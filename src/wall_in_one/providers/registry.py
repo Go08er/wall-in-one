@@ -31,6 +31,11 @@ API_KEY_FILENAME: Final = "wallhaven-api-key"
 #: A key file is small; anything larger is not one.
 MAX_KEY_FILE_BYTES: Final = 4096
 
+#: The one thing an unauthenticated Wallhaven cannot do. Named so the UI can
+#: recognise this particular limitation rather than treating any limitation as
+#: a missing key.
+NSFW_NEEDS_KEY: Final = "NSFW results need a Wallhaven API key"
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderInfo:
@@ -77,12 +82,25 @@ def _key_from_file(path: Path) -> str:
         return ""
 
 
+def usable_api_key(explicit: str = "") -> tuple[str, str]:
+    """The key to run Wallhaven with, and what is wrong with it if anything.
+
+    A key the user fumbled is not the same situation as no key at all, and the
+    difference matters: unauthenticated Wallhaven still works, so the right
+    response is to carry on without the key and say why, not to refuse to build
+    the provider at all. The second element is empty when nothing is wrong.
+    """
+    try:
+        return wallhaven_api_key(explicit), ""
+    except ProviderError:
+        if explicit:
+            return "", "the Wallhaven API key supplied is not a valid key"
+        return "", f"the {API_KEY_VARIABLE} in your environment is not a valid key"
+
+
 def describe(*, api_key: str = "") -> tuple[ProviderInfo, ...]:
     """Every provider and what it can do right now. Never raises."""
-    try:
-        key = wallhaven_api_key(api_key)
-    except ProviderError:
-        key = ""
+    key, complaint = usable_api_key(api_key)
     return (
         ProviderInfo(
             name=MotionBgs.name,
@@ -95,7 +113,7 @@ def describe(*, api_key: str = "") -> tuple[ProviderInfo, ...]:
             title=Wallhaven.title,
             media_kind=Wallhaven.media_kind,
             usable=True,
-            limitations=() if key else ("NSFW results need a Wallhaven API key",),
+            limitations=(complaint or NSFW_NEEDS_KEY,) if not key else (),
         ),
     )
 
@@ -109,7 +127,12 @@ def build(name: str, *, client: http.Client | None = None, api_key: str = "") ->
     if name == MotionBgs.name:
         return MotionBgs(client)
     if name == Wallhaven.name:
-        return Wallhaven(client, api_key=wallhaven_api_key(api_key))
+        # Deliberately the forgiving resolution: `describe` has already told
+        # the UI that Wallhaven is usable, so a malformed key in the
+        # environment must not turn every attempt to build it into an
+        # exception. It runs unauthenticated, and `describe` says why.
+        key, _complaint = usable_api_key(api_key)
+        return Wallhaven(client, api_key=key)
     raise ProviderError("unknown-provider", f"no such provider: {name!r}")
 
 

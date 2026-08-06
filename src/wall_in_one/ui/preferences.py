@@ -17,6 +17,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 from wall_in_one import config
+from wall_in_one.providers import credentials, registry
+from wall_in_one.providers.base import ProviderError
 from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
@@ -39,11 +41,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.set_title("Settings")
         page = Adw.PreferencesPage()
         page.add(self._build_playback_group())
+        page.add(self._build_providers_group())
         page.add(self._build_colour_group())
         page.add(self._build_appearance_group())
         self.add(page)
 
         self._load(application.settings)
+        self._refresh_api_key_status()
         self.show_palette(application.resolved_palette)
 
     # -- construction ----------------------------------------------------
@@ -79,6 +83,43 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
+        return group
+
+    def _build_providers_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(
+            title="Providers",
+            description=(
+                "Wallhaven searches work without an API key, but NSFW results "
+                "are only reachable with one. A key saved here is written to a "
+                "file only you can read."
+            ),
+        )
+
+        self._api_key_status = Adw.ActionRow(title="Wallhaven API key")
+        self._clear_api_key = Gtk.Button(label="Clear")
+        self._clear_api_key.set_valign(Gtk.Align.CENTER)
+        self._clear_api_key.add_css_class("flat")
+        self._clear_api_key.set_tooltip_text("Delete the saved key file")
+        self._clear_api_key.connect("clicked", self._on_clear_api_key)
+        self._api_key_status.add_suffix(self._clear_api_key)
+        group.add(self._api_key_status)
+
+        # A password row so the key is not left legible on a screen someone
+        # else can see. It starts empty and is never filled from the stored
+        # key: this dialogue only ever needs to know that a key exists.
+        self._api_key_entry = Adw.PasswordEntryRow(title="New key")
+        self._api_key_entry.connect("entry-activated", self._on_save_api_key)
+        # Otherwise the row stays red from a rejected key while the user is
+        # already typing the corrected one.
+        self._api_key_entry.connect(
+            "changed", lambda _entry: self._api_key_entry.remove_css_class("error")
+        )
+        save = Gtk.Button(label="Save")
+        save.set_valign(Gtk.Align.CENTER)
+        save.add_css_class("flat")
+        save.connect("clicked", self._on_save_api_key)
+        self._api_key_entry.add_suffix(save)
+        group.add(self._api_key_entry)
         return group
 
     def _build_colour_group(self) -> Adw.PreferencesGroup:
@@ -183,6 +224,70 @@ class PreferencesDialog(Adw.PreferencesDialog):
             if scheme_index < len(ALL_SCHEMES)
             else config.Settings().preview_scheme,
         )
+
+    # -- the Wallhaven key -----------------------------------------------
+
+    def _refresh_api_key_status(self) -> None:
+        """Say where the key in force comes from, without showing the key."""
+        from_environment = bool(credentials.environment_key())
+        stored = credentials.stored_key_present()
+        if from_environment and stored:
+            subtitle = (
+                f"Taken from {registry.API_KEY_VARIABLE}, which overrides the "
+                "saved key. Unset the variable to use the saved one."
+            )
+        elif from_environment:
+            subtitle = (
+                f"Taken from {registry.API_KEY_VARIABLE}. The environment is "
+                "read first, so a key saved here would stay unused."
+            )
+        elif credentials.environment_key_is_malformed():
+            # Set but unusable. Reporting this as "not set" would send the user
+            # looking for a key they have already exported.
+            # The environment is read first and stops there, so a saved key is
+            # not a way out of this: the variable has to be corrected or unset.
+            saved = " Unset it to use the saved key." if stored else ""
+            subtitle = (
+                f"{registry.API_KEY_VARIABLE} is set to something that is not a "
+                f"valid key, so Wallhaven runs unauthenticated.{saved}"
+            )
+        elif stored:
+            subtitle = f"Saved in {credentials.key_path()}"
+        else:
+            subtitle = "Not set. Searches work; NSFW results are out of reach."
+        self._api_key_status.set_subtitle(subtitle)
+        self._clear_api_key.set_sensitive(stored)
+
+    def _on_save_api_key(self, _widget: Gtk.Widget) -> None:
+        try:
+            credentials.save_key(self._api_key_entry.get_text())
+        except ProviderError as error:
+            # Every message shown here is composed from the error's kind rather
+            # than from the text the user typed, so that no path out of this
+            # branch can put the key on screen or into the log.
+            self._api_key_entry.add_css_class("error")
+            self._report(
+                "That does not look like a Wallhaven API key"
+                if error.kind == "credential"
+                else "The key could not be written to disk"
+            )
+            return
+        self._api_key_entry.remove_css_class("error")
+        self._api_key_entry.set_text("")
+        self._refresh_api_key_status()
+        self._report("Wallhaven API key saved")
+
+    def _on_clear_api_key(self, _button: Gtk.Button) -> None:
+        try:
+            removed = credentials.clear_key()
+        except ProviderError:
+            self._report("The saved key could not be removed")
+            return
+        self._refresh_api_key_status()
+        self._report("Wallhaven API key removed" if removed else "There was no saved key")
+
+    def _report(self, message: str) -> None:
+        self.add_toast(Adw.Toast.new(message))
 
     def _on_reload_palette(self, _button: Gtk.Button) -> None:
         self.show_palette(self._app.reload_palette())

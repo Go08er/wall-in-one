@@ -187,6 +187,37 @@ def test_sync_moves_the_cursor_onto_the_live_wallpaper(monkeypatch: pytest.Monke
     assert session.playlist.current().path == Path("/w/c.png")  # type: ignore[union-attr]
 
 
+def test_the_cursor_is_set_before_anything_is_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the grid highlights at startup.
+
+    Nothing has been applied through us yet, so `current` is empty -- but the
+    wallpaper on screen is still the one the user expects to see marked.
+    """
+    monkeypatch.setattr(
+        "wall_in_one.theme.noctalia.set_wallpaper", lambda path, connector=None: None
+    )
+    monkeypatch.setattr("wall_in_one.theme.noctalia.current_wallpaper", lambda: Path("/w/b.png"))
+
+    session = _session([_still("a"), _still("b")])
+    session.refresh()
+    session.sync_with_noctalia()
+
+    assert session.current is None
+    cursor = session.cursor
+    assert cursor is not None
+    assert cursor.path == Path("/w/b.png")
+
+
+def test_the_cursor_follows_navigation(applied_paths: list[Path]) -> None:
+    session = _session([_still("a"), _still("b")])
+    session.refresh()
+    applied = session.next()
+
+    cursor = session.cursor
+    assert cursor is not None
+    assert cursor.path == applied.item.path
+
+
 def test_sync_recognises_a_videos_paired_still(monkeypatch: pytest.MonkeyPatch) -> None:
     """Noctalia reports the still we set underneath, not the video itself."""
     monkeypatch.setattr(

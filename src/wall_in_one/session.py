@@ -56,7 +56,19 @@ class Session:
 
     @property
     def current(self) -> Applied | None:
+        """What *this app* last applied, or ``None`` if it has not applied yet."""
         return self._applier.current
+
+    @property
+    def cursor(self) -> MediaItem | None:
+        """The wallpaper the app is pointing at -- what the grid highlights.
+
+        Not the same as :attr:`current`. At startup nothing has been applied
+        through us, but `sync_with_noctalia` has already moved the cursor onto
+        whatever is actually on screen, and that is the wallpaper the user
+        expects to see marked. `next` and friends move this too.
+        """
+        return self._playlist.current()
 
     # -- library ---------------------------------------------------------
 

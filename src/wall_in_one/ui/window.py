@@ -1,268 +1,151 @@
-"""The main window.
+"""The main window: a grid of wallpapers, and the controls to move through it.
 
-At this stage it exists to prove the colour pipeline end to end: resolve the
-palette, render it to CSS, apply it live, and show where it came from. The
-library and playlist views land on top of this once the pipeline is trusted.
+The wallpapers are the content. Settings live in a dialog behind the header bar
+menu, because a wallpaper manager whose main view is a preferences page is a
+settings app wearing a costume.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gio, Gtk
 
 from wall_in_one import config
+from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import source
-from wall_in_one.theme.palette import Palette
+from wall_in_one.ui.grid import WallpaperGrid
+from wall_in_one.ui.preferences import PreferencesDialog
+from wall_in_one.ui.thumbnails import ThumbnailLoader
 
-#: Tokens worth showing as a swatch strip. The full 72 are available to CSS;
-#: these are the ones that tell you at a glance whether sync is working.
-_SWATCH_TOKENS: tuple[tuple[str, str], ...] = (
-    ("primary", "Primary"),
-    ("secondary", "Secondary"),
-    ("tertiary", "Tertiary"),
-    ("error", "Error"),
-    ("surface", "Surface"),
-    ("surface_container", "Container"),
-    ("outline", "Outline"),
-)
+if TYPE_CHECKING:
+    from wall_in_one.ui.app import Application
 
 
 class MainWindow(Adw.ApplicationWindow):
-    """Application window. Owns the settings that affect its own appearance."""
+    """Application window."""
 
-    def __init__(self, application: Adw.Application, settings: config.Settings) -> None:
+    def __init__(self, application: Application, settings: config.Settings) -> None:
         super().__init__(application=application)
+        self._app = application
         self._settings = settings
-        self._on_settings_changed: list[Any] = []
+        self._loader = ThumbnailLoader()
+        self._preferences: PreferencesDialog | None = None
 
         self.set_title("Wall-in-One")
-        self.set_default_size(880, 620)
+        self.set_default_size(1100, 760)
 
-        self._status_row = Adw.ActionRow(title="Palette source")
-        self._swatches = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._swatches.set_homogeneous(True)
-        self._library_row = Adw.ActionRow(title="Library")
-        self._now_playing_row = Adw.ActionRow(title="Now showing")
+        self._grid = WallpaperGrid(self._loader, self._on_tile_activated)
+        self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle="No library loaded")
+        self._toast = Adw.ToastOverlay()
 
         self.set_content(self._build_content())
+        self.connect("destroy", self._on_destroy)
 
     # -- construction ----------------------------------------------------
 
     def _build_content(self) -> Gtk.Widget:
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title="Wall-in-One", subtitle="Wallpaper manager"))
+        header.set_title_widget(self._subtitle)
+
+        navigation = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        navigation.add_css_class("linked")
+        for icon, tooltip, verb in (
+            ("go-previous-symbolic", "Previous wallpaper", "previous"),
+            ("media-playlist-shuffle-symbolic", "Random wallpaper", "random"),
+            ("go-next-symbolic", "Next wallpaper", "next"),
+        ):
+            button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
+            button.connect("clicked", self._make_navigator(verb))
+            navigation.append(button)
+        header.pack_start(navigation)
+
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Rescan the library")
+        refresh.connect("clicked", lambda _button: self._app.refresh_library())
+        header.pack_start(refresh)
+
+        menu = Gio.Menu()
+        menu.append("Settings", "win.preferences")
+        menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Main menu")
+        menu_button.set_menu_model(menu)
+        header.pack_end(menu_button)
+
+        action = Gio.SimpleAction.new("preferences", None)
+        action.connect("activate", lambda *_: self.open_preferences())
+        self.add_action(action)
+
         toolbar.add_top_bar(header)
-
-        page = Adw.PreferencesPage()
-        page.add(self._build_library_group())
-        page.add(self._build_palette_group())
-        page.add(self._build_appearance_group())
-
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_child(page)
-        scroller.set_vexpand(True)
-        toolbar.set_content(scroller)
+        self._toast.set_child(self._grid)
+        toolbar.set_content(self._toast)
         return toolbar
 
-    def _build_library_group(self) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(
-            title="Library",
-            description="Wallpapers found under the configured roots.",
-        )
-        group.add(self._now_playing_row)
-        group.add(self._library_row)
-
-        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        controls.set_margin_top(8)
-        controls.set_margin_bottom(8)
-        controls.set_margin_start(12)
-        for label, callback in (
-            ("Previous", self._on_previous),
-            ("Next", self._on_next),
-            ("Random", self._on_random),
-        ):
-            button = Gtk.Button(label=label)
-            button.add_css_class("flat")
-            button.connect("clicked", callback)
-            controls.append(button)
-
-        row = Adw.PreferencesRow()
-        row.set_activatable(False)
-        row.set_child(controls)
-        group.add(row)
-        return group
-
-    def _on_next(self, _button: Gtk.Button) -> None:
-        self._navigate("next")
-
-    def _on_previous(self, _button: Gtk.Button) -> None:
-        self._navigate("previous")
-
-    def _on_random(self, _button: Gtk.Button) -> None:
-        self._navigate("random")
-
-    def _navigate(self, verb: str) -> None:
-        application = self.get_application()
-        if application is not None:
+    def _make_navigator(self, verb: str) -> Any:
+        def navigate(_button: Gtk.Button) -> None:
             # The application owns the session and the error handling; the
             # window only says which direction.
-            application.apply(getattr(application.session, verb))  # type: ignore[attr-defined]
+            response = self._app.apply(getattr(self._app.session, verb))
+            if not response.ok:
+                self.report(response.message)
 
-    def _build_palette_group(self) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(
-            title="Colour",
-            description="Colours follow Noctalia's active palette.",
-        )
-        group.add(self._status_row)
-
-        swatch_row = Adw.PreferencesRow()
-        swatch_row.set_activatable(False)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        box.append(self._swatches)
-        swatch_row.set_child(box)
-        group.add(swatch_row)
-
-        refresh = Gtk.Button(label="Reload palette")
-        refresh.set_halign(Gtk.Align.START)
-        refresh.add_css_class("flat")
-        refresh.connect("clicked", lambda _button: self.reload_palette())
-        refresh_row = Adw.PreferencesRow()
-        refresh_row.set_activatable(False)
-        refresh.set_margin_top(8)
-        refresh.set_margin_bottom(8)
-        refresh.set_margin_start(12)
-        refresh_row.set_child(refresh)
-        group.add(refresh_row)
-        return group
-
-    def _build_appearance_group(self) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(
-            title="Appearance",
-            description=(
-                "Translucency is applied by this app. Blur behind it is the "
-                "compositor's job -- see docs/niri.md for the window rule."
-            ),
-        )
-
-        adjustment = Gtk.Adjustment(
-            lower=config.MIN_OPACITY,
-            upper=1.0,
-            step_increment=0.01,
-            page_increment=0.05,
-            value=self._settings.opacity,
-        )
-        scale = Gtk.Scale(adjustment=adjustment, orientation=Gtk.Orientation.HORIZONTAL)
-        scale.set_digits(2)
-        scale.set_draw_value(True)
-        scale.set_hexpand(True)
-        scale.set_size_request(260, -1)
-        scale.connect("value-changed", self._on_opacity_changed)
-
-        row = Adw.ActionRow(
-            title="Window opacity",
-            subtitle="Lower values let the compositor show and blur through",
-        )
-        row.add_suffix(scale)
-        group.add(row)
-        return group
+        return navigate
 
     # -- behaviour -------------------------------------------------------
 
-    def _on_opacity_changed(self, scale: Gtk.Scale) -> None:
-        value = round(scale.get_value(), 2)
-        if abs(value - self._settings.opacity) < 1e-9:
-            return
-        from dataclasses import replace
+    def _on_tile_activated(self, item: MediaItem) -> None:
+        response = self._app.apply(lambda: self._app.session.select(item.path))
+        if not response.ok:
+            self.report(response.message)
 
-        self._settings = replace(self._settings, opacity=value).validated()
-        self.emit_settings_changed()
+    def open_preferences(self) -> None:
+        dialog = PreferencesDialog(self._app)
+        self._preferences = dialog
+        dialog.connect("closed", self._on_preferences_closed)
+        dialog.present(self)
 
-    def emit_settings_changed(self) -> None:
-        for callback in self._on_settings_changed:
-            callback(self._settings)
+    def _on_preferences_closed(self, _dialog: Adw.PreferencesDialog) -> None:
+        self._preferences = None
 
-    def connect_settings_changed(self, callback: Any) -> None:
-        self._on_settings_changed.append(callback)
+    def report(self, message: str) -> None:
+        """Surface a failure where the user will actually see it."""
+        self._toast.add_toast(Adw.Toast.new(message))
+
+    def _on_destroy(self, _window: Gtk.Window) -> None:
+        self._loader.shutdown()
 
     @property
     def settings(self) -> config.Settings:
         return self._settings
 
-    def reload_palette(self) -> source.ResolvedPalette:
-        resolved = source.resolve(scheme=self._settings.preview_scheme)
-        self.show_palette(resolved)
-        return resolved
+    def apply_settings(self, settings: config.Settings) -> None:
+        self._settings = settings
+
+    # -- display ---------------------------------------------------------
 
     def show_library(self, session: Session) -> None:
         library = session.library
-        playable = len(session.playlist)
+        cursor = session.cursor
+        self._grid.populate(session.playlist.items, cursor.path if cursor else None)
+
         summary = (
-            f"{len(library)} found, {playable} playable "
+            f"{len(session.playlist)} of {len(library)} playable "
             f"({len(library.videos)} video, {len(library.stills)} still)"
         )
         if library.skipped:
             summary += f" - {len(library.skipped)} skipped"
-        self._library_row.set_subtitle(summary)
+        self._subtitle.set_subtitle(summary)
 
-        current = session.current
-        if current is None:
-            self._now_playing_row.set_subtitle("nothing applied yet")
-        else:
-            self._now_playing_row.set_subtitle(current.describe())
+    def show_current(self, session: Session) -> None:
+        """Move the highlight without rebuilding the grid."""
+        cursor = session.cursor
+        self._grid.set_current(cursor.path if cursor else None)
 
     def show_palette(self, resolved: source.ResolvedPalette) -> None:
-        self._status_row.set_subtitle(f"{resolved.origin.value} - {resolved.detail}")
-        self._rebuild_swatches(resolved.palette)
-
-    def _rebuild_swatches(self, palette: Palette) -> None:
-        child = self._swatches.get_first_child()
-        while child is not None:
-            following = child.get_next_sibling()
-            self._swatches.remove(child)
-            child = following
-
-        for token, label in _SWATCH_TOKENS:
-            if token not in palette.colours:
-                continue
-            self._swatches.append(_swatch(palette, token, label))
-
-
-def _swatch(palette: Palette, token: str, label: str) -> Gtk.Widget:
-    colour = palette[token]
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-
-    chip = Gtk.Box()
-    chip.set_size_request(-1, 44)
-    # Set inline rather than through the stylesheet: these are data, not theme,
-    # and regenerating 70-odd rules on every palette change to express them
-    # would be the wrong shape.
-    provider = Gtk.CssProvider()
-    provider.load_from_string(
-        f".wio-swatch-{token} {{ background-color: {colour.hex};"
-        " border-radius: 8px; border: 1px solid alpha(currentColor, 0.15); }"
-    )
-    chip.add_css_class(f"wio-swatch-{token}")
-    chip.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-
-    caption = Gtk.Label(label=label)
-    caption.add_css_class("caption")
-    value = Gtk.Label(label=colour.hex)
-    value.add_css_class("caption")
-    value.add_css_class("dim-label")
-
-    box.append(chip)
-    box.append(caption)
-    box.append(value)
-    return box
+        if self._preferences is not None:
+            self._preferences.show_palette(resolved)

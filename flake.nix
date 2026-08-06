@@ -19,6 +19,10 @@
         # it would force a shell install on someone who only wants the manager.
         runtimeTools = [
           pkgs.mpvpaper
+          # Thumbnails, for stills as well as videos: this closure's GdkPixbuf
+          # has no webp or avif loader, and ffmpeg covers every format the
+          # library accepts with one code path.
+          pkgs.ffmpeg
         ];
 
         wall-in-one = python.pkgs.buildPythonApplication {

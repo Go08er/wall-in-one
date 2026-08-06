@@ -107,6 +107,12 @@ def _structural_rules(palette: Palette, opacity: float) -> str:
     """
     surface = palette["surface"]
     outline = palette.get("outline_variant", "outline")
+    container = palette.get("surface_container", "surface")
+    primary = palette["primary"]
+    on_primary = palette.get("on_primary", "on_surface")
+    # Badges sit on top of the wallpaper image, not on a themed surface, so
+    # they need their own scrim to stay readable over an arbitrary picture.
+    scrim = palette.get("scrim", "shadow").css(0.55)
     window_background = surface.hex if opacity >= 1.0 else surface.css(opacity)
 
     return f"""
@@ -121,6 +127,34 @@ window.background.csd {{
 
 .wio-hairline {{
     border-color: {outline.hex};
+}}
+
+/* The wallpaper grid. Tiles are images, so they take their colour from the
+   palette only at their edges and in the "this one is up" marker. */
+.wio-tile-image {{
+    border-radius: 10px;
+}}
+
+.wio-tile-blank {{
+    background-color: {container.hex};
+    border-radius: 10px;
+}}
+
+.wio-tile-current .wio-tile-image {{
+    outline: 3px solid {primary.hex};
+    outline-offset: -3px;
+}}
+
+.wio-tile-current label {{
+    color: {primary.hex};
+    font-weight: bold;
+}}
+
+.wio-badge {{
+    background-color: {scrim};
+    color: {on_primary.hex};
+    border-radius: 6px;
+    padding: 2px 6px;
 }}
 """.strip()
 

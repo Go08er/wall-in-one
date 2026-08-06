@@ -20,9 +20,13 @@ def test_adwaita_names_are_all_defined() -> None:
         assert f"@define-color {name} " in stylesheet
 
 
-def test_opaque_render_has_no_alpha_backgrounds() -> None:
+def test_opaque_render_has_no_alpha_surfaces() -> None:
     stylesheet = css.render(fallback_palette(), opacity=1.0)
-    assert "rgba(" not in stylesheet
+    assert not _alpha_definitions(stylesheet)
+    assert _named_colour(stylesheet, "window_bg_color") == fallback_palette()["surface"].hex
+    # The one exception is the badge scrim, which sits over a wallpaper image
+    # rather than a themed surface and is translucent at every opacity.
+    assert "rgba(" in stylesheet
 
 
 def test_translucency_reaches_the_window_but_not_the_foreground() -> None:
@@ -38,7 +42,7 @@ def test_translucency_reaches_the_window_but_not_the_foreground() -> None:
 
 
 def test_opacity_is_clamped_into_range() -> None:
-    assert "rgba(" not in css.render(fallback_palette(), opacity=5.0)
+    assert not _alpha_definitions(css.render(fallback_palette(), opacity=5.0))
     low = css.render(fallback_palette(), opacity=-1.0)
     assert "0.000" in low
 
@@ -65,6 +69,15 @@ def test_missing_token_uses_its_fallback() -> None:
     stylesheet = css.render(palette)
     assert _named_colour(stylesheet, "borders") == "#8f909a"
     assert _named_colour(stylesheet, "success_bg_color") == "#a5c8ff"
+
+
+def _alpha_definitions(stylesheet: str) -> list[str]:
+    """Named colours carrying alpha -- the themed surfaces, not the overlays."""
+    return [
+        line
+        for line in stylesheet.splitlines()
+        if line.startswith("@define-color") and "rgba(" in line
+    ]
 
 
 def _named_colour(stylesheet: str, name: str) -> str:

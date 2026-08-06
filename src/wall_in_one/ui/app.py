@@ -55,7 +55,6 @@ class Application(Adw.Application):
     def do_activate(self) -> None:
         if self._window is None:
             window = MainWindow(self, self._settings)
-            window.connect_settings_changed(self._on_settings_changed)
             window.connect("close-request", self._on_close_request)
             self._window = window
         self.reload_palette()
@@ -111,6 +110,10 @@ class Application(Adw.Application):
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
 
+    @property
+    def resolved_palette(self) -> source.ResolvedPalette | None:
+        return self._resolved
+
     # -- library ---------------------------------------------------------
 
     @property
@@ -131,7 +134,9 @@ class Application(Adw.Application):
         except ApplyError as error:
             return Response.failure(str(error))
         if self._window is not None:
-            self._window.show_library(self._session)
+            # Only the highlight moves: rebuilding the grid on every `next`
+            # would throw away every loaded thumbnail and flicker.
+            self._window.show_current(self._session)
         return Response.success(applied.describe())
 
     # -- cycle timer -----------------------------------------------------
@@ -174,12 +179,23 @@ class Application(Adw.Application):
         return self._settings
 
     def update_settings(self, **changes: Any) -> config.Settings:
+        previous = self._settings
         self._settings = replace(self._settings, **changes).validated()
         config.save(self._settings)
         self._session.update_settings(self._settings)
         self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
+        if self._window is not None:
+            self._window.apply_settings(self._settings)
+            if self._settings.dynamics_enabled != previous.dynamics_enabled:
+                # Dynamics changes which wallpapers are playable at all, so the
+                # grid has different contents now, not just a different state.
+                self._window.show_library(self._session)
+            else:
+                self._window.show_current(self._session)
+        if self._settings.preview_scheme != previous.preview_scheme:
+            self.reload_palette()
         return self._settings
 
 

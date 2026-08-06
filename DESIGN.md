@@ -356,12 +356,17 @@ Ordered so the riskiest integration is proven before any bulk code moves.
       script needed `socat` or a capable `nc`, and probed for which. Not
       carried over: per-output renderer children, `--auto-mode` (mpvpaper 1.8
       has no such flag), and live volume control.
-- [ ] **6. Providers.** Lift the 5,493-line backend, strip the RPC transport,
-      keep the test suite.
+- [x] **6. Providers.** Lift the 5,493-line backend, strip the RPC transport,
+      keep the test suite. The transport was the bulk of it: MotionBGS and
+      Wallhaven came across as ~2,000 lines of typed Python behind one
+      stubable HTTP seam. Not yet wired into the session or the UI.
 - [x] **7. Palette browser.** Built-in / community / custom, live scheme preview
       across all 10 generators, custom palette editing.
-- [ ] **8. Socket + `ctl`.** Then shrink the Noctalia plugin to widget +
-      shortcut and ship `palette.json.tmpl` alongside it.
+- [x] **8. Socket + `ctl`.** Then shrink the Noctalia plugin to widget +
+      shortcut and ship `palette.json.tmpl` alongside it. Done in the plugin
+      repo: 51,628 lines out, 653 in. Never loaded into a running shell, so
+      the host-API surface is matched by pattern against a working plugin
+      rather than executed -- that is the outstanding risk.
 
 Steps 1–3 are the vertical slice that proves the colour pipeline. Nothing else
 starts until that is green.

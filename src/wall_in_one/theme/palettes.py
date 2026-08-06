@@ -1,6 +1,6 @@
 """Noctalia's palette files: what is on disk, and how to add to it.
 
-Three sources, and they are not symmetrical:
+Four sources, and they are not symmetrical:
 
 * **built-in** palettes are compiled into the Noctalia binary. Confirmed by
   reading it: the ten names are in there as plain strings, their colours are
@@ -11,6 +11,9 @@ Three sources, and they are not symmetrical:
   that appears as `[theme] community_palette` -- is the decoded name.
 * **custom** palettes are plain `<name>.json` files the user owns, and the only
   ones this module will ever write.
+* **legacy** palettes are the pre-5.x `<Name>/<Name>.json` directories still
+  sitting in `~/.config/noctalia/colorschemes`. Noctalia has stopped reading
+  them, so they are shown to be copied forward rather than applied.
 
 The file format is *not* the 72-token document `noctalia theme` emits. It is
 Noctalia's `mPrimary` shape with a nested `terminal` block, so parsing maps it
@@ -55,13 +58,20 @@ class PaletteWriteError(PaletteError):
 class Origin(Enum):
     """Where a palette comes from.
 
-    The values are exactly the source names `noctalia msg color-scheme-set`
-    takes, so applying an entry is `color-scheme-set <origin.value> <name>`.
+    The values are the source names `noctalia msg color-scheme-set` takes, so
+    applying an entry is `color-scheme-set <origin.value> <name>` -- with one
+    exception. `LEGACY` is not a source name, because 5.0.0-beta.7 has no such
+    source: `colorschemes` appears nowhere in that binary and `custom` resolves
+    against the flat `palettes` directory only, so asking it to set a legacy
+    scheme answers "unknown scheme/palette". Folding those into `CUSTOM` would
+    therefore have produced entries that look applicable and are not, which is
+    why they get an origin of their own and `is_applicable` to say so.
     """
 
     BUILTIN = "builtin"
     COMMUNITY = "community"
     CUSTOM = "custom"
+    LEGACY = "legacy"
 
     @property
     def is_writable(self) -> bool:
@@ -69,8 +79,22 @@ class Origin(Enum):
         return self is Origin.CUSTOM
 
     @property
+    def is_applicable(self) -> bool:
+        """Whether `color-scheme-set` will accept this origin as a source.
+
+        The way out for a palette that is not applicable is `duplicate`, which
+        copies it into the custom directory Noctalia does read.
+        """
+        return self is not Origin.LEGACY
+
+    @property
     def label(self) -> str:
-        return {"builtin": "Built-in", "community": "Community", "custom": "Custom"}[self.value]
+        return {
+            "builtin": "Built-in",
+            "community": "Community",
+            "custom": "Custom",
+            "legacy": "Legacy",
+        }[self.value]
 
 
 #: The palettes compiled into Noctalia, from `src/theme/builtin_palettes.cpp`
@@ -182,6 +206,10 @@ def custom_directory() -> Path:
 
 def community_directory() -> Path:
     return paths.noctalia_community_palettes_dir()
+
+
+def legacy_directory() -> Path:
+    return paths.noctalia_legacy_palettes_dir()
 
 
 # -- parsing -------------------------------------------------------------
@@ -339,9 +367,16 @@ def entry_name(path: Path, origin: Origin) -> str:
     back over IPC, and that `[theme] community_palette` holds, is the decoded
     one. Custom files are named by us, and we only allow names that need no
     encoding, so the stem is already the name.
+
+    A legacy scheme is its directory, and the file inside is only the payload:
+    on this machine `NaySayer/` holds `Naysayer.json`, so the two disagree and
+    one of them has to win. The directory is what the old Noctalia recorded the
+    scheme as, so it is the name shown and the name a copy inherits.
     """
     if origin is Origin.COMMUNITY:
         return unquote(path.stem)
+    if origin is Origin.LEGACY:
+        return path.parent.name
     return path.stem
 
 
@@ -383,10 +418,88 @@ def _scan_directory(directory: Path, origin: Origin, skipped: list[str]) -> list
     return entries
 
 
+def _legacy_payload(scheme: Path, skipped: list[str]) -> Path | None:
+    """The one palette file inside a pre-5.x scheme directory, if there is one.
+
+    Found by extension rather than by name, since the inner file does not
+    reliably agree with the directory about case. A symlink is refused outright
+    instead of followed: it would let a file outside the scheme directory decide
+    what that scheme contains, and this layout is dead weight Noctalia no longer
+    validates, so nothing else is checking.
+    """
+    found: list[Path] = []
+    try:
+        with os.scandir(scheme) as entries:
+            for entry in entries:
+                if entry.name.startswith(".") or not entry.name.endswith(".json"):
+                    continue
+                if entry.is_symlink():
+                    skipped.append(f"{scheme.name}: {entry.name} is a symlink")
+                    return None
+                if entry.is_file():
+                    found.append(Path(entry.path))
+    except OSError as error:
+        skipped.append(f"{scheme.name}: {error.strerror or error}")
+        return None
+    if not found:
+        skipped.append(f"{scheme.name}: holds no palette file")
+        return None
+    ordered = sorted(found)
+    for candidate in ordered:
+        if candidate.stem.casefold() == scheme.name.casefold():
+            return candidate
+    if len(ordered) == 1:
+        return ordered[0]
+    skipped.append(f"{scheme.name}: {len(ordered)} palette files, none named after it")
+    return None
+
+
+def _scan_legacy(directory: Path, skipped: list[str]) -> list[PaletteEntry]:
+    """The pre-5.x layout, one directory per scheme.
+
+    Bounded on directories examined rather than on palettes loaded, because a
+    directory full of empty subdirectories costs the same to walk as a directory
+    full of real ones. Loose files alongside the scheme directories are ignored
+    in silence; a symlinked scheme is reported, since somebody put it there on
+    purpose and would otherwise watch it vanish without explanation.
+    """
+    schemes: list[Path] = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name.startswith(".") or not entry.is_dir():
+                    continue
+                if entry.is_symlink():
+                    skipped.append(f"{entry.name}: is a symlink, not a scheme directory")
+                    continue
+                schemes.append(Path(entry.path))
+    except FileNotFoundError:
+        # Nobody ever ran the old Noctalia here. Empty, not broken.
+        return []
+    except OSError as error:
+        skipped.append(f"{directory}: {error.strerror or error}")
+        return []
+    schemes.sort()
+    if len(schemes) > MAX_ENTRIES:
+        skipped.append(f"{directory}: stopped at {MAX_ENTRIES} palettes")
+        schemes = schemes[:MAX_ENTRIES]
+    loaded: list[PaletteEntry] = []
+    for scheme in schemes:
+        payload = _legacy_payload(scheme, skipped)
+        if payload is None:
+            continue
+        try:
+            loaded.append(load_entry(payload, Origin.LEGACY))
+        except PaletteError as error:
+            skipped.append(f"{scheme.name}: {error}")
+    return loaded
+
+
 def discover(
     *,
     custom: Path | None = None,
     community: Path | None = None,
+    legacy: Path | None = None,
     builtins: Sequence[str] | None = None,
 ) -> Discovery:
     """Every palette this machine can offer. Never raises."""
@@ -405,7 +518,8 @@ def discover(
         Origin.CUSTOM,
         skipped,
     )
-    order = {Origin.BUILTIN: 0, Origin.COMMUNITY: 1, Origin.CUSTOM: 2}
+    entries += _scan_legacy(legacy if legacy is not None else legacy_directory(), skipped)
+    order = {Origin.BUILTIN: 0, Origin.COMMUNITY: 1, Origin.CUSTOM: 2, Origin.LEGACY: 3}
     entries.sort(key=lambda entry: (order[entry.origin], entry.name.casefold()))
     return Discovery(entries=tuple(entries), skipped=tuple(skipped))
 

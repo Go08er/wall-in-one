@@ -74,6 +74,20 @@ def _write(path: Path, document: object) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every default directory lookup inside tmp_path.
+
+    `discover` falls back to the real Noctalia directories for any source the
+    caller does not name, and this machine has palettes in all of them. Nothing
+    in this file may read the user's own files, so the fallbacks are moved
+    rather than each test being trusted to pass every path.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
 @pytest.fixture
 def directories(tmp_path: Path) -> tuple[Path, Path]:
     """A custom and a community directory, both empty and both under tmp_path."""
@@ -82,6 +96,19 @@ def directories(tmp_path: Path) -> tuple[Path, Path]:
     custom.mkdir(parents=True)
     community.mkdir(parents=True)
     return custom, community
+
+
+@pytest.fixture
+def legacy(tmp_path: Path) -> Path:
+    """A pre-5.x `colorschemes` directory, empty, under tmp_path."""
+    directory = tmp_path / "config" / "noctalia" / "colorschemes"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def _legacy_scheme(root: Path, scheme: str, stem: str | None = None) -> Path:
+    """Write one `<scheme>/<stem>.json`, defaulting to the matching name."""
+    return _write(root / scheme / f"{stem if stem is not None else scheme}.json", _document())
 
 
 # -- parsing -------------------------------------------------------------
@@ -231,6 +258,131 @@ def test_discovery_is_bounded(
 
     assert len(found.of_origin(Origin.CUSTOM)) == 2
     assert any("stopped at 2 palettes" in note for note in found.skipped)
+
+
+# -- the pre-5.x colorschemes layout -------------------------------------
+
+
+def test_a_legacy_scheme_directory_is_discovered(legacy: Path) -> None:
+    _legacy_scheme(legacy, "Oasis Abyss")
+
+    found = palettes.discover(legacy=legacy)
+
+    entries = found.of_origin(Origin.LEGACY)
+    assert [entry.name for entry in entries] == ["Oasis Abyss"]
+    assert entries[0].colours is not None
+    assert entries[0].path == legacy / "Oasis Abyss" / "Oasis Abyss.json"
+    assert found.skipped == ()
+
+
+def test_a_legacy_inner_filename_may_disagree_about_case(legacy: Path) -> None:
+    """The real `NaySayer/` holds `Naysayer.json`; the directory is the scheme."""
+    _legacy_scheme(legacy, "NaySayer", stem="Naysayer")
+
+    found = palettes.discover(legacy=legacy)
+
+    assert [entry.name for entry in found.of_origin(Origin.LEGACY)] == ["NaySayer"]
+    assert found.skipped == ()
+
+
+def test_a_legacy_directory_with_no_palette_file_is_skipped_and_recorded(legacy: Path) -> None:
+    (legacy / "Empty").mkdir()
+    (legacy / "Empty" / "notes.txt").write_text("nothing here", encoding="utf-8")
+    _legacy_scheme(legacy, "Cream Autumn")
+
+    found = palettes.discover(legacy=legacy)
+
+    assert [entry.name for entry in found.of_origin(Origin.LEGACY)] == ["Cream Autumn"]
+    assert any("Empty: holds no palette file" in note for note in found.skipped)
+
+
+def test_a_symlinked_legacy_palette_is_refused(legacy: Path, tmp_path: Path) -> None:
+    """A symlink would let a file outside the scheme directory define the scheme."""
+    elsewhere = _write(tmp_path / "elsewhere.json", _document())
+    (legacy / "Linked").mkdir()
+    (legacy / "Linked" / "Linked.json").symlink_to(elsewhere)
+
+    found = palettes.discover(legacy=legacy)
+
+    assert found.of_origin(Origin.LEGACY) == ()
+    assert any("Linked.json is a symlink" in note for note in found.skipped)
+
+
+def test_a_symlinked_legacy_scheme_directory_is_refused(legacy: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    _write(outside / "Outside.json", _document())
+    (legacy / "Outside").symlink_to(outside, target_is_directory=True)
+
+    found = palettes.discover(legacy=legacy)
+
+    assert found.of_origin(Origin.LEGACY) == ()
+    assert any("Outside: is a symlink" in note for note in found.skipped)
+
+
+def test_stray_files_beside_the_legacy_scheme_directories_are_ignored(legacy: Path) -> None:
+    (legacy / "README").write_text("not a scheme", encoding="utf-8")
+    _write(legacy / "Loose.json", _document())
+    _legacy_scheme(legacy, "One Dark Two")
+
+    found = palettes.discover(legacy=legacy)
+
+    assert [entry.name for entry in found.of_origin(Origin.LEGACY)] == ["One Dark Two"]
+    assert found.skipped == ()
+
+
+def test_an_oversized_legacy_palette_is_skipped(legacy: Path) -> None:
+    padded = _document()
+    padded["padding"] = "x" * (2 * 256 * 1024)
+    _write(legacy / "Huge" / "Huge.json", padded)
+
+    found = palettes.discover(legacy=legacy)
+
+    assert found.of_origin(Origin.LEGACY) == ()
+    assert any("over the" in note for note in found.skipped)
+
+
+def test_legacy_discovery_is_bounded(legacy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(palettes, "MAX_ENTRIES", 2)
+    for index in range(4):
+        _legacy_scheme(legacy, f"P{index}")
+
+    found = palettes.discover(legacy=legacy)
+
+    assert len(found.of_origin(Origin.LEGACY)) == 2
+    assert any("stopped at 2 palettes" in note for note in found.skipped)
+
+
+def test_legacy_palettes_are_readable_but_neither_applicable_nor_writable(legacy: Path) -> None:
+    """Noctalia 5.x does not read this layout, so an apply would be a broken promise."""
+    _legacy_scheme(legacy, "Oasis Abyss")
+    entry = palettes.discover(legacy=legacy).of_origin(Origin.LEGACY)[0]
+
+    assert not entry.origin.is_applicable
+    assert not entry.origin.is_writable
+    assert not entry.is_editable
+    assert entry.for_mode("dark") is not None
+    with pytest.raises(PaletteWriteError):
+        palettes.target_for(entry)
+
+
+def test_every_other_origin_stays_applicable() -> None:
+    applicable = {origin for origin in Origin if origin.is_applicable}
+    assert applicable == {Origin.BUILTIN, Origin.COMMUNITY, Origin.CUSTOM}
+
+
+def test_duplicating_a_legacy_palette_is_how_it_comes_forward(
+    legacy: Path, directories: tuple[Path, Path]
+) -> None:
+    custom, _ = directories
+    original = _legacy_scheme(legacy, "NaySayer", stem="Naysayer")
+    before = original.read_bytes()
+
+    entry = palettes.discover(legacy=legacy).of_origin(Origin.LEGACY)[0]
+    copy = palettes.duplicate(entry, entry.name, directory=custom)
+
+    assert copy.origin is Origin.CUSTOM
+    assert copy.path == custom / "NaySayer.json"
+    assert original.read_bytes() == before
 
 
 # -- names ---------------------------------------------------------------

@@ -454,6 +454,15 @@ class PaletteBrowserDialog(Adw.Dialog):
         apply_button.set_valign(Gtk.Align.CENTER)
         apply_button.add_css_class("flat")
         apply_button.connect("clicked", lambda _button: self._on_apply_entry(entry))
+        if not entry.origin.is_applicable:
+            # `color-scheme-set` has no source name for these, so the button
+            # could only ever produce "unknown palette source". Duplicating is
+            # the route that works, and the tooltip has to say so or a dead
+            # button is all the user gets.
+            apply_button.set_sensitive(False)
+            apply_button.set_tooltip_text(
+                "Noctalia no longer reads this layout; duplicate it first"
+            )
         row.add_suffix(apply_button)
         return row
 
@@ -478,6 +487,11 @@ class PaletteBrowserDialog(Adw.Dialog):
         the whole point: it is the only route that covers built-ins, and it
         keeps the rest of the desktop in step with the app.
         """
+        if not entry.origin.is_applicable:
+            # The button is insensitive, so this is only reachable if a future
+            # caller forgets. Better a sentence than a Noctalia error.
+            self.report(f"{entry.name} lives in a layout Noctalia no longer reads")
+            return
         try:
             noctalia.message("color-scheme-set", entry.origin.value, entry.name)
         except noctalia.NoctaliaError as error:
@@ -636,12 +650,17 @@ _ORIGIN_DESCRIPTIONS: Final[dict[palettes.Origin, str]] = {
     ),
     palettes.Origin.COMMUNITY: "Downloaded by Noctalia and cached on disk.",
     palettes.Origin.CUSTOM: "Yours. The only palettes this app will write to.",
+    palettes.Origin.LEGACY: (
+        "From an older Noctalia layout that this version no longer reads. "
+        "Duplicate one to make it applicable again."
+    ),
 }
 
 _ORIGIN_EMPTY: Final[dict[palettes.Origin, str]] = {
     palettes.Origin.BUILTIN: "This build of Noctalia reports no built-in palettes",
     palettes.Origin.COMMUNITY: "Browse community palettes in Noctalia to cache some",
     palettes.Origin.CUSTOM: "Duplicate any palette above to start one",
+    palettes.Origin.LEGACY: "Nothing left over from an older Noctalia",
 }
 
 

@@ -93,6 +93,17 @@ def noctalia_custom_palettes_dir() -> Path:
     return config_home() / "noctalia" / "palettes"
 
 
+def noctalia_legacy_palettes_dir() -> Path:
+    """The pre-5.x layout: one directory per scheme, holding one JSON file.
+
+    Still populated on machines that ran an older Noctalia. 5.0.0-beta.7 does
+    not read it -- the string `colorschemes` appears nowhere in that binary,
+    only `palettes` does -- so what is here is readable history rather than
+    something the daemon will still apply.
+    """
+    return config_home() / "noctalia" / "colorschemes"
+
+
 def noctalia_community_palettes_dir() -> Path:
     return noctalia_state_dir() / "community-palettes"
 

@@ -7,3 +7,6 @@ result
 result-*
 dist/
 *.egg-info/
+
+# Agent worktrees, created by the harness for parallel work.
+.claude/

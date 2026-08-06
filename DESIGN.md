@@ -120,6 +120,40 @@ config-reload
 Sources: `src/theme/builtin_palettes.cpp`, `src/theme/community_palettes.cpp:26-27`,
 `src/theme/custom_palettes.cpp:215-220`.
 
+**A palette file is not a 72-token document.** Read off the real cache: it is
+Noctalia's `mPrimary` shape -- fourteen core keys plus a nested `terminal`
+block -- so `PalettePair.from_json`, which parses `noctalia theme --both`,
+cannot read one. `theme/palettes.py` maps it instead. Measured by diffing a
+cached community palette against `noctalia theme <img> --theme-json <file>
+--both`, which expands the same file into all 72:
+
+| file key | tokens it *is* | file key | tokens it *is* |
+|---|---|---|---|
+| `mPrimary` | `source_color`, `primary`, `surface_tint` | `mSurface` | `surface`, `background` |
+| `mSecondary` | `secondary` | `mSurfaceVariant` | `surface_variant`, `surface_container` |
+| `mTertiary` | `tertiary` | `mOutline` | `outline` |
+| `mError` | `error` | `mShadow` | `shadow`, `scrim` |
+
+Each `mOn*` maps to its `on_*`, and `terminal.normal.red` and friends map
+one-for-one onto the 22 terminal tokens. The other ~30 core tokens are tonal
+ramps Noctalia derives at apply time and are left missing rather than guessed;
+`Palette.get` already degrades through them.
+
+Three more things the real directories settled:
+
+- Community files are cached under a **percent-encoded** name
+  (`Osaka%20jade.json`), while the id Noctalia takes back over IPC -- and
+  writes as `[theme] community_palette` -- is the decoded `Osaka jade`.
+- Built-in colours really are unreachable. The ten names are plain strings in
+  the binary; their colours are not, and no CLI surface prints them. So the
+  browser lists built-ins without swatches and gets their colours the ordinary
+  way, by applying one and letting the template render.
+- `~/.config/noctalia/colorschemes/<Name>/<Name>.json` is a **pre-5.x** layout
+  still present on this machine. 5.0.0-beta.7 builds the flat `palettes`
+  directory instead ("failed to create palettes directory", "failed to write
+  custom palette file" are both in the binary), which is what `paths.py`
+  already points at.
+
 ### 4. Noctalia already writes the Qt colour scheme — but do not sync that way
 
 Confirmed live: `~/.local/state/noctalia/settings.toml` has
@@ -324,7 +358,7 @@ Ordered so the riskiest integration is proven before any bulk code moves.
       has no such flag), and live volume control.
 - [ ] **6. Providers.** Lift the 5,493-line backend, strip the RPC transport,
       keep the test suite.
-- [ ] **7. Palette browser.** Built-in / community / custom, live scheme preview
+- [x] **7. Palette browser.** Built-in / community / custom, live scheme preview
       across all 10 generators, custom palette editing.
 - [ ] **8. Socket + `ctl`.** Then shrink the Noctalia plugin to widget +
       shortcut and ship `palette.json.tmpl` alongside it.
@@ -367,6 +401,29 @@ wallpaper captured beforehand and restored afterwards.
 One bug came out of that live run: pausing dynamics on a video with no still
 raised, leaving the setting changed but the video still playing. Fixed, with a
 regression test.
+
+### How step 7 was proven
+
+The palette browser was built against the real cache and the real generator,
+read-only throughout: nothing was written to `~/.config/noctalia/palettes`,
+`~/.local/state/noctalia/community-palettes`, or `settings.toml`. Every test
+write goes to `tmp_path`.
+
+| check | result |
+|---|---|
+| file format | diffed `Oxocarbon.json` against `noctalia theme --theme-json <it> --both`; the mapping table in finding 3 is those equalities, not a guess |
+| discovery | ran against the live directories: 10 built-ins, both cached community palettes, 42 tokens each, `.catalog` ignored, nothing skipped |
+| community naming | `Osaka%20jade.json` decodes to `Osaka jade`, which is exactly what `[theme] community_palette` holds |
+| built-ins | `grep` of the binary finds the ten names and no colours next to them, so they are listed without swatches by design rather than by omission |
+| bounded | ceiling on entries, `MAX_PALETTE_BYTES` per file, and malformed / unreadable / oversized files land in `Discovery.skipped` |
+| read-only | `save_edits` on a community entry raises and the file is byte-identical afterwards; `write_custom` resolves only inside the custom directory, so `../escape` never reaches the filesystem |
+| off-thread previews | `SchemePreviewLoader` drove a real `noctalia theme` and delivered through `GLib.idle_add` into a pumped main loop |
+| widget API | every method, signal and construct property the browser uses checked against the installed GTK 4.22 / libadwaita 1.9 by introspection |
+
+Gates: `ruff` clean, `mypy --strict` clean, 182 tests green (36 new).
+
+Not proven: the browser has never been on screen. Layout, the ten-card grid,
+and the colour-picker rows are correct by construction and by API check only.
 
 ---
 

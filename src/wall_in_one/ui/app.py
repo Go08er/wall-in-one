@@ -114,6 +114,11 @@ class Application(Adw.Application):
     def resolved_palette(self) -> source.ResolvedPalette | None:
         return self._resolved
 
+    def open_palette_browser(self) -> None:
+        """Open the palette browser, from wherever asked."""
+        if self._window is not None:
+            self._window.open_palette_browser()
+
     # -- library ---------------------------------------------------------
 
     @property

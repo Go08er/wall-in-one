@@ -7,6 +7,7 @@ settings app wearing a costume.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import gi
@@ -21,6 +22,7 @@ from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import source
 from wall_in_one.ui.grid import WallpaperGrid
+from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.preferences import PreferencesDialog
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
@@ -37,6 +39,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._settings = settings
         self._loader = ThumbnailLoader()
         self._preferences: PreferencesDialog | None = None
+        self._palettes: PaletteBrowserDialog | None = None
 
         self.set_title("Wall-in-One")
         self.set_default_size(1100, 760)
@@ -72,19 +75,32 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_start(refresh)
 
         menu = Gio.Menu()
+        menu.append("Palettes", "win.palettes")
         menu.append("Settings", "win.preferences")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Main menu")
         menu_button.set_menu_model(menu)
         header.pack_end(menu_button)
 
-        action = Gio.SimpleAction.new("preferences", None)
-        action.connect("activate", lambda *_: self.open_preferences())
-        self.add_action(action)
+        for name, opener in (
+            ("preferences", self.open_preferences),
+            ("palettes", self.open_palette_browser),
+        ):
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", self._make_opener(opener))
+            self.add_action(action)
 
         toolbar.add_top_bar(header)
         self._toast.set_child(self._grid)
         toolbar.set_content(self._toast)
         return toolbar
+
+    def _make_opener(self, opener: Callable[[], None]) -> Any:
+        # Bound now rather than read from the loop variable when the action
+        # fires, which would open whichever dialog came last.
+        def activate(*_arguments: object) -> None:
+            opener()
+
+        return activate
 
     def _make_navigator(self, verb: str) -> Any:
         def navigate(_button: Gtk.Button) -> None:
@@ -111,6 +127,15 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_preferences_closed(self, _dialog: Adw.PreferencesDialog) -> None:
         self._preferences = None
+
+    def open_palette_browser(self) -> None:
+        dialog = PaletteBrowserDialog(self._app)
+        self._palettes = dialog
+        dialog.connect("closed", self._on_palette_browser_closed)
+        dialog.present(self)
+
+    def _on_palette_browser_closed(self, _dialog: Adw.Dialog) -> None:
+        self._palettes = None
 
     def report(self, message: str) -> None:
         """Surface a failure where the user will actually see it."""
@@ -149,3 +174,5 @@ class MainWindow(Adw.ApplicationWindow):
     def show_palette(self, resolved: source.ResolvedPalette) -> None:
         if self._preferences is not None:
             self._preferences.show_palette(resolved)
+        if self._palettes is not None:
+            self._palettes.show_palette()

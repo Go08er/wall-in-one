@@ -20,21 +20,10 @@ from wall_in_one import config
 from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
+from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
-
-#: Tokens worth showing as a swatch strip. All 72 are available to CSS; these
-#: are the ones that tell you at a glance whether sync is working.
-_SWATCH_TOKENS: tuple[tuple[str, str], ...] = (
-    ("primary", "Primary"),
-    ("secondary", "Secondary"),
-    ("tertiary", "Tertiary"),
-    ("error", "Error"),
-    ("surface", "Surface"),
-    ("surface_container", "Container"),
-    ("outline", "Outline"),
-)
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -122,6 +111,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
         swatch_row.set_child(box)
         group.add(swatch_row)
 
+        browse_row = Adw.ActionRow(
+            title="Palettes",
+            subtitle="Browse installed palettes and preview every scheme",
+        )
+        browse_button = Gtk.Button(label="Browse")
+        browse_button.set_valign(Gtk.Align.CENTER)
+        browse_button.add_css_class("flat")
+        browse_button.connect("clicked", lambda _button: self._app.open_palette_browser())
+        browse_row.add_suffix(browse_button)
+        group.add(browse_row)
+
         reload_row = Adw.ActionRow(
             title="Reload palette",
             subtitle="Re-read the colours Noctalia last rendered",
@@ -201,35 +201,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
     def _rebuild_swatches(self, palette: Palette) -> None:
         while (child := self._swatches.get_first_child()) is not None:
             self._swatches.remove(child)
-        for token, label in _SWATCH_TOKENS:
-            if token in palette.colours:
-                self._swatches.append(_swatch(palette, token, label))
-
-
-def _swatch(palette: Palette, token: str, label: str) -> Gtk.Widget:
-    colour = palette[token]
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-
-    chip = Gtk.Box()
-    chip.set_size_request(-1, 44)
-    # Set inline rather than through the stylesheet: these are data, not theme,
-    # and regenerating 70-odd rules on every palette change to express them
-    # would be the wrong shape.
-    provider = Gtk.CssProvider()
-    provider.load_from_string(
-        f".wio-swatch-{token} {{ background-color: {colour.hex};"
-        " border-radius: 8px; border: 1px solid alpha(currentColor, 0.15); }"
-    )
-    chip.add_css_class(f"wio-swatch-{token}")
-    chip.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-
-    caption = Gtk.Label(label=label)
-    caption.add_css_class("caption")
-    value = Gtk.Label(label=colour.hex)
-    value.add_css_class("caption")
-    value.add_css_class("dim-label")
-
-    box.append(chip)
-    box.append(caption)
-    box.append(value)
-    return box
+        for token, label in STRIP_TOKENS:
+            colour = palette.colours.get(token)
+            if colour is not None:
+                self._swatches.append(swatch(colour, label))

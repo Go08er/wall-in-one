@@ -131,6 +131,62 @@ def generate(item: MediaItem, *, force: bool = False) -> Path:
     return destination
 
 
+#: What `Gdk.Texture.new_from_bytes` decodes on its own, by magic number. Every
+#: other format a provider might hand us -- webp above all -- goes through
+#: ffmpeg first, for the same reason local thumbnails do.
+_NATIVE_MAGIC: Final[tuple[bytes, ...]] = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
+
+#: A remote preview is a few hundred KB; a transcode of one should be quick.
+DECODE_TIMEOUT: Final = 10.0
+
+
+def is_natively_decodable(data: bytes) -> bool:
+    return data.startswith(_NATIVE_MAGIC)
+
+
+def to_displayable(data: bytes) -> bytes:
+    """Bytes GTK can turn into a texture, transcoding through ffmpeg if needed.
+
+    Remote thumbnails arrive as whatever the provider serves, and MotionBGS
+    serves webp. Returns empty rather than raising: a preview that will not
+    decode is a card without a picture, not a failure worth a dialog.
+    """
+    if not data:
+        return b""
+    if is_natively_decodable(data):
+        return data
+    if not is_available():
+        return b""
+    try:
+        completed = subprocess.run(
+            # `-` for both ends: nothing about a downloaded preview should
+            # reach the filesystem on its way to being looked at.
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                "-f",
+                "image2",
+                "pipe:1",
+            ],
+            input=data,
+            capture_output=True,
+            timeout=DECODE_TIMEOUT,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return b""
+    if completed.returncode != 0:
+        return b""
+    return completed.stdout if is_natively_decodable(completed.stdout) else b""
+
+
 def prune(limit: int = MAX_CACHE_ENTRIES) -> int:
     """Drop the least recently modified thumbnails past ``limit``."""
     directory = cache_directory()

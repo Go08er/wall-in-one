@@ -198,3 +198,55 @@ def test_prune_under_the_limit_does_nothing(cache_home: Path) -> None:
 
 def test_prune_on_a_missing_cache_is_harmless(cache_home: Path) -> None:
     assert thumbnails.prune() == 0
+
+
+# -- remote previews -----------------------------------------------------
+
+
+def _make_webp(path: Path) -> bytes:
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc=size=64x36:rate=1",
+            "-frames:v", "1", "-c:v", "libwebp", str(path),
+        ],
+        check=True,
+    )  # fmt: skip
+    return path.read_bytes()
+
+
+def test_png_and_jpeg_are_recognised_without_decoding() -> None:
+    assert thumbnails.is_natively_decodable(b"\x89PNG\r\n\x1a\n rest")
+    assert thumbnails.is_natively_decodable(b"\xff\xd8\xff\xe0 rest")
+    assert not thumbnails.is_natively_decodable(b"RIFF____WEBP")
+
+
+@needs_ffmpeg
+def test_a_png_preview_is_passed_through_untouched(tmp_path: Path) -> None:
+    """No ffmpeg process for the common case: GTK decodes PNG itself."""
+    data = _make_png(tmp_path / "a.png").read_bytes()
+    assert thumbnails.to_displayable(data) is data
+
+
+@needs_ffmpeg
+def test_a_webp_preview_is_transcoded_for_gtk(tmp_path: Path) -> None:
+    # MotionBGS serves webp, and this closure's GdkPixbuf has no webp loader.
+    converted = thumbnails.to_displayable(_make_webp(tmp_path / "a.webp"))
+    assert thumbnails.is_natively_decodable(converted)
+
+
+def test_an_empty_preview_stays_empty() -> None:
+    assert thumbnails.to_displayable(b"") == b""
+
+
+@needs_ffmpeg
+def test_a_preview_that_is_not_an_image_yields_nothing() -> None:
+    """An error page must not become a broken texture."""
+    assert thumbnails.to_displayable(b"<html>not an image</html>") == b""
+
+
+def test_a_preview_without_ffmpeg_is_dropped_not_guessed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(thumbnails, "is_available", lambda: False)
+    assert thumbnails.to_displayable(b"RIFF____WEBPsomething") == b""

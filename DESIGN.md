@@ -359,7 +359,9 @@ Ordered so the riskiest integration is proven before any bulk code moves.
 - [x] **6. Providers.** Lift the 5,493-line backend, strip the RPC transport,
       keep the test suite. The transport was the bulk of it: MotionBGS and
       Wallhaven came across as ~2,000 lines of typed Python behind one
-      stubable HTTP seam. Not yet wired into the session or the UI.
+      stubable HTTP seam. Wired up in `browse.Browser` (root selection,
+      downloads, bounded preview fetches) and `ui.browse_dialog`; a finished
+      download rescans the library, so the file appears in the grid unasked.
 - [x] **7. Palette browser.** Built-in / community / custom, live scheme preview
       across all 10 generators, custom palette editing.
 - [x] **8. Socket + `ctl`.** Then shrink the Noctalia plugin to widget +

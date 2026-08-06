@@ -21,6 +21,7 @@ from wall_in_one import config
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import source
+from wall_in_one.ui.browse_dialog import BrowseDialog
 from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.preferences import PreferencesDialog
@@ -40,6 +41,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._loader = ThumbnailLoader()
         self._preferences: PreferencesDialog | None = None
         self._palettes: PaletteBrowserDialog | None = None
+        self._browse: BrowseDialog | None = None
 
         self.set_title("Wall-in-One")
         self.set_default_size(1100, 760)
@@ -74,7 +76,14 @@ class MainWindow(Adw.ApplicationWindow):
         refresh.connect("clicked", lambda _button: self._app.refresh_library())
         header.pack_start(refresh)
 
+        browse = Gtk.Button(
+            icon_name="system-search-symbolic", tooltip_text="Find wallpapers online"
+        )
+        browse.connect("clicked", lambda _button: self.open_browse())
+        header.pack_end(browse)
+
         menu = Gio.Menu()
+        menu.append("Find wallpapers", "win.browse")
         menu.append("Palettes", "win.palettes")
         menu.append("Settings", "win.preferences")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Main menu")
@@ -84,6 +93,7 @@ class MainWindow(Adw.ApplicationWindow):
         for name, opener in (
             ("preferences", self.open_preferences),
             ("palettes", self.open_palette_browser),
+            ("browse", self.open_browse),
         ):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", self._make_opener(opener))
@@ -136,6 +146,23 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_palette_browser_closed(self, _dialog: Adw.Dialog) -> None:
         self._palettes = None
+
+    def open_browse(self) -> None:
+        """Open the search-and-download dialog, one at a time.
+
+        Reusing the open one keeps its results and its preview cache, so
+        pressing the button again does not throw away a page of downloads.
+        """
+        if self._browse is not None:
+            self._browse.present(self)
+            return
+        dialog = BrowseDialog(self._app)
+        self._browse = dialog
+        dialog.connect("closed", self._on_browse_closed)
+        dialog.present(self)
+
+    def _on_browse_closed(self, _dialog: Adw.Dialog) -> None:
+        self._browse = None
 
     def report(self, message: str) -> None:
         """Surface a failure where the user will actually see it."""

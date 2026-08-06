@@ -9,9 +9,9 @@ the companion Noctalia plugin talks to it.
 
 **Status: early but working.** The colour pipeline, the library and playlist
 model, and wallpaper application (stills and video) are built and verified
-against a live system. Still to come: thumbnails, the provider layer, and the
-palette browser. See [`DESIGN.md`](DESIGN.md) for the findings this is built on
-and the plan.
+against a live system. Thumbnails, the palette browser, and searching two
+wallpaper sites are built on top of that. See [`DESIGN.md`](DESIGN.md) for the
+findings this is built on and the plan.
 
 ## Why it exists
 
@@ -88,6 +88,30 @@ Files are only ever considered deletable when we downloaded them: a directory
 marker says we made the directory, and a per-file sidecar says we fetched that
 particular file. Both are required, so anything you drop into a managed
 directory by hand stays yours.
+
+## Finding wallpapers
+
+The search button in the header — or **Find wallpapers** in the menu — opens a
+dialog that searches two sites: [Wallhaven](https://wallhaven.cc) for stills and
+[MotionBGS](https://motionbgs.com) for video wallpapers. Each result is a card
+with a preview and a download button.
+
+Downloads land in `Wall-in-One/Wallhaven/` or `Wall-in-One/MotionBGS/` beneath
+the first library root — the same directory the library was scanned from, so
+they arrive inside the library rather than beside it. The library is rescanned
+when a download finishes, so the file shows up in the grid without being asked
+for. Each download writes both the directory marker and the per-file sidecar
+described above, which is what makes it deletable from the app.
+
+Wallhaven works without an API key. The one thing a key buys is NSFW results:
+without one, that rating is greyed out in the filters, because sending it
+anyway gets a silent downgrade and an unexplained empty grid. Supply a key
+through `WALLHAVEN_API_KEY` or in `~/.config/wall-in-one/wallhaven-api-key`.
+MotionBGS needs no credentials at all.
+
+[`docs/browsing.md`](docs/browsing.md) covers the filters each site
+understands, MotionBGS's paging constraints, and what the download path checks
+before it writes anything.
 
 ## Control socket
 

@@ -32,10 +32,11 @@ class ProviderError(Exception):
     while the message is for a human to read. The kinds in use:
 
     ``challenge``, ``conflict``, ``content-type``, ``credential``,
-    ``dimensions``, ``http``, ``invalid-request``, ``invalid-url``,
-    ``local-io``, ``rate-limit``, ``redirects``, ``remote``, ``response``,
-    ``site-markup``, ``size-limit``, ``size-mismatch``, ``timeout``,
-    ``transport``, ``unknown-provider``, ``validation``.
+    ``dimensions``, ``http``, ``invalid-path``, ``invalid-request``,
+    ``invalid-url``, ``local-io``, ``no-root``, ``rate-limit``, ``redirects``,
+    ``remote``, ``response``, ``site-markup``, ``size-limit``,
+    ``size-mismatch``, ``timeout``, ``transport``, ``unknown-provider``,
+    ``validation``.
     """
 
     def __init__(self, kind: str, message: str) -> None:

@@ -24,7 +24,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 from wall_in_one import thumbnails
 from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library.model import Kind
-from wall_in_one.providers import wallhaven
+from wall_in_one.providers import registry, wallhaven
 from wall_in_one.providers.base import (
     ProviderError,
     SearchQuery,
@@ -344,15 +344,7 @@ class BrowseDialog(Adw.Dialog):
         )
         self._wallhaven_filters.append(self._categories)
 
-        key_missing = any(
-            info.limitations for info in self._infos if info.name == wallhaven.Wallhaven.name
-        )
         self._purity = _CheckRow("Rating", ("SFW", "Sketchy", "NSFW"), (True, False, False))
-        # NSFW results need a key; offering the toggle without one produces an
-        # empty grid and no explanation.
-        self._purity.set_enabled(2, not key_missing)
-        if key_missing:
-            self._purity.set_hint(2, "needs a Wallhaven API key")
         self._wallhaven_filters.append(self._purity)
 
         self._atleast = Gtk.Entry(placeholder_text="At least, e.g. 1920x1080")
@@ -371,7 +363,40 @@ class BrowseDialog(Adw.Dialog):
 
         popover = Gtk.Popover()
         popover.set_child(box)
+        # Re-asked every time the popover opens rather than once at
+        # construction: the settings dialogue can store a key while this dialog
+        # is alive, and the window keeps one browse dialog for the session, so
+        # a value read at construction would stay stale until it is closed.
+        popover.connect("notify::visible", self._on_filters_shown)
+        self._sync_nsfw_toggle()
         return popover
+
+    def _on_filters_shown(self, popover: Gtk.Popover, _parameter: object) -> None:
+        if popover.get_visible():
+            self._sync_nsfw_toggle()
+
+    def _sync_nsfw_toggle(self) -> None:
+        """Offer the NSFW rating only when Wallhaven can actually return it.
+
+        Matched against the specific limitation rather than "has any
+        limitation", so a future limitation about something else does not
+        silently disable an unrelated control.
+        """
+        limitations = next(
+            (
+                info.limitations
+                for info in registry.describe()
+                if info.name == wallhaven.Wallhaven.name
+            ),
+            (),
+        )
+        # Anything wrong with the key blocks NSFW, but only the plain
+        # missing-key case has a short hint; a malformed key gets its own
+        # sentence from the registry.
+        blocked = bool(limitations)
+        self._purity.set_enabled(2, not blocked)
+        if blocked:
+            self._purity.set_hint(2, limitations[0])
 
     def _build_pager(self) -> Gtk.Widget:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -437,7 +462,13 @@ class BrowseDialog(Adw.Dialog):
             # MotionBGS rejects the two together.
             options["mode"] = "search" if text else mode
             if options["mode"] == "genre":
-                options["genre"] = self._genre.get_text().strip()
+                genre = self._genre.get_text().strip()
+                if not genre:
+                    # MotionBGS would answer "genre is not a lowercase
+                    # MotionBGS slug", which is true and tells the user
+                    # nothing about the empty box in front of them.
+                    raise ProviderError("validation", "type a genre, or pick another way to browse")
+                options["genre"] = genre
         return SearchQuery(text=text, page=page, options=options)
 
     # -- searching ---------------------------------------------------------

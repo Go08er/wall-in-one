@@ -314,10 +314,14 @@ Ordered so the riskiest integration is proven before any bulk code moves.
       any UI exists.
 - [x] **3. App shell.** Adw window with a stable `app-id`, translucency setting,
       live palette applied as CSS. Ship the niri snippet (`docs/niri.md`).
-- [ ] **4. Library + playlist model.** Scan roots, still/video pairing,
-      thumbnails, shuffle/cycle state.
-- [ ] **5. Wallpaper application.** Statics via `noctalia msg wallpaper-set`;
-      dynamics via mpvpaper supervision (port `renderer-supervisor`).
+- [x] **4. Library + playlist model.** Scan roots, still/video pairing,
+      shuffle/cycle state. Thumbnails still to come.
+- [x] **5. Wallpaper application.** Statics via `noctalia msg wallpaper-set`;
+      dynamics via mpvpaper. The 886-line `renderer-supervisor` shrank to
+      ~200 lines because Python speaks mpv's AF_UNIX IPC directly -- the old
+      script needed `socat` or a capable `nc`, and probed for which. Not
+      carried over: per-output renderer children, `--auto-mode` (mpvpaper 1.8
+      has no such flag), and live volume control.
 - [ ] **6. Providers.** Lift the 5,493-line backend, strip the RPC transport,
       keep the test suite.
 - [ ] **7. Palette browser.** Built-in / community / custom, live scheme preview
@@ -345,6 +349,24 @@ write confined to a sandboxed set of XDG directories — the user's own
 | app-id | launch, then `niri msg -j windows` | `dev.goober.WallInOne` |
 
 Gates: `ruff` clean, `mypy --strict` clean, `pytest` green.
+
+### How steps 4–5 were proven
+
+Scanning and playback were exercised against the real library, with the live
+wallpaper captured beforehand and restored afterwards.
+
+| check | result |
+|---|---|
+| `scan()` with no arguments | found the root from Noctalia's `[wallpaper] directory`, classified all 5 items |
+| ownership | both MotionBGS downloads `managed`; a file dropped into a managed directory by hand stays `user` |
+| dynamics off | playable count 5 → 3, exactly the unpaired videos dropping out |
+| `ctl next` on a video | mpvpaper started; mpv answered `get_property path` over the IPC socket with the right file |
+| `ctl dynamics off` mid-video | renderer stopped, fell back to a still |
+| `ctl quit` | no mpvpaper or mpv process left, both sockets unlinked |
+
+One bug came out of that live run: pausing dynamics on a video with no still
+raised, leaving the setting changed but the video still playing. Fixed, with a
+regression test.
 
 ---
 

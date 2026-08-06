@@ -17,6 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 from wall_in_one import config
+from wall_in_one.session import Session
 from wall_in_one.theme import source
 from wall_in_one.theme.palette import Palette
 
@@ -47,6 +48,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._status_row = Adw.ActionRow(title="Palette source")
         self._swatches = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._swatches.set_homogeneous(True)
+        self._library_row = Adw.ActionRow(title="Library")
+        self._now_playing_row = Adw.ActionRow(title="Now showing")
 
         self.set_content(self._build_content())
 
@@ -59,6 +62,7 @@ class MainWindow(Adw.ApplicationWindow):
         toolbar.add_top_bar(header)
 
         page = Adw.PreferencesPage()
+        page.add(self._build_library_group())
         page.add(self._build_palette_group())
         page.add(self._build_appearance_group())
 
@@ -67,6 +71,50 @@ class MainWindow(Adw.ApplicationWindow):
         scroller.set_vexpand(True)
         toolbar.set_content(scroller)
         return toolbar
+
+    def _build_library_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(
+            title="Library",
+            description="Wallpapers found under the configured roots.",
+        )
+        group.add(self._now_playing_row)
+        group.add(self._library_row)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        controls.set_margin_top(8)
+        controls.set_margin_bottom(8)
+        controls.set_margin_start(12)
+        for label, callback in (
+            ("Previous", self._on_previous),
+            ("Next", self._on_next),
+            ("Random", self._on_random),
+        ):
+            button = Gtk.Button(label=label)
+            button.add_css_class("flat")
+            button.connect("clicked", callback)
+            controls.append(button)
+
+        row = Adw.PreferencesRow()
+        row.set_activatable(False)
+        row.set_child(controls)
+        group.add(row)
+        return group
+
+    def _on_next(self, _button: Gtk.Button) -> None:
+        self._navigate("next")
+
+    def _on_previous(self, _button: Gtk.Button) -> None:
+        self._navigate("previous")
+
+    def _on_random(self, _button: Gtk.Button) -> None:
+        self._navigate("random")
+
+    def _navigate(self, verb: str) -> None:
+        application = self.get_application()
+        if application is not None:
+            # The application owns the session and the error handling; the
+            # window only says which direction.
+            application.apply(getattr(application.session, verb))  # type: ignore[attr-defined]
 
     def _build_palette_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
@@ -156,6 +204,23 @@ class MainWindow(Adw.ApplicationWindow):
         resolved = source.resolve(scheme=self._settings.preview_scheme)
         self.show_palette(resolved)
         return resolved
+
+    def show_library(self, session: Session) -> None:
+        library = session.library
+        playable = len(session.playlist)
+        summary = (
+            f"{len(library)} found, {playable} playable "
+            f"({len(library.videos)} video, {len(library.stills)} still)"
+        )
+        if library.skipped:
+            summary += f" - {len(library.skipped)} skipped"
+        self._library_row.set_subtitle(summary)
+
+        current = session.current
+        if current is None:
+            self._now_playing_row.set_subtitle("nothing applied yet")
+        else:
+            self._now_playing_row.set_subtitle(current.describe())
 
     def show_palette(self, resolved: source.ResolvedPalette) -> None:
         self._status_row.set_subtitle(f"{resolved.origin.value} - {resolved.detail}")

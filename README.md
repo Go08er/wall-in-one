@@ -7,9 +7,11 @@ It manages stills and video wallpapers, keeps its own colours in sync with
 is driven either from its window or from a small control socket — which is how
 the companion Noctalia plugin talks to it.
 
-**Status: early.** The colour pipeline is built and verified end to end. The
-library, playlist, and provider layers are not written yet. See
-[`DESIGN.md`](DESIGN.md) for the findings this is built on and the plan.
+**Status: early but working.** The colour pipeline, the library and playlist
+model, and wallpaper application (stills and video) are built and verified
+against a live system. Still to come: thumbnails, the provider layer, and the
+palette browser. See [`DESIGN.md`](DESIGN.md) for the findings this is built on
+and the plan.
 
 ## Why it exists
 
@@ -61,6 +63,31 @@ The app draws its own translucency; blur behind it is the compositor's job. On
 niri 26.04 that is a four-line window rule. See [`docs/niri.md`](docs/niri.md)
 — it covers the app-id to match, the xray caveat that matters when a video
 wallpaper is running, and what to do on older niri.
+
+## The library
+
+Roots default to Noctalia's own `[wallpaper] directory`, so the two agree about
+what the library is without configuring it twice.
+
+Stills are set through Noctalia. Videos are played by mpvpaper, with the paired
+still set underneath first — so if the renderer dies the right image is still
+on screen, and Noctalia's palette matches what the video looks like.
+
+A video pairs with a still three ways, in order: a `<video>.wall-in-one.json`
+sidecar naming one; a file of the same name under `Wall-in-One/Automatic
+Stills/`; or a sibling named `foo-still.png` (or plain `foo.png`) next to
+`foo.mp4`. A still that exists only to represent a video is not listed
+separately — otherwise the same picture turns up twice in the rotation.
+
+`dynamics off` pauses videos and shows their stills instead. Videos with no
+still simply drop out of the rotation until dynamics come back on. Blur is
+markedly more expensive over an animated wallpaper, so this is a performance
+control as much as a battery one — see [`docs/niri.md`](docs/niri.md).
+
+Files are only ever considered deletable when we downloaded them: a directory
+marker says we made the directory, and a per-file sidecar says we fetched that
+particular file. Both are required, so anything you drop into a managed
+directory by hand stays yours.
 
 ## Control socket
 

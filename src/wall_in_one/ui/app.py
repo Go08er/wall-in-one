@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -16,8 +17,10 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 from wall_in_one import config, paths
 from wall_in_one.control import server
 from wall_in_one.control.protocol import Response
+from wall_in_one.session import Session
 from wall_in_one.theme import css, source
 from wall_in_one.ui.window import MainWindow
+from wall_in_one.wallpaper.applier import Applied, ApplyError
 
 
 class Application(Adw.Application):
@@ -33,6 +36,8 @@ class Application(Adw.Application):
         self._provider = Gtk.CssProvider()
         self._control: server.SocketServer | None = None
         self._resolved: source.ResolvedPalette | None = None
+        self._session = Session(self._settings)
+        self._cycle_source: int = 0
 
     # -- lifecycle -------------------------------------------------------
 
@@ -54,10 +59,13 @@ class Application(Adw.Application):
             window.connect("close-request", self._on_close_request)
             self._window = window
         self.reload_palette()
+        self.refresh_library()
         assert self._window is not None
         self._window.present()
 
     def do_shutdown(self) -> None:
+        self._stop_cycle()
+        self._session.shutdown()
         if self._control is not None:
             self._control.stop()
             self._control = None
@@ -99,8 +107,54 @@ class Application(Adw.Application):
 
     def _on_settings_changed(self, settings: config.Settings) -> None:
         self._settings = settings
+        self._session.update_settings(settings)
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
+
+    # -- library ---------------------------------------------------------
+
+    @property
+    def session(self) -> Session:
+        return self._session
+
+    def refresh_library(self) -> None:
+        """Rescan, then line the cursor up with the wallpaper already on screen."""
+        self._session.refresh()
+        self._session.sync_with_noctalia()
+        if self._window is not None:
+            self._window.show_library(self._session)
+
+    def apply(self, action: Callable[[], Applied]) -> Response:
+        """Run a navigation action and report it, without letting it kill the app."""
+        try:
+            applied = action()
+        except ApplyError as error:
+            return Response.failure(str(error))
+        if self._window is not None:
+            self._window.show_library(self._session)
+        return Response.success(applied.describe())
+
+    # -- cycle timer -----------------------------------------------------
+
+    def _stop_cycle(self) -> None:
+        if self._cycle_source:
+            GLib.source_remove(self._cycle_source)
+            self._cycle_source = 0
+
+    def sync_cycle_timer(self) -> None:
+        """Start, stop, or re-time the cycle timer to match the settings."""
+        self._stop_cycle()
+        if not self._settings.cycle_enabled:
+            return
+        self._cycle_source = GLib.timeout_add_seconds(
+            self._settings.cycle_interval, self._on_cycle_tick
+        )
+
+    def _on_cycle_tick(self) -> bool:
+        # A failure here is nearly always an empty library or a missing file;
+        # neither is a reason to stop cycling, so keep the timer alive.
+        self.apply(self._session.next)
+        return GLib.SOURCE_CONTINUE
 
     # -- control socket --------------------------------------------------
 
@@ -122,6 +176,8 @@ class Application(Adw.Application):
     def update_settings(self, **changes: Any) -> config.Settings:
         self._settings = replace(self._settings, **changes).validated()
         config.save(self._settings)
+        self._session.update_settings(self._settings)
+        self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
         return self._settings
@@ -130,23 +186,22 @@ class Application(Adw.Application):
 class _Commands:
     """Control-socket verb implementations.
 
-    The playlist verbs are stubs until the library model lands; they answer
-    honestly rather than pretending to have worked.
+    Thin on purpose: each verb is one call into the session plus a sentence
+    describing what happened. This is the whole surface the Noctalia plugin
+    drives.
     """
-
-    _PENDING = "not implemented yet: the library model is not wired up"
 
     def __init__(self, application: Application) -> None:
         self._app = application
 
     def next_wallpaper(self) -> Response:
-        return Response.failure(self._PENDING)
+        return self._app.apply(self._app.session.next)
 
     def previous_wallpaper(self) -> Response:
-        return Response.failure(self._PENDING)
+        return self._app.apply(self._app.session.previous)
 
     def random_wallpaper(self) -> Response:
-        return Response.failure(self._PENDING)
+        return self._app.apply(self._app.session.random)
 
     def set_shuffle(self, value: str | None) -> Response:
         current = self._app.settings.shuffle
@@ -178,16 +233,7 @@ class _Commands:
         return Response.success(f"palette reloaded ({resolved.origin.value})")
 
     def report_status(self) -> Response:
-        settings = self._app.settings
-        parts = (
-            f"opacity={settings.opacity:.2f}",
-            f"scheme={settings.preview_scheme}",
-            f"shuffle={'on' if settings.shuffle else 'off'}",
-            f"cycle={'on' if settings.cycle_enabled else 'off'}",
-            f"cycle-interval={settings.cycle_interval}",
-            f"dynamics={'on' if settings.dynamics_enabled else 'off'}",
-        )
-        return Response.success(" ".join(parts))
+        return Response.success(self._app.session.describe())
 
     def quit(self) -> Response:
         GLib.idle_add(self._app.quit)

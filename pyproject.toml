@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wall-in-one"
+version = "0.1.0"
+description = "A wallpaper manager for Wayland with Noctalia palette sync"
+requires-python = ">=3.11"
+dependencies = ["PyGObject"]
+
+[project.scripts]
+wall-in-one = "wall_in_one.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"wall_in_one" = ["data/*.tmpl"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+# PyGObject's generated bindings are only partly typed even with stubs, so the
+# UI layer is checked but not held to the same bar as the pure-Python core.
+[[tool.mypy.overrides]]
+module = ["gi.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["wall_in_one.ui.*", "wall_in_one.control.server"]
+disallow_untyped_calls = false
+disallow_any_unimported = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gui: needs a display and the GTK stack",
+    "noctalia: needs the noctalia binary on PATH",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# PyGObject requires gi.require_version() to run before the corresponding
+# `from gi.repository import ...`, so imports cannot all sit at the top.
+"src/wall_in_one/ui/*.py" = ["E402"]
+# Tests reach into module internals to assert on the exact marker text the
+# installer writes into another program's config file.
+"tests/*.py" = ["SLF001"]

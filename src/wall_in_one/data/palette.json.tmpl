@@ -1,0 +1,24 @@
+<* comment
+   Noctalia user template. Renders the live palette for wall-in-one.
+
+   Registered under [theme.templates.user.wall-in-one] in Noctalia's
+   settings.toml by `wall-in-one --install-theme-template`. Noctalia re-renders
+   this on every palette change, then runs the template's post_hook, which is
+   what pushes the new colours into the running app.
+
+   The colour loop is generic on purpose, so tokens added by a future Noctalia
+   version flow through without this file needing an edit.
+
+   Note: an unrecognised block is silently skipped by Noctalia's template
+   engine, which is what makes this a comment. Do not write a block-closing
+   delimiter inside it -- the engine's block regex is non-greedy and would end
+   the comment there, spilling the rest into the output.
+*>
+{
+  "mode": "{{mode}}",
+  "colors": {
+<* for name, value in colors *>
+    "{{name}}": "{{value.default.hex}}"<* if not loop.last *>,<* endif *>
+<* endfor *>
+  }
+}

@@ -545,13 +545,23 @@ each step is independently useful if the next never happens.
       recomputed the defaults from disk and overwrote the first pass, which is
       how the first attempt at this failed. `MediaItem.paired_still` survives
       as the derived view the applier and the grid already read.
-- [ ] **10. Per-item palette policy.** Each pairing resolves dark/light/auto
+- [x] **10. Per-item palette policy.** Each pairing resolves dark/light/auto
       plus one of builtin, wallpaper-generated, community, custom, or
       keep-current. The default stays adaptive-from-wallpaper, which is what
       happens today. `theme/palettes.py` already discovers all four sources and
       `theme/source.py` already resolves them; what is missing is storing a
       choice per item and applying it in the order still, mode, palette,
       renderer.
+      **Done.** `PalettePolicy` is `kind`, `name` and `mode`, stored as the
+      wire form `kind` or `kind:name` so a source Noctalia adds later survives
+      a round trip through a build that predates it. `adaptive` is Noctalia's
+      own `wallpaper` source named by the generator from settings, so
+      "adaptive" and "generated from this wallpaper with m3-tonal-spot" are one
+      request rather than two code paths. The order matters and is tested:
+      Noctalia derives adaptive colours from whatever wallpaper is set, so
+      asking before the still lands generates them from the previous picture.
+      A palette that will not apply is never fatal -- the wallpaper is already
+      on screen by then.
 - [ ] **11. Manual still override.** A picker over indexed stills plus an
       absolute-path escape hatch. `library/stills.py` already writes the
       sidecar that records one, so this is UI and a verb, not new machinery.

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer
@@ -343,3 +344,106 @@ def test_a_videos_paired_still_is_aimed_the_same_way(
 
 def test_the_renderer_defaults_to_every_output() -> None:
     assert renderer.Renderer().output == renderer.ALL_OUTPUTS
+
+
+# -- the palette a wallpaper asks for -------------------------------------
+
+
+@pytest.fixture
+def noctalia_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every Noctalia call the applier makes, in order."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "wall_in_one.theme.noctalia.set_wallpaper",
+        lambda path, connector=None: calls.append(("wallpaper", Path(path).name)),
+    )
+    monkeypatch.setattr(
+        "wall_in_one.theme.noctalia.set_mode", lambda mode: calls.append(("mode", str(mode)))
+    )
+    monkeypatch.setattr(
+        "wall_in_one.theme.noctalia.set_scheme",
+        lambda selection: calls.append(("scheme", f"{selection.source}/{selection.name}")),
+    )
+    return calls
+
+
+def test_the_still_is_set_before_the_palette_is_asked_for(
+    noctalia_calls: list[tuple[str, str]], tmp_path: Path
+) -> None:
+    """Noctalia derives adaptive colours from whatever wallpaper is set, so
+    asking first would generate them from the previous picture."""
+    applier = Applier(FakeRenderer())  # type: ignore[arg-type]
+    applier.apply(
+        _still(tmp_path),
+        dynamics_enabled=True,
+        palette=pairings.PalettePolicy(),
+        generator="m3-fruit-salad",
+    )
+    assert noctalia_calls == [("wallpaper", "a.png"), ("scheme", "wallpaper/m3-fruit-salad")]
+
+
+def test_the_mode_is_set_before_the_palette(
+    noctalia_calls: list[tuple[str, str]], tmp_path: Path
+) -> None:
+    applier = Applier(FakeRenderer())  # type: ignore[arg-type]
+    applier.apply(
+        _still(tmp_path),
+        dynamics_enabled=True,
+        palette=pairings.PalettePolicy("builtin", "Nord", pairings.Mode.DARK),
+    )
+    assert noctalia_calls == [
+        ("wallpaper", "a.png"),
+        ("mode", "dark"),
+        ("scheme", "builtin/Nord"),
+    ]
+
+
+def test_a_video_gets_its_palette_from_its_still_before_playing(
+    noctalia_calls: list[tuple[str, str]], tmp_path: Path
+) -> None:
+    """The still goes underneath first, so adaptive colours come from what the
+    video looks like rather than from the wallpaper before it."""
+    fake = FakeRenderer()
+    applier = Applier(fake)  # type: ignore[arg-type]
+    applier.apply(_video(tmp_path), dynamics_enabled=True, palette=pairings.PalettePolicy())
+    assert noctalia_calls[0] == ("wallpaper", "clip-still.png")
+    assert noctalia_calls[1][0] == "scheme"
+    assert fake.started, "the renderer starts last, after the colours are settled"
+
+
+def test_keeping_the_palette_asks_noctalia_for_nothing(
+    noctalia_calls: list[tuple[str, str]], tmp_path: Path
+) -> None:
+    applier = Applier(FakeRenderer())  # type: ignore[arg-type]
+    applier.apply(
+        _still(tmp_path),
+        dynamics_enabled=True,
+        palette=pairings.PalettePolicy(kind=pairings.KEEP),
+    )
+    assert noctalia_calls == [("wallpaper", "a.png")]
+
+
+def test_no_policy_at_all_leaves_the_palette_alone(
+    noctalia_calls: list[tuple[str, str]], tmp_path: Path
+) -> None:
+    """What every caller that predates policies does."""
+    applier = Applier(FakeRenderer())  # type: ignore[arg-type]
+    applier.apply(_still(tmp_path), dynamics_enabled=True)
+    assert noctalia_calls == [("wallpaper", "a.png")]
+
+
+def test_a_palette_that_will_not_apply_does_not_lose_the_wallpaper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The picture is what was asked for and is already on screen by then."""
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", lambda *a, **k: None)
+
+    def refuse(_selection: object) -> None:
+        raise noctalia.NoctaliaError("no shell")
+
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_scheme", refuse)
+    applier = Applier(FakeRenderer())  # type: ignore[arg-type]
+    applied = applier.apply(
+        _still(tmp_path), dynamics_enabled=True, palette=pairings.PalettePolicy()
+    )
+    assert applied.path.name == "a.png"

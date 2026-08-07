@@ -19,7 +19,14 @@ import pytest
 
 from wall_in_one.library import pairing, pairings
 from wall_in_one.library.model import Kind, MediaItem
-from wall_in_one.library.pairings import Identity, Medium, Pairing, PairingError, Store
+from wall_in_one.library.pairings import (
+    Identity,
+    Medium,
+    Pairing,
+    PairingError,
+    PalettePolicy,
+    Store,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -189,9 +196,9 @@ def test_resetting_returns_an_item_to_the_default(tmp_path: Path) -> None:
 def test_clearing_the_still_keeps_the_rest_of_the_customization(tmp_path: Path) -> None:
     picture = png(tmp_path / "a.png")
     store = Store(path=tmp_path / "pairings.json")
-    store.choose_palette(item(picture), "keep-current")
+    store.choose_palette(item(picture), PalettePolicy(kind=pairings.KEEP))
     store.choose_still(item(picture), None)
-    assert store.resolve(item(picture)).palette == "keep-current"
+    assert store.resolve(item(picture)).palette.keeps_palette
 
 
 def test_choosing_a_palette_leaves_a_chosen_still_alone(tmp_path: Path) -> None:
@@ -199,16 +206,17 @@ def test_choosing_a_palette_leaves_a_chosen_still_alone(tmp_path: Path) -> None:
     chosen = png(tmp_path / "chosen.png")
     store = Store(path=tmp_path / "pairings.json")
     store.choose_still(item(clip, Kind.VIDEO), chosen)
-    store.choose_palette(item(clip, Kind.VIDEO), "builtin:Nord")
+    store.choose_palette(item(clip, Kind.VIDEO), PalettePolicy("builtin", "Nord"))
     bundle = store.resolve(item(clip, Kind.VIDEO), roots=[tmp_path])
-    assert (bundle.still, bundle.palette) == (chosen, "builtin:Nord")
+    assert bundle.still == chosen
+    assert (bundle.palette.kind, bundle.palette.name) == ("builtin", "Nord")
 
 
 def test_a_deleted_wallpaper_loses_its_record(tmp_path: Path) -> None:
     """Records outlive a missing file on purpose. Not one we destroyed."""
     picture = png(tmp_path / "a.png")
     store = Store(path=tmp_path / "pairings.json")
-    store.choose_palette(item(picture), "keep-current")
+    store.choose_palette(item(picture), PalettePolicy(kind=pairings.KEEP))
     assert store.forget_identity(Identity.of(item(picture))) is True
     assert len(store) == 0
 
@@ -324,7 +332,7 @@ def test_the_write_is_a_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     target = tmp_path / "pairings.json"
     picture = png(tmp_path / "a.png")
     store = Store(path=target)
-    store.choose_palette(item(picture), "first")
+    store.choose_palette(item(picture), PalettePolicy("builtin", "first"))
     observed: list[str] = []
     real_replace = os.replace
 
@@ -334,7 +342,7 @@ def test_the_write_is_a_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         real_replace(source, destination)  # type: ignore[arg-type]
 
     monkeypatch.setattr(os, "replace", watch)
-    store.choose_palette(item(picture), "second")
+    store.choose_palette(item(picture), PalettePolicy("builtin", "second"))
     assert "first" in observed[0]
 
 
@@ -357,10 +365,120 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     target.write_text("not json but somebody's choices", encoding="utf-8")
     store = Store.open(target)
     assert store.fault is not None
-    store.choose_palette(item(png(tmp_path / "a.png")), "keep-current")
+    store.choose_palette(item(png(tmp_path / "a.png")), PalettePolicy(kind=pairings.KEEP))
     kept = target.with_name(target.name + pairings.BROKEN_SUFFIX)
     assert kept.read_text(encoding="utf-8") == "not json but somebody's choices"
 
 
 def test_the_default_file_lives_beside_the_favourites(state_home: Path) -> None:
     assert pairings.state_path().parent == state_home / "wall-in-one"
+
+
+# -- the palette policy ---------------------------------------------------
+
+
+def test_the_default_policy_is_adaptive() -> None:
+    assert PalettePolicy().is_adaptive
+    assert not PalettePolicy().keeps_palette
+
+
+def test_adaptive_asks_noctalia_for_wallpaper_colours() -> None:
+    """ "Adaptive" and "generated from this wallpaper with m3-tonal-spot" are
+    the same request, so the generator the user chose is the name."""
+    selection = PalettePolicy().selection("m3-fruit-salad")
+    assert selection is not None
+    assert (selection.source, selection.name) == ("wallpaper", "m3-fruit-salad")
+
+
+def test_keeping_the_palette_asks_for_nothing() -> None:
+    """The one policy that is not a palette. There is nothing to send."""
+    assert PalettePolicy(kind=pairings.KEEP).selection("m3-tonal-spot") is None
+
+
+@pytest.mark.parametrize("source", ["builtin", "community", "custom"])
+def test_each_noctalia_source_is_passed_through(source: str) -> None:
+    selection = PalettePolicy(source, "Nord").selection("m3-tonal-spot")
+    assert selection is not None
+    assert (selection.source, selection.name) == (source, "Nord")
+
+
+def test_a_named_source_with_no_name_asks_for_nothing() -> None:
+    """`color-scheme-set builtin ''` is not a request, it is a mistake."""
+    assert PalettePolicy("builtin", "").selection("m3-tonal-spot") is None
+
+
+def test_an_unknown_source_asks_for_nothing_rather_than_guessing() -> None:
+    assert PalettePolicy("something-new", "x").selection("m3-tonal-spot") is None
+
+
+@pytest.mark.parametrize(
+    ("policy", "encoded"),
+    [
+        (PalettePolicy(), "adaptive"),
+        (PalettePolicy(kind=pairings.KEEP), "keep"),
+        (PalettePolicy("builtin", "Nord"), "builtin:Nord"),
+        (PalettePolicy("community", "Osaka jade"), "community:Osaka jade"),
+    ],
+)
+def test_a_policy_survives_the_wire_form(policy: PalettePolicy, encoded: str) -> None:
+    assert policy.encode() == encoded
+    assert PalettePolicy.decode(encoded) == policy
+
+
+def test_a_name_containing_a_colon_survives() -> None:
+    original = PalettePolicy("custom", "mine:v2")
+    assert PalettePolicy.decode(original.encode()) == original
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None, 7, ":", ":name"])
+def test_an_unusable_policy_reads_as_adaptive(raw: object) -> None:
+    """Which is what every wallpaper did before policies existed."""
+    assert PalettePolicy.decode(raw).is_adaptive
+
+
+def test_a_source_this_build_does_not_know_survives_a_round_trip() -> None:
+    """It cannot be applied -- `selection` refuses it -- but a build that
+    predates a new Noctalia source must not silently rewrite the record."""
+    policy = PalettePolicy.decode("nebula:something")
+    assert (policy.kind, policy.name) == ("nebula", "something")
+    assert policy.encode() == "nebula:something"
+
+
+@pytest.mark.parametrize("mode", list(pairings.Mode))
+def test_a_mode_survives_the_round_trip(tmp_path: Path, mode: pairings.Mode) -> None:
+    target = tmp_path / "pairings.json"
+    picture = png(tmp_path / "a.png")
+    store = Store(path=target)
+    store.choose_palette(item(picture), PalettePolicy("builtin", "Nord", mode))
+    assert Store.open(target).resolve(item(picture)).palette.mode is mode
+
+
+def test_a_record_that_says_nothing_about_mode_keeps_the_current_one(tmp_path: Path) -> None:
+    target = tmp_path / "pairings.json"
+    target.write_text(
+        json.dumps({"pairings": [{"identity": "still:/w/a.png", "palette": "builtin:Nord"}]}),
+        encoding="utf-8",
+    )
+    assert pairings.load(target)["still:/w/a.png"].palette.mode is pairings.Mode.KEEP
+
+
+def test_an_unreadable_mode_keeps_the_current_one(tmp_path: Path) -> None:
+    target = tmp_path / "pairings.json"
+    target.write_text(
+        json.dumps({"pairings": [{"identity": "still:/w/a.png", "mode": "purple"}]}),
+        encoding="utf-8",
+    )
+    assert pairings.load(target)["still:/w/a.png"].palette.mode is pairings.Mode.KEEP
+
+
+def test_keeping_the_mode_is_not_written_out(tmp_path: Path) -> None:
+    """The common case leaves no trace, so a hand-edited file stays readable.
+
+    Checked on the parsed key rather than as a substring: `tmp_path` carries
+    the test's own name, which contains "mode", and the substring version
+    passed for the wrong reason.
+    """
+    target = tmp_path / "pairings.json"
+    Store(path=target).choose_palette(item(png(tmp_path / "a.png")), PalettePolicy("builtin", "N"))
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert "mode" not in written["pairings"][0]

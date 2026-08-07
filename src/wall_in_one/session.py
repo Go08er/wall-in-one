@@ -192,7 +192,15 @@ class Session:
     def _apply(self, item: MediaItem | None) -> Applied:
         if item is None:
             raise ApplyError("the library is empty")
-        return self._applier.apply(item, dynamics_enabled=self._settings.dynamics_enabled)
+        # The pairing is resolved here rather than in the applier, because the
+        # store is the session's and the applier has no business reading files.
+        bundle = self._pairings.resolve(item, self._library.roots)
+        return self._applier.apply(
+            item,
+            dynamics_enabled=self._settings.dynamics_enabled,
+            palette=bundle.palette,
+            generator=self._settings.preview_scheme,
+        )
 
     def apply_current(self) -> Applied:
         return self._apply(self._playlist.current())

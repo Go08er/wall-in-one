@@ -24,12 +24,17 @@ from wall_in_one.library import favourites, manage, pairings
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
-from wall_in_one.theme import source
+from wall_in_one.theme import palettes, source
 from wall_in_one.ui.browse_dialog import BrowseDialog
 from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.preferences import PreferencesDialog
 from wall_in_one.ui.thumbnails import ThumbnailLoader
+
+#: A palette submenu is a menu, not a list: past this many a person is
+#: scrolling rather than choosing, and the palette browser is the right place
+#: for a collection that size.
+MAX_PALETTES_PER_ORIGIN: Final = 24
 
 #: Accelerator, action, and what to call it in the shortcuts dialogue. One
 #: table, so a key that works and a key the dialogue claims cannot drift apart.
@@ -181,6 +186,13 @@ class MainWindow(Adw.ApplicationWindow):
             targeted = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
             targeted.connect("activate", handler)
             self.add_action(targeted)
+
+        # Two strings rather than one: a palette choice is about a wallpaper
+        # *and* a policy, and packing them into one string would need an
+        # escape rule for a separator that palette names are allowed to contain.
+        palette_action = Gio.SimpleAction.new("palette-wallpaper", GLib.VariantType.new("(ss)"))
+        palette_action.connect("activate", self._on_palette_path)
+        self.add_action(palette_action)
 
         toolbar.add_top_bar(header)
         toolbar.add_top_bar(self._build_library_bar())
@@ -425,10 +437,75 @@ class MainWindow(Adw.ApplicationWindow):
         )
         favourite_item.set_action_and_target_value("win.favourite-wallpaper", target)
         menu.append_item(favourite_item)
+        menu.append_submenu("Colours", self._palette_menu(item))
+
         remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
         remove_item.set_action_and_target_value("win.remove-wallpaper", target)
         menu.append_item(remove_item)
         return menu
+
+    def _palette_menu(self, item: MediaItem) -> Gio.MenuModel:
+        """Which colours this one wallpaper asks Noctalia for.
+
+        Built per tile rather than once, because the discovered palettes can
+        change while the window is open -- and because the menus are built on
+        first click now, so a submenu costs nothing until somebody opens it.
+        """
+        menu = Gio.Menu()
+        source = str(item.path)
+
+        fixed = Gio.Menu()
+        for label, policy in (
+            ("Adaptive", pairings.PalettePolicy()),
+            ("Keep current", pairings.PalettePolicy(kind=pairings.KEEP)),
+        ):
+            fixed_item = Gio.MenuItem.new(label, None)
+            fixed_item.set_action_and_target_value(
+                "win.palette-wallpaper",
+                GLib.Variant("(ss)", (source, policy.encode())),
+            )
+            fixed.append_item(fixed_item)
+        menu.append_section(None, fixed)
+
+        found = palettes.discover()
+        for origin in (palettes.Origin.BUILTIN, palettes.Origin.COMMUNITY, palettes.Origin.CUSTOM):
+            entries = [entry for entry in found.entries if entry.origin is origin]
+            if not entries:
+                continue
+            section = Gio.Menu()
+            for entry in entries[:MAX_PALETTES_PER_ORIGIN]:
+                policy = pairings.PalettePolicy(origin.value, entry.name)
+                chosen = Gio.MenuItem.new(entry.name, None)
+                chosen.set_action_and_target_value(
+                    "win.palette-wallpaper",
+                    GLib.Variant("(ss)", (source, policy.encode())),
+                )
+                section.append_item(chosen)
+            menu.append_submenu(origin.label, section)
+        return menu
+
+    def _on_palette_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        """Record which colours a wallpaper asks for, and show them now.
+
+        Applied immediately only when it is the wallpaper on screen: changing
+        the colours of something you are not looking at would be a surprise.
+        """
+        if raw is None:
+            return
+        source, encoded = raw.unpack()
+        item = self._app.session.library.find(Path(source))
+        if item is None:
+            return
+        policy = pairings.PalettePolicy.decode(encoded)
+        try:
+            self._app.session.pairings.choose_palette(item, policy)
+        except pairings.PairingError:
+            self.report(f"{item.name} keeps those colours for now, but they could not be saved")
+
+        cursor = self._app.session.cursor
+        if cursor is not None and cursor.path == item.path:
+            self._app.apply(lambda: self._app.session.apply_current())
+        self._app.refresh_library()
 
     def _item_at(self, raw: GLib.Variant | None) -> MediaItem | None:
         if raw is None:

@@ -45,6 +45,7 @@ from typing import Any, Final
 from wall_in_one import paths
 from wall_in_one.library import pairing
 from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.theme import noctalia
 
 #: The file, under `paths.app_state_dir()`, beside the favourites.
 STATE_FILENAME: Final = "pairings.json"
@@ -63,12 +64,14 @@ MAX_STATE_BYTES: Final = 8 * 1024 * 1024
 #: Where a file we could not parse is moved before it would be overwritten.
 BROKEN_SUFFIX: Final = ".broken"
 
-#: The palette a pairing asks for when nobody has said otherwise: whatever
-#: Noctalia generates from the wallpaper itself, which is what happens today.
-#: Step 10 gives this field structure -- mode, and a choice among builtin,
-#: generated, community, custom and keep-current. It is a string now so that
-#: adding that structure does not have to change the file format twice.
+#: What a pairing asks for when nobody has said otherwise: whatever Noctalia
+#: generates from the wallpaper itself, which is what has always happened.
 ADAPTIVE: Final = "adaptive"
+
+#: Leave the palette exactly as it is. The one policy that is not a palette:
+#: it exists because "this wallpaper should not disturb my colours" is a real
+#: thing to want, and is not expressible as a choice among palettes.
+KEEP: Final = "keep"
 
 
 class PairingError(Exception):
@@ -134,6 +137,79 @@ class Identity:
             return None
 
 
+class Mode(Enum):
+    """The dark/light half of a palette policy.
+
+    `KEEP` rather than a `None`, because "do not touch the mode" is a choice
+    somebody makes and not the absence of one -- and because a record that
+    says nothing about mode has to mean the same thing.
+    """
+
+    KEEP = "keep"
+    DARK = "dark"
+    LIGHT = "light"
+    AUTO = "auto"
+
+
+@dataclass(frozen=True, slots=True)
+class PalettePolicy:
+    """Which colours a wallpaper asks Noctalia for, and in which mode.
+
+    `kind` is `ADAPTIVE`, `KEEP`, or one of Noctalia's own palette sources --
+    `builtin`, `community`, `custom` -- with `name` naming one within it. The
+    wire form is `kind` or `kind:name`, which is what keeps a record readable
+    and lets a source Noctalia adds later survive a round trip through a build
+    that predates it.
+    """
+
+    kind: str = ADAPTIVE
+    name: str = ""
+    mode: Mode = Mode.KEEP
+
+    @property
+    def is_adaptive(self) -> bool:
+        return self.kind == ADAPTIVE
+
+    @property
+    def keeps_palette(self) -> bool:
+        return self.kind == KEEP
+
+    def encode(self) -> str:
+        return f"{self.kind}:{self.name}" if self.name else self.kind
+
+    @classmethod
+    def decode(cls, raw: object, mode: object = None) -> PalettePolicy:
+        """Read a stored policy, defaulting anything unusable to adaptive."""
+        kind, name = ADAPTIVE, ""
+        if isinstance(raw, str) and raw.strip():
+            head, _, tail = raw.partition(":")
+            if head.strip():
+                kind, name = head.strip(), tail.strip()
+        chosen = Mode.KEEP
+        if isinstance(mode, str):
+            with contextlib.suppress(ValueError):
+                chosen = Mode(mode)
+        return cls(kind=kind, name=name, mode=chosen)
+
+    def selection(self, generator: str) -> noctalia.ColourSchemeSelection | None:
+        """What to hand `color-scheme-set`, or ``None`` to leave it alone.
+
+        An adaptive policy is Noctalia's own `wallpaper` source named by the
+        generator the user picked in settings, so "adaptive" and "generated
+        from this wallpaper with m3-tonal-spot" are the same request.
+        """
+        if self.keeps_palette:
+            return None
+        if self.is_adaptive:
+            return noctalia.ColourSchemeSelection(source="wallpaper", name=generator)
+        if self.kind not in ("builtin", "community", "custom") or not self.name:
+            return None
+        return noctalia.ColourSchemeSelection(
+            source=self.kind,  # type: ignore[arg-type]
+            name=self.name,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Pairing:
     """One library item as the app actually uses it."""
@@ -144,7 +220,7 @@ class Pairing:
     still: Path | None = None
     #: The moving source rendered above the still, or `None` for a plain still.
     motion: Path | None = None
-    palette: str = ADAPTIVE
+    palette: PalettePolicy = PalettePolicy()
     #: True when a person chose some part of this rather than inheriting it.
     customized: bool = False
     #: True when a chosen still is not on disk right now, so `still` fell back
@@ -157,7 +233,12 @@ class Pairing:
         return self.motion is not None
 
     def to_json(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"identity": self.identity.key, "palette": self.palette}
+        payload: dict[str, Any] = {
+            "identity": self.identity.key,
+            "palette": self.palette.encode(),
+        }
+        if self.palette.mode is not Mode.KEEP:
+            payload["mode"] = self.palette.mode.value
         if self.still is not None:
             payload["still"] = str(self.still)
         return payload
@@ -181,11 +262,10 @@ def _record(raw: object) -> Pairing | None:
     if chosen is not None and not chosen.is_absolute():
         # Nothing to be relative to: the process reading this may run anywhere.
         chosen = None
-    palette = raw.get("palette")
     return Pairing(
         identity=identity,
         still=chosen,
-        palette=palette if isinstance(palette, str) and palette else ADAPTIVE,
+        palette=PalettePolicy.decode(raw.get("palette"), raw.get("mode")),
         customized=True,
     )
 
@@ -405,13 +485,13 @@ class Store:
         """
         identity = Identity.of(item)
         existing = self._records.get(identity.key)
-        palette = existing.palette if existing is not None else ADAPTIVE
+        palette = existing.palette if existing is not None else PalettePolicy()
         return self._commit(
             Pairing(identity=identity, still=still, palette=palette, customized=True)
         )
 
-    def choose_palette(self, item: MediaItem, palette: str) -> Pairing:
-        """Record a palette policy for ``item``. Step 10 gives this meaning."""
+    def choose_palette(self, item: MediaItem, palette: PalettePolicy) -> Pairing:
+        """Record which colours ``item`` asks for."""
         identity = Identity.of(item)
         existing = self._records.get(identity.key)
         still = existing.still if existing is not None else None

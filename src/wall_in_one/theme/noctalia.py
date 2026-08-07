@@ -171,6 +171,21 @@ def current_mode() -> Mode:
     return reply  # type: ignore[return-value]
 
 
+def set_scheme(selection: ColourSchemeSelection) -> None:
+    """Ask Noctalia to use a palette. It regenerates and fires our template.
+
+    The counterpart of `current_scheme_selection`, and the reason a pairing can
+    carry a palette at all: everything else about a wallpaper is ours, but the
+    palette is Noctalia's, and this is the only public way to move it.
+    """
+    message("color-scheme-set", selection.source, selection.name)
+
+
+def set_mode(mode: Mode | Literal["auto"]) -> None:
+    """Set dark, light, or let Noctalia decide."""
+    message("theme-mode-set", mode)
+
+
 def reload_config() -> None:
     message("config-reload")
 

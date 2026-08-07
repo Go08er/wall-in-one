@@ -223,6 +223,12 @@ $ wall-in-one ctl status
 $ wall-in-one ctl providers
 $ wall-in-one ctl search wallhaven aurora borealis
 $ wall-in-one ctl download motionbgs <identifier> [hd|4k]
+$ wall-in-one ctl list [everything|stills|videos|favourites] [query]
+$ wall-in-one ctl select /path/to/wallpaper.png
+$ wall-in-one ctl favourites
+$ wall-in-one ctl favourite /path/to/wallpaper.png
+$ wall-in-one ctl unfavourite /path/to/wallpaper.png
+$ wall-in-one ctl remove /path/to/wallpaper.png
 $ wall-in-one ctl quit
 ```
 
@@ -234,6 +240,20 @@ understand; the identifier comes first because it is the field `download` takes
 back. Because `search` and `download` wait on a website, they are answered from
 a worker rather than from the main loop, so the window does not freeze for the
 duration.
+
+`list` selects and orders through the same code the window's search box uses,
+so the two cannot disagree about what `stills snow` means. `favourites` is a
+separate listing from `list favourites` because it has to show entries whose
+file is not in the library right now -- an unmounted drive -- which by
+definition `list` cannot.
+
+`remove` is the only verb that destroys anything, and over a socket there is no
+confirmation dialogue to fall back on. So the path must be absolute and must
+match a wallpaper the scan actually produced; anything else is refused before it
+reaches the code that deletes. What happens then is the same split as the tile
+menu -- a downloaded wallpaper is deleted and the reply says it cannot be
+undone, one of your own is moved to the trash, and if the trash is on another
+filesystem it is refused rather than quietly unlinked.
 
 Exit code 3 means no instance is running -- distinct from 1, so a caller can
 react by launching it instead of reporting a failure.

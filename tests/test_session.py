@@ -386,3 +386,79 @@ def test_settings_that_do_not_touch_the_roots_do_not_rescan(
     session.refresh()
     session.update_settings(replace(session.settings, opacity=0.5))
     assert scans == 1
+
+
+# -- video playback settings ----------------------------------------------
+
+
+class AudioRenderer(FakeRenderer):
+    """A FakeRenderer that remembers what it was retuned to."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.audio: list[tuple[bool, int]] = []
+        self.when_hidden = "pause"
+
+    def apply_audio(self, *, muted: bool, volume: int) -> None:
+        self.audio.append((muted, volume))
+
+
+def _audio_session(**overrides: object) -> tuple[Session, AudioRenderer]:
+    fake = AudioRenderer()
+    settings = replace(config.Settings(), **overrides)  # type: ignore[arg-type]
+    session = Session(
+        settings.validated(),
+        applier=Applier(fake),  # type: ignore[arg-type]
+        scanner=lambda _roots: Library(roots=(), items=()),
+    )
+    return session, fake
+
+
+def test_unmuting_retunes_the_video_already_playing(applied_paths: list[Path]) -> None:
+    """Over mpv's IPC. Restarting mpvpaper to change the volume would blink
+    the wallpaper, which is a ludicrous price for a slider."""
+    session, fake = _audio_session()
+    session.update_settings(replace(session.settings, video_muted=False))
+    assert fake.audio == [(False, 100)]
+
+
+def test_changing_the_volume_retunes_it_too(applied_paths: list[Path]) -> None:
+    session, fake = _audio_session(video_muted=False)
+    session.update_settings(replace(session.settings, video_volume=30))
+    assert fake.audio == [(False, 30)]
+
+
+def test_settings_that_leave_the_audio_alone_do_not_retune(applied_paths: list[Path]) -> None:
+    session, fake = _audio_session()
+    session.update_settings(replace(session.settings, opacity=0.5))
+    assert fake.audio == []
+
+
+def test_the_hidden_policy_is_recorded_for_the_next_video(applied_paths: list[Path]) -> None:
+    """It is an mpvpaper launch flag, not an mpv property, so it cannot be
+    retuned live -- and restarting the wallpaper under someone to apply it
+    would be worse than waiting."""
+    session, fake = _audio_session()
+    session.update_settings(replace(session.settings, video_when_hidden="stop"))
+    assert fake.when_hidden == "stop"
+
+
+def test_a_session_that_builds_its_own_renderer_carries_the_settings() -> None:
+    """`when_hidden` becomes a command-line flag, so it has to be right before
+    the first video starts, not pushed afterwards."""
+    settings = replace(
+        config.Settings(), video_muted=False, video_volume=25, video_when_hidden="stop"
+    ).validated()
+    built = Session(settings, scanner=lambda _roots: Library(roots=(), items=()))
+    assert built._applier.renderer.muted is False
+    assert built._applier.renderer.volume == 25
+    assert built._applier.renderer.when_hidden == "stop"
+    built.shutdown()
+
+
+def test_an_applier_handed_in_is_left_as_its_owner_configured_it() -> None:
+    fake = AudioRenderer()
+    fake.when_hidden = "play"
+    settings = replace(config.Settings(), video_when_hidden="stop").validated()
+    Session(settings, applier=Applier(fake), scanner=lambda _roots: Library(roots=(), items=()))  # type: ignore[arg-type]
+    assert fake.when_hidden == "play"

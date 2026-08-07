@@ -25,6 +25,15 @@ from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
+from wall_in_one.wallpaper import renderer
+
+#: mpvpaper's vocabulary is `--auto-pause` and `--auto-stop`, which say what
+#: the flag does rather than what the user gets. These say what they get.
+_WHEN_HIDDEN_LABELS: dict[str, str] = {
+    "pause": "Pause (resumes instantly)",
+    "stop": "Stop (frees memory too)",
+    "play": "Keep playing",
+}
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -181,6 +190,33 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
+
+        self._muted = Adw.SwitchRow(
+            title="Mute video wallpapers",
+            subtitle="The audio track stays loaded, so this takes effect immediately",
+        )
+        self._muted.connect("notify::active", self._on_changed)
+        group.add(self._muted)
+
+        self._volume = Adw.SpinRow(
+            title="Video volume",
+            subtitle="Applied to the video already playing",
+            adjustment=Gtk.Adjustment(
+                lower=0, upper=renderer.MAX_VOLUME, step_increment=5, value=renderer.MAX_VOLUME
+            ),
+        )
+        self._volume.connect("notify::value", self._on_changed)
+        group.add(self._volume)
+
+        self._when_hidden = Adw.ComboRow(
+            title="When covered by a window",
+            subtitle="Takes effect on the next video. Try 'Keep playing' if the others misbehave",
+            model=Gtk.StringList.new(
+                [_WHEN_HIDDEN_LABELS[choice] for choice in renderer.WHEN_HIDDEN_CHOICES]
+            ),
+        )
+        self._when_hidden.connect("notify::selected", self._on_changed)
+        group.add(self._when_hidden)
         return group
 
     def _build_providers_group(self) -> Adw.PreferencesGroup:
@@ -302,6 +338,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self._cycle.set_active(settings.cycle_enabled)
             self._interval.set_value(settings.cycle_interval)
             self._dynamics.set_active(settings.dynamics_enabled)
+            self._muted.set_active(settings.video_muted)
+            self._volume.set_value(settings.video_volume)
+            if settings.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES:
+                self._when_hidden.set_selected(
+                    renderer.WHEN_HIDDEN_CHOICES.index(settings.video_when_hidden)
+                )
             self._opacity.set_value(settings.opacity)
             if settings.preview_scheme in ALL_SCHEMES:
                 self._scheme.set_selected(ALL_SCHEMES.index(settings.preview_scheme))
@@ -312,11 +354,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
         if self._loading:
             return
         scheme_index = self._scheme.get_selected()
+        hidden_index = self._when_hidden.get_selected()
         self._app.update_settings(
             shuffle=self._shuffle.get_active(),
             cycle_enabled=self._cycle.get_active(),
             cycle_interval=int(self._interval.get_value()),
             dynamics_enabled=self._dynamics.get_active(),
+            video_muted=self._muted.get_active(),
+            video_volume=int(self._volume.get_value()),
+            video_when_hidden=renderer.WHEN_HIDDEN_CHOICES[hidden_index]
+            if hidden_index < len(renderer.WHEN_HIDDEN_CHOICES)
+            else renderer.DEFAULT_WHEN_HIDDEN,
             opacity=round(self._opacity.get_value(), 2),
             preview_scheme=ALL_SCHEMES[scheme_index]
             if scheme_index < len(ALL_SCHEMES)

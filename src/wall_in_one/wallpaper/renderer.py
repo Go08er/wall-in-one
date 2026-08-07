@@ -29,6 +29,23 @@ ALL_OUTPUTS: Final = "ALL"
 #: Wayland layer to render on. `background` puts it under everything.
 DEFAULT_LAYER: Final = "background"
 
+#: What to do with a video nobody can see because a window is covering it.
+#: mpvpaper spells these `--auto-pause` and `--auto-stop`, and its own help
+#: warns that they "might not work as intended" -- which is exactly why turning
+#: them off has to stay reachable rather than being decided here for everyone.
+#:
+#: `pause` keeps the process and its decoded state, so coming back is instant
+#: and only CPU is saved. `stop` gives the memory back too and resumes more
+#: abruptly. `play` keeps decoding a picture nobody is looking at, which is
+#: only sensible when the auto options misbehave on a particular compositor.
+WHEN_HIDDEN_CHOICES: Final[tuple[str, ...]] = ("pause", "stop", "play")
+DEFAULT_WHEN_HIDDEN: Final = "pause"
+
+#: mpv's own scale, where 100 is the file's own level. It accepts more, but
+#: amplifying a wallpaper past its own volume is not something to reach by
+#: dragging a slider to the end.
+MAX_VOLUME: Final = 100
+
 #: How long to wait for a polite shutdown before insisting.
 TERMINATE_TIMEOUT: Final = 3.0
 
@@ -61,15 +78,17 @@ class Renderer:
         *,
         output: str = ALL_OUTPUTS,
         layer: str = DEFAULT_LAYER,
-        auto_pause: bool = True,
+        when_hidden: str = DEFAULT_WHEN_HIDDEN,
         hardware_decode: bool = True,
         muted: bool = True,
+        volume: int = MAX_VOLUME,
     ) -> None:
         self.output = output
         self.layer = layer
-        self.auto_pause = auto_pause
+        self.when_hidden = when_hidden
         self.hardware_decode = hardware_decode
         self.muted = muted
+        self.volume = volume
         self._process: subprocess.Popen[bytes] | None = None
         self._video: Path | None = None
         self._socket: Path | None = None
@@ -102,6 +121,9 @@ class Renderer:
             # Keep the audio track loaded even when muted, so it can be unmuted
             # later over IPC. `no-audio` would throw that control away.
             "mute=yes" if self.muted else "mute=no",
+            # Set even while muted, so unmuting over IPC lands at the level the
+            # user chose rather than at whatever mpv defaulted to.
+            f"volume={max(0, min(MAX_VOLUME, self.volume))}",
             "hwdec=auto" if self.hardware_decode else "hwdec=no",
         ]
         if ipc_socket is not None:
@@ -125,8 +147,10 @@ class Renderer:
         self.stop()
         ipc_socket = self._socket_path()
         command = ["mpvpaper", "--layer", self.layer]
-        if self.auto_pause:
+        if self.when_hidden == "pause":
             command.append("--auto-pause")
+        elif self.when_hidden == "stop":
+            command.append("--auto-stop")
         command += ["-o", self._mpv_options(ipc_socket), self.output, str(video)]
 
         try:
@@ -212,6 +236,26 @@ class Renderer:
     def set_muted(self, muted: bool) -> bool:
         self.muted = muted
         return self.set_property("mute", muted)
+
+    def set_volume(self, volume: int) -> bool:
+        """Retune the volume of the video already playing.
+
+        The value is kept even when IPC is unavailable, so the next `start`
+        launches at the right level. That is the difference worth preserving
+        between "the setting did not take" and "the setting did not take *yet*".
+        """
+        self.volume = max(0, min(MAX_VOLUME, volume))
+        return self.set_property("volume", self.volume)
+
+    def apply_audio(self, *, muted: bool, volume: int) -> None:
+        """Push both audio settings at a running video, tolerating no IPC.
+
+        Volume first: unmuting at the previous level and then correcting it
+        would put a moment of the wrong loudness through the speakers, which is
+        the one mistake here that a person actually hears.
+        """
+        self.set_volume(volume)
+        self.set_muted(muted)
 
     def set_paused(self, paused: bool) -> bool:
         return self.set_property("pause", paused)

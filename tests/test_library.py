@@ -10,6 +10,7 @@ from wall_in_one import config
 from wall_in_one.library import pairing, scan
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 from wall_in_one.library.playlist import Playlist
+from wall_in_one.wallpaper import renderer
 
 
 def _touch(path: Path, body: bytes = b"x") -> Path:
@@ -407,3 +408,29 @@ def test_a_roots_entry_that_is_not_a_string_costs_only_that_entry() -> None:
 
 def test_roots_that_are_not_a_list_are_ignored_rather_than_fatal() -> None:
     assert config.Settings.from_mapping({"roots": "/one"}).roots == ()
+
+
+# -- video playback settings ----------------------------------------------
+
+
+def test_the_playback_settings_survive_a_toml_round_trip(tmp_path: Path) -> None:
+    settings = config.Settings(video_muted=False, video_volume=35, video_when_hidden="stop")
+    written = tmp_path / "settings.toml"
+    config.save(settings, written)
+    read = config.load(written)
+    assert (read.video_muted, read.video_volume, read.video_when_hidden) == (False, 35, "stop")
+
+
+@pytest.mark.parametrize(("given", "expected"), [(-5, 0), (0, 0), (100, 100), (900, 100)])
+def test_the_volume_is_clamped_to_mpvs_scale(given: int, expected: int) -> None:
+    assert config.Settings(video_volume=given).validated().video_volume == expected
+
+
+def test_an_unknown_hidden_policy_falls_back_rather_than_failing() -> None:
+    """A hand-edited settings file should degrade to something usable."""
+    assert config.Settings(video_when_hidden="explode").validated().video_when_hidden == "pause"
+
+
+def test_every_hidden_policy_survives_validation() -> None:
+    for choice in renderer.WHEN_HIDDEN_CHOICES:
+        assert config.Settings(video_when_hidden=choice).validated().video_when_hidden == choice

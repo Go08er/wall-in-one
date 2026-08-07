@@ -18,6 +18,7 @@ from typing import Any, Final, Self
 
 from wall_in_one import paths
 from wall_in_one.theme.noctalia import ALL_SCHEMES, DEFAULT_SCHEME
+from wall_in_one.wallpaper import renderer
 
 #: Below this the window stops being legible against a busy wallpaper, and the
 #: compositor's blur cannot rescue it.
@@ -72,6 +73,20 @@ class Settings:
     #: so this is a performance control as much as a battery one.
     dynamics_enabled: bool = True
 
+    #: A wallpaper that makes noise is a surprise, so silence is the default.
+    #: The audio track is still loaded rather than disabled, which is what lets
+    #: this be undone live instead of only at the next video.
+    video_muted: bool = True
+
+    #: 0 to `renderer.MAX_VOLUME`. Kept while muted, so unmuting lands at the
+    #: level the user chose rather than at whatever mpv would have picked.
+    video_volume: int = 100
+
+    #: What to do with a video no one can see because a window covers it. One
+    #: of `renderer.WHEN_HIDDEN_CHOICES`. mpvpaper warns its auto options
+    #: "might not work as intended", so `play` stays reachable.
+    video_when_hidden: str = renderer.DEFAULT_WHEN_HIDDEN
+
     #: Directories to scan for wallpapers. Empty means "whatever
     #: `library.scan.default_roots` decides", which follows Noctalia's own
     #: `wallpaper.directory`. That is the right default and the wrong thing to
@@ -88,11 +103,18 @@ class Settings:
         opacity = min(1.0, max(MIN_OPACITY, self.opacity))
         scheme = self.preview_scheme if self.preview_scheme in ALL_SCHEMES else DEFAULT_SCHEME
         interval = min(24 * 60 * 60, max(5, self.cycle_interval))
+        hidden = (
+            self.video_when_hidden
+            if self.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES
+            else renderer.DEFAULT_WHEN_HIDDEN
+        )
         return replace(
             self,
             opacity=opacity,
             preview_scheme=scheme,
             cycle_interval=interval,
+            video_volume=min(renderer.MAX_VOLUME, max(0, self.video_volume)),
+            video_when_hidden=hidden,
             roots=_tidy_roots(self.roots),
         )
 
@@ -130,6 +152,9 @@ class Settings:
             cycle_enabled=boolean("cycle_enabled", False),
             shuffle=boolean("shuffle", False),
             dynamics_enabled=boolean("dynamics_enabled", True),
+            video_muted=boolean("video_muted", True),
+            video_volume=int(number("video_volume", 100)),
+            video_when_hidden=text("video_when_hidden", renderer.DEFAULT_WHEN_HIDDEN),
             roots=directories("roots"),
         ).validated()
 
@@ -145,6 +170,9 @@ class Settings:
             f"cycle_enabled = {str(self.cycle_enabled).lower()}",
             f"shuffle = {str(self.shuffle).lower()}",
             f"dynamics_enabled = {str(self.dynamics_enabled).lower()}",
+            f"video_muted = {str(self.video_muted).lower()}",
+            f"video_volume = {self.video_volume}",
+            f'video_when_hidden = "{self.video_when_hidden}"',
         )
         return "\n".join(lines) + "\n"
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -206,3 +207,90 @@ def test_mpv_options_keep_audio_loaded_when_muted() -> None:
     assert "mute=yes" in options
     assert "no-audio" not in options
     assert "loop-file=inf" in options
+
+
+# -- video playback settings ----------------------------------------------
+#
+# The renderer always had the knobs -- mute, hardware decode, an auto-pause
+# flag -- and nothing ever set them. These pin the wiring between a setting and
+# the process that has to honour it.
+
+
+def test_the_volume_reaches_mpv_even_while_muted() -> None:
+    """Unmuting later must land at the chosen level, not at mpv's default."""
+    options = renderer.Renderer(muted=True, volume=40)._mpv_options(None)
+    assert "volume=40" in options
+    assert "mute=yes" in options
+
+
+@pytest.mark.parametrize(
+    ("volume", "expected"),
+    [(-10, "volume=0"), (0, "volume=0"), (100, "volume=100"), (500, "volume=100")],
+)
+def test_the_volume_is_clamped_to_mpvs_scale(volume: int, expected: str) -> None:
+    assert expected in renderer.Renderer(volume=volume)._mpv_options(None)
+
+
+@pytest.mark.parametrize(
+    ("policy", "flag"),
+    [("pause", "--auto-pause"), ("stop", "--auto-stop")],
+)
+def test_the_hidden_policy_becomes_an_mpvpaper_flag(
+    policy: str, flag: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[list[str]] = []
+
+    def capture(command: list[str], **_kwargs: object) -> object:
+        seen.append(command)
+        raise OSError("not really starting mpvpaper")
+
+    monkeypatch.setattr(renderer, "is_available", lambda: True)
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"0")
+    with pytest.raises(renderer.RendererError):
+        renderer.Renderer(when_hidden=policy).start(video)
+    assert flag in seen[0]
+
+
+def test_keeping_it_playing_passes_neither_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mpvpaper warns its auto options 'might not work as intended', so the
+    escape hatch has to be reachable."""
+    seen: list[list[str]] = []
+
+    def capture(command: list[str], **_kwargs: object) -> object:
+        seen.append(command)
+        raise OSError("not really starting mpvpaper")
+
+    monkeypatch.setattr(renderer, "is_available", lambda: True)
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"0")
+    with pytest.raises(renderer.RendererError):
+        renderer.Renderer(when_hidden="play").start(video)
+    assert "--auto-pause" not in seen[0]
+    assert "--auto-stop" not in seen[0]
+
+
+def test_the_volume_is_remembered_even_when_ipc_is_unavailable() -> None:
+    """ "The setting did not take" and "did not take yet" are different things."""
+    instance = renderer.Renderer(volume=100)
+    assert instance.set_volume(30) is False
+    assert instance.volume == 30
+    assert "volume=30" in instance._mpv_options(None)
+
+
+def test_applying_audio_sets_the_volume_before_unmuting() -> None:
+    """Unmuting at the old level first would put a moment of the wrong
+    loudness through the speakers, which is the one mistake here you hear."""
+    order: list[tuple[str, object]] = []
+
+    class Recording(renderer.Renderer):
+        def set_property(self, name: str, value: object) -> bool:
+            order.append((name, value))
+            return True
+
+    Recording().apply_audio(muted=False, volume=55)
+    assert order == [("volume", 55), ("mute", False)]

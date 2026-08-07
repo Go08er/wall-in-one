@@ -18,9 +18,24 @@ from wall_in_one.library import scan, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
+from wall_in_one.wallpaper import renderer
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
 
 Scanner = Callable[[Sequence[Path] | None], Library]
+
+
+def _renderer_for(settings: config.Settings) -> renderer.Renderer:
+    """A video renderer carrying the user's playback settings from the start.
+
+    Set at construction rather than pushed afterwards, because `when_hidden`
+    becomes a command-line flag of mpvpaper's and cannot be changed once a
+    video is playing.
+    """
+    return renderer.Renderer(
+        when_hidden=settings.video_when_hidden,
+        muted=settings.video_muted,
+        volume=settings.video_volume,
+    )
 
 
 class Session:
@@ -35,7 +50,10 @@ class Session:
         rng: random.Random | None = None,
     ) -> None:
         self._settings = settings
-        self._applier = applier if applier is not None else Applier()
+        # Only when we build the renderer ourselves: an applier handed in has
+        # been configured by whoever handed it in, and reaching into it would
+        # overwrite that.
+        self._applier = applier if applier is not None else Applier(_renderer_for(settings))
         self._scan: Scanner = scanner if scanner is not None else scan.scan
         self._library = Library(roots=(), items=())
         self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
@@ -152,6 +170,24 @@ class Session:
             # asks, and a root the user just added would stay invisible until
             # the next launch.
             self.refresh()
+
+        if (settings.video_muted, settings.video_volume) != (
+            previous.video_muted,
+            previous.video_volume,
+        ):
+            # Over mpv's IPC, so the video keeps playing. Restarting mpvpaper
+            # to change the volume would blink the wallpaper, which is a
+            # ludicrous price for a slider.
+            self._applier.renderer.apply_audio(
+                muted=settings.video_muted, volume=settings.video_volume
+            )
+
+        if settings.video_when_hidden != previous.video_when_hidden:
+            # This one is a launch flag of mpvpaper's, not an mpv property, so
+            # it cannot be retuned live. Recording it is enough: the next video
+            # starts under the new policy, and saying so beats restarting the
+            # wallpaper underneath someone.
+            self._applier.renderer.when_hidden = settings.video_when_hidden
 
         if settings.dynamics_enabled != previous.dynamics_enabled:
             # Pausing a video with no still used to mean jumping to an unrelated

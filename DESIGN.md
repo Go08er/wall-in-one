@@ -373,6 +373,66 @@ Ordered so the riskiest integration is proven before any bulk code moves.
 Steps 1–3 are the vertical slice that proves the colour pipeline. Nothing else
 starts until that is green.
 
+### After step 8
+
+The plan above ends at "the pipeline works". What followed is the difference
+between that and something worth using daily, found by listing what the app
+still could not do rather than by extending the plan.
+
+- [x] **Legacy palettes.** The four schemes in Noctalia's older
+      `colorschemes/<Name>/<Name>.json` layout were invisible. Shown under a
+      fourth origin, with Apply disabled and the reason stated: the string
+      `colorschemes` appears nowhere in the 5.0.0-beta.7 binary, so
+      `color-scheme-set` cannot apply one.
+- [x] **The Wallhaven key from Settings.** Written 0600 through a temporary
+      name, in a GTK-free module so the permissions and the refusals are
+      testable without a display. A key the rest of the machine can read is
+      refused on the way *in* as well, and says which `chmod` mends it.
+- [x] **A still for every video.** `pairing` documented three routes to one and
+      only the user's own naming convention could ever happen -- nothing wrote
+      a sidecar and nothing filled `Automatic Stills`. Pausing dynamics on an
+      unpaired video raised, jumped to an unrelated wallpaper, and left
+      Noctalia's palette derived from a picture no longer on screen.
+      `library.stills` takes a frame three seconds in, at full resolution, as
+      PNG.
+- [x] **A bounded thumbnail cache.** Every thumbnail goes through ffmpeg
+      because this closure's GdkPixbuf has no webp loader; 230–330 ms per
+      wallpaper was being paid on every launch. 256 MB ceiling, LRU eviction,
+      a one-minute grace so nothing about to be drawn is thrown away. The
+      plugin this replaces left 108 files and 2.4 MB with nothing that could
+      remove them.
+- [x] **More than one root.** The library was Noctalia's single
+      `wallpaper.directory`. Resolution moved inside `session.refresh`, so
+      every route into a rescan honours the setting; order is kept because the
+      first root receives downloads and generated stills.
+- [x] **Taking a wallpaper away.** `MediaItem.deletable` had existed since the
+      library model was written with nothing implementing it. Ownership is
+      re-derived from disk at the moment of deletion, because the item came
+      from a scan that may be minutes old; the user's own file is trashed
+      rather than unlinked.
+- [x] **Finding one.** Search, kind filter and sort, with the matching in a
+      GTK-free `library.filter` and the grid filtering through
+      `set_filter_func` rather than rebuilding tiles -- an item whose thumbnail
+      failed has no cache entry, so rebuilding would resubmit the same failing
+      ffmpeg call on every keystroke.
+- [x] **`ctl` reaches the providers.** `providers`, `search`, `download`.
+      Handlers may now return a `Deferred`, because the socket server runs
+      inside the GTK main loop and a blocking download would freeze the window
+      for its duration.
+- [x] **Video playback controls.** Mute, volume and what to do with a video
+      nobody can see. Audio is retuned over mpv's IPC so the wallpaper does not
+      blink; the hidden policy is an mpvpaper launch flag and waits for the
+      next video.
+- [x] **A launcher entry and an icon**, installed where XDG looks. Fixing this
+      turned up two things quietly broken: `nix build` failed in `checkPhase`
+      because ffmpeg is only on PATH via the runtime wrapper, so 29 tests were
+      skipping and one passed for the wrong reason; and `nix flake check`
+      failed outright because `cd`ing into the store leaves ruff unable to
+      create its cache.
+
+Still not done: per-output wallpapers, favourites, and the plugin has still
+never been loaded into a running shell.
+
 ### How the slice was proven
 
 All three resolution tiers were exercised against the real Noctalia, with every
@@ -431,6 +491,28 @@ Gates: `ruff` clean, `mypy --strict` clean, 182 tests green (36 new).
 
 Not proven: the browser has never been on screen. Layout, the ten-card grid,
 and the colour-picker rows are correct by construction and by API check only.
+
+### How the post-step-8 work was proven
+
+Against the real machine, with the wallpaper and colour scheme captured before
+each live run and checked unchanged after. Nothing was written to the user's
+Noctalia directories; every write went to a sandboxed XDG home or `tmp_path`.
+
+| claim | check | result |
+|---|---|---|
+| thumbnail cache pays for itself | generate then look up four real wallpapers | 230–330 ms cold, ~0.1 ms cached |
+| eviction is LRU and bounded | age four entries past the grace, prune to a chosen ceiling | evicted oldest-first down to 90% of the ceiling; a foreign file in the directory survived both `prune` and `clear` |
+| deletion refuses what is not ours | ran `manage.remove` over a copy of the real library | both real marker formats recognised, sidecars taken along, markers left, the user's own files refused |
+| search and sort | drove the real grid over the real library | `"vil snow"` = `"snow vil"`, case-folded, `narrows` false for a sort alone, newest Aug 6 → Jul 18, largest 24.7 MB → 0.46 MB |
+| `ctl` reaches the providers | real socket, real GTK loop, both providers | `search wallhaven aurora` returned the same 741-result page the dialog shows; `search motionbgs naruto` returned 250; unknown provider → `unknown-provider`, exit 1 |
+| key status never lies | six combinations of environment and saved key | absent, valid and malformed each distinguished, and the key never appears in a message |
+| the package installs | `nix build` then read `$out` | entry and icon in `share/applications` and `share/icons/hicolor/scalable/apps`, `Exec` rewritten to the wrapped binary |
+| the whole suite runs packaged | `nix build` check phase | 638 passed, 0 skipped, where it had been 608 passed / 29 skipped / 1 failed |
+| every gate | `nix flake check` | all five checks pass |
+
+| stills come out usable | took one from the real 24.7 MB 4K video | 1.0 s, full 3840x2160, mean luma 0.31 -- a real frame, not the black opening the three-second seek exists to avoid; found afterwards by both the sidecar and the directory convention |
+
+Not proven: per-output behaviour, because only one output is connected here.
 
 ---
 

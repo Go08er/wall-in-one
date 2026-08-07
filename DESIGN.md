@@ -449,7 +449,25 @@ still could not do rather than by extending the plan.
       routes. The monitor list comes from `Gdk.Display` rather than from `niri
       msg -j outputs`, so the core is not tied to one compositor.
 
-Still not done: the plugin has never been loaded into a running shell.
+Still not done: the plugin has never been loaded into a running shell. It has
+since been audited statically, which narrows the risk without closing it:
+
+- Every one of the **19 host API symbols** the new plugin uses -- `noctalia.tr`,
+  `noctalia.state`, `noctalia.runAsync`, `ui.button` and the rest -- also
+  appears in plugins that are installed and working on this machine. There is
+  nothing in its surface that has not been seen to run.
+- `plugin.toml` is structurally what a working plugin's manifest is: the same
+  key set, `[[setting]]` / `[[widget]]` / `[[panel]]` / `[[shortcut]]` blocks in
+  the same shapes.
+- It declares `plugin_api = 17`. Another plugin in the same source repo
+  (`nocvox`) declares 17 and has been *materialized* by Noctalia, but it is not
+  enabled, so 17 has been accepted into the plugin store and not observed to
+  load. Everything else installed here is 15 or below. This is the one part of
+  the manifest that a static check cannot settle.
+
+The remaining risk is therefore narrower than "the host API is matched by
+pattern": it is whether `plugin_api = 17` loads on 5.0.0-beta.7, and whether
+the four entry points behave once running.
 
 ### How the slice was proven
 

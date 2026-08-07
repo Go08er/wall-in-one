@@ -430,8 +430,26 @@ still could not do rather than by extending the plan.
       failed outright because `cd`ing into the store leaves ruff unable to
       create its cache.
 
-Still not done: per-output wallpapers, favourites, and the plugin has still
-never been loaded into a running shell.
+- [x] **Every missing still, not just the paused one.** `StillMaker` fills the
+      rest in after each rescan. The loop needed care: a finished batch causes
+      a rescan and a rescan asks again, so a video ffmpeg cannot read would go
+      round forever if attempts were not remembered.
+- [x] **Taking one away, from the tile.** A menu with "Set as wallpaper" and a
+      removal verb named for what it does to that file -- "Remove" for
+      something downloaded, "Move to Trash" for the user's own -- and a
+      confirmation on only the one that cannot be undone.
+- [x] **Favourites**, in their own state file rather than in the settings, with
+      the rotation narrowed to them. Narrowing is skipped when it would leave
+      nothing to rotate through: a manager that stops changing the wallpaper is
+      a worse answer to "you have no favourites right now" than one that falls
+      back and keeps working.
+- [x] **Per-output wallpapers.** The blocking unknown was whether Noctalia
+      could do it at all; `wallpaper-set [connector] <path>` says it can. Both
+      halves are aimed, since a still and a video reach the screen by different
+      routes. The monitor list comes from `Gdk.Display` rather than from `niri
+      msg -j outputs`, so the core is not tied to one compositor.
+
+Still not done: the plugin has never been loaded into a running shell.
 
 ### How the slice was proven
 
@@ -512,7 +530,16 @@ Noctalia directories; every write went to a sandboxed XDG home or `tmp_path`.
 
 | stills come out usable | took one from the real 24.7 MB 4K video | 1.0 s, full 3840x2160, mean luma 0.31 -- a real frame, not the black opening the three-second seek exists to avoid; found afterwards by both the sidecar and the directory convention |
 
-Not proven: per-output behaviour, because only one output is connected here.
+| favourites survive the round trip | starred through the real buttons, reloaded | view narrows, search combines with it, persists, and reflecting the store fires no spurious toggles |
+| removal refuses correctly | menu + `manage` over a copy of the real library | right verb per ownership, sidecar taken along, the user's own file refused by name and left on disk, trashing it instead leaves it recoverable |
+| stills fill themselves in | launched against a copy, untouched | still and sidecar written within 25 s, badge went from "Video (no still)" to "Video", grid refreshed itself |
+| the output picker | three settings against the real display | offers "All outputs" plus `eDP-1`, keeps an unplugged connector selected rather than resetting it |
+
+Not proven: that two monitors show different things, because only one output is
+connected here -- what is checked is that the connector reaches both commands.
+The star also revealed something no test would have: in Papirus,
+`starred-symbolic` and `non-starred-symbolic` are both solid stars, so the
+state had to be carried by colour from the palette rather than by the icon.
 
 ---
 

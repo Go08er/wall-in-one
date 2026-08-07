@@ -42,6 +42,18 @@ def set_calls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     return calls
 
 
+@pytest.fixture
+def applied_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str | None]]:
+    """Every wallpaper handed to Noctalia, with the output it was aimed at."""
+    calls: list[tuple[Path, str | None]] = []
+
+    def record(path: Path, connector: str | None = None) -> None:
+        calls.append((Path(path), connector))
+
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", record)
+    return calls
+
+
 def _still(tmp_path: Path) -> MediaItem:
     return MediaItem(path=tmp_path / "a.png", kind=Kind.STILL, size=1, mtime=0)
 
@@ -294,3 +306,40 @@ def test_applying_audio_sets_the_volume_before_unmuting() -> None:
 
     Recording().apply_audio(muted=False, volume=55)
     assert order == [("volume", 55), ("mute", False)]
+
+
+# -- which output ---------------------------------------------------------
+#
+# `noctalia msg wallpaper-set [connector] <path>` takes an optional connector
+# and mpvpaper takes an output selector, so both halves can be aimed. Only one
+# output is connected on the development machine, so what is pinned here is
+# that the connector reaches the command -- not that two monitors end up
+# showing different things.
+
+
+def test_a_still_goes_to_every_output_by_default(
+    applied_calls: list[tuple[Path, str | None]], tmp_path: Path
+) -> None:
+    Applier(FakeRenderer()).apply(_still(tmp_path), dynamics_enabled=True)  # type: ignore[arg-type]
+    assert applied_calls[-1][1] is None
+
+
+def test_a_still_can_be_aimed_at_one_output(
+    applied_calls: list[tuple[Path, str | None]], tmp_path: Path
+) -> None:
+    applier = Applier(FakeRenderer(), output="DP-2")  # type: ignore[arg-type]
+    applier.apply(_still(tmp_path), dynamics_enabled=True)
+    assert applied_calls[-1][1] == "DP-2"
+
+
+def test_a_videos_paired_still_is_aimed_the_same_way(
+    applied_calls: list[tuple[Path, str | None]], tmp_path: Path
+) -> None:
+    """It goes underneath the video, so it has to land on the same screen."""
+    applier = Applier(FakeRenderer(), output="DP-2")  # type: ignore[arg-type]
+    applier.apply(_video(tmp_path), dynamics_enabled=True)
+    assert applied_calls[-1][1] == "DP-2"
+
+
+def test_the_renderer_defaults_to_every_output() -> None:
+    assert renderer.Renderer().output == renderer.ALL_OUTPUTS

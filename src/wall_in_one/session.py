@@ -32,6 +32,7 @@ def _renderer_for(settings: config.Settings) -> renderer.Renderer:
     video is playing.
     """
     return renderer.Renderer(
+        output=settings.output or renderer.ALL_OUTPUTS,
         when_hidden=settings.video_when_hidden,
         muted=settings.video_muted,
         volume=settings.video_volume,
@@ -54,7 +55,9 @@ class Session:
         # Only when we build the renderer ourselves: an applier handed in has
         # been configured by whoever handed it in, and reaching into it would
         # overwrite that.
-        self._applier = applier if applier is not None else Applier(_renderer_for(settings))
+        self._applier = (
+            applier if applier is not None else Applier(_renderer_for(settings), settings.output)
+        )
         self._scan: Scanner = scanner if scanner is not None else scan.scan
         self._library = Library(roots=(), items=())
         self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
@@ -200,6 +203,12 @@ class Session:
 
         if settings.shuffle != previous.shuffle:
             self._playlist.set_shuffle(settings.shuffle)
+
+        if settings.output != previous.output:
+            # Both halves, because a still and a video reach the screen by
+            # different routes and only one of them can be retuned live.
+            self._applier.output = settings.output
+            self._applier.renderer.output = settings.output or renderer.ALL_OUTPUTS
 
         if settings.cycle_favourites_only != previous.cycle_favourites_only:
             self._rebuild_playlist()

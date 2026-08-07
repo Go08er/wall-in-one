@@ -43,9 +43,17 @@ class Applied:
 class Applier:
     """Applies wallpapers, owning the video renderer's lifetime."""
 
-    def __init__(self, video_renderer: renderer.Renderer | None = None) -> None:
+    def __init__(
+        self,
+        video_renderer: renderer.Renderer | None = None,
+        output: str = "",
+    ) -> None:
         self._renderer = video_renderer if video_renderer is not None else renderer.Renderer()
         self._current: Applied | None = None
+        #: Connector name, or empty for every output. Stills carry it to
+        #: Noctalia's `wallpaper-set [connector]`; videos carry mpvpaper's own
+        #: selector, which the renderer already holds.
+        self.output = output
 
     @property
     def current(self) -> Applied | None:
@@ -72,7 +80,7 @@ class Applier:
         # Stop first: a running video would cover the still we are about to set.
         self._renderer.stop()
         try:
-            noctalia.set_wallpaper(path)
+            noctalia.set_wallpaper(path, self.output or None)
         except noctalia.NoctaliaError as error:
             raise ApplyError(str(error)) from error
         return Applied(item=item, path=path, animated=False)
@@ -84,7 +92,7 @@ class Applier:
         if item.paired_still is not None:
             # Not fatal if it fails: the video is what the user asked for.
             with contextlib.suppress(noctalia.NoctaliaError):
-                noctalia.set_wallpaper(item.paired_still)
+                noctalia.set_wallpaper(item.paired_still, self.output or None)
         try:
             self._renderer.start(path)
         except renderer.RendererError as error:

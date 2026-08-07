@@ -15,7 +15,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from wall_in_one import config
 from wall_in_one.library import scan
@@ -34,6 +34,22 @@ _WHEN_HIDDEN_LABELS: dict[str, str] = {
     "stop": "Stop (frees memory too)",
     "play": "Keep playing",
 }
+
+
+def _connected_outputs() -> tuple[str, ...]:
+    """Connector names of the monitors attached right now, in GTK's order."""
+    display = Gdk.Display.get_default()
+    if display is None:
+        return ()
+    monitors = display.get_monitors()
+    found = []
+    for index in range(monitors.get_n_items()):
+        monitor = monitors.get_item(index)
+        connector = monitor.get_connector() if isinstance(monitor, Gdk.Monitor) else None
+        if connector:
+            found.append(connector)
+    return tuple(found)
+
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -191,6 +207,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
 
+        # Enumerated through GTK rather than by shelling out to the
+        # compositor: `Gdk.Display` knows the connectors, needs no subprocess,
+        # and does not tie the app to niri the way `niri msg -j outputs` would.
+        self._outputs = _connected_outputs()
+        self._output = Adw.ComboRow(
+            title="Output",
+            subtitle="Which monitor the wallpaper is applied to",
+            model=Gtk.StringList.new(["All outputs", *self._outputs]),
+        )
+        self._output.connect("notify::selected", self._on_changed)
+        group.add(self._output)
+
         self._favourites_only = Adw.SwitchRow(
             title="Cycle favourites only",
             subtitle="Ignored while nothing is starred, so the rotation never empties",
@@ -225,6 +253,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._when_hidden.connect("notify::selected", self._on_changed)
         group.add(self._when_hidden)
         return group
+
+    def _selected_output(self) -> str:
+        index = self._output.get_selected()
+        # Zero is "All outputs", which is the empty string on disk.
+        if index == 0 or index > len(self._outputs):
+            return ""
+        return self._outputs[index - 1]
 
     def _build_providers_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
@@ -346,6 +381,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self._interval.set_value(settings.cycle_interval)
             self._dynamics.set_active(settings.dynamics_enabled)
             self._favourites_only.set_active(settings.cycle_favourites_only)
+            # A monitor that has since been unplugged is offered anyway rather
+            # than silently reset to "All outputs": the setting is still what
+            # the user asked for, and it starts working again when the cable
+            # goes back in.
+            if settings.output and settings.output not in self._outputs:
+                self._outputs = (*self._outputs, settings.output)
+                self._output.set_model(Gtk.StringList.new(["All outputs", *self._outputs]))
+            chosen = self._outputs.index(settings.output) + 1 if settings.output else 0
+            self._output.set_selected(chosen)
             self._muted.set_active(settings.video_muted)
             self._volume.set_value(settings.video_volume)
             if settings.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES:
@@ -369,6 +413,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cycle_interval=int(self._interval.get_value()),
             dynamics_enabled=self._dynamics.get_active(),
             cycle_favourites_only=self._favourites_only.get_active(),
+            output=self._selected_output(),
             video_muted=self._muted.get_active(),
             video_volume=int(self._volume.get_value()),
             video_when_hidden=renderer.WHEN_HIDDEN_CHOICES[hidden_index]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -25,6 +26,7 @@ from wall_in_one.control.server import (
     parse_download,
     parse_list,
     parse_pair,
+    parse_pair_from_left,
     parse_path,
     parse_search,
     parse_toggle,
@@ -39,6 +41,7 @@ from wall_in_one.library import favourites
 from wall_in_one.library.filter import Kinds, Query
 from wall_in_one.library.manage import ManageError
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
+from wall_in_one.library.playlists import PlaylistError
 from wall_in_one.providers.base import ProviderError, SearchResult, WallpaperCandidate
 from wall_in_one.providers.registry import ProviderInfo
 from wall_in_one.session import Session
@@ -160,6 +163,24 @@ class _StubCommands:
 
     def reset_pairing(self, value: str | None) -> Response:
         return self._record("reset-pairing", value)
+
+    def list_playlists(self, value: str | None) -> Response:
+        return self._record("playlists", value)
+
+    def make_playlist(self, value: str | None) -> Response:
+        return self._record("playlist-new", value)
+
+    def drop_playlist(self, value: str | None) -> Response:
+        return self._record("playlist-delete", value)
+
+    def add_to_playlist(self, value: str | None) -> Response:
+        return self._record("playlist-add", value)
+
+    def remove_from_playlist(self, value: str | None) -> Response:
+        return self._record("playlist-remove", value)
+
+    def use_playlist(self, value: str | None) -> Response:
+        return self._record("playlist-use", value)
 
     def list_providers(self) -> Response:
         return self._record("providers")
@@ -792,6 +813,8 @@ class _FakeApp:
         self.restarred = 0
         self.forgotten: list[Path] = []
         self.repaired: list[Path] = []
+        self.relisted = 0
+        self.settings_written: list[dict[str, object]] = []
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         return Response.success(action().describe())
@@ -804,6 +827,12 @@ class _FakeApp:
 
     def pairing_changed(self, item: MediaItem) -> None:
         self.repaired.append(item.path)
+
+    def playlists_changed(self) -> None:
+        self.relisted += 1
+
+    def update_settings(self, **changes: object) -> None:
+        self.settings_written.append(changes)
 
 
 @pytest.fixture
@@ -1144,3 +1173,112 @@ def test_a_pairing_verb_refuses_a_path_outside_the_library(
     commands, _app = _commands(sandbox, [_wallpaper("aurora")])
     with pytest.raises(UnknownWallpaperError):
         commands.show_pairing("/etc/passwd")
+
+
+# -- playlists over the socket --------------------------------------------
+
+
+def test_a_playlist_reference_splits_from_the_left() -> None:
+    """The mirror of `parse_pair`: here the short side is on the left."""
+    name, rest = parse_pair_from_left("Evening /w/some path/a.png", verb="playlist-add")
+    assert (name, rest) == ("Evening", "/w/some path/a.png")
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "Evening", " /only/a/path"])
+def test_a_playlist_pair_missing_half_of_itself_is_refused(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_pair_from_left(raw, verb="playlist-add")
+
+
+def test_playlists_list_as_rows_marking_the_active_one(sandbox: Path, applied: list[Path]) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    commands.make_playlist("Morning")
+    made = app.session.playlists.find("Evening")
+    app.session.update_settings(replace(app.session.settings, active_playlist=made.id))
+
+    message = commands.list_playlists(None).message
+
+    assert "# fields: name, entries, active" in message
+    assert "Evening\t0\tyes" in message
+    assert "Morning\t0\tno" in message
+
+
+def test_a_named_playlist_lists_its_entries_with_their_ids(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+    commands.make_playlist("Evening")
+    commands.add_to_playlist(f"Evening {wallpaper.path}")
+
+    message = commands.list_playlists("Evening").message
+
+    assert "# fields: entry, present, path" in message
+    entry = app.session.playlists.find("Evening").entries[0]
+    assert f"{entry.id}\tyes\t{wallpaper.path}" in message
+
+
+def test_an_entry_the_library_lost_is_shown_as_absent(sandbox: Path, applied: list[Path]) -> None:
+    """An unmounted drive is not a deletion, so the row stays and says so."""
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+    commands.make_playlist("Evening")
+    app.session.playlists.add("Evening", Path("/w/unmounted.png"))
+
+    assert "\tno\t/w/unmounted.png" in commands.list_playlists("Evening").message
+
+
+def test_adding_something_outside_the_library_is_refused(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    with pytest.raises(UnknownWallpaperError):
+        commands.add_to_playlist("Evening /etc/passwd")
+
+
+def test_using_a_playlist_writes_the_setting(sandbox: Path, applied: list[Path]) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+
+    assert commands.use_playlist("Evening").ok
+
+    written = app.settings_written[-1]
+    assert written["active_playlist"] == app.session.playlists.find("Evening").id
+
+
+def test_using_none_goes_back_to_the_whole_library(sandbox: Path, applied: list[Path]) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    assert commands.use_playlist("none").ok
+    assert app.settings_written[-1]["active_playlist"] == ""
+
+
+def test_using_a_playlist_that_is_not_there_says_which(sandbox: Path, applied: list[Path]) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    with pytest.raises(PlaylistError) as caught:
+        commands.use_playlist("nope")
+    assert caught.value.kind == "no-such-playlist"
+
+
+def test_editing_a_playlist_tells_the_window(sandbox: Path, applied: list[Path]) -> None:
+    """Otherwise the rotation and the list disagree until something else
+    happens to rebuild it."""
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+    commands.make_playlist("Evening")
+    before = app.relisted
+    commands.add_to_playlist(f"Evening {wallpaper.path}")
+    assert app.relisted == before + 1
+
+
+def test_removing_an_entry_by_its_id(sandbox: Path, applied: list[Path]) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+    commands.make_playlist("Evening")
+    commands.add_to_playlist(f"Evening {wallpaper.path}")
+    entry = app.session.playlists.find("Evening").entries[0]
+
+    assert commands.remove_from_playlist(f"Evening {entry.id}").ok
+
+    assert len(app.session.playlists.find("Evening")) == 0

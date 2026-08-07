@@ -240,6 +240,12 @@ $ wall-in-one ctl still /path/to/wallpaper.mp4 /path/to/picture.png
 $ wall-in-one ctl still /path/to/wallpaper.mp4 default
 $ wall-in-one ctl palette /path/to/wallpaper.png builtin:Nord
 $ wall-in-one ctl reset-pairing /path/to/wallpaper.png
+$ wall-in-one ctl playlists [name]
+$ wall-in-one ctl playlist-new Evening
+$ wall-in-one ctl playlist-add Evening /path/to/wallpaper.png
+$ wall-in-one ctl playlist-remove Evening <entry-id>
+$ wall-in-one ctl playlist-use Evening|none
+$ wall-in-one ctl playlist-delete Evening
 $ wall-in-one ctl quit
 ```
 
@@ -266,6 +272,15 @@ reaches everything you have not spoken for. `pairing` shows one; `still` and
 `palette` choose; `reset-pairing` forgets. A palette policy is `adaptive`,
 `keep`, or `builtin:`/`community:`/`custom:` and a name. The path is split from
 the right, so a wallpaper directory with a space in its name needs no quoting.
+
+A **playlist** is a named, ordered list, and `playlist-use` makes one the
+rotation. Entries have identities of their own, printed by `playlists <name>`
+and taken back by `playlist-remove`, so reordering never renumbers anything and
+the same wallpaper can appear twice. A list naming wallpapers that are not here
+keeps them -- an unmounted drive is not a deletion -- and if none of them are
+here the rotation quietly falls back to the whole library rather than stopping.
+A playlist whose name has a space in it is referred to by the id `playlists`
+prints beside it.
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

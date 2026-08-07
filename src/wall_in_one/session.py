@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import favourites, pairings, scan, stills
+from wall_in_one.library import favourites, pairings, playlists, scan, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
@@ -51,6 +51,7 @@ class Session:
         rng: random.Random | None = None,
         favourite_store: favourites.Store | None = None,
         pairing_store: pairings.Store | None = None,
+        playlist_store: playlists.Store | None = None,
     ) -> None:
         self._settings = settings
         # Only when we build the renderer ourselves: an applier handed in has
@@ -76,6 +77,7 @@ class Session:
         # the applier are built from what it resolves, so the window cannot be
         # the only thing that knows.
         self._pairings = pairing_store if pairing_store is not None else pairings.Store.open()
+        self._playlists = playlist_store if playlist_store is not None else playlists.Store.open()
 
     # -- state -----------------------------------------------------------
 
@@ -133,6 +135,11 @@ class Session:
         return self._pairings
 
     @property
+    def playlists(self) -> playlists.Store:
+        """The named lists. The rotation follows whichever one is in force."""
+        return self._playlists
+
+    @property
     def favourites(self) -> favourites.Store:
         """The starred wallpapers. The grid reads it; the rotation obeys it."""
         return self._favourites
@@ -151,11 +158,29 @@ class Session:
         not an instruction to show none.
         """
         playable = self._library.playable(dynamics_enabled=self._settings.dynamics_enabled)
+
+        # A named playlist is the stronger statement, so it goes first:
+        # somebody who built a list and then left "favourites only" on from
+        # last week meant the list.
+        listed = playlists.rotation(self._playlists, self._settings.active_playlist, playable)
+        if listed is not None:
+            return listed
+
         if not self._settings.cycle_favourites_only:
             return playable
         starred = self._favourites.paths
         chosen = tuple(item for item in playable if item.path in starred)
         return chosen if chosen else playable
+
+    def playlists_changed(self) -> None:
+        """Re-narrow the rotation after a list was edited.
+
+        Unconditional, like `favourites_changed`: only the active list changes
+        the rotation, but working out whether the edited one *was* the active
+        one is more code than rebuilding, and getting it wrong means a list
+        that quietly does not take effect.
+        """
+        self._rebuild_playlist()
 
     def favourites_changed(self) -> None:
         """Re-narrow the rotation after a star moved.
@@ -235,7 +260,10 @@ class Session:
             self._applier.output = settings.output
             self._applier.renderer.output = settings.output or renderer.ALL_OUTPUTS
 
-        if settings.cycle_favourites_only != previous.cycle_favourites_only:
+        if (settings.cycle_favourites_only, settings.active_playlist) != (
+            previous.cycle_favourites_only,
+            previous.active_playlist,
+        ):
             self._rebuild_playlist()
 
         if settings.roots != previous.roots:

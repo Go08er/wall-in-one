@@ -565,7 +565,7 @@ each step is independently useful if the next never happens.
 - [x] **11. Manual still override.** A picker over indexed stills plus an
       absolute-path escape hatch. `library/stills.py` already writes the
       sidecar that records one, so this is UI and a verb, not new machinery.
-- [ ] **12. Named playlists.** Named, ordered, persisted, with stable entry IDs
+- [x] **12. Named playlists.** Named, ordered, persisted, with stable entry IDs
       so reordering and rebinding do not lose an entry's identity. The existing
       `Playlist` becomes the runtime cursor over whichever list is active,
       which is roughly what it already is.

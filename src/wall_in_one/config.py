@@ -92,6 +92,11 @@ class Settings:
     #: and what mpvpaper's `ALL` does for videos.
     output: str = ""
 
+    #: Which named playlist the rotation follows, by id or name. Empty means
+    #: the whole library. Ignored when it would leave nothing to rotate
+    #: through -- see `library.playlists.rotation`.
+    active_playlist: str = ""
+
     #: Narrow the rotation to the starred wallpapers. Ignored when that would
     #: leave nothing to rotate through -- see `session._rotation`.
     cycle_favourites_only: bool = False
@@ -165,6 +170,7 @@ class Settings:
             video_volume=int(number("video_volume", 100)),
             video_when_hidden=text("video_when_hidden", renderer.DEFAULT_WHEN_HIDDEN),
             cycle_favourites_only=boolean("cycle_favourites_only", False),
+            active_playlist=text("active_playlist", ""),
             output=text("output", ""),
             roots=directories("roots"),
         ).validated()
@@ -185,6 +191,7 @@ class Settings:
             f"video_volume = {self.video_volume}",
             f'video_when_hidden = "{self.video_when_hidden}"',
             f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
+            f'active_playlist = "{self.active_playlist}"',
             f'output = "{self.output}"',
         )
         return "\n".join(lines) + "\n"

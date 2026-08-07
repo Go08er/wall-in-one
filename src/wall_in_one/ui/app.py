@@ -241,6 +241,11 @@ class Application(Adw.Application):
             self._session.pairings.forget_path(path)
         GLib.idle_add(self.refresh_library)
 
+    def playlists_changed(self) -> None:
+        """Re-narrow the rotation and redraw after a list was edited."""
+        self._session.playlists_changed()
+        GLib.idle_add(self.refresh_library)
+
     def pairing_changed(self, item: MediaItem) -> None:
         """Make the window agree after a pairing moved over the socket.
 
@@ -531,6 +536,61 @@ class _Commands:
             return Response.success(f"{item.name} had nothing customized")
         self._app.pairing_changed(item)
         return Response.success(f"{item.name} is back to its defaults")
+
+    def list_playlists(self, value: str | None) -> Response:
+        """Every playlist, or the entries of one named playlist."""
+        session = self._app.session
+        if not (value or "").strip():
+            return Response.success(
+                server.describe_playlists(session.playlists, session.settings.active_playlist)
+            )
+        playlist = session.playlists.find(value or "")
+        return Response.success(server.describe_playlist(playlist, session.library))
+
+    def make_playlist(self, value: str | None) -> Response:
+        made = self._app.session.playlists.create(value or "")
+        return Response.success(f"made {made.name}")
+
+    def drop_playlist(self, value: str | None) -> Response:
+        session = self._app.session
+        playlist = session.playlists.find(value or "")
+        session.playlists.delete(playlist.id)
+        self._app.playlists_changed()
+        return Response.success(f"deleted {playlist.name}")
+
+    def add_to_playlist(self, value: str | None) -> Response:
+        """`playlist-add <playlist> <wallpaper>`.
+
+        Split from the left here, not the right: the playlist name is the
+        short side and the wallpaper is the path. A name with a space in it
+        therefore has to be referred to by id, which `playlists` prints.
+        """
+        name, source = server.parse_pair_from_left(value, verb="playlist-add")
+        session = self._app.session
+        playlist = session.playlists.find(name)
+        item = server.resolve(session.library, source, verb="playlist-add")
+        session.playlists.add(playlist.id, item.path)
+        self._app.playlists_changed()
+        return Response.success(f"{item.name} added to {playlist.name}")
+
+    def remove_from_playlist(self, value: str | None) -> Response:
+        """`playlist-remove <playlist> <entry-id>`, as `playlists <name>` prints."""
+        name, entry = server.parse_pair_from_left(value, verb="playlist-remove")
+        session = self._app.session
+        playlist = session.playlists.find(name)
+        session.playlists.remove_entry(playlist.id, entry)
+        self._app.playlists_changed()
+        return Response.success(f"removed {entry} from {playlist.name}")
+
+    def use_playlist(self, value: str | None) -> Response:
+        """Make one playlist the rotation, or `none` for the whole library."""
+        wanted = (value or "").strip()
+        if wanted.casefold() in ("", "none"):
+            self._app.update_settings(active_playlist="")
+            return Response.success("the rotation is the whole library")
+        playlist = self._app.session.playlists.find(wanted)
+        self._app.update_settings(active_playlist=playlist.id)
+        return Response.success(f"the rotation is {playlist.name}")
 
     def add_favourite(self, value: str | None) -> Response:
         """Star a wallpaper the library knows about.

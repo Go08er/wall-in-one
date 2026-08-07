@@ -43,7 +43,7 @@ from wall_in_one.control.protocol import (
     Response,
 )
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library import manage, pairings
+from wall_in_one.library import manage, pairings, playlists
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchResult
@@ -108,6 +108,12 @@ class Commands(Protocol):
     def set_still(self, value: str | None) -> Response: ...
     def set_palette(self, value: str | None) -> Response: ...
     def reset_pairing(self, value: str | None) -> Response: ...
+    def list_playlists(self, value: str | None) -> Response: ...
+    def make_playlist(self, value: str | None) -> Response: ...
+    def drop_playlist(self, value: str | None) -> Response: ...
+    def add_to_playlist(self, value: str | None) -> Response: ...
+    def remove_from_playlist(self, value: str | None) -> Response: ...
+    def use_playlist(self, value: str | None) -> Response: ...
     def list_providers(self) -> Response: ...
     def search(self, value: str | None) -> Outcome: ...
     def download(self, value: str | None) -> Outcome: ...
@@ -135,6 +141,12 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "still": commands.set_still,
         "palette": commands.set_palette,
         "reset-pairing": commands.reset_pairing,
+        "playlists": commands.list_playlists,
+        "playlist-new": commands.make_playlist,
+        "playlist-delete": commands.drop_playlist,
+        "playlist-add": commands.add_to_playlist,
+        "playlist-remove": commands.remove_from_playlist,
+        "playlist-use": commands.use_playlist,
         "providers": lambda _: commands.list_providers(),
         "search": commands.search,
         "download": commands.download,
@@ -274,6 +286,21 @@ def parse_pair(value: str | None, *, verb: str) -> tuple[str, str]:
     return path.strip(), rest.strip()
 
 
+def parse_pair_from_left(value: str | None, *, verb: str) -> tuple[str, str]:
+    """Split ``<name> <rest>`` at the first space.
+
+    The mirror of `parse_pair`, and used where the *left* side is the short
+    one: a playlist reference followed by a path or an entry id. A playlist
+    whose name has a space in it therefore has to be given by id, which is
+    what `playlists` prints alongside it.
+    """
+    text = (value or "").strip()
+    head, separator, tail = text.partition(" ")
+    if not separator or not head.strip() or not tail.strip():
+        raise ValueError(f"{verb} needs two arguments, as: {verb} <playlist> <value>")
+    return head.strip(), tail.strip()
+
+
 def describe_pairing(item: MediaItem, bundle: pairings.Pairing) -> str:
     """One pairing as rows, in the format the other listings use."""
     lines = [
@@ -286,6 +313,32 @@ def describe_pairing(item: MediaItem, bundle: pairings.Pairing) -> str:
     ]
     if bundle.override_missing:
         lines.append("# the chosen still is not on disk right now, so the default is in use")
+    return "\n".join(lines)
+
+
+def describe_playlists(store: playlists.Store, active: str) -> str:
+    """Every playlist as rows, marking whichever is in force."""
+    lines = ["# fields: name, entries, active"]
+    for playlist in store.all():
+        in_force = "yes" if active in (playlist.id, playlist.name) else "no"
+        lines.append(f"{_field(playlist.name)}\t{len(playlist)}\t{in_force}")
+    return f"# playlists: {len(store)}\n" + "\n".join(lines)
+
+
+def describe_playlist(playlist: playlists.Playlist, library: Library) -> str:
+    """One playlist as rows, in its own order, entry identity first.
+
+    The entry id leads because it is the field the editing verbs take back,
+    the same way `search` leads with the identifier `download` wants.
+    """
+    absent = set(playlist.missing(library.items))
+    lines = [
+        f"# {playlist.name}: {len(playlist)} entries",
+        "# fields: entry, present, path",
+    ]
+    for entry in playlist.entries:
+        here = "no" if entry.source in absent else "yes"
+        lines.append(f"{entry.id}\t{here}\t{_field(entry.source)}")
     return "\n".join(lines)
 
 

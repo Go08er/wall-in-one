@@ -50,6 +50,10 @@ def applied_paths(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
         calls.append(Path(path))
 
     monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", record)
+    # Applying also settles the palette now, and `conftest` refuses the live
+    # calls -- so a test that means to apply has to say it means all of it.
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_scheme", lambda _selection: None)
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_mode", lambda _mode: None)
     monkeypatch.setattr(
         "wall_in_one.theme.noctalia.current_wallpaper",
         lambda: (_ for _ in ()).throw(noctalia.NoctaliaUnavailableError("no shell")),

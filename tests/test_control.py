@@ -793,8 +793,10 @@ class _FakeApp:
 def applied(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """Nothing reaches the real shell.
 
-    Applying a still shells out to `noctalia msg wallpaper-set`, which would
-    change the wallpaper of whoever is running the suite.
+    Applying shells out to `noctalia msg`, which would change the wallpaper --
+    and, since pairings carry a palette, the colour scheme -- of whoever is
+    running the suite. `conftest` refuses all three by default; this stands in
+    for them, because these tests do mean to apply.
     """
     calls: list[Path] = []
 
@@ -802,6 +804,8 @@ def applied(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
         calls.append(Path(path))
 
     monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", record)
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_scheme", lambda _selection: None)
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_mode", lambda _mode: None)
     return calls
 
 

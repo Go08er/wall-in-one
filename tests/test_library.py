@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import pairing, scan
+from wall_in_one.library import pairing, pairings, scan
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.wallpaper import renderer
@@ -115,7 +115,8 @@ def test_apply_drops_stills_that_only_represent_a_video(tmp_path: Path) -> None:
     paired = _item(tmp_path / "clip-still.png")
     standalone = _item(tmp_path / "china-town-still.png")
 
-    result = pairing.apply([video, paired, standalone], resolver={video.path: paired.path})
+    paired.path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    result = pairings.apply([video, paired, standalone], roots=[tmp_path])
 
     assert [item.path for item in result] == [video.path, standalone.path]
     assert result[0].paired_still == paired.path
@@ -123,8 +124,8 @@ def test_apply_drops_stills_that_only_represent_a_video(tmp_path: Path) -> None:
 
 def test_apply_leaves_an_unpaired_video_alone(tmp_path: Path) -> None:
     video = _item(tmp_path / "clip.mp4", Kind.VIDEO)
-    (paired,) = pairing.apply([video], resolver={})
-    assert paired.paired_still is None
+    (resolved,) = pairings.apply([video], roots=[tmp_path])
+    assert resolved.paired_still is None
 
 
 # -- scanning ------------------------------------------------------------

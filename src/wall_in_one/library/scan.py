@@ -12,12 +12,12 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
 from wall_in_one import paths
-from wall_in_one.library import pairing
+from wall_in_one.library import pairing, pairings
 from wall_in_one.library.model import Library, MediaItem, Ownership, classify
 
 #: Ceilings for one scan.
@@ -151,8 +151,18 @@ def _walk(root: Path, budget: list[int], skipped: list[str]) -> Iterable[Path]:
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
-def scan(roots: Sequence[Path] | None = None) -> Library:
-    """Build a `Library` from ``roots`` (or the default roots)."""
+def scan(
+    roots: Sequence[Path] | None = None,
+    records: Mapping[str, pairings.Pairing] | None = None,
+) -> Library:
+    """Build a `Library` from ``roots`` (or the default roots).
+
+    ``records`` are the stored pairing customizations. Passed in rather than
+    read here, because a scan should not have opinions about whose choices it
+    is honouring -- and because pairing has to happen exactly once. Resolving
+    a second time somewhere else would recompute the defaults from disk and
+    overwrite whatever this pass decided.
+    """
     resolved_roots = tuple(roots) if roots is not None else default_roots()
 
     budget = [MAX_ENTRIES_EXAMINED]
@@ -207,5 +217,5 @@ def scan(roots: Sequence[Path] | None = None) -> Library:
             )
 
     items.sort(key=lambda item: (item.path.parent.as_posix(), item.name.lower()))
-    paired = pairing.apply(items, resolved_roots)
+    paired = pairings.apply(items, resolved_roots, records)
     return Library(roots=resolved_roots, items=paired, skipped=tuple(skipped))

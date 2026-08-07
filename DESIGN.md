@@ -528,7 +528,7 @@ inherits that constraint.
 Ordered so that the type change lands before anything depends on it, and so
 each step is independently useful if the next never happens.
 
-- [ ] **9. The pairing model.** `MediaItem` becomes a file record; a new
+- [x] **9. The pairing model.** `MediaItem` becomes a file record; a new
       `Pairing` carries representative still, optional motion source, and
       palette policy, keyed by a stable identity rather than a path. Every
       scanned item synthesizes a default pairing; saving one marks it
@@ -537,6 +537,14 @@ each step is independently useful if the next never happens.
       unreadable. This is a migration: `library.pairing` and
       `MediaItem.paired_still` are the read side of the old model and both have
       callers.
+      **Done.** `library.pairings` owns the record, the choice and the file;
+      `library.pairing` shrank to the conventions that synthesize a default,
+      and its `apply` is gone rather than left as a second implementation of
+      the same drop-logic. Pairing happens exactly once, inside the scan, with
+      the store's records carried in -- resolving a second time elsewhere
+      recomputed the defaults from disk and overwrote the first pass, which is
+      how the first attempt at this failed. `MediaItem.paired_still` survives
+      as the derived view the applier and the grid already read.
 - [ ] **10. Per-item palette policy.** Each pairing resolves dark/light/auto
       plus one of builtin, wallpaper-generated, community, custom, or
       keep-current. The default stays adaptive-from-wallpaper, which is what

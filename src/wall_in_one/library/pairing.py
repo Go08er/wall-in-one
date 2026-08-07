@@ -1,4 +1,8 @@
-"""Pairing a video wallpaper with a still.
+"""Finding the still that stands behind a video, by convention.
+
+The read half, and the narrow one: given a video, which still already
+represents it. `library.pairings` (plural) owns the record, the choice and the
+file, and calls in here for the default. `library.stills` is the write half.
 
 When dynamics are paused the app shows a still instead of the video, so every
 video wants a still standing behind it. There are three ways one gets there,
@@ -17,11 +21,11 @@ so it is not a fallback so much as the common case.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
-from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
+from wall_in_one.library.model import IMAGE_EXTENSIONS
 
 #: Written by us next to a video to record which still represents it.
 SIDECAR_SUFFIX: Final = ".wall-in-one.json"
@@ -120,44 +124,3 @@ def find_still(video: Path, roots: Iterable[Path] = ()) -> Path | None:
     if generated is not None:
         return generated
     return _sibling_still(video)
-
-
-def apply(
-    items: Iterable[MediaItem],
-    roots: Iterable[Path] = (),
-    *,
-    resolver: Mapping[Path, Path] | None = None,
-) -> tuple[MediaItem, ...]:
-    """Attach stills to videos and drop stills that exist only as a pair.
-
-    A still whose whole job is representing a video is not a separate
-    wallpaper, so it is removed from the returned items -- otherwise the same
-    picture turns up twice in the rotation, once on its own and once as the
-    paused form of the video.
-
-    A still nobody pairs with stays, which is why the user's three root-level
-    `*-still.png` files survive: they have no video behind them.
-
-    ``resolver`` short-circuits disk lookups, for tests and for reusing a scan.
-    """
-    materialised = list(items)
-    roots = tuple(roots)
-
-    paired: dict[Path, Path] = {}
-    for item in materialised:
-        if item.kind is not Kind.VIDEO:
-            continue
-        still = (
-            resolver.get(item.path) if resolver is not None else find_still(item.path, roots=roots)
-        )
-        if still is not None:
-            paired[item.path] = still
-
-    consumed = set(paired.values())
-    result: list[MediaItem] = []
-    for item in materialised:
-        if item.kind is Kind.VIDEO:
-            result.append(item.with_still(paired.get(item.path)))
-        elif item.path not in consumed:
-            result.append(item)
-    return tuple(result)

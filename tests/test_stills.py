@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import pairing, scan, stills
+from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
@@ -178,7 +178,7 @@ def test_a_generated_still_does_not_become_a_wallpaper_of_its_own(
     video = make_video(tmp_path / "clip.mp4")
     still = stills.generate(video, root)
     items = (item(video, Kind.VIDEO), item(still, Kind.STILL))
-    paired = pairing.apply(items, roots=(root,))
+    paired = pairings.apply(items, roots=(root,))
     assert [entry.path for entry in paired] == [video]
     assert paired[0].paired_still == still
 

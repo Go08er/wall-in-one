@@ -7,6 +7,7 @@ settings app wearing a costume.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeVar
@@ -19,7 +20,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config
-from wall_in_one.library import favourites, manage
+from wall_in_one.library import favourites, manage, pairings
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
@@ -497,12 +498,15 @@ class MainWindow(Adw.ApplicationWindow):
     def _forget(self, item: MediaItem) -> None:
         """Drop a removed wallpaper from the favourites, then rescan.
 
-        The star is the one piece of state that survives the file, and keeping
-        an entry the app itself destroyed would be pointless: the reason
-        favourites outlive a missing file is that the file might come back,
-        which is not true of one we just deleted.
+        The star and the pairing are what survive the file, and keeping either
+        for something the app itself destroyed would be pointless: the reason
+        they outlive a missing file is that the file might come back, which is
+        not true of one we just deleted.
         """
-        self._favourites.discard(item.path)
+        with contextlib.suppress(favourites.FavouritesError):
+            self._favourites.discard(item.path)
+        with contextlib.suppress(pairings.PairingError):
+            self._app.session.pairings.forget_path(item.path)
         self._grid.set_favourites(self._favourites.paths)
         self._app.refresh_library()
 

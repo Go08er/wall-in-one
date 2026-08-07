@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import favourites, scan, stills
+from wall_in_one.library import favourites, pairings, scan, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
@@ -50,6 +50,7 @@ class Session:
         scanner: Scanner | None = None,
         rng: random.Random | None = None,
         favourite_store: favourites.Store | None = None,
+        pairing_store: pairings.Store | None = None,
     ) -> None:
         self._settings = settings
         # Only when we build the renderer ourselves: an applier handed in has
@@ -58,7 +59,11 @@ class Session:
         self._applier = (
             applier if applier is not None else Applier(_renderer_for(settings), settings.output)
         )
-        self._scan: Scanner = scanner if scanner is not None else scan.scan
+        # The default scanner carries the customizations in with it, so pairing
+        # happens once, inside the scan. An injected scanner is left alone: a
+        # test that hands over a ready-made library means it, and re-resolving
+        # would recompute every pairing from a disk the test never wrote to.
+        self._scan: Scanner = scanner if scanner is not None else self._scan_with_pairings
         self._library = Library(roots=(), items=())
         self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
         # Owned here rather than by the window, because the rotation is built
@@ -67,6 +72,10 @@ class Session:
         self._favourites = (
             favourite_store if favourite_store is not None else favourites.Store.open()
         )
+        # Owned here for the same reason the favourites are: the rotation and
+        # the applier are built from what it resolves, so the window cannot be
+        # the only thing that knows.
+        self._pairings = pairing_store if pairing_store is not None else pairings.Store.open()
 
     # -- state -----------------------------------------------------------
 
@@ -114,6 +123,14 @@ class Session:
         self._library = self._scan(roots)
         self._rebuild_playlist()
         return self._library
+
+    def _scan_with_pairings(self, roots: Sequence[Path] | None) -> Library:
+        return scan.scan(roots, self._pairings.records)
+
+    @property
+    def pairings(self) -> pairings.Store:
+        """The customizations. The grid reads them; the applier obeys them."""
+        return self._pairings
 
     @property
     def favourites(self) -> favourites.Store:

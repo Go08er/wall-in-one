@@ -21,7 +21,7 @@ from wall_in_one import config, paths
 from wall_in_one.browse import Browser
 from wall_in_one.control import server
 from wall_in_one.control.protocol import Response
-from wall_in_one.library import favourites
+from wall_in_one.library import favourites, pairings
 from wall_in_one.library import filter as library_filter
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
@@ -222,10 +222,10 @@ class Application(Adw.Application):
     def forget(self, path: Path) -> None:
         """Drop a wallpaper this app has just destroyed, and rescan.
 
-        The star is the one piece of state that outlives the file, and an entry
-        for something we deleted ourselves is pointless: favourites survive a
-        missing file because the file might come back, which is not true of one
-        we have just unlinked. The store's own write failing changes nothing
+        The star and the pairing are the two pieces of state that outlive the
+        file, and an entry for something we deleted ourselves is pointless:
+        both survive a missing file because the file might come back, which is
+        not true of one we have just unlinked. The store's own write failing changes nothing
         here -- the file is gone either way, and the socket has already been
         told what happened to it.
 
@@ -236,6 +236,8 @@ class Application(Adw.Application):
         """
         with contextlib.suppress(favourites.FavouritesError):
             self._session.favourites.discard(path)
+        with contextlib.suppress(pairings.PairingError):
+            self._session.pairings.forget_path(path)
         GLib.idle_add(self.refresh_library)
 
     def apply(self, action: Callable[[], Applied]) -> Response:

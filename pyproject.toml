@@ -16,7 +16,11 @@ wall-in-one = "wall_in_one.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"wall_in_one" = ["data/*.tmpl"]
+# The template is read from here at runtime. The desktop entry and the icon are
+# not read at all -- they ride along so that any distribution built from this
+# tree carries them, and so the tests check the same bytes the Nix package
+# installs into share/applications and share/icons.
+"wall_in_one" = ["data/*.tmpl", "data/*.desktop", "data/*.svg"]
 
 [tool.mypy]
 python_version = "3.11"

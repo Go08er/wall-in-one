@@ -136,10 +136,20 @@ Exit code 3 means no instance is running.
 ## Install
 
 ```console
-$ nix run github:goober/wall-in-one     # once published
-$ nix develop                           # dev shell
+$ nix profile install github:goober/wall-in-one   # once published
+$ nix run github:goober/wall-in-one               # try it without installing
+$ nix develop                                     # dev shell
 $ python -m wall_in_one
 ```
+
+Installing into a profile also installs a launcher entry and an icon —
+`share/applications/dev.goober.WallInOne.desktop` and
+`share/icons/hicolor/scalable/apps/dev.goober.WallInOne.svg` — so the app can be
+started from a menu rather than only from a terminal. Both are named for the
+app-id, which is what lets the compositor pair the window with the entry.
+[`docs/installing.md`](docs/installing.md) covers why `nix run` gives you no
+menu entry, why the packaged `Exec` is a store path, and why the entry claims
+neither D-Bus activation nor a `StartupWMClass`.
 
 Noctalia is deliberately *not* a dependency. Without it the app falls back to
 tier 3 and everything except colour sync still works.
@@ -153,7 +163,9 @@ $ mypy --strict src tests
 $ ruff check src tests && ruff format --check src tests
 ```
 
-All three run as flake checks: `nix flake check`.
+All three run as flake checks: `nix flake check`. A fourth check, `desktop`,
+validates the installed launcher entry and rasterises the icon, since neither
+can be seen from the Python suite.
 
 Tests that need a display are marked `gui`; tests that need a live Noctalia are
 marked `noctalia`. The packaged build runs neither.

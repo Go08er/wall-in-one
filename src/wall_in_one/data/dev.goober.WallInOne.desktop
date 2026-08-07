@@ -1,0 +1,31 @@
+# The filename has to be exactly the Wayland app-id (wall_in_one.paths.
+# APPLICATION_ID) or the compositor cannot tell that this entry and the window
+# on screen are the same program: that association is made by name, not by
+# anything inside the file. See docs/niri.md.
+#
+# Exec stays a bare command here so the file is the same in a checkout, a wheel
+# and the Nix store; the Nix package rewrites it to the wrapped binary's
+# absolute path at install time.
+#
+# No StartupWMClass either. That key matches X11's WM_CLASS, which GTK takes
+# from the program name rather than from the application id, so under XWayland
+# it would have to say "wall-in-one" and under Wayland it is not consulted at
+# all -- the filename above already does that job.
+#
+# No DBusActivatable. The app does export org.gtk.Actions on the session bus,
+# because GtkApplication always does, but activation over D-Bus additionally
+# needs a dev.goober.WallInOne.service file and we ship none -- claiming it
+# without one buys nothing and costs a failed launch on any launcher that does
+# not fall back to Exec.
+[Desktop Entry]
+Type=Application
+Name=Wall-in-One
+GenericName=Wallpaper Manager
+Comment=Set still and video wallpapers, and keep your colours in step with them
+Exec=wall-in-one
+TryExec=wall-in-one
+Icon=dev.goober.WallInOne
+Terminal=false
+StartupNotify=true
+Categories=Settings;DesktopSettings;GTK;
+Keywords=wallpaper;background;desktop;video;slideshow;palette;colour;color;theme;

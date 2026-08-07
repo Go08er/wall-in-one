@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Wall-in-One</title>
+  <desc>A framed dusk landscape with a second wallpaper waiting behind it.</desc>
+  <!--
+    Every edge sits on a multiple of eight, so at 16px - the size a panel or a
+    menu asks for - nothing lands on a half pixel and the frame stays crisp.
+    The motif is deliberately thin: one picture, one card behind it. A third
+    card and any finer detail inside the scene turn to mush at that size.
+
+    It is a colour icon rather than a monochrome glyph on purpose. A fixed dark
+    foreground vanishes on a dark panel, whereas these fills carry their own
+    contrast against either one. The only near-white ink is the frame
+    highlight, at low opacity: it lifts the card off a dark background and is
+    imperceptible against a light one.
+  -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4650c4"/>
+      <stop offset="0.55" stop-color="#8a5bbe"/>
+      <stop offset="1" stop-color="#f0a05c"/>
+    </linearGradient>
+    <clipPath id="card">
+      <rect x="24" y="40" width="96" height="72" rx="12"/>
+    </clipPath>
+  </defs>
+
+  <!-- The next wallpaper in the stack. Offset down-right rather than centred,
+       or the pair reads as a lid on a box. -->
+  <rect x="8" y="16" width="96" height="72" rx="12" fill="#8a79e2"/>
+
+  <g clip-path="url(#card)">
+    <rect x="24" y="40" width="96" height="72" fill="url(#sky)"/>
+    <circle cx="52" cy="64" r="10" fill="#ffd66b"/>
+    <path d="M24 112 L48 74 L72 100 L96 68 L120 112 Z" fill="#5b4bab"/>
+    <path d="M24 112 L60 84 L82 104 L100 86 L120 112 Z" fill="#2a2456"/>
+  </g>
+
+  <rect x="24" y="40" width="96" height="72" rx="12" fill="none"
+        stroke="#ffffff" stroke-opacity="0.3" stroke-width="4"/>
+</svg>

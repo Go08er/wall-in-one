@@ -14,6 +14,11 @@
         pkgs = import nixpkgs { inherit system; };
         python = pkgs.python3;
 
+        # The GApplication id, and so the Wayland app-id, the desktop entry's
+        # filename and the icon's. It is `wall_in_one.paths.APPLICATION_ID`;
+        # spelled once here so the three names cannot drift apart.
+        applicationId = "dev.goober.WallInOne";
+
         # Runtime tools the app shells out to. noctalia is deliberately *not*
         # here: the app degrades gracefully without it, and hard-depending on
         # it would force a shell install on someone who only wants the manager.
@@ -51,11 +56,36 @@
           ];
 
           # The GUI needs a display; the offline suite is what CI can run.
-          nativeCheckInputs = [ python.pkgs.pytest ];
+          #
+          # ffmpeg is here as well as in `runtimeTools` because the runtime
+          # wrapper does not exist yet during the check phase: without it the
+          # thumbnail and still-generation tests either skip or, worse, pass
+          # for the wrong reason -- `test_a_missing_file_is_reported` was
+          # getting "ffmpeg is not installed" and matching nothing it meant to.
+          # Twenty-nine tests were silently sitting out the packaged build.
+          nativeCheckInputs = [ python.pkgs.pytest ] ++ runtimeTools;
           checkPhase = ''
             runHook preCheck
             PYTHONPATH=$PWD/src:$PYTHONPATH pytest tests -q -m "not gui"
             runHook postCheck
+          '';
+
+          # The launcher entry and its icon go where XDG looks for them, so
+          # that `nix profile install` produces something a menu can find. They
+          # travel in the wheel too (package-data), but site-packages is not a
+          # place any desktop shell reads.
+          #
+          # Exec is rewritten from the bare command to this store path because
+          # a session whose PATH never picked up the profile would otherwise
+          # own a menu entry it cannot start. The same substitution catches
+          # TryExec, which holds the same string.
+          postInstall = ''
+            install -Dm644 src/wall_in_one/data/${applicationId}.desktop \
+              $out/share/applications/${applicationId}.desktop
+            install -Dm644 src/wall_in_one/data/${applicationId}.svg \
+              $out/share/icons/hicolor/scalable/apps/${applicationId}.svg
+            substituteInPlace $out/share/applications/${applicationId}.desktop \
+              --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
           '';
 
           # buildPythonApplication's wrapper and wrapGAppsHook4's wrapper both
@@ -103,12 +133,42 @@
                 touch $out
               '';
 
+          # What the Python tests cannot see: that the entry satisfies the
+          # desktop-entry spec, and that the icon really rasterises at both the
+          # size a panel asks for and the size a settings page does. Both run
+          # against the installed paths, so a broken postInstall fails here
+          # rather than on someone's menu. Two tiny tools on top of a package
+          # that had to be built anyway.
+          desktop =
+            pkgs.runCommand "wall-in-one-desktop"
+              {
+                nativeBuildInputs = [
+                  pkgs.desktop-file-utils
+                  pkgs.librsvg
+                ];
+              }
+              ''
+                desktop-file-validate ${wall-in-one}/share/applications/${applicationId}.desktop
+                for size in 16 128; do
+                  rsvg-convert -w "$size" -h "$size" \
+                    ${wall-in-one}/share/icons/hicolor/scalable/apps/${applicationId}.svg \
+                    -o "rendered-$size.png"
+                done
+                touch $out
+              '';
+
           ruff =
             pkgs.runCommand "wall-in-one-ruff" { nativeBuildInputs = [ pkgs.ruff ]; }
               ''
                 cd ${./.}
-                ruff check src tests
-                ruff format --check src tests
+                # `cd` lands in the read-only store, where ruff cannot create
+                # the cache it makes next to the files it is linting. The
+                # check is a one-shot in a fresh sandbox, so there is nothing
+                # for a cache to make faster anyway -- mypy above is told the
+                # same thing in its own spelling.
+                export RUFF_CACHE_DIR="$TMPDIR/ruff-cache"
+                ruff check --no-cache src tests
+                ruff format --check --no-cache src tests
                 touch $out
               '';
         };

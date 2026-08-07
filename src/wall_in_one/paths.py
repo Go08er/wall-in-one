@@ -46,6 +46,10 @@ def cache_home() -> Path:
     return _xdg("XDG_CACHE_HOME", Path.home() / ".cache")
 
 
+def data_home() -> Path:
+    return _xdg("XDG_DATA_HOME", Path.home() / ".local" / "share")
+
+
 def runtime_dir() -> Path:
     raw = os.environ.get("XDG_RUNTIME_DIR")
     if raw and Path(raw).is_absolute():

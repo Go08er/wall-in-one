@@ -74,6 +74,22 @@ def _is_sidecar(path: Path) -> bool:
     )
 
 
+#: The two halves of ownership, published for `library.manage`. Deletion has to
+#: ask the same question a scan asks, and asking it with a second copy of the
+#: rule is how the two come to disagree -- with an unlink on the losing side.
+FILE_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = _FILE_SIDECAR_SUFFIXES
+
+
+def is_managed_directory(directory: Path) -> bool:
+    """Whether ``directory`` carries a marker saying this app created it."""
+    return _read_marker(directory) is not None
+
+
+def has_file_sidecar(path: Path) -> bool:
+    """Whether ``path`` has a sidecar proving this app downloaded it."""
+    return _has_file_sidecar(path)
+
+
 def wallpaper_directory_from_noctalia() -> Path | None:
     """Read `[wallpaper] directory` out of Noctalia's settings.
 

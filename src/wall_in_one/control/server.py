@@ -43,7 +43,7 @@ from wall_in_one.control.protocol import (
     Response,
 )
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library import manage
+from wall_in_one.library import manage, pairings
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchResult
@@ -104,6 +104,10 @@ class Commands(Protocol):
     def add_favourite(self, value: str | None) -> Response: ...
     def remove_favourite(self, value: str | None) -> Response: ...
     def remove_wallpaper(self, value: str | None) -> Response: ...
+    def show_pairing(self, value: str | None) -> Response: ...
+    def set_still(self, value: str | None) -> Response: ...
+    def set_palette(self, value: str | None) -> Response: ...
+    def reset_pairing(self, value: str | None) -> Response: ...
     def list_providers(self) -> Response: ...
     def search(self, value: str | None) -> Outcome: ...
     def download(self, value: str | None) -> Outcome: ...
@@ -127,6 +131,10 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "favourite": commands.add_favourite,
         "unfavourite": commands.remove_favourite,
         "remove": commands.remove_wallpaper,
+        "pairing": commands.show_pairing,
+        "still": commands.set_still,
+        "palette": commands.set_palette,
+        "reset-pairing": commands.reset_pairing,
         "providers": lambda _: commands.list_providers(),
         "search": commands.search,
         "download": commands.download,
@@ -248,6 +256,37 @@ def resolve(library: Library, value: str | None, *, verb: str) -> MediaItem:
     if item is None:
         raise UnknownWallpaperError(f"not in the library: {path}")
     return item
+
+
+def parse_pair(value: str | None, *, verb: str) -> tuple[str, str]:
+    """Split ``<path> <rest>`` the way the shell handed it over.
+
+    From the right, because the left side is a path and paths contain spaces --
+    this machine's own library lives under one. The right side is a palette
+    policy or the word `default`, neither of which ever does.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise ValueError(f"{verb} needs a path and a value")
+    path, separator, rest = text.rpartition(" ")
+    if not separator or not path.strip() or not rest.strip():
+        raise ValueError(f"{verb} needs a path and a value, as: {verb} <path> <value>")
+    return path.strip(), rest.strip()
+
+
+def describe_pairing(item: MediaItem, bundle: pairings.Pairing) -> str:
+    """One pairing as rows, in the format the other listings use."""
+    lines = [
+        f"# {item.name}: {'customized' if bundle.customized else 'default'}",
+        "# fields: field, value",
+        f"still\t{bundle.still if bundle.still else '-'}",
+        f"motion\t{bundle.motion if bundle.motion else '-'}",
+        f"palette\t{bundle.palette.encode()}",
+        f"mode\t{bundle.palette.mode.value}",
+    ]
+    if bundle.override_missing:
+        lines.append("# the chosen still is not on disk right now, so the default is in use")
+    return "\n".join(lines)
 
 
 def remove_wallpaper(item: MediaItem, roots: tuple[Path, ...]) -> str:

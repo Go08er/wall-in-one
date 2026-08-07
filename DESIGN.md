@@ -562,7 +562,7 @@ each step is independently useful if the next never happens.
       asking before the still lands generates them from the previous picture.
       A palette that will not apply is never fatal -- the wallpaper is already
       on screen by then.
-- [ ] **11. Manual still override.** A picker over indexed stills plus an
+- [x] **11. Manual still override.** A picker over indexed stills plus an
       absolute-path escape hatch. `library/stills.py` already writes the
       sidecar that records one, so this is UI and a verb, not new machinery.
 - [ ] **12. Named playlists.** Named, ordered, persisted, with stable entry IDs

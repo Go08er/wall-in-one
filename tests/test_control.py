@@ -24,6 +24,7 @@ from wall_in_one.control.server import (
     handle,
     parse_download,
     parse_list,
+    parse_pair,
     parse_path,
     parse_search,
     parse_toggle,
@@ -147,6 +148,18 @@ class _StubCommands:
 
     def remove_wallpaper(self, value: str | None) -> Response:
         return self._record("remove", value)
+
+    def show_pairing(self, value: str | None) -> Response:
+        return self._record("pairing", value)
+
+    def set_still(self, value: str | None) -> Response:
+        return self._record("still", value)
+
+    def set_palette(self, value: str | None) -> Response:
+        return self._record("palette", value)
+
+    def reset_pairing(self, value: str | None) -> Response:
+        return self._record("reset-pairing", value)
 
     def list_providers(self) -> Response:
         return self._record("providers")
@@ -768,16 +781,17 @@ class _FakeRenderer:
 class _FakeApp:
     """Just enough `Application` for the library verbs.
 
-    Four things: the session they read, the wrapper navigation goes through,
-    and the two calls that leave the running window agreeing with whatever the
-    socket has just done. Counting those two is how the tests below check that
-    a star or a deletion is not left only in the session.
+    The session they read, the wrapper navigation goes through, and the three
+    calls that leave the running window agreeing with whatever the socket has
+    just done. Counting those is how the tests below check that a star, a
+    deletion or a pairing is not left only in the session.
     """
 
     def __init__(self, session: Session) -> None:
         self.session = session
         self.restarred = 0
         self.forgotten: list[Path] = []
+        self.repaired: list[Path] = []
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         return Response.success(action().describe())
@@ -787,6 +801,9 @@ class _FakeApp:
 
     def forget(self, path: Path) -> None:
         self.forgotten.append(path)
+
+    def pairing_changed(self, item: MediaItem) -> None:
+        self.repaired.append(item.path)
 
 
 @pytest.fixture
@@ -1022,3 +1039,108 @@ def test_a_socket_that_cannot_be_secured_leaves_nothing_listening(
         server.start()
 
     assert not server.path.exists()
+
+
+# -- pairings over the socket ---------------------------------------------
+
+
+def test_a_path_with_spaces_and_a_value_split_correctly() -> None:
+    """Split from the right: the left side is a path and this machine's own
+    library lives under a directory with a space in its name."""
+    path, value = parse_pair("/home/me/customization stuff/a.png builtin:Nord", verb="p")
+    assert (path, value) == ("/home/me/customization stuff/a.png", "builtin:Nord")
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "/only/a/path", "value-only "])
+def test_a_pair_missing_half_of_itself_is_refused(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_pair(raw, verb="palette")
+
+
+def test_a_pairing_reads_back_as_rows(sandbox: Path, applied: list[Path]) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, _app = _commands(sandbox, [wallpaper])
+    response = commands.show_pairing(str(wallpaper.path))
+    assert response.ok
+    assert "# fields: field, value" in response.message
+    assert f"still\t{wallpaper.path}" in response.message
+    assert "palette\tadaptive" in response.message
+
+
+def test_choosing_a_still_over_the_socket_sticks(sandbox: Path, applied: list[Path]) -> None:
+    clip = _wallpaper("clip.mp4", kind=Kind.VIDEO)
+    commands, app = _commands(sandbox, [clip])
+    chosen = sandbox / "chosen.png"
+    chosen.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    response = commands.set_still(f"{clip.path} {chosen}")
+
+    assert response.ok
+    assert app.session.pairings.resolve(clip, ()).still == chosen
+
+
+def test_a_still_that_is_not_there_is_refused(sandbox: Path, applied: list[Path]) -> None:
+    """A record naming a picture that does not exist is a record that does
+    nothing, and the caller would have no way to know."""
+    wallpaper = _wallpaper("aurora")
+    commands, _app = _commands(sandbox, [wallpaper])
+    with pytest.raises(ValueError):
+        commands.set_still(f"{wallpaper.path} {sandbox / 'nowhere.png'}")
+
+
+def test_the_word_default_stops_choosing_a_still(sandbox: Path, applied: list[Path]) -> None:
+    clip = _wallpaper("clip.mp4", kind=Kind.VIDEO)
+    commands, app = _commands(sandbox, [clip])
+    chosen = sandbox / "chosen.png"
+    chosen.write_bytes(b"\x89PNG\r\n\x1a\n")
+    commands.set_still(f"{clip.path} {chosen}")
+
+    commands.set_still(f"{clip.path} default")
+
+    assert app.session.pairings.resolve(clip, ()).still is None
+
+
+def test_a_palette_policy_is_stored(sandbox: Path, applied: list[Path]) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+
+    assert commands.set_palette(f"{wallpaper.path} builtin:Nord").ok
+
+    policy = app.session.pairings.resolve(wallpaper, ()).palette
+    assert (policy.kind, policy.name) == ("builtin", "Nord")
+    assert app.repaired == [wallpaper.path], "the window has to be told"
+
+
+def test_a_policy_that_would_not_survive_a_round_trip_is_refused(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    """`decode` is deliberately forgiving, so the verb has to be the strict
+    one: silently storing `adaptive` for a typo would be worse than refusing."""
+    wallpaper = _wallpaper("aurora")
+    commands, _app = _commands(sandbox, [wallpaper])
+    with pytest.raises(ValueError):
+        commands.set_palette(f"{wallpaper.path}   ")
+
+
+def test_resetting_forgets_every_choice(sandbox: Path, applied: list[Path]) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+    commands.set_palette(f"{wallpaper.path} builtin:Nord")
+
+    assert commands.reset_pairing(str(wallpaper.path)).ok
+
+    assert not app.session.pairings.resolve(wallpaper, ()).customized
+
+
+def test_resetting_something_untouched_says_so(sandbox: Path, applied: list[Path]) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, _app = _commands(sandbox, [wallpaper])
+    assert "nothing customized" in commands.reset_pairing(str(wallpaper.path)).message
+
+
+def test_a_pairing_verb_refuses_a_path_outside_the_library(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    with pytest.raises(UnknownWallpaperError):
+        commands.show_pairing("/etc/passwd")

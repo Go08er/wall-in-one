@@ -22,7 +22,7 @@ from gi.repository import Adw, Gio, GLib, Gtk
 from wall_in_one import config
 from wall_in_one.library import favourites, manage, pairings
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library.model import MediaItem
+from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import palettes, source
 from wall_in_one.ui.browse_dialog import BrowseDialog
@@ -182,6 +182,8 @@ class MainWindow(Adw.ApplicationWindow):
             ("apply-wallpaper", self._on_apply_path),
             ("remove-wallpaper", self._on_remove_path),
             ("favourite-wallpaper", self._on_favourite_path),
+            ("choose-still", self._on_choose_still),
+            ("reset-pairing", self._on_reset_pairing),
         ):
             targeted = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
             targeted.connect("activate", handler)
@@ -437,6 +439,18 @@ class MainWindow(Adw.ApplicationWindow):
         )
         favourite_item.set_action_and_target_value("win.favourite-wallpaper", target)
         menu.append_item(favourite_item)
+        bundle = self._app.session.pairings.resolve(item, self._app.session.library.roots)
+        still_item = Gio.MenuItem.new("Choose a still...", None)
+        still_item.set_action_and_target_value("win.choose-still", target)
+        menu.append_item(still_item)
+
+        if bundle.customized:
+            # Only offered when there is something to undo. A reset that does
+            # nothing is a menu entry teaching people the menu lies.
+            reset_item = Gio.MenuItem.new("Reset to defaults", None)
+            reset_item.set_action_and_target_value("win.reset-pairing", target)
+            menu.append_item(reset_item)
+
         menu.append_submenu("Colours", self._palette_menu(item))
 
         remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
@@ -484,6 +498,78 @@ class MainWindow(Adw.ApplicationWindow):
             menu.append_submenu(origin.label, section)
         return menu
 
+    def _on_choose_still(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        """Pick the picture that stands in for this wallpaper.
+
+        Any image will do, including one outside the library: a representative
+        is a picture, not a library entry, and refusing an outside one would
+        mean the only way to use a photo is to import it first.
+        """
+        item = self._item_at(raw)
+        if item is None:
+            return
+        dialog = Gtk.FileDialog(title=f"Choose a still for {item.name}", modal=True)
+        images = Gtk.FileFilter()
+        images.set_name("Images")
+        for extension in sorted(IMAGE_EXTENSIONS):
+            images.add_pattern(f"*{extension}")
+            images.add_pattern(f"*{extension.upper()}")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(images)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(images)
+        dialog.open(self._window_for_dialog(), None, self._make_still_receiver(item))
+
+    def _window_for_dialog(self) -> Gtk.Window | None:
+        return self
+
+    def _make_still_receiver(self, item: MediaItem) -> Any:
+        def chosen(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                picked = dialog.open_finish(result)
+            except GLib.Error:
+                # Dismissed. Saying so would be noise.
+                return
+            path = picked.get_path() if picked is not None else None
+            if path is None:
+                self.report("That file is not on this machine's filesystem")
+                return
+            self._store_still(item, Path(path))
+
+        return chosen
+
+    def _store_still(self, item: MediaItem, still: Path | None) -> None:
+        try:
+            self._app.session.pairings.choose_still(item, still)
+        except pairings.PairingError:
+            self.report(f"{item.name} uses it for now, but the choice could not be saved")
+        self._reapply_if_current(item)
+        self._app.refresh_library()
+
+    def _on_reset_pairing(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        """Forget everything chosen for one wallpaper."""
+        item = self._item_at(raw)
+        if item is None:
+            return
+        try:
+            if not self._app.session.pairings.reset(item):
+                return
+        except pairings.PairingError:
+            self.report(f"{item.name} is back to its defaults for now, but that was not saved")
+        self.report(f"{item.name} is back to its defaults")
+        self._reapply_if_current(item)
+        self._app.refresh_library()
+
+    def _reapply_if_current(self, item: MediaItem) -> None:
+        """Show a changed pairing at once, but only if it is what is on screen.
+
+        Changing the wallpaper somebody is not looking at would be a surprise;
+        leaving the one they *are* looking at stale would be a bug.
+        """
+        cursor = self._app.session.cursor
+        if cursor is not None and cursor.path == item.path:
+            self._app.apply(self._app.session.apply_current)
+
     def _on_palette_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Record which colours a wallpaper asks for, and show them now.
 
@@ -502,9 +588,7 @@ class MainWindow(Adw.ApplicationWindow):
         except pairings.PairingError:
             self.report(f"{item.name} keeps those colours for now, but they could not be saved")
 
-        cursor = self._app.session.cursor
-        if cursor is not None and cursor.path == item.path:
-            self._app.apply(lambda: self._app.session.apply_current())
+        self._reapply_if_current(item)
         self._app.refresh_library()
 
     def _item_at(self, raw: GLib.Variant | None) -> MediaItem | None:

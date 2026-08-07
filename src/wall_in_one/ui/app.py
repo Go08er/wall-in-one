@@ -23,6 +23,7 @@ from wall_in_one.control import server
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import favourites, pairings
 from wall_in_one.library import filter as library_filter
+from wall_in_one.library.model import MediaItem
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
@@ -239,6 +240,25 @@ class Application(Adw.Application):
         with contextlib.suppress(pairings.PairingError):
             self._session.pairings.forget_path(path)
         GLib.idle_add(self.refresh_library)
+
+    def pairing_changed(self, item: MediaItem) -> None:
+        """Make the window agree after a pairing moved over the socket.
+
+        Only the wallpaper on screen is re-applied: changing the colours of
+        something nobody is looking at would be a surprise. The rescan is
+        deferred for the reason every other one here is -- it is the window's
+        work, not the client's, and `ctl palette` should not be held open
+        while the library is walked.
+        """
+        session = self._session
+        cursor = session.cursor
+        if cursor is not None and cursor.path == item.path:
+            GLib.idle_add(self._reapply_current)
+        GLib.idle_add(self.refresh_library)
+
+    def _reapply_current(self) -> bool:
+        self.apply(self._session.apply_current)
+        return GLib.SOURCE_REMOVE
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         """Run a navigation action and report it, without letting it kill the app."""
@@ -461,6 +481,56 @@ class _Commands:
                 tuple(item.path for item in session.library.items),
             )
         )
+
+    def show_pairing(self, value: str | None) -> Response:
+        """What one wallpaper resolves to: still, motion, palette, mode."""
+        session = self._app.session
+        item = server.resolve(session.library, value, verb="pairing")
+        bundle = session.pairings.resolve(item, session.library.roots)
+        return Response.success(server.describe_pairing(item, bundle))
+
+    def set_still(self, value: str | None) -> Response:
+        """`still <wallpaper> <picture>`, or `default` to stop choosing.
+
+        The wallpaper is resolved against the library, so a record can only
+        name something the scan produced. The picture is not: a representative
+        is a picture, not a library entry, and requiring it to be indexed would
+        mean a photo has to be imported before it can stand in for anything.
+        """
+        source, chosen = server.parse_pair(value, verb="still")
+        session = self._app.session
+        item = server.resolve(session.library, source, verb="still")
+        still: Path | None = None
+        if chosen != "default":
+            still = server.parse_path(chosen, verb="still")
+            if not still.is_file():
+                raise ValueError(f"no such picture: {still}")
+        session.pairings.choose_still(item, still)
+        self._app.pairing_changed(item)
+        return Response.success(
+            f"{item.name} uses {still.name}" if still else f"{item.name} works its own still out"
+        )
+
+    def set_palette(self, value: str | None) -> Response:
+        """`palette <wallpaper> <policy>` -- adaptive, keep, or `source:name`."""
+        source, encoded = server.parse_pair(value, verb="palette")
+        session = self._app.session
+        item = server.resolve(session.library, source, verb="palette")
+        policy = pairings.PalettePolicy.decode(encoded)
+        if policy.encode() != encoded:
+            raise ValueError(f"not a palette policy: {encoded}")
+        session.pairings.choose_palette(item, policy)
+        self._app.pairing_changed(item)
+        return Response.success(f"{item.name} asks for {policy.encode()}")
+
+    def reset_pairing(self, value: str | None) -> Response:
+        """Forget every choice made for one wallpaper."""
+        session = self._app.session
+        item = server.resolve(session.library, value, verb="reset-pairing")
+        if not session.pairings.reset(item):
+            return Response.success(f"{item.name} had nothing customized")
+        self._app.pairing_changed(item)
+        return Response.success(f"{item.name} is back to its defaults")
 
     def add_favourite(self, value: str | None) -> Response:
         """Star a wallpaper the library knows about.

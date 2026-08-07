@@ -235,6 +235,11 @@ $ wall-in-one ctl favourites
 $ wall-in-one ctl favourite /path/to/wallpaper.png
 $ wall-in-one ctl unfavourite /path/to/wallpaper.png
 $ wall-in-one ctl remove /path/to/wallpaper.png
+$ wall-in-one ctl pairing /path/to/wallpaper.png
+$ wall-in-one ctl still /path/to/wallpaper.mp4 /path/to/picture.png
+$ wall-in-one ctl still /path/to/wallpaper.mp4 default
+$ wall-in-one ctl palette /path/to/wallpaper.png builtin:Nord
+$ wall-in-one ctl reset-pairing /path/to/wallpaper.png
 $ wall-in-one ctl quit
 ```
 
@@ -252,6 +257,15 @@ so the two cannot disagree about what `stills snow` means. `favourites` is a
 separate listing from `list favourites` because it has to show entries whose
 file is not in the library right now -- an unmounted drive -- which by
 definition `list` cannot.
+
+Every wallpaper resolves to a *pairing*: a representative still, an optional
+moving source, and the colours it asks Noctalia for. Nothing has to be created
+-- a still pairs with itself, a video pairs with whatever the conventions find
+-- and only the ones you change are written down, so a better default still
+reaches everything you have not spoken for. `pairing` shows one; `still` and
+`palette` choose; `reset-pairing` forgets. A palette policy is `adaptive`,
+`keep`, or `builtin:`/`community:`/`custom:` and a name. The path is split from
+the right, so a wallpaper directory with a space in its name needs no quoting.
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

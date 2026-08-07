@@ -11,10 +11,11 @@ from __future__ import annotations
 import contextlib
 import random
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import favourites, pairings, playlists, scan, stills
+from wall_in_one.library import favourites, pairings, playlists, scan, schedules, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
@@ -52,6 +53,8 @@ class Session:
         favourite_store: favourites.Store | None = None,
         pairing_store: pairings.Store | None = None,
         playlist_store: playlists.Store | None = None,
+        schedule_store: schedules.Store | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._settings = settings
         # Only when we build the renderer ourselves: an applier handed in has
@@ -66,6 +69,9 @@ class Session:
         # would recompute every pairing from a disk the test never wrote to.
         self._scan: Scanner = scanner if scanner is not None else self._scan_with_pairings
         self._library = Library(roots=(), items=())
+        #: What the schedule last asked for, so a tick can tell whether the
+        #: calendar has moved without rebuilding to find out.
+        self._in_force = ""
         self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
         # Owned here rather than by the window, because the rotation is built
         # from them and the window is not allowed to be the only thing that
@@ -78,6 +84,10 @@ class Session:
         # the only thing that knows.
         self._pairings = pairing_store if pairing_store is not None else pairings.Store.open()
         self._playlists = playlist_store if playlist_store is not None else playlists.Store.open()
+        self._schedules = schedule_store if schedule_store is not None else schedules.Store.open()
+        # Injected so a schedule can be tested at three in the morning in
+        # December without waiting until then.
+        self._now: Callable[[], datetime] = clock if clock is not None else datetime.now
 
     # -- state -----------------------------------------------------------
 
@@ -135,6 +145,18 @@ class Session:
         return self._pairings
 
     @property
+    def schedules(self) -> schedules.Store:
+        """The calendar rules that override the pinned playlist."""
+        return self._schedules
+
+    def active_playlist(self) -> str:
+        """Which playlist is in force right now: a matching rule, else the
+        pinned default from settings."""
+        return schedules.effective(
+            self._schedules.rules, self._settings.active_playlist, self._now()
+        )
+
+    @property
     def playlists(self) -> playlists.Store:
         """The named lists. The rotation follows whichever one is in force."""
         return self._playlists
@@ -145,6 +167,7 @@ class Session:
         return self._favourites
 
     def _rebuild_playlist(self) -> None:
+        self._in_force = self.active_playlist()
         self._playlist.set_items(self._rotation())
 
     def _rotation(self) -> tuple[MediaItem, ...]:
@@ -162,7 +185,7 @@ class Session:
         # A named playlist is the stronger statement, so it goes first:
         # somebody who built a list and then left "favourites only" on from
         # last week meant the list.
-        listed = playlists.rotation(self._playlists, self._settings.active_playlist, playable)
+        listed = playlists.rotation(self._playlists, self.active_playlist(), playable)
         if listed is not None:
             return listed
 
@@ -171,6 +194,19 @@ class Session:
         starred = self._favourites.paths
         chosen = tuple(item for item in playable if item.path in starred)
         return chosen if chosen else playable
+
+    def schedule_changed(self) -> bool:
+        """Rebuild if the calendar now asks for a different playlist.
+
+        Answers whether anything moved, so the caller polling this on a timer
+        can avoid redrawing a window every thirty seconds for nothing.
+        """
+        wanted = self.active_playlist()
+        if wanted == self._in_force:
+            return False
+        self._in_force = wanted
+        self._rebuild_playlist()
+        return True
 
     def playlists_changed(self) -> None:
         """Re-narrow the rotation after a list was edited.

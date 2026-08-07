@@ -114,6 +114,9 @@ class Commands(Protocol):
     def add_to_playlist(self, value: str | None) -> Response: ...
     def remove_from_playlist(self, value: str | None) -> Response: ...
     def use_playlist(self, value: str | None) -> Response: ...
+    def show_schedule(self) -> Response: ...
+    def add_schedule_rule(self, value: str | None) -> Response: ...
+    def drop_schedule_rule(self, value: str | None) -> Response: ...
     def list_providers(self) -> Response: ...
     def search(self, value: str | None) -> Outcome: ...
     def download(self, value: str | None) -> Outcome: ...
@@ -147,6 +150,9 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "playlist-add": commands.add_to_playlist,
         "playlist-remove": commands.remove_from_playlist,
         "playlist-use": commands.use_playlist,
+        "schedule": lambda _: commands.show_schedule(),
+        "schedule-add": commands.add_schedule_rule,
+        "schedule-remove": commands.drop_schedule_rule,
         "providers": lambda _: commands.list_providers(),
         "search": commands.search,
         "download": commands.download,
@@ -299,6 +305,27 @@ def parse_pair_from_left(value: str | None, *, verb: str) -> tuple[str, str]:
     if not separator or not head.strip() or not tail.strip():
         raise ValueError(f"{verb} needs two arguments, as: {verb} <playlist> <value>")
     return head.strip(), tail.strip()
+
+
+def parse_rule(value: str | None) -> tuple[str, dict[str, str]]:
+    """`<playlist> [days=sat,sun] [months=12] [from=22:00] [to=06:00]`.
+
+    Keyword arguments rather than positions, because four optional fields in a
+    fixed order is a syntax nobody remembers and every one of them is a
+    condition somebody may not want. The playlist comes first because it is the
+    only part that is never optional.
+    """
+    words = (value or "").split()
+    if not words:
+        raise ValueError("schedule-add needs a playlist, as: schedule-add <playlist> [days=...]")
+    playlist, *rest = words
+    options: dict[str, str] = {}
+    for word in rest:
+        key, separator, argument = word.partition("=")
+        if not separator or key not in ("days", "months", "from", "to"):
+            raise ValueError(f"{word!r} is not one of days=, months=, from= or to=")
+        options[key] = argument
+    return playlist, options
 
 
 def describe_pairing(item: MediaItem, bundle: pairings.Pairing) -> str:

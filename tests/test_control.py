@@ -28,6 +28,7 @@ from wall_in_one.control.server import (
     parse_pair,
     parse_pair_from_left,
     parse_path,
+    parse_rule,
     parse_search,
     parse_toggle,
     remove_wallpaper,
@@ -181,6 +182,15 @@ class _StubCommands:
 
     def use_playlist(self, value: str | None) -> Response:
         return self._record("playlist-use", value)
+
+    def show_schedule(self) -> Response:
+        return self._record("schedule")
+
+    def add_schedule_rule(self, value: str | None) -> Response:
+        return self._record("schedule-add", value)
+
+    def drop_schedule_rule(self, value: str | None) -> Response:
+        return self._record("schedule-remove", value)
 
     def list_providers(self) -> Response:
         return self._record("providers")
@@ -814,6 +824,7 @@ class _FakeApp:
         self.forgotten: list[Path] = []
         self.repaired: list[Path] = []
         self.relisted = 0
+        self.rescheduled = 0
         self.settings_written: list[dict[str, object]] = []
 
     def apply(self, action: Callable[[], Applied]) -> Response:
@@ -830,6 +841,9 @@ class _FakeApp:
 
     def playlists_changed(self) -> None:
         self.relisted += 1
+
+    def schedule_edited(self) -> None:
+        self.rescheduled += 1
 
     def update_settings(self, **changes: object) -> None:
         self.settings_written.append(changes)
@@ -1282,3 +1296,82 @@ def test_removing_an_entry_by_its_id(sandbox: Path, applied: list[Path]) -> None
     assert commands.remove_from_playlist(f"Evening {entry.id}").ok
 
     assert len(app.session.playlists.find("Evening")) == 0
+
+
+# -- schedules over the socket --------------------------------------------
+
+
+def test_a_rule_is_written_as_keywords() -> None:
+    """Four optional fields in a fixed order is a syntax nobody remembers."""
+    playlist, options = parse_rule("Evening days=sat,sun from=22:00 to=06:00")
+    assert playlist == "Evening"
+    assert options == {"days": "sat,sun", "from": "22:00", "to": "06:00"}
+
+
+def test_a_rule_needs_at_least_a_playlist() -> None:
+    with pytest.raises(ValueError):
+        parse_rule("  ")
+
+
+def test_an_unknown_keyword_is_refused_rather_than_ignored() -> None:
+    """Silently dropping `weekdays=` would schedule something for every day."""
+    with pytest.raises(ValueError):
+        parse_rule("Evening weekdays=sat")
+
+
+def test_scheduling_a_playlist_stores_a_rule(sandbox: Path, applied: list[Path]) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+
+    assert commands.add_schedule_rule("Evening days=sat,sun").ok
+
+    rule = app.session.schedules.rules[0]
+    assert rule.playlist == app.session.playlists.find("Evening").id
+    assert rule.weekdays == frozenset({5, 6})
+    assert app.rescheduled == 1
+
+
+def test_scheduling_something_that_is_not_a_playlist_says_so(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    with pytest.raises(PlaylistError):
+        commands.add_schedule_rule("Nope days=sat")
+
+
+def test_the_schedule_lists_its_rules(sandbox: Path, applied: list[Path]) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    commands.add_schedule_rule("Evening days=sat,sun")
+    message = commands.show_schedule().message
+    assert "# fields: rule, playlist, when, enabled, in-force" in message
+    assert "sat,sun" in message
+
+
+def test_a_rule_can_be_removed_by_its_id(sandbox: Path, applied: list[Path]) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    commands.add_schedule_rule("Evening")
+    rule = app.session.schedules.rules[0]
+
+    assert commands.drop_schedule_rule(rule.id).ok
+
+    assert app.session.schedules.rules == ()
+
+
+def test_removing_a_rule_that_is_not_there_says_so(sandbox: Path, applied: list[Path]) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    with pytest.raises(ValueError):
+        commands.drop_schedule_rule("nope")
+
+
+def test_deleting_a_playlist_takes_its_schedule_rules(sandbox: Path, applied: list[Path]) -> None:
+    """A rule pointing at a playlist that is gone reads as the schedule
+    silently not working."""
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    commands.add_schedule_rule("Evening")
+
+    commands.drop_playlist("Evening")
+
+    assert app.session.schedules.rules == ()

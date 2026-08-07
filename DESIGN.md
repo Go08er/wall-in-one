@@ -569,7 +569,7 @@ each step is independently useful if the next never happens.
       so reordering and rebinding do not lose an entry's identity. The existing
       `Playlist` becomes the runtime cursor over whichever list is active,
       which is roughly what it already is.
-- [ ] **13. Schedules.** Month, weekday and local-time rules evaluated in
+- [x] **13. Schedules.** Month, weekday and local-time rules evaluated in
       visible order, lowest match winning, with a pinned default when none
       match. Resolution must be pure and testable without a clock; the timer
       belongs in the UI layer, as the cycle timer already does.

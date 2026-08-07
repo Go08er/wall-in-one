@@ -246,6 +246,9 @@ $ wall-in-one ctl playlist-add Evening /path/to/wallpaper.png
 $ wall-in-one ctl playlist-remove Evening <entry-id>
 $ wall-in-one ctl playlist-use Evening|none
 $ wall-in-one ctl playlist-delete Evening
+$ wall-in-one ctl schedule
+$ wall-in-one ctl schedule-add Evening days=sat,sun from=22:00 to=06:00
+$ wall-in-one ctl schedule-remove <rule-id>
 $ wall-in-one ctl quit
 ```
 
@@ -281,6 +284,15 @@ keeps them -- an unmounted drive is not a deletion -- and if none of them are
 here the rotation quietly falls back to the whole library rather than stopping.
 A playlist whose name has a space in it is referred to by the id `playlists`
 prints beside it.
+
+A **schedule** puts the calendar in charge of which playlist is in force.
+Rules take `days=`, `months=`, `from=` and `to=`, all optional, all combined
+with and; a rule with none of them matches always. Times are local, inclusive
+at the start and exclusive at the end, and a window whose end is before its
+start wraps midnight -- `from=22:00 to=06:00` is one window. The **last**
+matching rule wins, so adding a rule is how you carve an exception out of an
+earlier one. When nothing matches, the pinned `playlist-use` choice applies.
+The calendar is re-read once a minute.
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

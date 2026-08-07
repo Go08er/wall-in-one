@@ -7,8 +7,9 @@ import sys
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import gi
 
@@ -21,7 +22,7 @@ from wall_in_one import config, paths
 from wall_in_one.browse import Browser
 from wall_in_one.control import server
 from wall_in_one.control.protocol import Response
-from wall_in_one.library import favourites, pairings
+from wall_in_one.library import favourites, pairings, schedules
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.providers import registry
@@ -47,6 +48,11 @@ def download_root(settings: config.Settings) -> Path | None:
     return configured[0] if configured else None
 
 
+#: How often the calendar is re-read. A minute, because that is the
+#: resolution schedule rules are written at.
+SCHEDULE_TICK_SECONDS: Final = 60
+
+
 class Application(Adw.Application):
     """Owns app-wide state: settings, the live palette, and the CSS provider."""
 
@@ -62,6 +68,7 @@ class Application(Adw.Application):
         self._resolved: source.ResolvedPalette | None = None
         self._session = Session(self._settings)
         self._cycle_source: int = 0
+        self._schedule_source: int = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
         self._stills = StillMaker()
 
@@ -77,6 +84,7 @@ class Application(Adw.Application):
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
             )
         self._install_accelerators()
+        self._start_schedule_timer()
         self._start_control_socket()
 
     def _install_accelerators(self) -> None:
@@ -105,6 +113,9 @@ class Application(Adw.Application):
 
     def do_shutdown(self) -> None:
         self._stop_cycle()
+        if self._schedule_source:
+            GLib.source_remove(self._schedule_source)
+            self._schedule_source = 0
         self._stills.shutdown()
         self._session.shutdown()
         if self._browse_jobs is not None:
@@ -246,6 +257,11 @@ class Application(Adw.Application):
         self._session.playlists_changed()
         GLib.idle_add(self.refresh_library)
 
+    def schedule_edited(self) -> None:
+        """Take a changed calendar into account now rather than at the next tick."""
+        self._session.schedule_changed()
+        GLib.idle_add(self.refresh_library)
+
     def pairing_changed(self, item: MediaItem) -> None:
         """Make the window agree after a pairing moved over the socket.
 
@@ -353,6 +369,29 @@ class Application(Adw.Application):
         # A failure here is nearly always an empty library or a missing file;
         # neither is a reason to stop cycling, so keep the timer alive.
         self.apply(self._session.next)
+        return GLib.SOURCE_CONTINUE
+
+    def _start_schedule_timer(self) -> None:
+        """Re-read the calendar every so often, independently of cycling.
+
+        Its own timer rather than the cycle one, because a schedule has to take
+        effect whether or not the wallpaper is rotating -- somebody with cycling
+        off and a "weekends" rule still expects Saturday to look different.
+
+        `SCHEDULE_TICK_SECONDS` is a minute because that is the resolution the
+        rules are written at; checking more often cannot notice anything sooner
+        and checking less often would let a rule start late by up to its own
+        error.
+        """
+        self._schedule_source = GLib.timeout_add_seconds(
+            SCHEDULE_TICK_SECONDS, self._on_schedule_tick
+        )
+
+    def _on_schedule_tick(self) -> bool:
+        # Only redraws when the calendar actually asks for a different
+        # playlist, so a quiet minute costs one comparison.
+        if self._session.schedule_changed() and self._window is not None:
+            self._window.show_library(self._session)
         return GLib.SOURCE_CONTINUE
 
     # -- control socket --------------------------------------------------
@@ -555,6 +594,10 @@ class _Commands:
         session = self._app.session
         playlist = session.playlists.find(value or "")
         session.playlists.delete(playlist.id)
+        # A rule pointing at a playlist that is gone resolves to nothing and
+        # then quietly falls back, which reads as the schedule not working
+        # rather than as a rule that should have gone with it.
+        session.schedules.forget_playlist(playlist.id)
         self._app.playlists_changed()
         return Response.success(f"deleted {playlist.name}")
 
@@ -591,6 +634,40 @@ class _Commands:
         playlist = self._app.session.playlists.find(wanted)
         self._app.update_settings(active_playlist=playlist.id)
         return Response.success(f"the rotation is {playlist.name}")
+
+    def show_schedule(self) -> Response:
+        session = self._app.session
+        return Response.success(
+            schedules.describe(
+                session.schedules.rules,
+                session.settings.active_playlist,
+                datetime.now(),
+                {one.id: one.name for one in session.playlists.all()},
+            )
+        )
+
+    def add_schedule_rule(self, value: str | None) -> Response:
+        """Append a rule. Appending is how you override: the last match wins."""
+        session = self._app.session
+        name, options = server.parse_rule(value)
+        playlist = session.playlists.find(name)
+        rule = session.schedules.add(
+            playlist.id,
+            months=[part for part in options.get("months", "").split(",") if part],
+            weekdays=[part for part in options.get("days", "").split(",") if part],
+            start=options.get("from", ""),
+            end=options.get("to", ""),
+        )
+        self._app.schedule_edited()
+        return Response.success(f"{playlist.name} scheduled: {rule.describe()}")
+
+    def drop_schedule_rule(self, value: str | None) -> Response:
+        session = self._app.session
+        rule_id = (value or "").strip()
+        if not session.schedules.remove(rule_id):
+            raise ValueError(f"no schedule rule {rule_id}")
+        self._app.schedule_edited()
+        return Response.success(f"removed rule {rule_id}")
 
     def add_favourite(self, value: str | None) -> Response:
         """Star a wallpaper the library knows about.

@@ -588,7 +588,18 @@ each step is independently useful if the next never happens.
       and `Video` in the real content, so it is compared case-folded -- trusting
       the casing hid eight wallpapers. Steam's files are `Ownership.USER`
       without exception, so removal refuses them.
-      **Still to do:** the scene renderer for those four.
+      **The scene renderer exists** (`wallpaper.scenes`): the command line,
+      process ownership, and `--screenshot` capture, all verified against the
+      real engine -- a 3.1 MB render of "China Town" in 2.1 seconds.
+      **The open question answered itself.** This machine runs Noctalia's
+      `linux-wallpaperengine-controller` plugin, and its engine had been
+      rendering the desktop for two and a half hours. The engine is
+      single-instance per output, so this app does *not* take it over by
+      default; `own_scene_renderer` is how somebody says otherwise, and a
+      foreign instance on the same output is detected and reported rather than
+      shouldered aside. Capturing a still is exempt -- window mode, no output.
+      **Still to do:** `Kind.SCENE` through the model, so a scene can be a
+      library item rather than only a thing the renderer could show.
       Bringing someone else's collection into the library turned up a real
       hole in removal: a Workshop wallpaper is `Ownership.USER`, so `remove`
       correctly refused to *delete* it -- and then fell through to `trash`,

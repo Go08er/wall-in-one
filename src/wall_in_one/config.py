@@ -92,6 +92,16 @@ class Settings:
     #: and what mpvpaper's `ALL` does for videos.
     output: str = ""
 
+    #: Let this app start `linux-wallpaperengine` for Workshop scenes.
+    #:
+    #: Off by default, and deliberately. The engine is single-instance per
+    #: output and other things drive it -- Noctalia's own
+    #: `linux-wallpaperengine-controller` plugin among them -- so starting a
+    #: second one is two programs fighting over one wallpaper. Turning this on
+    #: is saying this app owns it. Scene *stills* are captured either way:
+    #: that renders in a window and touches no output.
+    own_scene_renderer: bool = False
+
     #: Include Wallpaper Engine wallpapers installed through Steam. On by
     #: default because finding them costs one directory listing and somebody
     #: with none simply has none; off is for anyone who keeps the two
@@ -178,6 +188,7 @@ class Settings:
             cycle_favourites_only=boolean("cycle_favourites_only", False),
             active_playlist=text("active_playlist", ""),
             scan_workshop=boolean("scan_workshop", True),
+            own_scene_renderer=boolean("own_scene_renderer", False),
             output=text("output", ""),
             roots=directories("roots"),
         ).validated()
@@ -200,6 +211,7 @@ class Settings:
             f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
             f'active_playlist = "{self.active_playlist}"',
             f"scan_workshop = {str(self.scan_workshop).lower()}",
+            f"own_scene_renderer = {str(self.own_scene_renderer).lower()}",
             f'output = "{self.output}"',
         )
         return "\n".join(lines) + "\n"

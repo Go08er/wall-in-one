@@ -25,7 +25,7 @@ from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
 from wall_in_one.theme import css, source
 from wall_in_one.ui.stills import StillMaker
-from wall_in_one.ui.window import MainWindow
+from wall_in_one.ui.window import ACCELERATORS, MainWindow
 from wall_in_one.wallpaper.applier import Applied, ApplyError
 
 
@@ -72,7 +72,22 @@ class Application(Adw.Application):
                 self._provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
             )
+        self._install_accelerators()
         self._start_control_socket()
+
+    def _install_accelerators(self) -> None:
+        """Bind the keys. The table lives with the window, which owns the actions.
+
+        Several accelerators may share one action, so they are collected per
+        action before being set -- `set_accels_for_action` replaces the list
+        rather than adding to it, and binding them one at a time would leave
+        only the last.
+        """
+        bound: dict[str, list[str]] = {}
+        for _section, accelerator, action, _description in ACCELERATORS:
+            bound.setdefault(action, []).append(accelerator)
+        for action, accelerators in bound.items():
+            self.set_accels_for_action(action, accelerators)
 
     def do_activate(self) -> None:
         if self._window is None:

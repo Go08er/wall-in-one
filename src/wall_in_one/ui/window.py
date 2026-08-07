@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Final, TypeVar
 
 import gi
 
@@ -29,6 +29,37 @@ from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.preferences import PreferencesDialog
 from wall_in_one.ui.thumbnails import ThumbnailLoader
+
+#: Accelerator, action, and what to call it in the shortcuts dialogue. One
+#: table, so a key that works and a key the dialogue claims cannot drift apart.
+#:
+#: Everything is modified. The search box takes focus for whole seconds at a
+#: time and a bare `n` for "next wallpaper" would land in it, which is the
+#: kind of shortcut people learn once and then resent.
+ACCELERATORS: Final[tuple[tuple[str, str, str, str], ...]] = (
+    ("Wallpaper", "<Control>Right", "win.next", "Next wallpaper"),
+    ("Wallpaper", "<Control>Left", "win.previous", "Previous wallpaper"),
+    ("Wallpaper", "<Control><Shift>R", "win.random", "Random wallpaper"),
+    ("Library", "<Control>F", "win.search", "Search the library"),
+    ("Library", "F5", "win.refresh", "Rescan the library"),
+    ("Library", "<Control>B", "win.browse", "Find wallpapers online"),
+    ("Application", "<Control>comma", "win.preferences", "Settings"),
+    ("Application", "<Control>P", "win.palettes", "Palettes"),
+    ("Application", "<Control>question", "win.shortcuts", "Keyboard shortcuts"),
+    ("Application", "<Control>W", "window.close", "Close the window"),
+)
+
+
+def _sections() -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    """`_ACCELERATORS` regrouped for the dialogue, keeping the order above."""
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for section, accelerator, _action, description in ACCELERATORS:
+        grouped.setdefault(section, []).append((accelerator, description))
+    return tuple((title, tuple(entries)) for title, entries in grouped.items())
+
+
+_SHORTCUTS: Final = _sections()
+
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -98,12 +129,14 @@ class MainWindow(Adw.ApplicationWindow):
             ("go-next-symbolic", "Next wallpaper", "next"),
         ):
             button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
-            button.connect("clicked", self._make_navigator(verb))
+            navigate = self._make_navigator(verb)
+            button.connect("clicked", lambda _button, run=navigate: run())
             navigation.append(button)
         header.pack_start(navigation)
 
         refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Rescan the library")
         refresh.connect("clicked", lambda _button: self._app.refresh_library())
+        refresh.set_tooltip_text("Rescan the library (F5)")
         header.pack_start(refresh)
 
         browse = Gtk.Button(
@@ -116,6 +149,7 @@ class MainWindow(Adw.ApplicationWindow):
         menu.append("Find wallpapers", "win.browse")
         menu.append("Palettes", "win.palettes")
         menu.append("Settings", "win.preferences")
+        menu.append("Keyboard Shortcuts", "win.shortcuts")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Main menu")
         menu_button.set_menu_model(menu)
         header.pack_end(menu_button)
@@ -124,6 +158,12 @@ class MainWindow(Adw.ApplicationWindow):
             ("preferences", self.open_preferences),
             ("palettes", self.open_palette_browser),
             ("browse", self.open_browse),
+            ("shortcuts", self.open_shortcuts),
+            ("next", self._make_navigator("next")),
+            ("previous", self._make_navigator("previous")),
+            ("random", self._make_navigator("random")),
+            ("refresh", self._app.refresh_library),
+            ("search", self._focus_search),
         ):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", self._make_opener(opener))
@@ -205,8 +245,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         return activate
 
-    def _make_navigator(self, verb: str) -> Any:
-        def navigate(_button: Gtk.Button) -> None:
+    def _make_navigator(self, verb: str) -> Callable[[], None]:
+        def navigate() -> None:
             # The application owns the session and the error handling; the
             # window only says which direction.
             response = self._app.apply(getattr(self._app.session, verb))
@@ -214,6 +254,39 @@ class MainWindow(Adw.ApplicationWindow):
                 self.report(response.message)
 
         return navigate
+
+    def _focus_search(self) -> None:
+        """Put the cursor in the search box, selecting whatever is in it.
+
+        Selecting rather than clearing: pressing the shortcut twice by reflex
+        should not be the same as having typed the query again, and typing
+        replaces the selection anyway.
+        """
+        self._search.grab_focus()
+        self._search.select_region(0, -1)
+
+    def open_shortcuts(self) -> None:
+        """The list of accelerators, since nothing else announces them.
+
+        `attr-defined` is silenced because the installed pygobject-stubs
+        predate libadwaita 1.9, which is where `ShortcutsDialog` arrived. The
+        three classes are checked for at runtime rather than assumed, so an
+        older libadwaita gets a toast instead of a traceback.
+        """
+        if not hasattr(Adw, "ShortcutsDialog"):
+            self.report("This libadwaita is too old to show the shortcut list")
+            return
+        dialog = Adw.ShortcutsDialog()
+        for title, entries in _SHORTCUTS:
+            section = Adw.ShortcutsSection(title=title)  # type: ignore[attr-defined]
+            for accelerator, description in entries:
+                section.add(
+                    Adw.ShortcutsItem(  # type: ignore[attr-defined]
+                        title=description, accelerator=accelerator
+                    )
+                )
+            dialog.add(section)
+        dialog.present(self)
 
     # -- behaviour -------------------------------------------------------
 

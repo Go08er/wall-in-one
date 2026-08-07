@@ -32,6 +32,7 @@ from wall_in_one.library.filter import Query  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
 from wall_in_one.ui.grid import WallpaperGrid, WallpaperTile  # noqa: E402
 from wall_in_one.ui.thumbnails import Callback, ThumbnailLoader  # noqa: E402
+from wall_in_one.ui.window import ACCELERATORS  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -221,3 +222,81 @@ def test_the_query_survives_a_rescan(grid: WallpaperGrid) -> None:
     assert grid.visible_count == 1
     grid.populate((item("snowy-village"), item("cozy-campfire"), item("snowy-peak")))
     assert grid.visible_count == 2
+
+
+# -- accelerators ---------------------------------------------------------
+#
+# One table drives the keys, the shortcuts dialogue and this. The failure it
+# guards against is the ordinary one: a key renamed in the handler and left
+# alone in the dialogue, so the app advertises a shortcut that does nothing.
+
+
+def test_every_accelerator_names_an_action_the_window_has() -> None:
+    """`window.close` is GTK's own; everything else has to be ours."""
+    window_actions = {action for _s, _a, action, _d in ACCELERATORS if action.startswith("win.")}
+    missing = {action for action in window_actions if not _action_exists(action)}
+    assert missing == set()
+
+
+def _action_exists(qualified: str) -> bool:
+    from wall_in_one.ui import window as window_module
+
+    name = qualified.removeprefix("win.")
+    source = Path(window_module.__file__).read_text(encoding="utf-8")
+    return f'"{name}"' in source
+
+
+def test_no_accelerator_is_bound_twice() -> None:
+    """Two actions on one key means one of them silently never fires."""
+    keys = [accelerator for _s, accelerator, _a, _d in ACCELERATORS]
+    assert len(keys) == len(set(keys))
+
+
+def test_every_accelerator_parses() -> None:
+    from gi.repository import Gtk as _Gtk
+
+    for _section, accelerator, _action, description in ACCELERATORS:
+        ok, key, _mods = _Gtk.accelerator_parse(accelerator)
+        assert ok and key, f"{accelerator!r} for {description!r} is not a valid accelerator"
+
+
+def test_every_accelerator_is_modified() -> None:
+    """The search box holds focus for seconds at a time, and a bare key would
+    land in it rather than changing the wallpaper."""
+    for _section, accelerator, _action, description in ACCELERATORS:
+        assert accelerator.startswith(("<", "F")), f"{description!r} uses a bare key"
+
+
+def test_the_shortcuts_dialogue_shows_every_accelerator() -> None:
+    from wall_in_one.ui.window import _SHORTCUTS
+
+    listed = {
+        accelerator for _title, entries in _SHORTCUTS for accelerator, _description in entries
+    }
+    assert listed == {accelerator for _s, accelerator, _a, _d in ACCELERATORS}
+
+
+def test_every_declared_accelerator_is_actually_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Declaring a key and never binding it is the failure mode that looks
+    fine everywhere: the dialogue lists it, the action exists, and pressing it
+    does nothing.
+
+    Compared in GTK's normalised spelling, because `set_accels_for_action`
+    stores `<Shift><Control>r` for what the table calls `<Control><Shift>R`.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from wall_in_one.ui.app import Application
+
+    application = Application()
+    application._install_accelerators()
+
+    def normalised(accelerator: str) -> str | None:
+        ok, key, modifiers = Gtk.accelerator_parse(accelerator)
+        return Gtk.accelerator_name(key, modifiers) if ok else None
+
+    for _section, accelerator, action, description in ACCELERATORS:
+        bound = {normalised(each) for each in application.get_accels_for_action(action)}
+        assert normalised(accelerator) in bound, f"{description!r} is declared but not bound"

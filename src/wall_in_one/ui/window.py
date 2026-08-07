@@ -8,6 +8,7 @@ settings app wearing a costume.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import gi
@@ -15,10 +16,10 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config
-from wall_in_one.library import favourites
+from wall_in_one.library import favourites, manage
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
@@ -72,7 +73,9 @@ class MainWindow(Adw.ApplicationWindow):
         # the only thing that writes to it and the grid is the only thing that
         # reads it. `open` never raises: an unreadable list degrades to none.
         self._favourites = favourites.Store.open()
-        self._grid = WallpaperGrid(self._loader, self._on_tile_activated, self._on_favourite)
+        self._grid = WallpaperGrid(
+            self._loader, self._on_tile_activated, self._on_favourite, self._menu_for
+        )
         self._grid.set_favourites(self._favourites.paths)
         self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle=self._summary)
         self._toast = Adw.ToastOverlay()
@@ -125,6 +128,17 @@ class MainWindow(Adw.ApplicationWindow):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", self._make_opener(opener))
             self.add_action(action)
+
+        # Parameterised, so one action serves every tile: the alternative is a
+        # pair of actions per wallpaper, registered and torn down on every
+        # rescan.
+        for name, handler in (
+            ("apply-wallpaper", self._on_apply_path),
+            ("remove-wallpaper", self._on_remove_path),
+        ):
+            targeted = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
+            targeted.connect("activate", handler)
+            self.add_action(targeted)
 
         toolbar.add_top_bar(header)
         toolbar.add_top_bar(self._build_library_bar())
@@ -303,6 +317,97 @@ class MainWindow(Adw.ApplicationWindow):
             self.report(f"{item.name} is a favourite for now, but could not be saved")
         self._grid.set_favourites(self._favourites.paths)
         self._update_subtitle()
+
+    # -- the per-tile menu -----------------------------------------------
+
+    def _menu_for(self, item: MediaItem) -> Gio.MenuModel:
+        """The actions offered for one wallpaper.
+
+        The removal verb is named for what it does to *that* file. "Remove"
+        for something we downloaded means gone; "Move to Trash" for the user's
+        own means recoverable, and the two must not be spelled the same, since
+        one of them cannot be undone.
+        """
+        menu = Gio.Menu()
+        target = GLib.Variant.new_string(str(item.path))
+        apply_item = Gio.MenuItem.new("Set as wallpaper", None)
+        apply_item.set_action_and_target_value("win.apply-wallpaper", target)
+        menu.append_item(apply_item)
+        remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
+        remove_item.set_action_and_target_value("win.remove-wallpaper", target)
+        menu.append_item(remove_item)
+        return menu
+
+    def _item_at(self, raw: GLib.Variant | None) -> MediaItem | None:
+        if raw is None:
+            return None
+        return self._app.session.library.find(Path(raw.get_string()))
+
+    def _on_apply_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        item = self._item_at(raw)
+        if item is not None:
+            self._on_tile_activated(item)
+
+    def _on_remove_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        """Ask before an unlink, but not before a trip to the trash.
+
+        Confirming everything trains people to confirm everything, so the
+        prompt is spent where it buys something: `manage.remove` unlinks and
+        cannot be undone, while `manage.trash` is recoverable from the file
+        manager and asking about it would be theatre.
+        """
+        item = self._item_at(raw)
+        if item is None:
+            return
+        if not item.deletable:
+            self._trash(item)
+            return
+
+        dialog = Adw.AlertDialog(
+            heading=f"Remove {item.name}?",
+            body=f"{item.path} will be deleted. This cannot be undone.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_remove_confirmed, item)
+        dialog.present(self)
+
+    def _on_remove_confirmed(
+        self, _dialog: Adw.AlertDialog, response: str, item: MediaItem
+    ) -> None:
+        if response != "remove":
+            return
+        try:
+            result = manage.remove(item, self._app.session.library.roots)
+        except manage.ManageError as error:
+            self.report(str(error))
+            return
+        self._forget(item)
+        self.report(result.describe())
+
+    def _trash(self, item: MediaItem) -> None:
+        try:
+            manage.trash(item.path)
+        except manage.ManageError as error:
+            self.report(str(error))
+            return
+        self._forget(item)
+        self.report(f"{item.name} moved to the trash")
+
+    def _forget(self, item: MediaItem) -> None:
+        """Drop a removed wallpaper from the favourites, then rescan.
+
+        The star is the one piece of state that survives the file, and keeping
+        an entry the app itself destroyed would be pointless: the reason
+        favourites outlive a missing file is that the file might come back,
+        which is not true of one we just deleted.
+        """
+        self._favourites.discard(item.path)
+        self._grid.set_favourites(self._favourites.paths)
+        self._app.refresh_library()
 
     def show_current(self, session: Session) -> None:
         """Move the highlight without rebuilding the grid."""

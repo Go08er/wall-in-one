@@ -15,7 +15,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Adw, Gdk, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from wall_in_one import thumbnails as thumbnail_cache
 from wall_in_one.library import filter as library_filter
@@ -69,6 +69,20 @@ class WallpaperTile(Gtk.Box):
         self._reflecting = False
         frame.add_overlay(self._star)
 
+        # Bottom-right, below the star. A `MenuButton` rather than right-click
+        # alone: a right-click-only action is unreachable for anyone driving
+        # the app from the keyboard, and this is where the only destructive
+        # verb in the program lives.
+        self._menu = Gtk.MenuButton(icon_name="view-more-symbolic")
+        self._menu.set_halign(Gtk.Align.END)
+        self._menu.set_valign(Gtk.Align.END)
+        self._menu.set_margin_bottom(6)
+        self._menu.set_margin_end(6)
+        self._menu.add_css_class("circular")
+        self._menu.add_css_class("osd")
+        self._menu.set_tooltip_text(f"Actions for {item.name}")
+        frame.add_overlay(self._menu)
+
         badges = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         badges.set_halign(Gtk.Align.START)
         badges.set_valign(Gtk.Align.START)
@@ -118,6 +132,13 @@ class WallpaperTile(Gtk.Box):
         self._star.set_icon_name("starred-symbolic" if favourite else "non-starred-symbolic")
         self._star.set_tooltip_text("Remove from favourites" if favourite else "Add to favourites")
 
+    def set_menu(self, menu: Gio.MenuModel) -> None:
+        """Give the tile its action menu, and let a right-click raise it too."""
+        self._menu.set_menu_model(menu)
+        gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        gesture.connect("pressed", lambda *_arguments: self._menu.popup())
+        self.add_controller(gesture)
+
     def connect_favourite(self, on_toggle: Callable[[MediaItem, bool], None]) -> None:
         """Say who to tell when the star is clicked."""
 
@@ -144,11 +165,15 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         loader: ThumbnailLoader,
         on_activate: Callable[[MediaItem], None],
         on_favourite: Callable[[MediaItem, bool], None] | None = None,
+        menu_for: Callable[[MediaItem], Gio.MenuModel] | None = None,
     ) -> None:
         super().__init__()
         self._loader = loader
         self._on_activate = on_activate
         self._on_favourite = on_favourite
+        # The window builds the menus, because the window owns the actions they
+        # point at. The grid only knows where to hang one.
+        self._menu_for = menu_for
         #: Which paths are starred. Held rather than looked up per tile so the
         #: filter and the tiles cannot disagree within one pass.
         self._favourites: frozenset[Path] = frozenset()
@@ -218,6 +243,8 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             tile.set_current(item.path == current)
             if self._on_favourite is not None:
                 tile.connect_favourite(self._on_favourite)
+            if self._menu_for is not None:
+                tile.set_menu(self._menu_for(item))
             tile.set_favourite(item.path in self._favourites)
             self._tiles[item.path] = tile
             self._flow.append(tile)

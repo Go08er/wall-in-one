@@ -26,8 +26,16 @@ from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
 #: Written by us next to a video to record which still represents it.
 SIDECAR_SUFFIX: Final = ".wall-in-one.json"
 
-#: Directory generated stills are written into, relative to a managed root.
+#: Everything this app writes into someone's wallpaper root goes under here,
+#: so that one directory can be deleted to undo all of it. `providers.download`
+#: names the same directory for its own downloads.
+MANAGED_PARENT: Final = "Wall-in-One"
+
+#: Directory generated stills are written into, beneath `MANAGED_PARENT`.
 AUTOMATIC_STILLS_DIRECTORY: Final = "Automatic Stills"
+
+#: The key a sidecar records the still under.
+SIDECAR_STILL_KEY: Final = "still_path"
 
 #: Suffix on a hand-made still, before the extension.
 STILL_NAME_SUFFIX: Final = "-still"
@@ -66,7 +74,7 @@ def read_sidecar(video: Path) -> Path | None:
         return None
     if not isinstance(document, dict):
         return None
-    recorded = document.get("still_path")
+    recorded = document.get(SIDECAR_STILL_KEY)
     if not isinstance(recorded, str) or not recorded:
         return None
     candidate = Path(recorded)
@@ -75,10 +83,16 @@ def read_sidecar(video: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def still_directory(root: Path) -> Path:
+    """Where generated stills live under ``root``. Shared with `library.stills`,
+    so the half that writes them and the half that finds them cannot drift."""
+    return root / MANAGED_PARENT / AUTOMATIC_STILLS_DIRECTORY
+
+
 def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
     """Look for a generated still under a managed `Automatic Stills` directory."""
     for root in roots:
-        directory = root / "Wall-in-One" / AUTOMATIC_STILLS_DIRECTORY
+        directory = still_directory(root)
         for extension in _still_extensions():
             candidate = directory / (video.stem + extension)
             if candidate.is_file():

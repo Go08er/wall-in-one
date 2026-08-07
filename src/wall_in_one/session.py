@@ -14,8 +14,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import scan
-from wall_in_one.library.model import Library, MediaItem
+from wall_in_one.library import scan, stills
+from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
@@ -139,15 +139,51 @@ class Session:
             self._playlist.set_shuffle(settings.shuffle)
 
         if settings.dynamics_enabled != previous.dynamics_enabled:
+            # Pausing a video with no still used to mean jumping to an unrelated
+            # wallpaper. Take a still from it first: a third of a second of
+            # ffmpeg, once per video, against the thing the user is watching
+            # being swapped out from under them.
+            rescued = (
+                None if settings.dynamics_enabled else self._still_for_the_video_being_paused()
+            )
             # The playable set changes with dynamics: videos with no still drop
             # out when they are off, and come back when they are on.
             self._rebuild_playlist()
             if self._applier.set_dynamics(settings.dynamics_enabled) is None:
                 # The wallpaper that was up cannot be shown any more -- an
-                # unpaired video being paused. Fall back to whatever the
-                # playlist landed on rather than leaving a dead screen.
+                # unpaired video being paused. Show its new still if we just
+                # made one, and otherwise fall back to whatever the playlist
+                # landed on rather than leaving a dead screen.
                 with contextlib.suppress(ApplyError):
-                    self.apply_current()
+                    if rescued is not None:
+                        self.select(rescued)
+                    else:
+                        self.apply_current()
+
+    def _still_for_the_video_being_paused(self) -> Path | None:
+        """Take a still from the playing video, and return the video's path.
+
+        ``None`` when there is nothing to do or nothing can be done -- already
+        paired, not a video, no root to write into, or ffmpeg refusing the
+        file. None of those is worth reporting: the fallback below still puts
+        *a* wallpaper on screen, which is what pausing has always done.
+
+        The rescan is what makes the new still count. `paired_still` is fixed
+        on the `MediaItem` at scan time, so the library has to be re-read
+        before anything downstream can see the pairing that was just written.
+        """
+        current = self._applier.current
+        if current is None or current.item.kind is not Kind.VIDEO:
+            return None
+        if current.item.paired_still is not None:
+            return None
+        roots = self._library.roots
+        if not roots:
+            return None
+        if stills.ensure(current.item, roots[0]) is None:
+            return None
+        self.refresh()
+        return current.item.path
 
     def shutdown(self) -> None:
         self._applier.shutdown()

@@ -32,7 +32,7 @@ the same thing through the system or user profile.
 
 `nix run` deliberately does not. It builds the package and executes
 `bin/wall-in-one` without adding anything to a profile, so nothing is installed
-and no menu entry appears — which is the right behaviour for trying it out.
+and no menu entry appears -- which is the right behaviour for trying it out.
 
 The icon is found the way any themed icon is: `hicolor` is the fallback theme
 every icon lookup ends at, so an SVG at `hicolor/scalable/apps/<id>.svg` under
@@ -51,7 +51,7 @@ Exec=/nix/store/...-wall-in-one-0.1.0/bin/wall-in-one
 
 That rewrite is the difference between a menu entry that works and one that
 reports "command not found" in a session whose `PATH` never picked up the
-profile — a common enough state when the display manager starts before the
+profile -- a common enough state when the display manager starts before the
 profile is on `PATH`. It also guarantees the *wrapped* binary runs, the one
 carrying `GI_TYPELIB_PATH`, the GSettings schemas, and mpvpaper and ffmpeg on
 `PATH`. `TryExec` holds the same string and is rewritten with it.
@@ -59,7 +59,7 @@ carrying `GI_TYPELIB_PATH`, the GSettings schemas, and mpvpaper and ffmpeg on
 ## What the entry deliberately does not say
 
 **`DBusActivatable`.** The app is a `GtkApplication`, so it does own the
-`dev.goober.WallInOne` bus name and export `org.gtk.Actions` — that is how
+`dev.goober.WallInOne` bus name and export `org.gtk.Actions` -- that is how
 single-instance activation works, and it happens whatever this file says. Being
 *activatable* is a further claim: it means the session bus may start the program
 on demand, which requires a `share/dbus-1/services/dev.goober.WallInOne.service`
@@ -70,7 +70,7 @@ invocation rather than by its command line, the service file and the key go in
 together.
 
 **`StartupWMClass`.** That key exists to match X11's `WM_CLASS`, which GTK
-derives from the program name rather than from the application id — so under
+derives from the program name rather than from the application id -- so under
 XWayland it would have to read `wall-in-one`, and under Wayland it is not
 consulted at all. The filename already does the job for every case that matters
 here.

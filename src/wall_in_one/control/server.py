@@ -3,6 +3,15 @@
 Runs inside the GTK main loop via `Gio.SocketService`, so handlers execute on
 the main thread and can touch the UI directly without locking.
 
+That is the whole difficulty with `search` and `download`: a handler that waits
+for a website on this thread freezes every frame the app draws, for seconds or
+for minutes. So a handler may answer with a `Deferred` instead of a `Response`,
+which hands the reply to a callback later; the connection simply stays open
+until then. `ui.browse_dialog` already puts provider calls on a worker pool and
+comes back through `GLib.idle_add`, and the application's implementation of
+these verbs does exactly the same -- none of that machinery lives here, because
+this module has to stay importable and testable with no display attached.
+
 The verb table is kept separate from the transport (`Commands`) so it can be
 tested without a socket or a display.
 """
@@ -12,21 +21,51 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
 from wall_in_one import paths
 from wall_in_one.control.protocol import ProtocolError, Request, Response
+from wall_in_one.providers import registry
+from wall_in_one.providers.base import ProviderError, SearchResult
 
-Handler = Callable[[str | None], Response]
+#: Handed a response, exactly once, whenever it turns up.
+Reply = Callable[[Response], None]
+
+
+@dataclass(frozen=True, slots=True)
+class Deferred:
+    """An answer that is not ready yet.
+
+    `start` is called with a `Reply` and must arrange for it to be invoked once,
+    back on the main thread, when the answer arrives. Returning one of these is
+    a handler saying "not on this thread": the caller keeps the client's
+    connection open and writes whatever the reply eventually carries.
+
+    A `start` that never calls its reply leaves that client waiting until its
+    own timeout, which is the price of not blocking the compositor's idea of a
+    responsive window.
+    """
+
+    start: Callable[[Reply], None]
+
+
+#: What a handler answers with: a response now, or the promise of one later.
+Outcome = Response | Deferred
+
+Handler = Callable[[str | None], Outcome]
 
 
 class Commands(Protocol):
     """What the application must provide for the control surface to work.
 
     Mirrors the Noctalia plugin's control list: launch, transport, shuffle,
-    cycle, cycle duration, and the dynamics pause.
+    cycle, cycle duration, and the dynamics pause. The three browsing verbs are
+    not on the plugin's list -- they exist so that searching for a wallpaper and
+    pulling it into the library are reachable from a terminal or a script
+    without opening the window.
     """
 
     def next_wallpaper(self) -> Response: ...
@@ -38,6 +77,9 @@ class Commands(Protocol):
     def set_dynamics(self, value: str | None) -> Response: ...
     def reload_palette(self) -> Response: ...
     def report_status(self) -> Response: ...
+    def list_providers(self) -> Response: ...
+    def search(self, value: str | None) -> Outcome: ...
+    def download(self, value: str | None) -> Outcome: ...
     def quit(self) -> Response: ...
 
 
@@ -52,6 +94,9 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "dynamics": commands.set_dynamics,
         "reload-palette": lambda _: commands.reload_palette(),
         "status": lambda _: commands.report_status(),
+        "providers": lambda _: commands.list_providers(),
+        "search": commands.search,
+        "download": commands.download,
         "quit": lambda _: commands.quit(),
     }
 
@@ -68,7 +113,144 @@ def parse_toggle(value: str | None, current: bool) -> bool:
     raise ValueError(f"expected on, off or toggle, got {value!r}")
 
 
-def handle(verbs: dict[str, Handler], line: bytes) -> Response:
+def parse_search(value: str | None) -> tuple[str, str]:
+    """Split ``<provider> [query]``.
+
+    The query is everything after the first word, spaces and all, so that
+    quoting it is optional at a shell prompt. An empty query is not an error:
+    both providers answer it with whatever they are showing today.
+    """
+    parts = (value or "").split(maxsplit=1)
+    if not parts:
+        raise ValueError("usage: search <provider> [query]")
+    return parts[0], parts[1].strip() if len(parts) > 1 else ""
+
+
+def parse_download(value: str | None) -> tuple[str, str, str]:
+    """Split ``<provider> <identifier> [variant]``.
+
+    The variant is MotionBGS's `hd` or `4k`. Left off, the provider takes the
+    best it is offered, which is what the browse dialog's button does too.
+    """
+    parts = (value or "").split()
+    if not 2 <= len(parts) <= 3:
+        raise ValueError("usage: download <provider> <identifier> [variant]")
+    return parts[0], parts[1], parts[2] if len(parts) == 3 else ""
+
+
+# -- rendering for a terminal --------------------------------------------
+
+#: Rows are one line each with tab-separated fields, because that is the format
+#: both readers of this output already understand: a person sees columns, and
+#: `cut -f1`, `awk -F'\t'` and `while read -r id kind rest` all get the fields
+#: out with nothing installed. Tabs rather than spaces because a wallpaper title
+#: is full of spaces and would otherwise read as several columns.
+SEPARATOR: Final = "\t"
+
+#: Everything that is not a row -- the summary, the column names -- is a comment
+#: line, which is the one convention those same tools already know how to skip.
+COMMENT: Final = "# "
+
+#: Stands in for a field the provider left empty, so a column is never
+#: invisible.
+BLANK: Final = "-"
+
+
+def _field(text: str) -> str:
+    """One column's worth of text from an untrusted title.
+
+    Tabs separate the columns and newlines separate the rows, so neither may
+    survive inside a string a website chose; a title carrying either would
+    otherwise invent columns or whole rows in a script's input.
+    """
+    collapsed = " ".join(text.split())
+    return collapsed or BLANK
+
+
+def render_providers(infos: Sequence[registry.ProviderInfo]) -> str:
+    """The provider list, with what each one cannot currently do."""
+    lines = [f"{COMMENT}fields: name, media, usable, limitations"]
+    lines.extend(
+        SEPARATOR.join(
+            (
+                _field(info.name),
+                _field(info.media_kind.value),
+                "yes" if info.usable else "no",
+                # Semicolons rather than a row each: the name in column one has
+                # to stay the key of the line it is on.
+                _field("; ".join(info.limitations)),
+            )
+        )
+        for info in infos
+    )
+    return "\n".join(lines)
+
+
+def summarise(result: SearchResult) -> str:
+    """The same sentence the browse dialog puts under its grid.
+
+    Deliberately word-for-word: `dropped` counts results the provider returned
+    that we refused to normalise, and a sudden jump in it means the remote's
+    markup moved. That is worth noticing from a script too.
+    """
+    parts = [f"{len(result)} result{'' if len(result) == 1 else 's'}"]
+    if result.total_hint:
+        parts.append(f"of about {result.total_hint}")
+    parts.append(f"page {result.page}")
+    if result.dropped:
+        parts.append(f"{result.dropped} unreadable")
+    if result.cached:
+        parts.append("cached")
+    return " - ".join(parts)
+
+
+def render_search(result: SearchResult) -> str:
+    """One page of results: a summary, the column names, then a row each.
+
+    The identifier comes first because it is the field with a use -- it is what
+    `download` takes back.
+    """
+    lines = [
+        f"{COMMENT}{result.provider}: {summarise(result)}",
+        f"{COMMENT}fields: identifier, kind, resolution, title",
+    ]
+    lines.extend(
+        SEPARATOR.join(
+            (
+                _field(item.identifier),
+                _field(item.kind.value),
+                _field(item.resolution),
+                _field(item.title or item.identifier),
+            )
+        )
+        for item in result.items
+    )
+    return "\n".join(lines)
+
+
+# -- dispatch ------------------------------------------------------------
+
+
+def failed(error: Exception) -> Response:
+    """One failed response for any exception, keeping a provider's reason.
+
+    A `ProviderError` is the interesting case and the reason this exists: its
+    `kind` is the machine-readable half the browse dialog branches on, and a
+    caller holding a socket deserves the same. Its `str` already reads
+    ``kind: message``, which is the sentence the dialog toasts, so the client
+    prints one thing and switches on another.
+    """
+    if isinstance(error, ProviderError):
+        return Response.failure(str(error), kind=error.kind)
+    if isinstance(error, ValueError):
+        # Argument validation. The message is the whole point of it.
+        return Response.failure(str(error))
+    # Anything else is a bug or a broken machine, and the type name is the only
+    # part of it a person can act on.
+    return Response.failure(f"{type(error).__name__}: {error}")
+
+
+def handle(verbs: dict[str, Handler], line: bytes) -> Outcome:
     """Decode one request line and run it. Never raises."""
     try:
         request = Request.decode(line)
@@ -82,10 +264,40 @@ def handle(verbs: dict[str, Handler], line: bytes) -> Response:
 
     try:
         return handler(request.argument)
-    except ValueError as error:
-        return Response.failure(str(error))
     except Exception as error:
-        return Response.failure(f"{type(error).__name__}: {error}")
+        # Broad on purpose: a handler must never take the app down, and an
+        # unreachable network raises whatever the transport underneath felt like.
+        return failed(error)
+
+
+def dispatch(verbs: dict[str, Handler], line: bytes, reply: Reply) -> None:
+    """Run one request and hand its answer to ``reply``, exactly once.
+
+    ``reply`` runs before this returns for every verb that can answer at once,
+    and some time later for the ones that go to the network. Guarding the
+    once-ness here rather than trusting each handler keeps a double reply -- two
+    responses down a connection framed one-per-line -- impossible by
+    construction.
+    """
+    outcome = handle(verbs, line)
+    if isinstance(outcome, Response):
+        reply(outcome)
+        return
+
+    answered = False
+
+    def once(response: Response) -> None:
+        nonlocal answered
+        if answered:
+            return
+        answered = True
+        reply(response)
+
+    try:
+        outcome.start(once)
+    except Exception as error:
+        # A deferral that fails to even start still owes the client an answer.
+        once(failed(error))
 
 
 class SocketServer:
@@ -173,20 +385,32 @@ class SocketServer:
         from gi.repository import Gio, GLib
 
         assert isinstance(stream, Gio.DataInputStream)
+        assert isinstance(connection, Gio.SocketConnection)
         try:
             line, _length = stream.read_line_finish(result)  # type: ignore[arg-type]
         except GLib.Error:
             line = None
 
-        response = (
-            handle(self._verbs, bytes(line))
-            if line is not None
-            else Response.failure("empty request")
-        )
+        if line is None:
+            self._answer(connection, Response.failure("empty request"))
+            return
+        # `dispatch` writes the reply itself, which for a search or a download
+        # happens once the worker running it has come back to this thread. The
+        # connection is held open in the meantime and closed by `_answer`.
+        dispatch(self._verbs, bytes(line), lambda response: self._answer(connection, response))
+
+    def _answer(self, connection: object, response: Response) -> None:
+        from gi.repository import Gio, GLib
 
         assert isinstance(connection, Gio.SocketConnection)
         try:
-            connection.get_output_stream().write_all(response.encode(), None)
+            payload = response.encode()
+        except ProtocolError as error:
+            # A reply too large for the frame: say so rather than send half of
+            # it, which the client would read as a malformed message.
+            payload = Response.failure(f"reply could not be sent: {error}").encode()
+        try:
+            connection.get_output_stream().write_all(payload, None)
         except GLib.Error:
             # The client hung up before reading; nothing useful to do.
             pass

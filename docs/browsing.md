@@ -58,6 +58,79 @@ download in flight: the provider stages bytes under a temporary name and links
 them into place at the end, so an interrupted one leaves nothing behind and a
 finished one is already in the library.
 
+## Browsing without the window
+
+The same three operations are on the control socket, so a running instance can
+be searched and downloaded from without opening the dialog:
+
+```
+wall-in-one ctl providers
+wall-in-one ctl search <provider> [query]
+wall-in-one ctl download <provider> <identifier> [hd|4k]
+```
+
+The query is everything after the provider name, spaces and all, so quoting it
+is optional: `ctl search wallhaven aurora over the fjord` is one query, not four
+arguments. The variant on `download` is MotionBGS's quality; left off, the
+provider takes the best it is offered, which is what the dialog's download
+button does too.
+
+Output is **one row per line with tab-separated fields**, and everything that is
+not a row is a `#` comment. That is the format both readers of it already
+understand: a person sees columns, and `cut -f1`, `awk -F'\t'` and
+`while read -r id kind rest` get the fields out with nothing installed. Tabs
+rather than spaces because a wallpaper title is full of spaces and would
+otherwise read as several columns; a tab or a newline *inside* a title collapses
+to a space before it is printed, so a website cannot invent a column or a row in
+a script's input.
+
+```
+$ wall-in-one ctl search wallhaven aurora
+# wallhaven: 24 results - of about 1130 - page 1
+# fields: identifier, kind, resolution, title
+o5jvv1	still	3840x2160	Aurora over the fjord
+zyw8kg	still	1920x1080	Northern lights
+...
+
+$ wall-in-one ctl download wallhaven o5jvv1
+downloaded wallhaven-o5jvv1.jpg (2.4 MB) -> /home/you/Pictures/Wallpapers/Wall-in-One/Wallhaven/wallhaven-o5jvv1.jpg
+```
+
+The summary comment is word-for-word the one under the dialog's grid, including
+`unreadable` and `cached`. An empty field prints as `-`, and a result with no
+title prints its identifier instead, exactly as the cards do. `ctl providers`
+prints `name, media, usable, limitations` the same way, which is how a script
+finds out that NSFW results are unreachable before asking for them.
+
+Only the first page is reachable: the protocol carries one argument per request,
+and spending it on a page number would cost the query its spaces. There is no
+filter surface either — categories, purity, sorting and MotionBGS's browse modes
+are the dialog's, not the socket's.
+
+**Nothing blocks the window.** The control server answers from the GTK main
+loop, so a handler that waited for a website would freeze every frame the app
+draws for as long as the site took. `search` and `download` therefore answer
+*later*: the verb hands its work to a single-worker pool, returns without a
+response, and the reply is written when the worker comes back through
+`GLib.idle_add` — the same arrangement the dialog uses, for the same two calls.
+The client's connection simply stays open until then, which costs one file
+descriptor and keeps `ctl search` an ordinary blocking command that prints its
+results. `ctl` allows a minute for a search and ten for a download, against five
+seconds for every other verb.
+
+A failure comes back on stderr with a non-zero exit, reading `kind: message` —
+the same sentence the dialog toasts. The kind also travels as its own field in
+the reply, so a client can branch on `rate-limit` without parsing the English
+next to it. An unreachable network is a failed response, never a traceback and
+never a dead app: whatever the transport raises is caught on the worker and
+turned into one.
+
+Downloads from here are indistinguishable from downloads from the dialog. They
+run the provider's own install path, so the directory marker and the per-file
+sidecar come out identical, and they land in the first configured root for the
+same reason the dialog's do. A finished one rescans the library, so the file is
+in the grid of an open window without being asked for.
+
 ## Wallhaven filters
 
 The provider accepts exactly these option keys (`FILTER_OPTIONS` in

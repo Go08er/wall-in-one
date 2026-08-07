@@ -13,8 +13,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final, Self
 
-#: A control message is a verb and at most one argument, so this is generous.
-#: It exists to stop a confused writer from making us buffer without bound.
+#: A request is a verb and at most one argument, and the largest reply is a page
+#: of search results -- forty-eight lines of a few hundred bytes -- so this is
+#: generous for both. It exists to stop a confused writer from making us buffer
+#: without bound.
 MAX_MESSAGE_BYTES: Final = 64 * 1024
 
 ENCODING: Final = "utf-8"
@@ -51,9 +53,19 @@ class Request:
 class Response:
     ok: bool
     message: str = ""
+    #: Why it failed, for a caller rather than for a reader: a
+    #: `ProviderError.kind` where one caused it, empty everywhere else. It rides
+    #: in its own field so that branching on `rate-limit` never means parsing
+    #: the English sentence next to it.
+    kind: str = ""
 
     def encode(self) -> bytes:
-        return _encode({"ok": self.ok, "message": self.message})
+        payload: dict[str, Any] = {"ok": self.ok, "message": self.message}
+        if self.kind:
+            # Omitted when empty, so an older client sees exactly the two fields
+            # it always saw.
+            payload["kind"] = self.kind
+        return _encode(payload)
 
     @classmethod
     def decode(cls, line: bytes) -> Self:
@@ -62,15 +74,20 @@ class Response:
         if not isinstance(ok, bool):
             raise ProtocolError("response has no ok flag")
         message = payload.get("message", "")
-        return cls(ok=ok, message=message if isinstance(message, str) else "")
+        kind = payload.get("kind", "")
+        return cls(
+            ok=ok,
+            message=message if isinstance(message, str) else "",
+            kind=kind if isinstance(kind, str) else "",
+        )
 
     @classmethod
     def success(cls, message: str = "ok") -> Self:
         return cls(ok=True, message=message)
 
     @classmethod
-    def failure(cls, message: str) -> Self:
-        return cls(ok=False, message=message)
+    def failure(cls, message: str, kind: str = "") -> Self:
+        return cls(ok=False, message=message, kind=kind)
 
 
 def _encode(payload: dict[str, Any]) -> bytes:

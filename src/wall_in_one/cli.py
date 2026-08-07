@@ -30,6 +30,9 @@ CTL_VERBS: Final[tuple[str, ...]] = (
     "dynamics",
     "reload-palette",
     "status",
+    "providers",
+    "search",
+    "download",
     "quit",
 )
 
@@ -71,7 +74,15 @@ def _build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command")
     control = subcommands.add_parser("ctl", help="control a running instance")
     control.add_argument("verb", choices=CTL_VERBS)
-    control.add_argument("argument", nargs="?", help="value for verbs that take one")
+    # Several words rather than one, joined back into the single argument the
+    # protocol carries, so that `ctl search wallhaven aurora borealis` works
+    # without quoting -- `search` and `download` both read a provider name off
+    # the front and treat the rest as their own.
+    control.add_argument(
+        "argument",
+        nargs="*",
+        help="value for verbs that take one, e.g. `search wallhaven aurora`",
+    )
 
     return parser
 
@@ -143,7 +154,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "ctl":
         from wall_in_one.control import client
 
-        return client.dispatch(options.verb, options.argument)
+        words: list[str] = options.argument
+        return client.dispatch(options.verb, " ".join(words) if words else None)
 
     maintenance = _run_maintenance(options)
     if maintenance is not None:

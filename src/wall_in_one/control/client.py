@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import socket
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -18,6 +19,22 @@ from wall_in_one.control.protocol import MAX_MESSAGE_BYTES, ProtocolError, Reque
 #: a busy UI, not a dead one. Still bounded -- `ctl` must never hang a plugin
 #: callback.
 TIMEOUT: Final = 5.0
+
+#: A search is answered on a worker, so the wait here is the website's rather
+#: than the window's -- the app stays responsive throughout. Generous enough to
+#: cover a rate limiter's own spacing between requests.
+SEARCH_TIMEOUT: Final = 60.0
+
+#: A MotionBGS wallpaper is a video, and the ceiling on one is 512 MB. Minutes
+#: is the honest number on a domestic line.
+DOWNLOAD_TIMEOUT: Final = 600.0
+
+#: The verbs that wait on a remote site. Everything else answers immediately or
+#: is not answering at all.
+TIMEOUTS: Final[Mapping[str, float]] = {
+    "search": SEARCH_TIMEOUT,
+    "download": DOWNLOAD_TIMEOUT,
+}
 
 #: Exit code for "the app is not running". Distinct from a failed command so a
 #: caller can react by launching it.
@@ -32,10 +49,11 @@ class NotRunningError(ControlError):
     """No app is listening on the control socket."""
 
 
-def send(request: Request, *, path: Path | None = None) -> Response:
+def send(request: Request, *, path: Path | None = None, timeout: float | None = None) -> Response:
     target = path if path is not None else paths.socket_path()
+    wait = timeout if timeout is not None else TIMEOUTS.get(request.verb, TIMEOUT)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.settimeout(TIMEOUT)
+    connection.settimeout(wait)
     try:
         try:
             connection.connect(str(target))
@@ -48,7 +66,7 @@ def send(request: Request, *, path: Path | None = None) -> Response:
             connection.sendall(request.encode())
             line = _read_line(connection)
         except TimeoutError as error:
-            raise ControlError(f"timed out after {TIMEOUT}s") from error
+            raise ControlError(f"timed out after {wait}s") from error
         except OSError as error:
             raise ControlError(f"control connection failed: {error}") from error
     finally:
@@ -91,5 +109,9 @@ def dispatch(verb: str, argument: str | None) -> int:
 
     stream = sys.stdout if response.ok else sys.stderr
     if response.message:
+        # A provider failure already reads `kind: message`, the same sentence
+        # the browse dialog toasts, so printing the message prints the kind
+        # with it. `Response.kind` is there for a caller that wants to branch on
+        # the reason rather than read it.
         print(response.message, file=stream)
     return 0 if response.ok else 1

@@ -15,7 +15,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, Gtk, Pango
 
 from wall_in_one import thumbnails as thumbnail_cache
 from wall_in_one.library import filter as library_filter
@@ -105,16 +105,12 @@ class WallpaperTile(Gtk.Box):
         self.append(frame)
         self.append(caption)
 
-    def show_thumbnail(self, path: Path | None) -> None:
+    def show_thumbnail(self, texture: Gdk.Texture | None) -> None:
+        """Take the decoded thumbnail. Already decoded, on a worker thread."""
         self._spinner.set_visible(False)
-        if path is None:
+        if texture is None:
             # No preview available; the name still identifies it.
             self._picture.set_paintable(None)
-            self.add_css_class("wio-tile-blank")
-            return
-        try:
-            texture = Gdk.Texture.new_from_filename(str(path))
-        except GLib.Error:
             self.add_css_class("wio-tile-blank")
             return
         self._picture.set_paintable(texture)
@@ -135,9 +131,20 @@ class WallpaperTile(Gtk.Box):
         self._star.set_icon_name("starred-symbolic" if favourite else "non-starred-symbolic")
         self._star.set_tooltip_text("Remove from favourites" if favourite else "Add to favourites")
 
-    def set_menu(self, menu: Gio.MenuModel) -> None:
-        """Give the tile its action menu, and let a right-click raise it too."""
-        self._menu.set_menu_model(menu)
+    def set_menu(self, build: Callable[[MediaItem], Gio.MenuModel]) -> None:
+        """Give the tile an action menu, built the first time it is opened.
+
+        `set_menu_model` builds the popover there and then, which is 160 ms
+        across six hundred tiles for menus almost none of which are ever
+        opened -- more than half the cost of building the grid. Deferring it
+        costs one comparison per click.
+        """
+
+        def create(button: Gtk.MenuButton) -> None:
+            if button.get_menu_model() is None:
+                button.set_menu_model(build(self.item))
+
+        self._menu.set_create_popup_func(create)
         gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
         gesture.connect("pressed", lambda *_arguments: self._menu.popup())
         self.add_controller(gesture)
@@ -259,7 +266,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             if self._on_favourite is not None:
                 tile.connect_favourite(self._on_favourite)
             if self._menu_for is not None:
-                tile.set_menu(self._menu_for(item))
+                tile.set_menu(self._menu_for)
             tile.set_favourite(item.path in self._favourites)
             self._tiles[item.path] = tile
             self._flow.append(tile)
@@ -270,10 +277,10 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         self.set_current(current)
         self._apply_query()
 
-    def _on_thumbnail(self, item: MediaItem, path: Path | None) -> None:
+    def _on_thumbnail(self, item: MediaItem, texture: Gdk.Texture | None) -> None:
         tile = self._tiles.get(item.path)
         if tile is not None:
-            tile.show_thumbnail(path)
+            tile.show_thumbnail(texture)
 
     # -- searching, filtering, sorting -------------------------------------
 

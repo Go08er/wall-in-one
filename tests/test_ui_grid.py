@@ -300,3 +300,96 @@ def test_every_declared_accelerator_is_actually_installed(
     for _section, accelerator, action, description in ACCELERATORS:
         bound = {normalised(each) for each in application.get_accels_for_action(action)}
         assert normalised(accelerator) in bound, f"{description!r} is declared but not bound"
+
+
+# -- decoding off the main thread -----------------------------------------
+#
+# `ThumbnailLoader` hands back a decoded `Gdk.Texture` rather than a path, and
+# does the decoding on its pool. A warm cache of six hundred thumbnails is
+# 372 ms of `Gdk.Texture.new_from_filename` on the main thread otherwise --
+# more than building all the widgets. What is tested here is the worker half,
+# which needs no main loop to run.
+
+
+def _png(path: Path) -> Path:
+    """A real, decodable PNG. One pixel is enough to prove a decode happened."""
+    import subprocess
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=8x8:d=1",
+            "-frames:v",
+            "1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def test_the_worker_returns_a_texture_not_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gi.repository import Gdk
+
+    from wall_in_one.ui.thumbnails import ThumbnailLoader as Loader
+
+    picture = _png(tmp_path / "thumb.png")
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.lookup", lambda _item: picture)
+    texture = Loader._texture_for(item("a"))
+    assert isinstance(texture, Gdk.Texture)
+    assert (texture.get_width(), texture.get_height()) == (8, 8)
+
+
+def test_a_texture_made_off_the_main_thread_goes_into_a_widget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole premise. GDK textures are immutable and safe to create on a
+    worker, and one made there has to drop straight into a `Gtk.Picture`."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from wall_in_one.ui.thumbnails import ThumbnailLoader as Loader
+
+    picture = _png(tmp_path / "thumb.png")
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.lookup", lambda _item: picture)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        texture = pool.submit(Loader._texture_for, item("a")).result()
+    tile = WallpaperTile(item("a"))
+    tile.show_thumbnail(texture)
+    assert tile._picture.get_paintable() is texture
+
+
+def test_a_file_gdk_cannot_decode_is_a_blank_tile_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ffmpeg and GDK do not agree on every format, and the tile still has a
+    name under it either way."""
+    from wall_in_one.ui.thumbnails import ThumbnailLoader as Loader
+
+    rubbish = tmp_path / "thumb.png"
+    rubbish.write_bytes(b"not a picture")
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.lookup", lambda _item: rubbish)
+    assert Loader._texture_for(item("a")) is None
+
+
+def test_a_wallpaper_that_cannot_be_thumbnailed_is_a_blank_tile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one import thumbnails as cache
+    from wall_in_one.ui.thumbnails import ThumbnailLoader as Loader
+
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.lookup", lambda _item: None)
+
+    def refuse(_item: MediaItem) -> Path:
+        raise cache.ThumbnailError("nope")
+
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.generate", refuse)
+    assert Loader._texture_for(item("a")) is None

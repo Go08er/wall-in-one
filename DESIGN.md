@@ -589,6 +589,12 @@ each step is independently useful if the next never happens.
       the casing hid eight wallpapers. Steam's files are `Ownership.USER`
       without exception, so removal refuses them.
       **Still to do:** the scene renderer for those four.
+      Bringing someone else's collection into the library turned up a real
+      hole in removal: a Workshop wallpaper is `Ownership.USER`, so `remove`
+      correctly refused to *delete* it -- and then fell through to `trash`,
+      which moved a 129 MB file out of Steam's directory on this machine.
+      "Not ours to delete" and "not ours to move" are different claims. Neither
+      verb will now touch anything outside the configured roots.
       The largest piece and the one with a real
       question in front of it. It needs a third renderer alongside mpvpaper and
       Noctalia stills, Workshop scanning under Steam's directories, and

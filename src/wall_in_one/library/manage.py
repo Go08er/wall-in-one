@@ -20,6 +20,13 @@ they can get it back. `Ownership.USER` says "we never delete these", and that
 remains true: moving a file to the trash at the user's explicit request is not
 the same act as a program deciding on its own that a file is disposable.
 
+Neither verb will touch a file outside the configured roots, and that is a
+third case rather than a refinement of the first two. A Wallpaper Engine
+wallpaper is in the library and is `Ownership.USER` -- the user did not put it
+there, Steam did, and Steam will consider it missing. "Not ours to delete" and
+"not ours to move either" are different claims, and only checking the first one
+sent a 129 MB Workshop file to the trash on the machine this was written on.
+
 Nothing here follows a symlink and nothing here deletes outside the roots it
 was given, so a library entry pointing somewhere unexpected costs nothing.
 """
@@ -28,6 +35,7 @@ from __future__ import annotations
 
 import errno
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -197,7 +205,17 @@ def _trash_name(directory: Path, original: Path) -> str:
     raise ManageError("local-io", f"the trash already holds {MAX_TRASH_ATTEMPTS} files so named")
 
 
-def trash(path: Path) -> Path:
+def is_removable(path: Path, roots: Sequence[Path] = ()) -> bool:
+    """Whether this app may move ``path`` at all.
+
+    Inside a configured root, or nowhere. Being in the library is not enough:
+    Steam's Workshop content is scanned into the library and is emphatically
+    not the app's to move.
+    """
+    return not roots or _within(path, tuple(roots))
+
+
+def trash(path: Path, roots: Sequence[Path] = ()) -> Path:
     """Move ``path`` into the trash and return where it landed.
 
     The reversible verb, and therefore the right one for a file the user made.
@@ -207,6 +225,11 @@ def trash(path: Path) -> Path:
     better than silently unlinking something the user expected to be able to
     get back.
     """
+    if not is_removable(path, roots):
+        raise ManageError(
+            "not-ours",
+            f"{path.name} lives outside your wallpaper folders, so it is not this app's to move",
+        )
     if path.is_symlink() or not path.exists():
         raise ManageError("missing", f"{path} is no longer there")
 

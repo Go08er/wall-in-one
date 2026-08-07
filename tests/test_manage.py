@@ -322,3 +322,50 @@ def test_a_failed_move_leaves_no_orphan_record(
     assert caught.value.kind == "cross-device"
     assert theirs.is_file()
     assert list((data_home / "Trash" / "info").iterdir()) == []
+
+
+# -- somebody else's collection -------------------------------------------
+#
+# The case that cost a 129 MB file. A Wallpaper Engine wallpaper is scanned
+# into the library and is `Ownership.USER`, so `remove` correctly refuses to
+# delete it -- and then the caller fell through to `trash`, which moved it.
+# "Not ours to delete" and "not ours to move" are different claims.
+
+
+def test_a_file_outside_the_roots_is_not_trashed_either(root: Path, tmp_path: Path) -> None:
+    steam = tmp_path / "Steam" / "workshop" / "431960" / "12345"
+    steam.mkdir(parents=True)
+    wallpaper = steam / "someone elses.mp4"
+    wallpaper.write_bytes(b"0" * 64)
+
+    with pytest.raises(ManageError) as caught:
+        manage.trash(wallpaper, (root,))
+
+    assert caught.value.kind == "not-ours"
+    assert wallpaper.is_file()
+
+
+def test_a_file_inside_the_roots_is_still_trashed(root: Path) -> None:
+    theirs = root / "holiday.png"
+    theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert manage.trash(theirs, (root,)).is_file()
+    assert not theirs.exists()
+
+
+def test_with_no_roots_given_nothing_is_refused(root: Path) -> None:
+    """The containment check is what a caller opts into by passing roots; a
+    caller with none has not said where its library is."""
+    theirs = root / "holiday.png"
+    theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert manage.trash(theirs).is_file()
+
+
+def test_removability_is_about_the_roots_not_the_ownership(root: Path, tmp_path: Path) -> None:
+    inside = root / "a.png"
+    inside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    outside = tmp_path / "elsewhere" / "b.png"
+    outside.parent.mkdir()
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    assert manage.is_removable(inside, (root,))
+    assert not manage.is_removable(outside, (root,))

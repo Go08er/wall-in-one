@@ -387,7 +387,7 @@ def remove_wallpaper(item: MediaItem, roots: tuple[Path, ...]) -> str:
     if item.deletable:
         result = manage.remove(item, roots)
         return f"{result.describe()} - deleted, which cannot be undone"
-    landed = manage.trash(item.path)
+    landed = manage.trash(item.path, roots)
     return f"{item.path.name} moved to the trash - {landed}"
 
 

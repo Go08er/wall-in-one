@@ -649,7 +649,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _trash(self, item: MediaItem) -> None:
         try:
-            manage.trash(item.path)
+            manage.trash(item.path, self._app.session.library.roots)
         except manage.ManageError as error:
             self.report(str(error))
             return

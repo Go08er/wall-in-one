@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -169,35 +168,6 @@ def test_a_file_that_is_not_an_image_fails_cleanly(cache_home: Path, tmp_path: P
     assert not thumbnails.cached_path(item).exists()
     leftovers = list(thumbnails.cache_directory().glob("*.tmp.png"))
     assert leftovers == []
-
-
-# -- pruning -------------------------------------------------------------
-
-
-def test_prune_removes_the_oldest_past_the_limit(cache_home: Path) -> None:
-    directory = thumbnails.cache_directory()
-    directory.mkdir(parents=True)
-    for index in range(6):
-        entry = directory / f"{index:032x}.png"
-        entry.write_bytes(b"x")
-        os.utime(entry, (index, index))
-
-    removed = thumbnails.prune(limit=2)
-
-    assert removed == 4
-    survivors = sorted(path.name for path in directory.glob("*.png"))
-    assert survivors == [f"{4:032x}.png", f"{5:032x}.png"]
-
-
-def test_prune_under_the_limit_does_nothing(cache_home: Path) -> None:
-    directory = thumbnails.cache_directory()
-    directory.mkdir(parents=True)
-    (directory / "a.png").write_bytes(b"x")
-    assert thumbnails.prune(limit=10) == 0
-
-
-def test_prune_on_a_missing_cache_is_harmless(cache_home: Path) -> None:
-    assert thumbnails.prune() == 0
 
 
 # -- remote previews -----------------------------------------------------

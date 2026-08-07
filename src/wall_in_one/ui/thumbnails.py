@@ -4,6 +4,9 @@ At ~0.3s each, a library of any size would stall the main loop if thumbnails
 were generated inline. Work happens on a small thread pool; results come back
 through `GLib.idle_add`, which is the only safe way to touch a widget from
 another thread.
+
+The cache itself lives in `wall_in_one.thumbnails` and knows nothing about GTK.
+This module only decides *when* to ask it, and on which thread.
 """
 
 from __future__ import annotations
@@ -36,19 +39,27 @@ class ThumbnailLoader:
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb")
         self._pending: dict[Path, Future[Path | None]] = {}
         self._closed = False
+        # Bound the cache once at startup, on the pool rather than here. A user
+        # who moves their wallpaper collection elsewhere generates nothing new,
+        # so without this the thumbnails of a library they no longer own would
+        # sit in `~/.cache` forever -- which is exactly what the plugin this
+        # app replaces did.
+        self._pool.submit(thumbnails.prune)
 
     def request(self, item: MediaItem, callback: Callback) -> None:
         """Ask for ``item``'s thumbnail. ``callback`` runs on the main thread.
 
         A cache hit is delivered immediately and synchronously, so a rebuilt
         grid of already-thumbnailed wallpapers does not flash through an empty
-        state on its way to looking identical.
+        state on its way to looking identical. `lookup` validates the entry
+        before answering, so a thumbnail truncated by a power cut takes the slow
+        path here instead of failing to decode in a tile.
         """
         if self._closed:
             return
 
-        cached = thumbnails.cached_path(item)
-        if cached.is_file():
+        cached = thumbnails.lookup(item)
+        if cached is not None:
             callback(item, cached)
             return
 

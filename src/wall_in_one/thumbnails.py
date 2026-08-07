@@ -8,14 +8,31 @@ happen to be installed.
 
 Measured at ~0.3s per thumbnail, including seeking a 4K mp4, so generation
 belongs off the main thread. See `wall_in_one.ui.thumbnails` for that part.
+
+That cost is also why the cache is on disk rather than in memory: a library the
+user has not changed should cost nothing to show on the second launch. A disk
+cache then has to answer three questions the in-memory one never did -- when an
+entry stops being valid, how large the directory may grow, and what happens when
+something in it is not what we wrote. The answers are, in order: the key carries
+the source file's size and mtime, so editing a wallpaper in place misses; the
+directory is bounded by :data:`MAX_CACHE_BYTES` and evicted least-recently-used
+first; and every read is validated, so a truncated or foreign file is a miss
+rather than a decode failure.
+
+This module deliberately knows nothing about GTK, which is what makes all of the
+above testable without a display.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
+import stat
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -34,13 +51,67 @@ VIDEO_SEEK_SECONDS: Final = 1.0
 #: A wedged decode must not hang the worker forever.
 GENERATE_TIMEOUT: Final = 20.0
 
-#: Cache ceiling. At roughly 100 KB a thumbnail this is a few hundred MB worst
-#: case, and the library scan tops out at 4096 items anyway.
-MAX_CACHE_ENTRIES: Final = 4096
+#: Bytes the thumbnail directory may occupy. A 320x180 PNG of photographic
+#: content measures 60-120 KB, so this holds on the order of 2,500 thumbnails --
+#: comfortably past what a library scan, itself capped at 4096 wallpapers, will
+#: usually produce, and still an unremarkable amount of space to find in
+#: `~/.cache`. The exact number matters far less than there being one: the
+#: plugin this app replaces had no bound at all and no way to clear what it
+#: left behind.
+MAX_CACHE_BYTES: Final = 256 * 1024 * 1024
+
+#: Evict down to this fraction of the ceiling rather than exactly to it. Trimming
+#: to the ceiling exactly would mean an unlink for every thumbnail generated
+#: thereafter; leaving headroom makes eviction happen in occasional batches.
+PRUNE_TARGET_RATIO: Final = 0.9
+
+#: Never evict an entry stamped more recently than this. Unlinking a file another
+#: process is reading is harmless on POSIX -- its descriptor keeps the inode --
+#: and a reader that loses the race just treats the entry as a miss. The grace
+#: window is for the narrower case of a second instance that has just written a
+#: thumbnail it is about to display, which would otherwise be worth regenerating.
+EVICTION_GRACE_SECONDS: Final = 60.0
+
+#: How long an abandoned temporary may sit before it is swept. Longer than
+#: `GENERATE_TIMEOUT` by a wide margin, so a slow encode in another instance is
+#: never mistaken for the leavings of a crashed one.
+TEMPORARY_GRACE_SECONDS: Final = 3600.0
+
+#: Re-stamping an entry on every hit would be a write syscall per tile per grid
+#: rebuild. Hour granularity is far finer than the eviction decisions it feeds.
+TOUCH_INTERVAL_SECONDS: Final = 3600.0
+
+#: Bumped when anything about the encoded output changes. It is in the key, so a
+#: bump invalidates the whole cache instead of leaving entries that decode but
+#: no longer look like what this version produces.
+CACHE_FORMAT: Final = 1
+
+_PNG_MAGIC: Final = b"\x89PNG\r\n\x1a\n"
+
+#: The terminating IEND chunk, CRC and all. A PNG that does not end with these
+#: exact bytes was truncated.
+_PNG_TAIL: Final = b"IEND\xaeB\x60\x82"
+
+#: Short enough to be nonsense, and long enough that reading the magic number and
+#: reading the tail cannot overlap on the same bytes.
+_MINIMUM_PNG_BYTES: Final = len(_PNG_MAGIC) + len(_PNG_TAIL)
+
+#: The two name shapes this module writes, and therefore the only two it will
+#: ever delete. Everything else in the directory belongs to someone else.
+_ENTRY_NAME: Final = re.compile(r"\A[0-9a-f]{32}\.png\Z")
+_TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[0-9]+\.tmp\.png\Z")
 
 
 class ThumbnailError(Exception):
     """A thumbnail could not be generated."""
+
+
+@dataclass(frozen=True, slots=True)
+class CacheUsage:
+    """What the thumbnail directory currently costs the user."""
+
+    entries: int
+    total_bytes: int
 
 
 def is_available() -> bool:
@@ -58,9 +129,16 @@ def cache_key(item: MediaItem) -> str:
     regenerates it, and the geometry is in the key so changing the tile size
     invalidates every thumbnail rather than showing stale ones at the wrong
     dimensions.
+
+    Not a hash of the file's contents. A wallpaper can be a 400 MB video, and
+    reading all of it to decide whether to spend 0.3s decoding a frame of it
+    would cost more than the decode. Size and mtime come free with the `stat`
+    the library scan already did, and the failure they admit -- an edit that
+    preserves both -- is not something wallpapers do to themselves.
     """
     material = "\0".join(
         (
+            str(CACHE_FORMAT),
             str(item.path),
             str(item.size),
             str(item.mtime),
@@ -72,7 +150,73 @@ def cache_key(item: MediaItem) -> str:
 
 
 def cached_path(item: MediaItem) -> Path:
+    """Where ``item``'s thumbnail lives, whether or not anything is there."""
     return cache_directory() / f"{cache_key(item)}.png"
+
+
+def _opener(path: str, flags: int) -> int:
+    # O_NOFOLLOW: a symlink where a cache entry should be is not ours, and is
+    # not something to read through whatever it points at.
+    return os.open(path, flags | os.O_NOFOLLOW)
+
+
+def _is_intact(path: Path) -> bool:
+    """Whether a cache entry is a complete PNG worth handing to a decoder.
+
+    A cache directory is the one place a half-written file is *expected*: the
+    machine can lose power mid-encode, a filesystem can fill up, and people do
+    poke around in `~/.cache`. Checking the magic number and the terminating
+    chunk costs two seeks, catches both truncation and the file simply not being
+    a PNG, and turns either into an ordinary miss.
+    """
+    try:
+        with open(str(path), "rb", opener=_opener) as handle:
+            if handle.read(len(_PNG_MAGIC)) != _PNG_MAGIC:
+                return False
+            if handle.seek(0, os.SEEK_END) < _MINIMUM_PNG_BYTES:
+                return False
+            handle.seek(-len(_PNG_TAIL), os.SEEK_END)
+            return handle.read(len(_PNG_TAIL)) == _PNG_TAIL
+    except OSError:
+        # Missing, a symlink, a directory, unreadable: all of them mean there is
+        # no thumbnail here, and none of them is worth raising over.
+        return False
+
+
+def _touch(path: Path) -> None:
+    """Re-stamp an entry so eviction counts it as recently used.
+
+    Deliberately not `st_atime`. `relatime` is the default nearly everywhere and
+    `noatime` is common, so the kernel's own record of last access is either a
+    day stale or frozen outright. Owning the timestamp costs one syscall on the
+    occasional hit and is the only version that is true on every mount.
+    """
+    now = time.time()
+    try:
+        if now - path.stat().st_mtime < TOUCH_INTERVAL_SECONDS:
+            return
+        os.utime(path, (now, now))
+    except OSError:
+        # A read-only cache, or the entry evicted underneath us. A lost LRU
+        # update makes an entry look older than it is, which costs at worst one
+        # regeneration.
+        return
+
+
+def lookup(item: MediaItem) -> Path | None:
+    """A usable cached thumbnail for ``item``, or ``None``.
+
+    This is the read side of the cache: it validates before answering, so a
+    corrupt entry reports a miss, and it marks the entry used, so showing a
+    wallpaper keeps its thumbnail alive. Cheap enough for the main thread --
+    a stat and two short reads -- which matters, because delivering a hit
+    synchronously is what stops a rebuilt grid flashing through an empty state.
+    """
+    path = cached_path(item)
+    if not _is_intact(path):
+        return None
+    _touch(path)
+    return path
 
 
 def _command(item: MediaItem, destination: Path) -> list[str]:
@@ -97,7 +241,8 @@ def generate(item: MediaItem, *, force: bool = False) -> Path:
         raise ThumbnailError("ffmpeg is not installed")
 
     destination = cached_path(item)
-    if not force and destination.is_file():
+    if not force and _is_intact(destination):
+        _touch(destination)
         return destination
     if not item.path.is_file():
         raise ThumbnailError(f"no such file: {item.path}")
@@ -128,6 +273,10 @@ def generate(item: MediaItem, *, force: bool = False) -> Path:
         )
 
     os.replace(temporary, destination)
+    # Bound the directory here rather than leaving it to the caller: every path
+    # that grows the cache runs through this line, and a scan costs a couple of
+    # milliseconds against the 0.3s decode that just happened.
+    prune()
     return destination
 
 
@@ -187,28 +336,114 @@ def to_displayable(data: bytes) -> bytes:
     return completed.stdout if is_natively_decodable(completed.stdout) else b""
 
 
-def prune(limit: int = MAX_CACHE_ENTRIES) -> int:
-    """Drop the least recently modified thumbnails past ``limit``."""
-    directory = cache_directory()
+@dataclass(frozen=True, slots=True)
+class _Entry:
+    """One file in the cache directory that this module wrote."""
+
+    path: Path
+    size: int
+    used_at: float
+
+
+def _scan() -> tuple[list[_Entry], list[_Entry]]:
+    """Cache entries and abandoned temporaries, each least-recently-used first.
+
+    Only files whose names this module could have written are returned, and only
+    if they are regular files. That single rule is what keeps eviction honest:
+    a foreign file dropped in the directory is never counted and never deleted,
+    and a symlink is never followed to whatever it points at outside.
+    """
+    entries: list[_Entry] = []
+    temporaries: list[_Entry] = []
     try:
-        entries = [entry for entry in directory.iterdir() if entry.suffix == ".png"]
+        with os.scandir(cache_directory()) as found:
+            for candidate in found:
+                if _ENTRY_NAME.match(candidate.name):
+                    bucket = entries
+                elif _TEMPORARY_NAME.match(candidate.name):
+                    bucket = temporaries
+                else:
+                    continue
+                try:
+                    status = candidate.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(status.st_mode):
+                    continue
+                bucket.append(_Entry(Path(candidate.path), status.st_size, status.st_mtime))
     except OSError:
-        return 0
-    if len(entries) <= limit:
-        return 0
+        # No cache directory yet, or one we cannot read. Either way there is
+        # nothing here to account for.
+        return [], []
+    entries.sort(key=lambda entry: entry.used_at)
+    temporaries.sort(key=lambda entry: entry.used_at)
+    return entries, temporaries
 
-    def age(path: Path) -> float:
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            return 0.0
 
-    entries.sort(key=age)
+def _discard(entry: _Entry) -> bool:
+    """Unlink one entry, tolerating a second instance having got there first."""
+    try:
+        entry.path.unlink()
+    except FileNotFoundError:
+        # Two instances evicting the same entry. Gone is gone.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def usage() -> CacheUsage:
+    """How many thumbnails are cached and what they weigh."""
+    entries, temporaries = _scan()
+    both = (*entries, *temporaries)
+    return CacheUsage(entries=len(entries), total_bytes=sum(entry.size for entry in both))
+
+
+def prune(max_bytes: int = MAX_CACHE_BYTES) -> int:
+    """Evict least-recently-used thumbnails until the cache fits ``max_bytes``.
+
+    Returns the number of files removed. Safe to run while another instance is
+    reading the same directory: eviction only ever unlinks, readers hold their
+    own descriptors, and a reader that loses the race sees a miss and
+    regenerates. Two instances pruning at once simply agree.
+
+    Entries used within :data:`EVICTION_GRACE_SECONDS` are left alone even if
+    that means finishing over the ceiling, which is the right trade -- being
+    briefly over is cheaper than throwing away a thumbnail somebody is about to
+    draw. The next prune collects them.
+    """
+    moment = time.time()
+    entries, temporaries = _scan()
+
     removed = 0
-    for entry in entries[: len(entries) - limit]:
-        try:
-            entry.unlink()
-        except OSError:
+    for temporary in temporaries:
+        # A temporary this old is the leavings of a crashed or killed encode;
+        # nothing live writes to one for an hour.
+        if moment - temporary.used_at > TEMPORARY_GRACE_SECONDS and _discard(temporary):
+            removed += 1
+
+    total = sum(entry.size for entry in entries)
+    if total <= max_bytes:
+        return removed
+
+    target = int(max(max_bytes, 0) * PRUNE_TARGET_RATIO)
+    for entry in entries:
+        if total <= target:
+            break
+        if moment - entry.used_at < EVICTION_GRACE_SECONDS:
             continue
-        removed += 1
+        if _discard(entry):
+            removed += 1
+            total -= entry.size
     return removed
+
+
+def clear() -> int:
+    """Delete every thumbnail this app wrote, and report how many.
+
+    Here for a Settings button to call. The old plugin left 108 files and 2.4 MB
+    in its state directory with nothing anywhere that could remove them; the
+    fact that they were small was luck, not design.
+    """
+    entries, temporaries = _scan()
+    return sum(_discard(entry) for entry in (*entries, *temporaries))

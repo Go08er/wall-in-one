@@ -10,7 +10,10 @@ Wallhaven rather than an app that will not start.
 
 from __future__ import annotations
 
+import os
 import socket
+import stat
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -38,18 +41,28 @@ def offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def key_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def key_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """The key file's path under a config home of our own, with no key set.
 
     The file itself is not created; each test decides what, if anything, is
     there. Both the variable and the directory are redirected so that a
     developer with a real key in either place still runs the same suite.
+
+    The umask is narrowed for the duration, so that a plain `write_text` lands
+    at 0600 the way it would for a user whose umask is not 022. The tests below
+    are about what is *in* the file; the ones about its mode set the mode
+    themselves, and would be saying nothing if the default here were already a
+    mode the reader rejects.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv(registry.API_KEY_VARIABLE, raising=False)
-    directory = tmp_path / "config" / "wall-in-one"
-    directory.mkdir(parents=True)
-    return directory / registry.API_KEY_FILENAME
+    previous = os.umask(0o077)
+    try:
+        directory = tmp_path / "config" / "wall-in-one"
+        directory.mkdir(parents=True)
+        yield directory / registry.API_KEY_FILENAME
+    finally:
+        os.umask(previous)
 
 
 # -- resolution order ----------------------------------------------------
@@ -347,3 +360,133 @@ def test_build_all_shares_the_client_it_makes_for_itself(key_file: Path) -> None
     assert isinstance(first, MotionBgs)
     assert isinstance(second, Wallhaven)
     assert first._client is second._client
+
+
+# -- the credential's permissions ----------------------------------------
+#
+# A key file lives in a directory the user edits by hand, restores from
+# backups, and syncs between machines. None of those preserve a mode reliably,
+# so the reader states its own requirements rather than trusting whatever it
+# finds. Every refusal below has to end in an unauthenticated Wallhaven that
+# says why, never in an exception: the app has to start.
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [0o640, 0o604, 0o644, 0o660, 0o606, 0o666, 0o700 | stat.S_IXGRP],
+    ids=["group-read", "other-read", "world-read", "group-write", "other-write", "world", "exec"],
+)
+def test_a_key_reachable_by_anyone_else_is_not_used(key_file: Path, mode: int) -> None:
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(mode)
+    assert registry.wallhaven_api_key() == ""
+
+
+def test_an_exposed_key_says_which_mode_and_how_to_mend_it(key_file: Path) -> None:
+    """The complaint has to be actionable: a mode and a command, not a scolding."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o644)
+    _key, complaint = registry.usable_api_key()
+    assert "0644" in complaint
+    assert f"chmod 600 {key_file}" in complaint
+
+
+def test_an_exposed_key_never_appears_in_the_complaint(key_file: Path) -> None:
+    """Explaining that a key is too readable must not read it out loud."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o644)
+    _key, complaint = registry.usable_api_key()
+    assert KEY not in complaint
+
+
+def test_a_key_only_its_owner_can_read_is_used(key_file: Path) -> None:
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o600)
+    assert registry.wallhaven_api_key() == KEY
+
+
+def test_a_read_only_key_is_still_used(key_file: Path) -> None:
+    """0400 is a deliberate choice, not a mistake. Reading does not need write."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o400)
+    assert registry.wallhaven_api_key() == KEY
+
+
+def test_a_key_in_a_directory_others_can_write_to_is_not_used(key_file: Path) -> None:
+    """Whoever can write the directory can swap the file every other check ran on."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o600)
+    key_file.parent.chmod(0o777)
+    try:
+        key, complaint = registry.usable_api_key()
+    finally:
+        key_file.parent.chmod(0o700)
+    assert key == ""
+    assert "writable by other users" in complaint
+
+
+def test_a_sticky_directory_others_can_write_to_is_allowed(key_file: Path) -> None:
+    """The sticky bit is exactly the thing that makes /tmp-like modes safe:
+    others can write, but cannot rename away a file they do not own."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o600)
+    key_file.parent.chmod(0o1777)
+    try:
+        assert registry.wallhaven_api_key() == KEY
+    finally:
+        key_file.parent.chmod(0o700)
+
+
+def test_a_symlinked_config_directory_is_not_followed(
+    key_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whoever controls the link chooses which file we would read."""
+    real = tmp_path / "elsewhere" / "wall-in-one"
+    real.mkdir(parents=True)
+    (real / registry.API_KEY_FILENAME).write_text(KEY + "\n", encoding="utf-8")
+    (real / registry.API_KEY_FILENAME).chmod(0o600)
+    link_home = tmp_path / "linked"
+    link_home.mkdir()
+    (link_home / "wall-in-one").symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(link_home))
+    key, complaint = registry.usable_api_key()
+    assert key == ""
+    assert "symbolic link" in complaint
+
+
+def test_a_directory_that_does_not_exist_yet_is_not_a_fault(key_file: Path) -> None:
+    """Never having saved a key is the ordinary state, and says nothing."""
+    assert registry.key_directory_fault(key_file.parent / "not-created") == ""
+
+
+def test_a_missing_key_file_is_silent_rather_than_explained(key_file: Path) -> None:
+    """There is no file to claim we are ignoring, so the generic limitation stands."""
+    assert not key_file.exists()
+    key, complaint = registry.usable_api_key()
+    assert (key, complaint) == ("", "")
+
+
+def test_an_exposed_key_reaches_the_ui_through_the_limitation(key_file: Path) -> None:
+    """`describe` is the only channel the dialogue reads; a refusal must use it."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o644)
+    wallhaven = next(info for info in registry.describe() if info.name == Wallhaven.name)
+    assert wallhaven.usable
+    assert len(wallhaven.limitations) == 1
+    assert "chmod 600" in wallhaven.limitations[0]
+
+
+def test_an_exposed_key_still_builds_an_unauthenticated_provider(key_file: Path) -> None:
+    """The app has to start. An unusable key means no key, not no Wallhaven."""
+    key_file.write_text(KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o644)
+    provider = registry.build(Wallhaven.name, client=FakeClient())
+    assert isinstance(provider, Wallhaven)
+    assert not provider.authenticated
+
+
+def test_an_explicit_key_is_unaffected_by_a_bad_file(key_file: Path) -> None:
+    """The file is never consulted when the caller supplied a key."""
+    key_file.write_text(OTHER_KEY + "\n", encoding="utf-8")
+    key_file.chmod(0o666)
+    assert registry.wallhaven_api_key(KEY) == KEY

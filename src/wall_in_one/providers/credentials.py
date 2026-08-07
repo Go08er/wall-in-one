@@ -20,11 +20,24 @@ import os
 import stat
 import tempfile
 from pathlib import Path
+from typing import Final
 
 from wall_in_one import paths
 from wall_in_one.providers.base import ProviderError
-from wall_in_one.providers.registry import API_KEY_FILENAME, API_KEY_VARIABLE
+from wall_in_one.providers.registry import (
+    API_KEY_FILENAME,
+    API_KEY_VARIABLE,
+    KEY_DIRECTORY_UNSAFE_MODE,
+    key_directory_fault,
+)
 from wall_in_one.providers.wallhaven import normalise_api_key
+
+#: The mode the config directory is created with when we are the one creating
+#: it. `paths.ensure_directory` leaves it to the umask, which is the right
+#: default for settings and the wrong one for a credential: on a machine with
+#: a umask of 002 it would produce a group-writable directory that `registry`
+#: then refuses to read a key out of.
+DIRECTORY_MODE: Final = 0o700
 
 
 def key_path() -> Path:
@@ -63,6 +76,37 @@ def stored_key_present() -> bool:
         return False
 
 
+def _refuse_an_unsafe_directory(directory: Path) -> None:
+    """Raise unless a credential can honestly be created in ``directory``.
+
+    Writing 0600 into a directory another user can write to, or one a symlink
+    has redirected, only looks careful: whoever can write to the directory can
+    rename our file away and leave their own under the same name. Worse, the
+    reader applies the same rule, so saving into such a place would report
+    success and then go on running Wallhaven unauthenticated -- a lie told to
+    the one person who was trying to fix the problem.
+
+    The mode is the single fault worth mending rather than reporting. The
+    directory is ours either way, some other part of the app may have created
+    it first at whatever the umask allowed, and taking access away from other
+    users cannot break anything. Ownership and a symlink are not ours to mend:
+    both mean the directory belongs to a decision somebody else made.
+    """
+    if not directory.is_symlink():
+        try:
+            mode = stat.S_IMODE(directory.stat().st_mode)
+            if mode & KEY_DIRECTORY_UNSAFE_MODE:
+                directory.chmod(mode & 0o700)
+        except OSError:
+            # No message of its own: the check below has the final say, and it
+            # says the same thing whether the mode could not be read or not
+            # be changed.
+            pass
+    fault = key_directory_fault(directory)
+    if fault:
+        raise ProviderError("local-io", f"{directory} {fault}, so no key was written there")
+
+
 def save_key(value: str) -> Path:
     """Validate ``value`` and write it as the stored key, atomically and 0600.
 
@@ -74,14 +118,16 @@ def save_key(value: str) -> Path:
     if not key:
         raise ProviderError("credential", "a Wallhaven API key cannot be empty")
     destination = key_path()
+    directory = destination.parent
     try:
-        paths.ensure_directory(destination.parent)
+        os.makedirs(directory, mode=DIRECTORY_MODE, exist_ok=True)
     except OSError as error:
         raise ProviderError(
-            "local-io", f"could not create {destination.parent}: {error.strerror or error}"
+            "local-io", f"could not create {directory}: {error.strerror or error}"
         ) from error
+    _refuse_an_unsafe_directory(directory)
 
-    descriptor, name = tempfile.mkstemp(prefix=".wall-in-one-tmp-", dir=destination.parent)
+    descriptor, name = tempfile.mkstemp(prefix=".wall-in-one-tmp-", dir=directory)
     temporary = Path(name)
     try:
         # mkstemp already opens at 0600, but the mode is restated because the

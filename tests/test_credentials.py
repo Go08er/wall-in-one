@@ -229,3 +229,105 @@ def test_the_environment_still_wins_over_a_key_we_just_saved(
     monkeypatch.setenv(registry.API_KEY_VARIABLE, OTHER_KEY)
     credentials.save_key(KEY)
     assert registry.wallhaven_api_key() == OTHER_KEY
+
+
+# -- the directory the key lands in --------------------------------------
+#
+# Writing 0600 into a directory somebody else can write to only looks careful:
+# whoever can write the directory can rename our file away and leave their own
+# under the same name. The reader applies exactly that rule, so saving into
+# such a place would report success and then run unauthenticated anyway.
+
+
+def test_the_config_directory_is_created_private_whatever_the_umask(
+    config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ensure_directory` leaves the mode to the umask, which is right for
+    settings and wrong for a credential: 002 would produce a directory the
+    reader then refuses to take a key out of."""
+    previous = os.umask(0o002)
+    try:
+        credentials.save_key(KEY)
+    finally:
+        os.umask(previous)
+    assert mode_of(config_home) == 0o700
+
+
+def test_a_key_saved_under_a_loose_umask_is_read_back(config_home: Path) -> None:
+    """The round trip is the thing that matters: save must produce something
+    the reader's own defences accept, on any machine."""
+    previous = os.umask(0o022)
+    try:
+        credentials.save_key(KEY)
+    finally:
+        os.umask(previous)
+    assert registry.wallhaven_api_key() == KEY
+
+
+def test_a_directory_others_can_write_to_is_mended_rather_than_refused(
+    config_home: Path,
+) -> None:
+    """The directory is ours either way, and taking access away from other
+    users cannot break anything -- so this fault is worth fixing silently."""
+    config_home.mkdir(parents=True)
+    config_home.chmod(0o777)
+    try:
+        credentials.save_key(KEY)
+    finally:
+        config_home.chmod(0o700)
+    assert mode_of(config_home) == 0o700
+    assert registry.wallhaven_api_key() == KEY
+
+
+def test_a_symlinked_config_directory_is_refused_rather_than_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whose directory this really is was somebody else's decision, not ours."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link_home = tmp_path / "linked"
+    link_home.mkdir()
+    (link_home / "wall-in-one").symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(link_home))
+    with pytest.raises(ProviderError) as caught:
+        credentials.save_key(KEY)
+    assert caught.value.kind == "local-io"
+    assert "symbolic link" in str(caught.value)
+
+
+def test_a_refused_directory_is_left_without_debris(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusing has to happen before anything is written, not after."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link_home = tmp_path / "linked"
+    link_home.mkdir()
+    (link_home / "wall-in-one").symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(link_home))
+    with pytest.raises(ProviderError):
+        credentials.save_key(KEY)
+    assert list(real.iterdir()) == []
+
+
+def test_the_saved_key_never_appears_in_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link_home = tmp_path / "linked"
+    link_home.mkdir()
+    (link_home / "wall-in-one").symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(link_home))
+    with pytest.raises(ProviderError) as caught:
+        credentials.save_key(KEY)
+    assert KEY not in str(caught.value)
+
+
+def test_the_writer_and_the_reader_agree_on_what_is_safe(config_home: Path) -> None:
+    """One function decides, so the two halves cannot drift apart."""
+    config_home.mkdir(parents=True)
+    config_home.chmod(0o700)
+    assert registry.key_directory_fault(config_home) == ""
+    credentials.save_key(KEY)
+    assert registry.wallhaven_api_key() == KEY

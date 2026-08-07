@@ -551,6 +551,9 @@ Noctalia directories; every write went to a sandboxed XDG home or `tmp_path`.
 | the whole suite runs packaged | `nix build` check phase | 638 passed, 0 skipped, where it had been 608 passed / 29 skipped / 1 failed |
 | every gate | `nix flake check` | all five checks pass |
 
+| the grid survives a real library | 600 synthetic wallpapers, profiled | first show 367 ms, rescan 15 ms, ~196 MB resident. Three costs found by measuring rather than reading: a full tile rebuild on every rescan (620 ms), `Gdk.Texture` decoding on the main thread (372 ms), and eager popover construction (160 ms) |
+| the app survives its own socket failing | a 95-character runtime directory | window comes up, warning on stderr. Before the fix this killed startup outright -- `Gio.SocketService` bound without complaint and the `chmod` two lines later raised `FileNotFoundError` inside `do_startup` |
+| `ctl` cannot be talked into deleting the wrong thing | `remove` against a live instance | `/etc/passwd` refused as not in the library, a relative path refused, a download deleted with its sidecar, one of the user's own refused rather than unlinked when the trash was on another filesystem |
 | stills come out usable | took one from the real 24.7 MB 4K video | 1.0 s, full 3840x2160, mean luma 0.31 -- a real frame, not the black opening the three-second seek exists to avoid; found afterwards by both the sidecar and the directory convention |
 
 | favourites survive the round trip | starred through the real buttons, reloaded | view narrows, search combines with it, persists, and reflecting the store fires no spurious toggles |

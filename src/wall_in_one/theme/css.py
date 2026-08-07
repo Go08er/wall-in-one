@@ -156,6 +156,34 @@ window.background.csd {{
     border-radius: 6px;
     padding: 2px 6px;
 }}
+
+/* The star cannot carry its own state: in several icon themes -- Papirus
+   among them -- `starred-symbolic` and `non-starred-symbolic` are both solid
+   stars, and once symbolic recolouring flattens them they are the same
+   picture. So the colour says it, from the palette rather than from whatever
+   the icon theme happened to ship. */
+.wio-star {{
+    color: {on_primary.hex};
+    opacity: 0.55;
+}}
+
+.wio-star:checked {{
+    color: {primary.hex};
+    opacity: 1;
+}}
+
+/* Both overlay buttons stay out of the way until the tile is pointed at or
+   focused, so five tiles are five wallpapers rather than ten buttons. */
+.wio-tile-action {{
+    opacity: 0;
+}}
+
+.wio-tile:hover .wio-tile-action,
+.wio-tile-action:focus,
+.wio-tile-action:focus-within,
+.wio-tile-action:checked {{
+    opacity: 1;
+}}
 """.strip()
 
 

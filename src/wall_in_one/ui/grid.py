@@ -61,6 +61,8 @@ class WallpaperTile(Gtk.Box):
         self._star.set_margin_end(6)
         self._star.add_css_class("circular")
         self._star.add_css_class("osd")
+        self._star.add_css_class("wio-star")
+        self._star.add_css_class("wio-tile-action")
         self._star.set_tooltip_text("Add to favourites")
         #: Set while the star is being moved to match the store rather than by
         #: a click. Without it, reflecting the state would look like a click
@@ -80,6 +82,7 @@ class WallpaperTile(Gtk.Box):
         self._menu.set_margin_end(6)
         self._menu.add_css_class("circular")
         self._menu.add_css_class("osd")
+        self._menu.add_css_class("wio-tile-action")
         self._menu.set_tooltip_text(f"Actions for {item.name}")
         frame.add_overlay(self._menu)
 

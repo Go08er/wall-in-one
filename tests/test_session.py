@@ -290,3 +290,99 @@ def test_shutdown_stops_the_renderer(applied_paths: list[Path]) -> None:
     )
     session.shutdown()
     assert fake.stops >= 1
+
+
+# -- configured roots -----------------------------------------------------
+
+
+def test_a_rescan_uses_the_configured_roots(applied_paths: list[Path]) -> None:
+    """Resolved in `refresh` rather than at each call site, so that every path
+    into a rescan honours the setting without having to remember to."""
+    asked: list[object] = []
+
+    def scanner(roots: Sequence[Path] | None) -> Library:
+        asked.append(roots)
+        return Library(roots=(), items=())
+
+    session = Session(
+        replace(config.Settings(), roots=(Path("/one"), Path("/two"))).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    session.refresh()
+    assert asked == [(Path("/one"), Path("/two"))]
+
+
+def test_no_configured_roots_leaves_the_scanner_to_decide(applied_paths: list[Path]) -> None:
+    """`None` is what makes `library.scan` fall back to asking Noctalia."""
+    asked: list[object] = []
+
+    def scanner(roots: Sequence[Path] | None) -> Library:
+        asked.append(roots)
+        return Library(roots=(), items=())
+
+    session = Session(
+        config.Settings().validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    session.refresh()
+    assert asked == [None]
+
+
+def test_an_explicit_root_still_wins_over_the_configured_ones(
+    applied_paths: list[Path],
+) -> None:
+    asked: list[object] = []
+
+    def scanner(roots: Sequence[Path] | None) -> Library:
+        asked.append(roots)
+        return Library(roots=(), items=())
+
+    session = Session(
+        replace(config.Settings(), roots=(Path("/one"),)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    session.refresh([Path("/elsewhere")])
+    assert asked == [[Path("/elsewhere")]]
+
+
+def test_changing_the_roots_rescans_immediately(applied_paths: list[Path]) -> None:
+    """Otherwise a folder the user just added stays invisible until relaunch."""
+    scans = 0
+
+    def scanner(_roots: Sequence[Path] | None) -> Library:
+        nonlocal scans
+        scans += 1
+        return Library(roots=(), items=())
+
+    session = Session(
+        config.Settings().validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    session.refresh()
+    assert scans == 1
+    session.update_settings(replace(session.settings, roots=(Path("/new"),)))
+    assert scans == 2
+
+
+def test_settings_that_do_not_touch_the_roots_do_not_rescan(
+    applied_paths: list[Path],
+) -> None:
+    scans = 0
+
+    def scanner(_roots: Sequence[Path] | None) -> Library:
+        nonlocal scans
+        scans += 1
+        return Library(roots=(), items=())
+
+    session = Session(
+        config.Settings().validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    session.refresh()
+    session.update_settings(replace(session.settings, opacity=0.5))
+    assert scans == 1

@@ -229,7 +229,11 @@ class BrowseDialog(Adw.Dialog):
     def __init__(self, application: Application) -> None:
         super().__init__()
         self._app = application
-        self._browser = Browser()
+        # Downloads land in the first configured root, because that is the one
+        # the user put first. With none configured the Browser asks
+        # `library.scan`, which is the directory being read from anyway.
+        configured = application.settings.roots
+        self._browser = Browser(root=configured[0] if configured else None)
         self._loader = PreviewLoader(self._browser)
         # Separate pools: a 40 MB video download must not hold up the next
         # search, and two searches at once would only fight over the cache.

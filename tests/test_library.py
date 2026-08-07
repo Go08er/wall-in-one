@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one import config
 from wall_in_one.library import pairing, scan
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 from wall_in_one.library.playlist import Playlist
@@ -342,3 +343,67 @@ def test_set_items_falls_back_to_the_start_when_it_does_not() -> None:
     playlist.set_items(remaining)
     current = playlist.current()
     assert current is not None and current.name == "0"
+
+
+# -- configured roots -----------------------------------------------------
+#
+# The library used to be whatever Noctalia's single `wallpaper.directory` said.
+# Anyone whose wallpapers sat in two places saw half of them, with nothing
+# anywhere to say so.
+
+
+def test_roots_default_to_empty_meaning_ask_noctalia() -> None:
+    assert config.Settings().roots == ()
+
+
+def test_roots_survive_a_toml_round_trip(tmp_path: Path) -> None:
+    settings = config.Settings(roots=(tmp_path / "one", tmp_path / "two"))
+    written = tmp_path / "settings.toml"
+    config.save(settings, written)
+    assert config.load(written).roots == (tmp_path / "one", tmp_path / "two")
+
+
+def test_an_empty_root_list_survives_the_round_trip(tmp_path: Path) -> None:
+    """It is written out rather than omitted: a setting nobody can see is a
+    setting nobody knows they have."""
+    written = tmp_path / "settings.toml"
+    config.save(config.Settings(), written)
+    assert "roots = []" in written.read_text(encoding="utf-8")
+    assert config.load(written).roots == ()
+
+
+def test_a_root_with_an_awkward_name_survives(tmp_path: Path) -> None:
+    """A quote or a backslash in a directory name must not produce bad TOML."""
+    awkward = tmp_path / 'quote"and\\slash'
+    written = tmp_path / "settings.toml"
+    config.save(config.Settings(roots=(awkward,)), written)
+    assert config.load(written).roots == (awkward,)
+
+
+def test_a_duplicate_root_is_dropped(tmp_path: Path) -> None:
+    """Scanning a directory twice would put everything in it into the
+    rotation twice."""
+    settings = config.Settings(roots=(tmp_path, tmp_path)).validated()
+    assert settings.roots == (tmp_path,)
+
+
+def test_a_root_written_with_a_tilde_is_the_same_root_expanded() -> None:
+    """`~/Pictures` and `/home/you/Pictures` are the duplicate a person adds."""
+    settings = config.Settings(roots=(Path("~/Pictures"), Path.home() / "Pictures")).validated()
+    assert settings.roots == (Path.home() / "Pictures",)
+
+
+def test_root_order_is_kept_because_the_first_one_receives_downloads(
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "b", tmp_path / "a"
+    assert config.Settings(roots=(first, second)).validated().roots == (first, second)
+
+
+def test_a_roots_entry_that_is_not_a_string_costs_only_that_entry() -> None:
+    raw = {"roots": ["/one", 7, "", "/two"]}
+    assert config.Settings.from_mapping(raw).roots == (Path("/one"), Path("/two"))
+
+
+def test_roots_that_are_not_a_list_are_ignored_rather_than_fatal() -> None:
+    assert config.Settings.from_mapping({"roots": "/one"}).roots == ()

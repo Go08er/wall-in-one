@@ -7,8 +7,11 @@ duplicated here, so there is only ever one source of truth.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Self
@@ -23,6 +26,25 @@ MIN_OPACITY: Final = 0.30
 
 class ConfigError(Exception):
     """The settings file could not be read or was malformed."""
+
+
+def _tidy_roots(roots: Sequence[Path]) -> tuple[Path, ...]:
+    """Absolute, `~`-expanded, in order, with the duplicates dropped.
+
+    Scanning the same directory twice would put every wallpaper in it into the
+    rotation twice, and an entry that only *looks* different -- `~/Pictures`
+    against `/home/you/Pictures` -- is exactly the duplicate a person would add
+    by accident. Order is kept because the first root is where downloads and
+    generated stills land, which makes it the user's choice rather than ours.
+    """
+    seen: dict[Path, None] = {}
+    for root in roots:
+        expanded = Path(root).expanduser()
+        with contextlib.suppress(OSError):
+            expanded = expanded.absolute()
+        if str(expanded):
+            seen.setdefault(expanded, None)
+    return tuple(seen)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +72,13 @@ class Settings:
     #: so this is a performance control as much as a battery one.
     dynamics_enabled: bool = True
 
+    #: Directories to scan for wallpapers. Empty means "whatever
+    #: `library.scan.default_roots` decides", which follows Noctalia's own
+    #: `wallpaper.directory`. That is the right default and the wrong thing to
+    #: be stuck with: Noctalia has exactly one, so a library spread across two
+    #: places was previously half invisible with no way to say so.
+    roots: tuple[Path, ...] = ()
+
     def validated(self) -> Self:
         """Clamp and correct anything out of range rather than failing.
 
@@ -64,6 +93,7 @@ class Settings:
             opacity=opacity,
             preview_scheme=scheme,
             cycle_interval=interval,
+            roots=_tidy_roots(self.roots),
         )
 
     @classmethod
@@ -84,6 +114,14 @@ class Settings:
             value = raw.get(key, fallback)
             return value if isinstance(value, str) else fallback
 
+        def directories(key: str) -> tuple[Path, ...]:
+            value = raw.get(key)
+            if not isinstance(value, list):
+                return ()
+            # Each entry is checked on its own: one bad line in a hand-edited
+            # file should cost that line, not the whole list.
+            return tuple(Path(entry) for entry in value if isinstance(entry, str) and entry.strip())
+
         return cls(
             opacity=number("opacity", 1.0),
             preview_scheme=text("preview_scheme", DEFAULT_SCHEME),
@@ -92,12 +130,14 @@ class Settings:
             cycle_enabled=boolean("cycle_enabled", False),
             shuffle=boolean("shuffle", False),
             dynamics_enabled=boolean("dynamics_enabled", True),
+            roots=directories("roots"),
         ).validated()
 
     def to_toml(self) -> str:
         lines = (
             "# wall-in-one settings",
             "",
+            _roots_line(self.roots),
             f"opacity = {self.opacity:.2f}",
             f'preview_scheme = "{self.preview_scheme}"',
             f"follow_noctalia_palette = {str(self.follow_noctalia_palette).lower()}",
@@ -107,6 +147,21 @@ class Settings:
             f"dynamics_enabled = {str(self.dynamics_enabled).lower()}",
         )
         return "\n".join(lines) + "\n"
+
+
+def _roots_line(roots: Sequence[Path]) -> str:
+    """The `roots` array, written so a person can edit it by hand.
+
+    Empty is written as an empty array with the default spelled out beside it,
+    rather than omitted: a setting nobody can see is a setting nobody knows
+    they have.
+    """
+    if not roots:
+        return "# empty follows Noctalia's own wallpaper directory\nroots = []"
+    # A TOML basic string takes the same escapes a JSON string does, which is
+    # what keeps a directory with a quote or a backslash in its name writable.
+    inner = ", ".join(json.dumps(str(root)) for root in roots)
+    return f"roots = [{inner}]"
 
 
 def load(path: Path | None = None) -> Settings:

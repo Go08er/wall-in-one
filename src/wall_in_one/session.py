@@ -73,7 +73,16 @@ class Session:
     # -- library ---------------------------------------------------------
 
     def refresh(self, roots: Sequence[Path] | None = None) -> Library:
-        """Rescan and rebuild the play order, keeping our place if we can."""
+        """Rescan and rebuild the play order, keeping our place if we can.
+
+        With no roots given, the configured ones are used, and only when there
+        are none does `library.scan` fall back to asking Noctalia. Resolving it
+        here rather than at each call site is what makes every path into a
+        rescan -- startup, the refresh button, a finished download -- honour
+        the setting without having to remember to.
+        """
+        if roots is None and self._settings.roots:
+            roots = self._settings.roots
         self._library = self._scan(roots)
         self._rebuild_playlist()
         return self._library
@@ -137,6 +146,12 @@ class Session:
 
         if settings.shuffle != previous.shuffle:
             self._playlist.set_shuffle(settings.shuffle)
+
+        if settings.roots != previous.roots:
+            # Nothing else notices: the library is only re-read when something
+            # asks, and a root the user just added would stay invisible until
+            # the next launch.
+            self.refresh()
 
         if settings.dynamics_enabled != previous.dynamics_enabled:
             # Pausing a video with no still used to mean jumping to an unrelated

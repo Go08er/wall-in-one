@@ -7,16 +7,18 @@ interval, and dynamics.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config
+from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.providers.base import ProviderError
 from wall_in_one.theme import source
@@ -40,6 +42,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.set_title("Settings")
         page = Adw.PreferencesPage()
+        page.add(self._build_library_group())
         page.add(self._build_playback_group())
         page.add(self._build_providers_group())
         page.add(self._build_colour_group())
@@ -47,10 +50,105 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.add(page)
 
         self._load(application.settings)
+        self._refresh_roots()
         self._refresh_api_key_status()
         self.show_palette(application.resolved_palette)
 
     # -- construction ----------------------------------------------------
+
+    def _build_library_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(
+            title="Library",
+            description=(
+                "Folders scanned for wallpapers. With none listed, Noctalia's "
+                "own wallpaper directory is used. Downloads and generated "
+                "stills go into the first one."
+            ),
+        )
+        add = Gtk.Button(icon_name="folder-new-symbolic", tooltip_text="Add a folder")
+        add.set_valign(Gtk.Align.CENTER)
+        add.add_css_class("flat")
+        add.connect("clicked", self._on_add_root)
+        group.set_header_suffix(add)
+
+        # Rebuilt wholesale on every change: a handful of rows, and tracking
+        # which one moved would be more code than making them again.
+        self._roots_group = group
+        self._root_rows: list[Gtk.Widget] = []
+        return group
+
+    def _refresh_roots(self) -> None:
+        for row in self._root_rows:
+            self._roots_group.remove(row)
+        self._root_rows = []
+
+        roots = self._app.settings.roots
+        if not roots:
+            row = Adw.ActionRow(
+                title="Following Noctalia",
+                subtitle=self._noctalia_root_subtitle(),
+            )
+            self._roots_group.add(row)
+            self._root_rows.append(row)
+            return
+
+        for index, root in enumerate(roots):
+            row = Adw.ActionRow(title=root.name or str(root), subtitle=str(root))
+            if index == 0:
+                row.add_prefix(Gtk.Image(icon_name="folder-download-symbolic"))
+                row.set_tooltip_text("Downloads and generated stills go here")
+            if not root.is_dir():
+                # Said plainly rather than dropped: a folder on a drive that is
+                # not mounted should come back when it is, not disappear.
+                row.set_subtitle(f"{root} -- not there right now")
+                row.add_css_class("warning")
+            remove = Gtk.Button(icon_name="list-remove-symbolic", tooltip_text="Remove")
+            remove.set_valign(Gtk.Align.CENTER)
+            remove.add_css_class("flat")
+            remove.connect("clicked", self._make_root_remover(root))
+            row.add_suffix(remove)
+            self._roots_group.add(row)
+            self._root_rows.append(row)
+
+    def _noctalia_root_subtitle(self) -> str:
+        found = scan.default_roots()
+        return str(found[0]) if found else "no wallpaper directory found"
+
+    def _make_root_remover(self, root: Path) -> Any:
+        def remove(_button: Gtk.Button) -> None:
+            self._set_roots(tuple(r for r in self._app.settings.roots if r != root))
+
+        return remove
+
+    def _set_roots(self, roots: tuple[Path, ...]) -> None:
+        self._app.update_settings(roots=roots)
+        self._refresh_roots()
+
+    def _on_add_root(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileDialog(title="Add a wallpaper folder", modal=True)
+        dialog.select_folder(self._window_for_dialog(), None, self._on_root_chosen)
+
+    def _window_for_dialog(self) -> Gtk.Window | None:
+        root = self.get_root()
+        return root if isinstance(root, Gtk.Window) else None
+
+    def _on_root_chosen(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+        try:
+            chosen = dialog.select_folder_finish(result)
+        except GLib.Error:
+            # The only realistic error here is the user dismissing the chooser,
+            # and a toast saying so would be noise.
+            return
+        path = chosen.get_path() if chosen is not None else None
+        if path is None:
+            self._report("That folder is not on this machine's filesystem")
+            return
+        added = Path(path)
+        if added in self._app.settings.roots:
+            self._report(f"{added.name} is already in the library")
+            return
+        self._set_roots((*self._app.settings.roots, added))
+        self._report(f"Scanning {added.name}")
 
     def _build_playback_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="Playback")

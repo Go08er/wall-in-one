@@ -507,8 +507,13 @@ write goes to `tmp_path`.
 
 Gates: `ruff` clean, `mypy --strict` clean, 182 tests green (36 new).
 
-Not proven: the browser has never been on screen. Layout, the ten-card grid,
-and the colour-picker rows are correct by construction and by API check only.
+Since revisited. The browser has been opened in the running app -- over
+`org.gtk.Actions` on the session bus, which is also how the other dialogues get
+driven from a terminal -- and its tree read back: four groups (Built-in,
+Community, Custom, Legacy), all ten built-in palettes discovered with nothing
+skipped, and a card for every one of the ten generators with its swatch strip
+and buttons. What is still unconfirmed is only how it *looks*: the layout has
+been checked for existing, not for being right.
 
 ### How the post-step-8 work was proven
 

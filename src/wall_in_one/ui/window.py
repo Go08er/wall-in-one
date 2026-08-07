@@ -175,6 +175,7 @@ class MainWindow(Adw.ApplicationWindow):
         for name, handler in (
             ("apply-wallpaper", self._on_apply_path),
             ("remove-wallpaper", self._on_remove_path),
+            ("favourite-wallpaper", self._on_favourite_path),
         ):
             targeted = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
             targeted.connect("activate", handler)
@@ -407,6 +408,17 @@ class MainWindow(Adw.ApplicationWindow):
         apply_item = Gio.MenuItem.new("Set as wallpaper", None)
         apply_item.set_action_and_target_value("win.apply-wallpaper", target)
         menu.append_item(apply_item)
+
+        # Also in the menu, not only on the star. The star is hidden until the
+        # tile is hovered or focused, which keeps the grid readable but leaves
+        # favouriting undiscoverable for anyone who never hovers -- and the
+        # menu is where someone looks for "what can I do with this one".
+        starred = item.path in self._favourites.paths
+        favourite_item = Gio.MenuItem.new(
+            "Remove from favourites" if starred else "Add to favourites", None
+        )
+        favourite_item.set_action_and_target_value("win.favourite-wallpaper", target)
+        menu.append_item(favourite_item)
         remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
         remove_item.set_action_and_target_value("win.remove-wallpaper", target)
         menu.append_item(remove_item)
@@ -421,6 +433,12 @@ class MainWindow(Adw.ApplicationWindow):
         item = self._item_at(raw)
         if item is not None:
             self._on_tile_activated(item)
+
+    def _on_favourite_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        """Flip the star from the menu. Same path as clicking it."""
+        item = self._item_at(raw)
+        if item is not None:
+            self._on_favourite(item, item.path not in self._favourites.paths)
 
     def _on_remove_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Ask before an unlink, but not before a trip to the trash.

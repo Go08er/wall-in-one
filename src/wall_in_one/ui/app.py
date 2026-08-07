@@ -24,6 +24,7 @@ from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
 from wall_in_one.theme import css, source
+from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import MainWindow
 from wall_in_one.wallpaper.applier import Applied, ApplyError
 
@@ -58,6 +59,7 @@ class Application(Adw.Application):
         self._session = Session(self._settings)
         self._cycle_source: int = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
+        self._stills = StillMaker()
 
     # -- lifecycle -------------------------------------------------------
 
@@ -84,6 +86,7 @@ class Application(Adw.Application):
 
     def do_shutdown(self) -> None:
         self._stop_cycle()
+        self._stills.shutdown()
         self._session.shutdown()
         if self._browse_jobs is not None:
             # Not waiting: a download in flight stages its bytes under a
@@ -157,6 +160,33 @@ class Application(Adw.Application):
         self._session.sync_with_noctalia()
         if self._window is not None:
             self._window.show_library(self._session)
+        self._make_missing_stills()
+
+    def _make_missing_stills(self) -> None:
+        """Fill in the stills for videos that have none, in the background.
+
+        Without this a video only gets its still at the moment dynamics are
+        switched off, and only the one video that was playing. Every other one
+        keeps dropping out of the rotation when dynamics are off, and keeps
+        leaving Noctalia's palette derived from whatever was on screen before.
+        """
+        # The root the scan actually read from, rather than `download_root`'s
+        # answer: that one is allowed to be None so the Browser can decide for
+        # itself, and a still has to go somewhere `pairing` will look, which
+        # means somewhere the library is read from.
+        roots = self._session.library.roots
+        if not roots:
+            return
+        self._stills.request(self._session.library.items, roots[0], self._on_stills_made)
+
+    def _on_stills_made(self, made: int) -> None:
+        """A batch finished, so the pairings it wrote are worth re-reading.
+
+        Safe against looping: `StillMaker` remembers every video it has
+        attempted, so this rescan cannot queue the same work again.
+        """
+        del made
+        self.refresh_library()
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         """Run a navigation action and report it, without letting it kill the app."""

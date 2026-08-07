@@ -576,7 +576,20 @@ each step is independently useful if the next never happens.
 - [ ] **14. Per-display assignment.** Each output gets a default playlist and
       its own schedule and engine settings. Requires the leader-display rule
       above for palettes, and turns the single `output` setting into a map.
-- [ ] **15. Wallpaper Engine.** The largest piece and the one with a real
+- [~] **15. Wallpaper Engine.** Half done, and the survey moved the goalposts
+      in a good direction.
+      **Surveyed first, against the 49 items installed here.** 45 of them are
+      `type: video` whose entry file is a real `.mp4` -- those need nothing but
+      mpvpaper, which this app already drives, and they are in the library now.
+      Only **4** are `scene`, whose `file` names a `scene.json` that does not
+      exist on disk because the content is packed inside `scene.pkg`; those are
+      what actually need `linux-wallpaperengine`, and they are reported by
+      `workshop.unplayable` rather than hidden. The type is spelled both `video`
+      and `Video` in the real content, so it is compared case-folded -- trusting
+      the casing hid eight wallpapers. Steam's files are `Ownership.USER`
+      without exception, so removal refuses them.
+      **Still to do:** the scene renderer for those four.
+      The largest piece and the one with a real
       question in front of it. It needs a third renderer alongside mpvpaper and
       Noctalia stills, Workshop scanning under Steam's directories, and
       `--screenshot` capture for pairings. **Open: this machine already runs the

@@ -17,8 +17,11 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import paths
-from wall_in_one.library import pairing, pairings
-from wall_in_one.library.model import Library, MediaItem, Ownership, classify
+from wall_in_one.library import pairing, pairings, workshop
+from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
+
+#: What a Wallpaper Engine wallpaper is labelled as in the grid.
+WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
 
 #: Ceilings for one scan.
 MAX_ITEMS: Final = 4096
@@ -151,9 +154,42 @@ def _walk(root: Path, budget: list[int], skipped: list[str]) -> Iterable[Path]:
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
+def workshop_items() -> tuple[MediaItem, ...]:
+    """Installed Wallpaper Engine wallpapers this app can already play.
+
+    `Ownership.USER` without exception: these are Steam's files, in Steam's
+    directories, and `library.manage` must refuse to delete one however
+    managed the surrounding tree looks. The scenes are left out because there
+    is nothing yet that can render one -- `library.workshop.unplayable` is how
+    a caller says how many were passed over.
+    """
+    found: list[MediaItem] = []
+    for item in workshop.videos(workshop.scan()):
+        entry = item.entry
+        if entry is None:
+            continue
+        try:
+            info = entry.stat()
+        except OSError:
+            continue
+        found.append(
+            MediaItem(
+                path=entry,
+                kind=Kind.VIDEO,
+                size=info.st_size,
+                mtime=int(info.st_mtime),
+                ownership=Ownership.USER,
+                provider=WORKSHOP_PROVIDER,
+            )
+        )
+    return tuple(found)
+
+
 def scan(
     roots: Sequence[Path] | None = None,
     records: Mapping[str, pairings.Pairing] | None = None,
+    *,
+    include_workshop: bool = False,
 ) -> Library:
     """Build a `Library` from ``roots`` (or the default roots).
 
@@ -215,6 +251,14 @@ def scan(
                     provider=provider,
                 )
             )
+
+    if include_workshop:
+        # After the roots, so a wallpaper somebody has copied into their own
+        # library wins over the Steam copy of it -- `seen` keeps the first.
+        for item in workshop_items():
+            if item.path not in seen:
+                seen.add(item.path)
+                items.append(item)
 
     items.sort(key=lambda item: (item.path.parent.as_posix(), item.name.lower()))
     paired = pairings.apply(items, resolved_roots, records)

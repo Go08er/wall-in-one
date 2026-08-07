@@ -44,6 +44,16 @@ SIDECAR_STILL_KEY: Final = "still_path"
 #: Suffix on a hand-made still, before the extension.
 STILL_NAME_SUFFIX: Final = "-still"
 
+#: What Wallpaper Engine calls the picture it ships beside a wallpaper.
+#:
+#: Deliberately *not* used as a still, and not as the source for one. Measured
+#: against the real content: they run from 192x192 to 1080x1080, so a still
+#: taken from one puts a thumbnail on a 4K screen and hands Noctalia a
+#: thumbnail to derive 72 colour tokens from. They are the right size for a
+#: grid tile and the wrong size for a wallpaper, which is the whole difference
+#: between `thumbnails` and `stills`.
+PREVIEW_STEM: Final = "preview"
+
 #: A sidecar is a few hundred bytes. Anything larger is not one of ours.
 MAX_SIDECAR_BYTES: Final = 64 * 1024
 
@@ -111,6 +121,20 @@ def _sibling_still(video: Path) -> Path | None:
             candidate = video.with_name(stem + extension)
             if candidate != video and candidate.is_file():
                 return candidate
+    return None
+
+
+def preview_beside(video: Path) -> Path | None:
+    """A `preview.*` in the same directory, whatever kind of file it is.
+
+    Here for `thumbnails`, which wants a small picture, and not for `stills`,
+    which wants a wallpaper. See `PREVIEW_STEM`.
+    """
+    directory = video.parent
+    for extension in (*_still_extensions(), ".gif", ".mp4", ".webm"):
+        candidate = directory / f"{PREVIEW_STEM}{extension}"
+        if candidate != video and candidate.is_file():
+            return candidate
     return None
 
 

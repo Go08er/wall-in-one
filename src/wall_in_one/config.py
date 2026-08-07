@@ -92,6 +92,12 @@ class Settings:
     #: and what mpvpaper's `ALL` does for videos.
     output: str = ""
 
+    #: Include Wallpaper Engine wallpapers installed through Steam. On by
+    #: default because finding them costs one directory listing and somebody
+    #: with none simply has none; off is for anyone who keeps the two
+    #: collections deliberately apart.
+    scan_workshop: bool = True
+
     #: Which named playlist the rotation follows, by id or name. Empty means
     #: the whole library. Ignored when it would leave nothing to rotate
     #: through -- see `library.playlists.rotation`.
@@ -171,6 +177,7 @@ class Settings:
             video_when_hidden=text("video_when_hidden", renderer.DEFAULT_WHEN_HIDDEN),
             cycle_favourites_only=boolean("cycle_favourites_only", False),
             active_playlist=text("active_playlist", ""),
+            scan_workshop=boolean("scan_workshop", True),
             output=text("output", ""),
             roots=directories("roots"),
         ).validated()
@@ -192,6 +199,7 @@ class Settings:
             f'video_when_hidden = "{self.video_when_hidden}"',
             f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
             f'active_playlist = "{self.active_playlist}"',
+            f"scan_workshop = {str(self.scan_workshop).lower()}",
             f'output = "{self.output}"',
         )
         return "\n".join(lines) + "\n"

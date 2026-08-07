@@ -137,7 +137,7 @@ def generate(video: Path, root: Path, *, force: bool = False) -> Path:
 
     target = destination(video, root)
     if not force and target.is_file() and target.stat().st_size > 0:
-        write_sidecar(video, target)
+        _record_beside(video, target, root)
         return target
 
     try:
@@ -165,8 +165,27 @@ def generate(video: Path, root: Path, *, force: bool = False) -> Path:
         temporary.unlink(missing_ok=True)
         raise StillError(f"could not write {target}: {error.strerror or error}") from error
 
-    write_sidecar(video, target)
+    _record_beside(video, target, root)
     return target
+
+
+def _record_beside(video: Path, still: Path, root: Path) -> None:
+    """Write the sidecar, but only into a directory this app is entitled to.
+
+    A Wallpaper Engine wallpaper lives in Steam's Workshop tree, and writing
+    into it is not ours to do -- Steam may replace the directory wholesale, and
+    a foreign file in there is litter in somebody else's collection. The still
+    itself lands under the managed `Automatic Stills` directory either way, and
+    `pairing` finds it there by name, so the sidecar is belt to that braces
+    rather than the only record.
+    """
+    try:
+        inside = video.is_relative_to(root)
+    except (OSError, ValueError):
+        inside = False
+    if not inside:
+        return
+    write_sidecar(video, still)
 
 
 def ensure(item: MediaItem, root: Path) -> Path | None:

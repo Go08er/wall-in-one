@@ -156,16 +156,19 @@ def test_a_file_that_is_not_a_video_leaves_no_torn_still(root: Path, tmp_path: P
 # -- pairing the two -----------------------------------------------------
 
 
-def test_generating_writes_a_sidecar_the_reader_understands(root: Path, tmp_path: Path) -> None:
-    """The end-to-end claim: what the write half produces, the read half finds."""
-    video = make_video(tmp_path / "clip.mp4")
+def test_generating_writes_a_sidecar_the_reader_understands(root: Path) -> None:
+    """The end-to-end claim: what the write half produces, the read half finds.
+
+    The video is inside the root, which is where a scanned one always is.
+    """
+    video = make_video(root / "clip.mp4")
     still = stills.generate(video, root)
     assert pairing.read_sidecar(video) == still
 
 
-def test_the_still_is_found_by_the_managed_directory_alone(root: Path, tmp_path: Path) -> None:
+def test_the_still_is_found_by_the_managed_directory_alone(root: Path) -> None:
     """Even with the sidecar gone, the convention still locates it."""
-    video = make_video(tmp_path / "clip.mp4")
+    video = make_video(root / "clip.mp4")
     still = stills.generate(video, root)
     video.with_name(video.name + pairing.SIDECAR_SUFFIX).unlink()
     assert pairing.find_still(video, roots=(root,)) == still
@@ -348,3 +351,62 @@ def test_a_video_that_ffmpeg_cannot_read_still_falls_back(applied: list[Path], r
     session.update_settings(replace(session.settings, dynamics_enabled=False))
 
     assert applied[-1] == fallback
+
+
+# -- somebody else's directory --------------------------------------------
+
+
+def test_no_sidecar_is_written_beside_a_video_outside_the_library(
+    root: Path, tmp_path: Path
+) -> None:
+    """A Wallpaper Engine wallpaper lives in Steam's Workshop tree. Writing
+    into it is not ours to do: Steam may replace the directory wholesale, and
+    a foreign file in there is litter in somebody else's collection.
+
+    Caught live, after a real run left a sidecar in the developer's Steam
+    directory.
+    """
+    elsewhere = tmp_path / "steam" / "workshop"
+    video = make_video(elsewhere / "clip.mp4")
+
+    still = stills.generate(video, root)
+
+    assert still.is_file(), "the still itself still gets made"
+    assert list(elsewhere.iterdir()) == [video], "and nothing else appears beside the video"
+
+
+def test_a_still_for_an_outside_video_is_still_found_afterwards(root: Path, tmp_path: Path) -> None:
+    """Which is why skipping the sidecar costs nothing: the still lands in the
+    managed directory and the convention finds it there by name."""
+    video = make_video(tmp_path / "steam" / "clip.mp4")
+    still = stills.generate(video, root)
+    assert pairing.find_still(video, roots=(root,)) == still
+
+
+def test_a_still_is_taken_at_the_wallpapers_own_resolution(root: Path) -> None:
+    """Not the preview's. Wallpaper Engine ships previews between 192x192 and
+    1080x1080, so taking the still from one would put a thumbnail on a 4K
+    screen and hand Noctalia a thumbnail to derive 72 colour tokens from."""
+    video = make_video(root / "clip.mp4")
+    (root / "preview.gif").write_bytes(b"GIF89a")
+
+    still = stills.generate(video, root)
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            str(still),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.stdout.strip().rstrip(",") == "320,180"

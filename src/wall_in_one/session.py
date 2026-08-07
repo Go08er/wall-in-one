@@ -137,7 +137,11 @@ class Session:
         return self._library
 
     def _scan_with_pairings(self, roots: Sequence[Path] | None) -> Library:
-        return scan.scan(roots, self._pairings.records)
+        return scan.scan(
+            roots,
+            self._pairings.records,
+            include_workshop=self._settings.scan_workshop,
+        )
 
     @property
     def pairings(self) -> pairings.Store:

@@ -230,20 +230,32 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             self._on_activate(tile.item)
 
     def populate(self, items: tuple[MediaItem, ...], current: Path | None = None) -> None:
-        """Rebuild the grid for ``items``, keeping the search and sort in force.
+        """Bring the grid into line with ``items``, keeping search and sort.
 
-        A tile is built and a thumbnail asked for once per item here, and
-        nowhere else. Everything the search and sort controls do afterwards
-        goes through `set_query`, which touches neither.
+        A diff rather than a rebuild. Rescans are not rare any more -- one
+        follows every download and every batch of generated stills -- and
+        tearing down six hundred tiles to build six hundred identical ones
+        costs about six hundred milliseconds of frozen window each time, plus
+        a re-decode of every thumbnail texture that was already on screen.
+
+        A tile is reused when its `MediaItem` is unchanged. The comparison is
+        the whole frozen dataclass on purpose: size and mtime are what the
+        thumbnail cache is keyed on, and kind, pairing, ownership and provider
+        are what the badges say, so anything that moves is something the tile
+        is drawing.
         """
-        while (child := self._flow.get_first_child()) is not None:
-            self._flow.remove(child)
-        self._tiles.clear()
-        self._items = items
+        incoming = {item.path: item for item in items}
+        for path, tile in list(self._tiles.items()):
+            replacement = incoming.get(path)
+            if replacement is None or replacement != tile.item:
+                self._flow.remove(tile)
+                del self._tiles[path]
 
+        self._items = items
         for item in items:
+            if item.path in self._tiles:
+                continue
             tile = WallpaperTile(item)
-            tile.set_current(item.path == current)
             if self._on_favourite is not None:
                 tile.connect_favourite(self._on_favourite)
             if self._menu_for is not None:
@@ -253,6 +265,9 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             self._flow.append(tile)
             self._loader.request(item, self._on_thumbnail)
 
+        # After the diff, because a reused tile keeps whatever it was told last
+        # time and the highlight may have moved since.
+        self.set_current(current)
         self._apply_query()
 
     def _on_thumbnail(self, item: MediaItem, path: Path | None) -> None:

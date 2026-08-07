@@ -13,7 +13,15 @@ these verbs does exactly the same -- none of that machinery lives here, because
 this module has to stay importable and testable with no display attached.
 
 The verb table is kept separate from the transport (`Commands`) so it can be
-tested without a socket or a display.
+tested without a socket or a display. The library verbs added later keep to the
+same line: everything that is only a question about paths and files -- which
+wallpapers a filter names, what a row looks like, which of the two removals a
+file is due -- is here, where a test needs neither. Only what touches the
+running session and the window is in `ui.app`.
+
+One rule governs all of it. A path arriving over this socket is text somebody
+outside the process typed, and it is turned into a wallpaper by looking it up
+in the library rather than by being believed; see `resolve`.
 """
 
 from __future__ import annotations
@@ -21,15 +29,24 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
 from wall_in_one import paths
-from wall_in_one.control.protocol import ProtocolError, Request, Response
+from wall_in_one.control.protocol import (
+    ENCODING,
+    MAX_MESSAGE_BYTES,
+    ProtocolError,
+    Request,
+    Response,
+)
+from wall_in_one.library import filter as library_filter
+from wall_in_one.library import manage
+from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
-from wall_in_one.providers.base import ProviderError, SearchResult
+from wall_in_one.providers.base import SearchResult
 
 #: Handed a response, exactly once, whenever it turns up.
 Reply = Callable[[Response], None]
@@ -61,11 +78,15 @@ Handler = Callable[[str | None], Outcome]
 class Commands(Protocol):
     """What the application must provide for the control surface to work.
 
-    Mirrors the Noctalia plugin's control list: launch, transport, shuffle,
-    cycle, cycle duration, and the dynamics pause. The three browsing verbs are
-    not on the plugin's list -- they exist so that searching for a wallpaper and
-    pulling it into the library are reachable from a terminal or a script
-    without opening the window.
+    Three groups. The first mirrors the Noctalia plugin's control list: launch,
+    transport, shuffle, cycle, cycle duration, and the dynamics pause. The
+    browsing three are not on the plugin's list -- they exist so that searching
+    for a wallpaper and pulling it into the library are reachable from a
+    terminal or a script without opening the window. The library six are there
+    for the same reason and answer the question the other two groups left out:
+    the socket could drive the playback and fill the library, but could not say
+    what was in it, star anything, apply one wallpaper by name, or take one
+    away.
     """
 
     def next_wallpaper(self) -> Response: ...
@@ -77,6 +98,12 @@ class Commands(Protocol):
     def set_dynamics(self, value: str | None) -> Response: ...
     def reload_palette(self) -> Response: ...
     def report_status(self) -> Response: ...
+    def list_library(self, value: str | None) -> Response: ...
+    def select_wallpaper(self, value: str | None) -> Response: ...
+    def list_favourites(self) -> Response: ...
+    def add_favourite(self, value: str | None) -> Response: ...
+    def remove_favourite(self, value: str | None) -> Response: ...
+    def remove_wallpaper(self, value: str | None) -> Response: ...
     def list_providers(self) -> Response: ...
     def search(self, value: str | None) -> Outcome: ...
     def download(self, value: str | None) -> Outcome: ...
@@ -94,6 +121,12 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "dynamics": commands.set_dynamics,
         "reload-palette": lambda _: commands.reload_palette(),
         "status": lambda _: commands.report_status(),
+        "list": commands.list_library,
+        "select": commands.select_wallpaper,
+        "favourites": lambda _: commands.list_favourites(),
+        "favourite": commands.add_favourite,
+        "unfavourite": commands.remove_favourite,
+        "remove": commands.remove_wallpaper,
         "providers": lambda _: commands.list_providers(),
         "search": commands.search,
         "download": commands.download,
@@ -138,6 +171,107 @@ def parse_download(value: str | None) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2] if len(parts) == 3 else ""
 
 
+def parse_list(value: str | None) -> tuple[library_filter.Kinds, str]:
+    """Split ``[everything|stills|videos|favourites] [query]``.
+
+    The kind comes first and the rest is the query, spaces and all, exactly as
+    `parse_search` reads a provider off the front -- so `list videos snow
+    village` is one query and needs no quoting. A first word that names no kind
+    is a usage error rather than a query, because `list videos` would otherwise
+    be ambiguous between the filter and a search for the word.
+
+    The names are `library.filter.Kinds`' own, so the words typed at a socket
+    and the choices in the window's dropdown cannot drift apart.
+    """
+    parts = (value or "").split(maxsplit=1)
+    if not parts:
+        return library_filter.Kinds.EVERYTHING, ""
+    try:
+        kinds = library_filter.Kinds(parts[0].strip().lower())
+    except ValueError:
+        choices = "|".join(choice.value for choice in library_filter.KIND_CHOICES)
+        raise ValueError(f"usage: list [{choices}] [query]") from None
+    return kinds, parts[1].strip() if len(parts) > 1 else ""
+
+
+class UnknownWallpaperError(ValueError):
+    """A path from outside that names no wallpaper in the library.
+
+    A `ValueError`, because it is a bad argument and reads as one. It carries a
+    `kind` as well so that a script can tell it from `manage`'s refusals: "there
+    is no such wallpaper" and "that wallpaper is yours and I will not delete it"
+    are different things to do something about.
+    """
+
+    kind: Final = "not-in-library"
+
+
+def parse_path(value: str | None, *, verb: str) -> Path:
+    """The one absolute path a path verb takes.
+
+    A relative path is refused rather than guessed at. This server's working
+    directory is the window's -- wherever the app was launched from, which for
+    a session started by a compositor is `/` -- and almost never where the
+    person typing `ctl` is standing, so resolving one here would silently name
+    a file in a directory they have never seen. `~` is expanded, because a
+    shell that was not asked to expand it (``ctl remove '~/a.png'``) is a
+    mistake with only one possible meaning.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise ValueError(f"usage: {verb} <path>")
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{verb} needs an absolute path, and {text!r} is relative")
+    return path
+
+
+def resolve(library: Library, value: str | None, *, verb: str) -> MediaItem:
+    """The wallpaper ``value`` names, or a refusal.
+
+    The only way a path from outside this process becomes something the app
+    will act on. It is matched against what the scan actually found rather than
+    trusted, which is what keeps `remove` from being a verb that unlinks
+    whatever string it is handed -- a bug even when the caller is the person
+    who owns the files, because the caller may equally be a script with a stale
+    path or a typo in it.
+
+    The match is exact. A path that says the same thing a different way
+    (`..` in the middle of it, or a route in through a symlinked directory) is
+    refused rather than normalised: resolving it would mean deciding that two
+    strings name one file, and being wrong about that here costs somebody a
+    file. Every path this app prints is one the scan produced, so the way to
+    get one right is to copy it out of `list`.
+    """
+    path = parse_path(value, verb=verb)
+    item = library.find(path)
+    if item is None:
+        raise UnknownWallpaperError(f"not in the library: {path}")
+    return item
+
+
+def remove_wallpaper(item: MediaItem, roots: tuple[Path, ...]) -> str:
+    """Take one wallpaper away, and say which of the two ways it went.
+
+    Here rather than in `ui.app` because nothing about it needs a toolkit, and
+    because it is the one thing this program does that destroys something: it
+    belongs where a test can drive it. All the deciding is `library.manage`'s.
+    Ownership is re-derived from disk there, the user's own files are refused
+    outright, and there is no confirmation on a socket to fall back on -- so
+    there is deliberately no way to ask for the other verb, and no flag that
+    turns a refusal into an unlink.
+
+    The sentence has to say which happened. "Removed" and "moved to the trash"
+    are the same word to a user in a hurry, and only one of them is
+    recoverable.
+    """
+    if item.deletable:
+        result = manage.remove(item, roots)
+        return f"{result.describe()} - deleted, which cannot be undone"
+    landed = manage.trash(item.path)
+    return f"{item.path.name} moved to the trash - {landed}"
+
+
 # -- rendering for a terminal --------------------------------------------
 
 #: Rows are one line each with tab-separated fields, because that is the format
@@ -154,6 +288,15 @@ COMMENT: Final = "# "
 #: Stands in for a field the provider left empty, so a column is never
 #: invisible.
 BLANK: Final = "-"
+
+#: How many bytes of rows one listing may spend. A library is six hundred
+#: wallpapers on this machine and the whole reply has to fit in one frame, so
+#: unlike a page of search results it can genuinely run out of room; saying so
+#: in the summary is the alternative to `Response.encode` refusing the lot and
+#: the caller getting a size error instead of their wallpapers. Half the frame,
+#: because these rows are JSON-escaped into it afterwards and the escaping only
+#: ever grows them.
+LIST_BUDGET: Final = MAX_MESSAGE_BYTES // 2
 
 
 def _field(text: str) -> str:
@@ -228,20 +371,154 @@ def render_search(result: SearchResult) -> str:
     return "\n".join(lines)
 
 
+def _path_field(path: Path) -> str | None:
+    """``path`` as a column, or ``None`` if it cannot honestly be one.
+
+    Unlike a provider's title, a path may not be tidied on the way out: it is
+    the field with a use here -- what `select`, `favourite` and `remove` take
+    back -- so collapsing the whitespace inside it, as `_field` does, would
+    print a key that no longer names the file. Tabs and newlines are this
+    format's structure and cannot be printed at all, so the rare wallpaper
+    carrying one in its name is counted in the summary rather than shown under
+    a name that would not work.
+    """
+    text = str(path)
+    return None if any(character in text for character in "\t\n\r") else text
+
+
+def _within_budget(rows: Sequence[str]) -> tuple[list[str], int]:
+    """As many rows as fit in one reply, and how many did not.
+
+    Truncating in the middle of a row would hand a script half a path, so the
+    cut is always between two of them.
+    """
+    kept: list[str] = []
+    spent = 0
+    for index, row in enumerate(rows):
+        spent += len(row.encode(ENCODING)) + 1
+        if spent > LIST_BUDGET:
+            return kept, len(rows) - index
+        kept.append(row)
+    return kept, 0
+
+
+def render_library(
+    items: Sequence[MediaItem],
+    query: library_filter.Query,
+    favourites: Collection[Path],
+) -> str:
+    """What the library holds, in the rows `search` already writes.
+
+    The selecting and the ordering are `library.filter`'s -- the grid's own --
+    rather than a second matcher written for the socket, so `ctl list videos
+    snow vil` and the window's search box can never disagree about which
+    wallpapers those words name.
+
+    `ownership` is in the columns because it is the field that says what
+    `remove` would do to that file: `managed` is deleted, `user` is moved to
+    the trash, and those are not the same decision.
+    """
+    selected = library_filter.apply(items, query, favourites)
+    starred = frozenset(favourites)
+    rows: list[str] = []
+    unlistable = 0
+    for item in selected:
+        printed = _path_field(item.path)
+        if printed is None:
+            unlistable += 1
+            continue
+        rows.append(
+            SEPARATOR.join(
+                (
+                    printed,
+                    _field(item.kind.value),
+                    _field(item.ownership.value),
+                    "yes" if item.path in starred else "no",
+                )
+            )
+        )
+
+    kept, dropped = _within_budget(rows)
+    parts = [f"{len(kept)} of {len(items)} {library_filter.describe(query)}"]
+    if dropped:
+        parts.append(f"{dropped} more than fit in one reply")
+    if unlistable:
+        parts.append(f"{unlistable} unlistable")
+    return "\n".join(
+        [
+            f"{COMMENT}library: {' - '.join(parts)}",
+            f"{COMMENT}fields: path, kind, ownership, favourite",
+            *kept,
+        ]
+    )
+
+
+def render_favourites(entries: Sequence[Path], present: Collection[Path]) -> str:
+    """The starred list itself, in the order the user built it.
+
+    Not the same question as `list favourites`, which can only show what the
+    last scan found. A favourite on a drive that is not mounted is still a
+    favourite -- `library.favourites` keeps it on purpose -- and this is where
+    a caller can see that it is still there rather than concluding the app
+    forgot it. That is what the `present` column is for.
+    """
+    known = frozenset(present)
+    rows: list[str] = []
+    unlistable = 0
+    for entry in entries:
+        printed = _path_field(entry)
+        if printed is None:
+            unlistable += 1
+            continue
+        rows.append(SEPARATOR.join((printed, "yes" if entry in known else "no")))
+
+    kept, dropped = _within_budget(rows)
+    missing = sum(1 for entry in entries if entry not in known)
+    parts = [f"{len(entries)} starred"]
+    if missing:
+        parts.append(f"{missing} not in the library right now")
+    if dropped:
+        parts.append(f"{dropped} more than fit in one reply")
+    if unlistable:
+        parts.append(f"{unlistable} unlistable")
+    return "\n".join(
+        [
+            f"{COMMENT}favourites: {' - '.join(parts)}",
+            f"{COMMENT}fields: path, present",
+            *kept,
+        ]
+    )
+
+
 # -- dispatch ------------------------------------------------------------
 
 
-def failed(error: Exception) -> Response:
-    """One failed response for any exception, keeping a provider's reason.
+def _kind_of(error: Exception) -> str:
+    """The machine-readable half of an error that has one.
 
-    A `ProviderError` is the interesting case and the reason this exists: its
-    `kind` is the machine-readable half the browse dialog branches on, and a
-    caller holding a socket deserves the same. Its `str` already reads
-    ``kind: message``, which is the sentence the dialog toasts, so the client
-    prints one thing and switches on another.
+    Three of this app's exceptions are the same shape: `ProviderError`,
+    `ManageError` and `FavouritesError` each pair a `kind` with a sentence
+    that already reads ``kind: message``. None of them share a base class,
+    because they belong to three subsystems with nothing else in common, so
+    the shape is the contract and asking for the attribute is how this module
+    relays all three without importing every one of them.
     """
-    if isinstance(error, ProviderError):
-        return Response.failure(str(error), kind=error.kind)
+    kind = getattr(error, "kind", "")
+    return kind if isinstance(kind, str) else ""
+
+
+def failed(error: Exception) -> Response:
+    """One failed response for any exception, keeping the reason where there is one.
+
+    The `kind` is the machine-readable half the browse dialog branches on, and
+    a caller holding a socket deserves the same: `rate-limit` from a provider,
+    `not-ours` from a removal that will not touch the user's own file. The
+    accompanying `str` already reads ``kind: message``, which is the sentence
+    the dialog toasts, so the client prints one thing and switches on another.
+    """
+    kind = _kind_of(error)
+    if kind:
+        return Response.failure(str(error), kind=kind)
     if isinstance(error, ValueError):
         # Argument validation. The message is the whole point of it.
         return Response.failure(str(error))
@@ -300,6 +577,14 @@ def dispatch(verbs: dict[str, Handler], line: bytes, reply: Reply) -> None:
         once(failed(error))
 
 
+#: AF_UNIX paths are capped near 108 bytes. Past that, `Gio.SocketService`
+#: silently fails to create the socket -- `add_address` returns without
+#: complaint and nothing is listening -- so we refuse the address rather than
+#: pretend we have one. The same ceiling, for the same reason, as
+#: `wallpaper.renderer.MAX_SOCKET_PATH_BYTES`, which found it first with mpv.
+MAX_SOCKET_PATH_BYTES: Final = 100
+
+
 class SocketServer:
     """Binds the control socket and answers requests from the GTK main loop."""
 
@@ -339,9 +624,30 @@ class SocketServer:
             probe.close()
 
     def start(self) -> None:
+        """Listen, or raise `RuntimeError` saying why not.
+
+        Every failure leaves as `RuntimeError` and nothing else, because that
+        is the contract the caller relies on: losing the control socket costs
+        the Noctalia plugin's buttons, not the app, and `ui.app` catches this
+        one type and carries on into the window. An `OSError` escaping from
+        here instead is a wallpaper manager that will not start at all --
+        which is exactly what an over-long runtime directory used to do.
+        """
+        # Before anything is created, since past the ceiling nothing would be.
+        if len(os.fsencode(self._path)) > MAX_SOCKET_PATH_BYTES:
+            raise RuntimeError(
+                f"{self._path} is too long for a unix socket "
+                f"({MAX_SOCKET_PATH_BYTES} bytes at most)"
+            )
+
         from gi.repository import Gio, GLib
 
-        paths.ensure_directory(self._path.parent)
+        try:
+            paths.ensure_directory(self._path.parent)
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot create {self._path.parent}: {error.strerror or error}"
+            ) from error
         self._clear_stale_socket()
 
         service = Gio.SocketService.new()
@@ -359,9 +665,17 @@ class SocketServer:
         service.connect("incoming", self._on_incoming)
         service.start()
         self._service = service
-        # The socket carries control of the wallpaper; no reason for anyone
-        # else on the system to reach it.
-        os.chmod(self._path, 0o600)
+        try:
+            # The socket carries control of the wallpaper; no reason for anyone
+            # else on the system to reach it.
+            os.chmod(self._path, 0o600)
+        except OSError as error:
+            # A service is already listening on a socket we could not secure.
+            # Stop it and take the address back down: half-started is worse
+            # than not started, since the reply would be that we have no
+            # control socket while one sat there readable by the machine.
+            self.stop()
+            raise RuntimeError(f"cannot secure {self._path}: {error.strerror or error}") from error
 
     def stop(self) -> None:
         service = self._service

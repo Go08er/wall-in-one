@@ -30,6 +30,12 @@ CTL_VERBS: Final[tuple[str, ...]] = (
     "dynamics",
     "reload-palette",
     "status",
+    "list",
+    "select",
+    "favourites",
+    "favourite",
+    "unfavourite",
+    "remove",
     "providers",
     "search",
     "download",
@@ -76,8 +82,9 @@ def _build_parser() -> argparse.ArgumentParser:
     control.add_argument("verb", choices=CTL_VERBS)
     # Several words rather than one, joined back into the single argument the
     # protocol carries, so that `ctl search wallhaven aurora borealis` works
-    # without quoting -- `search` and `download` both read a provider name off
-    # the front and treat the rest as their own.
+    # without quoting -- `search`, `download` and `list` all read a word off the
+    # front and treat the rest as their own. It also means the path verbs take
+    # an unquoted wallpaper with spaces in its name, which most of them have.
     control.add_argument(
         "argument",
         nargs="*",

@@ -393,3 +393,53 @@ def test_a_wallpaper_that_cannot_be_thumbnailed_is_a_blank_tile(
 
     monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.generate", refuse)
     assert Loader._texture_for(item("a")) is None
+
+
+# -- the window and the store ---------------------------------------------
+
+
+def test_showing_the_library_repushes_the_favourites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A star can move without this window touching it -- `ctl favourite`
+    reaches the session's store directly -- so the tiles have to be told again
+    every time the library is shown, not only when the star itself is clicked.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", lambda *a, **k: None)
+
+    from wall_in_one import config
+    from wall_in_one.library import scan
+    from wall_in_one.session import Session
+    from wall_in_one.theme import source
+    from wall_in_one.ui.window import MainWindow
+
+    root = tmp_path / "lib"
+    root.mkdir()
+    wallpaper = root / "one.png"
+    _png(wallpaper)
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.RepushTest")
+            self.settings = config.Settings()
+            self.resolved_palette = source.resolve()
+            self.session = Session(self.settings, scanner=lambda _roots: scan.scan((root,)))
+            self.session.refresh()
+
+        def refresh_library(self) -> None: ...
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_library(application.session)
+    tile = window._grid._tiles[wallpaper]
+    assert not tile._star.get_active()
+
+    # Somebody else stars it -- the socket, not this window.
+    application.session.favourites.add(wallpaper)
+    window.show_library(application.session)
+
+    assert window._grid._tiles[wallpaper]._star.get_active()
+    application.session.shutdown()

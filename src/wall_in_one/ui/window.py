@@ -350,6 +350,11 @@ class MainWindow(Adw.ApplicationWindow):
     def show_library(self, session: Session) -> None:
         library = session.library
         cursor = session.cursor
+        # Before `populate`, so a tile built in this pass arrives already
+        # starred. The store is the session's and anything may have moved it
+        # since we last looked -- `ctl favourite` reaches it without going
+        # anywhere near this window.
+        self._grid.set_favourites(self._favourites.paths)
         self._grid.populate(session.playlist.items, cursor.path if cursor else None)
 
         self._playable = len(session.playlist)

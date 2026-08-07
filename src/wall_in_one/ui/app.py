@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -20,6 +21,8 @@ from wall_in_one import config, paths
 from wall_in_one.browse import Browser
 from wall_in_one.control import server
 from wall_in_one.control.protocol import Response
+from wall_in_one.library import favourites
+from wall_in_one.library import filter as library_filter
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
@@ -203,6 +206,38 @@ class Application(Adw.Application):
         del made
         self.refresh_library()
 
+    def favourites_changed(self) -> None:
+        """Bring everything that reads the favourites back into line.
+
+        Two readers, and neither may be left behind by a star toggled over the
+        socket. The rotation is narrowed from the same store when
+        `cycle_favourites_only` is on, which is `Session.favourites_changed`'s
+        job; the window's counts and its favourites view come from a rebuild.
+        This is the pair the window's own star button already does.
+        """
+        self._session.favourites_changed()
+        if self._window is not None:
+            self._window.show_library(self._session)
+
+    def forget(self, path: Path) -> None:
+        """Drop a wallpaper this app has just destroyed, and rescan.
+
+        The star is the one piece of state that outlives the file, and an entry
+        for something we deleted ourselves is pointless: favourites survive a
+        missing file because the file might come back, which is not true of one
+        we have just unlinked. The store's own write failing changes nothing
+        here -- the file is gone either way, and the socket has already been
+        told what happened to it.
+
+        The rescan is deferred for the reason a finished download's is: it is
+        the window's work, not the client's, and `ctl remove` should not be
+        held open while six hundred files are walked to confirm that one of
+        them is missing.
+        """
+        with contextlib.suppress(favourites.FavouritesError):
+            self._session.favourites.discard(path)
+        GLib.idle_add(self.refresh_library)
+
     def apply(self, action: Callable[[], Applied]) -> Response:
         """Run a navigation action and report it, without letting it kill the app."""
         try:
@@ -335,9 +370,17 @@ class _Commands:
     """Control-socket verb implementations.
 
     Thin on purpose: each verb is one call into the session plus a sentence
-    describing what happened. The first ten are the whole surface the Noctalia
-    plugin drives; the browsing three are for a terminal, and are the only ones
-    that answer later rather than at once, because they wait on a website.
+    describing what happened. The first nine are the whole surface the Noctalia
+    plugin drives; the library six and the browsing three are for a terminal.
+    The browsing three are the only ones that answer later rather than at once,
+    because they wait on a website.
+
+    What is thin here is not the same as easy. Every verb below that takes a
+    path hands it to `control.server` to be resolved against the library before
+    anything happens to a file, and every one that changes the library or the
+    favourites leaves through `Application.forget` or
+    `Application.favourites_changed`, so the running window never disagrees
+    with what the socket just did.
     """
 
     def __init__(self, application: Application) -> None:
@@ -383,6 +426,107 @@ class _Commands:
 
     def report_status(self) -> Response:
         return Response.success(self._app.session.describe())
+
+    # -- the library ------------------------------------------------------
+
+    def list_library(self, value: str | None) -> Response:
+        """What is in the library, as rows a script can read.
+
+        The scan the window is already showing, not a fresh one: `ctl list`
+        answers what the app currently believes, which is the same thing the
+        grid is drawing. `ctl status` reports the counts and the refresh button
+        re-reads the disk.
+        """
+        kinds, text = server.parse_list(value)
+        session = self._app.session
+        return Response.success(
+            server.render_library(
+                session.library.items,
+                library_filter.Query(text=text, kinds=kinds),
+                session.favourites.paths,
+            )
+        )
+
+    def select_wallpaper(self, value: str | None) -> Response:
+        item = server.resolve(self._app.session.library, value, verb="select")
+        return self._app.apply(lambda: self._app.session.select(item.path))
+
+    def list_favourites(self) -> Response:
+        session = self._app.session
+        return Response.success(
+            server.render_favourites(
+                session.favourites.favourites.entries,
+                tuple(item.path for item in session.library.items),
+            )
+        )
+
+    def add_favourite(self, value: str | None) -> Response:
+        """Star a wallpaper the library knows about.
+
+        Resolved against the library, so the state file can only ever fill with
+        paths the scan produced. A star on something we cannot see would be a
+        line in a file with no tile, no rotation entry and nothing to take it
+        off again.
+        """
+        item = server.resolve(self._app.session.library, value, verb="favourite")
+        return self._star(item.path, wanted=True)
+
+    def remove_favourite(self, value: str | None) -> Response:
+        """Unstar a path, whether or not the library still has it.
+
+        The asymmetry with `favourite` is deliberate and is the whole reason
+        this one does not resolve. `library.favourites` keeps an entry whose
+        file has gone -- an unmounted drive, a root taken out of the settings
+        -- precisely so the list is not silently pruned, and taking the star
+        off by hand is the only thing left to do with one. Resolving here would
+        make the entries you most want to remove the ones you cannot.
+        """
+        return self._star(server.parse_path(value, verb="unfavourite"), wanted=False)
+
+    def _star(self, path: Path, *, wanted: bool) -> Response:
+        """Move one star, and leave the window agreeing with the store.
+
+        The session's store, never a new one: the window's tiles and the
+        rotation are built from that object, and a second copy here would mean
+        `ctl favourite` and the star on the tile disagreeing until the next
+        launch.
+        """
+        store = self._app.session.favourites
+        try:
+            moved = store.add(path) if wanted else store.discard(path)
+        except favourites.FavouritesError as error:
+            # The store takes the change in memory whatever the disk did, so
+            # the window still has to be told; the failure is only about
+            # whether the star outlives the session, and it travels with the
+            # `local-io` kind that says so.
+            self._app.favourites_changed()
+            return server.failed(error)
+        self._app.favourites_changed()
+        if wanted:
+            return Response.success(
+                f"{path.name} starred" if moved else f"{path.name} was already starred"
+            )
+        return Response.success(
+            f"{path.name} unstarred" if moved else f"{path.name} was not starred"
+        )
+
+    def remove_wallpaper(self, value: str | None) -> Response:
+        """Delete a downloaded wallpaper, or trash one of the user's own.
+
+        There is no confirmation dialogue on a socket, so the refusals in
+        `library.manage` are the whole of the protection and nothing here may
+        weaken them: the path is resolved against the library first, so a
+        string naming no wallpaper never reaches `manage` at all, ownership is
+        re-derived from disk there, and there is no flag that turns any of it
+        off. A failure arrives carrying the `kind` that says which refusal it
+        was -- `not-ours` for the user's own file, `missing` for one already
+        gone.
+        """
+        session = self._app.session
+        item = server.resolve(session.library, value, verb="remove")
+        message = server.remove_wallpaper(item, session.library.roots)
+        self._app.forget(item.path)
+        return Response.success(message)
 
     # -- browsing ---------------------------------------------------------
 

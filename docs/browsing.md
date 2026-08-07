@@ -131,6 +131,115 @@ sidecar come out identical, and they land in the first configured root for the
 same reason the dialog's do. A finished one rescans the library, so the file is
 in the grid of an open window without being asked for.
 
+## Driving the library from the socket
+
+The verbs above fill the library. These six read it, and are documented here
+because they answer in the same rows and are read by the same `awk`:
+
+```
+wall-in-one ctl list [everything|stills|videos|favourites] [query]
+wall-in-one ctl select <path>
+wall-in-one ctl favourites
+wall-in-one ctl favourite <path>
+wall-in-one ctl unfavourite <path>
+wall-in-one ctl remove <path>
+```
+
+`list` prints `path, kind, ownership, favourite`. The kind word comes first and
+everything after it is the query, spaces and all, exactly as `search` reads a
+provider off the front — so `ctl list videos snow village` is one query. A first
+word that names no kind is a usage error rather than a query, because
+`ctl list videos` would otherwise be ambiguous. The selecting, the matching and
+the ordering are `library/filter.py`'s, the same code behind the window's search
+box and kind dropdown, so the two cannot come to disagree about which wallpapers
+a word names.
+
+```
+$ wall-in-one ctl list videos snow
+# library: 2 of 634 videos matching "snow"
+# fields: path, kind, ownership, favourite
+/home/you/Pictures/Wallpapers/snowy-village.mp4	video	user	yes
+/home/you/Pictures/Wallpapers/Wall-in-One/MotionBGS/snowfall.4k.mp4	video	managed	no
+```
+
+The `ownership` column is what says which of the two things `remove` would do to
+that file. It is the same distinction as ["What makes a file
+ours"](#what-makes-a-file-ours): `managed` is a file this app downloaded and
+`user` is one of yours.
+
+`list` reports the scan the window is already showing rather than re-reading the
+disk; the refresh button and a finished download are what re-read it. One reply
+has to fit in a single 64 KB message, so a very large library is cut between two
+rows and the summary says how many did not fit — narrow it with a query. A
+wallpaper whose *name* contains a tab or a newline cannot be printed in a
+tab-separated row at all without printing a path that would no longer work, so
+it is counted as `unlistable` instead of being shown mangled.
+
+### Paths are resolved, not trusted
+
+Every verb above that takes a path looks it up in the library and refuses
+anything it does not find, with the kind `not-in-library`. The path must be
+absolute: this socket is answered by the window's process, whose working
+directory is wherever the app was launched from and almost never where you are
+standing, so a relative one would quietly name a different file. A leading `~`
+is expanded. The match is exact — `/w/../w/a.png` is refused rather than
+normalised, because deciding that two strings name one file is a decision worth
+getting wrong nowhere, and least of all in front of `remove`. The paths `list`
+prints are the ones the scan produced, so copying one out of it always works.
+
+### `remove` destroys something
+
+There is no confirmation over a socket, so the refusals in `library/manage.py`
+are the whole of the protection, and the socket adds none of its own and takes
+none away. There is no force flag and no way to ask for the other verb.
+
+```
+$ wall-in-one ctl remove /home/you/Pictures/Wallpapers/Wall-in-One/Wallhaven/wallhaven-o5jvv1.jpg
+removed wallhaven-o5jvv1.jpg and 1 file beside it - deleted, which cannot be undone
+
+$ wall-in-one ctl remove /home/you/Pictures/Wallpapers/holiday.png
+holiday.png moved to the trash - /home/you/.local/share/Trash/files/holiday.png
+```
+
+Which of those two happened is in the reply, because only one of them can be
+undone. A downloaded wallpaper is unlinked along with the sidecar and any still
+this app generated for it; one of your own is moved to the freedesktop trash,
+where your file manager can put it back. Ownership is re-derived from disk at
+the moment of deletion rather than taken from the listing, which may be minutes
+old, and a file that fails that check comes back refused with the kind
+`not-ours` and is left exactly where it was. The wallpaper also loses its star,
+and the open window rescans, so no tile outlives the file it was drawing.
+
+### Favourites
+
+`favourite` and `unfavourite` write the same starred list the tiles show — the
+running app's own, so a star set from a terminal appears in the window and
+narrows the rotation when **Cycle favourites only** is on.
+
+The two are deliberately not symmetrical. `favourite` needs a wallpaper the
+library has; a star on something we cannot see would be a line in a file with no
+tile and no rotation entry. `unfavourite` takes any absolute path, because a
+favourite whose file is not here — an unmounted drive, a root removed from the
+settings — is kept rather than pruned, and taking the star off by hand is the
+only thing left to do with one. Requiring a lookup there would make the entries
+most worth removing the ones you could not remove.
+
+`ctl favourites` prints those entries in the order they were marked, with a
+`present` column saying whether the last scan found each one. That is a
+different question from `ctl list favourites`, which can only show what is here.
+
+```
+$ wall-in-one ctl favourites
+# favourites: 3 starred - 1 not in the library right now
+# fields: path, present
+/home/you/Pictures/Wallpapers/snowy-village.mp4	yes
+/media/photos/aurora.jpg	no
+```
+
+A write that fails comes back as a failure with the kind `local-io`, and the
+star still moves: the app keeps it for this session and is telling you it will
+not survive the next launch.
+
 ## Wallhaven filters
 
 The provider accepts exactly these option keys (`FILTER_OPTIONS` in

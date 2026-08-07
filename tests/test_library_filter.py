@@ -250,3 +250,71 @@ def test_every_choice_has_a_label_of_its_own() -> None:
     labels += [choice.label for choice in library_filter.SORT_CHOICES]
     assert all(labels)
     assert len(set(labels)) == len(labels)
+
+
+# -- favourites -----------------------------------------------------------
+#
+# Not a kind of file but a kind of interest, which is why it shares the kind
+# control. `Kinds.accepts` cannot answer it -- membership is a question about
+# paths, and the enum has none -- so `apply` takes the set separately.
+
+
+def test_the_favourites_view_shows_only_starred_wallpapers(tmp_path: Path) -> None:
+    items = (
+        _item(tmp_path, "one"),
+        _item(tmp_path, "two"),
+        _item(tmp_path, "three", Kind.VIDEO),
+    )
+    starred = {items[0].path, items[2].path}
+    kept = library_filter.apply(items, Query(kinds=Kinds.FAVOURITES), starred)
+    assert _names(kept) == ["one", "three"]
+
+
+def test_favourites_accept_every_kind_of_file(tmp_path: Path) -> None:
+    """A starred video is a favourite; the kind control is asking one question."""
+    video = _item(tmp_path, "clip", Kind.VIDEO)
+    kept = library_filter.apply((video,), Query(kinds=Kinds.FAVOURITES), {video.path})
+    assert _names(kept) == ["clip"]
+
+
+def test_no_favourites_means_an_empty_favourites_view(tmp_path: Path) -> None:
+    items = (_item(tmp_path, "one"), _item(tmp_path, "two"))
+    assert library_filter.apply(items, Query(kinds=Kinds.FAVOURITES)) == ()
+
+
+def test_a_favourite_that_is_not_in_the_library_shows_nothing_and_breaks_nothing(
+    tmp_path: Path,
+) -> None:
+    """The favourites file outlives the files it names; a stale entry is a
+    tile that is not there, not an error."""
+    items = (_item(tmp_path, "one"),)
+    starred = {tmp_path / "gone.png", items[0].path}
+    assert _names(library_filter.apply(items, Query(kinds=Kinds.FAVOURITES), starred)) == ["one"]
+
+
+def test_searching_within_favourites_narrows_further(tmp_path: Path) -> None:
+    items = (_item(tmp_path, "snowy-village"), _item(tmp_path, "cozy-campfire"))
+    starred = {item.path for item in items}
+    kept = library_filter.apply(items, Query(text="snow", kinds=Kinds.FAVOURITES), starred)
+    assert _names(kept) == ["snowy-village"]
+
+
+def test_the_favourites_view_counts_as_narrowing() -> None:
+    """Otherwise the window would report the whole library while showing three."""
+    assert Query(kinds=Kinds.FAVOURITES).narrows
+
+
+def test_the_favourites_view_names_itself_in_an_empty_state() -> None:
+    assert library_filter.describe(Query(kinds=Kinds.FAVOURITES)) == "favourites"
+    assert (
+        library_filter.describe(Query(text="snow", kinds=Kinds.FAVOURITES))
+        == 'favourites matching "snow"'
+    )
+
+
+def test_favourites_are_ignored_by_every_other_view(tmp_path: Path) -> None:
+    """Starring something must not change what the other filters show."""
+    items = (_item(tmp_path, "one"), _item(tmp_path, "two"))
+    starred = {items[0].path}
+    for kinds in (Kinds.EVERYTHING, Kinds.STILLS):
+        assert len(library_filter.apply(items, Query(kinds=kinds), starred)) == 2

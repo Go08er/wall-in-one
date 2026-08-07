@@ -11,9 +11,10 @@ from `library.stills`.
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Final
 
 from wall_in_one.library.model import Kind, MediaItem
@@ -25,6 +26,11 @@ class Kinds(Enum):
     EVERYTHING = "everything"
     STILLS = "stills"
     VIDEOS = "videos"
+    #: Not a kind of file but a kind of interest, and in this control rather
+    #: than beside it because "which of these am I being shown" has one answer
+    #: at a time: a separate favourites toggle would let someone ask for videos
+    #: *and* favourites and then have to work out which of the two won.
+    FAVOURITES = "favourites"
 
     @property
     def label(self) -> str:
@@ -37,7 +43,10 @@ class Kinds(Enum):
         return _KIND_NOUNS[self]
 
     def accepts(self, kind: Kind) -> bool:
-        if self is Kinds.EVERYTHING:
+        """Whether a file of this kind passes. Favourites accept every kind --
+        which of them are favourites is a question about paths, and `apply`
+        asks it separately because this enum has no way to know."""
+        if self in (Kinds.EVERYTHING, Kinds.FAVOURITES):
             return True
         return kind is (Kind.STILL if self is Kinds.STILLS else Kind.VIDEO)
 
@@ -59,12 +68,14 @@ _KIND_LABELS: Final[Mapping[Kinds, str]] = {
     Kinds.EVERYTHING: "Everything",
     Kinds.STILLS: "Stills only",
     Kinds.VIDEOS: "Videos only",
+    Kinds.FAVOURITES: "Favourites only",
 }
 
 _KIND_NOUNS: Final[Mapping[Kinds, str]] = {
     Kinds.EVERYTHING: "wallpapers",
     Kinds.STILLS: "stills",
     Kinds.VIDEOS: "videos",
+    Kinds.FAVOURITES: "favourites",
 }
 
 #: Named for what they do rather than for the field they read: "Newest" is a
@@ -78,7 +89,12 @@ _SORT_LABELS: Final[Mapping[Sort, str]] = {
 #: Every choice, in the order the controls offer them. The controls index back
 #: into these tuples, so the list a user sees and the value they get cannot
 #: drift apart.
-KIND_CHOICES: Final[tuple[Kinds, ...]] = (Kinds.EVERYTHING, Kinds.STILLS, Kinds.VIDEOS)
+KIND_CHOICES: Final[tuple[Kinds, ...]] = (
+    Kinds.EVERYTHING,
+    Kinds.STILLS,
+    Kinds.VIDEOS,
+    Kinds.FAVOURITES,
+)
 SORT_CHOICES: Final[tuple[Sort, ...]] = (Sort.NAME, Sort.NEWEST, Sort.LARGEST)
 
 
@@ -169,10 +185,27 @@ def order_key(item: MediaItem, sort: Sort) -> tuple[int, str, str]:
     return (leading, fold(item.name), str(item.path))
 
 
-def apply(items: Iterable[MediaItem], query: Query) -> tuple[MediaItem, ...]:
-    """The items ``query`` selects, in the order it asks for."""
+def apply(
+    items: Iterable[MediaItem],
+    query: Query,
+    favourites: Collection[Path] = (),
+) -> tuple[MediaItem, ...]:
+    """The items ``query`` selects, in the order it asks for.
+
+    ``favourites`` is a separate argument rather than a field on the `Query`
+    because the query is what the controls are asking for, while the favourites
+    are data the controls know nothing about. Passing it every time also means
+    a stale set cannot hide inside a query object that looks current.
+    """
     wanted = terms(query.text)
-    kept = [item for item in items if query.kinds.accepts(item.kind) and matches(item.name, wanted)]
+    starred = frozenset(favourites)
+    kept = [
+        item
+        for item in items
+        if query.kinds.accepts(item.kind)
+        and (query.kinds is not Kinds.FAVOURITES or item.path in starred)
+        and matches(item.name, wanted)
+    ]
     kept.sort(key=lambda item: order_key(item, query.sort))
     return tuple(kept)
 

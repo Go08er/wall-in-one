@@ -50,6 +50,25 @@ class WallpaperTile(Gtk.Box):
         self._spinner.set_valign(Gtk.Align.CENTER)
         frame.add_overlay(self._spinner)
 
+        # Top-right, opposite the badges, so that a long provider name can
+        # never push it off the tile. A button rather than a decoration,
+        # because marking a favourite should not mean finding a menu first --
+        # and a `ToggleButton` is focusable, so the keyboard reaches it too.
+        self._star = Gtk.ToggleButton(icon_name="non-starred-symbolic")
+        self._star.set_halign(Gtk.Align.END)
+        self._star.set_valign(Gtk.Align.START)
+        self._star.set_margin_top(6)
+        self._star.set_margin_end(6)
+        self._star.add_css_class("circular")
+        self._star.add_css_class("osd")
+        self._star.set_tooltip_text("Add to favourites")
+        #: Set while the star is being moved to match the store rather than by
+        #: a click. Without it, reflecting the state would look like a click
+        #: and write the value straight back -- harmless once, and an endless
+        #: exchange the first time anything else moves the state.
+        self._reflecting = False
+        frame.add_overlay(self._star)
+
         badges = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         badges.set_halign(Gtk.Align.START)
         badges.set_valign(Gtk.Align.START)
@@ -89,6 +108,26 @@ class WallpaperTile(Gtk.Box):
         else:
             self.remove_css_class("wio-tile-current")
 
+    def set_favourite(self, favourite: bool) -> None:
+        """Show whether this one is starred. Never reads as a click."""
+        self._reflecting = True
+        try:
+            self._star.set_active(favourite)
+        finally:
+            self._reflecting = False
+        self._star.set_icon_name("starred-symbolic" if favourite else "non-starred-symbolic")
+        self._star.set_tooltip_text("Remove from favourites" if favourite else "Add to favourites")
+
+    def connect_favourite(self, on_toggle: Callable[[MediaItem, bool], None]) -> None:
+        """Say who to tell when the star is clicked."""
+
+        def toggled(button: Gtk.ToggleButton) -> None:
+            if self._reflecting:
+                return
+            on_toggle(self.item, button.get_active())
+
+        self._star.connect("toggled", toggled)
+
 
 def _badge(text: str) -> Gtk.Widget:
     label = Gtk.Label(label=text)
@@ -100,10 +139,19 @@ def _badge(text: str) -> Gtk.Widget:
 class WallpaperGrid(Gtk.ScrolledWindow):
     """A scrolling grid of tiles. Activating one applies that wallpaper."""
 
-    def __init__(self, loader: ThumbnailLoader, on_activate: Callable[[MediaItem], None]) -> None:
+    def __init__(
+        self,
+        loader: ThumbnailLoader,
+        on_activate: Callable[[MediaItem], None],
+        on_favourite: Callable[[MediaItem, bool], None] | None = None,
+    ) -> None:
         super().__init__()
         self._loader = loader
         self._on_activate = on_activate
+        self._on_favourite = on_favourite
+        #: Which paths are starred. Held rather than looked up per tile so the
+        #: filter and the tiles cannot disagree within one pass.
+        self._favourites: frozenset[Path] = frozenset()
         self._tiles: dict[Path, WallpaperTile] = {}
         self._items: tuple[MediaItem, ...] = ()
         self._query = library_filter.Query()
@@ -168,6 +216,9 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         for item in items:
             tile = WallpaperTile(item)
             tile.set_current(item.path == current)
+            if self._on_favourite is not None:
+                tile.connect_favourite(self._on_favourite)
+            tile.set_favourite(item.path in self._favourites)
             self._tiles[item.path] = tile
             self._flow.append(tile)
             self._loader.request(item, self._on_thumbnail)
@@ -200,8 +251,26 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         """How many tiles the current query leaves showing."""
         return len(self._positions)
 
+    def set_favourites(self, favourites: frozenset[Path]) -> None:
+        """Adopt a new set of starred paths, restarring the tiles it changes.
+
+        Only the tiles whose state actually moved are touched. Restarring all
+        of them would be correct and would also mean a widget write per
+        wallpaper every time one star is clicked.
+        """
+        changed = self._favourites ^ favourites
+        self._favourites = favourites
+        for path in changed:
+            tile = self._tiles.get(path)
+            if tile is not None:
+                tile.set_favourite(path in favourites)
+        # Only the favourites view is narrowed by this, but re-filtering is
+        # cheap and getting it wrong means a starred wallpaper that will not
+        # appear until something else happens to invalidate the filter.
+        self._apply_query()
+
     def _apply_query(self) -> None:
-        visible = library_filter.apply(self._items, self._query)
+        visible = library_filter.apply(self._items, self._query, self._favourites)
         self._positions = {item.path: index for index, item in enumerate(visible)}
         self._flow.invalidate_filter()
         self._flow.invalidate_sort()

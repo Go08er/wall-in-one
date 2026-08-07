@@ -18,6 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk
 
 from wall_in_one import config
+from wall_in_one.library import favourites
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
@@ -67,7 +68,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_title("Wall-in-One")
         self.set_default_size(1100, 760)
 
-        self._grid = WallpaperGrid(self._loader, self._on_tile_activated)
+        # Opened here rather than in the app, because the star on a tile is
+        # the only thing that writes to it and the grid is the only thing that
+        # reads it. `open` never raises: an unreadable list degrades to none.
+        self._favourites = favourites.Store.open()
+        self._grid = WallpaperGrid(self._loader, self._on_tile_activated, self._on_favourite)
+        self._grid.set_favourites(self._favourites.paths)
         self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle=self._summary)
         self._toast = Adw.ToastOverlay()
 
@@ -282,6 +288,21 @@ class MainWindow(Adw.ApplicationWindow):
         if self._query.narrows:
             summary = f"Showing {self._grid.visible_count} of {self._playable} - {summary}"
         self._subtitle.set_subtitle(summary)
+
+    def _on_favourite(self, item: MediaItem, wanted: bool) -> None:
+        """Star or unstar one wallpaper, and tell the user if it did not stick."""
+        try:
+            if wanted:
+                self._favourites.add(item.path)
+            else:
+                self._favourites.discard(item.path)
+        except favourites.FavouritesError:
+            # The store keeps the change in memory whatever the disk did, so
+            # the star stays where the user put it; this only says that it
+            # will not outlive the session.
+            self.report(f"{item.name} is a favourite for now, but could not be saved")
+        self._grid.set_favourites(self._favourites.paths)
+        self._update_subtitle()
 
     def show_current(self, session: Session) -> None:
         """Move the highlight without rebuilding the grid."""

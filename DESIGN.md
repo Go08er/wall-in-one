@@ -469,6 +469,112 @@ The remaining risk is therefore narrower than "the host API is matched by
 pattern": it is whether `plugin_api = 17` loads on 5.0.0-beta.7, and whether
 the four entry points behave once running.
 
+### What the rewrite has not carried across
+
+The plan above was written as "lift the backend and shrink the plugin", and
+that is what happened. It was never checked against what the plugin actually
+*did*, and the difference is large enough that the 51,390-line deletion in the
+plugin repo is not a like-for-like replacement. Nothing in this document
+mentioned Wallpaper Engine, Steam, schedules or named playlists before this
+section existed, so these were not weighed and dropped -- they went out with
+`renderer.luau` and nobody wrote it down.
+
+Read off the deleted plugin's own README, ADAPTERS.md and `plugin.toml`:
+
+| capability | 0.8.0 plugin | this app |
+|---|---|---|
+| still images | yes | yes |
+| local video via mpvpaper | yes | yes |
+| **Wallpaper Engine Workshop scenes** | `linux-wallpaperengine`, owned per display | **nothing** |
+| Wallhaven shop | yes | yes |
+| MotionBGS shop | yes | yes |
+| **Steam Workshop shop** | browse and acquire | **nothing** |
+| still/motion pairing | yes | partial -- video only |
+| automatic stills | video *and* Workshop screenshot | video only |
+| manual still override | paged picker plus path escape hatch | **nothing** |
+| **per-item palette policy** | mode plus builtin/generated/community/custom/keep | **nothing** |
+| managed library and ownership | yes | yes |
+| **named playlists** | visual editor, stable IDs, drag to reorder | **nothing** -- `Playlist` here is a cursor |
+| **schedules** | month/weekday/time rules, ordered, lowest match wins | **nothing** |
+| **per-display assignment** | pinned default plus schedule per output | partial -- one global output field |
+| per-display engine settings | layer, mute, hwdec, auto-pause mode, FPS, scaling | partial -- global, no Workshop half |
+
+Three of those are structural rather than additive, and one of them changes a
+type everything else is built on.
+
+**A pairing is the unit, not an attribute of a video.** Today `MediaItem` is a
+file and `paired_still` is an optional field that only videos ever set. What is
+wanted is that *every* library item resolves to a bundle -- a representative
+still, an optional motion source, and a palette policy -- with the still
+synthesized by default for both moving kinds and replaceable by hand, and no
+separate "create a pairing" step. The old plugin arrived at exactly this and
+said so plainly: "Library items synthesize a validated default bundle. Saving a
+customization creates or updates the stable profile with `customized = true`."
+That is the shape to copy, because it is the one that makes the common case
+free and the customized case durable.
+
+**Identity has to survive the file moving.** Profiles are keyed by static path
+or by dynamic medium/source identity, so a customization updates one record
+rather than accumulating duplicates. Nothing here has an identity for a
+wallpaper beyond its path.
+
+**One shell, one palette.** Noctalia has a single palette, so per-display
+palettes cannot all be live at once; the old plugin nominated a leader display
+and otherwise let the latest successful apply win. Any per-display work here
+inherits that constraint.
+
+### Plan, part two
+
+Ordered so that the type change lands before anything depends on it, and so
+each step is independently useful if the next never happens.
+
+- [ ] **9. The pairing model.** `MediaItem` becomes a file record; a new
+      `Pairing` carries representative still, optional motion source, and
+      palette policy, keyed by a stable identity rather than a path. Every
+      scanned item synthesizes a default pairing; saving one marks it
+      customized so a later default change cannot silently overwrite it.
+      Persisted beside the favourites, atomically, degrading to defaults when
+      unreadable. This is a migration: `library.pairing` and
+      `MediaItem.paired_still` are the read side of the old model and both have
+      callers.
+- [ ] **10. Per-item palette policy.** Each pairing resolves dark/light/auto
+      plus one of builtin, wallpaper-generated, community, custom, or
+      keep-current. The default stays adaptive-from-wallpaper, which is what
+      happens today. `theme/palettes.py` already discovers all four sources and
+      `theme/source.py` already resolves them; what is missing is storing a
+      choice per item and applying it in the order still, mode, palette,
+      renderer.
+- [ ] **11. Manual still override.** A picker over indexed stills plus an
+      absolute-path escape hatch. `library/stills.py` already writes the
+      sidecar that records one, so this is UI and a verb, not new machinery.
+- [ ] **12. Named playlists.** Named, ordered, persisted, with stable entry IDs
+      so reordering and rebinding do not lose an entry's identity. The existing
+      `Playlist` becomes the runtime cursor over whichever list is active,
+      which is roughly what it already is.
+- [ ] **13. Schedules.** Month, weekday and local-time rules evaluated in
+      visible order, lowest match winning, with a pinned default when none
+      match. Resolution must be pure and testable without a clock; the timer
+      belongs in the UI layer, as the cycle timer already does.
+- [ ] **14. Per-display assignment.** Each output gets a default playlist and
+      its own schedule and engine settings. Requires the leader-display rule
+      above for palettes, and turns the single `output` setting into a map.
+- [ ] **15. Wallpaper Engine.** The largest piece and the one with a real
+      question in front of it. It needs a third renderer alongside mpvpaper and
+      Noctalia stills, Workshop scanning under Steam's directories, and
+      `--screenshot` capture for pairings. **Open: this machine already runs the
+      separate `linux-wallpaperengine-controller` Noctalia plugin.** Owning the
+      renderer here means two things driving one `linux-wallpaperengine`, which
+      the old plugin avoided by owning it outright and telling users to disable
+      the other. That is a decision to take deliberately, not to discover.
+- [ ] **16. Steam Workshop shop.** Browse and acquire, which in the old plugin
+      meant links out to Steam rather than a scraper. Depends on 15 for
+      anything to do with what it acquires.
+
+Not planned, and worth saying so: the routed hub panel, the external-backend
+install flow, and the provider-preview cache are all artefacts of living inside
+a Luau plugin with a CPU budget. This app is the backend; it does not need to
+reinstall itself.
+
 ### How the slice was proven
 
 All three resolution tiers were exercised against the real Noctalia, with every

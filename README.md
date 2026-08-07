@@ -9,12 +9,18 @@ the companion Noctalia plugin talks to it.
 
 ## Status
 
-**Early but working.** The colour pipeline, the library, wallpaper application
-for stills and video, thumbnails, the palette browser, searching two wallpaper
-sites, favourites and per-tile removal are all built and exercised against a
-live system. [`DESIGN.md`](DESIGN.md) is the
-record: what each piece was checked against, and what the check actually
-showed.
+**Working, and not yet a replacement.** The colour pipeline, the library,
+wallpaper application for stills and video, thumbnails, the palette browser,
+searching two wallpaper sites, favourites and per-tile removal are all built and
+exercised against a live system. [`DESIGN.md`](DESIGN.md) is the record: what
+each piece was checked against, and what the check actually showed.
+
+But this replaces a Noctalia plugin that did more, and the rewrite did not carry
+everything across. **Missing outright: Wallpaper Engine Workshop scenes, the
+Steam shop, named playlists, schedules, per-item palette policy, and a manual
+still override.** Pairing is video-only rather than the unit every item resolves
+to. `DESIGN.md` has the full comparison and a plan for closing it; until that is
+done, do not treat this as a drop-in for the 0.8.0 plugin.
 
 Three things are not proven, and are worth knowing before relying on them:
 

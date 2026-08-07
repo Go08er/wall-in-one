@@ -87,6 +87,10 @@ class Settings:
     #: "might not work as intended", so `play` stays reachable.
     video_when_hidden: str = renderer.DEFAULT_WHEN_HIDDEN
 
+    #: Narrow the rotation to the starred wallpapers. Ignored when that would
+    #: leave nothing to rotate through -- see `session._rotation`.
+    cycle_favourites_only: bool = False
+
     #: Directories to scan for wallpapers. Empty means "whatever
     #: `library.scan.default_roots` decides", which follows Noctalia's own
     #: `wallpaper.directory`. That is the right default and the wrong thing to
@@ -155,6 +159,7 @@ class Settings:
             video_muted=boolean("video_muted", True),
             video_volume=int(number("video_volume", 100)),
             video_when_hidden=text("video_when_hidden", renderer.DEFAULT_WHEN_HIDDEN),
+            cycle_favourites_only=boolean("cycle_favourites_only", False),
             roots=directories("roots"),
         ).validated()
 
@@ -173,6 +178,7 @@ class Settings:
             f"video_muted = {str(self.video_muted).lower()}",
             f"video_volume = {self.video_volume}",
             f'video_when_hidden = "{self.video_when_hidden}"',
+            f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
         )
         return "\n".join(lines) + "\n"
 

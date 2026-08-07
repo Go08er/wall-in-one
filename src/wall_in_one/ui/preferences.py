@@ -191,6 +191,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
 
+        self._favourites_only = Adw.SwitchRow(
+            title="Cycle favourites only",
+            subtitle="Ignored while nothing is starred, so the rotation never empties",
+        )
+        self._favourites_only.connect("notify::active", self._on_changed)
+        group.add(self._favourites_only)
+
         self._muted = Adw.SwitchRow(
             title="Mute video wallpapers",
             subtitle="The audio track stays loaded, so this takes effect immediately",
@@ -338,6 +345,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self._cycle.set_active(settings.cycle_enabled)
             self._interval.set_value(settings.cycle_interval)
             self._dynamics.set_active(settings.dynamics_enabled)
+            self._favourites_only.set_active(settings.cycle_favourites_only)
             self._muted.set_active(settings.video_muted)
             self._volume.set_value(settings.video_volume)
             if settings.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES:
@@ -360,6 +368,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cycle_enabled=self._cycle.get_active(),
             cycle_interval=int(self._interval.get_value()),
             dynamics_enabled=self._dynamics.get_active(),
+            cycle_favourites_only=self._favourites_only.get_active(),
             video_muted=self._muted.get_active(),
             video_volume=int(self._volume.get_value()),
             video_when_hidden=renderer.WHEN_HIDDEN_CHOICES[hidden_index]

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
+from wall_in_one.library import favourites
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
@@ -462,3 +463,93 @@ def test_an_applier_handed_in_is_left_as_its_owner_configured_it() -> None:
     settings = replace(config.Settings(), video_when_hidden="stop").validated()
     Session(settings, applier=Applier(fake), scanner=lambda _roots: Library(roots=(), items=()))  # type: ignore[arg-type]
     assert fake.when_hidden == "play"
+
+
+# -- the rotation and the favourites --------------------------------------
+
+
+def _with_favourites(
+    items: Sequence[MediaItem], starred: Sequence[Path], tmp_path: Path, **overrides: object
+) -> Session:
+    store = favourites.Store(path=tmp_path / "favourites.json")
+    for path in starred:
+        store.add(path)
+    settings = replace(config.Settings(), **overrides)  # type: ignore[arg-type]
+    library = Library(roots=(Path("/w"),), items=tuple(items))
+    session = Session(
+        settings.validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: library,
+        favourite_store=store,
+    )
+    session.refresh()
+    return session
+
+
+def test_the_rotation_is_the_whole_library_by_default(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("a"), _still("b"), _still("c")]
+    session = _with_favourites(items, [items[0].path], tmp_path)
+    assert len(session.playlist) == 3
+
+
+def test_favourites_only_narrows_the_rotation(applied_paths: list[Path], tmp_path: Path) -> None:
+    items = [_still("a"), _still("b"), _still("c")]
+    session = _with_favourites(
+        items, [items[0].path, items[2].path], tmp_path, cycle_favourites_only=True
+    )
+    assert [item.path for item in session.playlist.items] == [items[0].path, items[2].path]
+
+
+def test_favourites_only_is_ignored_when_nothing_is_starred(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    """A manager that stops changing the wallpaper is a worse answer to "you
+    have no favourites right now" than one that falls back and keeps working."""
+    items = [_still("a"), _still("b")]
+    session = _with_favourites(items, [], tmp_path, cycle_favourites_only=True)
+    assert len(session.playlist) == 2
+
+
+def test_favourites_only_is_ignored_when_none_of_them_are_here(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    """The drive they live on is not mounted; the rotation must not empty."""
+    items = [_still("a"), _still("b")]
+    session = _with_favourites(
+        items, [Path("/elsewhere/gone.png")], tmp_path, cycle_favourites_only=True
+    )
+    assert len(session.playlist) == 2
+
+
+def test_turning_the_setting_on_renarrows_immediately(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("a"), _still("b"), _still("c")]
+    session = _with_favourites(items, [items[1].path], tmp_path)
+    assert len(session.playlist) == 3
+    session.update_settings(replace(session.settings, cycle_favourites_only=True))
+    assert [item.path for item in session.playlist.items] == [items[1].path]
+
+
+def test_starring_something_renarrows_the_rotation(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    """The grid writes to the store the session owns, then says so."""
+    items = [_still("a"), _still("b")]
+    session = _with_favourites(items, [items[0].path], tmp_path, cycle_favourites_only=True)
+    assert len(session.playlist) == 1
+    session.favourites.add(items[1].path)
+    session.favourites_changed()
+    assert len(session.playlist) == 2
+
+
+def test_unstarring_the_last_one_falls_back_rather_than_emptying(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("a"), _still("b")]
+    session = _with_favourites(items, [items[0].path], tmp_path, cycle_favourites_only=True)
+    session.favourites.discard(items[0].path)
+    session.favourites_changed()
+    assert len(session.playlist) == 2

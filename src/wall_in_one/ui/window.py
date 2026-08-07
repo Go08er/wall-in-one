@@ -69,10 +69,10 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_title("Wall-in-One")
         self.set_default_size(1100, 760)
 
-        # Opened here rather than in the app, because the star on a tile is
-        # the only thing that writes to it and the grid is the only thing that
-        # reads it. `open` never raises: an unreadable list degrades to none.
-        self._favourites = favourites.Store.open()
+        # The session's, not one of our own: it builds the rotation from these,
+        # so a second copy here would let the grid and what actually cycles
+        # disagree.
+        self._favourites = application.session.favourites
         self._grid = WallpaperGrid(
             self._loader, self._on_tile_activated, self._on_favourite, self._menu_for
         )
@@ -316,6 +316,7 @@ class MainWindow(Adw.ApplicationWindow):
             # will not outlive the session.
             self.report(f"{item.name} is a favourite for now, but could not be saved")
         self._grid.set_favourites(self._favourites.paths)
+        self._app.session.favourites_changed()
         self._update_subtitle()
 
     # -- the per-tile menu -----------------------------------------------

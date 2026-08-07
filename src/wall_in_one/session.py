@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import scan, stills
+from wall_in_one.library import favourites, scan, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
@@ -48,6 +48,7 @@ class Session:
         applier: Applier | None = None,
         scanner: Scanner | None = None,
         rng: random.Random | None = None,
+        favourite_store: favourites.Store | None = None,
     ) -> None:
         self._settings = settings
         # Only when we build the renderer ourselves: an applier handed in has
@@ -57,6 +58,12 @@ class Session:
         self._scan: Scanner = scanner if scanner is not None else scan.scan
         self._library = Library(roots=(), items=())
         self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
+        # Owned here rather than by the window, because the rotation is built
+        # from them and the window is not allowed to be the only thing that
+        # knows. `open` never raises: an unreadable list degrades to none.
+        self._favourites = (
+            favourite_store if favourite_store is not None else favourites.Store.open()
+        )
 
     # -- state -----------------------------------------------------------
 
@@ -105,10 +112,39 @@ class Session:
         self._rebuild_playlist()
         return self._library
 
+    @property
+    def favourites(self) -> favourites.Store:
+        """The starred wallpapers. The grid reads it; the rotation obeys it."""
+        return self._favourites
+
     def _rebuild_playlist(self) -> None:
-        self._playlist.set_items(
-            self._library.playable(dynamics_enabled=self._settings.dynamics_enabled)
-        )
+        self._playlist.set_items(self._rotation())
+
+    def _rotation(self) -> tuple[MediaItem, ...]:
+        """What `next` walks through.
+
+        Narrowing to favourites is skipped when it would empty the rotation --
+        favourites all deleted, or on a drive that is not mounted. A wallpaper
+        manager that stops changing the wallpaper is a worse answer to "you
+        have no favourites right now" than one that falls back to the library
+        and keeps working; the setting is a preference about which wallpapers,
+        not an instruction to show none.
+        """
+        playable = self._library.playable(dynamics_enabled=self._settings.dynamics_enabled)
+        if not self._settings.cycle_favourites_only:
+            return playable
+        starred = self._favourites.paths
+        chosen = tuple(item for item in playable if item.path in starred)
+        return chosen if chosen else playable
+
+    def favourites_changed(self) -> None:
+        """Re-narrow the rotation after a star moved.
+
+        Only matters while `cycle_favourites_only` is on, but calling it
+        unconditionally is what stops the rotation and the stars drifting
+        apart the moment somebody turns the setting on later.
+        """
+        self._rebuild_playlist()
 
     def sync_with_noctalia(self) -> bool:
         """Move the cursor onto whatever wallpaper is actually up.
@@ -164,6 +200,9 @@ class Session:
 
         if settings.shuffle != previous.shuffle:
             self._playlist.set_shuffle(settings.shuffle)
+
+        if settings.cycle_favourites_only != previous.cycle_favourites_only:
+            self._rebuild_playlist()
 
         if settings.roots != previous.roots:
             # Nothing else notices: the library is only re-read when something

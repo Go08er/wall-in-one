@@ -8,7 +8,7 @@ settings app wearing a costume.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import gi
 
@@ -18,6 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk
 
 from wall_in_one import config
+from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import source
@@ -29,6 +30,18 @@ from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
+
+_Choice = TypeVar("_Choice")
+
+
+def _chosen(dropdown: Gtk.DropDown, choices: tuple[_Choice, ...]) -> _Choice:
+    """What ``dropdown`` is pointing at.
+
+    GTK answers `GTK_INVALID_LIST_POSITION` when nothing is selected, which is
+    an unsigned -1 and would index off the end of a three-item tuple.
+    """
+    index = dropdown.get_selected()
+    return choices[index] if index < len(choices) else choices[0]
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -42,12 +55,20 @@ class MainWindow(Adw.ApplicationWindow):
         self._preferences: PreferencesDialog | None = None
         self._palettes: PaletteBrowserDialog | None = None
         self._browse: BrowseDialog | None = None
+        # How the library is being looked at. Deliberately not in
+        # `config.Settings`: a search is about the next thirty seconds, and
+        # reopening the app to yesterday's filter still applied -- with most of
+        # the library missing and no obvious reason why -- is a bug report.
+        # Surviving a rescan is enough, and the grid keeps it for that.
+        self._query = library_filter.Query()
+        self._playable = 0
+        self._summary = "No library loaded"
 
         self.set_title("Wall-in-One")
         self.set_default_size(1100, 760)
 
         self._grid = WallpaperGrid(self._loader, self._on_tile_activated)
-        self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle="No library loaded")
+        self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle=self._summary)
         self._toast = Adw.ToastOverlay()
 
         self.set_content(self._build_content())
@@ -100,9 +121,61 @@ class MainWindow(Adw.ApplicationWindow):
             self.add_action(action)
 
         toolbar.add_top_bar(header)
+        toolbar.add_top_bar(self._build_library_bar())
         self._toast.set_child(self._grid)
         toolbar.set_content(self._toast)
         return toolbar
+
+    def _build_library_bar(self) -> Gtk.Widget:
+        """Search, kind, and sort, on a row of their own under the header.
+
+        A second top bar rather than a revealed search bar, because two of the
+        three controls are useful without typing anything: a sort hidden behind
+        a search button is a sort nobody finds. It is the same row the browse
+        dialog puts its query and its filters on, so the two views of
+        wallpapers -- yours and the internet's -- are driven the same way.
+        """
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar.set_margin_top(6)
+        bar.set_margin_bottom(6)
+        bar.set_margin_start(12)
+        bar.set_margin_end(12)
+
+        self._search = Gtk.SearchEntry(hexpand=True)
+        self._search.set_placeholder_text("Search your library")
+        # `search-changed` rather than `activate`: GTK debounces it, so
+        # filtering as the user types costs one pass per pause, not per key.
+        self._search.connect("search-changed", self._on_controls_changed)
+        self._search.connect("stop-search", self._on_search_stopped)
+        bar.append(self._search)
+
+        self._kinds = Gtk.DropDown.new_from_strings(
+            [choice.label for choice in library_filter.KIND_CHOICES]
+        )
+        self._kinds.set_tooltip_text("Show stills, videos, or everything")
+        self._kinds.connect("notify::selected", self._on_controls_changed)
+        bar.append(self._kinds)
+
+        self._sorts = Gtk.DropDown.new_from_strings(
+            [choice.label for choice in library_filter.SORT_CHOICES]
+        )
+        self._sorts.set_tooltip_text("Sort the grid")
+        self._sorts.connect("notify::selected", self._on_controls_changed)
+        bar.append(self._sorts)
+        return bar
+
+    def _on_controls_changed(self, *_arguments: object) -> None:
+        self._query = library_filter.Query(
+            text=self._search.get_text(),
+            kinds=_chosen(self._kinds, library_filter.KIND_CHOICES),
+            sort=_chosen(self._sorts, library_filter.SORT_CHOICES),
+        )
+        self._grid.set_query(self._query)
+        self._update_subtitle()
+
+    def _on_search_stopped(self, _entry: Gtk.SearchEntry) -> None:
+        # Escape in the search box means "show me everything again".
+        self._search.set_text("")
 
     def _make_opener(self, opener: Callable[[], None]) -> Any:
         # Bound now rather than read from the loop variable when the action
@@ -185,12 +258,29 @@ class MainWindow(Adw.ApplicationWindow):
         cursor = session.cursor
         self._grid.populate(session.playlist.items, cursor.path if cursor else None)
 
+        self._playable = len(session.playlist)
         summary = (
             f"{len(session.playlist)} of {len(library)} playable "
             f"({len(library.videos)} video, {len(library.stills)} still)"
         )
         if library.skipped:
             summary += f" - {len(library.skipped)} skipped"
+        self._summary = summary
+        self._update_subtitle()
+
+    def _update_subtitle(self) -> None:
+        """Report what is on screen without misreporting the library.
+
+        A filtered view says both numbers. The counts behind it are facts about
+        the library and do not change because something is being hidden, so a
+        search that matches two wallpapers must not leave the window claiming
+        the user owns two -- which is what replacing the count would do, and it
+        would be indistinguishable from a scan that had just lost most of their
+        collection.
+        """
+        summary = self._summary
+        if self._query.narrows:
+            summary = f"Showing {self._grid.visible_count} of {self._playable} - {summary}"
         self._subtitle.set_subtitle(summary)
 
     def show_current(self, session: Session) -> None:

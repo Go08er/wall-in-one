@@ -18,6 +18,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from wall_in_one import thumbnails as thumbnail_cache
+from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import Kind, MediaItem, Ownership
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
@@ -104,6 +105,11 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         self._loader = loader
         self._on_activate = on_activate
         self._tiles: dict[Path, WallpaperTile] = {}
+        self._items: tuple[MediaItem, ...] = ()
+        self._query = library_filter.Query()
+        #: Where each visible item sits in the current order. Membership is the
+        #: filter and the value is the sort, both decided by `library.filter`.
+        self._positions: dict[Path, int] = {}
 
         self._flow = Gtk.FlowBox()
         self._flow.set_valign(Gtk.Align.START)
@@ -116,6 +122,11 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         self._flow.set_margin_start(12)
         self._flow.set_margin_end(12)
         self._flow.connect("child-activated", self._on_child_activated)
+        # The FlowBox does the hiding and the reordering itself, from the two
+        # lookups below. Rebuilding the children instead would be a fresh set
+        # of tiles on every keystroke.
+        self._flow.set_filter_func(self._is_visible)
+        self._flow.set_sort_func(self._compare)
 
         self._empty = Adw.StatusPage(
             title="No wallpapers found",
@@ -123,9 +134,15 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             icon_name="image-x-generic-symbolic",
         )
 
+        # A search that matches nothing is not an empty library, and saying so
+        # in the empty state above would tell a user with six hundred
+        # wallpapers to go and check their wallpaper directory.
+        self._unmatched = Adw.StatusPage(icon_name="system-search-symbolic")
+
         self._stack = Gtk.Stack()
         self._stack.add_named(self._flow, "grid")
         self._stack.add_named(self._empty, "empty")
+        self._stack.add_named(self._unmatched, "unmatched")
 
         self.set_child(self._stack)
         self.set_vexpand(True)
@@ -137,12 +154,16 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             self._on_activate(tile.item)
 
     def populate(self, items: tuple[MediaItem, ...], current: Path | None = None) -> None:
-        """Rebuild the grid for ``items``."""
+        """Rebuild the grid for ``items``, keeping the search and sort in force.
+
+        A tile is built and a thumbnail asked for once per item here, and
+        nowhere else. Everything the search and sort controls do afterwards
+        goes through `set_query`, which touches neither.
+        """
         while (child := self._flow.get_first_child()) is not None:
             self._flow.remove(child)
         self._tiles.clear()
-
-        self._stack.set_visible_child_name("grid" if items else "empty")
+        self._items = items
 
         for item in items:
             tile = WallpaperTile(item)
@@ -151,10 +172,69 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             self._flow.append(tile)
             self._loader.request(item, self._on_thumbnail)
 
+        self._apply_query()
+
     def _on_thumbnail(self, item: MediaItem, path: Path | None) -> None:
         tile = self._tiles.get(item.path)
         if tile is not None:
             tile.show_thumbnail(path)
+
+    # -- searching, filtering, sorting -------------------------------------
+
+    def set_query(self, query: library_filter.Query) -> None:
+        """Narrow or reorder what is already on screen.
+
+        Nothing is built and nothing is fetched: the tiles all exist from
+        `populate`, and this only settles which of them the FlowBox shows and
+        in what order. That matters more than it looks -- `ThumbnailLoader`
+        answers a cache hit straight away, but an item whose thumbnail could
+        not be generated has no cache entry, so rebuilding tiles per keystroke
+        would put the same failing ffmpeg call back on the pool for every
+        letter typed.
+        """
+        self._query = query
+        self._apply_query()
+
+    @property
+    def visible_count(self) -> int:
+        """How many tiles the current query leaves showing."""
+        return len(self._positions)
+
+    def _apply_query(self) -> None:
+        visible = library_filter.apply(self._items, self._query)
+        self._positions = {item.path: index for index, item in enumerate(visible)}
+        self._flow.invalidate_filter()
+        self._flow.invalidate_sort()
+
+        if not self._items:
+            self._stack.set_visible_child_name("empty")
+        elif not visible:
+            self._unmatched.set_title(f"No {library_filter.describe(self._query)}")
+            self._unmatched.set_description(
+                "Nothing in your library matches. Clear the search, or widen the filter."
+            )
+            self._stack.set_visible_child_name("unmatched")
+        else:
+            self._stack.set_visible_child_name("grid")
+
+    def _is_visible(self, child: Gtk.FlowBoxChild) -> bool:
+        return self._position(child) is not None
+
+    def _compare(self, first: Gtk.FlowBoxChild, second: Gtk.FlowBoxChild) -> int:
+        # The order was decided in `library.filter`; this only reads off the
+        # positions it produced. Hidden children sort past the end, where their
+        # order does not matter because nothing draws them.
+        return self._rank(first) - self._rank(second)
+
+    def _rank(self, child: Gtk.FlowBoxChild) -> int:
+        position = self._position(child)
+        return len(self._positions) if position is None else position
+
+    def _position(self, child: Gtk.FlowBoxChild) -> int | None:
+        tile = child.get_child()
+        if not isinstance(tile, WallpaperTile):
+            return None
+        return self._positions.get(tile.item.path)
 
     def set_current(self, current: Path | None) -> None:
         """Move the "this one is up" highlight without rebuilding anything."""

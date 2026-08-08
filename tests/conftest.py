@@ -21,6 +21,7 @@ here.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -41,8 +42,23 @@ MUTATORS: tuple[str, ...] = (
 
 
 @pytest.fixture(autouse=True)
-def no_live_noctalia(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Refuse any call that would change the machine the suite runs on."""
+def no_live_noctalia(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """Refuse desktop mutation and isolate every conventional state path.
+
+    The mutator guard protects Noctalia, but the app also owns playlists,
+    schedules, caches and downloads. A test that constructs a default Store
+    must not silently resolve those into the developer's home directory. The
+    Nix sandbox exposed this when ``HOME=/homeless-shelter`` made such a write
+    fail; outside the sandbox it had been succeeding against real app state.
+    """
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
 
     def refuse(name: str) -> Any:
         def called(*_arguments: object, **_keywords: object) -> None:

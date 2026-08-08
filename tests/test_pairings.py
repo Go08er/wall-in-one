@@ -73,11 +73,28 @@ def test_a_source_containing_a_colon_survives() -> None:
     assert Identity.parse(original.key) == original
 
 
-@pytest.mark.parametrize("key", ["", "still", "still:", ":/w/a.png", "scene:12345", "nonsense"])
+@pytest.mark.parametrize("key", ["", "still", "still:", ":/w/a.png", "nebula:1", "nonsense"])
 def test_an_unreadable_key_is_dropped_rather_than_guessed(key: str) -> None:
-    """`scene:` is the interesting one: a record written by a later version
-    that knows about Workshop. Not ours to interpret, and not ours to mangle."""
+    """A medium this build does not know is not ours to interpret, and not
+    ours to mangle. `scene:` used to be the example here; it is a real medium
+    now, which is what the design anticipated."""
     assert Identity.parse(key) is None
+
+
+def test_a_scene_is_keyed_by_its_workshop_id_not_its_directory() -> None:
+    """A reinstall moves the directory. Losing the still somebody chose
+    because Steam unpacked it somewhere else would be the whole reason a
+    record is keyed `medium:source` rather than by a filename."""
+    scene = MediaItem(
+        path=Path("/steam/workshop/content/431960/2149140853"),
+        kind=Kind.SCENE,
+        size=1,
+        mtime=0,
+        scene="2149140853",
+    )
+    identity = Identity.of(scene)
+    assert identity.key == "scene:2149140853"
+    assert Identity.parse(identity.key) == identity
 
 
 # -- the default bundle ---------------------------------------------------

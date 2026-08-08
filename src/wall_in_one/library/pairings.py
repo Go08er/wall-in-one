@@ -91,17 +91,23 @@ class PairingError(Exception):
 class Medium(Enum):
     """What kind of thing the pairing is *of*.
 
-    Not `library.model.Kind`, which says how to play a file. A Workshop scene
-    is neither a still nor a video on disk, so the two will part company at
-    step 15 and are kept separate now to save a migration then.
+    Not `library.model.Kind`, which says how to show a wallpaper. They agree
+    for files and part company for scenes, whose source is a Workshop id
+    rather than a path -- which is the whole reason a record is keyed
+    `medium:source` and not by a filename.
     """
 
     STILL = "still"
     VIDEO = "video"
+    SCENE = "scene"
 
     @classmethod
     def of(cls, kind: Kind) -> Medium:
-        return cls.VIDEO if kind is Kind.VIDEO else cls.STILL
+        if kind is Kind.VIDEO:
+            return cls.VIDEO
+        if kind is Kind.SCENE:
+            return cls.SCENE
+        return cls.STILL
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +119,13 @@ class Identity:
 
     @classmethod
     def of(cls, item: MediaItem) -> Identity:
-        return cls(medium=Medium.of(item.kind), source=str(item.path))
+        """A scene is keyed by its Workshop id, not by where Steam put it.
+
+        Which is the point of `medium:source`: a reinstall moves the directory
+        and must not lose the still somebody chose for it.
+        """
+        source = item.scene if item.kind is Kind.SCENE and item.scene else str(item.path)
+        return cls(medium=Medium.of(item.kind), source=source)
 
     @property
     def key(self) -> str:
@@ -356,8 +368,14 @@ def synthesize(item: MediaItem, roots: Sequence[Path] = ()) -> Pairing:
     `Automatic Stills` directory, or a sibling named by the user's own habit.
     """
     identity = Identity.of(item)
-    if item.kind is not Kind.VIDEO:
+    if not item.is_moving:
         return Pairing(identity=identity, still=item.path, motion=None)
+    if item.kind is Kind.SCENE:
+        return Pairing(
+            identity=identity,
+            still=pairing.scene_still(item.scene, roots=roots),
+            motion=item.path,
+        )
     return Pairing(
         identity=identity,
         still=pairing.find_still(item.path, roots=roots),

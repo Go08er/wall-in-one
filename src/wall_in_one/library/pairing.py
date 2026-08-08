@@ -138,6 +138,21 @@ def preview_beside(video: Path) -> Path | None:
     return None
 
 
+def scene_still(scene: str, roots: Iterable[Path] = ()) -> Path | None:
+    """The captured still for a Workshop scene, named by its id.
+
+    By id rather than by directory, so a reinstall that moves the directory
+    still finds the still that was taken before.
+    """
+    for root in roots:
+        directory = still_directory(root)
+        for extension in _still_extensions():
+            candidate = directory / f"{scene}{extension}"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def find_still(video: Path, roots: Iterable[Path] = ()) -> Path | None:
     """Best still for ``video``, or ``None`` if it has none."""
     roots = tuple(roots)

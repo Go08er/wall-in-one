@@ -576,8 +576,8 @@ each step is independently useful if the next never happens.
 - [ ] **14. Per-display assignment.** Each output gets a default playlist and
       its own schedule and engine settings. Requires the leader-display rule
       above for palettes, and turns the single `output` setting into a map.
-- [~] **15. Wallpaper Engine.** Half done, and the survey moved the goalposts
-      in a good direction.
+- [x] **15. Wallpaper Engine.** The survey moved the goalposts in a good
+      direction, and both halves are in.
       **Surveyed first, against the 49 items installed here.** 45 of them are
       `type: video` whose entry file is a real `.mp4` -- those need nothing but
       mpvpaper, which this app already drives, and they are in the library now.
@@ -598,8 +598,12 @@ each step is independently useful if the next never happens.
       default; `own_scene_renderer` is how somebody says otherwise, and a
       foreign instance on the same output is detected and reported rather than
       shouldered aside. Capturing a still is exempt -- window mode, no output.
-      **Still to do:** `Kind.SCENE` through the model, so a scene can be a
-      library item rather than only a thing the renderer could show.
+      `Kind.SCENE` runs through the model now, so all 49 wallpapers are
+      library items. A scene is keyed by its Workshop id rather than by its
+      directory, so a reinstall that moves the directory does not lose the
+      still somebody chose. `MediaItem.title` exists because a scene's
+      directory is called `1647046763` and its wallpaper is called "Toothless
+      in a Field" -- which the video items get too.
       Bringing someone else's collection into the library turned up a real
       hole in removal: a Workshop wallpaper is `Ownership.USER`, so `remove`
       correctly refused to *delete* it -- and then fell through to `trash`,

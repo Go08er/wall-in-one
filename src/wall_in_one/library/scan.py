@@ -155,33 +155,53 @@ def _walk(root: Path, budget: list[int], skipped: list[str]) -> Iterable[Path]:
 
 
 def workshop_items() -> tuple[MediaItem, ...]:
-    """Installed Wallpaper Engine wallpapers this app can already play.
+    """Installed Wallpaper Engine wallpapers, videos and scenes alike.
 
     `Ownership.USER` without exception: these are Steam's files, in Steam's
-    directories, and `library.manage` must refuse to delete one however
-    managed the surrounding tree looks. The scenes are left out because there
-    is nothing yet that can render one -- `library.workshop.unplayable` is how
-    a caller says how many were passed over.
+    directories, and `library.manage` must refuse to touch one however managed
+    the surrounding tree looks.
     """
     found: list[MediaItem] = []
-    for item in workshop.videos(workshop.scan()):
+    for item in workshop.scan():
         entry = item.entry
-        if entry is None:
-            continue
-        try:
-            info = entry.stat()
-        except OSError:
-            continue
-        found.append(
-            MediaItem(
-                path=entry,
-                kind=Kind.VIDEO,
-                size=info.st_size,
-                mtime=int(info.st_mtime),
-                ownership=Ownership.USER,
-                provider=WORKSHOP_PROVIDER,
+        if item.is_video and entry is not None:
+            try:
+                info = entry.stat()
+            except OSError:
+                continue
+            found.append(
+                MediaItem(
+                    path=entry,
+                    kind=Kind.VIDEO,
+                    size=info.st_size,
+                    mtime=int(info.st_mtime),
+                    ownership=Ownership.USER,
+                    provider=WORKSHOP_PROVIDER,
+                    title=item.title,
+                )
             )
-        )
+        elif item.kind == "scene":
+            # No file to point at: the content is inside `scene.pkg`, so the
+            # path is the directory and the Workshop id is what the renderer
+            # is given. Size is the directory's own, which is meaningless as a
+            # wallpaper size but keeps "largest first" from putting every
+            # scene at one end of the grid.
+            try:
+                info = item.directory.stat()
+            except OSError:
+                continue
+            found.append(
+                MediaItem(
+                    path=item.directory,
+                    kind=Kind.SCENE,
+                    size=info.st_size,
+                    mtime=int(info.st_mtime),
+                    ownership=Ownership.USER,
+                    provider=WORKSHOP_PROVIDER,
+                    scene=item.id,
+                    title=item.title,
+                )
+            )
     return tuple(found)
 
 

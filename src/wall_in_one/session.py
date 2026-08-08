@@ -19,7 +19,7 @@ from wall_in_one.library import favourites, pairings, playlists, scan, schedules
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
-from wall_in_one.wallpaper import renderer
+from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
 
 Scanner = Callable[[Sequence[Path] | None], Library]
@@ -61,7 +61,14 @@ class Session:
         # been configured by whoever handed it in, and reaching into it would
         # overwrite that.
         self._applier = (
-            applier if applier is not None else Applier(_renderer_for(settings), settings.output)
+            applier
+            if applier is not None
+            else Applier(
+                _renderer_for(settings),
+                settings.output,
+                scenes.SceneRenderer(output=settings.output),
+                own_scene_renderer=settings.own_scene_renderer,
+            )
         )
         # The default scanner carries the customizations in with it, so pairing
         # happens once, inside the scan. An injected scanner is left alone: a
@@ -294,11 +301,15 @@ class Session:
         if settings.shuffle != previous.shuffle:
             self._playlist.set_shuffle(settings.shuffle)
 
+        if settings.own_scene_renderer != previous.own_scene_renderer:
+            self._applier.own_scene_renderer = settings.own_scene_renderer
+
         if settings.output != previous.output:
             # Both halves, because a still and a video reach the screen by
             # different routes and only one of them can be retuned live.
             self._applier.output = settings.output
             self._applier.renderer.output = settings.output or renderer.ALL_OUTPUTS
+            self._applier.scenes.output = settings.output
 
         if (settings.cycle_favourites_only, settings.active_playlist) != (
             previous.cycle_favourites_only,

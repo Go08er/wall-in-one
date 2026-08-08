@@ -43,12 +43,22 @@ class Kinds(Enum):
         return _KIND_NOUNS[self]
 
     def accepts(self, kind: Kind) -> bool:
-        """Whether a file of this kind passes. Favourites accept every kind --
-        which of them are favourites is a question about paths, and `apply`
-        asks it separately because this enum has no way to know."""
+        """Whether a wallpaper of this kind passes.
+
+        A Wallpaper Engine scene counts as moving rather than as a third
+        choice: the split somebody makes here is between wallpapers that move
+        and wallpapers that do not, and which renderer draws the moving one is
+        not a distinction they were asking about.
+
+        Favourites accept every kind -- which of them are favourites is a
+        question about paths, and `apply` asks it separately because this enum
+        has no way to know.
+        """
         if self in (Kinds.EVERYTHING, Kinds.FAVOURITES):
             return True
-        return kind is (Kind.STILL if self is Kinds.STILLS else Kind.VIDEO)
+        if self is Kinds.STILLS:
+            return kind is Kind.STILL
+        return kind.moves
 
 
 class Sort(Enum):
@@ -67,14 +77,14 @@ class Sort(Enum):
 _KIND_LABELS: Final[Mapping[Kinds, str]] = {
     Kinds.EVERYTHING: "Everything",
     Kinds.STILLS: "Stills only",
-    Kinds.VIDEOS: "Videos only",
+    Kinds.VIDEOS: "Videos and scenes",
     Kinds.FAVOURITES: "Favourites only",
 }
 
 _KIND_NOUNS: Final[Mapping[Kinds, str]] = {
     Kinds.EVERYTHING: "wallpapers",
     Kinds.STILLS: "stills",
-    Kinds.VIDEOS: "videos",
+    Kinds.VIDEOS: "videos or scenes",
     Kinds.FAVOURITES: "favourites",
 }
 

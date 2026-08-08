@@ -623,7 +623,7 @@ def test_a_listing_selects_and_orders_exactly_as_the_grid_does() -> None:
 def test_a_listing_of_one_kind_says_so_in_its_summary() -> None:
     items = (_wallpaper("aurora"), _wallpaper("clip", Kind.VIDEO))
     assert render_library(items, Query(kinds=Kinds.VIDEOS), ()).splitlines()[0] == (
-        "# library: 1 of 2 videos"
+        "# library: 1 of 2 videos or scenes"
     )
 
 

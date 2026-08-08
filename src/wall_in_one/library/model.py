@@ -24,10 +24,27 @@ AMBIGUOUS_EXTENSIONS: Final[frozenset[str]] = IMAGE_EXTENSIONS & VIDEO_EXTENSION
 
 
 class Kind(Enum):
-    """Whether a file is played as a still or as a video."""
+    """How a wallpaper is shown.
+
+    `SCENE` is the odd one and is why this is not a two-way split: a Wallpaper
+    Engine scene is not a file at all. Its content is packed inside a
+    `scene.pkg` that only `linux-wallpaperengine` can read, so it is named by
+    its Steam Workshop id and its `path` points at the directory it lives in
+    rather than at anything playable.
+    """
 
     STILL = "still"
     VIDEO = "video"
+    SCENE = "scene"
+
+    @property
+    def moves(self) -> bool:
+        """Whether showing this needs a renderer above the wallpaper.
+
+        The distinction the dynamics setting is really about. A scene and a
+        video differ in which renderer, not in whether one is needed.
+        """
+        return self is not Kind.STILL
 
 
 class Ownership(Enum):
@@ -66,17 +83,32 @@ class MediaItem:
     mtime: int
     ownership: Ownership = Ownership.USER
     provider: str = "local"
+    #: A Wallpaper Engine Workshop id, when `kind` is `SCENE`. Empty otherwise.
+    #: The renderer is given this rather than a path, because there is no file
+    #: to give it.
+    scene: str = ""
+    #: What to call this where a person will read it. Empty for anything whose
+    #: filename already says what it is, which is nearly everything; a Workshop
+    #: scene needs it because its directory is named `1647046763` and its
+    #: wallpaper is called "Toothless in a Field".
+    title: str = ""
     #: For a video: a still to show when dynamics are paused. See
     #: `wall_in_one.library.pairing`.
     paired_still: Path | None = None
 
     @property
     def name(self) -> str:
-        return self.path.stem
+        """What to show, and what the search box matches against."""
+        return self.title or self.path.stem
 
     @property
     def is_video(self) -> bool:
         return self.kind is Kind.VIDEO
+
+    @property
+    def is_moving(self) -> bool:
+        """Whether this needs a renderer: a video or a scene."""
+        return self.kind.moves
 
     @property
     def deletable(self) -> bool:
@@ -90,7 +122,7 @@ class MediaItem:
         no paired still has nothing to show, which is what ``None`` means --
         the playlist skips it rather than silently starting the video anyway.
         """
-        if self.kind is Kind.STILL or dynamics_enabled:
+        if not self.kind.moves or dynamics_enabled:
             return self.path
         return self.paired_still
 
@@ -127,6 +159,10 @@ class Library:
     @property
     def videos(self) -> tuple[MediaItem, ...]:
         return tuple(item for item in self.items if item.kind is Kind.VIDEO)
+
+    @property
+    def scenes(self) -> tuple[MediaItem, ...]:
+        return tuple(item for item in self.items if item.kind is Kind.SCENE)
 
     @property
     def stills(self) -> tuple[MediaItem, ...]:

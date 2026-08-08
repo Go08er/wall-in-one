@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
 from wall_in_one.wallpaper.scenes import SceneRenderer
 
@@ -148,3 +149,98 @@ def test_an_unreadable_process_is_skipped_rather_than_fatal(tmp_path: Path) -> N
         {2388: ["linux-wallpaperengine", "--screen-root", "eDP-1", "--bg", "1"]},
     )
     assert scenes.running_elsewhere("eDP-1", proc) == (2388,)
+
+
+# -- a scene as a library item --------------------------------------------
+
+
+def scene_item(workshop_id: str = "2149140853", still: Path | None = None) -> MediaItem:
+    return MediaItem(
+        path=Path("/steam/workshop/content/431960") / workshop_id,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=0,
+        scene=workshop_id,
+        paired_still=still,
+    )
+
+
+def test_a_scene_counts_as_a_moving_wallpaper() -> None:
+    assert scene_item().is_moving
+    assert Kind.SCENE.moves
+    assert not Kind.STILL.moves
+
+
+def test_a_scene_with_no_still_cannot_be_shown_with_dynamics_off() -> None:
+    """The same rule videos follow: there is nothing to put on screen."""
+    assert scene_item().playback_path(dynamics_enabled=False) is None
+    assert scene_item(still=Path("/w/a.png")).playback_path(dynamics_enabled=False) == Path(
+        "/w/a.png"
+    )
+
+
+def test_the_filter_treats_a_scene_as_moving(tmp_path: Path) -> None:
+    """The split somebody makes is moving-versus-still; which renderer draws
+    the moving one is not a distinction they were asking about."""
+    from wall_in_one.library.filter import Kinds
+
+    assert Kinds.VIDEOS.accepts(Kind.SCENE)
+    assert not Kinds.STILLS.accepts(Kind.SCENE)
+
+
+def test_a_scene_is_refused_when_the_app_does_not_own_the_renderer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The default. Somebody else's engine is probably drawing the desktop."""
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", lambda *a, **k: None)
+    from wall_in_one.wallpaper.applier import Applier, ApplyError
+
+    applier = Applier(_QuietRenderer(), own_scene_renderer=False)  # type: ignore[arg-type]
+    with pytest.raises(ApplyError) as caught:
+        applier.apply(scene_item(still=tmp_path / "a.png"), dynamics_enabled=True)
+    assert "not set to drive" in str(caught.value)
+
+
+def test_a_scene_is_refused_when_another_engine_holds_the_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two programs driving one output is two programs fighting over one
+    wallpaper, and the loser is whichever the user was looking at."""
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", lambda *a, **k: None)
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.running_elsewhere", lambda _o: (2388,))
+    from wall_in_one.wallpaper.applier import Applier, ApplyError
+
+    applier = Applier(_QuietRenderer(), "eDP-1", own_scene_renderer=True)  # type: ignore[arg-type]
+    with pytest.raises(ApplyError) as caught:
+        applier.apply(scene_item(still=tmp_path / "a.png"), dynamics_enabled=True)
+    assert "already running" in str(caught.value)
+    assert "2388" in str(caught.value)
+
+
+def test_the_still_still_reaches_the_screen_when_a_scene_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A refusal leaves the scene's representative up rather than nothing."""
+    applied: list[Path] = []
+    monkeypatch.setattr(
+        "wall_in_one.theme.noctalia.set_wallpaper",
+        lambda path, connector=None: applied.append(Path(path)),
+    )
+    from wall_in_one.wallpaper.applier import Applier, ApplyError
+
+    applier = Applier(_QuietRenderer(), own_scene_renderer=False)  # type: ignore[arg-type]
+    with pytest.raises(ApplyError):
+        applier.apply(scene_item(still=tmp_path / "a.png"), dynamics_enabled=True)
+    assert applied == [tmp_path / "a.png"]
+
+
+class _QuietRenderer:
+    """Stands in for mpvpaper, which a scene test has no business starting."""
+
+    def __init__(self) -> None:
+        self.stops = 0
+
+    def start(self, video: Path) -> None: ...
+
+    def stop(self) -> None:
+        self.stops += 1

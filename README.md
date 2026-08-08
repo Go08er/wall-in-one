@@ -285,6 +285,20 @@ here the rotation quietly falls back to the whole library rather than stopping.
 A playlist whose name has a space in it is referred to by the id `playlists`
 prints beside it.
 
+**Wallpaper Engine** content installed through Steam is picked up automatically
+-- 49 wallpapers on the machine this was built on. Most Workshop items turn out
+to be plain videos, which play through mpvpaper like any other; only true
+`scene` wallpapers need `linux-wallpaperengine`, and their stills are captured
+through it in a window without anything appearing on screen.
+
+The app does **not** drive `linux-wallpaperengine` unless you tell it to
+(`own_scene_renderer`). The engine is single-instance per output and other
+things drive it -- Noctalia's own `linux-wallpaperengine-controller` plugin
+among them -- so starting a second one means two programs fighting over one
+wallpaper. If another engine already holds the screen, the app says so and
+leaves the scene's still up instead. Steam's files are never deleted, moved or
+written beside.
+
 A **schedule** puts the calendar in charge of which playlist is in force.
 Rules take `days=`, `months=`, `from=` and `to=`, all optional, all combined
 with and; a rule with none of them matches always. Times are local, inclusive

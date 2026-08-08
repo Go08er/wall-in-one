@@ -226,7 +226,7 @@ def test_an_empty_library_sorts_to_nothing() -> None:
 
 def test_the_description_names_what_is_being_shown() -> None:
     assert library_filter.describe(Query()) == "wallpapers"
-    assert library_filter.describe(Query(kinds=Kinds.VIDEOS)) == "videos"
+    assert library_filter.describe(Query(kinds=Kinds.VIDEOS)) == "videos or scenes"
     assert library_filter.describe(Query(text="snow")) == 'wallpapers matching "snow"'
     assert (
         library_filter.describe(Query(text=" snow ", kinds=Kinds.STILLS))

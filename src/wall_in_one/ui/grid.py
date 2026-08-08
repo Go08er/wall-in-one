@@ -91,8 +91,12 @@ class WallpaperTile(Gtk.Box):
         badges.set_valign(Gtk.Align.START)
         badges.set_margin_top(6)
         badges.set_margin_start(6)
-        if item.kind is Kind.VIDEO:
-            badges.append(_badge("Video" if item.paired_still else "Video (no still)"))
+        if item.is_moving:
+            # Named for what it is, because a scene and a video are shown by
+            # different programs and only one of them can be paused to a still
+            # without help.
+            what = "Scene" if item.kind is Kind.SCENE else "Video"
+            badges.append(_badge(what if item.paired_still else f"{what} (no still)"))
         if item.ownership is Ownership.MANAGED:
             badges.append(_badge(item.provider))
         frame.add_overlay(badges)

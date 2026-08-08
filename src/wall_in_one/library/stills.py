@@ -32,6 +32,7 @@ from typing import Final
 from wall_in_one import paths
 from wall_in_one.library import pairing
 from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.wallpaper import scenes
 
 #: Where to seek before grabbing the frame. Far enough in to clear an opening
 #: fade, near enough that a short loop still has something there.
@@ -188,15 +189,48 @@ def _record_beside(video: Path, still: Path, root: Path) -> None:
     write_sidecar(video, still)
 
 
+def capture_scene(item: MediaItem, root: Path, *, force: bool = False) -> Path:
+    """Take a still from a Wallpaper Engine scene, through the engine itself.
+
+    ffmpeg cannot help here: a scene has no file to decode, only a `scene.pkg`
+    that `linux-wallpaperengine` knows how to read. The engine renders it in a
+    window and writes one frame, which is why this can run while somebody
+    else's engine owns the screen -- see `wallpaper.scenes`.
+
+    The still is named by the Workshop id rather than by the directory, so a
+    reinstall that moves the directory still finds it.
+    """
+    if not item.scene:
+        raise StillError(f"{item.name} is not a Wallpaper Engine scene")
+    target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    if not force and target.is_file() and target.stat().st_size > 0:
+        return target
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise StillError(f"could not create {target.parent}: {error.strerror or error}") from error
+    try:
+        return scenes.screenshot(item.scene, target)
+    except scenes.SceneError as error:
+        raise StillError(str(error)) from error
+
+
 def ensure(item: MediaItem, root: Path) -> Path | None:
     """The still for ``item``, making one if it has none. ``None`` if it needs none.
 
     The forgiving entry point, for callers that want a still if one can be had
     and can carry on without: a still that cannot be made is not a reason to
-    refuse to play the video.
+    refuse to play the wallpaper.
     """
-    if item.kind is not Kind.VIDEO:
+    if not item.is_moving:
         return None
+    if item.kind is Kind.SCENE:
+        if item.paired_still is not None:
+            return item.paired_still
+        try:
+            return capture_scene(item, root)
+        except StillError:
+            return None
     if item.paired_still is not None:
         return item.paired_still
     existing = pairing.find_still(item.path, roots=(root,))

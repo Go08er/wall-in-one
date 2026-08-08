@@ -21,7 +21,7 @@ from pathlib import Path
 from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
-from wall_in_one.wallpaper import renderer
+from wall_in_one.wallpaper import renderer, scenes
 
 
 class ApplyError(Exception):
@@ -48,8 +48,18 @@ class Applier:
         self,
         video_renderer: renderer.Renderer | None = None,
         output: str = "",
+        scene_renderer: scenes.SceneRenderer | None = None,
+        *,
+        own_scene_renderer: bool = False,
     ) -> None:
         self._renderer = video_renderer if video_renderer is not None else renderer.Renderer()
+        self._scenes = (
+            scene_renderer if scene_renderer is not None else scenes.SceneRenderer(output=output)
+        )
+        #: Whether this app may start `linux-wallpaperengine` at all. Off by
+        #: default: the engine is single-instance per output and other things
+        #: drive it, so taking it over is the user's decision.
+        self.own_scene_renderer = own_scene_renderer
         self._current: Applied | None = None
         #: Connector name, or empty for every output. Stills carry it to
         #: Noctalia's `wallpaper-set [connector]`; videos carry mpvpaper's own
@@ -85,7 +95,7 @@ class Applier:
         if target is None:
             raise ApplyError(f"{item.name} is a video with no still, and dynamics are off")
 
-        moving = item.kind is Kind.VIDEO and dynamics_enabled
+        moving = item.is_moving and dynamics_enabled
         still = item.paired_still if moving else target
         if moving:
             self._set_still_under_video(still)
@@ -94,11 +104,12 @@ class Applier:
 
         self._apply_palette(palette, generator)
 
-        applied = (
-            self._start_video(item, target)
-            if moving
-            else Applied(item=item, path=target, animated=False)
-        )
+        if not moving:
+            applied = Applied(item=item, path=target, animated=False)
+        elif item.kind is Kind.SCENE:
+            applied = self._start_scene(item, target)
+        else:
+            applied = self._start_video(item, target)
         self._current = applied
         return applied
 
@@ -121,8 +132,10 @@ class Applier:
             noctalia.set_scheme(selection)
 
     def _set_still(self, path: Path) -> None:
-        # Stop first: a running video would cover the still we are about to set.
+        # Stop first: a running video or scene would cover the still we are
+        # about to set.
         self._renderer.stop()
+        self._scenes.stop()
         try:
             noctalia.set_wallpaper(path, self.output or None)
         except noctalia.NoctaliaError as error:
@@ -140,6 +153,33 @@ class Applier:
             return
         with contextlib.suppress(noctalia.NoctaliaError):
             noctalia.set_wallpaper(still, self.output or None)
+
+    def _start_scene(self, item: MediaItem, path: Path) -> Applied:
+        """Hand a Wallpaper Engine scene to `linux-wallpaperengine`.
+
+        Refuses rather than fights. The engine is single-instance per output,
+        so starting a second one means two programs driving one wallpaper and
+        the loser is whichever the user was actually looking at. The still is
+        already on screen by this point either way, so a refusal leaves them
+        with the scene's representative rather than with nothing.
+        """
+        if not self.own_scene_renderer:
+            raise ApplyError(
+                f"{item.name} is a Wallpaper Engine scene, and this app is not set to drive "
+                "linux-wallpaperengine. Turn on 'own the scene renderer' in Settings."
+            )
+        held = scenes.running_elsewhere(self.output)
+        if held:
+            raise ApplyError(
+                f"linux-wallpaperengine is already running on {self.output or 'this screen'} "
+                f"(pid {held[0]}), so {item.name} was not started. Stop the other one first."
+            )
+        self._renderer.stop()
+        try:
+            self._scenes.start(item.scene)
+        except scenes.SceneError as error:
+            raise ApplyError(str(error)) from error
+        return Applied(item=item, path=path, animated=True)
 
     def _start_video(self, item: MediaItem, path: Path) -> Applied:
         try:
@@ -170,6 +210,11 @@ class Applier:
             return None
         return self.apply(current.item, dynamics_enabled=enabled)
 
+    @property
+    def scenes(self) -> scenes.SceneRenderer:
+        return self._scenes
+
     def shutdown(self) -> None:
-        """Stop the renderer. The still stays: Noctalia owns it now."""
+        """Stop the renderers. The still stays: Noctalia owns it now."""
         self._renderer.stop()
+        self._scenes.stop()

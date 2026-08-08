@@ -83,15 +83,19 @@ SORTING: Final[frozenset[str]] = frozenset(
 )
 ORDER: Final[frozenset[str]] = frozenset({"asc", "desc"})
 TOP_RANGE: Final[frozenset[str]] = frozenset({"1d", "3d", "1w", "1M", "3M", "6M", "1y"})
-COLORS: Final[frozenset[str]] = frozenset(
-    {
-        "660000", "990000", "cc0000", "cc3333", "ea4c88", "993399",
-        "663399", "333399", "0066cc", "0099cc", "66cccc", "77cc33",
-        "669900", "336600", "666600", "999900", "cccc33", "ffff00",
-        "ffcc33", "ff9900", "ff6600", "cc6633", "996633", "663300",
-        "000000", "999999", "cccccc", "ffffff", "424153",
-    }
+#: Wallhaven's palette, in Wallhaven's own order -- reds through pinks,
+#: purples, blues, greens, yellows, oranges, browns, then the neutrals. A
+#: sequence rather than a set because a colour picker has to lay them out, and
+#: a set would rearrange the swatches between runs.
+COLOR_ORDER: Final[tuple[str, ...]] = (
+    "660000", "990000", "cc0000", "cc3333", "ea4c88", "993399",
+    "663399", "333399", "0066cc", "0099cc", "66cccc", "77cc33",
+    "669900", "336600", "666600", "999900", "cccc33", "ffff00",
+    "ffcc33", "ff9900", "ff6600", "cc6633", "996633", "663300",
+    "000000", "999999", "cccccc", "ffffff", "424153",
 )  # fmt: skip
+
+COLORS: Final[frozenset[str]] = frozenset(COLOR_ORDER)
 
 FILTER_OPTIONS: Final[frozenset[str]] = frozenset(
     {

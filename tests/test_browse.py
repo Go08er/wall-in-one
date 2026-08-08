@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from tests.test_providers_fakes import FakeClient, Reply, png_bytes
+from wall_in_one import browse
 from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library.model import Kind
+from wall_in_one.providers import wallhaven
 from wall_in_one.providers.base import (
     DownloadResult,
     ProviderError,
@@ -173,3 +175,100 @@ def test_search_is_delegated_to_the_named_provider(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(engine, "provider", lambda _name: Stub())
     assert engine.search("wallhaven", SearchQuery(text="aurora")) is answer
     assert seen[0].text == "aurora"
+
+
+# -- filters -------------------------------------------------------------
+#
+# The dialog reads its widgets into a `Filters` and asks for a query back.
+# What is worth pinning is the conditional parts: Wallhaven refuses a seed
+# outside random sorting rather than ignoring it, so a control that always
+# sent one would turn changing the sort order into an error message.
+
+
+def test_default_filters_ask_for_nothing_unusual() -> None:
+    query = browse.Filters(text="mountain").to_query(browse.WALLHAVEN)
+    assert query.text == "mountain"
+    assert query.options == {
+        "sorting": "date_added",
+        "order": "desc",
+        "categories": "111",
+        "purity": "100",
+    }
+
+
+def test_the_optional_wallhaven_filters_appear_only_when_set() -> None:
+    filters = browse.Filters(atleast="1920x1080", ratios="16x9", colour="0066cc")
+    options = filters.to_query(browse.WALLHAVEN).options
+    assert options["atleast"] == "1920x1080"
+    assert options["ratios"] == "16x9"
+    assert options["colors"] == "0066cc"
+
+
+def test_the_top_range_is_sent_only_for_the_toplist() -> None:
+    """Wallhaven ignores it elsewhere, so sending it would misdescribe the URL."""
+    assert "top_range" not in browse.Filters(sorting="hot").to_query(browse.WALLHAVEN).options
+    ranged = browse.Filters(sorting="toplist", top_range="1w").to_query(browse.WALLHAVEN)
+    assert ranged.options["top_range"] == "1w"
+
+
+def test_a_seed_is_generated_for_random_sorting() -> None:
+    """Without one, page two of a random search overlaps page one."""
+    filters = browse.Filters(sorting="random").seeded()
+    assert len(filters.seed) == browse.SEED_LENGTH
+    assert filters.seed.isalnum()
+    assert filters.to_query(browse.WALLHAVEN).options["seed"] == filters.seed
+
+
+def test_an_existing_seed_is_kept_so_paging_stays_put() -> None:
+    filters = browse.Filters(sorting="random", seed="abc123")
+    assert filters.seeded().seed == "abc123"
+
+
+def test_a_stale_seed_is_dropped_when_the_sorting_changes() -> None:
+    """Wallhaven refuses a seed outside random sorting, rather than ignoring it.
+
+    So a user who searches randomly and then switches to "Top list" would get
+    a validation error instead of results.
+    """
+    filters = browse.Filters(sorting="toplist", seed="abc123").seeded()
+    assert filters.seed == ""
+    assert "seed" not in filters.to_query(browse.WALLHAVEN).options
+
+
+def test_seeds_differ_between_searches() -> None:
+    seeds = {browse.new_seed() for _ in range(20)}
+    assert len(seeds) > 1
+
+
+def test_motionbgs_gets_its_own_shape() -> None:
+    options = browse.Filters(mode="genre", genre="anime").to_query(browse.MOTIONBGS).options
+    assert options == {"mode": "genre", "genre": "anime"}
+
+
+def test_typing_a_query_overrides_the_motionbgs_browse_mode() -> None:
+    """MotionBGS rejects a query and a browse mode together."""
+    options = browse.Filters(text="kakashi", mode="latest").to_query(browse.MOTIONBGS).options
+    assert options["mode"] == "search"
+
+
+def test_wallhaven_accepts_every_option_the_filters_produce() -> None:
+    """The two halves have to agree, and only one of them is in this module.
+
+    `WallhavenFilters.from_query` refuses an unknown option outright, so a
+    name misspelled here would fail at the website rather than in a test.
+    """
+    filters = browse.Filters(
+        text="forest",
+        sorting="random",
+        order="asc",
+        atleast="2560x1440",
+        ratios="16x9,21x9",
+        colour="336600",
+    ).seeded()
+    parsed = wallhaven.WallhavenFilters.from_query(
+        filters.to_query(browse.WALLHAVEN), authenticated=False
+    )
+    assert parsed.seed == filters.seed
+    assert parsed.colors == "336600"
+    assert parsed.ratios == "16x9,21x9"
+    assert parsed.order == "asc"

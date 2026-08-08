@@ -9,7 +9,7 @@ on a worker and comes back through `GLib.idle_add`, the same arrangement
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final
 
@@ -21,7 +21,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
-from wall_in_one import thumbnails
+from wall_in_one import browse, thumbnails
 from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import registry, wallhaven
@@ -52,6 +52,23 @@ SORTINGS: Final[tuple[tuple[str, str], ...]] = (
     ("favorites", "Favourites"),
     ("toplist", "Top list"),
     ("hot", "Hot"),
+)
+
+ORDERS: Final[tuple[tuple[str, str], ...]] = (
+    ("desc", "Descending"),
+    ("asc", "Ascending"),
+)
+
+#: Wallhaven's toplist windows, shortest first. Spelled out rather than left as
+#: `1d`/`3M`, which are the API's names and not anybody's reading of them.
+TOP_RANGES: Final[tuple[tuple[str, str], ...]] = (
+    ("1d", "Last day"),
+    ("3d", "Last 3 days"),
+    ("1w", "Last week"),
+    ("1M", "Last month"),
+    ("3M", "Last 3 months"),
+    ("6M", "Last 6 months"),
+    ("1y", "Last year"),
 )
 
 #: MotionBGS browse modes. `search` is implied by typing a query, so it is not
@@ -249,6 +266,9 @@ class BrowseDialog(Adw.Dialog):
         self._cards: list[_CandidateCard] = []
         self._result: SearchResult | None = None
         self._page = 1
+        #: Held across the pages of one random search so it does not re-roll
+        #: between them, and cleared whenever a new search starts.
+        self._seed = ""
         self._searching = False
         self._closed = False
 
@@ -347,7 +367,18 @@ class BrowseDialog(Adw.Dialog):
         # -- Wallhaven -----------------------------------------------------
         self._wallhaven_filters = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._sorting = Gtk.DropDown.new_from_strings([label for _value, label in SORTINGS])
+        self._sorting.connect("notify::selected", self._on_sorting_changed)
         self._wallhaven_filters.append(_labelled("Sort by", self._sorting))
+
+        self._order = Gtk.DropDown.new_from_strings([label for _value, label in ORDERS])
+        self._wallhaven_filters.append(_labelled("Order", self._order))
+
+        # Only means anything for the top list, so it is shown only then rather
+        # than sitting there inert next to six sortings that ignore it.
+        self._top_range = Gtk.DropDown.new_from_strings([label for _value, label in TOP_RANGES])
+        self._top_range.set_selected(_index_of(TOP_RANGES, "1M"))
+        self._top_range_row = _labelled("Top list covers", self._top_range)
+        self._wallhaven_filters.append(self._top_range_row)
 
         self._categories = _CheckRow(
             "Categories", ("General", "Anime", "People"), (True, True, True)
@@ -359,6 +390,12 @@ class BrowseDialog(Adw.Dialog):
 
         self._atleast = Gtk.Entry(placeholder_text="At least, e.g. 1920x1080")
         self._wallhaven_filters.append(_labelled("Minimum size", self._atleast))
+
+        self._ratios = Gtk.Entry(placeholder_text="e.g. 16x9, or 16x9,21x9")
+        self._wallhaven_filters.append(_labelled("Aspect ratio", self._ratios))
+
+        self._colours = _ColourPicker()
+        self._wallhaven_filters.append(self._colours)
         box.append(self._wallhaven_filters)
 
         # -- MotionBGS -----------------------------------------------------
@@ -379,11 +416,26 @@ class BrowseDialog(Adw.Dialog):
         # a value read at construction would stay stale until it is closed.
         popover.connect("notify::visible", self._on_filters_shown)
         self._sync_nsfw_toggle()
+        self._sync_top_range()
         return popover
 
     def _on_filters_shown(self, popover: Gtk.Popover, _parameter: object) -> None:
         if popover.get_visible():
             self._sync_nsfw_toggle()
+
+    def _on_sorting_changed(self, _dropdown: Gtk.DropDown, _parameter: object) -> None:
+        """Show the toplist window only when it applies, and re-roll.
+
+        Dropping the seed matters in both directions: leaving random sorting
+        would carry a value Wallhaven refuses outright, and returning to it
+        would repeat the previous random search rather than draw a new one.
+        """
+        self._seed = ""
+        self._sync_top_range()
+
+    def _sync_top_range(self) -> None:
+        sorting = SORTINGS[self._sorting.get_selected()][0]
+        self._top_range_row.set_visible(sorting in browse.RANGED_SORTINGS)
 
     def _sync_nsfw_toggle(self) -> None:
         """Offer the NSFW rating only when Wallhaven can actually return it.
@@ -456,36 +508,56 @@ class BrowseDialog(Adw.Dialog):
             "Search Wallhaven" if is_wallhaven else "Search MotionBGS (first page only)"
         )
 
+    def _read_filters(self) -> browse.Filters:
+        """Read every control into one toolkit-free value.
+
+        The awkward rules -- which options are legal with which sorting, how a
+        seed survives paging -- live in `browse.Filters` where they can be
+        tested. This is only the reading.
+        """
+        return browse.Filters(
+            text=self._entry.get_text().strip(),
+            sorting=SORTINGS[self._sorting.get_selected()][0],
+            order=ORDERS[self._order.get_selected()][0],
+            categories=self._categories.bits(),
+            purity=self._purity.bits(),
+            atleast=self._atleast.get_text().strip(),
+            ratios=self._ratios.get_text().strip(),
+            colour=self._colours.colour(),
+            top_range=TOP_RANGES[self._top_range.get_selected()][0],
+            seed=self._seed,
+            mode=MODES[self._mode.get_selected()][0],
+            genre=self._genre.get_text().strip(),
+        )
+
     def _query(self, page: int) -> SearchQuery:
-        text = self._entry.get_text().strip()
-        options: dict[str, str] = {}
+        filters = self._read_filters()
         if self.provider_name == wallhaven.Wallhaven.name:
-            options["sorting"] = SORTINGS[self._sorting.get_selected()][0]
-            options["categories"] = self._categories.bits()
-            options["purity"] = self._purity.bits()
-            atleast = self._atleast.get_text().strip()
-            if atleast:
-                options["atleast"] = atleast
-        else:
-            mode = MODES[self._mode.get_selected()][0]
-            # Typing a query means searching, whatever the browse mode says;
-            # MotionBGS rejects the two together.
-            options["mode"] = "search" if text else mode
-            if options["mode"] == "genre":
-                genre = self._genre.get_text().strip()
-                if not genre:
-                    # MotionBGS would answer "genre is not a lowercase
-                    # MotionBGS slug", which is true and tells the user
-                    # nothing about the empty box in front of them.
-                    raise ProviderError("validation", "type a genre, or pick another way to browse")
-                options["genre"] = genre
-        return SearchQuery(text=text, page=page, options=options)
+            # Held across pages so a random search does not re-roll underneath
+            # the user, and dropped by `seeded` when the sorting stops wanting
+            # one -- Wallhaven refuses a stale seed rather than ignoring it.
+            filters = filters.seeded()
+            self._seed = filters.seed
+            return filters.to_query(browse.WALLHAVEN, page)
+
+        if filters.motionbgs_options().get("mode") == "genre" and not filters.genre:
+            # MotionBGS would answer "genre is not a lowercase MotionBGS slug",
+            # which is true and tells the user nothing about the empty box in
+            # front of them.
+            raise ProviderError("validation", "type a genre, or pick another way to browse")
+        return filters.to_query(browse.MOTIONBGS, page)
 
     # -- searching ---------------------------------------------------------
 
     def start_search(self, *, page: int) -> None:
         if self._searching or page < 1:
             return
+        if page == 1:
+            # A fresh search re-rolls; paging within one does not. Without
+            # this, asking for random wallpapers twice would return the same
+            # ones, because the seed that keeps page two honest would also
+            # pin page one.
+            self._seed = ""
         try:
             query = self._query(page)
         except ProviderError as error:
@@ -647,6 +719,15 @@ class BrowseDialog(Adw.Dialog):
 # -- small widgets -------------------------------------------------------
 
 
+def _index_of(choices: tuple[tuple[str, str], ...], value: str) -> int:
+    """Where ``value`` sits in a dropdown's list, or the first entry.
+
+    So a default is named by what it is rather than by the position it happens
+    to occupy, and reordering the list cannot silently change it.
+    """
+    return next((at for at, (name, _label) in enumerate(choices) if name == value), 0)
+
+
 def _labelled(text: str, widget: Gtk.Widget) -> Gtk.Box:
     box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
     label = Gtk.Label(label=text, xalign=0.0, hexpand=True)
@@ -685,3 +766,81 @@ class _CheckRow(Gtk.Box):
 
     def set_hint(self, index: int, hint: str) -> None:
         self._checks[index].set_tooltip_text(hint)
+
+
+#: Swatch edge in pixels. Large enough to judge a colour against the wallpaper
+#: it will find, small enough that all 29 fit without the popover scrolling.
+SWATCH: Final = 26
+
+
+def _swatch_texture(colour: str, size: int = SWATCH) -> Gdk.Texture:
+    """A solid square of ``colour``, as six hex digits without the hash.
+
+    Built rather than drawn: a `Gtk.DrawingArea` per swatch would mean 29 draw
+    callbacks for something that never changes, and styling 29 buttons through
+    CSS would mean generating and parsing a stylesheet to say "this one is
+    blue".
+    """
+    red, green, blue = (int(colour[at : at + 2], 16) for at in (0, 2, 4))
+    pixels = bytes((red, green, blue)) * (size * size)
+    return Gdk.MemoryTexture.new(
+        size, size, Gdk.MemoryFormat.R8G8B8, GLib.Bytes.new(pixels), size * 3
+    )
+
+
+class _ColourPicker(Gtk.Box):
+    """Wallhaven's palette, one colour at a time.
+
+    The filter this app has the most use for, and the one it was missing.
+    Searching by colour is how somebody finds a wallpaper that will generate
+    the scheme they want, which is the whole premise of pairing a wallpaper
+    with a palette -- and Wallhaven has indexed it all along.
+
+    Single-select, because the API takes one colour. Clicking the selected
+    swatch clears it, so "no colour" is reachable without a separate button
+    that would be dead most of the time.
+    """
+
+    def __init__(self, colours: Sequence[str] = wallhaven.COLOR_ORDER) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        heading = Gtk.Label(label="Colour", xalign=0.0)
+        heading.add_css_class("dim-label")
+        heading.add_css_class("caption")
+        self.append(heading)
+
+        self._selected = ""
+        self._buttons: dict[str, Gtk.ToggleButton] = {}
+        grid = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            max_children_per_line=10,
+            min_children_per_line=10,
+            homogeneous=True,
+            column_spacing=2,
+            row_spacing=2,
+        )
+        for colour in colours:
+            button = Gtk.ToggleButton(tooltip_text=f"#{colour}")
+            button.add_css_class("flat")
+            picture = Gtk.Picture.new_for_paintable(_swatch_texture(colour))
+            picture.set_size_request(SWATCH, SWATCH)
+            button.set_child(picture)
+            button.connect("toggled", self._on_toggled, colour)
+            self._buttons[colour] = button
+            grid.append(button)
+        self.append(grid)
+
+    def _on_toggled(self, button: Gtk.ToggleButton, colour: str) -> None:
+        if not button.get_active():
+            # Untoggling the selected swatch is how "any colour" is said.
+            if self._selected == colour:
+                self._selected = ""
+            return
+        self._selected = colour
+        for other, widget in self._buttons.items():
+            if other != colour and widget.get_active():
+                # Recurses once into this handler with `active` false, which
+                # falls out at the guard above without clearing the selection.
+                widget.set_active(False)
+
+    def colour(self) -> str:
+        return self._selected

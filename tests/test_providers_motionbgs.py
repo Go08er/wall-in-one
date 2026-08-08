@@ -525,3 +525,29 @@ def test_the_mp4_check_reads_the_file_not_the_header(tmp_path: Path) -> None:
     with pytest.raises(ProviderError) as caught:
         motionbgs.validate_mp4(bad, "video/mp4")
     assert caught.value.kind == "content-type"
+
+
+# -- durations -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("PT26.9S", "27s"),
+        ("PT5S", "5s"),
+        ("PT1M", "1m"),
+        ("PT1M30S", "1m 30s"),
+        ("PT2H", "2h"),
+        ("PT1H5M", "1h 5m"),
+        ("PT90S", "1m 30s"),
+    ],
+)
+def test_iso_durations_are_made_readable(raw: str, expected: str) -> None:
+    """The site publishes ISO 8601, which is correct and unreadable."""
+    assert motionbgs.readable_duration(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "26 seconds", "P", "PT", "nonsense"])
+def test_an_unparsable_duration_is_passed_through(raw: str) -> None:
+    """An odd-looking string is more use on a card than a blank row."""
+    assert motionbgs.readable_duration(raw) == raw

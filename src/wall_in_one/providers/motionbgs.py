@@ -39,11 +39,14 @@ from wall_in_one.providers import download as download_module
 from wall_in_one.providers import http
 from wall_in_one.providers.base import (
     MAX_RESULTS,
+    CandidateDetail,
     DownloadResult,
+    Fact,
     ProviderError,
     SearchQuery,
     SearchResult,
     WallpaperCandidate,
+    human_bytes,
 )
 from wall_in_one.providers.cache import TtlCache
 
@@ -112,6 +115,37 @@ def normalise_query(value: str) -> str:
     if not normalised or len(normalised.encode("utf-8")) > MAX_QUERY_BYTES:
         raise ProviderError("validation", f"search query must be 1-{MAX_QUERY_BYTES} UTF-8 bytes")
     return normalised
+
+
+#: The site publishes durations as ISO 8601 in its structured data, so a
+#: 27-second loop reads `PT26.9S`. Correct, and not what anybody wants to see
+#: on a card.
+_DURATION_RE: Final = re.compile(
+    r"^P(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?(?:(?P<minutes>\d+(?:\.\d+)?)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)$"
+)
+
+
+def readable_duration(value: str) -> str:
+    """`PT26.9S` as `27s`, or the original when it is not a duration.
+
+    Rounded to whole seconds: the tenth is real but it is the length of a
+    wallpaper loop, and nobody is timing it. Anything unparsed is passed
+    through rather than dropped -- an odd-looking string is more use than a
+    blank row.
+    """
+    match = _DURATION_RE.fullmatch(value.strip().upper()) if value else None
+    if match is None or not any(match.groupdict().values()):
+        return value
+    parts = {name: float(found or 0) for name, found in match.groupdict().items()}
+    total = round(parts["hours"] * 3600 + parts["minutes"] * 60 + parts["seconds"])
+    if total < 60:
+        return f"{total}s"
+    minutes, seconds = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds}s" if seconds else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
 
 
 def normalise_slug(value: str, *, label: str = "slug") -> str:
@@ -791,6 +825,38 @@ class MotionBgs:
         detail = parse_detail(markup, slug)
         self._details.put(slug, detail)
         return detail
+
+    def describe(self, candidate: WallpaperCandidate) -> CandidateDetail:
+        """The detail page, arranged for a window.
+
+        MotionBGS knows less than Wallhaven and offers something Wallhaven does
+        not: two download qualities. Those become `variants`, so the dialog can
+        let somebody take the HD file when they do not want 40 MB of 4K.
+
+        Sizes here are the site's own advertised megabytes rather than a byte
+        count, because nothing has been fetched yet -- it is a claim on a page,
+        and is labelled as approximate for that reason.
+        """
+        detail = self.detail(candidate.identifier)
+        facts = [Fact("Title", detail.title), Fact("Duration", readable_duration(detail.duration))]
+        for option in detail.downloads:
+            size = (
+                human_bytes(int(option.advertised_size_mb * 1024 * 1024))
+                if option.advertised_size_mb > 0
+                else ""
+            )
+            value = ", ".join(
+                part for part in (option.resolution, f"~{size}" if size else "") if part
+            )
+            facts.append(Fact(option.quality.upper(), value or option.label))
+        return CandidateDetail(
+            candidate=candidate,
+            # The poster frame: a still of the video, which is the only large
+            # preview a detail page offers short of the video itself.
+            preview_url=detail.poster_url or candidate.thumbnail_url,
+            facts=tuple(fact for fact in facts if fact.value),
+            variants=tuple(option.quality for option in detail.downloads),
+        )
 
     # -- download --------------------------------------------------------
 

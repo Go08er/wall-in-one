@@ -18,6 +18,7 @@ from typing import Final
 from wall_in_one.library import owned, scan
 from wall_in_one.providers import http, registry
 from wall_in_one.providers.base import (
+    CandidateDetail,
     DownloadResult,
     Provider,
     ProviderError,
@@ -32,6 +33,15 @@ MAX_THUMBNAIL_BYTES: Final = 4 * 1024 * 1024
 
 #: A preview nobody is waiting on should not hold a worker for long.
 THUMBNAIL_TIMEOUT: Final = 10.0
+
+#: The detail view's picture is full width rather than a 300-pixel card, so it
+#: gets its own ceiling. Still far below the wallpaper itself: opening a detail
+#: view must not pull down 20 MB to show somebody something they have not asked
+#: to download.
+MAX_PREVIEW_BYTES: Final = 16 * 1024 * 1024
+
+#: Longer than a thumbnail's, because somebody *is* waiting on this one.
+PREVIEW_TIMEOUT: Final = 20.0
 
 #: Named here rather than imported from the provider modules, so that building
 #: a query does not drag two websites' worth of parsing in behind it.
@@ -276,6 +286,15 @@ class Browser:
         _ = self.owned
         return result
 
+    def describe(self, candidate: WallpaperCandidate) -> CandidateDetail:
+        """Everything the provider will say about one result.
+
+        A second request, so it belongs on a worker like `search` does. The
+        providers cache it, which is what makes re-opening the same wallpaper
+        free rather than another round trip to the site.
+        """
+        return self.provider(candidate.provider).describe(candidate)
+
     def download(self, candidate: WallpaperCandidate, *, variant: str = "") -> Downloaded:
         """Fetch ``candidate`` into the library.
 
@@ -310,6 +329,32 @@ class Browser:
         if response.status != 200 or not response.content_type.startswith("image/"):
             # A redirect or an error page is not a preview. Say nothing and let
             # the card fall back to its title.
+            return b""
+        return response.body
+
+    def preview(self, url: str) -> bytes:
+        """A larger preview for the detail view, by URL.
+
+        Separate from `thumbnail` because the ceiling is different rather than
+        because the fetch is: a detail preview is a full-width picture and a
+        card thumbnail is 300 pixels wide, and one ceiling for both would
+        either truncate the first or leave the second unbounded in practice.
+
+        Still nowhere near the size of the wallpaper itself. Opening a detail
+        view must not quietly pull 20 MB down to show somebody a picture they
+        have not asked to download.
+        """
+        if not url:
+            return b""
+        response = self._client.fetch(
+            http.Request(
+                url=http.require_https(url),
+                accept="image/*",
+                timeout=PREVIEW_TIMEOUT,
+                max_bytes=MAX_PREVIEW_BYTES,
+            )
+        )
+        if response.status != 200 or not response.content_type.startswith("image/"):
             return b""
         return response.body
 

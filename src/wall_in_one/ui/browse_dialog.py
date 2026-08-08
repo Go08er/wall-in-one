@@ -9,6 +9,7 @@ on a worker and comes back through `GLib.idle_add`, the same arrangement
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final
@@ -26,6 +27,7 @@ from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import registry, wallhaven
 from wall_in_one.providers.base import (
+    CandidateDetail,
     ProviderError,
     SearchQuery,
     SearchResult,
@@ -164,10 +166,12 @@ class _CandidateCard(Gtk.Box):
         self,
         candidate: WallpaperCandidate,
         on_download: Callable[[WallpaperCandidate], None],
+        on_open: Callable[[WallpaperCandidate], None] | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.candidate = candidate
         self._on_download = on_download
+        self._on_open = on_open
         self.add_css_class("wio-tile")
         # Fixed width, not merely a minimum: a FlowBox hands children their
         # natural width, and a card that grows to fill the dialog stretches its
@@ -183,6 +187,16 @@ class _CandidateCard(Gtk.Box):
         self._picture.set_can_shrink(True)
         self._frame.set_child(self._picture)
         self.append(self._frame)
+
+        if on_open is not None:
+            # A gesture rather than wrapping the frame in a button: a button
+            # brings its own padding and focus ring, which would put a border
+            # inside the 16:9 frame and letterbox every preview by a few pixels.
+            click = Gtk.GestureClick()
+            click.connect("released", self._on_picture_clicked)
+            self._frame.add_controller(click)
+            self._frame.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+            self._frame.set_tooltip_text("Show details")
 
         caption = Gtk.Label(label=candidate.title or candidate.identifier, xalign=0.0)
         caption.set_ellipsize(Pango.EllipsizeMode.END)
@@ -213,6 +227,14 @@ class _CandidateCard(Gtk.Box):
 
     def _on_clicked(self, _button: Gtk.Button) -> None:
         self._on_download(self.candidate)
+
+    def _on_picture_clicked(
+        self, _gesture: Gtk.GestureClick, count: int, _x: float, _y: float
+    ) -> None:
+        # Single click only. A double click would otherwise open the dialog
+        # twice, once per release.
+        if count == 1 and self._on_open is not None:
+            self._on_open(self.candidate)
 
     def set_preview(self, data: bytes) -> None:
         if not data:
@@ -269,6 +291,9 @@ class BrowseDialog(Adw.Dialog):
         #: Held across the pages of one random search so it does not re-roll
         #: between them, and cleared whenever a new search starts.
         self._seed = ""
+        #: Open detail views by identifier, so a download started inside one
+        #: can tell it what happened.
+        self._detail_dialogs: dict[str, DetailDialog] = {}
         self._searching = False
         self._closed = False
 
@@ -612,7 +637,7 @@ class BrowseDialog(Adw.Dialog):
         # produced these results.
         held = self._browser.owned
         for candidate in result.items:
-            card = _CandidateCard(candidate, self._on_download)
+            card = _CandidateCard(candidate, self._on_download, self._open_detail)
             if held.holds(candidate):
                 card.mark_downloaded()
             self._cards.append(card)
@@ -655,13 +680,32 @@ class BrowseDialog(Adw.Dialog):
 
     # -- downloading -------------------------------------------------------
 
-    def _on_download(self, candidate: WallpaperCandidate) -> None:
+    def _open_detail(self, candidate: WallpaperCandidate) -> None:
+        """Show everything the provider knows about one result.
+
+        The dialog is remembered so that a download started from inside it can
+        report back: it owns its own button, and a card behind it is not
+        necessarily the thing the user is looking at.
+        """
+        detail = DetailDialog(
+            self._browser,
+            candidate,
+            self._on_download,
+            held=self._browser.owned.holds(candidate),
+        )
+        self._detail_dialogs[candidate.identifier] = detail
+        detail.connect(
+            "closed", lambda _dialog: self._detail_dialogs.pop(candidate.identifier, None)
+        )
+        detail.present(self)
+
+    def _on_download(self, candidate: WallpaperCandidate, variant: str = "") -> None:
         card = self._card_for(candidate)
         if card is not None:
             card.set_busy(True)
 
         def work() -> Downloaded:
-            return self._browser.download(candidate)
+            return self._browser.download(candidate, variant=variant)
 
         future = self._downloads.submit(work)
         future.add_done_callback(lambda done: self._downloaded(candidate, done))
@@ -686,13 +730,18 @@ class BrowseDialog(Adw.Dialog):
             if self._closed:
                 return GLib.SOURCE_REMOVE
             card = self._card_for(candidate)
+            detail = self._detail_dialogs.get(candidate.identifier)
             if done is None:
                 if card is not None:
                     card.set_busy(False)
+                if detail is not None:
+                    detail.failed()
                 self.report(message)
             else:
                 if card is not None:
                     card.mark_downloaded()
+                if detail is not None:
+                    detail.downloaded()
                 self.report(done.describe())
                 # The file is in the library directory but not in the library
                 # until something looks again.
@@ -844,3 +893,226 @@ class _ColourPicker(Gtk.Box):
 
     def colour(self) -> str:
         return self._selected
+
+
+# -- the detail view -----------------------------------------------------
+
+
+#: How wide the detail preview is allowed to get. Wider than a card by enough
+#: to actually judge a wallpaper, narrow enough to sit on a laptop screen.
+DETAIL_WIDTH: Final = 720
+DETAIL_HEIGHT: Final = 405
+
+
+class DetailDialog(Adw.Dialog):
+    """Everything one provider knows about one wallpaper.
+
+    The endpoint behind this has been implemented in both providers since they
+    were written and had no caller: a search response is deliberately thin, and
+    tags, colours, an exact file size and MotionBGS's two download qualities
+    only come from asking about a single wallpaper.
+
+    Two requests, both on a worker: the detail, then the larger preview it
+    names. They are sequential because the second needs a URL from the first,
+    and the picture is the slower of the two, so the facts appear while it is
+    still arriving rather than after.
+    """
+
+    def __init__(
+        self,
+        browser: Browser,
+        candidate: WallpaperCandidate,
+        on_download: Callable[[WallpaperCandidate, str], None],
+        *,
+        held: bool = False,
+    ) -> None:
+        super().__init__()
+        self._browser = browser
+        self._candidate = candidate
+        self._on_download = on_download
+        self._held = held
+        self._closed = False
+        self._detail: CandidateDetail | None = None
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detail")
+        self.connect("closed", self._on_closed)
+
+        self.set_title(candidate.title or candidate.identifier)
+        self.set_content_width(DETAIL_WIDTH + 48)
+
+        outer = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(
+            Adw.WindowTitle(
+                title=candidate.title or candidate.identifier,
+                subtitle=candidate.provider,
+            )
+        )
+        outer.add_top_bar(header)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        body.set_margin_top(12)
+        body.set_margin_bottom(12)
+        body.set_margin_start(12)
+        body.set_margin_end(12)
+
+        frame = Gtk.Frame()
+        frame.set_size_request(DETAIL_WIDTH, DETAIL_HEIGHT)
+        self._picture = Gtk.Picture()
+        self._picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self._picture.set_can_shrink(True)
+        frame.set_child(self._picture)
+        body.append(frame)
+
+        self._facts = Gtk.Grid(column_spacing=18, row_spacing=4)
+        body.append(self._facts)
+
+        self._tags = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE, column_spacing=4, row_spacing=4
+        )
+        self._tags.set_visible(False)
+        body.append(self._tags)
+
+        self._colours = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._colours.set_visible(False)
+        body.append(self._colours)
+
+        self._status = Gtk.Label(label="Loading…", xalign=0.0)
+        self._status.add_css_class("dim-label")
+        body.append(self._status)
+
+        scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        scroller.set_child(body)
+        outer.set_content(scroller)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        actions.set_margin_top(6)
+        actions.set_margin_bottom(6)
+        actions.set_margin_start(12)
+        actions.set_margin_end(12)
+
+        page = Gtk.LinkButton(uri=candidate.page_url, label="Open page")
+        page.set_visible(bool(candidate.page_url))
+        actions.append(page)
+        actions.append(Gtk.Box(hexpand=True))
+
+        # Hidden until the detail says there is a choice. MotionBGS offers HD
+        # and 4K; Wallhaven publishes one file, and a dropdown with one entry
+        # is a control that asks a question with no answer.
+        self._variants = Gtk.DropDown.new_from_strings([])
+        self._variants.set_visible(False)
+        actions.append(self._variants)
+
+        self._download = Gtk.Button(label="Download")
+        self._download.add_css_class("suggested-action")
+        self._download.connect("clicked", self._on_download_clicked)
+        actions.append(self._download)
+        outer.add_bottom_bar(actions)
+
+        self.set_child(outer)
+        if held:
+            self._mark_held()
+        self._load()
+
+    def _mark_held(self) -> None:
+        self._download.set_sensitive(False)
+        self._download.set_label("In your library")
+
+    # -- loading ---------------------------------------------------------
+
+    def _load(self) -> None:
+        candidate = self._candidate
+
+        def work() -> tuple[CandidateDetail, bytes]:
+            detail = self._browser.describe(candidate)
+            picture = self._browser.preview(detail.preview_url)
+            return detail, thumbnails.to_displayable(picture) if picture else b""
+
+        future = self._pool.submit(work)
+        future.add_done_callback(self._deliver)
+
+    def _deliver(self, future: Future[tuple[CandidateDetail, bytes]]) -> None:
+        try:
+            detail, picture = future.result()
+        except ProviderError as error:
+            message = str(error)
+            detail, picture = None, b""
+        except Exception:
+            # Broad on purpose: a worker must never take the app down.
+            message = "could not load the details"
+            detail, picture = None, b""
+        else:
+            message = ""
+
+        def show() -> bool:
+            if not self._closed:
+                self._show(detail, picture, message)
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(show)
+
+    def _show(self, detail: CandidateDetail | None, picture: bytes, message: str) -> None:
+        if detail is None:
+            # The download button stays live: failing to describe a wallpaper
+            # is no reason to refuse to fetch it, and the candidate from the
+            # search is enough to download by.
+            self._status.set_label(message or "could not load the details")
+            return
+        self._detail = detail
+        self._status.set_visible(False)
+
+        for row, fact in enumerate(detail.facts):
+            label = Gtk.Label(label=fact.label, xalign=0.0)
+            label.add_css_class("dim-label")
+            value = Gtk.Label(label=fact.value, xalign=0.0, selectable=True)
+            value.set_ellipsize(Pango.EllipsizeMode.END)
+            value.set_max_width_chars(60)
+            self._facts.attach(label, 0, row, 1, 1)
+            self._facts.attach(value, 1, row, 1, 1)
+
+        for tag in detail.tags:
+            chip = Gtk.Label(label=tag)
+            chip.add_css_class("caption")
+            chip.add_css_class("dim-label")
+            self._tags.append(chip)
+        self._tags.set_visible(bool(detail.tags))
+
+        for colour in detail.colours:
+            swatch = Gtk.Picture.new_for_paintable(_swatch_texture(colour, SWATCH))
+            swatch.set_size_request(SWATCH, SWATCH)
+            swatch.set_tooltip_text(f"#{colour}")
+            self._colours.append(swatch)
+        self._colours.set_visible(bool(detail.colours))
+
+        if len(detail.variants) > 1:
+            self._variants.set_model(Gtk.StringList.new([v.upper() for v in detail.variants]))
+            self._variants.set_visible(True)
+
+        if picture:
+            # A preview GTK will not decode leaves the frame blank, which is
+            # what the card does too. The facts above it are the point.
+            with contextlib.suppress(GLib.Error):
+                self._picture.set_paintable(Gdk.Texture.new_from_bytes(GLib.Bytes.new(picture)))
+
+    # -- acting ----------------------------------------------------------
+
+    def _on_download_clicked(self, _button: Gtk.Button) -> None:
+        variant = ""
+        detail = self._detail
+        if detail is not None and len(detail.variants) > 1:
+            variant = detail.variants[self._variants.get_selected()]
+        self._download.set_sensitive(False)
+        self._download.set_label("Downloading…")
+        self._on_download(self._candidate, variant)
+
+    def downloaded(self) -> None:
+        """Called back when the download this dialog started has landed."""
+        self._held = True
+        self._mark_held()
+
+    def failed(self) -> None:
+        self._download.set_sensitive(True)
+        self._download.set_label("Download")
+
+    def _on_closed(self, _dialog: Adw.Dialog) -> None:
+        self._closed = True
+        self._pool.shutdown(wait=False, cancel_futures=True)

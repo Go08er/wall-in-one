@@ -127,9 +127,63 @@ class DownloadResult:
     downloaded_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class Fact:
+    """One labelled thing a provider knows about a wallpaper."""
+
+    label: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateDetail:
+    """Everything a provider will say about one wallpaper.
+
+    Label-and-value pairs rather than a field per property, because the two
+    providers know almost disjoint things -- Wallhaven has views, favourites
+    and a category; MotionBGS has a duration and two download qualities -- and
+    a struct wide enough for both would be mostly empty whichever one filled
+    it. The dialog renders whatever it is handed and needs to know nothing
+    about either site.
+
+    The named fields are the ones the window does more than print: a preview
+    to show, tags to make searchable, colours to swatch, variants to choose
+    between.
+    """
+
+    candidate: WallpaperCandidate
+    #: A larger preview than the card's thumbnail. Falls back to the thumbnail.
+    preview_url: str = ""
+    facts: tuple[Fact, ...] = ()
+    tags: tuple[str, ...] = ()
+    #: Palette entries, six hex digits without the hash.
+    colours: tuple[str, ...] = ()
+    #: What can be downloaded when there is a choice -- MotionBGS `hd`/`4k`.
+    #: Empty where the provider offers exactly one file.
+    variants: tuple[str, ...] = ()
+
+
+def human_bytes(size: int) -> str:
+    """A file size a person can read, for a `Fact` value.
+
+    Binary units, because that is what a file manager shows for the same file
+    and disagreeing with it would only raise the question of which was right.
+    """
+    if size <= 0:
+        return ""
+    step = 1024.0
+    amount = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if amount < step or unit == "GiB":
+            precision = 0 if unit == "B" or amount >= 100 else 1
+            return f"{amount:.{precision}f} {unit}"
+        amount /= step
+    return f"{amount:.1f} GiB"
+
+
 @runtime_checkable
 class Provider(Protocol):
-    """The surface the app drives. Deliberately four verbs wide."""
+    """The surface the app drives. Deliberately five verbs wide."""
 
     @property
     def name(self) -> str:
@@ -144,6 +198,16 @@ class Provider(Protocol):
         """What this provider serves: stills or videos."""
 
     def search(self, query: SearchQuery) -> SearchResult: ...
+
+    def describe(self, candidate: WallpaperCandidate) -> CandidateDetail:
+        """Everything known about one result, for a detail view.
+
+        A second request in general: a search response is deliberately thin,
+        and tags, colours and an exact file size are what the per-wallpaper
+        endpoint is for. Providers cache it, so re-opening the same wallpaper
+        does not ask twice.
+        """
+        ...
 
     def download(
         self, candidate: WallpaperCandidate, root: Path, *, variant: str = ""

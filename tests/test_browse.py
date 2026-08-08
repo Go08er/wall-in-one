@@ -10,7 +10,7 @@ from tests.test_providers_fakes import FakeClient, Reply, png_bytes
 from wall_in_one import browse
 from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library.model import Kind
-from wall_in_one.providers import wallhaven
+from wall_in_one.providers import base, wallhaven
 from wall_in_one.providers.base import (
     DownloadResult,
     ProviderError,
@@ -272,3 +272,22 @@ def test_wallhaven_accepts_every_option_the_filters_produce() -> None:
     assert parsed.colors == "336600"
     assert parsed.ratios == "16x9,21x9"
     assert parsed.order == "asc"
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        (0, ""),
+        (-1, ""),
+        (512, "512 B"),
+        (1024, "1.0 KiB"),
+        (1536, "1.5 KiB"),
+        (1024 * 1024, "1.0 MiB"),
+        (int(1.5 * 1024 * 1024), "1.5 MiB"),
+        (200 * 1024 * 1024, "200 MiB"),
+        (3 * 1024**3, "3.0 GiB"),
+    ],
+)
+def test_file_sizes_read_the_way_a_file_manager_shows_them(size: int, expected: str) -> None:
+    """Binary units, so the two do not disagree about the same file."""
+    assert base.human_bytes(size) == expected

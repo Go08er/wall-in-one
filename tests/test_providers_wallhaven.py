@@ -562,3 +562,29 @@ def test_the_download_ceiling_is_the_advertised_size(tmp_path: Path) -> None:
     engine.download(candidate(), tmp_path)
     media_request = client.requests[-1]
     assert media_request.max_bytes == len(png_bytes(4, 3))
+
+
+def test_detail_colours_lose_the_hash_the_api_adds() -> None:
+    """`#424153` is not a value the colour filter or a swatch can take."""
+    wallpaper = wallhaven.WallhavenWallpaper(
+        identifier="abc123",
+        page_url="https://wallhaven.cc/w/abc123",
+        short_url="",
+        media_url="https://w.wallhaven.cc/full/ab/wallhaven-abc123.jpg",
+        extension="jpg",
+        file_type="image/jpeg",
+        file_size=1024,
+        width=1920,
+        height=1080,
+        resolution="1920x1080",
+        ratio="1.78",
+        purity="sfw",
+        category="general",
+        views=1,
+        favorites=0,
+        source="",
+        created_at="2026-01-01 00:00:00",
+        colors=("#424153", "#000000"),
+    )
+    assert tuple(colour.lstrip("#") for colour in wallpaper.colors) == ("424153", "000000")
+    assert all(colour in wallhaven.COLORS for colour in ("424153", "000000"))

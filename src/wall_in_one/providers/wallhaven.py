@@ -43,11 +43,14 @@ from wall_in_one.providers import download as download_module
 from wall_in_one.providers import http
 from wall_in_one.providers.base import (
     MAX_RESULTS,
+    CandidateDetail,
     DownloadResult,
+    Fact,
     ProviderError,
     SearchQuery,
     SearchResult,
     WallpaperCandidate,
+    human_bytes,
 )
 from wall_in_one.providers.cache import TtlCache
 
@@ -853,6 +856,41 @@ class Wallhaven:
             raise ProviderError("response", "Wallhaven returned details for a different wallpaper")
         self._details.put(identifier, wallpaper)
         return wallpaper
+
+    def describe(self, candidate: WallpaperCandidate) -> CandidateDetail:
+        """The detail response, arranged for a window rather than a downloader.
+
+        Facts are added only where the site actually said something: a
+        wallpaper with no source and no uploader should show two fewer rows,
+        not two empty ones.
+        """
+        wallpaper = self.detail(candidate.identifier)
+        facts = [
+            Fact("Resolution", wallpaper.resolution),
+            Fact("Aspect ratio", wallpaper.ratio),
+            Fact("File size", human_bytes(wallpaper.file_size)),
+            Fact("Type", wallpaper.file_type),
+            Fact("Category", wallpaper.category.title()),
+            Fact("Views", f"{wallpaper.views:,}"),
+            Fact("Favourites", f"{wallpaper.favorites:,}"),
+            Fact("Uploader", wallpaper.uploader),
+            Fact("Added", wallpaper.created_at),
+            Fact("Source", wallpaper.source),
+        ]
+        return CandidateDetail(
+            candidate=wallpaper.to_candidate(),
+            # The largest preview Wallhaven publishes short of the file itself,
+            # which for a 20 MB wallpaper is not what a dialog should fetch.
+            preview_url=wallpaper.thumbnail_original
+            or wallpaper.thumbnail_large
+            or candidate.thumbnail_url,
+            facts=tuple(fact for fact in facts if fact.value),
+            tags=tuple(tag.name for tag in wallpaper.tags),
+            # Stripped of the leading `#` the API returns them with, because
+            # that is the form the colour filter and the swatches both take:
+            # `#424153` is not a value this app can search for.
+            colours=tuple(colour.lstrip("#") for colour in wallpaper.colors),
+        )
 
     # -- download --------------------------------------------------------
 

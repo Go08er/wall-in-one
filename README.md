@@ -1,5 +1,14 @@
 # Wall-in-One
 
+> [!WARNING]
+> **Pre-alpha — in testing.** This is not ready to be relied on. It has never
+> been run for more than a short stretch, most of its interface has never been
+> clicked by a human, and the bugs found so far were found by running it rather
+> than by its 1,150 tests — so assume running it longer will find more.
+>
+> Expect breakage, expect settings and on-disk formats to move without
+> migration, and do not point it at wallpapers you would mind losing.
+
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.
 
 It manages stills and video wallpapers, keeps its own colours in sync with

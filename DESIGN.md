@@ -627,6 +627,45 @@ install flow, and the provider-preview cache are all artefacts of living inside
 a Luau plugin with a CPU budget. This app is the backend; it does not need to
 reinstall itself.
 
+### Two moving renderers, not one
+
+The tempting simplification is to drop mpvpaper and let `linux-wallpaperengine`
+play everything. It was measured rather than assumed, and it does not work out.
+
+The engine will not take a video file. Handed one directly it answers `the
+specified mount cannot be handled by any of the filesystem adapters`. What it
+*will* take is a **directory containing a `project.json`** naming the file —
+a synthesised one, with no Workshop id anywhere, rendered a plain test clip
+without complaint. So unification is possible, at the price of writing a shim
+directory for every ordinary video in the library, and then keeping those shims
+in step as files are added, renamed and removed. That trades a renderer for a
+cache-invalidation problem, and gives up mpv's hardware decode and its IPC
+socket — which is what makes volume and mute changeable on a playing wallpaper
+rather than only at start.
+
+So both renderers stay, and the cost is that **every hop between them has to
+hand over cleanly**. Three rules, one per direction:
+
+- *scene → video*: the engine is stopped before mpvpaper starts. This was the
+  bug. `Renderer.start` stops mpvpaper itself, so the video→video and
+  video→scene cases were covered by accident and the missing case looked like
+  symmetry that was already there. It was not: a scene followed by a video left
+  two programs drawing on one output.
+- *video → scene*: mpvpaper is stopped before the engine starts.
+- *either → still*: both are stopped, which `_set_still` already did.
+
+And a fourth, for the transition that fails: a scene the app may not start is
+refused **after** its still and palette have been applied, so mpvpaper is
+stopped *before* the refusal rather than after. Otherwise the previous video
+keeps playing over the next wallpaper's colours — the one outcome that belongs
+to neither item. Stopping first degrades to the scene's own still, which under
+the pairing model is a legitimate way to show that wallpaper, not a failure.
+
+That last case is the common one rather than the exotic one: owning the scene
+renderer is off by default, and on the development machine another engine holds
+`eDP-1` permanently. Four of the 49 installed Workshop items are scenes, so an
+automatic rotation meets this path regularly and must stay on its feet.
+
 ### How the slice was proven
 
 All three resolution tiers were exercised against the real Noctalia, with every

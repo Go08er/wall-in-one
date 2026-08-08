@@ -159,10 +159,17 @@ class Applier:
 
         Refuses rather than fights. The engine is single-instance per output,
         so starting a second one means two programs driving one wallpaper and
-        the loser is whichever the user was actually looking at. The still is
-        already on screen by this point either way, so a refusal leaves them
-        with the scene's representative rather than with nothing.
+        the loser is whichever the user was actually looking at.
+
+        mpvpaper is stopped *before* the refusals rather than after, so that a
+        refusal degrades coherently instead of leaving a seam. By this point
+        the scene's still is on screen and its palette applied; a video left
+        running would cover that still, showing the *previous* wallpaper under
+        the *next* one's colours -- which is worse than either. Stopping it
+        first means a refused scene leaves the right picture, the right
+        colours, and no motion.
         """
+        self._renderer.stop()
         if not self.own_scene_renderer:
             raise ApplyError(
                 f"{item.name} is a Wallpaper Engine scene, and this app is not set to drive "
@@ -174,7 +181,6 @@ class Applier:
                 f"linux-wallpaperengine is already running on {self.output or 'this screen'} "
                 f"(pid {held[0]}), so {item.name} was not started. Stop the other one first."
             )
-        self._renderer.stop()
         try:
             self._scenes.start(item.scene)
         except scenes.SceneError as error:
@@ -182,6 +188,17 @@ class Applier:
         return Applied(item=item, path=path, animated=True)
 
     def _start_video(self, item: MediaItem, path: Path) -> Applied:
+        """Hand an ordinary video to mpvpaper.
+
+        The engine is stopped first, for the same reason `_start_scene` stops
+        mpvpaper: a playlist mixes the two, so every hop between renderers has
+        to make the one being left actually let go. `Renderer.start` stops
+        mpvpaper itself, which hid the asymmetry for a long time -- the scene
+        half had no equivalent, so a scene followed by a video left
+        `linux-wallpaperengine` still rendering underneath, two programs
+        drawing on one output with nothing to say which had won.
+        """
+        self._scenes.stop()
         try:
             self._renderer.start(path)
         except renderer.RendererError as error:

@@ -8,7 +8,7 @@ import pytest
 from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
-from wall_in_one.wallpaper import renderer
+from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applier, ApplyError
 
 
@@ -447,3 +447,117 @@ def test_a_palette_that_will_not_apply_does_not_lose_the_wallpaper(
         _still(tmp_path), dynamics_enabled=True, palette=pairings.PalettePolicy()
     )
     assert applied.path.name == "a.png"
+
+
+# -- switching between the two moving renderers --------------------------
+#
+# A playlist mixes stills, mpvpaper videos and Wallpaper Engine scenes, and
+# every hop between them has to leave exactly one renderer running. The engine
+# is single-instance per output, so a scene left behind is not a cosmetic
+# leak: it is a second program drawing on the same screen as the video that
+# replaced it.
+
+
+class FakeScenes:
+    """Stands in for `linux-wallpaperengine`."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.started: list[str] = []
+        self.stops = 0
+        self._fail = fail
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self.started)
+
+    def start(self, scene: str) -> None:
+        if self._fail:
+            raise scenes.SceneError("boom")
+        self.started.append(scene)
+
+    def stop(self) -> None:
+        self.stops += 1
+        self.started.clear()
+
+
+def _scene(tmp_path: Path) -> MediaItem:
+    return MediaItem(
+        path=tmp_path / "1647046763",
+        kind=Kind.SCENE,
+        size=1,
+        mtime=0,
+        scene="1647046763",
+        paired_still=tmp_path / "1647046763-still.png",
+    )
+
+
+@pytest.fixture
+def both(
+    monkeypatch: pytest.MonkeyPatch, set_calls: list[Path]
+) -> tuple[Applier, FakeRenderer, FakeScenes]:
+    """An applier owning both renderers, with no foreign engine in the way."""
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.running_elsewhere", lambda output="": ())
+    video, scene = FakeRenderer(), FakeScenes()
+    applier = Applier(video, scene_renderer=scene, own_scene_renderer=True)  # type: ignore[arg-type]
+    return applier, video, scene
+
+
+def test_switching_from_a_scene_to_a_video_stops_the_engine(
+    tmp_path: Path, both: tuple[Applier, FakeRenderer, FakeScenes]
+) -> None:
+    """The transition that left two renderers drawing at once.
+
+    mpvpaper's own `start` stops mpvpaper, so the video half was covered; the
+    scene half had no such guarantee and the engine kept rendering underneath.
+    """
+    applier, video, scene = both
+    applier.apply(_scene(tmp_path), dynamics_enabled=True)
+    assert scene.started == ["1647046763"]
+
+    applier.apply(_video(tmp_path), dynamics_enabled=True)
+    assert scene.stops == 1
+    assert scene.started == []
+    assert video.started == [tmp_path / "clip.mp4"]
+
+
+def test_switching_from_a_video_to_a_scene_stops_mpvpaper(
+    tmp_path: Path, both: tuple[Applier, FakeRenderer, FakeScenes]
+) -> None:
+    applier, video, scene = both
+    applier.apply(_video(tmp_path), dynamics_enabled=True)
+    applier.apply(_scene(tmp_path), dynamics_enabled=True)
+    assert video.stops >= 1
+    assert video.video is None
+    assert scene.started == ["1647046763"]
+
+
+@pytest.mark.parametrize("first", ["video", "scene"])
+def test_switching_to_a_still_stops_whichever_was_running(
+    tmp_path: Path, first: str, both: tuple[Applier, FakeRenderer, FakeScenes]
+) -> None:
+    applier, video, scene = both
+    applier.apply(_video(tmp_path) if first == "video" else _scene(tmp_path), dynamics_enabled=True)
+    applier.apply(_still(tmp_path), dynamics_enabled=True)
+    assert video.video is None
+    assert not scene.is_running
+
+
+def test_a_refused_scene_stops_the_video_it_was_replacing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_calls: list[Path]
+) -> None:
+    """A playlist reaching a scene it may not start must not show the last video.
+
+    By the time the refusal happens the scene's still is already on screen and
+    its palette already applied -- so leaving mpvpaper running would show the
+    *previous* video under the *next* wallpaper's colours. Stopping it is the
+    coherent outcome: the right still, the right colours, no motion.
+    """
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.running_elsewhere", lambda output="": ())
+    video, scene = FakeRenderer(), FakeScenes()
+    applier = Applier(video, scene_renderer=scene, own_scene_renderer=False)  # type: ignore[arg-type]
+    applier.apply(_video(tmp_path), dynamics_enabled=True)
+
+    with pytest.raises(ApplyError, match="not set to drive"):
+        applier.apply(_scene(tmp_path), dynamics_enabled=True)
+    assert video.video is None
+    assert set_calls[-1] == tmp_path / "1647046763-still.png"

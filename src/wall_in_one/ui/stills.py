@@ -57,7 +57,7 @@ class StillMaker:
         self._attempted: set[Path] = set()
 
     def request(self, items: Iterable[MediaItem], root: Path, callback: Callback) -> None:
-        """Make stills for any videos in ``items`` that have none.
+        """Make stills for anything in ``items`` that moves and has none.
 
         Returns immediately. ``callback`` runs on the main thread once, and
         only if something was actually made -- a rescan that would change
@@ -68,13 +68,23 @@ class StillMaker:
         wanted = [
             item
             for item in items
-            if item.kind is Kind.VIDEO
-            and item.paired_still is None
-            and item.path not in self._attempted
+            # Every moving kind, not video alone. `stills.ensure` has always
+            # known how to capture a Wallpaper Engine scene through the engine
+            # itself, and this filter was the only reason it was never asked
+            # to. Under the pairing model every item is a pairing, and a scene
+            # with no still has nothing to show when dynamics are off and
+            # nothing for an adaptive palette to be generated from.
+            if item.kind.moves and item.paired_still is None and item.path not in self._attempted
         ]
         if not wanted:
             return
         self._attempted.update(item.path for item in wanted)
+        # Videos first. A scene capture spawns the engine and waits for it to
+        # render and for the file to settle -- seconds each, against a
+        # fraction of one for an ffmpeg seek -- and the pool is one worker
+        # wide, so leaving the two interleaved would let a handful of scenes
+        # hold up every video behind them.
+        wanted.sort(key=lambda item: item.kind is Kind.SCENE)
         self._pool.submit(self._run, tuple(wanted), root, callback)
 
     def _run(self, items: tuple[MediaItem, ...], root: Path, callback: Callback) -> None:

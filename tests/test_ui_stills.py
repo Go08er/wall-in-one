@@ -44,6 +44,15 @@ class Recording(StillMaker):
         """Run what the pool would have run, here and now."""
         self._run(items, root, self.batches.append)
 
+    def drain(self) -> None:
+        """Let the pool finish what `request` queued, then stop it.
+
+        `shutdown` on the maker sets `_closed`, which makes `_run` return
+        without doing the work -- correct for quitting, useless for a test
+        that wants to see what the work was. This waits on the pool itself.
+        """
+        self._pool.shutdown(wait=True)
+
 
 def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
     """A generator that records what it was asked for and always gives up."""
@@ -137,3 +146,58 @@ def test_a_shut_down_maker_stops_mid_batch(maker: Recording) -> None:
     maker.shutdown()
     maker.submit((item("b.mp4", Kind.VIDEO), item("c.mp4", Kind.VIDEO)), Path("/w"))
     assert maker.asked == []
+
+
+# -- scenes ---------------------------------------------------------------
+#
+# `stills.ensure` has always known how to capture a Wallpaper Engine scene
+# through the engine itself. The batch filter asked only for `Kind.VIDEO`, so
+# it was never given one -- which showed up as four scenes with no still on a
+# machine where all 45 videos had one.
+
+
+def test_scenes_are_offered_a_still_too(maker: Recording) -> None:
+    """Every item is a pairing, and a pairing has a representative."""
+    items = (
+        item("clip.mp4", Kind.VIDEO),
+        item("1647046763", Kind.SCENE),
+    )
+    maker.request(items, Path("/w"), maker.batches.append)
+    maker.drain()
+
+    assert set(maker.asked) == {Path("/w/clip.mp4"), Path("/w/1647046763")}
+
+
+def test_a_scene_that_already_has_a_still_is_left_alone(maker: Recording) -> None:
+    items = (item("1647046763", Kind.SCENE, still=Path("/w/scene-still.png")),)
+    maker.request(items, Path("/w"), maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == []
+
+
+def test_stills_are_left_out_of_the_batch(maker: Recording) -> None:
+    """Only things that move need a representative."""
+    maker.request((item("a.png", Kind.STILL),), Path("/w"), maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == []
+
+
+def test_videos_are_captured_before_scenes(maker: Recording) -> None:
+    """A scene capture spawns the engine and waits for it to settle.
+
+    On one worker, interleaving them would let a handful of scenes hold up
+    every video queued behind them.
+    """
+    items = (
+        item("1647046763", Kind.SCENE),
+        item("one.mp4", Kind.VIDEO),
+        item("3238389972", Kind.SCENE),
+        item("two.mp4", Kind.VIDEO),
+    )
+    maker.request(items, Path("/w"), maker.batches.append)
+    maker.drain()
+
+    kinds = [path.suffix == ".mp4" for path in maker.asked]
+    assert kinds == [True, True, False, False]

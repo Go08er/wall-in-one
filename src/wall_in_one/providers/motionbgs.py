@@ -53,8 +53,8 @@ from wall_in_one.providers.cache import TtlCache
 ORIGIN: Final = "https://motionbgs.com"
 HOST: Final = "motionbgs.com"
 
-#: Browse modes the site exposes. `search` has no pagination and `hd` is a
-#: single curated page; both were established by observation, not documented.
+#: Browse modes the site exposes. Text searches that redirect to a tag listing
+#: page through that tag; `hd` is the only deliberately single-page catalogue.
 MODES: Final[frozenset[str]] = frozenset({"search", "latest", "genre", "4k", "hd"})
 
 MAX_HTML_BYTES: Final = 1024 * 1024
@@ -83,6 +83,7 @@ VIDEO_PATH_RE: Final = re.compile(
 )
 DOWNLOAD_PATH_RE: Final = re.compile(r"^/dl/(hd|4k)/([0-9]{1,12})/?$")
 LISTING_PATH_RE: Final = re.compile(r"^/([a-z0-9][a-z0-9-]{0,119})/?$")
+SEARCH_TAG_PATH_RE: Final = re.compile(r"^/tag:([a-z0-9][a-z0-9-]{0,119})/$")
 
 _STILL_EXTENSIONS: Final[tuple[str, ...]] = (".jpg", ".jpeg", ".png", ".webp")
 _CHALLENGE_MARKERS: Final[tuple[str, ...]] = (
@@ -248,6 +249,21 @@ def browse_url(mode: str, query: str, genre: str, page: int) -> str:
 def _canonical_search_slug(query: str) -> str | None:
     candidate = query.lower().replace(" ", "-")
     return candidate if SLUG_RE.fullmatch(candidate) is not None else None
+
+
+def search_tag_slug(value: str) -> str | None:
+    """The exact tag listing a search redirected to, or ``None``.
+
+    A same-origin redirect is not enough. Only ``/tag:<safe-slug>/`` with no
+    query data becomes a paging route; any other destination remains an
+    ordinary redirect that the caller refuses.
+    """
+    normalised = normalise_url(value)
+    parsed = urlsplit(normalised)
+    if parsed.query:
+        return None
+    match = SEARCH_TAG_PATH_RE.fullmatch(parsed.path)
+    return match.group(1) if match is not None else None
 
 
 def listing_route_matches(mode: str, query: str, genre: str, page: int, value: str) -> bool:
@@ -764,6 +780,9 @@ class MotionBgs:
         self._max_download_bytes = max_download_bytes
         self._listings: TtlCache[ListingPage] = TtlCache(max_entries=8)
         self._details: TtlCache[MotionBgsDetail] = TtlCache(max_entries=48)
+        # Query -> the validated tag slug it redirected to. Empty means the
+        # site returned a direct, first-page-only search instead.
+        self._search_routes: TtlCache[str] = TtlCache(max_entries=32)
 
     # -- transport -------------------------------------------------------
 
@@ -799,19 +818,66 @@ class MotionBgs:
         source_url = browse_url(mode, text, genre, page)
         cached = self._listings.get(key)
         if cached is not None:
+            if mode == "search" and page > 1:
+                tag = self._search_routes.get(text)
+                if tag:
+                    source_url = browse_url("genre", "", tag, page)
             return _to_result(cached, source_url, cached_flag=True)
-        markup, effective = self._get_html(source_url, "listing")
+        parse_mode, parse_query, parse_genre = mode, text, genre
+        markup: str
+        effective: str
+        if mode == "search":
+            tag, first_markup, first_effective = self._resolve_search_route(text)
+            if not tag:
+                if page != 1:
+                    raise ProviderError(
+                        "validation",
+                        "this MotionBGS search did not resolve to a pageable tag listing",
+                    )
+                if first_markup is None or first_effective is None:
+                    # A cached unpageable route can only be reached after page
+                    # one was cached too; this is a defensive fallback for a
+                    # deliberately tiny or independently expired cache.
+                    markup, effective = self._get_html(source_url, "listing")
+                else:
+                    markup, effective = first_markup, first_effective
+            else:
+                parse_mode, parse_query, parse_genre = "genre", "", tag
+                tag_url = browse_url("genre", "", tag, page)
+                source_url = browse_url("search", text, "", 1) if page == 1 else tag_url
+                if page == 1 and first_markup is not None and first_effective is not None:
+                    markup, effective = first_markup, first_effective
+                else:
+                    markup, effective = self._get_html(tag_url, "listing")
+        else:
+            markup, effective = self._get_html(source_url, "listing")
         listing = parse_listing(
             markup,
-            mode=mode,
-            query=text,
-            genre=genre,
+            mode=parse_mode,
+            query=parse_query,
+            genre=parse_genre,
             page=page,
             source_url=effective,
             limit=limit,
         )
         self._listings.put(key, listing)
         return _to_result(listing, source_url, cached_flag=False)
+
+    def _resolve_search_route(self, query: str) -> tuple[str, str | None, str | None]:
+        """Resolve a search once, retaining its safe tag route for later pages."""
+        cached = self._search_routes.get(query)
+        if cached is not None:
+            return cached, None, None
+        requested = browse_url("search", query, "", 1)
+        markup, effective = self._get_html(requested, "listing")
+        tag = search_tag_slug(effective)
+        if tag is None and normalise_url(effective) != normalise_url(requested):
+            raise ProviderError(
+                "redirects", "MotionBGS search redirected outside a pageable tag route"
+            )
+        resolved = tag or ""
+        self._search_routes.put(query, resolved)
+        return resolved, markup, effective
 
     def detail(self, slug: str) -> MotionBgsDetail:
         slug = normalise_slug(slug)
@@ -974,6 +1040,7 @@ class MotionBgs:
     def clear_cache(self) -> None:
         self._listings.clear()
         self._details.clear()
+        self._search_routes.clear()
 
 
 def _refuse_error_status(status: int, purpose: str) -> None:
@@ -997,8 +1064,6 @@ def _plan_search(query: SearchQuery) -> tuple[str, str, str, int, int]:
     genre = ""
     if mode == "search":
         text = normalise_query(query.text)
-        if page != 1:
-            raise ProviderError("validation", "MotionBGS text search does not expose pagination")
     elif query.text:
         raise ProviderError("validation", "a query is valid only in search mode")
     if mode == "genre":

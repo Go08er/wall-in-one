@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,17 @@ MEDIA_URL = "https://motionbgs.com/media/42/aurora.mp4"
 
 def html(body: str = LISTING) -> Reply:
     return Reply(body=body.encode("utf-8"), content_type="text/html")
+
+
+def tag_listing(slug: str, page: int) -> str:
+    """The fixture's cards with pagination links for one tag catalogue."""
+    previous = f"/tag:{slug}/" if page == 2 else f"/tag:{slug}/{page - 1}/"
+    following = f"/tag:{slug}/{page + 1}/"
+    return re.sub(
+        r'<link rel="prev"[^>]+>\s*<link rel="next"[^>]+>',
+        f'<link rel="prev" href="{previous}">\n<link rel="next" href="{following}">',
+        LISTING,
+    )
 
 
 def provider(routes: dict[str, Reply | list[Reply]]) -> tuple[motionbgs.MotionBgs, FakeClient]:
@@ -259,6 +271,74 @@ def test_a_search_redirected_to_its_own_tag_page_is_allowed() -> None:
     assert len(result) == 2
 
 
+def test_a_search_pages_through_its_validated_tag_redirect() -> None:
+    engine, client = provider(
+        {
+            ORIGIN + "/search?q=naruto": Reply(status=302, location="/tag:naruto/"),
+            ORIGIN + "/tag:naruto/": html(tag_listing("naruto", 1)),
+            ORIGIN + "/tag:naruto/2/": html(tag_listing("naruto", 2)),
+        }
+    )
+
+    first = engine.search(SearchQuery(text="naruto"))
+    second = engine.search(SearchQuery(text="naruto", page=2))
+
+    assert first.has_next
+    assert second.has_previous and second.has_next
+    assert first.query_url == ORIGIN + "/search?q=naruto"
+    assert second.query_url == ORIGIN + "/tag:naruto/2/"
+    assert [request.url for request in client.requests] == [
+        ORIGIN + "/search?q=naruto",
+        ORIGIN + "/tag:naruto/",
+        ORIGIN + "/tag:naruto/2/",
+    ]
+
+
+def test_page_two_can_resolve_the_tag_when_requested_first() -> None:
+    engine, client = provider(
+        {
+            ORIGIN + "/search?q=naruto": Reply(status=302, location="/tag:naruto/"),
+            ORIGIN + "/tag:naruto/": html(tag_listing("naruto", 1)),
+            ORIGIN + "/tag:naruto/2/": html(tag_listing("naruto", 2)),
+        }
+    )
+
+    result = engine.search(SearchQuery(text="naruto", page=2))
+
+    assert result.page == 2 and result.has_next
+    assert len(client.requests) == 3
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "/naruto/",
+        "/tag:naruto/2/",
+        "/tag:NARUTO/",
+        "/tag:naruto/?sort=evil",
+    ],
+)
+def test_a_search_redirect_must_be_an_exact_safe_tag_root(location: str) -> None:
+    engine, _ = provider(
+        {
+            ORIGIN + "/search?q=naruto": Reply(status=302, location=location),
+            motionbgs.normalise_url(location, base=ORIGIN + "/search?q=naruto"): html(),
+        }
+    )
+    with pytest.raises(ProviderError) as caught:
+        engine.search(SearchQuery(text="naruto"))
+    assert caught.value.kind == "redirects"
+
+
+def test_a_direct_search_remains_a_clear_first_page_only_result() -> None:
+    engine, client = provider({ORIGIN + "/search?q=unusual": html()})
+    first = engine.search(SearchQuery(text="unusual"))
+    assert not first.has_next
+    with pytest.raises(ProviderError, match="did not resolve to a pageable tag"):
+        engine.search(SearchQuery(text="unusual", page=2))
+    assert len(client.requests) == 1
+
+
 def test_a_cross_origin_redirect_fails_closed() -> None:
     engine, _ = provider({ORIGIN + "/": Reply(status=302, location="https://evil.example/x")})
     with pytest.raises(ProviderError) as caught:
@@ -285,7 +365,6 @@ def test_a_challenge_status_is_not_retried() -> None:
     "query",
     [
         SearchQuery(options={"mode": "sideways"}),
-        SearchQuery(text="a", page=2),
         SearchQuery(page=0, options={"mode": "latest"}),
         SearchQuery(text="a", options={"mode": "latest"}),
         SearchQuery(options={"mode": "genre"}),

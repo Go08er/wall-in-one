@@ -796,9 +796,7 @@ class BrowseDialog(Adw.Dialog):
         self._motionbgs_filters.set_visible(not is_wallhaven)
         if not is_wallhaven:
             self._on_mode_changed()
-        self._entry.set_placeholder_text(
-            "Search Wallhaven" if is_wallhaven else "Search MotionBGS (first page only)"
-        )
+        self._entry.set_placeholder_text("Search Wallhaven" if is_wallhaven else "Search MotionBGS")
 
     def _read_filters(self) -> browse.Filters:
         """Read every control into one toolkit-free value.

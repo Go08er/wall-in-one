@@ -224,9 +224,9 @@ writable by anyone else, is larger than 4 KB, or sits in a directory other
 users can write to. A credential the whole machine can read is worth saying out
 loud rather than using quietly. Wallhaven then simply runs unauthenticated.
 
-[`docs/browsing.md`](docs/browsing.md) covers the filters each site
-understands, MotionBGS's paging constraints, and what the download path checks
-before it writes anything.
+[`docs/browsing.md`](docs/browsing.md) covers the filters each site understands,
+how MotionBGS text searches continue through their validated tag pages, and
+what the download path checks before it writes anything.
 
 ## Colour sync
 

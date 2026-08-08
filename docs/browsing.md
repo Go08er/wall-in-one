@@ -291,8 +291,12 @@ established by observation rather than from documentation, and enforced locally
 so a request that cannot work fails with an explanation instead of returning
 someone else's page.
 
-- **Text search is first page only.** The site's search route exposes no
-  pagination, so asking for page 2 of a search is a validation error.
+- **Text search normally pages through its tag catalogue.** The site redirects
+  searches such as `naruto` to `/tag:naruto/`; Wall-in-One follows that one
+  same-origin redirect, validates the final path as exactly
+  `/tag:<lowercase-slug>/`, and uses `/2/`, `/3/` and later pages as the result
+  grid scrolls. If a query does not resolve to a tag route, its direct result is
+  still shown but honestly remains one page.
 - **HD browsing is first page only.** `/hd/` is a single curated page.
 - **`latest`, `genre` and `4k` are paged.** Even there, the previous and next
   buttons are only enabled when the page's own `rel="prev"` / `rel="next"` link

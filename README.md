@@ -9,39 +9,38 @@ the companion Noctalia plugin talks to it.
 
 ## Status
 
-**Working, and not yet a replacement.** The colour pipeline, the library,
-wallpaper application for stills and video, thumbnails, the palette browser,
-searching two wallpaper sites, favourites and per-tile removal are all built and
-exercised against a live system. [`DESIGN.md`](DESIGN.md) is the record: what
-each piece was checked against, and what the check actually showed.
+**Working, and in use.** The library, pairings, automatic stills, playlists,
+schedules, per-display assignment, the colour pipeline, and browsing two
+wallpaper sites are all built and exercised against a live system.
+[`DESIGN.md`](DESIGN.md) is the record: what each piece was checked against and
+what the check actually showed, including the things that turned out to be
+wrong.
 
-But this replaces a Noctalia plugin that did more, and the rewrite did not carry
-everything across. **Missing outright: Wallpaper Engine Workshop scenes, the
-Steam shop, named playlists, schedules, per-item palette policy, and a manual
-still override.** Pairing is video-only rather than the unit every item resolves
-to. `DESIGN.md` has the full comparison and a plan for closing it; until that is
-done, do not treat this as a drop-in for the 0.8.0 plugin.
+Everything the Luau plugin it replaces could do, it now does. The one capability
+not carried across is **per-output renderer settings** -- mute, FPS and scaling
+are global rather than per screen.
 
-Three things are not proven, and are worth knowing before relying on them:
+Three things are worth knowing before you rely on it:
 
-- **The Noctalia plugin has never been loaded into a running shell.** It shrank
-  to a widget, a panel, a service and a shortcut that shell out to
-  `wall-in-one ctl`. A static audit narrowed the risk: all nineteen host API
-  symbols it uses also appear in plugins installed and working on the
-  development machine, and its manifest matches a working one's shape. What is
-  left is that it declares `plugin_api = 17`, which has been accepted into
-  Noctalia's plugin store but never seen to load. Still the largest outstanding
-  risk in the project.
-- **Per-output wallpapers have not been seen working on two monitors**, because
-  only one output is connected here. What is checked is that the chosen
-  connector reaches both commands -- `wallpaper-set <connector>` for stills and
-  mpvpaper's output for video. Whether two screens then show different things
-  is untested.
-- **The palette browser has not been looked at.** It has been opened in the
-  running app and its tree read back -- four groups, all ten built-in palettes
-  found, a card for each of the ten generators -- so it is known to be there
-  and to be populated. Whether it *looks* right is a different question, and
-  that one is unanswered.
+- **Two monitors showing two different playlists is unverified.** The machine
+  this was written on has one output. Screen discovery is checked against real
+  niri, and assignment is tested, but nobody has watched two screens disagree.
+- **The GUI has had little human use.** 1,150 tests cover the logic and drive
+  the widgets programmatically, which proves wiring rather than whether
+  anything *looks* right. Most of the browsing interface is new.
+- **It has not been through a long soak.** Bugs found so far were found by
+  running it, not by reading it -- so assume running it longer will find more.
+
+## The Noctalia plugin
+
+There is a companion plugin at
+[Go08er/goober-noctalia-plugins-v5](https://github.com/Go08er/goober-noctalia-plugins-v5),
+under `noctalia_5/wall-in-one`. It is a thin client: a bar widget, a panel, a
+Control Center shortcut and a service that launch this app and drive it over
+the control socket described below. None of the wallpaper logic lives there.
+
+The plugin is optional. This app is a complete wallpaper manager on its own;
+the plugin exists so the bar can drive it without opening the window.
 
 ## Why it exists
 
@@ -57,11 +56,29 @@ good at: a widget and a few shortcuts that poke the app.
 
 ## Install
 
+A Nix flake, so there is nothing to build by hand and no Python environment to
+manage.
+
 ```console
-$ nix profile install github:goober/wall-in-one   # once published
-$ nix profile install .                           # from a checkout
-$ nix run github:goober/wall-in-one               # try it without installing
+$ nix run github:Go08er/wall-in-one                # try it, install nothing
+$ nix profile install github:Go08er/wall-in-one    # keep it
+$ nix profile install .                            # from a checkout
 ```
+
+Or as a NixOS / home-manager input:
+
+```nix
+{
+  inputs.wall-in-one.url = "github:Go08er/wall-in-one";
+
+  # then, in your packages list:
+  #   inputs.wall-in-one.packages.${pkgs.system}.default
+}
+```
+
+Flakes must be enabled. If `nix run` complains about an experimental feature,
+add `experimental-features = nix-command flakes` to `/etc/nix/nix.conf` or pass
+`--extra-experimental-features 'nix-command flakes'`.
 
 A profile install also installs a launcher entry and an icon --
 `share/applications/dev.goober.WallInOne.desktop` and

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from wall_in_one.library import scan
+from wall_in_one.library import owned, scan
 from wall_in_one.providers import http, registry
 from wall_in_one.providers.base import (
     DownloadResult,
@@ -54,12 +54,36 @@ class Browser:
         *,
         client: http.Client | None = None,
         root: Path | None = None,
+        library_roots: Sequence[Path] = (),
     ) -> None:
         # One transport for every provider: connection reuse, and one seam for
         # a test to replace.
         self._client = client if client is not None else http.UrllibClient()
         self._root = root
+        self._library_roots = tuple(library_roots)
         self._providers: dict[str, Provider] = {}
+        self._owned: owned.Index | None = None
+
+    # -- what we already have ----------------------------------------------
+
+    @property
+    def owned(self) -> owned.Index:
+        """Which results are already in the library.
+
+        Built on first use and then kept, because walking every root is
+        filesystem work and the answer is wanted once per card.
+        """
+        if self._owned is None:
+            self._owned = owned.read(self._library_roots or scan.default_roots())
+        return self._owned
+
+    def forget_owned(self) -> None:
+        """Drop the index, so the next question re-reads the disk.
+
+        For the cases this object cannot see: a wallpaper removed through the
+        library window, or the roots being reconfigured underneath it.
+        """
+        self._owned = None
 
     # -- providers -------------------------------------------------------
 
@@ -104,7 +128,17 @@ class Browser:
     # -- verbs -------------------------------------------------------------
 
     def search(self, name: str, query: SearchQuery) -> SearchResult:
-        return self.provider(name).search(query)
+        """Ask ``name`` for a page, warming the owned index on the way past.
+
+        The warming is deliberate and belongs here rather than in the caller.
+        A search runs on a worker; the cards it produces are built on the UI
+        thread, and each of them wants to know whether the library already
+        holds that wallpaper. Reading the index lazily from the card would put
+        a filesystem walk on the main loop the first time a search returns.
+        """
+        result = self.provider(name).search(query)
+        _ = self.owned
+        return result
 
     def download(self, candidate: WallpaperCandidate, *, variant: str = "") -> Downloaded:
         """Fetch ``candidate`` into the library.
@@ -115,6 +149,10 @@ class Browser:
         """
         root = self.download_root()
         result = self.provider(candidate.provider).download(candidate, root, variant=variant)
+        # Record it rather than invalidating the index: this process knows both
+        # the candidate and where it landed, so re-walking every root to learn
+        # one fact it just created would be work for nothing.
+        self.owned.add(candidate, result.path)
         return Downloaded(result=result, root=root)
 
     def thumbnail(self, candidate: WallpaperCandidate) -> bytes:

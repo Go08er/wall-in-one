@@ -233,7 +233,13 @@ class BrowseDialog(Adw.Dialog):
         # the user put first. With none configured the Browser asks
         # `library.scan`, which is the directory being read from anyway.
         configured = application.settings.roots
-        self._browser = Browser(root=configured[0] if configured else None)
+        # `library_roots` is every configured root rather than just the first:
+        # downloads land in one place, but a wallpaper already in *any* of them
+        # is one the user has, and offering it again is the thing being fixed.
+        self._browser = Browser(
+            root=configured[0] if configured else None,
+            library_roots=configured,
+        )
         self._loader = PreviewLoader(self._browser)
         # Separate pools: a 40 MB video download must not hold up the next
         # search, and two searches at once would only fight over the cache.
@@ -529,8 +535,14 @@ class BrowseDialog(Adw.Dialog):
         self._page = page
         self._clear()
 
+        # Asked once per page rather than once per card, and safe to touch from
+        # the main loop because `Browser.search` warmed it on the worker that
+        # produced these results.
+        held = self._browser.owned
         for candidate in result.items:
             card = _CandidateCard(candidate, self._on_download)
+            if held.holds(candidate):
+                card.mark_downloaded()
             self._cards.append(card)
             self._flow.append(card)
             self._loader.request(candidate, self._on_preview)

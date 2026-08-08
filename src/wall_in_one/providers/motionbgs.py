@@ -831,6 +831,12 @@ class MotionBgs:
                     "schema": 1,
                     "plugin": "goober/wall-in-one",
                     "provider": "MotionBGS",
+                    # The slug, under the name Wallhaven's sidecar already uses
+                    # for the same thing, so `library.owned` has one key to
+                    # look for rather than two. Sidecars written before this
+                    # carry no id, which is why `source_page` remains a key
+                    # instead of being replaced by it.
+                    "id": detail.slug,
                     "path": str(destination),
                     "title": detail.title,
                     "source_page": detail.page_url,

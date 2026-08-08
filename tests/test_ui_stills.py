@@ -176,6 +176,21 @@ def test_a_scene_that_already_has_a_still_is_left_alone(maker: Recording) -> Non
     assert maker.asked == []
 
 
+def test_a_stale_automatic_scene_still_is_queued_again(
+    maker: Recording, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = item("1647046763", Kind.SCENE, still=Path("/w/scene-still.png"))
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.stills.scene_capture_required",
+        lambda candidate, _root: candidate.path == scene.path,
+    )
+
+    maker.request((scene,), Path("/w"), maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == [scene.path]
+
+
 def test_stills_are_left_out_of_the_batch(maker: Recording) -> None:
     """Only things that move need a representative."""
     maker.request((item("a.png", Kind.STILL),), Path("/w"), maker.batches.append)

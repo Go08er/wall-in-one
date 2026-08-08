@@ -21,7 +21,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
 from wall_in_one.library import pairings
-from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
+from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
 from wall_in_one.theme import palettes
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui.palette_browser import SchemePreview, SchemePreviewLoader, swatch_strip
@@ -227,6 +227,16 @@ class PairingsPage(Gtk.Box):
         choose.connect("clicked", lambda _button: self._choose_manual_still(item))
         manual.add_suffix(choose)
         still_group.add(manual)
+        if item.kind is Kind.SCENE:
+            regenerate = Adw.ActionRow(
+                title="Regenerate automatic scene still",
+                subtitle="Recapture at the target display's physical aspect and resolution",
+            )
+            button = Gtk.Button(label="Regenerate")
+            button.set_valign(Gtk.Align.CENTER)
+            button.connect("clicked", lambda _button: self._regenerate_scene(item))
+            regenerate.add_suffix(button)
+            still_group.add(regenerate)
         self._editor.append(still_group)
 
         colour_group = Adw.PreferencesGroup(
@@ -444,3 +454,9 @@ class PairingsPage(Gtk.Box):
             return
         self._app.pairing_changed(item)
         self._show_editor(item)
+
+    def _regenerate_scene(self, item: MediaItem) -> None:
+        if self._app.regenerate_scene_still(item):
+            self._app.window_report("Regenerating the automatic scene still in the background")
+        else:
+            self._app.window_report("Choose a library directory before generating scene stills")

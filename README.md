@@ -363,7 +363,12 @@ prints beside it.
 -- 49 wallpapers on the machine this was built on. Most Workshop items turn out
 to be plain videos, which play through mpvpaper like any other; only true
 `scene` wallpapers need `linux-wallpaperengine`, and their stills are captured
-through it in a window without anything appearing on screen.
+through it in a window without anything appearing on screen. The capture window
+uses the target display's physical mode (or a 2560x1440 fallback), because the
+engine's default window produces a small portrait screenshot. Managed scene
+stills with the old portrait/wrong-resolution shape are regenerated
+automatically and atomically; custom still choices are never overwritten. A
+manual **Regenerate** control is also available on a scene's Pairings page.
 
 **Play Wallpaper Engine scenes** is on by default and is visible under
 **Settings -> Playback**. The engine is single-instance per output and other

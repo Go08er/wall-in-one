@@ -14,8 +14,9 @@ import pytest
 
 from wall_in_one.wallpaper import outputs
 
-#: niri 26.04's actual answer on the development machine, trimmed of the modes
-#: list, which nothing here reads.
+#: niri 26.04's actual answer on the development machine. The active mode is
+#: included because scene capture now needs physical pixels, not only logical
+#: compositor coordinates.
 REAL_SINGLE = {
     "eDP-1": {
         "name": "eDP-1",
@@ -24,6 +25,10 @@ REAL_SINGLE = {
         "serial": None,
         "physical_size": [340, 210],
         "current_mode": 1,
+        "modes": [
+            {"width": 1920, "height": 1200, "refresh_rate": 60000},
+            {"width": 2560, "height": 1600, "refresh_rate": 165000},
+        ],
         "vrr_supported": True,
         "vrr_enabled": False,
         "logical": {
@@ -61,6 +66,7 @@ def test_the_real_reply_from_this_machine_parses() -> None:
     assert found[0].make == "BOE"
     assert (found[0].width, found[0].height) == (1706, 1066)
     assert found[0].scale == 1.5
+    assert (found[0].physical_width, found[0].physical_height) == (2560, 1600)
 
 
 def test_two_screens_come_back_in_a_fixed_order() -> None:

@@ -22,6 +22,7 @@ from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
+from wall_in_one.wallpaper import scenes
 from wall_in_one.wallpaper.applier import Applier
 
 pytestmark = pytest.mark.skipif(not stills.is_available(), reason="ffmpeg is not installed")
@@ -237,6 +238,73 @@ def test_ensure_swallows_a_failure_rather_than_stopping_playback(
     impostor = tmp_path / "clip.mp4"
     impostor.write_bytes(b"not a video at all")
     assert stills.ensure(item(impostor, Kind.VIDEO), root) is None
+
+
+# -- scene captures -------------------------------------------------------
+
+
+def _scene(workshop_id: str, paired: Path | None = None) -> MediaItem:
+    return MediaItem(
+        path=Path("/steam/workshop/content/431960") / workshop_id,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=0,
+        scene=workshop_id,
+        paired_still=paired,
+    )
+
+
+def _png_header(path: Path, width: int, height: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+    )
+
+
+def test_an_old_portrait_scene_still_is_marked_for_recapture(root: Path) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    _png_header(target, 1270, 1537)
+    scene = _scene("1647046763", target)
+
+    assert stills.scene_capture_required(scene, root, size=(2560, 1600))
+
+
+def test_a_large_correct_aspect_scene_still_is_reused(root: Path) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    _png_header(target, 3840, 2400)
+    scene = _scene("1647046763", target)
+
+    assert not stills.scene_capture_required(scene, root, size=(2560, 1600))
+
+
+def test_a_custom_scene_still_is_never_replaced_by_maintenance(root: Path) -> None:
+    custom = root / "portrait-i-chose.png"
+    _png_header(custom, 800, 1200)
+
+    assert not stills.scene_capture_required(_scene("1647046763", custom), root)
+
+
+def test_scene_capture_replaces_the_managed_still_atomically(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    _png_header(target, 1270, 1537)
+    scene = _scene("1647046763", target)
+    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+
+    def capture(_scene_id: str, destination: Path, *, size: tuple[int, int]) -> Path:
+        assert size == (2560, 1600)
+        _png_header(destination, 3840, 2400)
+        return destination
+
+    monkeypatch.setattr(scenes, "screenshot", capture)
+
+    assert stills.capture_scene(scene, root) == target
+    assert stills._png_size(target) == (3840, 2400)
+    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
 
 
 # -- pausing a video that has no still ------------------------------------

@@ -47,11 +47,15 @@ class Output:
     make: str = ""
     model: str = ""
     #: Logical size, which is the size after scaling and therefore the one that
-    #: describes what somebody sees. The physical mode is not carried: nothing
-    #: in this app picks a wallpaper by pixel count.
+    #: describes what somebody sees.
     width: int = 0
     height: int = 0
     scale: float = 1.0
+    #: Pixel dimensions of the active mode. Scene still capture needs these:
+    #: using linux-wallpaperengine's default window produced a portrait image
+    #: that was then cropped and enlarged onto a landscape display.
+    physical_width: int = 0
+    physical_height: int = 0
 
     @property
     def label(self) -> str:
@@ -107,6 +111,17 @@ def parse(document: object) -> tuple[Output, ...]:
         logical = value.get("logical")
         block: Mapping[str, object] = logical if isinstance(logical, dict) else {}
         scale = block.get("scale")
+        modes = value.get("modes")
+        current = value.get("current_mode")
+        mode: Mapping[str, object] = {}
+        if (
+            isinstance(modes, list)
+            and isinstance(current, int)
+            and not isinstance(current, bool)
+            and 0 <= current < len(modes)
+            and isinstance(modes[current], dict)
+        ):
+            mode = modes[current]
         found.append(
             Output(
                 name=name,
@@ -115,6 +130,8 @@ def parse(document: object) -> tuple[Output, ...]:
                 width=_as_int(block.get("width")),
                 height=_as_int(block.get("height")),
                 scale=float(scale) if isinstance(scale, (int, float)) and scale > 0 else 1.0,
+                physical_width=_as_int(mode.get("width")),
+                physical_height=_as_int(mode.get("height")),
             )
         )
     return tuple(sorted(found, key=lambda output: output.name))

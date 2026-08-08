@@ -43,6 +43,8 @@ import time
 from pathlib import Path
 from typing import Final
 
+from wall_in_one.wallpaper import outputs
+
 #: What `--layer` should be on niri. Its own help says so: pairing with the
 #: `place-within-backdrop` rule, without which the wallpaper is cloned into
 #: every workspace in the overview.
@@ -69,6 +71,11 @@ DEFAULT_FPS: Final = 30
 #: `linux-wallpaperengine`'s own default is 15; scenes with audio are a
 #: surprise on a wallpaper, so this app starts them silent like the video half.
 DEFAULT_VOLUME: Final = 0
+
+#: Landscape fallback when the compositor cannot report a mode. This is the
+#: geometry proven against linux-wallpaperengine rather than its portrait
+#: window-mode default.
+DEFAULT_CAPTURE_SIZE: Final = (2560, 1440)
 
 
 class SceneError(Exception):
@@ -160,7 +167,13 @@ class SceneRenderer:
         """The Workshop id currently rendering, or ``""``."""
         return self._scene if self.is_running else ""
 
-    def command(self, scene: str, screenshot: Path | None = None) -> list[str]:
+    def command(
+        self,
+        scene: str,
+        screenshot: Path | None = None,
+        *,
+        window: tuple[int, int] | None = None,
+    ) -> list[str]:
         """The argument list, built once so the tests can read it.
 
         `--screen-root` has to come *before* `--bg`: the help is explicit that
@@ -181,6 +194,9 @@ class SceneRenderer:
                 "--screenshot-delay",
                 str(SCREENSHOT_DELAY_FRAMES),
             ]
+            if window is not None:
+                width, height = window
+                arguments += ["--window", f"0x0x{width}x{height}"]
 
         if self.output:
             arguments += ["--screen-root", self.output]
@@ -257,6 +273,7 @@ def screenshot(
     *,
     timeout: float = SCREENSHOT_TIMEOUT,
     renderer: SceneRenderer | None = None,
+    size: tuple[int, int] | None = None,
 ) -> Path:
     """Render ``scene`` until it has written one frame, then stop it.
 
@@ -282,7 +299,11 @@ def screenshot(
 
     try:
         process = subprocess.Popen(
-            capture.command(scene, screenshot=destination),
+            capture.command(
+                scene,
+                screenshot=destination,
+                window=size or capture_size(renderer.output if renderer else ""),
+            ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -300,6 +321,23 @@ def screenshot(
         destination.unlink(missing_ok=True)
         raise SceneError(f"linux-wallpaperengine wrote no screenshot for {scene}")
     return destination
+
+
+def capture_size(
+    output: str = "", found: tuple[outputs.Output, ...] | None = None
+) -> tuple[int, int]:
+    """Physical capture geometry for ``output``, with a safe landscape fallback."""
+    screens = outputs.discover() if found is None else found
+    selected = next((screen for screen in screens if screen.name == output), None)
+    if selected is None and not output and screens:
+        selected = screens[0]
+    if selected is None:
+        return DEFAULT_CAPTURE_SIZE
+    if selected.physical_width > 0 and selected.physical_height > 0:
+        return selected.physical_width, selected.physical_height
+    if selected.width > 0 and selected.height > 0:
+        return round(selected.width * selected.scale), round(selected.height * selected.scale)
+    return DEFAULT_CAPTURE_SIZE
 
 
 def _wait_for(destination: Path, process: subprocess.Popen[bytes], timeout: float) -> None:

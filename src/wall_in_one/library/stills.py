@@ -49,9 +49,54 @@ GENERATE_TIMEOUT: Final = 60.0
 #: palette from, and re-quantising it through JPEG shifts the colours it reads.
 STILL_SUFFIX: Final = ".png"
 
+#: Difference tolerated when comparing an existing still with the target
+#: display. Small rounding differences from compositor scaling are harmless;
+#: the old portrait capture is nowhere near this bound.
+ASPECT_TOLERANCE: Final = 0.04
+
 
 class StillError(Exception):
     """A still could not be made. Never fatal: the video still plays."""
+
+
+def _png_size(path: Path) -> tuple[int, int] | None:
+    """Read a PNG's IHDR dimensions without pulling image decoding into scans."""
+    try:
+        header = path.read_bytes()[:24]
+    except OSError:
+        return None
+    if len(header) < 24 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    width = int.from_bytes(header[16:20], "big")
+    height = int.from_bytes(header[20:24], "big")
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def scene_capture_required(
+    item: MediaItem,
+    root: Path,
+    *,
+    size: tuple[int, int] | None = None,
+) -> bool:
+    """Whether an automatic scene still is absent, undersized, or wrong-shaped.
+
+    Only the managed automatic filename is eligible. A custom still selected
+    from the library may intentionally have another shape and must never be
+    overwritten by this maintenance path.
+    """
+    if item.kind is not Kind.SCENE or not item.scene:
+        return False
+    target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    if item.paired_still is not None and item.paired_still != target:
+        return False
+    actual = _png_size(target)
+    if actual is None:
+        return True
+    wanted = size or scenes.capture_size()
+    width, height = actual
+    wanted_width, wanted_height = wanted
+    aspect_error = abs(width / height - wanted_width / wanted_height)
+    return aspect_error > ASPECT_TOLERANCE or width < wanted_width or height < wanted_height
 
 
 def destination(video: Path, root: Path) -> Path:
@@ -203,16 +248,24 @@ def capture_scene(item: MediaItem, root: Path, *, force: bool = False) -> Path:
     if not item.scene:
         raise StillError(f"{item.name} is not a Wallpaper Engine scene")
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
-    if not force and target.is_file() and target.stat().st_size > 0:
+    size = scenes.capture_size()
+    if not force and not scene_capture_required(item, root, size=size):
         return target
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
         raise StillError(f"could not create {target.parent}: {error.strerror or error}") from error
+    temporary = target.with_name(f".{target.stem}.{os.getpid()}.tmp{target.suffix}")
     try:
-        return scenes.screenshot(item.scene, target)
+        scenes.screenshot(item.scene, temporary, size=size)
+        os.replace(temporary, target)
+        return target
     except scenes.SceneError as error:
+        temporary.unlink(missing_ok=True)
         raise StillError(str(error)) from error
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise StillError(f"could not replace {target}: {error.strerror or error}") from error
 
 
 def ensure(item: MediaItem, root: Path) -> Path | None:
@@ -225,8 +278,10 @@ def ensure(item: MediaItem, root: Path) -> Path | None:
     if not item.is_moving:
         return None
     if item.kind is Kind.SCENE:
-        if item.paired_still is not None:
-            return item.paired_still
+        if not scene_capture_required(item, root):
+            return item.paired_still or (
+                pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+            )
         try:
             return capture_scene(item, root)
         except StillError:

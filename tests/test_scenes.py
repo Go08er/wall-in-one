@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one.library.model import Kind, MediaItem
-from wall_in_one.wallpaper import scenes
+from wall_in_one.wallpaper import outputs, scenes
 from wall_in_one.wallpaper.scenes import SceneRenderer
 
 
@@ -74,6 +74,29 @@ def test_a_screenshot_run_carries_a_delay() -> None:
     arguments = SceneRenderer().command("12345", screenshot=Path("/tmp/x.png"))
     assert arguments[arguments.index("--screenshot") + 1] == "/tmp/x.png"
     assert int(arguments[arguments.index("--screenshot-delay") + 1]) > 0
+
+
+def test_a_screenshot_run_uses_linux_wallpaperengines_window_geometry() -> None:
+    arguments = SceneRenderer().command("12345", screenshot=Path("/tmp/x.png"), window=(2560, 1600))
+    assert arguments[arguments.index("--window") + 1] == "0x0x2560x1600"
+
+
+def test_capture_size_prefers_the_physical_mode() -> None:
+    screen = outputs.Output(
+        "eDP-1",
+        width=1706,
+        height=1066,
+        scale=1.5,
+        physical_width=2560,
+        physical_height=1600,
+    )
+    assert scenes.capture_size("eDP-1", (screen,)) == (2560, 1600)
+
+
+def test_capture_size_can_derive_pixels_or_fall_back() -> None:
+    scaled = outputs.Output("DP-1", width=1280, height=720, scale=2.0)
+    assert scenes.capture_size("DP-1", (scaled,)) == (2560, 1440)
+    assert scenes.capture_size("missing", (scaled,)) == scenes.DEFAULT_CAPTURE_SIZE
 
 
 def test_the_layer_is_the_one_niri_wants() -> None:

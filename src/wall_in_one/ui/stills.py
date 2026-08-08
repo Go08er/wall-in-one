@@ -74,7 +74,12 @@ class StillMaker:
             # to. Under the pairing model every item is a pairing, and a scene
             # with no still has nothing to show when dynamics are off and
             # nothing for an adaptive palette to be generated from.
-            if item.kind.moves and item.paired_still is None and item.path not in self._attempted
+            if item.kind.moves
+            and (
+                item.paired_still is None
+                or (item.kind is Kind.SCENE and stills.scene_capture_required(item, root))
+            )
+            and item.path not in self._attempted
         ]
         if not wanted:
             return
@@ -106,6 +111,29 @@ class StillMaker:
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(deliver)
+
+    def regenerate_scene(self, item: MediaItem, root: Path, callback: Callback) -> None:
+        """Force one managed scene still to be replaced, off the UI thread."""
+        if self._closed or item.kind is not Kind.SCENE:
+            return
+        self._attempted.add(item.path)
+
+        def run() -> None:
+            try:
+                stills.capture_scene(item, root, force=True)
+            except stills.StillError:
+                made = 0
+            else:
+                made = 1
+            if made and not self._closed:
+
+                def deliver() -> bool:
+                    callback(made)
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(deliver)
+
+        self._pool.submit(run)
 
     def forget(self, path: Path) -> None:
         """Allow ``path`` to be attempted again.

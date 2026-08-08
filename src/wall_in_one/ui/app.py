@@ -247,6 +247,14 @@ class Application(Adw.Application):
             return
         self._stills.request(self._session.library.items, roots[0], self._on_stills_made)
 
+    def regenerate_scene_still(self, item: MediaItem) -> bool:
+        """Queue an explicit scene recapture; return whether it could start."""
+        roots = self._session.library.roots
+        if not roots or not item.scene:
+            return False
+        self._stills.regenerate_scene(item, roots[0], self._on_stills_made)
+        return True
+
     def _on_stills_made(self, made: int) -> None:
         """A batch finished, so the pairings it wrote are worth re-reading.
 

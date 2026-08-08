@@ -481,26 +481,38 @@ section existed, so these were not weighed and dropped -- they went out with
 
 Read off the deleted plugin's own README, ADAPTERS.md and `plugin.toml`:
 
-| capability | 0.8.0 plugin | this app |
-|---|---|---|
-| still images | yes | yes |
-| local video via mpvpaper | yes | yes |
-| **Wallpaper Engine Workshop scenes** | `linux-wallpaperengine`, owned per display | **nothing** |
-| Wallhaven shop | yes | yes |
-| MotionBGS shop | yes | yes |
-| **Steam Workshop shop** | browse and acquire | **nothing** |
-| still/motion pairing | yes | partial -- video only |
-| automatic stills | video *and* Workshop screenshot | video only |
-| manual still override | paged picker plus path escape hatch | **nothing** |
-| **per-item palette policy** | mode plus builtin/generated/community/custom/keep | **nothing** |
-| managed library and ownership | yes | yes |
-| **named playlists** | visual editor, stable IDs, drag to reorder | **nothing** -- `Playlist` here is a cursor |
-| **schedules** | month/weekday/time rules, ordered, lowest match wins | **nothing** |
-| **per-display assignment** | pinned default plus schedule per output | partial -- one global output field |
-| per-display engine settings | layer, mute, hwdec, auto-pause mode, FPS, scaling | partial -- global, no Workshop half |
+This table was the scorecard the rest of the plan was written against. It is
+kept up to date rather than left as a snapshot, because a stale "nothing" reads
+as work outstanding when it is not.
 
-Three of those are structural rather than additive, and one of them changes a
-type everything else is built on.
+| capability | 0.8.0 plugin | this app | step |
+|---|---|---|---|
+| still images | yes | yes | — |
+| local video via mpvpaper | yes | yes | — |
+| Wallpaper Engine Workshop scenes | `linux-wallpaperengine`, owned per display | yes, and refuses rather than fights for a held output | 15 |
+| Wallhaven shop | yes | yes | — |
+| MotionBGS shop | yes | yes | — |
+| Steam Workshop shop | browse and acquire | links out to Steam — there is no unauthenticated subscribe | 16 |
+| still/motion pairing | yes | yes, every item resolves to a bundle | 9–10 |
+| automatic stills | video *and* Workshop screenshot | both, video by ffmpeg and scene through the engine | 11, fixed later |
+| manual still override | paged picker plus path escape hatch | yes, `ctl still` and the pairing editor | 10 |
+| per-item palette policy | mode plus builtin/generated/community/custom/keep | yes, all five | 10 |
+| managed library and ownership | yes | yes, and it now refuses to *move* what it will not delete | — |
+| named playlists | visual editor, stable IDs, drag to reorder | yes, stable ids, reorder does not renumber | 12 |
+| schedules | month/weekday/time rules, ordered, lowest match wins | yes — **last** match wins here, which is the deliberate difference | 13 |
+| per-display assignment | pinned default plus schedule per output | yes, a playlist per connector | 14 |
+| per-display engine settings | layer, mute, hwdec, auto-pause mode, FPS, scaling | **partial — still global** | — |
+
+**The one row still short.** Renderer settings are global: one mute, one FPS,
+one scaling mode for every screen. Per-output settings would mean a settings
+object per connector and a renderer that reads its own rather than the app's,
+and on a single-screen machine there is no way to tell a correct implementation
+from a plausible one. It is left undone and written down rather than built
+blind — the same reason step 14's second half carries a caveat.
+
+Three of those were structural rather than additive, and one of them changed a
+type everything else is built on. All three are done; they are kept below
+because the reasoning is what the shape of the code now depends on.
 
 **A pairing is the unit, not an attribute of a video.** Today `MediaItem` is a
 file and `paired_still` is an optional field that only videos ever set. What is

@@ -360,13 +360,13 @@ to be plain videos, which play through mpvpaper like any other; only true
 `scene` wallpapers need `linux-wallpaperengine`, and their stills are captured
 through it in a window without anything appearing on screen.
 
-The app does **not** drive `linux-wallpaperengine` unless you tell it to
-(`own_scene_renderer`). The engine is single-instance per output and other
+**Play Wallpaper Engine scenes** is on by default and is visible under
+**Settings -> Playback**. The engine is single-instance per output and other
 things drive it -- Noctalia's own `linux-wallpaperengine-controller` plugin
-among them -- so starting a second one means two programs fighting over one
-wallpaper. If another engine already holds the screen, the app says so and
-leaves the scene's still up instead. Steam's files are never deleted, moved or
-written beside.
+among them -- so Wall-in-One checks for an existing owner before it starts one.
+If another engine already holds the screen, the app says so and leaves the
+scene's still up instead. Turn the setting off if another controller should
+always own scenes. Steam's files are never deleted, moved or written beside.
 
 A **schedule** puts the calendar in charge of which playlist is in force.
 Rules take `days=`, `months=`, `from=` and `to=`, all optional, all combined

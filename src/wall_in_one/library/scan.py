@@ -200,6 +200,7 @@ def workshop_items() -> tuple[MediaItem, ...]:
                     provider=WORKSHOP_PROVIDER,
                     scene=item.id,
                     title=item.title,
+                    preview=item.preview,
                 )
             )
     return tuple(found)

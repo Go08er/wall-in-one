@@ -358,6 +358,12 @@ def test_roots_default_to_empty_meaning_ask_noctalia() -> None:
     assert config.Settings().roots == ()
 
 
+def test_scene_renderer_is_available_without_hand_editing_settings() -> None:
+    assert config.Settings().own_scene_renderer is True
+    assert config.Settings.from_mapping({}).own_scene_renderer is True
+    assert config.Settings.from_mapping({"own_scene_renderer": False}).own_scene_renderer is False
+
+
 def test_roots_survive_a_toml_round_trip(tmp_path: Path) -> None:
     settings = config.Settings(roots=(tmp_path / "one", tmp_path / "two"))
     written = tmp_path / "settings.toml"

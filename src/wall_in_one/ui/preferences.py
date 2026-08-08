@@ -207,6 +207,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
 
+        self._own_scenes = Adw.SwitchRow(
+            title="Play Wallpaper Engine scenes",
+            subtitle=(
+                "Starts linux-wallpaperengine only when no other process owns the target output"
+            ),
+        )
+        self._own_scenes.connect("notify::active", self._on_changed)
+        group.add(self._own_scenes)
+
         # Enumerated through GTK rather than by shelling out to the
         # compositor: `Gdk.Display` knows the connectors, needs no subprocess,
         # and does not tie the app to niri the way `niri msg -j outputs` would.
@@ -380,6 +389,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self._cycle.set_active(settings.cycle_enabled)
             self._interval.set_value(settings.cycle_interval)
             self._dynamics.set_active(settings.dynamics_enabled)
+            self._own_scenes.set_active(settings.own_scene_renderer)
             self._favourites_only.set_active(settings.cycle_favourites_only)
             # A monitor that has since been unplugged is offered anyway rather
             # than silently reset to "All outputs": the setting is still what
@@ -412,6 +422,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cycle_enabled=self._cycle.get_active(),
             cycle_interval=int(self._interval.get_value()),
             dynamics_enabled=self._dynamics.get_active(),
+            own_scene_renderer=self._own_scenes.get_active(),
             cycle_favourites_only=self._favourites_only.get_active(),
             output=self._selected_output(),
             video_muted=self._muted.get_active(),

@@ -85,12 +85,108 @@ def test_stills_do_not_seek(cache_home: Path) -> None:
     assert "-ss" not in command
 
 
+def test_a_scene_uses_its_generated_still_instead_of_its_directory(
+    cache_home: Path, tmp_path: Path
+) -> None:
+    directory = tmp_path / "123"
+    directory.mkdir()
+    still = tmp_path / "123.png"
+    still.write_bytes(b"still")
+    scene = MediaItem(
+        path=directory,
+        kind=Kind.SCENE,
+        size=directory.stat().st_size,
+        mtime=int(directory.stat().st_mtime),
+        scene="123",
+        paired_still=still,
+    )
+
+    command = thumbnails._command(scene, Path("/out.png"))
+
+    assert command[command.index("-i") + 1] == str(still)
+
+
+def test_a_scene_falls_back_to_the_workshop_preview(cache_home: Path, tmp_path: Path) -> None:
+    directory = tmp_path / "123"
+    directory.mkdir()
+    preview = directory / "preview.gif"
+    preview.write_bytes(b"preview")
+    scene = MediaItem(
+        path=directory,
+        kind=Kind.SCENE,
+        size=directory.stat().st_size,
+        mtime=int(directory.stat().st_mtime),
+        scene="123",
+        preview=preview,
+    )
+
+    command = thumbnails._command(scene, Path("/out.png"))
+
+    assert command[command.index("-i") + 1] == str(preview)
+
+
+def test_a_scene_cache_key_changes_when_its_still_changes(cache_home: Path, tmp_path: Path) -> None:
+    directory = tmp_path / "123"
+    directory.mkdir()
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two two")
+    base = MediaItem(
+        path=directory,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        scene="123",
+        paired_still=first,
+    )
+
+    changed = MediaItem(
+        path=directory,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        scene="123",
+        paired_still=second,
+    )
+    assert thumbnails.cache_key(base) != thumbnails.cache_key(changed)
+
+
 # -- generation ----------------------------------------------------------
 
 
 def test_a_missing_file_is_reported(cache_home: Path) -> None:
     with pytest.raises(thumbnails.ThumbnailError, match="no such file"):
         thumbnails.generate(_item(Path("/w/gone.png")))
+
+
+def test_a_scene_with_no_still_or_preview_is_reported(cache_home: Path, tmp_path: Path) -> None:
+    scene = MediaItem(
+        path=tmp_path,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        scene="123",
+    )
+    with pytest.raises(thumbnails.ThumbnailError, match="no still or preview"):
+        thumbnails.generate(scene)
+
+
+@needs_ffmpeg
+def test_generates_a_scene_thumbnail_from_its_still(cache_home: Path, tmp_path: Path) -> None:
+    directory = tmp_path / "123"
+    directory.mkdir()
+    still = _make_png(tmp_path / "scene.png", width=1920, height=1080)
+    scene = MediaItem(
+        path=directory,
+        kind=Kind.SCENE,
+        size=directory.stat().st_size,
+        mtime=int(directory.stat().st_mtime),
+        scene="123",
+        paired_still=still,
+    )
+
+    assert thumbnails.generate(scene).is_file()
 
 
 def test_missing_ffmpeg_is_reported(cache_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

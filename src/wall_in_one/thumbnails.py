@@ -155,12 +155,19 @@ def cache_key(item: MediaItem) -> str:
     the library scan already did, and the failure they admit -- an edit that
     preserves both -- is not something wallpapers do to themselves.
     """
+    source = _thumbnail_source(item)
+    try:
+        source_info = source.stat()
+        source_size, source_mtime = source_info.st_size, int(source_info.st_mtime)
+    except OSError:
+        source_size, source_mtime = item.size, item.mtime
     material = "\0".join(
         (
             str(CACHE_FORMAT),
             str(item.path),
-            str(item.size),
-            str(item.mtime),
+            str(source),
+            str(source_size),
+            str(source_mtime),
             item.kind.value,
             f"{THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT}",
         )
@@ -360,8 +367,31 @@ def _command(item: MediaItem, destination: Path) -> list[str]:
         # Seeking before -i is the fast path: ffmpeg jumps to the keyframe
         # rather than decoding everything up to that point.
         command += ["-ss", str(VIDEO_SEEK_SECONDS)]
-    command += ["-i", str(item.path), "-vf", filters, "-frames:v", "1", str(destination)]
+    command += [
+        "-i",
+        str(_thumbnail_source(item)),
+        "-vf",
+        filters,
+        "-frames:v",
+        "1",
+        str(destination),
+    ]
     return command
+
+
+def _thumbnail_source(item: MediaItem) -> Path:
+    """The file ffmpeg can decode for ``item``.
+
+    A Wallpaper Engine scene's path is a directory containing ``scene.pkg``.
+    Its generated pairing still is the best representation; the Workshop
+    author's preview is the fallback while that still is being made.
+    """
+    if item.kind is Kind.SCENE:
+        if item.paired_still is not None and item.paired_still.is_file():
+            return item.paired_still
+        if item.preview is not None and item.preview.is_file():
+            return item.preview
+    return item.path
 
 
 def generate(item: MediaItem, *, force: bool = False) -> Path:
@@ -373,7 +403,10 @@ def generate(item: MediaItem, *, force: bool = False) -> Path:
     if not force and _is_intact(destination):
         _touch(destination)
         return destination
-    if not item.path.is_file():
+    source = _thumbnail_source(item)
+    if not source.is_file():
+        if item.kind is Kind.SCENE:
+            raise ThumbnailError(f"no still or preview for scene: {item.name}")
         raise ThumbnailError(f"no such file: {item.path}")
 
     paths.ensure_directory(destination.parent)

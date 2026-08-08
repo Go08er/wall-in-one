@@ -94,13 +94,11 @@ class Settings:
 
     #: Let this app start `linux-wallpaperengine` for Workshop scenes.
     #:
-    #: Off by default, and deliberately. The engine is single-instance per
-    #: output and other things drive it -- Noctalia's own
-    #: `linux-wallpaperengine-controller` plugin among them -- so starting a
-    #: second one is two programs fighting over one wallpaper. Turning this on
-    #: is saying this app owns it. Scene *stills* are captured either way:
-    #: that renders in a window and touches no output.
-    own_scene_renderer: bool = False
+    #: On by default so selecting a scene works without hand-editing this file.
+    #: The renderer still refuses to start when another process owns the target
+    #: output, so the default does not turn coexistence into a fight. Scene
+    #: *stills* are captured in a window and touch no output either way.
+    own_scene_renderer: bool = True
 
     #: Include Wallpaper Engine wallpapers installed through Steam. On by
     #: default because finding them costs one directory listing and somebody
@@ -188,7 +186,7 @@ class Settings:
             cycle_favourites_only=boolean("cycle_favourites_only", False),
             active_playlist=text("active_playlist", ""),
             scan_workshop=boolean("scan_workshop", True),
-            own_scene_renderer=boolean("own_scene_renderer", False),
+            own_scene_renderer=boolean("own_scene_renderer", True),
             output=text("output", ""),
             roots=directories("roots"),
         ).validated()

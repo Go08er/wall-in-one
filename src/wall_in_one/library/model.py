@@ -95,6 +95,10 @@ class MediaItem:
     #: For a video: a still to show when dynamics are paused. See
     #: `wall_in_one.library.pairing`.
     paired_still: Path | None = None
+    #: A read-only source suitable for representing media that has no file of
+    #: its own. Workshop scenes use the author-supplied preview as a fallback
+    #: until their generated still exists.
+    preview: Path | None = None
 
     @property
     def name(self) -> str:

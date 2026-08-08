@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > **Pre-alpha — in testing.** This is not ready to be relied on. It has never
-> been run for more than a short stretch, most of its interface has never been
+> been run for more than a short stretch, much of its interface has had little
 > clicked by a human, and the bugs found so far were found by running it rather
 > than by its 1,150 tests — so assume running it longer will find more.
 >
@@ -34,7 +34,7 @@ Three things are worth knowing before you rely on it:
 - **Two monitors showing two different playlists is unverified.** The machine
   this was written on has one output. Screen discovery is checked against real
   niri, and assignment is tested, but nobody has watched two screens disagree.
-- **The GUI has had little human use.** 1,150 tests cover the logic and drive
+- **The GUI has had little human use.** More than 1,100 tests cover the logic and drive
   the widgets programmatically, which proves wiring rather than whether
   anything *looks* right. Most of the browsing interface is new.
 - **It has not been through a long soak.** Bugs found so far were found by
@@ -132,11 +132,24 @@ If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 
 ## Using it
 
-The window is a grid of your wallpapers. Click a tile to set it; the row under
-the header bar searches, filters by kind, and sorts; the star in the corner of
-a tile makes it a favourite; the tile's actions button, or a right-click on the
-tile, offers **Set as wallpaper** and either **Remove** or **Move to Trash**,
-depending on whether the app downloaded that file or you did.
+The window follows the same path as the data: **Media -> Pairings -> Playlists
+-> Displays**. The navigation bar at the bottom switches between four real
+pages:
+
+- **Media** is the wallpaper grid. Click a tile to set it; search, kind and sort
+  narrow the library; the star adds a favourite; the tile menu handles removal.
+- **Pairings** gives every library item a full-page editor for its representative
+  still and colour policy. Adaptive colours are generated from that still in
+  the background, while installed community and custom palettes show their
+  stored colour swatches. Built-in palettes can be selected, but Noctalia does
+  not expose their colours without applying them, so the app says so instead of
+  inventing a preview.
+- **Playlists** creates, renames and deletes ordered rotations. Add media from
+  the searchable library, remove it, or move it earlier and later; the entry's
+  stable id is not changed by reordering.
+- **Displays** chooses the default playlist, assigns a playlist to a connector,
+  and edits month, weekday and local-time overrides. Rules lower in the list
+  have higher priority: the last matching rule wins.
 
 [`docs/library.md`](docs/library.md) is the detail: multiple library folders,
 how a video finds the still that stands behind it, how search matches, what

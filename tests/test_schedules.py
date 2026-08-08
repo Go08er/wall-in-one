@@ -198,6 +198,29 @@ def test_a_rule_can_be_disabled_and_enabled(store: Store) -> None:
     assert store.resolve(FRIDAY_MORNING) == "Evening"
 
 
+def test_a_rule_can_move_without_changing_identity(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    store = Store(path=target)
+    first = store.add("Morning", rule_id="first")
+    second = store.add("Evening", rule_id="second")
+
+    moved = store.move(second.id, 0)
+
+    assert moved is second
+    assert first.id == "first"
+    assert [rule.id for rule in store.rules] == ["second", "first"]
+    assert [rule.id for rule in Store.open(target).rules] == ["second", "first"]
+
+
+def test_moving_a_rule_clamps_and_rejects_an_unknown_id(store: Store) -> None:
+    store.add("One", rule_id="one")
+    store.add("Two", rule_id="two")
+    store.move("one", 100)
+    assert [rule.id for rule in store.rules] == ["two", "one"]
+    with pytest.raises(ScheduleError, match="no-such-rule"):
+        store.move("missing", 0)
+
+
 def test_removing_reports_whether_there_was_one(store: Store) -> None:
     rule = store.add("Evening")
     assert store.remove(rule.id) is True

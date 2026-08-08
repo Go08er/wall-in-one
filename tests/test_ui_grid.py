@@ -472,3 +472,96 @@ def test_showing_the_library_repushes_the_favourites(
 
     assert window._grid._tiles[wallpaper]._star.get_active()
     application.session.shutdown()
+
+
+def test_main_window_exposes_the_four_management_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rich stores are application pages, not terminal-only features."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    from wall_in_one import config
+    from wall_in_one.library.model import Library
+    from wall_in_one.session import Session
+    from wall_in_one.theme import source
+    from wall_in_one.ui.window import MainWindow
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.ManagementPagesTest")
+            self.settings = config.Settings()
+            self.resolved_palette = source.resolve()
+            self.session = Session(
+                self.settings,
+                scanner=lambda _roots: Library(roots=(), items=()),
+            )
+            self.session.refresh()
+
+        def refresh_library(self) -> None: ...
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_library(application.session)
+
+    for page in ("media", "pairings", "playlists", "schedules"):
+        assert window._stack.get_child_by_name(page) is not None
+        window._stack.set_visible_child_name(page)
+        assert window._stack.get_visible_child_name() == page
+
+    window.destroy()
+    application.session.shutdown()
+
+
+def test_management_pages_render_real_pairing_playlist_and_schedule_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-empty store reaches every page without falling back to ``ctl``."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        "wall_in_one.ui.pairings_page.SchemePreviewLoader.request",
+        lambda *_arguments: None,
+    )
+
+    from wall_in_one import config
+    from wall_in_one.library import scan
+    from wall_in_one.session import Session
+    from wall_in_one.ui.window import MainWindow
+
+    root = tmp_path / "library"
+    root.mkdir()
+    wallpaper = root / "one.png"
+    _png(wallpaper)
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.ManagementDataTest")
+            self.settings = config.Settings(roots=(root,))
+            self.resolved_palette = None
+            self.session = Session(self.settings, scanner=lambda _roots: scan.scan((root,)))
+            self.session.refresh()
+
+        def refresh_library(self) -> None: ...
+
+        def window_report(self, _message: str) -> None: ...
+
+    application = FakeApp()
+    made = application.session.playlists.create("Evening")
+    application.session.playlists.add(made.id, wallpaper)
+    application.session.schedules.add(made.id, weekdays=["sat"], start="22:00", end="06:00")
+    application.session.displays.assign("DP-1", made.id)
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_library(application.session)
+
+    for page in ("pairings", "playlists", "schedules"):
+        window._stack.set_visible_child_name(page)
+        assert window._stack.get_visible_child_name() == page
+
+    assert window._pairings_page._selected is not None
+    assert window._playlists_page._selected == made.id
+    assert application.session.schedules.rules[0].describe() == "sat 22:00-06:00"
+    window.destroy()
+    application.session.shutdown()

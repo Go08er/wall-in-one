@@ -211,6 +211,11 @@ class Application(Adw.Application):
         if self._window is not None:
             self._window.open_palette_browser()
 
+    def window_report(self, message: str) -> None:
+        """Put a management-page result in the window's toast overlay."""
+        if self._window is not None:
+            self._window.report(message)
+
     # -- library ---------------------------------------------------------
 
     @property

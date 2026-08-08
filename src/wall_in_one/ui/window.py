@@ -27,8 +27,11 @@ from wall_in_one.session import Session
 from wall_in_one.theme import palettes, source
 from wall_in_one.ui.browse_dialog import BrowseDialog
 from wall_in_one.ui.grid import WallpaperGrid
+from wall_in_one.ui.pairings_page import PairingsPage
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
+from wall_in_one.ui.playlists_page import PlaylistsPage
 from wall_in_one.ui.preferences import PreferencesDialog
+from wall_in_one.ui.schedules_page import SchedulesPage
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 #: A palette submenu is a menu, not a list: past this many a person is
@@ -102,6 +105,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._query = library_filter.Query()
         self._playable = 0
         self._summary = "No library loaded"
+        self._management_session: Session | None = None
 
         self.set_title("Wall-in-One")
         self.set_default_size(1100, 760)
@@ -114,8 +118,10 @@ class MainWindow(Adw.ApplicationWindow):
             self._loader, self._on_tile_activated, self._on_favourite, self._menu_for
         )
         self._grid.set_favourites(self._favourites.paths)
-        self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle=self._summary)
         self._toast = Adw.ToastOverlay()
+        self._pairings_page = PairingsPage(application)
+        self._playlists_page = PlaylistsPage(application)
+        self._schedules_page = SchedulesPage(application)
 
         self.set_content(self._build_content())
         self.connect("destroy", self._on_destroy)
@@ -125,6 +131,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _build_content(self) -> Gtk.Widget:
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
+        self._stack = Adw.ViewStack()
+        self._subtitle = Adw.WindowTitle(title="Wall-in-One", subtitle=self._summary)
         header.set_title_widget(self._subtitle)
 
         navigation = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -197,9 +205,33 @@ class MainWindow(Adw.ApplicationWindow):
         self.add_action(palette_action)
 
         toolbar.add_top_bar(header)
-        toolbar.add_top_bar(self._build_library_bar())
+        media = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        media.append(self._build_library_bar())
         self._toast.set_child(self._grid)
-        toolbar.set_content(self._toast)
+        media.append(self._toast)
+        self._stack.add_titled_with_icon(media, "media", "Media", "image-x-generic-symbolic")
+        self._stack.add_titled_with_icon(
+            self._pairings_page,
+            "pairings",
+            "Pairings",
+            "preferences-color-symbolic",
+        )
+        self._stack.add_titled_with_icon(
+            self._playlists_page,
+            "playlists",
+            "Playlists",
+            "view-list-symbolic",
+        )
+        self._stack.add_titled_with_icon(
+            self._schedules_page,
+            "schedules",
+            "Displays",
+            "video-display-symbolic",
+        )
+        switcher = Adw.ViewSwitcherBar(stack=self._stack, reveal=True)
+        self._stack.connect("notify::visible-child-name", self._on_page_changed)
+        toolbar.add_bottom_bar(switcher)
+        toolbar.set_content(self._stack)
         return toolbar
 
     def _build_library_bar(self) -> Gtk.Widget:
@@ -352,6 +384,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_destroy(self, _window: Gtk.Window) -> None:
         self._loader.shutdown()
+        self._pairings_page.shutdown()
 
     @property
     def settings(self) -> config.Settings:
@@ -381,6 +414,24 @@ class MainWindow(Adw.ApplicationWindow):
             summary += f" - {len(library.skipped)} skipped"
         self._summary = summary
         self._update_subtitle()
+        self._management_session = session
+        self._refresh_visible_page()
+
+    def _on_page_changed(self, _stack: Adw.ViewStack, _property: object) -> None:
+        self._refresh_visible_page()
+
+    def _refresh_visible_page(self) -> None:
+        """Build only the page being viewed; palette previews stay truly lazy."""
+        session = self._management_session
+        if session is None:
+            return
+        shown = self._stack.get_visible_child_name()
+        if shown == "pairings":
+            self._pairings_page.refresh(session)
+        elif shown == "playlists":
+            self._playlists_page.refresh(session)
+        elif shown == "schedules":
+            self._schedules_page.refresh(session)
 
     def _update_subtitle(self) -> None:
         """Report what is on screen without misreporting the library.

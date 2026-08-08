@@ -375,6 +375,17 @@ class Store:
                 return updated
         raise ScheduleError("no-such-rule", f"no rule {rule_id}")
 
+    def move(self, rule_id: str, position: int) -> Rule:
+        """Move one stable rule to ``position``; later rows keep priority."""
+        for index, rule in enumerate(self._rules):
+            if rule.id == rule_id:
+                moving = self._rules.pop(index)
+                target = max(0, min(len(self._rules), position))
+                self._rules.insert(target, moving)
+                self._write()
+                return moving
+        raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
     def forget_playlist(self, playlist: str) -> bool:
         """Drop every rule naming a playlist that has just been deleted.
 

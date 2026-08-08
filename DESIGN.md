@@ -621,7 +621,7 @@ each step is independently useful if the next never happens.
 - [ ] **16. Steam Workshop shop.** Browse and acquire, which in the old plugin
       meant links out to Steam rather than a scraper. Depends on 15 for
       anything to do with what it acquires.
-- [ ] **17. Browsing worth using.** The stores no longer live inside the
+- [x] **17. Browsing worth using.** *Done — see "How step 17 was proven".* The stores no longer live inside the
       Noctalia shell, so the limits that shape them are self-imposed and can
       go. The dialog is still the plugin's: prev/next page buttons, a flow of
       cards, one download button each. Meanwhile the provider layer already
@@ -829,3 +829,43 @@ state had to be carried by colour from the palette rather than by the icon.
 | niri blur config | `niri-doc/share/doc/niri/wiki/Configuration:-Miscellaneous.md:332-410` |
 | niri background-effect | `niri-doc/.../Configuration:-Window-Rules.md:925-1010`, `Window-Effects.md` |
 | niri blur protocol | `ext_background_effect_manager_v1` in the niri binary |
+
+### How step 17 was proven
+
+Four of the seven pieces were verified against the live sites rather than
+against a fake, and three of those turned up defects a unit test would have
+agreed with.
+
+| Claim | How it was checked | Result |
+| --- | --- | --- |
+| Results already downloaded are recognised | `owned.read` over the real library | 2 found — the Wallhaven one by `id`, a MotionBGS one by page URL |
+| A colour search works end to end | Live Wallhaven: toplist + last week + `#0066cc` + 1920x1080 | 19 results, correct URL |
+| `describe` returns something worth showing | Live, both providers | Wallhaven: 10 facts, 6 tags, 5 colours. MotionBGS: duration and two qualities |
+| The preview cache is faster than the CDN | Live fetch, sandboxed `XDG_CACHE_HOME` | 112.8 ms → 0.1 ms, byte-identical |
+
+**What the live checks caught that the fakes did not.** Wallhaven returns
+colours as `#424153`, and neither the colour filter nor a swatch takes the
+hash. MotionBGS publishes durations as ISO 8601, so a 27-second loop rendered
+as `PT26.9S`. And `to_displayable` passes JPEG through untouched, so caching
+previews through the existing PNG-only integrity check would have called every
+Wallhaven preview corrupt — caching nothing, while appearing to work.
+
+**Three defects found by writing the tests rather than the code.** A first page
+shorter than the window never scrolls, so without an idle check after the first
+result the second page is never requested at all. Overlapping pages showed the
+same wallpaper twice and left `_card_for` picking whichever copy it met first.
+And a page whose results have all been seen would be followed by another, and
+another, at scroll speed.
+
+**One caught by the type checker.** The card's `pick()` was overriding
+`Gtk.Widget.pick(x, y, flags)` — GTK's hit-testing. `mypy --strict` reported it
+as a signature mismatch; it would have shown up as a widget that could not be
+clicked.
+
+The GUI tests build a real `BrowseDialog` and drive the whole loop — search,
+append, dedupe, stop, pick, queue, keyboard — through the main loop against a
+scripted browser. They carry the `gui` marker, so the Nix check sandbox skips
+them, and they stub `registry.describe` so they cannot read real credentials.
+
+Not carried across, deliberately: the routed hub panel and the
+external-backend install flow.

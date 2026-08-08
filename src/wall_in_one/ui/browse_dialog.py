@@ -180,11 +180,13 @@ class _CandidateCard(Gtk.Box):
         candidate: WallpaperCandidate,
         on_download: Callable[[WallpaperCandidate], None],
         on_open: Callable[[WallpaperCandidate], None] | None = None,
+        on_pick: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.candidate = candidate
         self._on_download = on_download
         self._on_open = on_open
+        self._on_pick = on_pick
         self.add_css_class("wio-tile")
         # Fixed width, not merely a minimum: a FlowBox hands children their
         # natural width, and a card that grows to fill the dialog stretches its
@@ -232,11 +234,29 @@ class _CandidateCard(Gtk.Box):
         details.append(label)
         details.append(Gtk.Box(hexpand=True))
 
+        # Always present rather than revealed by a selection mode. A mode
+        # would need discovering and then leaving, and the whole interaction
+        # here is "these three, please".
+        self._check = Gtk.CheckButton(tooltip_text="Pick for a batch download")
+        self._check.connect("toggled", self._on_toggled)
+        details.append(self._check)
+
         self._button = Gtk.Button(icon_name="folder-download-symbolic", tooltip_text="Download")
         self._button.add_css_class("flat")
         self._button.connect("clicked", self._on_clicked)
         details.append(self._button)
         self.append(details)
+
+    @property
+    def picked(self) -> bool:
+        return self._check.get_active()
+
+    def unpick(self) -> None:
+        self._check.set_active(False)
+
+    def _on_toggled(self, _check: Gtk.CheckButton) -> None:
+        if self._on_pick is not None:
+            self._on_pick()
 
     def _on_clicked(self, _button: Gtk.Button) -> None:
         self._on_download(self.candidate)
@@ -270,6 +290,11 @@ class _CandidateCard(Gtk.Box):
         self._button.set_sensitive(False)
         self._button.set_icon_name("object-select-symbolic")
         self._button.set_tooltip_text("In your library")
+        # Unpicked as well as disabled: a wallpaper that arrived while a batch
+        # was running must not still be counted in "3 selected", and must not
+        # be queued a second time by a later press.
+        self._check.set_active(False)
+        self._check.set_sensitive(False)
 
 
 # -- the dialog ----------------------------------------------------------
@@ -308,6 +333,11 @@ class BrowseDialog(Adw.Dialog):
         #: Identifiers already on screen, so an overlapping page cannot show
         #: the same wallpaper twice.
         self._shown: set[str] = set()
+        #: Batch progress. Counts every download this dialog started, not just
+        #: the picked ones, so a single-card download that lands mid-batch does
+        #: not make the count read wrong.
+        self._queued = 0
+        self._finished = 0
         #: Held across the pages of one random search so it does not re-roll
         #: between them, and cleared whenever a new search starts.
         self._seed = ""
@@ -532,7 +562,76 @@ class BrowseDialog(Adw.Dialog):
         self._more.add_css_class("dim-label")
         self._more.add_css_class("caption")
         bar.append(self._more)
+
+        # Its own label rather than sharing `_more`. Scrolling to the end of
+        # the grid while a batch downloads is an ordinary thing to do, and one
+        # label would have the two states overwriting each other.
+        self._queue = Gtk.Label(label="")
+        self._queue.add_css_class("caption")
+        bar.append(self._queue)
+
+        # Hidden until something is picked, so the footer stays a footer until
+        # there is actually a batch to act on.
+        self._picked = Gtk.Label(label="")
+        self._picked.add_css_class("caption")
+        self._picked.set_visible(False)
+        bar.append(self._picked)
+
+        self._clear_picked = Gtk.Button(label="Clear")
+        self._clear_picked.add_css_class("flat")
+        self._clear_picked.set_visible(False)
+        self._clear_picked.connect("clicked", lambda _button: self._unpick_all())
+        bar.append(self._clear_picked)
+
+        self._download_picked = Gtk.Button(label="Download")
+        self._download_picked.add_css_class("suggested-action")
+        self._download_picked.set_visible(False)
+        self._download_picked.connect("clicked", lambda _button: self._download_all_picked())
+        bar.append(self._download_picked)
         return bar
+
+    # -- picking several ---------------------------------------------------
+
+    def _on_pick_changed(self) -> None:
+        count = sum(1 for card in self._cards if card.picked)
+        self._picked.set_label(f"{count} selected")
+        for widget in (self._picked, self._clear_picked, self._download_picked):
+            widget.set_visible(count > 0)
+
+    def _unpick_all(self) -> None:
+        for card in self._cards:
+            card.unpick()
+        self._on_pick_changed()
+
+    def _download_all_picked(self) -> None:
+        """Queue everything picked, then let go of the selection.
+
+        The pool is one worker wide, so these run one at a time and the
+        remote is asked for one file at a time -- which is the polite shape
+        for a scraper and the only sane one for a 40 MB video.
+
+        The selection is dropped immediately rather than as each lands: the
+        request has been made, and leaving the boxes ticked would invite
+        pressing Download again and queueing the whole batch twice.
+        """
+        picked = [card.candidate for card in self._cards if card.picked]
+        if not picked:
+            return
+        for candidate in picked:
+            self._on_download(candidate)
+        self._unpick_all()
+
+    def _report_queue(self) -> None:
+        """Say where the batch has got to, and forget it once it is done.
+
+        Resetting both counters at zero outstanding is what lets a second
+        batch read "1 of 3" rather than continuing the first one's numbering.
+        """
+        if self._finished >= self._queued:
+            self._queued = self._finished = 0
+            self._queue.set_label("")
+            return
+        self._queue.set_label(f"downloading {self._finished + 1} of {self._queued}")
 
     # -- provider selection ------------------------------------------------
 
@@ -693,7 +792,9 @@ class BrowseDialog(Adw.Dialog):
             if candidate.identifier in self._shown:
                 continue
             self._shown.add(candidate.identifier)
-            card = _CandidateCard(candidate, self._on_download, self._open_detail)
+            card = _CandidateCard(
+                candidate, self._on_download, self._open_detail, self._on_pick_changed
+            )
             if held.holds(candidate):
                 card.mark_downloaded()
             self._cards.append(card)
@@ -761,6 +862,9 @@ class BrowseDialog(Adw.Dialog):
         for card in self._cards:
             self._flow.remove(card)
         self._cards.clear()
+        # The selection went with the cards. Leaving "3 selected" over an empty
+        # grid would offer a Download button with nothing behind it.
+        self._on_pick_changed()
 
     def _on_preview(self, candidate: WallpaperCandidate, data: bytes) -> None:
         for card in self._cards:
@@ -792,6 +896,11 @@ class BrowseDialog(Adw.Dialog):
         card = self._card_for(candidate)
         if card is not None:
             card.set_busy(True)
+        # Counted here rather than in the batch, so the one place a download
+        # starts is the one place it is counted. A single card pressed while a
+        # batch runs joins that batch's total instead of being invisible.
+        self._queued += 1
+        self._report_queue()
 
         def work() -> Downloaded:
             return self._browser.download(candidate, variant=variant)
@@ -818,6 +927,11 @@ class BrowseDialog(Adw.Dialog):
         def deliver() -> bool:
             if self._closed:
                 return GLib.SOURCE_REMOVE
+            # Counted whether it worked or not: a batch of five with one
+            # failure has still finished, and a progress line that never
+            # reaches the end is worse than one that stops early.
+            self._finished += 1
+            self._report_queue()
             card = self._card_for(candidate)
             detail = self._detail_dialogs.get(candidate.identifier)
             if done is None:

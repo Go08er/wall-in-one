@@ -24,10 +24,12 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib  # noqa: E402
 
+from wall_in_one.browse import Downloaded  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
 from wall_in_one.providers import registry, wallhaven  # noqa: E402
 from wall_in_one.providers.base import (  # noqa: E402
     CandidateDetail,
+    DownloadResult,
     Fact,
     ProviderError,
     SearchResult,
@@ -447,3 +449,167 @@ def test_the_summary_counts_everything_on_screen_not_the_last_page(
     dialog.start_search(page=1)
     assert _settle(lambda: len(dialog._cards) == 3)
     assert dialog._summary.get_label().startswith("3 results")
+
+
+# -- picking several, and the queue --------------------------------------
+
+
+def _downloaded(tmp_path: Path, name: str) -> Downloaded:
+    return Downloaded(
+        result=DownloadResult(
+            provider="wallhaven",
+            identifier=name,
+            path=tmp_path / f"{name}.jpg",
+            sidecar=tmp_path / f"{name}.jpg.wallhaven.json",
+            marker=tmp_path / "marker.json",
+            kind=Kind.STILL,
+            size=1024,
+            source_url=f"https://wallhaven.cc/w/{name}",
+            download_url=f"https://w.wallhaven.cc/full/aa/wallhaven-{name}.jpg",
+            sha256="0" * 64,
+            downloaded_at="2026-01-01T00:00:00Z",
+        ),
+        root=tmp_path,
+    )
+
+
+def _three(dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch) -> None:
+    _answer(dialog, monkeypatch, {1: _result("aaa111", "bbb222", "ccc333", page=1)})
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(dialog._cards) == 3)
+
+
+def test_nothing_picked_means_no_batch_controls(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The footer stays a footer until there is a batch to act on."""
+    _three(dialog, monkeypatch)
+    assert not dialog._download_picked.get_visible()
+    assert not dialog._picked.get_visible()
+
+
+def test_picking_cards_reveals_the_batch_controls(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _three(dialog, monkeypatch)
+
+    dialog._cards[0]._check.set_active(True)
+    dialog._cards[2]._check.set_active(True)
+
+    assert dialog._picked.get_label() == "2 selected"
+    assert dialog._download_picked.get_visible()
+
+
+def test_downloading_a_batch_queues_each_and_drops_the_selection(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The selection is released as soon as the request is made.
+
+    Leaving the boxes ticked would invite pressing Download again and queueing
+    the whole batch a second time.
+    """
+    _three(dialog, monkeypatch)
+    asked: list[str] = []
+
+    def download(candidate: WallpaperCandidate, *, variant: str = "") -> Downloaded:
+        asked.append(candidate.identifier)
+        return _downloaded(tmp_path, candidate.identifier)
+
+    monkeypatch.setattr(dialog._browser, "download", download)
+
+    dialog._cards[0]._check.set_active(True)
+    dialog._cards[1]._check.set_active(True)
+    dialog._download_all_picked()
+
+    assert not any(card.picked for card in dialog._cards)
+    assert not dialog._download_picked.get_visible()
+    assert _settle(lambda: sorted(asked) == ["aaa111", "bbb222"])
+
+
+def test_the_queue_says_where_it_has_got_to_and_then_stops(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _three(dialog, monkeypatch)
+    monkeypatch.setattr(
+        dialog._browser,
+        "download",
+        lambda candidate, variant="": _downloaded(tmp_path, candidate.identifier),
+    )
+
+    for card in dialog._cards:
+        card._check.set_active(True)
+    dialog._download_all_picked()
+    assert dialog._queue.get_label() == "downloading 1 of 3"
+
+    assert _settle(lambda: dialog._queue.get_label() == "")
+
+
+def test_a_second_batch_counts_from_one_again(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Otherwise the next batch would continue the last one's numbering."""
+    _three(dialog, monkeypatch)
+    monkeypatch.setattr(
+        dialog._browser,
+        "download",
+        lambda candidate, variant="": _downloaded(tmp_path, candidate.identifier),
+    )
+
+    dialog._cards[0]._check.set_active(True)
+    dialog._download_all_picked()
+    assert _settle(lambda: dialog._queue.get_label() == "")
+
+    dialog._cards[1]._check.set_active(True)
+    dialog._download_all_picked()
+    assert dialog._queue.get_label() == "downloading 1 of 1"
+
+
+def test_a_failed_download_still_advances_the_queue(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch of two with one failure has still finished.
+
+    A progress line that never reaches the end is worse than one that stops.
+    """
+    _three(dialog, monkeypatch)
+
+    def download(candidate: WallpaperCandidate, *, variant: str = "") -> Downloaded:
+        raise ProviderError("network", "the site is down")
+
+    monkeypatch.setattr(dialog._browser, "download", download)
+
+    dialog._cards[0]._check.set_active(True)
+    dialog._cards[1]._check.set_active(True)
+    dialog._download_all_picked()
+
+    assert _settle(lambda: dialog._queue.get_label() == "")
+
+
+def test_a_wallpaper_that_lands_cannot_be_picked_again(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It must not still be counted in "3 selected", nor queued twice."""
+    _three(dialog, monkeypatch)
+    card = dialog._cards[0]
+    card._check.set_active(True)
+
+    card.mark_downloaded()
+
+    assert not card.picked
+    assert not card._check.get_sensitive()
+    assert not dialog._download_picked.get_visible()
+
+
+def test_a_new_search_forgets_the_selection(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Download button over an empty grid has nothing behind it."""
+    _three(dialog, monkeypatch)
+    dialog._cards[0]._check.set_active(True)
+    assert dialog._download_picked.get_visible()
+
+    _answer(dialog, monkeypatch, {1: _result("zzz999", page=1)})
+    dialog.start_search(page=1)
+
+    assert _settle(lambda: len(dialog._cards) == 1)
+    assert not dialog._download_picked.get_visible()

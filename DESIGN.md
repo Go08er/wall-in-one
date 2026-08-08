@@ -621,11 +621,58 @@ each step is independently useful if the next never happens.
 - [ ] **16. Steam Workshop shop.** Browse and acquire, which in the old plugin
       meant links out to Steam rather than a scraper. Depends on 15 for
       anything to do with what it acquires.
+- [ ] **17. Browsing worth using.** The stores no longer live inside the
+      Noctalia shell, so the limits that shape them are self-imposed and can
+      go. The dialog is still the plugin's: prev/next page buttons, a flow of
+      cards, one download button each. Meanwhile the provider layer already
+      parses ratios, colours, `order`, `seed`, the toplist range and a
+      per-wallpaper detail response carrying tags and a palette — and the UI
+      offers sorting, categories, purity and "at least". **Most of this step is
+      surfacing capability that is already written and untouched**, which is
+      also why it is worth doing before anything that adds more of it.
+      What it means concretely:
+      - *Continuous scrolling* in place of paging. Pages were a way to bound
+        the work per request; nothing bounds it now. The next page loads as the
+        bottom approaches, and the page number becomes an implementation detail
+        rather than two buttons.
+      - *A detail view.* Clicking a card should give the full-size preview and
+        what the provider already knows about it — resolution, ratio, file
+        size, tags, colours, source URL. The detail endpoint is implemented and
+        has no caller.
+      - *The filters that exist.* Ratios, colours, ordering, toplist range.
+        Wallhaven's colour search in particular pairs with this app's whole
+        premise: find a wallpaper by the palette it will generate.
+      - *Multi-select and a download queue.* Downloading is one-at-a-time and
+        modal-ish; browsing should continue while things land, with progress
+        per item and a failure that does not take the queue with it.
+      - *Library awareness.* A result already in the library should say so
+        rather than offer itself again. The library knows; the browser does not
+        ask.
+      - *Keyboard navigation*, because a grid of six hundred results is not a
+        mouse target.
+      - *A thumbnail cache with a disk tier.* `providers.cache` is a bounded
+        dict, deliberately — the predecessor's JSON file existed only because
+        each request was a fresh process. A long-lived app does not need the
+        file for *sharing*, but re-browsing after a restart still re-downloads
+        every preview, and that is now the only reason left to keep one.
+      Explicitly not carried across, still: the routed hub panel and the
+      external-backend install flow. Dropping the CPU budget is not a reason to
+      rebuild the things the budget was not the problem with.
 
-Not planned, and worth saying so: the routed hub panel, the external-backend
-install flow, and the provider-preview cache are all artefacts of living inside
-a Luau plugin with a CPU budget. This app is the backend; it does not need to
-reinstall itself.
+Not planned, and worth saying so: the routed hub panel and the
+external-backend install flow are artefacts of living inside a Luau plugin
+with a CPU budget. This app is the backend; it does not need to reinstall
+itself.
+
+The provider-preview cache was on that list and has come off it, under step
+17. The reasoning it was struck for is still sound — the predecessor cached
+previews to a JSON file because each request was a fresh process that shared
+nothing with the last, and a long-lived app shares everything, so the file,
+the lock and the schema version are all answers to a question this app does
+not have. What that argument does not cover is *restarting*. Sharing within a
+session is free; nothing carries across sessions, so re-opening the browser
+re-downloads every preview from the CDN. That is a second, weaker reason for a
+disk tier, and it survives the first one being wrong.
 
 ### Two moving renderers, not one
 

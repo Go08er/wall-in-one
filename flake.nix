@@ -84,8 +84,12 @@
               $out/share/applications/${applicationId}.desktop
             install -Dm644 src/wall_in_one/data/${applicationId}.svg \
               $out/share/icons/hicolor/scalable/apps/${applicationId}.svg
+            install -Dm644 src/wall_in_one/data/systemd/wall-in-one.service \
+              $out/lib/systemd/user/wall-in-one.service
             substituteInPlace $out/share/applications/${applicationId}.desktop \
               --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
+            substituteInPlace $out/lib/systemd/user/wall-in-one.service \
+              --replace-fail "ExecStart=wall-in-one" "ExecStart=$out/bin/wall-in-one"
           '';
 
           # buildPythonApplication's wrapper and wrapGAppsHook4's wrapper both

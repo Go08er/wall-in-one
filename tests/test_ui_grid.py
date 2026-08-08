@@ -26,7 +26,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from wall_in_one.library.filter import Query  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
@@ -300,6 +300,35 @@ def test_every_declared_accelerator_is_actually_installed(
     for _section, accelerator, action, description in ACCELERATORS:
         bound = {normalised(each) for each in application.get_accels_for_action(action)}
         assert normalised(accelerator) in bound, f"{description!r} is declared but not bound"
+
+
+def test_service_mode_suppresses_the_initial_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from wall_in_one.ui.app import Application
+
+    service = Application(service=True)
+    graphical = Application()
+
+    assert service.get_flags() & Gio.ApplicationFlags.IS_SERVICE
+    assert not (graphical.get_flags() & Gio.ApplicationFlags.IS_SERVICE)
+
+
+def test_closing_the_window_keeps_only_the_service_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from wall_in_one.ui.app import Application
+
+    application = Application()
+    window = object()
+    application._window = window  # type: ignore[assignment]
+
+    assert application._on_close_request(window) is False  # type: ignore[arg-type]
+    assert application._window is None
 
 
 # -- decoding off the main thread -----------------------------------------

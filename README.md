@@ -104,6 +104,32 @@ and ffmpeg makes every thumbnail and every generated still.
 Noctalia is deliberately *not* a dependency. Without it the app falls back to a
 neutral palette and everything except colour sync still works.
 
+### Keep rotation running after the window closes
+
+The window is a configuration surface; the service owns the control socket,
+playlist timer, and schedule timer. Start it without a window with:
+
+```console
+$ wall-in-one --service
+```
+
+Opening `wall-in-one` later attaches to that same process and presents the
+window. Closing the window leaves the service running. Stop it deliberately
+with `wall-in-one ctl quit`.
+
+The Nix package also installs `share/systemd/user/wall-in-one.service`. To start
+the service with the graphical session:
+
+```console
+$ systemctl --user enable --now wall-in-one.service
+```
+
+The checked-in unit uses the bare `wall-in-one` command so it remains useful
+outside Nix; the Nix package rewrites `ExecStart` to its wrapped store path.
+If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
+`wall-in-one` is on the user manager's `PATH`, then run
+`systemctl --user daemon-reload` before enabling it.
+
 ## Using it
 
 The window is a grid of your wallpapers. Click a tile to set it; the row under
@@ -277,6 +303,10 @@ $ wall-in-one ctl schedule-add Evening days=sat,sun from=22:00 to=06:00
 $ wall-in-one ctl schedule-remove <rule-id>
 $ wall-in-one ctl quit
 ```
+
+`quit` is intentional service shutdown: it releases the application's lifetime
+hold and exits even when no window is open. Merely closing the window does not
+stop rotation or schedules.
 
 `providers`, `search` and `download` reach the same provider code the browse
 dialog uses, so a wallpaper can be found and pulled into the library without

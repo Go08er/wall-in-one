@@ -57,11 +57,19 @@ SCHEDULE_TICK_SECONDS: Final = 60
 class Application(Adw.Application):
     """Owns app-wide state: settings, the live palette, and the CSS provider."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, service: bool = False) -> None:
         super().__init__(
             application_id=paths.APPLICATION_ID,
-            flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
+            # IS_SERVICE suppresses the initial activation, so `--service`
+            # starts the singleton without constructing a window. A later
+            # ordinary invocation with the same application id is forwarded
+            # to this process as an activation and presents the GUI.
+            flags=(
+                Gio.ApplicationFlags.IS_SERVICE if service else Gio.ApplicationFlags.DEFAULT_FLAGS
+            ),
         )
+        self._service_start = service
+        self._held = False
         self._settings = config.load()
         self._window: MainWindow | None = None
         self._provider = Gtk.CssProvider()
@@ -77,6 +85,11 @@ class Application(Adw.Application):
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
+        # The process, rather than the last window, owns rotation and the
+        # calendar. Exactly one hold is released by `ctl quit`; closing every
+        # window therefore leaves the service and its timers alive.
+        self.hold()
+        self._held = True
         display = Gdk.Display.get_default()
         if display is not None:
             Gtk.StyleContext.add_provider_for_display(
@@ -85,8 +98,14 @@ class Application(Adw.Application):
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
             )
         self._install_accelerators()
+        self.sync_cycle_timer()
         self._start_schedule_timer()
         self._start_control_socket()
+        if self._service_start:
+            # A window normally performs the first scan from `do_activate`.
+            # A headless service has no activation, but its timer and socket
+            # need the same library and schedule state.
+            self.refresh_library()
 
     def _install_accelerators(self) -> None:
         """Bind the keys. The table lives with the window, which owns the actions.
@@ -128,11 +147,24 @@ class Application(Adw.Application):
         if self._control is not None:
             self._control.stop()
             self._control = None
+        self._held = False
         Adw.Application.do_shutdown(self)
 
-    def _on_close_request(self, _window: Gtk.Window) -> bool:
+    def _on_close_request(self, window: Gtk.Window) -> bool:
         config.save(self._settings)
+        if self._window is window:
+            # The default handler destroys the window after this callback.
+            # Drop our reference now so a later activation builds a fresh one
+            # instead of trying to present a destroyed GTK object.
+            self._window = None
         return False
+
+    def request_quit(self) -> None:
+        """Release the service lifetime and stop the singleton deliberately."""
+        if self._held:
+            self.release()
+            self._held = False
+        self.quit()
 
     # -- palette ---------------------------------------------------------
 
@@ -842,14 +874,14 @@ class _Commands:
         return self._app.browse_off_thread(work)
 
     def quit(self) -> Response:
-        GLib.idle_add(self._app.quit)
+        GLib.idle_add(self._app.request_quit)
         return Response.success("quitting")
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(argv: list[str] | None = None, *, service: bool = False) -> int:
     # GtkApplication overwrites prgname with the application id on Wayland, so
     # setting it here would be cosmetic at best and misleading at worst. The
     # Wayland app-id comes from paths.APPLICATION_ID; see docs/niri.md.
     GLib.set_application_name("Wall-in-One")
-    application = Application()
+    application = Application(service=service)
     return application.run(argv if argv is not None else [])

@@ -20,7 +20,7 @@ where = ["src"]
 # not read at all -- they ride along so that any distribution built from this
 # tree carries them, and so the tests check the same bytes the Nix package
 # installs into share/applications and share/icons.
-"wall_in_one" = ["data/*.tmpl", "data/*.desktop", "data/*.svg"]
+"wall_in_one" = ["data/*.tmpl", "data/*.desktop", "data/*.svg", "data/systemd/*.service"]
 
 [tool.mypy]
 python_version = "3.11"

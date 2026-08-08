@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -219,6 +221,26 @@ def test_verb_table_covers_the_documented_cli_surface() -> None:
 
     verbs = build_verb_table(_StubCommands())
     assert set(verbs) == set(CTL_VERBS)
+
+
+def test_service_mode_reaches_the_windowless_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI flag must survive the lazy GTK import unchanged."""
+    from wall_in_one import cli
+
+    calls: list[bool] = []
+    fake = types.ModuleType("wall_in_one.ui.app")
+
+    def run(_argv: list[str] | None = None, *, service: bool = False) -> int:
+        calls.append(service)
+        return 17
+
+    fake.run = run  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wall_in_one.ui.app", fake)
+
+    assert cli.main(["--service"]) == 17
+    assert calls == [True]
 
 
 def test_handle_dispatches_and_passes_the_argument() -> None:

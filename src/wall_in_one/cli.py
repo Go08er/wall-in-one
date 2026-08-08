@@ -1,8 +1,10 @@
 """Command line entry point.
 
-Three modes:
+Four modes:
 
 * no arguments -- launch the GUI
+* ``--service`` -- keep rotation, schedules, and the control socket alive
+  without presenting a window
 * ``ctl <verb>`` -- talk to a running instance (this is what the Noctalia
   plugin uses; every plugin control is one ``runAsync`` of a verb)
 * maintenance flags such as ``--install-theme-template``
@@ -65,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="A wallpaper manager for Wayland.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--service",
+        action="store_true",
+        help="run the wallpaper service without opening a window",
+    )
 
     maintenance = parser.add_argument_group("Noctalia integration")
     maintenance.add_argument(
@@ -186,7 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from wall_in_one.ui.app import run
 
-    return run()
+    return run(service=options.service)
 
 
 if __name__ == "__main__":

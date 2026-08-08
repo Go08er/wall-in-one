@@ -23,6 +23,7 @@ from wall_in_one import paths
 DATA_DIR = Path(wall_in_one.__file__).resolve().parent / "data"
 DESKTOP_PATH = DATA_DIR / f"{paths.APPLICATION_ID}.desktop"
 ICON_PATH = DATA_DIR / f"{paths.APPLICATION_ID}.svg"
+SYSTEMD_PATH = DATA_DIR / "systemd" / "wall-in-one.service"
 PYPROJECT_PATH = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 SVG = "http://www.w3.org/2000/svg"
@@ -138,6 +139,16 @@ def test_the_entry_claims_no_dbus_activation_it_cannot_service(
     assert not list(DATA_DIR.glob("*.service"))
 
 
+def test_the_systemd_unit_runs_the_windowless_service() -> None:
+    parser = DesktopParser()
+    parser.read_string(SYSTEMD_PATH.read_text(encoding="utf-8"))
+    service = parser["Service"]
+    assert service["Type"] == "simple"
+    assert service["ExecStart"] == "wall-in-one --service"
+    assert service["Restart"] == "on-failure"
+    assert parser["Install"]["WantedBy"] == "graphical-session.target"
+
+
 def test_the_icon_is_an_svg_that_parses_and_scales(icon: ElementTree.Element) -> None:
     assert icon.tag == f"{{{SVG}}}svg"
     assert icon.get("viewBox") == "0 0 128 128"
@@ -180,6 +191,8 @@ def test_the_distribution_carries_both_files() -> None:
     # installed package does not have.
     metadata = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     patterns = metadata["tool"]["setuptools"]["package-data"]["wall_in_one"]
-    for path in (DESKTOP_PATH, ICON_PATH):
+    for path in (DESKTOP_PATH, ICON_PATH, SYSTEMD_PATH):
         relative = f"data/{path.name}"
+        if path is SYSTEMD_PATH:
+            relative = f"data/systemd/{path.name}"
         assert any(fnmatch(relative, pattern) for pattern in patterns), relative

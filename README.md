@@ -4,7 +4,7 @@
 > **Pre-alpha — in testing.** This is not ready to be relied on. It has never
 > been run for more than a short stretch, much of its interface has had little
 > clicked by a human, and the bugs found so far were found by running it rather
-> than by its 1,150 tests — so assume running it longer will find more.
+> than by its test suite — so assume running it longer will find more.
 >
 > Expect breakage, expect settings and on-disk formats to move without
 > migration, and do not point it at wallpapers you would mind losing.
@@ -133,7 +133,7 @@ If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 ## Using it
 
 The window follows the same path as the data: **Media -> Pairings -> Playlists
--> Displays**. The navigation bar at the bottom switches between four real
+-> Display schedules**. The navigation bar at the bottom switches between four real
 pages:
 
 - **Media** is the wallpaper grid. Click a tile to set it; search, kind and sort
@@ -147,7 +147,7 @@ pages:
 - **Playlists** creates, renames and deletes ordered rotations. Add media from
   the searchable library, remove it, or move it earlier and later; the entry's
   stable id is not changed by reordering.
-- **Displays** chooses the default playlist, assigns a playlist to a connector,
+- **Display schedules** chooses the default playlist, assigns a playlist to a connector,
   and edits month, weekday and local-time overrides. Rules lower in the list
   have higher priority: the last matching rule wins.
 

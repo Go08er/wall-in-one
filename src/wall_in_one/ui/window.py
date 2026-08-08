@@ -225,7 +225,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._stack.add_titled_with_icon(
             self._schedules_page,
             "schedules",
-            "Displays",
+            "Display schedules",
             "video-display-symbolic",
         )
         switcher = Adw.ViewSwitcherBar(stack=self._stack, reveal=True)

@@ -879,6 +879,15 @@ class _FakeApp:
     def update_settings(self, **changes: object) -> None:
         self.settings_written.append(changes)
 
+    def activate_playlist(self, reference: str) -> Response:
+        chosen = self.session.use_playlist(reference)
+        response = self.apply(self.session.apply_current)
+        return Response.success(f"playing {chosen.name}") if response.ok else response
+
+    def resume_schedule(self) -> Response:
+        self.session.resume_schedule()
+        return self.apply(self.session.apply_current)
+
 
 @pytest.fixture
 def applied(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
@@ -1283,20 +1292,23 @@ def test_adding_something_outside_the_library_is_refused(
         commands.add_to_playlist("Evening /etc/passwd")
 
 
-def test_using_a_playlist_writes_the_setting(sandbox: Path, applied: list[Path]) -> None:
-    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+def test_using_a_playlist_switches_playback_now(sandbox: Path, applied: list[Path]) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
     commands.make_playlist("Evening")
+    app.session.playlists.add("Evening", wallpaper.path)
 
     assert commands.use_playlist("Evening").ok
+    assert app.session.manual_playlist == app.session.playlists.find("Evening").id
+    assert applied[-1] == wallpaper.path
 
-    written = app.settings_written[-1]
-    assert written["active_playlist"] == app.session.playlists.find("Evening").id
 
-
-def test_using_none_goes_back_to_the_whole_library(sandbox: Path, applied: list[Path]) -> None:
+def test_using_none_resumes_schedule_control(sandbox: Path, applied: list[Path]) -> None:
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    manual = app.session.playlists.set_singleton("manual", "Manual", Path("/w/aurora.png"))
+    app.session.use_playlist(manual.id)
     assert commands.use_playlist("none").ok
-    assert app.settings_written[-1]["active_playlist"] == ""
+    assert app.session.manual_playlist is None
 
 
 def test_using_a_playlist_that_is_not_there_says_which(sandbox: Path, applied: list[Path]) -> None:

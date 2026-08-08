@@ -1,10 +1,10 @@
 """Named lists of wallpapers, so the rotation can be a choice rather than a folder.
 
-`library.playlist`, singular, is the runtime cursor: what comes next, what came
-before, and shuffle. It has no name, no order anybody chose, and no memory
-between sessions -- it is whatever the library happened to contain. This module
-is the other thing the word means: a list somebody made, in the order they put
-it in, that survives a restart.
+`library.playlist`, singular, is only the cursor mechanism: what comes next,
+what came before, and shuffle. This module owns the actual playback sources:
+named lists somebody made, plus the visible one-entry ``Quick choice`` list.
+The session always resolves one of these (or the built-in all-media fallback)
+into that cursor; it never maintains a second direct-wallpaper playback path.
 
 The two decisions that shape the file.
 
@@ -358,6 +358,28 @@ class Store:
 
     def add(self, identifier: str, source: Path, entry_id: str | None = None) -> Playlist:
         return self._commit(self.find(identifier).with_added(source, entry_id))
+
+    def set_singleton(
+        self,
+        identifier: str,
+        name: str,
+        source: Path,
+        *,
+        entry_id: str | None = None,
+    ) -> Playlist:
+        """Create or replace a stable one-entry playlist.
+
+        Media-page activation uses this for the visible ``Quick choice``
+        playlist.  It is deliberately a real stored playlist rather than a
+        hidden direct-apply path, so there remains exactly one playback model
+        and the choice can be inspected or edited on the Playlists page.
+        """
+        existing = self.get(identifier)
+        if existing is None and len(self._playlists) >= MAX_PLAYLISTS:
+            raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+        entry = Entry(id=entry_id or new_id(), source=str(source))
+        playlist = Playlist(id=identifier, name=tidy_name(name), entries=(entry,))
+        return self._commit(playlist)
 
     def remove_entry(self, identifier: str, entry: str) -> Playlist:
         return self._commit(self.find(identifier).without(entry))

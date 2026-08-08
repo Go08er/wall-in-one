@@ -136,8 +136,10 @@ The window follows the same path as the data: **Media -> Pairings -> Playlists
 -> Display schedules**. The navigation bar at the bottom switches between four real
 pages:
 
-- **Media** is the wallpaper grid. Click a tile to set it; search, kind and sort
-  narrow the library; the star adds a favourite; the tile menu handles removal.
+- **Media** is the complete crafting library, independent of what is currently
+  playing. Clicking a tile updates and plays the visible one-entry **Quick
+  choice** playlist; there is no separate direct-wallpaper playback path.
+  Search, kind and sort narrow the library; the tile menu handles removal.
 - **Pairings** gives every library item a full-page editor for its representative
   still and colour policy. Adaptive colours are generated from that still in
   the background, while installed community and custom palettes show their
@@ -145,10 +147,11 @@ pages:
   not expose their colours without applying them, so the app says so instead of
   inventing a preview.
 - **Playlists** creates, renames and deletes ordered rotations. Add media from
-  the searchable library, remove it, or move it earlier and later; the entry's
-  stable id is not changed by reordering.
-- **Display schedules** chooses the default playlist, assigns a playlist to a connector,
-  and edits month, weekday and local-time overrides. Rules lower in the list
+  the searchable library, remove it, move it earlier or later, and switch to it
+  immediately; the entry's stable id is not changed by reordering.
+- **Display schedules** switches the active playlist, resumes calendar control,
+  chooses the default playlist, assigns a playlist to a connector, and edits
+  month, weekday and local-time overrides in place. Rules lower in the list
   have higher priority: the last matching rule wins.
 
 [`docs/library.md`](docs/library.md) is the detail: multiple library folders,
@@ -345,8 +348,10 @@ reaches everything you have not spoken for. `pairing` shows one; `still` and
 `keep`, or `builtin:`/`community:`/`custom:` and a name. The path is split from
 the right, so a wallpaper directory with a space in its name needs no quoting.
 
-A **playlist** is a named, ordered list, and `playlist-use` makes one the
-rotation. Entries have identities of their own, printed by `playlists <name>`
+A **playlist** is a named, ordered list, and `playlist-use` plays one now as a
+temporary override. `playlist-use none` returns control to the calendar. A
+manual override lasts until it is released or the service restarts; it does
+not erase or disable schedule rules. Entries have identities of their own, printed by `playlists <name>`
 and taken back by `playlist-remove`, so reordering never renumbers anything and
 the same wallpaper can appear twice. A list naming wallpapers that are not here
 keeps them -- an unmounted drive is not a deletion -- and if none of them are
@@ -374,8 +379,10 @@ with and; a rule with none of them matches always. Times are local, inclusive
 at the start and exclusive at the end, and a window whose end is before its
 start wraps midnight -- `from=22:00 to=06:00` is one window. The **last**
 matching rule wins, so adding a rule is how you carve an exception out of an
-earlier one. When nothing matches, the pinned `playlist-use` choice applies.
-The calendar is re-read once a minute.
+earlier one. When nothing matches, the configured default playlist applies.
+An on-demand playlist choice sits above the calendar until **Follow schedule**
+is selected. The calendar is re-read once a minute, and a changed result is
+applied even while the GUI is closed.
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

@@ -42,6 +42,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._app = application
         self._session: Session | None = None
         self._loading = False
+        self._editing_rule = ""
         self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self._content.set_margin_top(18)
         self._content.set_margin_bottom(24)
@@ -68,6 +69,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             )
             intro.add_css_class("dim-label")
             self._content.append(intro)
+            self._content.append(self._build_playback(session))
             self._content.append(self._build_defaults(session))
             self._content.append(self._build_displays(session))
             self._content.append(self._build_rules(session))
@@ -75,13 +77,40 @@ class SchedulesPage(Gtk.ScrolledWindow):
         finally:
             self._loading = False
 
+    def _build_playback(self, session: Session) -> Gtk.Widget:
+        """The on-demand switch, kept above calendar configuration."""
+        group = Adw.PreferencesGroup(
+            title="Playing now",
+            description=(
+                "Choose a playlist immediately, or return control to the schedule. "
+                "A manual choice lasts until you resume the schedule or restart the service."
+            ),
+        )
+        choices = session.playlists.all()
+        row = Adw.ComboRow(
+            title="Active playlist",
+            model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
+        )
+        selected = 0
+        if session.manual_playlist is not None:
+            for index, playlist in enumerate(choices, start=1):
+                if playlist.id == session.manual_playlist:
+                    selected = index
+                    break
+        row.set_selected(selected)
+        row.connect("notify::selected", self._make_playback_changed(choices))
+        group.add(row)
+        return group
+
     def _build_defaults(self, session: Session) -> Gtk.Widget:
         group = Adw.PreferencesGroup(
             title="Default rotation",
-            description="Used whenever no schedule rule matches.",
+            description="Used whenever no schedule rule matches and no manual choice is active.",
         )
         choices = session.playlists.all()
-        model = Gtk.StringList.new(["Whole library", *(one.name for one in choices)])
+        model = Gtk.StringList.new(
+            ["All media (built-in playlist)", *(one.name for one in choices)]
+        )
         row = Adw.ComboRow(title="Playlist", model=model)
         selected = 0
         for index, playlist in enumerate(choices, start=1):
@@ -162,6 +191,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
             remove.add_css_class("flat")
             remove.connect("clicked", self._make_remove(rule.id))
             row.add_suffix(remove)
+            edit = Gtk.Button(icon_name="document-edit-symbolic", tooltip_text="Edit rule")
+            edit.add_css_class("flat")
+            edit.connect("clicked", lambda _button, chosen=rule: self._edit_rule(chosen))
+            row.add_suffix(edit)
             group.add(row)
         return group
 
@@ -190,12 +223,33 @@ class SchedulesPage(Gtk.ScrolledWindow):
         time_box.append(self._start)
         time_box.append(self._end)
         group.add(time_box)
-        add = Gtk.Button(label="Add scheduled override")
-        add.add_css_class("suggested-action")
-        add.set_sensitive(bool(choices))
-        add.connect("clicked", lambda _button: self._add_rule(choices))
-        group.add(add)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._rule_commit = Gtk.Button(label="Add scheduled override")
+        self._rule_commit.add_css_class("suggested-action")
+        self._rule_commit.set_sensitive(bool(choices))
+        self._rule_commit.connect("clicked", lambda _button: self._save_rule(choices))
+        buttons.append(self._rule_commit)
+        self._rule_cancel = Gtk.Button(label="Cancel editing")
+        self._rule_cancel.set_visible(False)
+        self._rule_cancel.connect("clicked", lambda _button: self._clear_rule_editor())
+        buttons.append(self._rule_cancel)
+        group.add(buttons)
         return group
+
+    def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
+        def changed(row: Adw.ComboRow, _property: object) -> None:
+            if self._loading:
+                return
+            index = row.get_selected()
+            response = (
+                self._app.activate_playlist(choices[index - 1].id)
+                if 0 < index <= len(choices)
+                else self._app.resume_schedule()
+            )
+            if not response.ok:
+                self._app.window_report(response.message)
+
+        return changed
 
     def _make_default_changed(self, choices: tuple[Any, ...]) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
@@ -256,21 +310,59 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
         return remove
 
-    def _add_rule(self, choices: tuple[Any, ...]) -> None:
+    def _save_rule(self, choices: tuple[Any, ...]) -> None:
         index = self._rule_playlist.get_selected()
         if index >= len(choices):
             return
         months = [one for one in self._months.get_text().split(",") if one.strip()]
         weekdays = [one for one in self._weekdays.get_text().split(",") if one.strip()]
         try:
-            self._app.session.schedules.add(
-                choices[index].id,
-                months=months,
-                weekdays=weekdays,
-                start=self._start.get_text().strip(),
-                end=self._end.get_text().strip(),
-            )
+            start = self._start.get_text().strip()
+            end = self._end.get_text().strip()
+            if self._editing_rule:
+                self._app.session.schedules.update(
+                    self._editing_rule,
+                    choices[index].id,
+                    months=months,
+                    weekdays=weekdays,
+                    start=start,
+                    end=end,
+                )
+            else:
+                self._app.session.schedules.add(
+                    choices[index].id,
+                    months=months,
+                    weekdays=weekdays,
+                    start=start,
+                    end=end,
+                )
         except schedules.ScheduleError as error:
             self._app.window_report(str(error))
             return
+        self._editing_rule = ""
         self._app.schedule_edited()
+
+    def _edit_rule(self, rule: schedules.Rule) -> None:
+        choices = self._session.playlists.all() if self._session is not None else ()
+        for index, playlist in enumerate(choices):
+            if playlist.id == rule.playlist:
+                self._rule_playlist.set_selected(index)
+                break
+        self._months.set_text(",".join(str(month) for month in sorted(rule.months)))
+        self._weekdays.set_text(
+            ",".join(schedules.WEEKDAY_NAMES[day] for day in sorted(rule.weekdays))
+        )
+        self._start.set_text(schedules.format_time(rule.start) if rule.start is not None else "")
+        self._end.set_text(schedules.format_time(rule.end) if rule.end is not None else "")
+        self._editing_rule = rule.id
+        self._rule_commit.set_label("Save scheduled override")
+        self._rule_cancel.set_visible(True)
+
+    def _clear_rule_editor(self) -> None:
+        self._editing_rule = ""
+        self._months.set_text("")
+        self._weekdays.set_text("")
+        self._start.set_text("")
+        self._end.set_text("")
+        self._rule_commit.set_label("Add scheduled override")
+        self._rule_cancel.set_visible(False)

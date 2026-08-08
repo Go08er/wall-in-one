@@ -106,9 +106,9 @@ class Settings:
     #: collections deliberately apart.
     scan_workshop: bool = True
 
-    #: Which named playlist the rotation follows, by id or name. Empty means
-    #: the whole library. Ignored when it would leave nothing to rotate
-    #: through -- see `library.playlists.rotation`.
+    #: Default named playlist when no schedule rule matches. Empty selects the
+    #: built-in all-media playlist. On-demand choices are runtime overrides and
+    #: deliberately do not overwrite this calendar fallback.
     active_playlist: str = ""
 
     #: Narrow the rotation to the starred wallpapers. Ignored when that would

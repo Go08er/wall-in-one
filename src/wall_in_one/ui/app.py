@@ -22,7 +22,7 @@ from wall_in_one import config, paths
 from wall_in_one.browse import Browser
 from wall_in_one.control import server
 from wall_in_one.control.protocol import Response
-from wall_in_one.library import favourites, pairings, schedules
+from wall_in_one.library import favourites, pairings, playlists, schedules
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import MediaItem
 from wall_in_one.providers import registry
@@ -295,9 +295,31 @@ class Application(Adw.Application):
         self._session.playlists_changed()
         GLib.idle_add(self.refresh_library)
 
+    def activate_playlist(self, reference: str) -> Response:
+        """Switch immediately to a named playlist and apply its first entry."""
+        try:
+            chosen = self._session.use_playlist(reference)
+        except playlists.PlaylistError as error:
+            return Response.failure(str(error))
+        response = self.apply(self._session.apply_current)
+        if self._window is not None:
+            self._window.show_library(self._session)
+        if response.ok:
+            return Response.success(f"playing {chosen.name}")
+        return response
+
+    def resume_schedule(self) -> Response:
+        """Release a manual playlist choice and apply the scheduled/default list."""
+        self._session.resume_schedule()
+        response = self.apply(self._session.apply_current)
+        if self._window is not None:
+            self._window.show_library(self._session)
+        return response
+
     def schedule_edited(self) -> None:
         """Take a changed calendar into account now rather than at the next tick."""
-        self._session.schedule_changed()
+        if self._session.schedule_changed():
+            self.apply(self._session.apply_current)
         GLib.idle_add(self.refresh_library)
 
     def pairing_changed(self, item: MediaItem) -> None:
@@ -428,8 +450,13 @@ class Application(Adw.Application):
     def _on_schedule_tick(self) -> bool:
         # Only redraws when the calendar actually asks for a different
         # playlist, so a quiet minute costs one comparison.
-        if self._session.schedule_changed() and self._window is not None:
-            self._window.show_library(self._session)
+        if self._session.schedule_changed():
+            # A scheduled playlist switch is a playback event, not merely a
+            # cursor rebuild. This runs in service mode too, where no window
+            # exists to accidentally make the transition happen later.
+            self.apply(self._session.apply_current)
+            if self._window is not None:
+                self._window.show_library(self._session)
         return GLib.SOURCE_CONTINUE
 
     # -- control socket --------------------------------------------------
@@ -619,7 +646,7 @@ class _Commands:
         session = self._app.session
         if not (value or "").strip():
             return Response.success(
-                server.describe_playlists(session.playlists, session.settings.active_playlist)
+                server.describe_playlists(session.playlists, session.active_playlist())
             )
         playlist = session.playlists.find(value or "")
         return Response.success(server.describe_playlist(playlist, session.library))
@@ -719,14 +746,15 @@ class _Commands:
         return Response.success(f"removed {entry} from {playlist.name}")
 
     def use_playlist(self, value: str | None) -> Response:
-        """Make one playlist the rotation, or `none` for the whole library."""
+        """Play one playlist now, or ``none`` to resume calendar control."""
         wanted = (value or "").strip()
         if wanted.casefold() in ("", "none"):
-            self._app.update_settings(active_playlist="")
-            return Response.success("the rotation is the whole library")
+            response = self._app.resume_schedule()
+            if not response.ok:
+                return response
+            return Response.success("following the display schedule")
         playlist = self._app.session.playlists.find(wanted)
-        self._app.update_settings(active_playlist=playlist.id)
-        return Response.success(f"the rotation is {playlist.name}")
+        return self._app.activate_playlist(playlist.id)
 
     def show_schedule(self) -> Response:
         session = self._app.session

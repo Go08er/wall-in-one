@@ -339,6 +339,7 @@ class MainWindow(Adw.ApplicationWindow):
     # -- behaviour -------------------------------------------------------
 
     def _on_tile_activated(self, item: MediaItem) -> None:
+        """Play Media through the explicit one-entry ``Quick choice`` list."""
         response = self._app.apply(lambda: self._app.session.select(item.path))
         if not response.ok:
             self.report(response.message)
@@ -403,11 +404,17 @@ class MainWindow(Adw.ApplicationWindow):
         # since we last looked -- `ctl favourite` reaches it without going
         # anywhere near this window.
         self._grid.set_favourites(self._favourites.paths)
-        self._grid.populate(session.playlist.items, cursor.path if cursor else None)
+        # Media is the complete crafting library, never a disguised view of
+        # whichever playlist happens to be playing. Activating one item makes
+        # the visible one-entry Quick choice playlist; it does not bypass the
+        # playlist model.
+        self._grid.populate(library.items, cursor.path if cursor else None)
 
-        self._playable = len(session.playlist)
+        self._playable = len(library)
+        active = session.playlists.get(session.active_playlist())
+        playing = active.name if active is not None else "All media"
         summary = (
-            f"{len(session.playlist)} of {len(library)} playable "
+            f"{len(library)} media · playing {playing} "
             f"({len(library.videos)} video, {len(library.stills)} still)"
         )
         if library.skipped:
@@ -476,7 +483,7 @@ class MainWindow(Adw.ApplicationWindow):
         """
         menu = Gio.Menu()
         target = GLib.Variant.new_string(str(item.path))
-        apply_item = Gio.MenuItem.new("Set as wallpaper", None)
+        apply_item = Gio.MenuItem.new("Play as Quick choice", None)
         apply_item.set_action_and_target_value("win.apply-wallpaper", target)
         menu.append_item(apply_item)
 

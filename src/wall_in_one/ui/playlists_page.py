@@ -102,6 +102,7 @@ class PlaylistsPage(Gtk.Box):
             detail = Gtk.Label(
                 label=(
                     f"{len(playlist)} item{'s' if len(playlist) != 1 else ''}"
+                    + (" · playing" if playlist.id == session.active_playlist() else "")
                     + (" · default" if playlist.id == session.settings.active_playlist else "")
                 ),
                 xalign=0.0,
@@ -155,11 +156,22 @@ class PlaylistsPage(Gtk.Box):
         self._editor.append(title_row)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        play = Gtk.Button(
+            label=(
+                "Playing now"
+                if playlist.id == session.manual_playlist
+                else "Play this playlist now"
+            )
+        )
+        play.add_css_class("suggested-action")
+        play.set_sensitive(bool(playlist.entries) and playlist.id != session.manual_playlist)
+        play.connect("clicked", lambda _button: self._play_now())
+        actions.append(play)
         default = Gtk.Button(
             label=(
-                "Default rotation"
+                "Schedule default"
                 if playlist.id == session.settings.active_playlist
-                else "Use as default rotation"
+                else "Use as schedule default"
             )
         )
         default.set_sensitive(playlist.id != session.settings.active_playlist)
@@ -300,6 +312,8 @@ class PlaylistsPage(Gtk.Box):
         session.displays.forget_playlist(playlist.id)
         if session.settings.active_playlist == playlist.id:
             self._app.update_settings(active_playlist="")
+        if session.manual_playlist == playlist.id:
+            self._app.resume_schedule()
         self._selected = ""
         self._app.playlists_changed()
 
@@ -307,6 +321,13 @@ class PlaylistsPage(Gtk.Box):
         if self._selected:
             self._app.update_settings(active_playlist=self._selected)
             self._app.playlists_changed()
+
+    def _play_now(self) -> None:
+        if not self._selected:
+            return
+        response = self._app.activate_playlist(self._selected)
+        if not response.ok:
+            self._app.window_report(response.message)
 
     def _make_add(self, item: MediaItem) -> Any:
         def add(_button: Gtk.Button) -> None:

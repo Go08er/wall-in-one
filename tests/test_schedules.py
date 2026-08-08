@@ -198,6 +198,25 @@ def test_a_rule_can_be_disabled_and_enabled(store: Store) -> None:
     assert store.resolve(FRIDAY_MORNING) == "Evening"
 
 
+def test_a_rule_can_be_edited_without_changing_identity_or_priority(store: Store) -> None:
+    first = store.add("Morning", weekdays=["mon"])
+    second = store.add("Evening", weekdays=["fri"])
+
+    updated = store.update(
+        first.id,
+        "Weekend",
+        months=[12],
+        weekdays=["sat", "sun"],
+        start="22:00",
+        end="06:00",
+    )
+
+    assert updated.id == first.id
+    assert [rule.id for rule in store.rules] == [first.id, second.id]
+    assert updated.playlist == "Weekend"
+    assert updated.describe() == "months 12 sat,sun 22:00-06:00"
+
+
 def test_a_rule_can_move_without_changing_identity(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     store = Store(path=target)
@@ -344,7 +363,7 @@ def test_a_listing_marks_the_rule_in_force(store: Store) -> None:
 
 def test_a_listing_says_what_the_default_is(store: Store) -> None:
     assert "default Everyday" in schedules.describe((), "Everyday", FRIDAY_MORNING)
-    assert "the whole library" in schedules.describe((), "", FRIDAY_MORNING)
+    assert "All media" in schedules.describe((), "", FRIDAY_MORNING)
 
 
 def test_a_rule_describes_itself_in_the_words_it_was_written_in(store: Store) -> None:

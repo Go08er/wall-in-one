@@ -194,6 +194,15 @@ def test_a_wallpaper_listed_twice_is_shown_twice(store: Store) -> None:
     assert names(store.find(made.id).resolve(library)) == ["a", "a"]
 
 
+def test_a_singleton_playlist_is_visible_and_replaced_in_place(store: Store) -> None:
+    first = store.set_singleton("quick-choice", "Quick choice", Path("/w/a.png"), entry_id="a")
+    second = store.set_singleton("quick-choice", "Quick choice", Path("/w/b.png"), entry_id="b")
+
+    assert first.id == second.id == "quick-choice"
+    assert [entry.source for entry in second.entries] == ["/w/b.png"]
+    assert [playlist.id for playlist in store.all()] == ["quick-choice"]
+
+
 # -- what the rotation does with it ---------------------------------------
 
 

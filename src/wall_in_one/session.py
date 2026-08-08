@@ -18,11 +18,18 @@ from wall_in_one import config
 from wall_in_one.library import displays, favourites, pairings, playlists, scan, schedules, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
+from wall_in_one.library.playlists import Playlist as NamedPlaylist
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
 
 Scanner = Callable[[Sequence[Path] | None], Library]
+
+#: The one-entry playlist created when Media is activated.  A fixed id means
+#: repeated choices replace one visible playlist instead of filling the store
+#: with disposable records.
+QUICK_CHOICE_ID = "quick-choice"
+QUICK_CHOICE_NAME = "Quick choice"
 
 
 def _renderer_for(settings: config.Settings) -> renderer.Renderer:
@@ -80,6 +87,10 @@ class Session:
         #: What the schedule last asked for, so a tick can tell whether the
         #: calendar has moved without rebuilding to find out.
         self._in_force = ""
+        #: An on-demand playlist selection temporarily sits above the
+        #: calendar.  It is intentionally runtime-only: after a service
+        #: restart the saved schedule is authoritative again.
+        self._manual_playlist: str | None = None
         self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
         # Owned here rather than by the window, because the rotation is built
         # from them and the window is not allowed to be the only thing that
@@ -168,11 +179,17 @@ class Session:
         return self._schedules
 
     def active_playlist(self) -> str:
-        """Which playlist is in force right now: a matching rule, else the
-        pinned default from settings."""
+        """The one playlist in force: manual choice, schedule, then default."""
+        if self._manual_playlist is not None:
+            return self._manual_playlist
         return schedules.effective(
             self._schedules.rules, self._settings.active_playlist, self._now()
         )
+
+    @property
+    def manual_playlist(self) -> str | None:
+        """The temporary on-demand override, or ``None`` while following time."""
+        return self._manual_playlist
 
     @property
     def playlists(self) -> playlists.Store:
@@ -236,6 +253,18 @@ class Session:
         """
         self._rebuild_playlist()
 
+    def use_playlist(self, reference: str) -> NamedPlaylist:
+        """Play one named list now, temporarily overriding schedule rules."""
+        chosen = self._playlists.find(reference)
+        self._manual_playlist = chosen.id
+        self._rebuild_playlist()
+        return chosen
+
+    def resume_schedule(self) -> None:
+        """Release an on-demand choice and return control to the calendar."""
+        self._manual_playlist = None
+        self._rebuild_playlist()
+
     def favourites_changed(self) -> None:
         """Re-narrow the rotation after a star moved.
 
@@ -294,8 +323,14 @@ class Session:
         return self._apply(self._playlist.random())
 
     def select(self, path: Path) -> Applied:
-        if not self._playlist.select(path):
+        item = self._library.find(path)
+        if item is None:
             raise ApplyError(f"not in the library: {path}")
+        try:
+            self._playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, item.path)
+        except playlists.PlaylistError as error:
+            raise ApplyError(str(error)) from error
+        self.use_playlist(QUICK_CHOICE_ID)
         return self.apply_current()
 
     # -- settings --------------------------------------------------------

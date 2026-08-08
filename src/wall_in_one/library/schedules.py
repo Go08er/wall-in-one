@@ -375,6 +375,38 @@ class Store:
                 return updated
         raise ScheduleError("no-such-rule", f"no rule {rule_id}")
 
+    def update(
+        self,
+        rule_id: str,
+        playlist: str,
+        *,
+        months: Iterable[str | int] = (),
+        weekdays: Iterable[str] = (),
+        start: str = "",
+        end: str = "",
+    ) -> Rule:
+        """Edit a rule in place without changing its id or priority."""
+        if bool(start) != bool(end):
+            raise ScheduleError("invalid-time", "a window needs both a start and an end")
+        if not playlist.strip():
+            raise ScheduleError("no-such-rule", "a rule needs a playlist")
+        for index, rule in enumerate(self._rules):
+            if rule.id != rule_id:
+                continue
+            updated = Rule(
+                id=rule.id,
+                playlist=playlist.strip(),
+                months=parse_months(months),
+                weekdays=parse_weekdays(weekdays),
+                start=parse_time(start) if start else None,
+                end=parse_time(end) if end else None,
+                enabled=rule.enabled,
+            )
+            self._rules[index] = updated
+            self._write()
+            return updated
+        raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
     def move(self, rule_id: str, position: int) -> Rule:
         """Move one stable rule to ``position``; later rows keep priority."""
         for index, rule in enumerate(self._rules):
@@ -424,7 +456,7 @@ def describe(
     sixteen-character hex is unreadable, and this is output for a person.
     """
     winner = resolve(rules, at)
-    default = (names or {}).get(active, active) if active else "(the whole library)"
+    default = (names or {}).get(active, active) if active else "(All media)"
     lines = [
         f"# schedule: {len(rules)} rules, default {default}",
         "# fields: rule, playlist, when, enabled, in-force",

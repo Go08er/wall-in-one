@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import favourites
+from wall_in_one.library import favourites, playlists, schedules
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
@@ -85,6 +85,61 @@ def test_navigation_applies_wallpapers(applied_paths: list[Path]) -> None:
     assert session.next().path == Path("/w/b.png")
     assert session.previous().path == Path("/w/a.png")
     assert applied_paths == [Path("/w/b.png"), Path("/w/a.png")]
+
+
+def test_selecting_media_plays_through_a_visible_quick_choice_playlist(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("a"), _still("b")]
+    store = playlists.Store(path=tmp_path / "playlists.json")
+    library = Library(roots=(Path("/w"),), items=tuple(items))
+    session = Session(
+        config.Settings(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: library,
+        playlist_store=store,
+    )
+    session.refresh()
+
+    session.select(items[1].path)
+
+    quick = store.get("quick-choice")
+    assert quick is not None and quick.name == "Quick choice"
+    assert [entry.path for entry in quick.entries] == [items[1].path]
+    assert session.manual_playlist == quick.id
+    assert session.current is not None and session.current.item.path == items[1].path
+
+
+def test_a_manual_playlist_overrides_then_releases_the_schedule(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("day"), _still("night")]
+    lists = playlists.Store(path=tmp_path / "playlists.json")
+    day = lists.create("Day", entry_id="day")
+    night = lists.create("Night", entry_id="night")
+    lists.add(day.id, items[0].path)
+    lists.add(night.id, items[1].path)
+    calendar = schedules.Store(path=tmp_path / "schedules.json")
+    calendar.add(night.id, rule_id="always")
+    library = Library(roots=(Path("/w"),), items=tuple(items))
+    session = Session(
+        replace(config.Settings(), active_playlist=day.id),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: library,
+        playlist_store=lists,
+        schedule_store=calendar,
+    )
+    session.refresh()
+    assert session.active_playlist() == night.id
+
+    session.use_playlist(day.id)
+    assert session.active_playlist() == day.id
+    assert [item.path for item in session.playlist.items] == [items[0].path]
+
+    session.resume_schedule()
+    assert session.manual_playlist is None
+    assert session.active_playlist() == night.id
+    assert [item.path for item in session.playlist.items] == [items[1].path]
 
 
 def test_an_empty_library_says_so_instead_of_crashing(applied_paths: list[Path]) -> None:

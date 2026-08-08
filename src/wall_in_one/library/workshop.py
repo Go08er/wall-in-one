@@ -93,10 +93,20 @@ class WorkshopItem:
         return self.preview if self.preview.suffix.lower() in _STILL_SUFFIXES else None
 
 
-def steam_roots(extra: Sequence[Path] = ()) -> tuple[Path, ...]:
-    """Steam installations to look in, in order, without duplicates."""
+def steam_roots(extra: Sequence[Path] = (), *, include_defaults: bool = True) -> tuple[Path, ...]:
+    """Steam installations to look in, in order, without duplicates.
+
+    ``extra`` adds to the usual places rather than replacing them, because a
+    user with Steam somewhere unusual almost certainly still has the ordinary
+    one too. ``include_defaults=False`` is the escape hatch, and exists for
+    tests: without it there is no way to ask this module about a directory
+    without also being told about whatever Steam the developer happens to have
+    installed, which is a test that passes for the wrong reason on one machine
+    and fails on every other.
+    """
     seen: dict[Path, None] = {}
-    for candidate in (*extra, *DEFAULT_STEAM_ROOTS):
+    candidates = (*extra, *DEFAULT_STEAM_ROOTS) if include_defaults else tuple(extra)
+    for candidate in candidates:
         expanded = Path(candidate).expanduser()
         if expanded.is_dir():
             seen.setdefault(expanded, None)
@@ -125,10 +135,12 @@ def library_folders(root: Path) -> tuple[Path, ...]:
     return tuple(found)
 
 
-def content_directories(extra_roots: Sequence[Path] = ()) -> tuple[Path, ...]:
+def content_directories(
+    extra_roots: Sequence[Path] = (), *, include_defaults: bool = True
+) -> tuple[Path, ...]:
     """Every directory that could hold installed Wallpaper Engine content."""
     found: dict[Path, None] = {}
-    for root in steam_roots(extra_roots):
+    for root in steam_roots(extra_roots, include_defaults=include_defaults):
         for folder in library_folders(root):
             content = folder / "steamapps" / "workshop" / "content" / APP_ID
             if content.is_dir():
@@ -189,7 +201,9 @@ def _beside(directory: Path, name: object) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def scan(extra_roots: Sequence[Path] = ()) -> tuple[WorkshopItem, ...]:
+def scan(
+    extra_roots: Sequence[Path] = (), *, include_defaults: bool = True
+) -> tuple[WorkshopItem, ...]:
     """Every installed Wallpaper Engine wallpaper, by id.
 
     Bounded and quiet: a Steam that is not installed, a Workshop directory that
@@ -197,7 +211,7 @@ def scan(extra_roots: Sequence[Path] = ()) -> tuple[WorkshopItem, ...]:
     results rather than an error.
     """
     found: dict[str, WorkshopItem] = {}
-    for content in content_directories(extra_roots):
+    for content in content_directories(extra_roots, include_defaults=include_defaults):
         try:
             entries = sorted(content.iterdir())
         except OSError:
@@ -229,3 +243,78 @@ def unplayable(items: Iterable[WorkshopItem]) -> tuple[WorkshopItem, ...]:
     one that is actually there.
     """
     return tuple(item for item in items if not item.is_video)
+
+
+# -- getting more of it ---------------------------------------------------
+#
+# Step 16, and deliberately the smallest thing that could work. Wallpaper
+# Engine's catalogue is Steam's, and Steam already has a browser for it that
+# handles the account, the payment, the subscription and the download. Writing
+# a scraper would mean reimplementing all four badly, and subscribing without
+# Steam is not possible at all -- the Workshop API has no unauthenticated
+# subscribe. So this app links out and lets Steam be Steam.
+#
+# Both spellings are produced. `steam://` opens the client's own overlay, which
+# is where somebody can actually press Subscribe; the https URL is the fallback
+# for a machine where Steam is not installed, and is also what a middle-click
+# into a browser expects.
+
+#: The Workshop's own browse page for Wallpaper Engine.
+BROWSE_URL: Final = f"https://steamcommunity.com/app/{APP_ID}/workshop/"
+
+#: The same, as a handler the Steam client registers for itself.
+BROWSE_URI: Final = f"steam://url/SteamWorkshopPage/{APP_ID}"
+
+_ID_RE: Final = re.compile(r"\A[0-9]{1,20}\Z")
+
+
+def is_workshop_id(value: str) -> bool:
+    """Whether ``value`` is a plausible Workshop id.
+
+    Digits only. These end up in a URL handed to a browser or to the Steam
+    client, and an id read off a directory name on disk is not something to
+    interpolate unchecked.
+    """
+    return _ID_RE.fullmatch(value) is not None
+
+
+def item_page_url(workshop_id: str) -> str:
+    """The Workshop page for one item, or ``""`` for an id we will not trust."""
+    if not is_workshop_id(workshop_id):
+        return ""
+    return f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+
+
+def item_page_uri(workshop_id: str) -> str:
+    """The same page, opened inside the Steam client."""
+    if not is_workshop_id(workshop_id):
+        return ""
+    return f"steam://url/CommunityFilePage/{workshop_id}"
+
+
+def is_steam_installed(extra_roots: Sequence[Path] = (), *, include_defaults: bool = True) -> bool:
+    """Whether there is a Steam here at all.
+
+    Decides which of the two spellings to offer first: a `steam://` link on a
+    machine with no Steam opens nothing and explains nothing.
+    """
+    return bool(steam_roots(extra_roots, include_defaults=include_defaults))
+
+
+def links(
+    workshop_id: str = "", extra_roots: Sequence[Path] = (), *, include_defaults: bool = True
+) -> tuple[str, str]:
+    """``(preferred, fallback)`` URLs for the Workshop, or for one item in it.
+
+    Preferred is the Steam client where Steam exists, because that is the only
+    place the Subscribe button works; the https page is what is left otherwise,
+    and is always returned as the fallback so a caller can offer both.
+    """
+    if workshop_id:
+        native, web = item_page_uri(workshop_id), item_page_url(workshop_id)
+        if not web:
+            return "", ""
+    else:
+        native, web = BROWSE_URI, BROWSE_URL
+    installed = is_steam_installed(extra_roots, include_defaults=include_defaults)
+    return (native, web) if installed else (web, web)

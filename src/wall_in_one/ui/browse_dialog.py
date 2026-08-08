@@ -24,6 +24,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from wall_in_one import browse, thumbnails
 from wall_in_one.browse import Browser, Downloaded
+from wall_in_one.library import workshop
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import registry, wallhaven
 from wall_in_one.providers.base import (
@@ -472,10 +473,41 @@ class BrowseDialog(Adw.Dialog):
 
     # -- construction ----------------------------------------------------
 
+    def _build_workshop_button(self) -> Gtk.Widget:
+        """A way out to Steam's Workshop, which is not a provider and cannot be.
+
+        Wallpaper Engine's catalogue is Steam's, and subscribing to an item has
+        no unauthenticated API -- so a third search provider is not possible,
+        and a scraper would be a browse-only tease that could never install
+        anything. Steam already handles the account, the payment and the
+        download; this hands off to it.
+
+        Not offered when there is no Steam to hand off to, rather than opening
+        a `steam://` link that does nothing.
+        """
+        button = Gtk.Button(
+            icon_name="folder-remote-symbolic",
+            tooltip_text="Get more wallpapers from the Steam Workshop",
+        )
+        button.connect("clicked", self._on_workshop_clicked)
+        button.set_visible(workshop.is_steam_installed())
+        return button
+
+    def _on_workshop_clicked(self, _button: Gtk.Button) -> None:
+        preferred, fallback = workshop.links()
+        if not preferred:
+            return
+        launcher = Gtk.UriLauncher(uri=preferred)
+        # No callback: whether Steam came to the front is Steam's business, and
+        # there is nothing useful this dialog could do about it either way.
+        launcher.launch(None, None, None, None)
+        self.report(f"opening the Wallpaper Engine Workshop ({fallback})")
+
     def _build_content(self) -> Gtk.Widget:
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         header.set_title_widget(Adw.WindowTitle(title="Browse", subtitle="Wallhaven, MotionBGS"))
+        header.pack_end(self._build_workshop_button())
         toolbar.add_top_bar(header)
         toolbar.add_top_bar(self._build_search_bar())
 

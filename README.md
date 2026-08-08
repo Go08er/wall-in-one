@@ -44,7 +44,7 @@ Three things are worth knowing before you rely on it:
 
 There is a companion plugin at
 [Go08er/goober-noctalia-plugins-v5](https://github.com/Go08er/goober-noctalia-plugins-v5),
-under `noctalia_5/wall-in-one`. It is a thin client: a bar widget, a panel, a
+under `wall-in-one/`. It is a thin client: a bar widget, a panel, a
 Control Center shortcut and a service that launch this app and drive it over
 the control socket described below. None of the wallpaper logic lives there.
 

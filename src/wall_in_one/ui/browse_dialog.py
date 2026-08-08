@@ -132,6 +132,13 @@ class PreviewLoader:
         future.add_done_callback(lambda done: self._finish(candidate, done, callback))
 
     def _fetch(self, candidate: WallpaperCandidate) -> bytes:
+        url = candidate.thumbnail_url
+        # The disk tier. The dict above is free within one session and worth
+        # nothing across two, so without this every card is re-downloaded from
+        # the CDN each time the browser is opened.
+        cached = thumbnails.lookup_preview(url)
+        if cached:
+            return cached
         try:
             data = self._browser.thumbnail(candidate)
         except ProviderError:
@@ -140,7 +147,11 @@ class PreviewLoader:
             return b""
         # Decoding here rather than on the main thread: MotionBGS serves webp,
         # which means an ffmpeg call this closure's GdkPixbuf cannot avoid.
-        return thumbnails.to_displayable(data)
+        displayable = thumbnails.to_displayable(data)
+        # Cached after transcoding, so a webp preview costs one ffmpeg run
+        # ever rather than one per session.
+        thumbnails.store_preview(url, displayable)
+        return displayable
 
     def _finish(
         self, candidate: WallpaperCandidate, future: Future[bytes], callback: PreviewCallback
@@ -1227,8 +1238,14 @@ class DetailDialog(Adw.Dialog):
 
         def work() -> tuple[CandidateDetail, bytes]:
             detail = self._browser.describe(candidate)
-            picture = self._browser.preview(detail.preview_url)
-            return detail, thumbnails.to_displayable(picture) if picture else b""
+            url = detail.preview_url
+            cached = thumbnails.lookup_preview(url)
+            if cached:
+                return detail, cached
+            picture = self._browser.preview(url)
+            displayable = thumbnails.to_displayable(picture) if picture else b""
+            thumbnails.store_preview(url, displayable)
+            return detail, displayable
 
         future = self._pool.submit(work)
         future.add_done_callback(self._deliver)

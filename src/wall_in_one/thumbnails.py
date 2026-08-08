@@ -25,6 +25,7 @@ above testable without a display.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -59,6 +60,11 @@ GENERATE_TIMEOUT: Final = 20.0
 #: plugin this app replaces had no bound at all and no way to clear what it
 #: left behind.
 MAX_CACHE_BYTES: Final = 256 * 1024 * 1024
+
+#: Ceiling on one cached remote preview. A card thumbnail is tens of KB and a
+#: detail preview is single-digit MB; past this it is not a preview and does
+#: not belong in a cache sized for thousands of them.
+MAX_PREVIEW_ENTRY_BYTES: Final = 16 * 1024 * 1024
 
 #: Evict down to this fraction of the ceiling rather than exactly to it. Trimming
 #: to the ceiling exactly would mean an unlink for every thumbnail generated
@@ -96,10 +102,23 @@ _PNG_TAIL: Final = b"IEND\xaeB\x60\x82"
 #: reading the tail cannot overlap on the same bytes.
 _MINIMUM_PNG_BYTES: Final = len(_PNG_MAGIC) + len(_PNG_TAIL)
 
-#: The two name shapes this module writes, and therefore the only two it will
-#: ever delete. Everything else in the directory belongs to someone else.
+#: JPEG, which `to_displayable` passes through untouched, so a cached remote
+#: preview is as likely to be one of these as a PNG.
+_JPEG_MAGIC: Final = b"\xff\xd8\xff"
+_JPEG_TAIL: Final = b"\xff\xd9"
+_MINIMUM_JPEG_BYTES: Final = len(_JPEG_MAGIC) + len(_JPEG_TAIL)
+
+#: The name shapes this module writes, and therefore the only ones it will ever
+#: delete. Everything else in the directory belongs to someone else.
 _ENTRY_NAME: Final = re.compile(r"\A[0-9a-f]{32}\.png\Z")
 _TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[0-9]+\.tmp\.png\Z")
+
+#: Remote previews, cached beside the generated thumbnails so that one
+#: directory, one ceiling and one eviction pass cover both. No image extension:
+#: a preview is whatever the provider served, and calling a JPEG `.png` would
+#: be a lie that a decoder could trip over.
+_PREVIEW_NAME: Final = re.compile(r"\A[0-9a-f]{32}\.preview\Z")
+_PREVIEW_TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[0-9]+\.tmp\.preview\Z")
 
 
 class ThumbnailError(Exception):
@@ -183,6 +202,31 @@ def _is_intact(path: Path) -> bool:
         return False
 
 
+def _is_intact_image(path: Path) -> bool:
+    """`_is_intact`, for an entry that may be a JPEG instead of a PNG.
+
+    Remote previews are cached as served. Wallhaven's are JPEG, and running
+    them through the PNG check would call every one of them corrupt and cache
+    nothing at all.
+    """
+    try:
+        with open(str(path), "rb", opener=_opener) as handle:
+            head = handle.read(len(_PNG_MAGIC))
+            if head.startswith(_JPEG_MAGIC):
+                magic, tail, minimum = _JPEG_MAGIC, _JPEG_TAIL, _MINIMUM_JPEG_BYTES
+            elif head == _PNG_MAGIC:
+                magic, tail, minimum = _PNG_MAGIC, _PNG_TAIL, _MINIMUM_PNG_BYTES
+            else:
+                return False
+            del magic
+            if handle.seek(0, os.SEEK_END) < minimum:
+                return False
+            handle.seek(-len(tail), os.SEEK_END)
+            return handle.read(len(tail)) == tail
+    except OSError:
+        return False
+
+
 def _touch(path: Path) -> None:
     """Re-stamp an entry so eviction counts it as recently used.
 
@@ -217,6 +261,91 @@ def lookup(item: MediaItem) -> Path | None:
         return None
     _touch(path)
     return path
+
+
+# -- remote previews ------------------------------------------------------
+#
+# The browse dialog holds its previews in a dict, which is free within one
+# session and worth nothing across two: re-opening the browser re-downloads
+# every card from the provider's CDN. These four functions are the disk tier
+# that fixes that, sharing the thumbnail directory so there is still one place
+# to bound and one place to clear.
+
+
+def preview_key(url: str) -> str:
+    """Identity of a cached remote preview.
+
+    The URL alone. A provider's preview URL already names one image on one
+    CDN, and unlike a local file there is no mtime to notice a change by --
+    which is the right trade here, because a CDN that reuses a URL for
+    different bytes has bigger problems than this cache.
+    """
+    material = "\0".join((str(CACHE_FORMAT), "preview", url))
+    return hashlib.sha256(material.encode("utf-8", "surrogateescape")).hexdigest()[:32]
+
+
+def preview_path(url: str) -> Path:
+    return cache_directory() / f"{preview_key(url)}.preview"
+
+
+def lookup_preview(url: str) -> bytes:
+    """Cached bytes for ``url``, or empty.
+
+    Bytes rather than a path, because every caller hands them straight to
+    `Gdk.Texture.new_from_bytes` and would only have to read the file itself.
+    """
+    if not url:
+        return b""
+    path = preview_path(url)
+    if not _is_intact_image(path):
+        return b""
+    try:
+        with open(str(path), "rb", opener=_opener) as handle:
+            data = handle.read(MAX_PREVIEW_ENTRY_BYTES + 1)
+    except OSError:
+        return b""
+    if len(data) > MAX_PREVIEW_ENTRY_BYTES:
+        # Something else wrote this, or an earlier version had a larger
+        # ceiling. Either way it is not worth handing to a decoder.
+        return b""
+    _touch(path)
+    return data
+
+
+def store_preview(url: str, data: bytes) -> None:
+    """Cache ``data`` for ``url``. Never raises.
+
+    Written to a temporary and renamed, like `generate`, so a crash or a full
+    disk leaves a sweepable temporary rather than a truncated entry that the
+    next run would show as a broken picture.
+
+    Failure is silence: a preview that could not be cached is a preview that
+    gets downloaded again, which is exactly the situation this improves on
+    rather than one it has to guarantee.
+    """
+    if not url or not data or len(data) > MAX_PREVIEW_ENTRY_BYTES:
+        return
+    if not data.startswith((*_NATIVE_MAGIC,)):
+        # Only what a decoder will take. Caching webp that only ffmpeg can read
+        # would mean paying for the transcode on every hit.
+        return
+    destination = preview_path(url)
+    temporary = destination.with_name(f".{preview_key(url)}.{os.getpid()}.tmp.preview")
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(temporary), "wb", opener=_write_opener) as handle:
+            handle.write(data)
+        os.replace(temporary, destination)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+def _write_opener(path: str, flags: int) -> int:
+    # O_EXCL as well as O_NOFOLLOW: the temporary name carries this process's
+    # pid, so anything already there is a leftover rather than a peer, and
+    # opening it would be writing through whatever it has become.
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_EXCL, 0o600)
 
 
 def _command(item: MediaItem, destination: Path) -> list[str]:
@@ -358,9 +487,11 @@ def _scan() -> tuple[list[_Entry], list[_Entry]]:
     try:
         with os.scandir(cache_directory()) as found:
             for candidate in found:
-                if _ENTRY_NAME.match(candidate.name):
+                if _ENTRY_NAME.match(candidate.name) or _PREVIEW_NAME.match(candidate.name):
                     bucket = entries
-                elif _TEMPORARY_NAME.match(candidate.name):
+                elif _TEMPORARY_NAME.match(candidate.name) or _PREVIEW_TEMPORARY_NAME.match(
+                    candidate.name
+                ):
                     bucket = temporaries
                 else:
                     continue

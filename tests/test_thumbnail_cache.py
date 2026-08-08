@@ -332,3 +332,117 @@ def test_usage_reports_what_the_cache_costs(cache: Path) -> None:
 
     assert reported.entries == 3
     assert reported.total_bytes == 6000
+
+
+# -- remote previews -------------------------------------------------------
+#
+# Cached beside the generated thumbnails, under the same ceiling and the same
+# eviction pass. What is different is that the bytes come from a provider's
+# CDN rather than from ffmpeg, so they may be JPEG, and the PNG-only integrity
+# check would have called every Wallhaven preview corrupt.
+
+
+URL = "https://th.wallhaven.cc/lg/ab/ab1234.jpg"
+
+
+def _jpeg(body: bytes = b"\x00" * 64) -> bytes:
+    return b"\xff\xd8\xff" + body + b"\xff\xd9"
+
+
+def test_a_preview_survives_a_round_trip(cache: Path) -> None:
+    thumbnails.store_preview(URL, _jpeg())
+    assert thumbnails.lookup_preview(URL) == _jpeg()
+
+
+def test_a_jpeg_preview_is_not_called_corrupt(cache: Path) -> None:
+    """Wallhaven serves JPEG, which `to_displayable` passes through untouched."""
+    thumbnails.store_preview(URL, _jpeg())
+    assert thumbnails.preview_path(URL).is_file()
+    assert thumbnails.lookup_preview(URL)
+
+
+def test_a_png_preview_works_too(cache: Path) -> None:
+    thumbnails.store_preview(URL, _png())
+    assert thumbnails.lookup_preview(URL) == _png()
+
+
+def test_an_unknown_url_is_a_miss(cache: Path) -> None:
+    assert thumbnails.lookup_preview("https://example.invalid/nope.jpg") == b""
+
+
+def test_an_empty_url_is_a_miss_and_stores_nothing(cache: Path) -> None:
+    thumbnails.store_preview("", _jpeg())
+    assert thumbnails.lookup_preview("") == b""
+    assert list(cache.iterdir()) == []
+
+
+def test_a_truncated_preview_reports_a_miss(cache: Path) -> None:
+    """The one place a half-written file is expected."""
+    thumbnails.store_preview(URL, _jpeg())
+    path = thumbnails.preview_path(URL)
+    path.write_bytes(path.read_bytes()[:-1])
+
+    assert thumbnails.lookup_preview(URL) == b""
+
+
+def test_something_that_is_not_an_image_is_a_miss(cache: Path) -> None:
+    path = thumbnails.preview_path(URL)
+    path.write_bytes(b"<html>an error page</html>")
+    assert thumbnails.lookup_preview(URL) == b""
+
+
+def test_webp_is_never_cached(cache: Path) -> None:
+    """Caching it would mean paying for the ffmpeg transcode on every hit."""
+    thumbnails.store_preview(URL, b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    assert list(cache.iterdir()) == []
+
+
+def test_an_implausibly_large_preview_is_refused(cache: Path) -> None:
+    oversized = b"\xff\xd8\xff" + b"\x00" * thumbnails.MAX_PREVIEW_ENTRY_BYTES + b"\xff\xd9"
+    thumbnails.store_preview(URL, oversized)
+    assert list(cache.iterdir()) == []
+
+
+def test_a_preview_symlink_is_not_followed(cache: Path, tmp_path: Path) -> None:
+    """A symlink where a cache entry should be is not ours to read through."""
+    secret = tmp_path / "elsewhere.jpg"
+    secret.write_bytes(_jpeg(b"\x01" * 64))
+    thumbnails.preview_path(URL).symlink_to(secret)
+
+    assert thumbnails.lookup_preview(URL) == b""
+
+
+def test_previews_are_counted_and_evicted_with_the_thumbnails(cache: Path) -> None:
+    """One directory, one ceiling, one eviction pass."""
+    thumbnails.store_preview(URL, _jpeg())
+    before = thumbnails.usage()
+    assert before.entries == 1
+    assert before.total_bytes > 0
+
+    assert thumbnails.clear() == 1
+    assert thumbnails.usage().entries == 0
+
+
+def test_two_urls_do_not_collide(cache: Path) -> None:
+    other = "https://th.wallhaven.cc/lg/zz/zz9999.jpg"
+    thumbnails.store_preview(URL, _jpeg(b"\x01" * 64))
+    thumbnails.store_preview(other, _jpeg(b"\x02" * 64))
+
+    assert thumbnails.lookup_preview(URL) != thumbnails.lookup_preview(other)
+
+
+def test_storing_nothing_is_harmless(cache: Path) -> None:
+    thumbnails.store_preview(URL, b"")
+    assert list(cache.iterdir()) == []
+
+
+def test_a_preview_temporary_is_swept_like_any_other(cache: Path) -> None:
+    """A crash mid-write must not leave a file eviction cannot account for."""
+    leftover = cache / f".{thumbnails.preview_key(URL)}.999999.tmp.preview"
+    leftover.write_bytes(b"\xff\xd8\xff partial")
+    old = time.time() - 2 * thumbnails.TEMPORARY_GRACE_SECONDS
+    os.utime(leftover, (old, old))
+
+    thumbnails.prune()
+
+    assert not leftover.exists()

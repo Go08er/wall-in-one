@@ -84,6 +84,19 @@ MODES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+def near_the_end(*, value: float, upper: float, page_size: float) -> bool:
+    """Whether the scrolled view is close enough to the bottom to load more.
+
+    A whole screen of slack, so the next page is already arriving by the time
+    somebody reaches the bottom rather than starting when they get there.
+
+    A grid that does not fill its window has `upper == page_size`, which lands
+    here as "at the end" -- which is right, and is how a short first page still
+    goes on to ask for a second.
+    """
+    return (upper - value - page_size) <= page_size
+
+
 # -- off-thread previews -------------------------------------------------
 
 
@@ -288,6 +301,13 @@ class BrowseDialog(Adw.Dialog):
         self._cards: list[_CandidateCard] = []
         self._result: SearchResult | None = None
         self._page = 1
+        #: Whether the provider said there is another page. Also the switch
+        #: that stops the grid asking for more, which is why a failed
+        #: load-more clears it rather than retrying forever.
+        self._has_next = False
+        #: Identifiers already on screen, so an overlapping page cannot show
+        #: the same wallpaper twice.
+        self._shown: set[str] = set()
         #: Held across the pages of one random search so it does not re-roll
         #: between them, and cleared whenever a new search starts.
         self._seed = ""
@@ -333,8 +353,13 @@ class BrowseDialog(Adw.Dialog):
         self._flow.set_margin_start(12)
         self._flow.set_margin_end(12)
 
-        scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        scroller.set_child(self._flow)
+        self._scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        self._scroller.set_child(self._flow)
+        # Watching the adjustment rather than the scroll events: a scroll event
+        # says the wheel turned, and what matters is where the view ended up,
+        # which is also reached by dragging the bar or by the grid growing
+        # underneath it.
+        self._scroller.get_vadjustment().connect("value-changed", self._on_scrolled)
 
         self._status = Adw.StatusPage(
             title="Nothing searched yet",
@@ -346,7 +371,7 @@ class BrowseDialog(Adw.Dialog):
         self._stack = Gtk.Stack()
         self._stack.add_named(self._status, "empty")
         self._stack.add_named(self._spinner, "busy")
-        self._stack.add_named(scroller, "results")
+        self._stack.add_named(self._scroller, "results")
         self._stack.set_visible_child_name("empty")
 
         self._toast = Adw.ToastOverlay()
@@ -486,25 +511,27 @@ class BrowseDialog(Adw.Dialog):
             self._purity.set_hint(2, limitations[0])
 
     def _build_pager(self) -> Gtk.Widget:
+        """The footer. Not a pager any more -- a count and a loading hint.
+
+        Pages were a way to bound the work per request, and nothing bounds it
+        now: results load as the grid is scrolled. What is left is worth
+        keeping, because "19 results of about 400" is the difference between a
+        short answer and a broken one.
+        """
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bar.set_margin_top(6)
         bar.set_margin_bottom(6)
         bar.set_margin_start(12)
         bar.set_margin_end(12)
 
-        self._previous = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Previous page")
-        self._previous.connect("clicked", lambda _button: self.start_search(page=self._page - 1))
-        self._previous.set_sensitive(False)
-        bar.append(self._previous)
-
         self._summary = Gtk.Label(label="", xalign=0.0, hexpand=True)
         self._summary.add_css_class("dim-label")
         bar.append(self._summary)
 
-        self._next = Gtk.Button(icon_name="go-next-symbolic", tooltip_text="Next page")
-        self._next.connect("clicked", lambda _button: self.start_search(page=self._page + 1))
-        self._next.set_sensitive(False)
-        bar.append(self._next)
+        self._more = Gtk.Label(label="")
+        self._more.add_css_class("dim-label")
+        self._more.add_css_class("caption")
+        bar.append(self._more)
         return bar
 
     # -- provider selection ------------------------------------------------
@@ -574,14 +601,20 @@ class BrowseDialog(Adw.Dialog):
 
     # -- searching ---------------------------------------------------------
 
-    def start_search(self, *, page: int) -> None:
+    def start_search(self, *, page: int, append: bool = False) -> None:
+        """Ask for ``page``. ``append`` adds to the grid instead of replacing it.
+
+        The two callers are a person pressing Search, and the grid running out
+        of results to show. They differ only in whether what is already on
+        screen survives.
+        """
         if self._searching or page < 1:
             return
-        if page == 1:
-            # A fresh search re-rolls; paging within one does not. Without
-            # this, asking for random wallpapers twice would return the same
-            # ones, because the seed that keeps page two honest would also
-            # pin page one.
+        if not append:
+            # A fresh search re-rolls; loading more within one does not.
+            # Without this, asking for random wallpapers twice would return
+            # the same ones, because the seed that keeps page two honest would
+            # also pin page one.
             self._seed = ""
         try:
             query = self._query(page)
@@ -590,17 +623,20 @@ class BrowseDialog(Adw.Dialog):
             return
         name = self.provider_name
         self._searching = True
-        self._stack.set_visible_child_name("busy")
-        self._previous.set_sensitive(False)
-        self._next.set_sensitive(False)
+        if append:
+            # The grid stays. Swapping to the full-page spinner would throw
+            # away the results being scrolled and jump the view to the top.
+            self._more.set_label("Loading more…")
+        else:
+            self._stack.set_visible_child_name("busy")
 
         def work() -> SearchResult:
             return self._browser.search(name, query)
 
         future = self._searches.submit(work)
-        future.add_done_callback(lambda done: self._deliver(done, page))
+        future.add_done_callback(lambda done: self._deliver(done, page, append))
 
-    def _deliver(self, future: Future[SearchResult], page: int) -> None:
+    def _deliver(self, future: Future[SearchResult], page: int, append: bool = False) -> None:
         try:
             result: SearchResult | None = future.result()
             message = ""
@@ -613,53 +649,82 @@ class BrowseDialog(Adw.Dialog):
         def deliver() -> bool:
             if not self._closed:
                 self._searching = False
+                self._more.set_label("")
                 if result is None:
-                    self._show_failure(message)
+                    self._show_failure(message, append)
                 else:
-                    self._show_result(result, page)
+                    self._show_result(result, page, append)
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(deliver)
 
-    def _show_failure(self, message: str) -> None:
+    def _show_failure(self, message: str, append: bool = False) -> None:
+        if append:
+            # Failing to load *more* must not throw away what is on screen.
+            # The results already there are still results; say so and stop
+            # asking for further pages until something changes.
+            self._has_next = False
+            self.report(message)
+            return
         self._stack.set_visible_child_name("empty")
         self._status.set_title("That search did not work")
         self._status.set_description(message)
         self.report(message)
 
-    def _show_result(self, result: SearchResult, page: int) -> None:
+    def _show_result(self, result: SearchResult, page: int, append: bool = False) -> None:
         self._result = result
         self._page = page
-        self._clear()
+        self._has_next = result.has_next
+        if not append:
+            self._clear()
+            self._shown.clear()
 
         # Asked once per page rather than once per card, and safe to touch from
         # the main loop because `Browser.search` warmed it on the worker that
         # produced these results.
         held = self._browser.owned
+        added = 0
         for candidate in result.items:
+            # A page that overlaps the one before it would otherwise put the
+            # same wallpaper on screen twice, and leave `_card_for` picking
+            # whichever copy it met first. Wallhaven does this whenever a
+            # random search runs unseeded, and a scraped listing can do it
+            # whenever the site reorders between two requests.
+            if candidate.identifier in self._shown:
+                continue
+            self._shown.add(candidate.identifier)
             card = _CandidateCard(candidate, self._on_download, self._open_detail)
             if held.holds(candidate):
                 card.mark_downloaded()
             self._cards.append(card)
             self._flow.append(card)
             self._loader.request(candidate, self._on_preview)
+            added += 1
 
-        if not result.items:
+        if not self._cards:
             self._stack.set_visible_child_name("empty")
             self._status.set_title("No results")
             self._status.set_description("Nothing came back for that query.")
         else:
             self._stack.set_visible_child_name("results")
 
-        self._previous.set_sensitive(result.has_previous)
-        self._next.set_sensitive(result.has_next)
         self._summary.set_label(self._describe(result))
+        if append and added == 0 and result.has_next:
+            # Every result on this page was already shown. Asking for the next
+            # one immediately would spin through the whole catalogue at scroll
+            # speed, so stop here and let the user search again.
+            self._has_next = False
+        elif not append:
+            # A short first page may not fill the window, in which case no
+            # scroll will ever happen and the next page would never be asked
+            # for. Checking once after layout settles closes that gap.
+            GLib.idle_add(self._maybe_load_more)
 
     def _describe(self, result: SearchResult) -> str:
-        parts = [f"{len(result)} result{'' if len(result) == 1 else 's'}"]
+        shown = len(self._cards)
+        parts = [f"{shown} result{'' if shown == 1 else 's'}"]
         if result.total_hint:
             parts.append(f"of about {result.total_hint}")
-        parts.append(f"page {result.page}")
         if result.dropped:
             # A sudden jump here means the remote's markup moved, so it is
             # reported rather than quietly swallowed.
@@ -667,6 +732,30 @@ class BrowseDialog(Adw.Dialog):
         if result.cached:
             parts.append("cached")
         return " - ".join(parts)
+
+    # -- loading more as the grid is scrolled ------------------------------
+
+    def _on_scrolled(self, _adjustment: Gtk.Adjustment) -> None:
+        self._maybe_load_more()
+
+    def _maybe_load_more(self) -> bool:
+        """Ask for the next page when the end of this one comes into view.
+
+        Returns `GLib.SOURCE_REMOVE` so it can also be used as an idle
+        callback, which is how the short-first-page case is covered.
+        """
+        if self._closed or self._searching or not self._has_next:
+            return GLib.SOURCE_REMOVE
+        if self._stack.get_visible_child_name() != "results":
+            return GLib.SOURCE_REMOVE
+        adjustment = self._scroller.get_vadjustment()
+        if near_the_end(
+            value=adjustment.get_value(),
+            upper=adjustment.get_upper(),
+            page_size=adjustment.get_page_size(),
+        ):
+            self.start_search(page=self._page + 1, append=True)
+        return GLib.SOURCE_REMOVE
 
     def _clear(self) -> None:
         for card in self._cards:

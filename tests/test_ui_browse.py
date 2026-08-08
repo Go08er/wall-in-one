@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,11 +25,12 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib  # noqa: E402
 
 from wall_in_one.library.model import Kind  # noqa: E402
-from wall_in_one.providers import wallhaven  # noqa: E402
+from wall_in_one.providers import registry, wallhaven  # noqa: E402
 from wall_in_one.providers.base import (  # noqa: E402
     CandidateDetail,
     Fact,
     ProviderError,
+    SearchResult,
     WallpaperCandidate,
 )
 from wall_in_one.ui import browse_dialog  # noqa: E402
@@ -230,3 +233,217 @@ def test_a_download_that_fails_gives_the_button_back() -> None:
 
     assert dialog._download.get_sensitive()
     assert dialog._download.get_label() == "Download"
+
+
+# -- loading more as the grid is scrolled --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "upper", "page_size", "expected"),
+    [
+        # Fresh grid, one screen of results: nothing scrolled yet, nothing more.
+        (0.0, 400.0, 400.0, True),
+        # Three screens of results, sitting at the top: plenty left.
+        (0.0, 1200.0, 400.0, False),
+        # Scrolled to within one screen of the bottom.
+        (400.0, 1200.0, 400.0, True),
+        # One pixel outside that.
+        (399.0, 1200.0, 400.0, False),
+        # All the way down.
+        (800.0, 1200.0, 400.0, True),
+    ],
+)
+def test_the_load_more_threshold_leaves_a_screen_of_slack(
+    value: float, upper: float, page_size: float, expected: bool
+) -> None:
+    assert browse_dialog.near_the_end(value=value, upper=upper, page_size=page_size) is expected
+
+
+class _StubApp:
+    """The two things `BrowseDialog` asks of its application."""
+
+    def __init__(self, root: Path) -> None:
+        self.settings = SimpleNamespace(roots=(root,))
+        self.refreshes = 0
+
+    def refresh_library(self) -> None:
+        self.refreshes += 1
+
+
+def _result(*identifiers: str, page: int = 1, has_next: bool = False) -> SearchResult:
+    return SearchResult(
+        provider="wallhaven",
+        query_url="https://wallhaven.cc/api/v1/search",
+        items=tuple(
+            WallpaperCandidate(
+                provider="wallhaven",
+                identifier=name,
+                title=name,
+                kind=Kind.STILL,
+                page_url=f"https://wallhaven.cc/w/{name}",
+            )
+            for name in identifiers
+        ),
+        page=page,
+        has_next=has_next,
+        total_hint=99,
+    )
+
+
+@pytest.fixture
+def dialog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> browse_dialog.BrowseDialog:
+    """A real dialog whose searches are answered from a script.
+
+    `registry.describe` is stubbed so the test cannot read the developer's own
+    Wallhaven credentials on its way past.
+    """
+    monkeypatch.setattr(
+        registry,
+        "describe",
+        lambda: (
+            SimpleNamespace(name="wallhaven", title="Wallhaven", usable=True, limitations=()),
+            SimpleNamespace(name="motionbgs", title="MotionBGS", usable=True, limitations=()),
+        ),
+    )
+    built = browse_dialog.BrowseDialog(_StubApp(tmp_path))  # type: ignore[arg-type]
+    # No previews: they would open sockets, and nothing here is about pictures.
+    monkeypatch.setattr(built._loader, "request", lambda *_arguments: None)
+    return built
+
+
+def _answer(
+    dialog: browse_dialog.BrowseDialog,
+    monkeypatch: pytest.MonkeyPatch,
+    pages: dict[int, SearchResult],
+) -> list[int]:
+    """Serve ``pages`` from the fake browser, recording which were asked for."""
+    asked: list[int] = []
+
+    def search(_name: str, query: object) -> SearchResult:
+        page = getattr(query, "page", 1)
+        asked.append(page)
+        return pages[page]
+
+    monkeypatch.setattr(dialog._browser, "search", search)
+    return asked
+
+
+def test_a_first_page_that_says_there_is_more_asks_for_it(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grid is not realised, so it never fills the window and never scrolls.
+
+    That is exactly the short-first-page case: without the idle check after
+    the first result, the second page would never be requested at all.
+    """
+    asked = _answer(
+        dialog,
+        monkeypatch,
+        {
+            1: _result("aaa111", "bbb222", page=1, has_next=True),
+            2: _result("ccc333", page=2, has_next=False),
+        },
+    )
+
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(dialog._cards) == 3)
+    assert asked == [1, 2]
+    assert not dialog._has_next
+
+
+def test_an_overlapping_page_does_not_show_a_wallpaper_twice(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wallhaven does this whenever a random search runs unseeded."""
+    _answer(
+        dialog,
+        monkeypatch,
+        {
+            1: _result("aaa111", "bbb222", page=1, has_next=True),
+            2: _result("bbb222", "ccc333", page=2, has_next=False),
+        },
+    )
+
+    dialog.start_search(page=1)
+    assert _settle(lambda: not dialog._has_next and not dialog._searching)
+    assert [card.candidate.identifier for card in dialog._cards] == ["aaa111", "bbb222", "ccc333"]
+
+
+def test_a_page_that_is_entirely_repeats_stops_the_loading(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise the grid spins through the catalogue at scroll speed.
+
+    A provider that keeps answering "here is more" with results already shown
+    would be asked for page after page, none of which changes anything.
+    """
+    asked = _answer(
+        dialog,
+        monkeypatch,
+        {
+            1: _result("aaa111", page=1, has_next=True),
+            2: _result("aaa111", page=2, has_next=True),
+        },
+    )
+
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(asked) >= 2 and not dialog._searching)
+    assert len(dialog._cards) == 1
+    assert not dialog._has_next
+    # Page three is never asked for.
+    assert _settle(lambda: False, seconds=0.2) is False
+    assert asked == [1, 2]
+
+
+def test_a_new_search_replaces_the_grid_rather_than_growing_it(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _answer(dialog, monkeypatch, {1: _result("aaa111", "bbb222", page=1)})
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(dialog._cards) == 2)
+
+    _answer(dialog, monkeypatch, {1: _result("zzz999", page=1)})
+    dialog.start_search(page=1)
+
+    assert _settle(lambda: [c.candidate.identifier for c in dialog._cards] == ["zzz999"])
+
+
+def test_failing_to_load_more_keeps_what_is_already_shown(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The results already on screen are still results."""
+    calls: list[int] = []
+
+    def search(_name: str, query: object) -> SearchResult:
+        page = getattr(query, "page", 1)
+        calls.append(page)
+        if page > 1:
+            raise ProviderError("network", "the site is down")
+        return _result("aaa111", "bbb222", page=1, has_next=True)
+
+    monkeypatch.setattr(dialog._browser, "search", search)
+
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(calls) >= 2 and not dialog._searching)
+
+    assert len(dialog._cards) == 2
+    assert dialog._stack.get_visible_child_name() == "results"
+    assert not dialog._has_next
+
+
+def test_the_summary_counts_everything_on_screen_not_the_last_page(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With paging gone, "3 results" has to mean the grid, not the last request."""
+    _answer(
+        dialog,
+        monkeypatch,
+        {
+            1: _result("aaa111", "bbb222", page=1, has_next=True),
+            2: _result("ccc333", page=2, has_next=False),
+        },
+    )
+
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(dialog._cards) == 3)
+    assert dialog._summary.get_label().startswith("3 results")

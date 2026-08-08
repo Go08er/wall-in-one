@@ -84,6 +84,20 @@ MODES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+def _shortcut(action: Callable[[], None]) -> Callable[[Gtk.Widget, object], bool]:
+    """Adapt a plain callable to `Gtk.CallbackAction`'s signature.
+
+    Always reports the shortcut as handled, so a chord this dialog claims does
+    not also reach whatever is behind it.
+    """
+
+    def run(_widget: Gtk.Widget, _arguments: object) -> bool:
+        action()
+        return True
+
+    return run
+
+
 def near_the_end(*, value: float, upper: float, page_size: float) -> bool:
     """Whether the scrolled view is close enough to the bottom to load more.
 
@@ -205,6 +219,13 @@ class _CandidateCard(Gtk.Box):
         self.set_size_request(CARD_WIDTH, -1)
         self.set_hexpand(False)
         self.set_halign(Gtk.Align.CENTER)
+        # In the focus chain, so arrow keys walk the grid. A page of results is
+        # not a mouse target: 24 cards is a lot of pointing, and the whole
+        # point of loading more on scroll is that there are far more than 24.
+        self.set_focusable(True)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
 
         self._frame = Gtk.Frame()
         self._frame.set_size_request(CARD_WIDTH, CARD_HEIGHT)
@@ -262,8 +283,22 @@ class _CandidateCard(Gtk.Box):
     def picked(self) -> bool:
         return self._check.get_active()
 
-    def unpick(self) -> None:
-        self._check.set_active(False)
+    @property
+    def can_pick(self) -> bool:
+        """Whether this card is still available to pick.
+
+        False once the wallpaper is in the library, which is what stops a
+        select-all appearing to tick something it cannot download.
+        """
+        return self._check.get_sensitive()
+
+    def set_picked(self, picked: bool) -> None:
+        """Tick or untick the batch checkbox.
+
+        Not called `pick`: `Gtk.Widget.pick` is GTK's own hit-testing, and
+        shadowing it on a widget would break far more than a checkbox.
+        """
+        self._check.set_active(picked)
 
     def _on_toggled(self, _check: Gtk.CheckButton) -> None:
         if self._on_pick is not None:
@@ -271,6 +306,31 @@ class _CandidateCard(Gtk.Box):
 
     def _on_clicked(self, _button: Gtk.Button) -> None:
         self._on_download(self.candidate)
+
+    def _on_key(
+        self, _controller: Gtk.EventControllerKey, keyval: int, _code: int, state: Gdk.ModifierType
+    ) -> bool:
+        """Enter opens, space picks, Ctrl+Enter downloads.
+
+        Space is the pick rather than the download because picking is the
+        reversible one: pressing it by accident ticks a box, where the other
+        reading would start pulling a 40 MB video off somebody's server.
+        """
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                if self._button.get_sensitive():
+                    self._on_download(self.candidate)
+                return True
+            return False
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            if self._on_open is not None:
+                self._on_open(self.candidate)
+            return True
+        if keyval == Gdk.KEY_space:
+            if self._check.get_sensitive():
+                self._check.set_active(not self._check.get_active())
+            return True
+        return False
 
     def _on_picture_clicked(
         self, _gesture: Gtk.GestureClick, count: int, _x: float, _y: float
@@ -364,6 +424,7 @@ class BrowseDialog(Adw.Dialog):
         self.connect("closed", self._on_closed)
 
         self.set_child(self._build_content())
+        self._add_shortcuts()
         # Wallhaven first: it is the one that answers an arbitrary query, and
         # MotionBGS only has videos, which not every setup can play.
         for index, info in enumerate(self._infos):
@@ -371,6 +432,43 @@ class BrowseDialog(Adw.Dialog):
                 self._providers.set_selected(index)
                 break
         self._sync_provider_controls()
+
+    # -- keyboard --------------------------------------------------------
+
+    def _add_shortcuts(self) -> None:
+        """Ctrl+F to search, Ctrl+A to pick everything, Ctrl+D to download it.
+
+        Escape is left to `Adw.Dialog`, which already closes on it.
+
+        Ctrl+A is the one worth a second thought: on a grid that grows as it
+        scrolls, "all" can only honestly mean what is on screen. It does, and
+        that is also the only set the user has seen.
+        """
+        shortcuts = Gtk.ShortcutController()
+        shortcuts.set_scope(Gtk.ShortcutScope.LOCAL)
+        for accelerator, action in (
+            ("<Control>f", self._focus_search),
+            ("<Control>a", self._pick_all),
+            ("<Control>d", self._download_all_picked),
+        ):
+            shortcuts.add_shortcut(
+                Gtk.Shortcut(
+                    trigger=Gtk.ShortcutTrigger.parse_string(accelerator),
+                    action=Gtk.CallbackAction.new(_shortcut(action)),
+                )
+            )
+        self.add_controller(shortcuts)
+
+    def _focus_search(self) -> None:
+        self._entry.grab_focus()
+
+    def _pick_all(self) -> None:
+        # Only what is pickable: a wallpaper already in the library has its box
+        # disabled, and "select all" must not appear to tick it.
+        for card in self._cards:
+            if card.can_pick:
+                card.set_picked(True)
+        self._on_pick_changed()
 
     # -- construction ----------------------------------------------------
 
@@ -611,7 +709,7 @@ class BrowseDialog(Adw.Dialog):
 
     def _unpick_all(self) -> None:
         for card in self._cards:
-            card.unpick()
+            card.set_picked(False)
         self._on_pick_changed()
 
     def _download_all_picked(self) -> None:

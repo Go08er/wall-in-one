@@ -22,7 +22,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from wall_in_one.browse import Downloaded  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
@@ -613,3 +613,134 @@ def test_a_new_search_forgets_the_selection(
 
     assert _settle(lambda: len(dialog._cards) == 1)
     assert not dialog._download_picked.get_visible()
+
+
+# -- keyboard ------------------------------------------------------------
+
+
+def _press(card: browse_dialog._CandidateCard, keyval: int, ctrl: bool = False) -> bool:
+    state = Gdk.ModifierType.CONTROL_MASK if ctrl else Gdk.ModifierType(0)
+    handled = card._on_key(Gtk.EventControllerKey(), keyval, 0, state)
+    return bool(handled)
+
+
+def test_cards_are_in_the_focus_chain(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arrow keys can only walk the grid if its cards can take focus."""
+    _three(dialog, monkeypatch)
+    assert all(card.get_focusable() for card in dialog._cards)
+
+
+def test_enter_opens_the_detail_view(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _three(dialog, monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr(dialog._cards[0], "_on_open", lambda c: opened.append(c.identifier))
+
+    assert _press(dialog._cards[0], Gdk.KEY_Return)
+    assert opened == ["aaa111"]
+
+
+def test_space_picks_rather_than_downloads(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Picking is the reversible one.
+
+    Pressing space by accident should tick a box, not start pulling a 40 MB
+    video off somebody's server.
+    """
+    _three(dialog, monkeypatch)
+    started: list[str] = []
+    monkeypatch.setattr(dialog._cards[0], "_on_download", lambda c: started.append(c.identifier))
+
+    assert _press(dialog._cards[0], Gdk.KEY_space)
+
+    assert dialog._cards[0].picked
+    assert started == []
+
+
+def test_space_again_unpicks(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _three(dialog, monkeypatch)
+    _press(dialog._cards[0], Gdk.KEY_space)
+    _press(dialog._cards[0], Gdk.KEY_space)
+    assert not dialog._cards[0].picked
+
+
+def test_control_enter_downloads(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _three(dialog, monkeypatch)
+    started: list[str] = []
+    monkeypatch.setattr(dialog._cards[0], "_on_download", lambda c: started.append(c.identifier))
+
+    assert _press(dialog._cards[0], Gdk.KEY_Return, ctrl=True)
+    assert started == ["aaa111"]
+
+
+def test_the_keyboard_will_not_requeue_something_already_held(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _three(dialog, monkeypatch)
+    card = dialog._cards[0]
+    started: list[str] = []
+    monkeypatch.setattr(card, "_on_download", lambda c: started.append(c.identifier))
+    card.mark_downloaded()
+
+    _press(card, Gdk.KEY_Return, ctrl=True)
+    _press(card, Gdk.KEY_space)
+
+    assert started == []
+    assert not card.picked
+
+
+def test_an_unclaimed_key_is_left_alone(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arrow keys must reach GTK's focus handling, not be swallowed here."""
+    _three(dialog, monkeypatch)
+    assert not _press(dialog._cards[0], Gdk.KEY_Down)
+    assert not _press(dialog._cards[0], Gdk.KEY_Right)
+
+
+def test_select_all_takes_everything_on_screen(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a grid that grows as it scrolls, "all" can only mean what is shown."""
+    _three(dialog, monkeypatch)
+
+    dialog._pick_all()
+
+    assert all(card.picked for card in dialog._cards)
+    assert dialog._picked.get_label() == "3 selected"
+
+
+def test_select_all_skips_what_is_already_in_the_library(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _three(dialog, monkeypatch)
+    dialog._cards[1].mark_downloaded()
+
+    dialog._pick_all()
+
+    assert [card.picked for card in dialog._cards] == [True, False, True]
+    assert dialog._picked.get_label() == "2 selected"
+
+
+def test_control_f_reaches_the_search_box(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    focused: list[bool] = []
+
+    def grab() -> bool:
+        focused.append(True)
+        return True
+
+    monkeypatch.setattr(dialog._entry, "grab_focus", grab)
+
+    dialog._focus_search()
+
+    assert focused == [True]

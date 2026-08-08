@@ -31,6 +31,7 @@ from wall_in_one.session import Session
 from wall_in_one.theme import css, source
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
+from wall_in_one.wallpaper import outputs
 from wall_in_one.wallpaper.applier import Applied, ApplyError
 
 
@@ -598,8 +599,63 @@ class _Commands:
         # then quietly falls back, which reads as the schedule not working
         # rather than as a rule that should have gone with it.
         session.schedules.forget_playlist(playlist.id)
+        # And the same for a screen pointing at it: an assignment naming a
+        # playlist that is gone reads as "this screen is broken" rather than
+        # as "that list was deleted".
+        session.displays.forget_playlist(playlist.id)
         self._app.playlists_changed()
         return Response.success(f"deleted {playlist.name}")
+
+    def list_displays(self) -> Response:
+        """`displays` -- every screen, and what it is set to show."""
+        session = self._app.session
+        attached = outputs.discover()
+        # Assignments store the playlist *id*, so a rename does not break them.
+        # Nobody reads ids, so they are resolved back to names here rather than
+        # printed raw.
+        names = {playlist.id: playlist.name for playlist in session.playlists.all()}
+
+        def shown(identifier: str) -> str:
+            # A name that no longer resolves means the playlist went without
+            # taking its assignment -- say so rather than print a bare hash.
+            return names.get(identifier) or f"{identifier} (missing)"
+
+        lines = ["# fields: connector, playlist"]
+        assigned = dict(session.displays.all())
+        for screen in attached:
+            wanted = assigned.get(screen.name)
+            lines.append(f"{screen.label}\t{shown(wanted) if wanted else '(default)'}")
+        # Assignments for screens that are not plugged in are shown rather than
+        # hidden: keeping them is the point, so they have to be visible.
+        for connector, playlist in session.displays.all():
+            if connector not in {screen.name for screen in attached}:
+                lines.append(f"{connector}\t{shown(playlist)}\t(not attached)")
+        if not attached and not assigned:
+            return Response.success("# no screens reported; wallpapers apply everywhere")
+        return Response.success("\n".join(lines))
+
+    def assign_display(self, value: str | None) -> Response:
+        """`display-assign <connector> <playlist>`.
+
+        Split from the left: a connector never contains a space and a playlist
+        name may.
+        """
+        connector, _, wanted = (value or "").strip().partition(" ")
+        session = self._app.session
+        if not connector or not wanted.strip():
+            return Response.failure("usage: display-assign <connector> <playlist>")
+        playlist = session.playlists.find(wanted.strip())
+        session.displays.assign(connector, playlist.id)
+        return Response.success(f"{connector} shows {playlist.name}")
+
+    def clear_display(self, value: str | None) -> Response:
+        """`display-clear <connector>` -- follow the default again."""
+        connector = (value or "").strip()
+        if not connector:
+            return Response.failure("usage: display-clear <connector>")
+        if not self._app.session.displays.unassign(connector):
+            return Response.failure(f"{connector} was already following the default")
+        return Response.success(f"{connector} follows the default again")
 
     def add_to_playlist(self, value: str | None) -> Response:
         """`playlist-add <playlist> <wallpaper>`.

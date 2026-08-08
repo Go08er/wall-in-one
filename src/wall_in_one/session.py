@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import favourites, pairings, playlists, scan, schedules, stills
+from wall_in_one.library import displays, favourites, pairings, playlists, scan, schedules, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.theme import noctalia
@@ -54,6 +54,7 @@ class Session:
         pairing_store: pairings.Store | None = None,
         playlist_store: playlists.Store | None = None,
         schedule_store: schedules.Store | None = None,
+        display_store: displays.Store | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._settings = settings
@@ -92,6 +93,7 @@ class Session:
         self._pairings = pairing_store if pairing_store is not None else pairings.Store.open()
         self._playlists = playlist_store if playlist_store is not None else playlists.Store.open()
         self._schedules = schedule_store if schedule_store is not None else schedules.Store.open()
+        self._displays = display_store if display_store is not None else displays.Store.open()
         # Injected so a schedule can be tested at three in the morning in
         # December without waiting until then.
         self._now: Callable[[], datetime] = clock if clock is not None else datetime.now
@@ -154,6 +156,11 @@ class Session:
     def pairings(self) -> pairings.Store:
         """The customizations. The grid reads them; the applier obeys them."""
         return self._pairings
+
+    @property
+    def displays(self) -> displays.Store:
+        """Which playlist each screen shows. Empty means "follow the default"."""
+        return self._displays
 
     @property
     def schedules(self) -> schedules.Store:

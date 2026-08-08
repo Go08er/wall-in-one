@@ -183,6 +183,15 @@ class _StubCommands:
     def use_playlist(self, value: str | None) -> Response:
         return self._record("playlist-use", value)
 
+    def list_displays(self) -> Response:
+        return self._record("displays")
+
+    def assign_display(self, value: str | None) -> Response:
+        return self._record("display-assign", value)
+
+    def clear_display(self, value: str | None) -> Response:
+        return self._record("display-clear", value)
+
     def show_schedule(self) -> Response:
         return self._record("schedule")
 

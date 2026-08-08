@@ -24,6 +24,10 @@
         # it would force a shell install on someone who only wants the manager.
         runtimeTools = [
           pkgs.mpvpaper
+          # True Wallpaper Engine scenes and their full-resolution stills.
+          # Keeping this in the wrapper PATH makes scene support deterministic
+          # instead of depending on whichever ambient PATH launched the app.
+          pkgs.linux-wallpaperengine
           # Thumbnails, for stills as well as videos: this closure's GdkPixbuf
           # has no webp or avif loader, and ffmpeg covers every format the
           # library accepts with one code path.

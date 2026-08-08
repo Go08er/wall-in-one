@@ -98,8 +98,13 @@ app-id, which is what lets the compositor pair the window with the entry.
 menu entry, why the packaged `Exec` is a store path, and why the entry claims
 neither D-Bus activation nor a `StartupWMClass`.
 
-`mpvpaper` and `ffmpeg` come with the package: mpvpaper plays video wallpapers,
-and ffmpeg makes every thumbnail and every generated still.
+`mpvpaper`, `ffmpeg`, and `linux-wallpaperengine` come with the package:
+mpvpaper plays video wallpapers, ffmpeg makes thumbnails and video stills, and
+linux-wallpaperengine renders true Workshop scenes and captures their stills.
+The engine is deliberately a runtime dependency rather than an ambient-PATH
+option because a packaged application must not make scene support depend on
+how the desktop happened to launch it. A checkout/non-Nix launch reports the
+renderer status under **Settings -> Playback**.
 
 Noctalia is deliberately *not* a dependency. Without it the app falls back to a
 neutral palette and everything except colour sync still works.

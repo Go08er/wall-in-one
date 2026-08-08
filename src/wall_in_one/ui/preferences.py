@@ -25,7 +25,7 @@ from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
-from wall_in_one.wallpaper import renderer
+from wall_in_one.wallpaper import renderer, scenes
 
 #: mpvpaper's vocabulary is `--auto-pause` and `--auto-stop`, which say what
 #: the flag does rather than what the user gets. These say what they get.
@@ -215,6 +215,25 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         self._own_scenes.connect("notify::active", self._on_changed)
         group.add(self._own_scenes)
+
+        scene_available = scenes.is_available()
+        scene_status = Adw.ActionRow(
+            title="Wallpaper Engine renderer",
+            subtitle=(
+                "linux-wallpaperengine is available"
+                if scene_available
+                else (
+                    "linux-wallpaperengine was not found. Install the Nix package or launch "
+                    "Wall-in-One from its packaged wrapper."
+                )
+            ),
+        )
+        scene_status.add_prefix(
+            Gtk.Image(
+                icon_name=("emblem-ok-symbolic" if scene_available else "dialog-warning-symbolic")
+            )
+        )
+        group.add(scene_status)
 
         # Enumerated through GTK rather than by shelling out to the
         # compositor: `Gdk.Display` knows the connectors, needs no subprocess,

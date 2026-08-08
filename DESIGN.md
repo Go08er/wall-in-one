@@ -573,7 +573,7 @@ each step is independently useful if the next never happens.
       visible order, lowest match winning, with a pinned default when none
       match. Resolution must be pure and testable without a clock; the timer
       belongs in the UI layer, as the cycle timer already does.
-- [ ] **14. Per-display assignment.** Each output gets a default playlist and
+- [x] **14. Per-display assignment.** *Done, with one caveat — see below.* Each output gets a default playlist and
       its own schedule and engine settings. Requires the leader-display rule
       above for palettes, and turns the single `output` setting into a map.
 - [x] **15. Wallpaper Engine.** The survey moved the goalposts in a good
@@ -618,7 +618,7 @@ each step is independently useful if the next never happens.
       renderer here means two things driving one `linux-wallpaperengine`, which
       the old plugin avoided by owning it outright and telling users to disable
       the other. That is a decision to take deliberately, not to discover.
-- [ ] **16. Steam Workshop shop.** Browse and acquire, which in the old plugin
+- [x] **16. Steam Workshop shop.** *Done.* Browse and acquire, which in the old plugin
       meant links out to Steam rather than a scraper. Depends on 15 for
       anything to do with what it acquires.
 - [x] **17. Browsing worth using.** *Done — see "How step 17 was proven".* The stores no longer live inside the
@@ -869,3 +869,41 @@ them, and they stub `registry.describe` so they cannot read real credentials.
 
 Not carried across, deliberately: the routed hub panel and the
 external-backend install flow.
+
+### How steps 14 and 16 were proven, and what 14 still owes
+
+**16** needed no proof beyond reading the constraint: subscribing to a Workshop
+item has no unauthenticated API, so a scraper could browse and never install.
+Steam already owns the account, the payment and the download, so the app links
+out. What *was* worth testing is the reader underneath it, which had no tests at
+all — and writing them found that `extra_roots` adds to the default Steam paths
+rather than replacing them, so a test pointing at a temp directory was quietly
+scanning the developer's real Steam and getting 49 wallpapers back. "No Steam
+installed" passed for entirely the wrong reason. `include_defaults=False` closes
+it.
+
+**14** is in two halves, and only the first is fully proven.
+
+| Half | State |
+| --- | --- |
+| Discovery — what the connectors are | Verified against real niri 26.04: `eDP-1`, BOE 0x0A9B, 1706x1066 at scale 1.5 |
+| Assignment — which playlist a screen shows | Store tested; listing, not-attached marking and delete-cleanup exercised live |
+| Two screens actually showing two playlists | **Not verified. This machine has one output.** |
+
+The multi-output parsing is exercised against recorded JSON from a two-monitor
+layout, which proves the shape and the ordering rule and nothing about how it
+feels. The ordering rule is deliberate: niri answers with a JSON object, and
+while insertion order happens to be preserved, nothing in the protocol promises
+the same order twice — a display list that reshuffles between openings is worse
+than one in an arbitrary but fixed order.
+
+Two decisions worth keeping written down. A screen is assigned a *playlist*
+rather than a wallpaper, because a wallpaper pinned to a screen is a screen that
+never changes again. And an assignment for an unplugged screen is kept and
+listed rather than pruned, because unplugging a dock at the end of the day
+should not forget the arrangement — which only works if the entry stays visible.
+
+One defect came out of running it rather than reading it: `displays` printed the
+stored playlist id where a person expects its name. Storing the id is correct —
+it survives a rename — so the fix was to resolve it at the point of display, and
+to label an id that no longer resolves rather than print a bare hash.

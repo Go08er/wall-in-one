@@ -186,6 +186,17 @@ class PalettePolicy:
     def keeps_palette(self) -> bool:
         return self.kind == KEEP
 
+    def adaptive_scheme(self, fallback: str) -> str:
+        """Return this pairing's generator, or the application default.
+
+        Older records encoded adaptive as the bare word ``adaptive``. That
+        continues to follow the application-wide default, while a newly
+        chosen ``adaptive:<scheme>`` is an explicit per-item decision.
+        """
+        if self.is_adaptive and self.name in noctalia.ALL_SCHEMES:
+            return self.name
+        return fallback
+
     def encode(self) -> str:
         return f"{self.kind}:{self.name}" if self.name else self.kind
 
@@ -213,7 +224,9 @@ class PalettePolicy:
         if self.keeps_palette:
             return None
         if self.is_adaptive:
-            return noctalia.ColourSchemeSelection(source="wallpaper", name=generator)
+            return noctalia.ColourSchemeSelection(
+                source="wallpaper", name=self.adaptive_scheme(generator)
+            )
         if self.kind not in ("builtin", "community", "custom") or not self.name:
             return None
         return noctalia.ColourSchemeSelection(

@@ -407,6 +407,19 @@ def test_adaptive_asks_noctalia_for_wallpaper_colours() -> None:
     assert (selection.source, selection.name) == ("wallpaper", "m3-fruit-salad")
 
 
+def test_adaptive_can_pin_its_own_generator() -> None:
+    selection = PalettePolicy(pairings.ADAPTIVE, "muted").selection("m3-tonal-spot")
+
+    assert selection is not None
+    assert (selection.source, selection.name) == ("wallpaper", "muted")
+
+
+def test_unknown_adaptive_generator_falls_back_safely() -> None:
+    policy = PalettePolicy(pairings.ADAPTIVE, "not-a-generator")
+
+    assert policy.adaptive_scheme("soft") == "soft"
+
+
 def test_keeping_the_palette_asks_for_nothing() -> None:
     """The one policy that is not a palette. There is nothing to send."""
     assert PalettePolicy(kind=pairings.KEEP).selection("m3-tonal-spot") is None

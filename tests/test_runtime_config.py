@@ -89,6 +89,16 @@ def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     assert document["displays"] == [{"connector": "DP-1", "playlist": "evening"}]
 
 
+def test_compiler_uses_a_pairing_specific_adaptive_generator(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    still = session.library.items[0]
+    session.pairings.choose_palette(still, pairings.PalettePolicy(pairings.ADAPTIVE, "m3-rainbow"))
+
+    document = tomllib.loads(runtime_config.render(settings, session))
+
+    assert document["playlists"][0]["entries"][0]["palette"]["scheme"] == "m3-rainbow"
+
+
 def test_compiler_write_is_atomic_and_leaves_no_temporary(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     target = tmp_path / "state" / "runtime.toml"

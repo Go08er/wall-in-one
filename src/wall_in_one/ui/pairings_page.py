@@ -22,7 +22,7 @@ from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
 from wall_in_one.library import pairings
 from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
-from wall_in_one.theme import palettes
+from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui.palette_browser import SchemePreview, SchemePreviewLoader, swatch_strip
 
@@ -50,7 +50,7 @@ class PairingsPage(Gtk.Box):
         self._rows: dict[Path, Gtk.ListBoxRow] = {}
         self._items_by_row: dict[Gtk.ListBoxRow, MediaItem] = {}
         self._preview_loader = SchemePreviewLoader(max_workers=2)
-        self._adaptive_box: Gtk.Box | None = None
+        self._adaptive_boxes: dict[str, Gtk.Box] = {}
 
         split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         split.set_position(310)
@@ -168,7 +168,7 @@ class PairingsPage(Gtk.Box):
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:
             self._editor.remove(child)
-        self._adaptive_box = None
+        self._adaptive_boxes.clear()
 
     def _show_empty(self) -> None:
         self._clear_editor()
@@ -268,9 +268,10 @@ class PairingsPage(Gtk.Box):
                 first = radio
             else:
                 radio.set_group(first)
-            radio.set_active(
-                policy.kind == bundle.palette.kind and policy.name == bundle.palette.name
-            )
+            selected_name = bundle.palette.name
+            if bundle.palette.is_adaptive and not selected_name:
+                selected_name = self._app.settings.preview_scheme
+            radio.set_active(policy.kind == bundle.palette.kind and policy.name == selected_name)
             radio.connect("toggled", self._make_policy_changed(item, policy))
             content.append(radio)
             words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
@@ -280,7 +281,7 @@ class PairingsPage(Gtk.Box):
             if palette is not None:
                 words.append(swatch_strip(palette, height=18, width=24))
             elif policy.kind == pairings.ADAPTIVE:
-                self._adaptive_box = words
+                self._adaptive_boxes[policy.name] = words
                 waiting = Gtk.Label(label="Generating preview…", xalign=0.0)
                 waiting.add_css_class("caption")
                 waiting.add_css_class("dim-label")
@@ -308,11 +309,12 @@ class PairingsPage(Gtk.Box):
         self._editor.append(reset)
 
         if bundle.still is not None and bundle.still.is_file():
-            self._preview_loader.request(
-                bundle.still,
-                self._app.settings.preview_scheme,
-                self._on_adaptive_preview,
-            )
+            for scheme in noctalia.ALL_SCHEMES:
+                self._preview_loader.request(
+                    bundle.still,
+                    scheme,
+                    self._on_adaptive_preview,
+                )
 
     def _policies(
         self, bundle: pairings.Pairing
@@ -320,7 +322,14 @@ class PairingsPage(Gtk.Box):
         resolved = self._app.resolved_palette
         mode = resolved.palette.mode if resolved is not None else "dark"
         choices: list[tuple[str, pairings.PalettePolicy, Palette | None]] = [
-            ("Adaptive from this pairing's still", pairings.PalettePolicy(), None),
+            *(
+                (
+                    f"Adaptive · {scheme}",
+                    pairings.PalettePolicy(pairings.ADAPTIVE, scheme),
+                    None,
+                )
+                for scheme in noctalia.ALL_SCHEMES
+            ),
             (
                 "Keep the current colours",
                 pairings.PalettePolicy(kind=pairings.KEEP),
@@ -342,7 +351,7 @@ class PairingsPage(Gtk.Box):
         return choices
 
     def _on_adaptive_preview(self, preview: SchemePreview) -> None:
-        box = self._adaptive_box
+        box = self._adaptive_boxes.get(preview.scheme)
         item = self._selected
         session = self._session
         if box is None or item is None or session is None:

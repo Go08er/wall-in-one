@@ -52,7 +52,10 @@ def _palette(policy: pairings.PalettePolicy, generator: str) -> str:
     if policy.keeps_palette:
         return f'{{ kind = "keep", mode = {_quote(mode)} }}'
     if policy.is_adaptive:
-        return f'{{ kind = "adaptive", scheme = {_quote(generator)}, mode = {_quote(mode)} }}'
+        return (
+            f'{{ kind = "adaptive", scheme = {_quote(policy.adaptive_scheme(generator))}, '
+            f"mode = {_quote(mode)} }}"
+        )
     if policy.kind not in ("builtin", "community", "custom") or not policy.name:
         return f'{{ kind = "keep", mode = {_quote(mode)} }}'
     return (

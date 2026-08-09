@@ -366,6 +366,13 @@ assignment and rule edits still belong in the app-generated configuration. An
 open GUI is not accepted as a substitute for runtime status: exit code 3 still
 means automation is not running.
 
+If mpvpaper or linux-wallpaperengine exits, the runtime immediately falls back
+to that entry's paired still and reports the exact entry in `last_error`; it
+does not enter an automatic restart loop. A Workshop scene that crashes the
+engine stays static for the rest of that service session, so later rotations
+do not repeatedly launch a known-incompatible scene. The app shows the same
+failure as a one-time toast and a persistent static-fallback subtitle.
+
 `open` presents the requested workflow in an existing app process, or launches
 the app when only the Rust service is running. The
 `displays` spelling is an alias for the Display schedules page, so a shell or

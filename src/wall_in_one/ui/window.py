@@ -123,6 +123,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._playlists_page = PlaylistsPage(application)
         self._schedules_page = SchedulesPage(application)
         self._runtime_summary = ""
+        self._runtime_error = ""
 
         self.set_content(self._build_content())
         self.connect("destroy", self._on_destroy)
@@ -474,11 +475,20 @@ class MainWindow(Adw.ApplicationWindow):
         if not isinstance(playlist, str) or not isinstance(source, str):
             return
         state = "paused" if paused is True else "playing"
-        self._runtime_summary = f"{state} {playlist} ({source})"
+        last_error = status.get("last_error")
+        if isinstance(last_error, str) and last_error:
+            self._runtime_summary = f"static fallback · {last_error}"
+            if last_error != self._runtime_error:
+                self.report(last_error)
+            self._runtime_error = last_error
+        else:
+            self._runtime_error = ""
+            self._runtime_summary = f"{state} {playlist} ({source})"
         self._update_subtitle()
 
     def show_runtime_unavailable(self) -> None:
         """Say plainly that authoring works but automation currently does not."""
+        self._runtime_error = ""
         self._runtime_summary = "runtime unavailable"
         self._update_subtitle()
 

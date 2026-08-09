@@ -180,6 +180,24 @@ its duration; without one, advancing moves each distinct assigned playlist by
 one entry rather than indexing all of them through the default playlist's
 cursor.
 
+### Renderer exits fall back; they never auto-restart
+
+The runtime reaps every mpvpaper and linux-wallpaperengine child. An unexpected
+exit reapplies the already-resolved paired still, marks motion inactive, and
+keeps an entry-specific error in `status` until a later wallpaper applies
+successfully. It performs **zero automatic retries**. In particular,
+linux-wallpaperengine is an independent Wallpaper Engine reimplementation and
+some otherwise-valid Workshop scenes reliably crash it; restarting such a
+scene would create an unbounded crash loop while burning CPU and lying about
+playback.
+
+A scene ID that crashes is remembered for this service process and subsequent
+visits use its still without launching the engine again. The memory is
+deliberately session-scoped: an engine update may make that scene work, and the
+runtime must not write compatibility judgements back into app-owned data.
+Videos also fall back with no immediate retry, but are eligible when a later
+rotation revisits them because an mpvpaper exit is more plausibly transient.
+
 ---
 
 ## Playback is always a playlist

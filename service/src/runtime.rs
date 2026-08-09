@@ -16,6 +16,7 @@ pub struct Status<'a> {
     pub entry_id: Option<&'a str>,
     pub kind: Option<&'a str>,
     pub still: Option<String>,
+    pub motion_active: Option<bool>,
     pub paused: bool,
     pub shuffle: bool,
     pub cycle_enabled: bool,
@@ -66,6 +67,7 @@ pub struct DisplayStatus<'a> {
     pub entry_id: &'a str,
     pub kind: &'a str,
     pub still: String,
+    pub motion_active: bool,
 }
 
 #[derive(Debug)]
@@ -178,6 +180,10 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn tick(&mut self, at: NaiveDateTime, now: Instant) {
+        let failures = self.driver.poll_failures();
+        if !failures.is_empty() {
+            self.last_error = failures.join("; ");
+        }
         if self.manual_playlist.is_none() {
             if let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at) {
                 let overrode = scheduled.is_some();
@@ -523,6 +529,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     entry_id: &entry.id,
                     kind: entry_kind(entry.kind),
                     still: entry.still.display().to_string(),
+                    motion_active: self.driver.motion_active(""),
                 });
             }
         } else {
@@ -549,6 +556,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         entry_id: &entry.id,
                         kind: entry_kind(entry.kind),
                         still: entry.still.display().to_string(),
+                        motion_active: self.driver.motion_active(&display.connector),
                     });
                 }
             }
@@ -565,6 +573,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             entry_id: entry.map(|entry| entry.id.as_str()),
             kind,
             still: entry.map(|entry| entry.still.display().to_string()),
+            motion_active: summary_playlist.map(|_| {
+                if self.config.displays.is_empty() {
+                    self.driver.motion_active("")
+                } else {
+                    self.config
+                        .displays
+                        .iter()
+                        .any(|display| self.driver.motion_active(&display.connector))
+                }
+            }),
             paused: self.paused,
             shuffle: self.shuffle,
             cycle_enabled: self.config.settings.cycle_enabled,

@@ -275,6 +275,145 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("scene-crash");
+    let events = root.join("events");
+    let launches = root.join("scene-launches");
+    let noctalia = root.join("noctalia");
+    let engine = root.join("linux-wallpaperengine");
+    fs::write(
+        &noctalia,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\n", events),
+    )
+    .unwrap();
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nexit 42\n",
+            launches
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let document = config(&noctalia, Path::new("/bin/true"), true).replace(
+        "linux_wallpaperengine_program = \"/bin/true\"",
+        &format!("linux_wallpaperengine_program = {engine:?}"),
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let mut runtime = Runtime::new(
+        root.join("runtime.toml"),
+        parsed,
+        SystemDriver::new(toml::from_str::<Config>(&document).unwrap().renderer),
+        at,
+    )
+    .unwrap();
+
+    let started = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "playlist-use".into(),
+            argument: Some("night".into()),
+        },
+        at,
+    );
+    assert!(started.ok);
+    thread::sleep(Duration::from_millis(100));
+    runtime.tick(at, Instant::now());
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    assert_eq!(status["motion_active"], false);
+    assert!(status["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("scene 12345"));
+    assert!(status["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("linux-wallpaperengine"));
+    assert_eq!(
+        fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("wallpaper-set /tmp/three.png"))
+            .count(),
+        2,
+        "the initial still is explicitly reaffirmed after the renderer exits"
+    );
+
+    let refused = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "playlist-use".into(),
+            argument: Some("night".into()),
+        },
+        at,
+    );
+    assert!(!refused.ok);
+    assert!(refused.message.contains("previously crashed"));
+    assert_eq!(fs::read_to_string(&launches).unwrap().lines().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("video-crash");
+    let events = root.join("events");
+    let launches = root.join("video-launches");
+    let noctalia = root.join("noctalia");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(
+        &noctalia,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\n", events),
+    )
+    .unwrap();
+    fs::write(
+        &mpvpaper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nexit 23\n",
+            launches
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&mpvpaper, fs::Permissions::from_mode(0o755)).unwrap();
+    let parsed: Config = toml::from_str(&config(&noctalia, &mpvpaper, false)).unwrap();
+    let video = parsed.playlists[0].entries[1].clone();
+    let mut driver = SystemDriver::new(parsed.renderer.clone());
+
+    for _visit in 0..2 {
+        driver.apply(&video, "eDP-1", &parsed.settings).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let failures = driver.poll_failures();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("video entry \"video-two\""));
+        assert!(!driver.motion_active("eDP-1"));
+    }
+
+    assert_eq!(fs::read_to_string(&launches).unwrap().lines().count(), 2);
+    assert_eq!(
+        fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("wallpaper-set eDP-1 /tmp/two.png"))
+            .count(),
+        4
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[allow(dead_code)]
 fn _response_shape(_: Response) {}
 

@@ -78,3 +78,10 @@ runtime listing verbs: combining independent replies could mix two config
 generations, while display assignment itself belongs only in this generated
 file. Runtime status replies are bounded at 1 MiB; runtime requests and the
 Python authoring protocol remain bounded at 64 KiB.
+
+Every display and the top-level summary also report `motion_active`. If an
+owned renderer exits, the service reapplies that entry's still and records an
+attributed `last_error`; it never restarts the child automatically. A scene
+that crashed linux-wallpaperengine is suppressed for the rest of the service
+session, while a video may be attempted again only if rotation later revisits
+it.

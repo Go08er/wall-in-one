@@ -243,6 +243,13 @@ fn display_assignment_is_the_baseline_and_manual_override_wins() {
     ))
     .unwrap();
     parsed.schedules.clear();
+    let mut fourth = parsed.playlists[1].entries[0].clone();
+    fourth.id = "scene-four".into();
+    fourth.scene_id = Some("12346".into());
+    let mut fifth = parsed.playlists[1].entries[0].clone();
+    fifth.id = "scene-five".into();
+    fifth.scene_id = Some("12347".into());
+    parsed.playlists[1].entries.extend([fourth, fifth]);
     parsed.validate().unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)
@@ -272,6 +279,23 @@ fn display_assignment_is_the_baseline_and_manual_override_wins() {
     assert_eq!(status["displays"][0]["connector"], "DP-1");
     assert_eq!(status["displays"][0]["playlist_id"], "night");
     assert_eq!(status["displays"][0]["entry_id"], "scene-three");
+    assert_eq!(status["playlists"][1]["entries"], 3);
+
+    for expected in ["scene-four", "scene-five"] {
+        let response = runtime.handle(
+            wall_in_one_service::protocol::Request {
+                verb: "next".into(),
+                argument: None,
+            },
+            at,
+        );
+        assert!(response.ok);
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&("DP-1".into(), expected.into()))
+        );
+    }
+
     runtime.handle(
         wall_in_one_service::protocol::Request {
             verb: "playlist-use".into(),

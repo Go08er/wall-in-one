@@ -23,6 +23,28 @@ Four parts, and the arrows are the whole design.
 | **service** | Rust | runtime only. Timers, applying wallpapers, supervising renderers. Small, always on. |
 | **plugin** | Luau | a way in. Opens the app; sends the service runtime commands. |
 
+The user drew this out (`Untitled-2025-09-11-1106.png`), and the drawing agrees
+with the table above except for two arrows, both recorded here because they are
+the parts still open:
+
+- **plugin → conf.** The drawing has the plugin writing the conf directly. That
+  is the conf-only option, rejected above. If it is revived, the service needs
+  an event counter for `next`/`random`, the plugin needs atomic writes from
+  Luau, two writers share one file, and a status file has to exist for the bar
+  to read back. The socket avoids all four. Left as the user's call.
+- **app ↔ service is missing entirely.** The app displays runtime state it does
+  not own — the window header already says "playing Day samples" and the
+  Display schedules page says "Active playlist: Follow schedule" — and a
+  wallpaper chosen in the GUI is a runtime command, not a config change. Without
+  this channel the app can only show what it last *wrote*, which diverges from
+  what is *playing* the moment a schedule fires or the bar overrides it. The app
+  must speak the same socket the plugin does.
+
+One thing the drawing gets right that is easy to miss: the palette arrow runs
+*back* from Noctalia to the app. That is real — the service sets the still and
+Noctalia derives the colours, and the app then reads those colours to theme its
+own interface.
+
 **`conf` is a node in the chain, not a hand-wave.** It is the only thing the
 service reads from the app: no shared database, no shared store files, no
 imported code, no second reader of the library. The service must run correctly

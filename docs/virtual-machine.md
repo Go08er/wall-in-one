@@ -67,6 +67,9 @@ The result contains PNG screenshots named `wall-in-one-media.png`,
   responsive runtime socket without importing Python;
 - Media, Pairings, Playlists, and Display schedules open in the running app;
 - closing the GUI leaves the same service process alive and rotation advances;
+- an isolated Noctalia probe observes exactly one `wallpaper-set` for that
+  advance and records the Rust service as its parent, proving the GUI did not
+  start a second Python wallpaper driver;
 - a control-socket playlist switch changes the active media;
 - a schedule timer observes an injected local-time boundary and applies its
   playlist.

@@ -12,13 +12,20 @@ let
   home = "/home/${user}";
   runtimeDir = "/run/user/${uid}";
   app = "${wallInOnePackage}/bin/wall-in-one";
+  driverLog = "/tmp/wall-in-one-wallpaper-set.log";
+  noctaliaProbe = pkgs.writeShellScriptBin "noctalia" ''
+    if [ "$#" -ge 2 ] && [ "$1" = msg ] && [ "$2" = wallpaper-set ]; then
+      printf '%s\t%s\n' "$PPID" "$*" >> ${driverLog}
+    fi
+    exec ${lib.getExe pkgs.noctalia} "$@"
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "wall-in-one-desktop-vm";
   globalTimeout = 1200;
 
   node.specialArgs = {
-    inherit wallInOnePackage pluginSource sampleMedia;
+    inherit wallInOnePackage pluginSource sampleMedia noctaliaProbe;
   };
 
   nodes.machine =
@@ -46,7 +53,7 @@ pkgs.testers.runNixOSTest {
         "DBUS_SESSION_BUS_ADDRESS=unix:path=${runtimeDir}/bus "
         "XDG_DATA_DIRS=/run/current-system/sw/share "
         "LANG=C.UTF-8 "
-        "PATH=/run/current-system/sw/bin"
+        "PATH=${noctaliaProbe}/bin:/run/current-system/sw/bin"
     )
 
     def as_user(command: str) -> str:
@@ -110,6 +117,7 @@ pkgs.testers.runNixOSTest {
     with subtest("closing the GUI does not stop service rotation"):
         ctl("playlist-use day")
         before = machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")).strip()
+        machine.succeed("rm -f ${driverLog}")
         niri("action close-window")
         machine.wait_until_succeeds(
             as_user(
@@ -126,6 +134,12 @@ pkgs.testers.runNixOSTest {
         else:
             raise AssertionError("cycle timer did not advance after the GUI closed")
         machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.cycle_enabled == true'"))
+        machine.wait_for_file("${driverLog}")
+        applications = machine.succeed("cat ${driverLog}").splitlines()
+        assert len(applications) == 1, applications
+        parent, command = applications[0].split("\t", 1)
+        assert parent == service_pid, (parent, service_pid, command)
+        assert command.startswith("msg wallpaper-set "), command
 
     with subtest("the socket switches the active playlist"):
         assert ctl("playlist-use night") == "playing night-grid"

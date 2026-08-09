@@ -5,6 +5,7 @@
   wallInOnePackage,
   pluginSource,
   sampleMedia,
+  noctaliaProbe ? null,
   ...
 }:
 
@@ -13,6 +14,8 @@ let
   home = "/home/${user}";
   mediaDir = "${home}/Pictures/Wallpapers";
   runtimeDir = "/run/user/1000";
+  runtimeNoctalia =
+    if noctaliaProbe == null then lib.getExe pkgs.noctalia else "${noctaliaProbe}/bin/noctalia";
 
   appSettings = pkgs.writeText "wall-in-one-vm-settings.toml" ''
     roots = ["${mediaDir}"]
@@ -83,7 +86,7 @@ let
     dynamics_enabled = true
 
     [renderer]
-    noctalia_program = "${lib.getExe pkgs.noctalia}"
+    noctalia_program = "${runtimeNoctalia}"
     mpvpaper_program = "${lib.getExe pkgs.mpvpaper}"
     linux_wallpaperengine_program = "${lib.getExe pkgs.linux-wallpaperengine}"
     own_scene_renderer = false

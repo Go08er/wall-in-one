@@ -296,6 +296,10 @@
         specialArgs = {
           wallInOnePackage = self.packages.x86_64-linux.wall-in-one;
           pluginSource = noctalia-plugins;
+          # Only the automated test instruments Noctalia. The interactive VM
+          # runs the unwrapped package and therefore receives an explicit null
+          # module argument rather than relying on module-argument defaults.
+          noctaliaProbe = null;
           sampleMedia = import ./nix/sample-media.nix {
             pkgs = import nixpkgs { system = "x86_64-linux"; };
           };

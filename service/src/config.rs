@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -55,6 +55,7 @@ pub struct Settings {
 #[serde(deny_unknown_fields)]
 pub struct RendererSettings {
     pub noctalia_program: PathBuf,
+    pub niri_program: PathBuf,
     pub mpvpaper_program: PathBuf,
     pub linux_wallpaperengine_program: PathBuf,
     pub own_scene_renderer: bool,
@@ -216,6 +217,7 @@ impl Config {
         nonempty("renderer layer", &self.renderer.layer)?;
         for (label, path) in [
             ("noctalia_program", &self.renderer.noctalia_program),
+            ("niri_program", &self.renderer.niri_program),
             ("mpvpaper_program", &self.renderer.mpvpaper_program),
             (
                 "linux_wallpaperengine_program",

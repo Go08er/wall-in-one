@@ -27,7 +27,7 @@ fn directory(label: &str) -> PathBuf {
 
 fn config(noctalia: &Path, mpvpaper: &Path, own_scene: bool) -> String {
     format!(
-        r#"schema_version = 1
+        r#"schema_version = 2
 default_playlist = "day"
 [settings]
 cycle_interval_seconds = 300
@@ -36,6 +36,7 @@ shuffle = false
 dynamics_enabled = true
 [renderer]
 noctalia_program = {noctalia:?}
+niri_program = "/bin/true"
 mpvpaper_program = {mpvpaper:?}
 linux_wallpaperengine_program = "/bin/true"
 own_scene_renderer = {own_scene}
@@ -294,6 +295,66 @@ fn renderer_applies_still_then_mode_then_palette_then_motion() {
 }
 
 #[test]
+fn all_output_scene_uses_background_targets_for_every_live_connector() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("scene-all-outputs");
+    let events = root.join("events");
+    let noctalia = root.join("noctalia");
+    let niri = root.join("niri");
+    let engine = root.join("linux-wallpaperengine");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        &niri,
+        "#!/bin/sh\nprintf '%s\\n' '{\"eDP-1\":{\"name\":\"eDP-1\"},\"DP-1\":{\"name\":\"DP-1\"}}'\n",
+    )
+    .unwrap();
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nsleep 30\n",
+            events
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &niri, &engine] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, Path::new("/bin/true"), true)
+        .replace(
+            "niri_program = \"/bin/true\"",
+            &format!("niri_program = {niri:?}"),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!("linux_wallpaperengine_program = {engine:?}"),
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let scene = parsed.playlists[1].entries[0].clone();
+    let mut driver = SystemDriver::new(parsed.renderer.clone());
+
+    driver.apply(&scene, "", &parsed.settings).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let launched = fs::read_to_string(&events).unwrap();
+    assert!(launched.contains("--screen-root DP-1 --bg 12345"));
+    assert!(launched.contains("--screen-root eDP-1 --bg 12345"));
+    assert_eq!(launched.matches("--screen-root").count(), 2);
+    assert_eq!(launched.matches("--bg 12345").count(), 2);
+    let words: Vec<_> = launched.split_whitespace().collect();
+    for (index, word) in words.iter().enumerate() {
+        if *word == "12345" {
+            assert_eq!(
+                words[index - 1],
+                "--bg",
+                "scene id used as positional preview"
+            );
+        }
+    }
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("palette-failure");
@@ -317,6 +378,7 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
     let events = root.join("events");
     let launches = root.join("scene-launches");
     let noctalia = root.join("noctalia");
+    let niri = root.join("niri");
     let engine = root.join("linux-wallpaperengine");
     fs::write(
         &noctalia,
@@ -331,12 +393,23 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         ),
     )
     .unwrap();
-    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    let document = config(&noctalia, Path::new("/bin/true"), true).replace(
-        "linux_wallpaperengine_program = \"/bin/true\"",
-        &format!("linux_wallpaperengine_program = {engine:?}"),
-    );
+    fs::write(
+        &niri,
+        "#!/bin/sh\nprintf '%s\\n' '{\"eDP-1\":{\"name\":\"eDP-1\"}}'\n",
+    )
+    .unwrap();
+    for executable in [&noctalia, &niri, &engine] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, Path::new("/bin/true"), true)
+        .replace(
+            "niri_program = \"/bin/true\"",
+            &format!("niri_program = {niri:?}"),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!("linux_wallpaperengine_program = {engine:?}"),
+        );
     let parsed: Config = toml::from_str(&document).unwrap();
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)
         .unwrap()

@@ -162,11 +162,26 @@ irrelevant in the measurement — both implementations spend nearly all their
 time sleeping. This is a memory argument only.
 Target: single-digit MB.
 
-The packaged release service, running by itself from the handwritten schema-1
+The packaged release service, running by itself from the handwritten schema-2
 fixture, measured **about 2.8 MB RSS** (repeat probes: `2784–2800 kB`; virtual
 size: `3764–3768 kB`) on the same development machine. That is about 4% of the
 former 71.1 MB process. The measurement deliberately did not start or import
 the Python application.
+
+### All-output Wallpaper Engine scenes query niri at apply time
+
+`linux-wallpaperengine` treats a positional scene id as window-preview mode;
+desktop rendering always requires one or more `--screen-root <connector> --bg
+<scene>` pairs. A blank output in the resolved runtime configuration means all
+currently attached displays, so the Rust service asks niri for its current JSON
+output map immediately before launching an all-output scene and emits one pair
+per connector. The app writes the absolute niri executable path into schema 2,
+preserving the fully-resolved configuration contract.
+
+Connectors deliberately are not compiled into the configuration: docking and
+hot-plugging can change them while the GTK authoring app is closed. If niri
+cannot provide at least one connector, the service refuses to open a preview
+window and leaves the already-applied paired still visible.
 
 **Rejected: dropping GTK from the Python service** (~25 MB, a 3x win for a
 small change). Worth knowing as a fallback, but the user wants an always-on

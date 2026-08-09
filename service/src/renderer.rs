@@ -12,6 +12,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const MAX_OUTPUTS: usize = 32;
+const MAX_OUTPUT_REPLY_BYTES: usize = 1024 * 1024;
+
 pub trait VideoRenderer: Send {
     fn start(
         &mut self,
@@ -282,6 +285,58 @@ impl SystemDriver {
         }
     }
 
+    fn current_outputs(&self) -> Result<Vec<String>, String> {
+        let reply = Command::new(&self.settings.niri_program)
+            .args(["msg", "--json", "outputs"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot ask niri for outputs: {error}"))?;
+        if !reply.status.success() {
+            return Err(format!("niri outputs exited with {}", reply.status));
+        }
+        if reply.stdout.len() > MAX_OUTPUT_REPLY_BYTES {
+            return Err("niri outputs reply exceeded 1 MiB".into());
+        }
+        let document: serde_json::Value = serde_json::from_slice(&reply.stdout)
+            .map_err(|error| format!("niri outputs returned invalid JSON: {error}"))?;
+        let object = document
+            .as_object()
+            .ok_or("niri outputs did not return an object")?;
+        let mut outputs = Vec::new();
+        for (key, value) in object.iter().take(MAX_OUTPUTS) {
+            let candidate = value
+                .as_object()
+                .and_then(|entry| entry.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(key)
+                .trim();
+            if !candidate.is_empty()
+                && !candidate.chars().any(char::is_control)
+                && !outputs.iter().any(|known| known == candidate)
+            {
+                outputs.push(candidate.to_string());
+            }
+        }
+        outputs.sort();
+        if outputs.is_empty() {
+            Err("niri reported no usable outputs; paired still remains applied".into())
+        } else {
+            Ok(outputs)
+        }
+    }
+
+    fn add_scene_target(&self, command: &mut Command, output: &str, scene: &str) {
+        command.arg("--screen-root").arg(output);
+        if !self.settings.scene_scaling.is_empty() {
+            command.arg("--scaling").arg(&self.settings.scene_scaling);
+        }
+        if !self.settings.scene_clamp.is_empty() {
+            command.arg("--clamp").arg(&self.settings.scene_clamp);
+        }
+        command.arg("--bg").arg(scene);
+    }
+
     fn start_scene(&mut self, entry: &Entry, output: &str) -> Result<(), String> {
         if !self.settings.own_scene_renderer {
             return Err(
@@ -314,17 +369,12 @@ impl SystemDriver {
         if !self.settings.scene_pause_when_covered {
             command.arg("--no-fullscreen-pause");
         }
-        if !output.is_empty() {
-            command.arg("--screen-root").arg(output);
-            if !self.settings.scene_scaling.is_empty() {
-                command.arg("--scaling").arg(&self.settings.scene_scaling);
+        if output.is_empty() {
+            for connector in self.current_outputs()? {
+                self.add_scene_target(&mut command, &connector, scene);
             }
-            if !self.settings.scene_clamp.is_empty() {
-                command.arg("--clamp").arg(&self.settings.scene_clamp);
-            }
-            command.arg("--bg").arg(scene);
         } else {
-            command.arg(scene);
+            self.add_scene_target(&mut command, output, scene);
         }
         command
             .stdin(Stdio::null())

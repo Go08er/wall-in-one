@@ -20,7 +20,7 @@ from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 FALLBACK_PLAYLIST_ID: Final = "all-media"
 FALLBACK_PLAYLIST_NAME: Final = "All media"
 
@@ -88,7 +88,7 @@ def _resolved_entry(
 
 
 def render(settings: config.Settings, session: Session) -> str:
-    """Return schema-1 TOML with every authoring decision resolved."""
+    """Return schema-2 TOML with every authoring decision resolved."""
     known = {item.path: item for item in session.library.items}
     playlists: list[tuple[str, str, tuple[tuple[str, ...], ...]]] = []
 
@@ -138,6 +138,7 @@ def render(settings: config.Settings, session: Session) -> str:
         "",
         "[renderer]",
         f"noctalia_program = {_quote(_program('noctalia'))}",
+        f"niri_program = {_quote(_program('niri'))}",
         f"mpvpaper_program = {_quote(_program('mpvpaper'))}",
         f"linux_wallpaperengine_program = {_quote(_program('linux-wallpaperengine'))}",
         f"own_scene_renderer = {str(settings.own_scene_renderer).lower()}",

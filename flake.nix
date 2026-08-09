@@ -36,6 +36,9 @@
         # shell endpoint rather than another copy in this closure: authoring
         # works without it, while runtime status reports application failures.
         runtimeTools = [
+          # All-output scenes query the compositor at apply time so hot-plugged
+          # connectors never turn into a linux-wallpaperengine preview window.
+          pkgs.niri
           pkgs.mpvpaper
           # True Wallpaper Engine scenes and their full-resolution stills.
           # Keeping this in the wrapper PATH makes scene support deterministic

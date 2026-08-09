@@ -76,7 +76,7 @@ let
   );
 
   runtimeConfig = pkgs.writeText "wall-in-one-vm-runtime.toml" ''
-    schema_version = 1
+    schema_version = 2
     default_playlist = "day"
 
     [settings]
@@ -87,6 +87,7 @@ let
 
     [renderer]
     noctalia_program = "${runtimeNoctalia}"
+    niri_program = "${lib.getExe pkgs.niri}"
     mpvpaper_program = "${lib.getExe pkgs.mpvpaper}"
     linux_wallpaperengine_program = "${lib.getExe pkgs.linux-wallpaperengine}"
     own_scene_renderer = false

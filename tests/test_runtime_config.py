@@ -65,7 +65,8 @@ def _session(
 def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     document = tomllib.loads(runtime_config.render(settings, session))
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
+    assert Path(document["renderer"]["niri_program"]).is_absolute()
     assert document["default_playlist"] == "evening"
     assert [one["id"] for one in document["playlists"]] == ["all-media", "evening"]
     entry = document["playlists"][1]["entries"][0]
@@ -92,7 +93,7 @@ def test_compiler_write_is_atomic_and_leaves_no_temporary(tmp_path: Path) -> Non
     settings, session = _session(tmp_path)
     target = tmp_path / "state" / "runtime.toml"
     assert runtime_config.write(settings, session, target) == target
-    assert tomllib.loads(target.read_text())["schema_version"] == 1
+    assert tomllib.loads(target.read_text())["schema_version"] == 2
     assert list(target.parent.glob(".*.tmp")) == []
 
 

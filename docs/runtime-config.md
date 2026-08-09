@@ -31,9 +31,10 @@ playlist or changing only a timer keeps the existing renderer child; changing
 the active pairing, output, renderer options, or dynamics performs the normal
 break-before-make hand-over.
 
-Schema 1 contains `schema_version`, `default_playlist`, `[settings]`,
+Schema 2 contains `schema_version`, `default_playlist`, `[settings]`,
 `[renderer]`, `[[playlists]]`, `[[schedules]]`, and `[[displays]]`. Executable
-and media paths are absolute. Every playlist entry has a stable `id`, `kind`,
+paths—including niri for live connector discovery—and media paths are
+absolute. Every playlist entry has a stable `id`, `kind`,
 absolute `still`, and inline `palette`. A video additionally has an absolute
 `motion`; a scene has a numeric `scene_id`.
 

@@ -135,6 +135,22 @@ If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 `wall-in-one` is on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.
 
+### Test it away from your desktop
+
+The flake includes a bootable niri + Noctalia development desktop and an
+automated NixOS test that saves screenshots of all four workflow pages:
+
+```console
+$ nix run .#vm
+$ nix build -L .#checks.x86_64-linux.vm-test
+```
+
+The fixtures contain only build-generated sample media and never mount the
+host home, wallpaper library, Noctalia state, or Steam directory. See
+[`docs/virtual-machine.md`](docs/virtual-machine.md) for guest credentials,
+local companion-plugin overrides, screenshot locations, and the explicit
+software-rendering/Steam/multi-monitor limits.
+
 ## Using it
 
 The window follows the same path as the data: **Media -> Pairings -> Playlists
@@ -320,6 +336,7 @@ $ wall-in-one ctl playlist-remove Evening <entry-id>
 $ wall-in-one ctl playlist-use Evening|none
 $ wall-in-one ctl playlist-delete Evening
 $ wall-in-one ctl schedule
+$ wall-in-one ctl open media|pairings|playlists|schedules|displays
 $ wall-in-one ctl schedule-add Evening days=sat,sun from=22:00 to=06:00
 $ wall-in-one ctl schedule-remove <rule-id>
 $ wall-in-one ctl quit
@@ -328,6 +345,10 @@ $ wall-in-one ctl quit
 `quit` is intentional service shutdown: it releases the application's lifetime
 hold and exits even when no window is open. Merely closing the window does not
 stop rotation or schedules.
+
+`open` presents the requested workflow in the existing service process. The
+`displays` spelling is an alias for the Display schedules page, so a shell or
+panel integration does not have to know that both concepts share one screen.
 
 `providers`, `search` and `download` reach the same provider code the browse
 dialog uses, so a wallpaper can be found and pulled into the library without

@@ -34,10 +34,27 @@
         "type": "github"
       }
     },
+    "noctalia-plugins": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786220932,
+        "narHash": "sha256-PutM1l68tDyxS6bi7ysZq7uV9IqJXlQVtRDw5qNY+rA=",
+        "owner": "Go08er",
+        "repo": "goober-noctalia-plugins-v5",
+        "rev": "ece9a0b3df92761fbba50cba37c409929fd004a8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Go08er",
+        "repo": "goober-noctalia-plugins-v5",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "noctalia-plugins": "noctalia-plugins"
       }
     },
     "systems": {

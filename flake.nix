@@ -4,11 +4,24 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    noctalia-plugins = {
+      url = "github:Go08er/goober-noctalia-plugins-v5";
+      flake = false;
+    };
   };
 
   outputs =
-    { nixpkgs, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (
+    inputs@{
+      self,
+      nixpkgs,
+      flake-utils,
+      noctalia-plugins,
+      ...
+    }:
+    (flake-utils.lib.eachSystem [
+      "x86_64-linux"
+      "aarch64-linux"
+    ] (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -118,7 +131,14 @@
           inherit wall-in-one;
         };
 
-        apps.default = flake-utils.lib.mkApp { drv = wall-in-one; };
+        apps =
+          { default = flake-utils.lib.mkApp { drv = wall-in-one; }; }
+          // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            vm = flake-utils.lib.mkApp {
+              drv = self.nixosConfigurations.wall-in-one-vm.config.system.build.vm;
+              exePath = "/bin/run-wall-in-one-vm";
+            };
+          };
 
         checks = {
           inherit wall-in-one;
@@ -179,6 +199,14 @@
                 ruff format --check --no-cache src tests
                 touch $out
               '';
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          vm-test = import ./nix/vm-test.nix {
+            inherit pkgs;
+            wallInOnePackage = wall-in-one;
+            pluginSource = noctalia-plugins;
+            sampleMedia = import ./nix/sample-media.nix { inherit pkgs; };
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -224,5 +252,18 @@
           '';
         };
       }
-    );
+    ))
+    // {
+      nixosConfigurations.wall-in-one-vm = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = {
+          wallInOnePackage = self.packages.x86_64-linux.wall-in-one;
+          pluginSource = noctalia-plugins;
+          sampleMedia = import ./nix/sample-media.nix {
+            pkgs = import nixpkgs { system = "x86_64-linux"; };
+          };
+        };
+        modules = [ ./nix/vm.nix ];
+      };
+    };
 }

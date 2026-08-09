@@ -104,9 +104,12 @@ verb. This preserves the one-way app-to-service configuration boundary.
 
 Started by the Noctalia plugin, owned by the shell session, exits with it. The
 plugin prefers `wall-in-one.service` and falls back to `wall-in-one --service`.
-The packaged unit now starts `wall-in-one-service`; the Python `--service`
-command remains a compatibility fallback until the plugin can prefer the Rust
-binary explicitly when no user unit exists.
+The packaged unit starts `wall-in-one-service`, and as of the plugin's
+`fdaf4d1` the non-systemd path prefers it too: it derives the runtime as a
+sibling of the configured application binary before searching `PATH`, because
+an override names the application precisely to bypass `PATH`. The Python
+`--service` command stays as the fallback, so an installation predating the
+Rust runtime still starts rather than refusing to.
 
 ---
 

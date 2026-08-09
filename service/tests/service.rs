@@ -171,6 +171,52 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
 }
 
 #[test]
+fn explicit_reload_is_not_repeated_by_the_file_watcher() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("single-reload");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let log = root.join("events");
+    let recorder = root.join("record");
+    fs::write(
+        &recorder,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\n", log),
+    )
+    .unwrap();
+    fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+    let original = config(&recorder, &recorder, false);
+    fs::write(&config_path, &original).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    let _ = request(&socket, "status", None);
+
+    fs::write(
+        &config_path,
+        original.replace("/tmp/one.png", "/tmp/one-after-reload.png"),
+    )
+    .unwrap();
+    assert_eq!(request(&socket, "reload", None)["ok"], true);
+    thread::sleep(Duration::from_millis(1400));
+
+    let events = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.contains("wallpaper-set /tmp/one-after-reload.png"))
+            .count(),
+        1,
+        "the explicit reload must advance the watcher's known generation"
+    );
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn renderer_applies_still_then_mode_then_palette_then_motion() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("renderer-order");
@@ -199,6 +245,23 @@ fn renderer_applies_still_then_mode_then_palette_then_motion() {
     assert_eq!(lines[2], "msg color-scheme-set community catppuccin");
     assert!(lines[3].contains("--layer background"));
     assert_eq!(lines[4], "msg wallpaper-set eDP-1 /tmp/three.png");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("palette-failure");
+    let script = root.join("selective-failure");
+    fs::write(&script, "#!/bin/sh\n[ \"$2\" != color-scheme-set ]\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let parsed: Config = toml::from_str(&config(&script, &script, false)).unwrap();
+    let entry = parsed.playlists[0].entries[0].clone();
+    let mut driver = SystemDriver::new(parsed.renderer.clone());
+
+    let error = driver.apply(&entry, "", &parsed.settings).unwrap_err();
+
+    assert!(error.contains("noctalia exited"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -276,6 +339,8 @@ fn display_assignment_is_the_baseline_and_manual_override_wins() {
         at,
     );
     let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    assert_eq!(status["playlist_id"], "night");
+    assert_eq!(status["playlist"], "Night");
     assert_eq!(status["displays"][0]["connector"], "DP-1");
     assert_eq!(status["displays"][0]["playlist_id"], "night");
     assert_eq!(status["displays"][0]["entry_id"], "scene-three");
@@ -307,4 +372,47 @@ fn display_assignment_is_the_baseline_and_manual_override_wins() {
         events.lock().unwrap().last(),
         Some(&("DP-1".into(), "still-one".into()))
     );
+}
+
+#[test]
+fn reload_of_inactive_authoring_state_does_not_reapply_the_wallpaper() {
+    let root = directory("quiet-reload");
+    let config_path = root.join("runtime.toml");
+    let original = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    fs::write(&config_path, &original).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RecordingDriver(events.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    events.lock().unwrap().clear();
+    fs::write(
+        &config_path,
+        original.replace(
+            "cycle_interval_seconds = 300",
+            "cycle_interval_seconds = 301",
+        ),
+    )
+    .unwrap();
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "reload".into(),
+            argument: None,
+        },
+        at,
+    );
+
+    assert!(response.ok);
+    assert!(events.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
 }

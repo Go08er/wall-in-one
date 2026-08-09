@@ -3,12 +3,13 @@ Description=Wall-in-One wallpaper rotation service
 Documentation=https://github.com/Go08er/wall-in-one
 PartOf=graphical-session.target
 After=graphical-session.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=wall-in-one-service
-Restart=on-abnormal
-RestartSec=2
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=graphical-session.target

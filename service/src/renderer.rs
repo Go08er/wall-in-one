@@ -219,7 +219,7 @@ impl SystemDriver {
         }
     }
 
-    fn palette(&self, palette: &Palette) {
+    fn palette(&self, palette: &Palette) -> Result<(), String> {
         let mode = match palette.mode() {
             ThemeMode::Keep => None,
             ThemeMode::Dark => Some("dark"),
@@ -227,12 +227,12 @@ impl SystemDriver {
             ThemeMode::Auto => Some("auto"),
         };
         if let Some(mode) = mode {
-            let _ = self.noctalia(&["msg", "theme-mode-set", mode]);
+            self.noctalia(&["msg", "theme-mode-set", mode])?;
         }
         match palette {
-            Palette::Keep { .. } => {}
+            Palette::Keep { .. } => Ok(()),
             Palette::Adaptive { scheme, .. } => {
-                let _ = self.noctalia(&["msg", "color-scheme-set", "wallpaper", scheme]);
+                self.noctalia(&["msg", "color-scheme-set", "wallpaper", scheme])
             }
             Palette::Named { source, name, .. } => {
                 let source = match source {
@@ -240,7 +240,7 @@ impl SystemDriver {
                     PaletteSource::Community => "community",
                     PaletteSource::Custom => "custom",
                 };
-                let _ = self.noctalia(&["msg", "color-scheme-set", source, name]);
+                self.noctalia(&["msg", "color-scheme-set", source, name])
             }
         }
     }
@@ -306,7 +306,7 @@ impl WallpaperDriver for SystemDriver {
         // Break before make. A refused scene must expose its already-applied still.
         self.stop_output(output);
         self.still(entry, output)?;
-        self.palette(&entry.palette);
+        self.palette(&entry.palette)?;
         if !runtime.dynamics_enabled {
             return Ok(());
         }

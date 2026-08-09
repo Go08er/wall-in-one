@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 from wall_in_one import config, runtime_config
@@ -95,6 +96,17 @@ def test_compiler_write_is_atomic_and_leaves_no_temporary(tmp_path: Path) -> Non
     assert list(target.parent.glob(".*.tmp")) == []
 
 
+def test_unchanged_compilation_does_not_replace_the_runtime_document(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "state" / "runtime.toml"
+
+    assert runtime_config.update(settings, session, target)
+    inode = target.stat().st_ino
+    assert not runtime_config.update(settings, session, target)
+
+    assert target.stat().st_ino == inode
+
+
 def test_unresolved_playlist_entries_are_omitted_not_looked_up(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     session.playlists.add("evening", tmp_path / "not-in-library.mp4", entry_id="missing")
@@ -125,3 +137,27 @@ def test_legacy_single_output_becomes_a_resolved_display_assignment(tmp_path: Pa
     )
     document = tomllib.loads(runtime_config.render(settings, session))
     assert document["displays"] == [{"connector": "eDP-1", "playlist": "evening"}]
+
+
+def test_favourites_only_filters_the_builtin_fallback_playlist(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    favourite = tmp_path / "video.mp4"
+    session.favourites.add(favourite)
+
+    document = tomllib.loads(
+        runtime_config.render(replace(settings, cycle_favourites_only=True), session)
+    )
+
+    assert [entry["motion"] for entry in document["playlists"][0]["entries"]] == [str(favourite)]
+
+
+def test_favourites_only_falls_back_to_everything_when_none_are_starred(
+    tmp_path: Path,
+) -> None:
+    settings, session = _session(tmp_path)
+
+    document = tomllib.loads(
+        runtime_config.render(replace(settings, cycle_favourites_only=True), session)
+    )
+
+    assert len(document["playlists"][0]["entries"]) == 2

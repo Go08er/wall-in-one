@@ -341,7 +341,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_tile_activated(self, item: MediaItem) -> None:
         """Play Media through the explicit one-entry ``Quick choice`` list."""
-        response = self._app.apply(lambda: self._app.session.select(item.path))
+        response = self._app.play_item(item)
         if not response.ok:
             self.report(response.message)
 
@@ -477,6 +477,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_summary = f"{state} {playlist} ({source})"
         self._update_subtitle()
 
+    def show_runtime_unavailable(self) -> None:
+        """Say plainly that authoring works but automation currently does not."""
+        self._runtime_summary = "runtime unavailable"
+        self._update_subtitle()
+
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:
         """Star or unstar one wallpaper, and tell the user if it did not stick."""
         try:
@@ -490,7 +495,7 @@ class MainWindow(Adw.ApplicationWindow):
             # will not outlive the session.
             self.report(f"{item.name} is a favourite for now, but could not be saved")
         self._grid.set_favourites(self._favourites.paths)
-        self._app.session.favourites_changed()
+        self._app.favourites_changed()
         self._update_subtitle()
 
     # -- the per-tile menu -----------------------------------------------
@@ -623,8 +628,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._app.session.pairings.choose_still(item, still)
         except pairings.PairingError:
             self.report(f"{item.name} uses it for now, but the choice could not be saved")
-        self._reapply_if_current(item)
-        self._app.refresh_library()
+        self._app.pairing_changed(item)
 
     def _on_reset_pairing(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Forget everything chosen for one wallpaper."""
@@ -637,18 +641,7 @@ class MainWindow(Adw.ApplicationWindow):
         except pairings.PairingError:
             self.report(f"{item.name} is back to its defaults for now, but that was not saved")
         self.report(f"{item.name} is back to its defaults")
-        self._reapply_if_current(item)
-        self._app.refresh_library()
-
-    def _reapply_if_current(self, item: MediaItem) -> None:
-        """Show a changed pairing at once, but only if it is what is on screen.
-
-        Changing the wallpaper somebody is not looking at would be a surprise;
-        leaving the one they *are* looking at stale would be a bug.
-        """
-        cursor = self._app.session.cursor
-        if cursor is not None and cursor.path == item.path:
-            self._app.apply(self._app.session.apply_current)
+        self._app.pairing_changed(item)
 
     def _on_palette_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Record which colours a wallpaper asks for, and show them now.
@@ -668,8 +661,7 @@ class MainWindow(Adw.ApplicationWindow):
         except pairings.PairingError:
             self.report(f"{item.name} keeps those colours for now, but they could not be saved")
 
-        self._reapply_if_current(item)
-        self._app.refresh_library()
+        self._app.pairing_changed(item)
 
     def _item_at(self, raw: GLib.Variant | None) -> MediaItem | None:
         if raw is None:

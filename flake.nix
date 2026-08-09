@@ -124,12 +124,12 @@
             install -Dm644 src/wall_in_one/data/${applicationId}.svg \
               $out/share/icons/hicolor/scalable/apps/${applicationId}.svg
             install -Dm644 src/wall_in_one/data/systemd/wall-in-one.service \
-              $out/lib/systemd/user/wall-in-one.service
+              $out/share/systemd/user/wall-in-one.service
             install -Dm755 ${wall-in-one-service}/bin/wall-in-one-service \
               $out/bin/wall-in-one-service
             substituteInPlace $out/share/applications/${applicationId}.desktop \
               --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
-            substituteInPlace $out/lib/systemd/user/wall-in-one.service \
+            substituteInPlace $out/share/systemd/user/wall-in-one.service \
               --replace-fail "ExecStart=wall-in-one-service" \
               "ExecStart=$out/bin/wall-in-one-service"
           '';
@@ -187,9 +187,14 @@
               '';
 
           # What the Python tests cannot see: that the entry satisfies the
-          # desktop-entry spec, and that the icon really rasterises at both the
+          # desktop-entry spec, that the icon really rasterises at both the
           # size a panel asks for and the size a settings page does. Both run
-          # against the installed paths, so a broken postInstall fails here
+          # against the installed paths. The service unit is checked here too:
+          # a profile only exposes XDG's share/systemd/user path, not lib, and
+          # the unit must name the packaged Rust binary. Its source syntax and
+          # lifetime fields are parsed by tests/test_packaging.py; running
+          # systemd-analyze in a Nix sandbox is not viable because it insists
+          # on creating host /run/systemd state. A broken postInstall fails here
           # rather than on someone's menu. Two tiny tools on top of a package
           # that had to be built anyway.
           desktop =
@@ -207,6 +212,9 @@
                     ${wall-in-one}/share/icons/hicolor/scalable/apps/${applicationId}.svg \
                     -o "rendered-$size.png"
                 done
+                unit=${wall-in-one}/share/systemd/user/wall-in-one.service
+                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service' "$unit"
+                test -x ${wall-in-one}/bin/wall-in-one-service
                 touch $out
               '';
 

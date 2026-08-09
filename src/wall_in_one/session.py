@@ -322,15 +322,26 @@ class Session:
     def random(self) -> Applied:
         return self._apply(self._playlist.random())
 
-    def select(self, path: Path) -> Applied:
+    def choose(self, path: Path) -> NamedPlaylist:
+        """Make ``path`` the visible one-entry playlist without applying it.
+
+        The Python app is an authoring client now.  Keeping this step separate
+        lets it compile the Quick choice into the Rust runtime config and ask
+        that runtime to play it, instead of racing the service with its own
+        applier.  ``select`` below remains the legacy-service fallback.
+        """
         item = self._library.find(path)
         if item is None:
             raise ApplyError(f"not in the library: {path}")
         try:
-            self._playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, item.path)
+            chosen = self._playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, item.path)
         except playlists.PlaylistError as error:
             raise ApplyError(str(error)) from error
         self.use_playlist(QUICK_CHOICE_ID)
+        return chosen
+
+    def select(self, path: Path) -> Applied:
+        self.choose(path)
         return self.apply_current()
 
     # -- settings --------------------------------------------------------

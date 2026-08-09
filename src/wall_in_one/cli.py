@@ -3,8 +3,8 @@
 Four modes:
 
 * no arguments -- launch the GUI
-* ``--service`` -- keep rotation, schedules, and the control socket alive
-  without presenting a window
+* ``--service`` -- legacy Python compatibility service for installations that
+  predate ``wall-in-one-service``
 * ``ctl <verb>`` -- talk to a running instance (this is what the Noctalia
   plugin uses; every plugin control is one ``runAsync`` of a verb)
 * maintenance flags such as ``--install-theme-template``
@@ -86,7 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--service",
         action="store_true",
-        help="run the wallpaper service without opening a window",
+        help="run the legacy Python service (prefer wall-in-one-service)",
     )
     parser.add_argument(
         "--open-page",

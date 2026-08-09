@@ -110,6 +110,26 @@ def test_selecting_media_plays_through_a_visible_quick_choice_playlist(
     assert session.current is not None and session.current.item.path == items[1].path
 
 
+def test_choosing_media_authors_quick_choice_without_applying_it(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("a"), _still("b")]
+    store = playlists.Store(path=tmp_path / "playlists.json")
+    session = Session(
+        config.Settings(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: Library(roots=(Path("/w"),), items=tuple(items)),
+        playlist_store=store,
+    )
+    session.refresh()
+
+    chosen = session.choose(items[1].path)
+
+    assert chosen.id == "quick-choice"
+    assert session.manual_playlist == chosen.id
+    assert applied_paths == []
+
+
 def test_a_manual_playlist_overrides_then_releases_the_schedule(
     applied_paths: list[Path], tmp_path: Path
 ) -> None:

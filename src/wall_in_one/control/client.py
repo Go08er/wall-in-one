@@ -162,6 +162,11 @@ def dispatch(verb: str, argument: str | None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
+    if response.kind == "runtime-not-running":
+        if response.message:
+            print(response.message, file=sys.stderr)
+        return EXIT_NOT_RUNNING
+
     stream = sys.stdout if response.ok else sys.stderr
     if response.message:
         # A provider failure already reads `kind: message`, the same sentence

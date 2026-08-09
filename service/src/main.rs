@@ -78,15 +78,22 @@ fn parse() -> Result<Options, String> {
     Ok(options)
 }
 
-fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) {
+fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let mut reader = BufReader::new(&stream);
-    let response = match read_request(&mut reader) {
-        Ok(request) => runtime.handle(request, Local::now().naive_local()),
-        Err(error) => Response::failure(error),
+    let (response, was_reload) = match read_request(&mut reader) {
+        Ok(request) => {
+            let was_reload = request.verb == "reload";
+            (
+                runtime.handle(request, Local::now().naive_local()),
+                was_reload,
+            )
+        }
+        Err(error) => (Response::failure(error), false),
     };
     let mut writer = stream;
     let _ = write_response(&mut writer, &response);
+    was_reload
 }
 
 fn fingerprint(path: &Path) -> Option<(u64, u64, SystemTime)> {
@@ -139,7 +146,16 @@ fn run() -> Result<(), String> {
     while !runtime.should_quit() && !TERMINATE.load(Ordering::Relaxed) {
         loop {
             match listener.accept() {
-                Ok((stream, _)) => serve(stream, &mut runtime),
+                Ok((stream, _)) => {
+                    // Capture before loading. If an atomic rename races this
+                    // request, retaining the older fingerprint can cause one
+                    // harmless extra reload; capturing afterward could mark
+                    // unseen newer bytes as loaded and miss them entirely.
+                    let observed = fingerprint(&options.config);
+                    if serve(stream, &mut runtime) {
+                        known = observed;
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => eprintln!("wall-in-one-service: accept: {error}"),
             }

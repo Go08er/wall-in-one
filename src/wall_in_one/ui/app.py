@@ -53,6 +53,7 @@ def download_root(settings: config.Settings) -> Path | None:
 #: How often the calendar is re-read. A minute, because that is the
 #: resolution schedule rules are written at.
 SCHEDULE_TICK_SECONDS: Final = 60
+RUNTIME_STATUS_TICK_SECONDS: Final = 2
 
 
 class Application(Adw.Application):
@@ -80,6 +81,7 @@ class Application(Adw.Application):
         self._session = Session(self._settings)
         self._cycle_source: int = 0
         self._schedule_source: int = 0
+        self._runtime_status_source: int = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
         self._stills = StillMaker()
 
@@ -101,8 +103,12 @@ class Application(Adw.Application):
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
             )
         self._install_accelerators()
-        self.sync_cycle_timer()
-        self._start_schedule_timer()
+        # Only the explicitly requested legacy service owns Python timers.
+        # An ordinary GUI is an authoring client of the Rust runtime and must
+        # never become a second wallpaper scheduler when a status probe fails.
+        if self._service_start:
+            self.sync_cycle_timer()
+            self._start_schedule_timer()
         self._start_control_socket()
         if self._service_start:
             # A window normally performs the first scan from `do_activate`.
@@ -133,6 +139,7 @@ class Application(Adw.Application):
         self.refresh_library()
         assert self._window is not None
         self._window.present()
+        self._start_runtime_status_timer()
         if self._initial_page is not None:
             page = "schedules" if self._initial_page == "displays" else self._initial_page
             self._window.show_page(page)
@@ -143,6 +150,7 @@ class Application(Adw.Application):
         if self._schedule_source:
             GLib.source_remove(self._schedule_source)
             self._schedule_source = 0
+        self._stop_runtime_status_timer()
         self._stills.shutdown()
         self._session.shutdown()
         if self._browse_jobs is not None:
@@ -164,6 +172,7 @@ class Application(Adw.Application):
             # Drop our reference now so a later activation builds a fresh one
             # instead of trying to present a destroyed GTK object.
             self._window = None
+            self._stop_runtime_status_timer()
         return False
 
     def request_quit(self) -> None:
@@ -172,6 +181,11 @@ class Application(Adw.Application):
             self.release()
             self._held = False
         self.quit()
+
+    @property
+    def legacy_service(self) -> bool:
+        """Whether this Python process intentionally owns compatibility timers."""
+        return self._service_start
 
     def present_page(self, page: str) -> None:
         """Present the singleton window with one primary workflow page visible."""
@@ -250,21 +264,68 @@ class Application(Adw.Application):
             self._runtime_is_running()
         self._make_missing_stills()
 
-    def _publish_runtime(self) -> None:
-        """Compile authoring state, then ask a running Rust service to reload."""
+    def _publish_runtime(self) -> bool:
+        """Publish changed authoring state and reload once; report validity.
+
+        ``True`` means the generated document is usable, including when no
+        runtime is currently listening.  It does not mean a service exists.
+        """
         try:
-            runtime_config.write(self._settings, self._session)
+            changed = runtime_config.update(self._settings, self._session)
         except runtime_config.RuntimeConfigError as error:
             self.window_report(str(error))
-            return
-        with contextlib.suppress(client.ControlError):
-            client.send_runtime("reload")
+            return False
+        if not changed:
+            return True
+        try:
+            response = client.send_runtime("reload")
+        except client.NotRunningError:
+            if self._window is not None:
+                self._window.show_runtime_unavailable()
+            return True
+        except client.ControlError as error:
+            self.window_report(f"Runtime reload failed: {error}")
+            return False
+        if not response.ok:
+            self.window_report(f"Runtime rejected the new configuration: {response.message}")
+            return False
+        return True
+
+    def _stop_runtime_status_timer(self) -> None:
+        if self._runtime_status_source:
+            GLib.source_remove(self._runtime_status_source)
+            self._runtime_status_source = 0
+
+    def _start_runtime_status_timer(self) -> None:
+        """Keep the GUI on service-owned truth without doing playback work."""
+        self._stop_runtime_status_timer()
+        self._runtime_is_running()
+        self._runtime_status_source = GLib.timeout_add_seconds(
+            RUNTIME_STATUS_TICK_SECONDS, self._on_runtime_status_tick
+        )
+
+    def _on_runtime_status_tick(self) -> bool:
+        if self._window is None:
+            self._runtime_status_source = 0
+            return GLib.SOURCE_REMOVE
+        self._runtime_is_running()
+        return GLib.SOURCE_CONTINUE
 
     def _runtime_is_running(self) -> bool:
         try:
             response = client.send_runtime("status", timeout=0.25)
-        except client.ControlError:
+        except client.NotRunningError:
+            if self._window is not None:
+                self._window.show_runtime_unavailable()
             return False
+        except client.ControlError:
+            # A timeout or malformed answer is not proof that the process is
+            # absent.  In particular, the retained Python fallback must not
+            # start applying wallpapers merely because a busy Rust runtime
+            # missed one status deadline.
+            if self._window is not None:
+                self._window.show_runtime_unavailable()
+            return True
         if response.ok and self._window is not None:
             try:
                 status = json.loads(response.message)
@@ -273,7 +334,9 @@ class Application(Adw.Application):
             else:
                 if isinstance(status, dict):
                     self._window.show_runtime_status(status)
-        return response.ok
+        # Even a rejected status request proves that this socket has an owner;
+        # do not turn a protocol failure into permission for a second driver.
+        return True
 
     def runtime_action(self, verb: str) -> Response:
         """Drive the Rust runtime, retaining Python application as fallback."""
@@ -299,6 +362,26 @@ class Application(Adw.Application):
                 self._session.playlist.random()
             if self._window is not None:
                 self._window.show_current(self._session)
+        return response
+
+    def play_item(self, item: MediaItem) -> Response:
+        """Compile Media's Quick choice, then let the runtime apply it."""
+        try:
+            chosen = self._session.choose(item.path)
+        except ApplyError as error:
+            return Response.failure(str(error))
+        if not self._publish_runtime():
+            return Response.failure("the Quick choice could not be published to the runtime")
+        try:
+            response = client.send_runtime("playlist-use", chosen.id)
+        except client.NotRunningError:
+            # The retained Python --service implementation still needs a
+            # complete path on installations predating the Rust binary.
+            response = self.apply(self._session.apply_current)
+        except client.ControlError as error:
+            response = Response.failure(str(error))
+        if self._window is not None:
+            self._window.show_library(self._session)
         return response
 
     def _make_missing_stills(self) -> None:
@@ -345,6 +428,7 @@ class Application(Adw.Application):
         This is the pair the window's own star button already does.
         """
         self._session.favourites_changed()
+        self._publish_runtime()
         if self._window is not None:
             self._window.show_library(self._session)
 
@@ -429,8 +513,9 @@ class Application(Adw.Application):
         while the library is walked.
         """
         session = self._session
+        self._publish_runtime()
         cursor = session.cursor
-        if cursor is not None and cursor.path == item.path:
+        if not self._runtime_is_running() and cursor is not None and cursor.path == item.path:
             GLib.idle_add(self._reapply_current)
         GLib.idle_add(self.refresh_library)
 
@@ -516,7 +601,7 @@ class Application(Adw.Application):
     def sync_cycle_timer(self) -> None:
         """Start, stop, or re-time the cycle timer to match the settings."""
         self._stop_cycle()
-        if not self._settings.cycle_enabled:
+        if not self._service_start or not self._settings.cycle_enabled:
             return
         self._cycle_source = GLib.timeout_add_seconds(
             self._settings.cycle_interval, self._on_cycle_tick
@@ -542,6 +627,8 @@ class Application(Adw.Application):
         and checking less often would let a rule start late by up to its own
         error.
         """
+        if not self._service_start:
+            return
         self._schedule_source = GLib.timeout_add_seconds(
             SCHEDULE_TICK_SECONDS, self._on_schedule_tick
         )
@@ -674,6 +761,11 @@ class _Commands:
         return Response.success(f"opened {page}")
 
     def report_status(self) -> Response:
+        if not self._app.legacy_service:
+            return Response.failure(
+                "the GUI is open, but the wallpaper runtime is not running",
+                kind="runtime-not-running",
+            )
         return Response.success(self._app.session.describe())
 
     # -- the library ------------------------------------------------------
@@ -698,7 +790,7 @@ class _Commands:
 
     def select_wallpaper(self, value: str | None) -> Response:
         item = server.resolve(self._app.session.library, value, verb="select")
-        return self._app.apply(lambda: self._app.session.select(item.path))
+        return self._app.play_item(item)
 
     def list_favourites(self) -> Response:
         session = self._app.session
@@ -1028,6 +1120,11 @@ class _Commands:
         return self._app.browse_off_thread(work)
 
     def quit(self) -> Response:
+        if not self._app.legacy_service:
+            return Response.failure(
+                "the GUI is open, but the wallpaper runtime is not running",
+                kind="runtime-not-running",
+            )
         GLib.idle_add(self._app.request_quit)
         return Response.success("quitting")
 

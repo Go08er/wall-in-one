@@ -290,8 +290,8 @@ in
     path = [ pkgs.noctalia ];
     serviceConfig = {
       ExecStart = "${wallInOnePackage}/bin/wall-in-one-service";
-      Restart = "on-abnormal";
-      RestartSec = 2;
+      Restart = "on-failure";
+      RestartSec = 5;
     };
   };
 

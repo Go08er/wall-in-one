@@ -92,8 +92,14 @@ def render(settings: config.Settings, session: Session) -> str:
     known = {item.path: item for item in session.library.items}
     playlists: list[tuple[str, str, tuple[tuple[str, ...], ...]]] = []
 
+    fallback_items = session.library.items
+    if settings.cycle_favourites_only:
+        starred = tuple(item for item in fallback_items if item.path in session.favourites.paths)
+        if starred:
+            fallback_items = starred
+
     fallback_entries: list[tuple[str, ...]] = []
-    for item in session.library.items:
+    for item in fallback_items:
         compiled_lines = _resolved_entry(item, session, _entry_id(item.path))
         if compiled_lines is not None:
             fallback_entries.append(compiled_lines)
@@ -192,11 +198,37 @@ def render(settings: config.Settings, session: Session) -> str:
 def write(settings: config.Settings, session: Session, path: Path | None = None) -> Path:
     """Compile and install atomically, including the containing directory."""
     target = path if path is not None else paths.runtime_config_path()
+    _install(render(settings, session), target)
+    return target
+
+
+def update(settings: config.Settings, session: Session, path: Path | None = None) -> bool:
+    """Atomically install only a changed document; return whether bytes changed.
+
+    Reloading the runtime applies its current entry.  A GUI refresh that found
+    the same library must therefore not rewrite the generated file and restart
+    a video or scene for no configuration change.
+    """
+    target = path if path is not None else paths.runtime_config_path()
+    document = render(settings, session)
+    try:
+        if target.read_text(encoding="utf-8") == document:
+            return False
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise RuntimeConfigError(f"cannot read {target}: {error}") from error
+    _install(document, target)
+    return True
+
+
+def _install(document: str, target: Path) -> None:
+    """Durably replace ``target`` with already-rendered configuration."""
     paths.ensure_directory(target.parent)
     temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
         with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(render(settings, session))
+            handle.write(document)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
@@ -208,4 +240,3 @@ def write(settings: config.Settings, session: Session, path: Path | None = None)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise RuntimeConfigError(f"cannot write {target}: {error}") from error
-    return target

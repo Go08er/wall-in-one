@@ -299,6 +299,28 @@ def test_open_launches_the_gui_when_only_the_runtime_exists(
     assert launched[0][1]["start_new_session"] is True
 
 
+def test_status_does_not_accept_a_plain_gui_as_the_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one import paths
+    from wall_in_one.control import client
+
+    def answer(request: Request, *, path: Path | None = None, **_kwargs: object) -> Response:
+        if path == paths.runtime_socket_path():
+            raise client.NotRunningError("runtime is closed")
+        assert request.verb == "status"
+        return Response.failure(
+            "the GUI is open, but the wallpaper runtime is not running",
+            kind="runtime-not-running",
+        )
+
+    monkeypatch.setattr(client, "send", answer)
+
+    assert client.dispatch("status", None) == client.EXIT_NOT_RUNNING
+    assert "runtime is not running" in capsys.readouterr().err
+
+
 def test_handle_dispatches_and_passes_the_argument() -> None:
     commands = _StubCommands()
     verbs = build_verb_table(commands)
@@ -906,6 +928,7 @@ class _FakeApp:
     """
 
     def __init__(self, session: Session) -> None:
+        self.legacy_service = True
         self.session = session
         self.restarred = 0
         self.forgotten: list[Path] = []
@@ -918,6 +941,9 @@ class _FakeApp:
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         return Response.success(action().describe())
+
+    def play_item(self, item: MediaItem) -> Response:
+        return self.apply(lambda: self.session.select(item.path))
 
     def favourites_changed(self) -> None:
         self.restarred += 1
@@ -1021,6 +1047,34 @@ def test_open_rejects_unknown_pages_without_presenting(
     assert not response.ok
     assert response.message == "usage: open <media|pairings|playlists|schedules|displays>"
     assert app.presented_pages == []
+
+
+def test_plain_gui_status_refuses_to_masquerade_as_the_runtime(sandbox: Path) -> None:
+    commands, app = _commands(sandbox, [])
+    app.legacy_service = False
+
+    response = commands.report_status()
+
+    assert not response.ok
+    assert response.kind == "runtime-not-running"
+
+
+def test_legacy_service_status_remains_available(sandbox: Path) -> None:
+    commands, _app = _commands(sandbox, [])
+
+    response = commands.report_status()
+
+    assert response.ok
+
+
+def test_runtime_quit_does_not_close_a_plain_authoring_window(sandbox: Path) -> None:
+    commands, app = _commands(sandbox, [])
+    app.legacy_service = False
+
+    response = commands.quit()
+
+    assert not response.ok
+    assert response.kind == "runtime-not-running"
 
 
 def test_the_listing_reports_what_the_session_is_holding(sandbox: Path) -> None:

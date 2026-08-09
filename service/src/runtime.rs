@@ -177,24 +177,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
-        let mut targets = Vec::new();
-        if self.config.displays.is_empty() {
-            if let Some(entry) = self.current_entry_for(&self.active_playlist).cloned() {
-                targets.push((entry, String::new()));
-            }
-        } else {
-            for display in &self.config.displays {
-                let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
-                {
-                    &self.active_playlist
-                } else {
-                    &display.playlist
-                };
-                if let Some(entry) = self.current_entry_for(reference).cloned() {
-                    targets.push((entry, display.connector.clone()));
-                }
-            }
-        }
+        let targets = self.current_targets();
         if targets.is_empty() {
             return self.fail("active display playlists are empty");
         }
@@ -217,6 +200,28 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.last_error = error.clone();
             Err(error)
         }
+    }
+
+    fn current_targets(&self) -> Vec<(Entry, String)> {
+        let mut targets = Vec::new();
+        if self.config.displays.is_empty() {
+            if let Some(entry) = self.current_entry_for(&self.active_playlist).cloned() {
+                targets.push((entry, String::new()));
+            }
+        } else {
+            for display in &self.config.displays {
+                let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
+                {
+                    &self.active_playlist
+                } else {
+                    &display.playlist
+                };
+                if let Some(entry) = self.current_entry_for(reference).cloned() {
+                    targets.push((entry, display.connector.clone()));
+                }
+            }
+        }
+        targets
     }
 
     fn use_playlist(&mut self, value: Option<&str>) -> Result<String, String> {
@@ -308,8 +313,14 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn reload(&mut self, at: NaiveDateTime) -> Result<String, String> {
         let next = Config::load(&self.config_path).map_err(|error| error.to_string())?;
+        let old_targets = self.current_targets();
         let old_entries = self.current_entry_ids();
-        self.driver.reconfigure(next.renderer.clone());
+        let renderer_changed = next.renderer != self.config.renderer;
+        let dynamics_changed =
+            next.settings.dynamics_enabled != self.config.settings.dynamics_enabled;
+        if renderer_changed {
+            self.driver.reconfigure(next.renderer.clone());
+        }
         self.config = next;
         self.shuffle = self.config.settings.shuffle;
         if let Some(manual) = &self.manual_playlist {
@@ -329,7 +340,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .to_string()
         };
         self.rebuild_cursors(&old_entries)?;
-        self.apply_current()?;
+        if renderer_changed || dynamics_changed || old_targets != self.current_targets() {
+            self.apply_current()?;
+        }
         Ok("reloaded".into())
     }
 
@@ -337,10 +350,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.config
             .playlist(&self.active_playlist)
             .ok_or_else(|| format!("active playlist {:?} is missing", self.active_playlist))
-    }
-
-    fn current_entry(&self) -> Option<&Entry> {
-        self.current_entry_for(&self.active_playlist)
     }
 
     fn current_entry_for(&self, reference: &str) -> Option<&Entry> {
@@ -434,10 +443,21 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn status_json(&self) -> Result<String, String> {
-        let playlist = self.playlist()?;
-        let entry = self.current_entry();
+        let active_playlist = self.playlist()?;
+        let effective_ids = self.effective_playlist_ids();
+        let summary_playlist = if self.manual_playlist.is_some()
+            || self.schedule_overrode_default
+            || self.config.displays.is_empty()
+        {
+            Some(active_playlist)
+        } else if effective_ids.len() == 1 {
+            self.config.playlist(&effective_ids[0])
+        } else {
+            None
+        };
+        let entry = summary_playlist.and_then(|playlist| self.current_entry_for(&playlist.id));
         let kind = entry.map(|entry| entry_kind(entry.kind));
-        let active_ids: HashSet<_> = self.effective_playlist_ids().into_iter().collect();
+        let active_ids: HashSet<_> = effective_ids.into_iter().collect();
         let playlists = self
             .config
             .playlists
@@ -454,8 +474,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             if let Some(entry) = entry {
                 displays.push(DisplayStatus {
                     connector: "ALL",
-                    playlist_id: &playlist.id,
-                    playlist: &playlist.name,
+                    playlist_id: &active_playlist.id,
+                    playlist: &active_playlist.name,
                     entry_id: &entry.id,
                     kind: entry_kind(entry.kind),
                     still: entry.still.display().to_string(),
@@ -485,8 +505,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
         serde_json::to_string(&Status {
-            playlist_id: &playlist.id,
-            playlist: &playlist.name,
+            playlist_id: summary_playlist.map_or("", |playlist| playlist.id.as_str()),
+            playlist: summary_playlist
+                .map_or("Multiple displays", |playlist| playlist.name.as_str()),
             source: if self.manual_playlist.is_some() {
                 "manual"
             } else {

@@ -53,6 +53,8 @@ def _palette(policy: pairings.PalettePolicy, generator: str) -> str:
         return f'{{ kind = "keep", mode = {_quote(mode)} }}'
     if policy.is_adaptive:
         return f'{{ kind = "adaptive", scheme = {_quote(generator)}, mode = {_quote(mode)} }}'
+    if policy.kind not in ("builtin", "community", "custom") or not policy.name:
+        return f'{{ kind = "keep", mode = {_quote(mode)} }}'
     return (
         f'{{ kind = "named", source = {_quote(policy.kind)}, '
         f"name = {_quote(policy.name)}, mode = {_quote(mode)} }}"
@@ -107,6 +109,8 @@ def render(settings: config.Settings, session: Session) -> str:
             compiled = _resolved_entry(found_item, session, authored_entry.id)
             if compiled is not None:
                 resolved.append(compiled)
+        if not resolved:
+            continue
         playlists.append((playlist.id, playlist.name, tuple(resolved)))
         existing_ids.add(playlist.id)
 
@@ -168,7 +172,10 @@ def render(settings: config.Settings, session: Session) -> str:
             lines.append(f'end = "{rule.end // 60:02d}:{rule.end % 60:02d}"')
         lines.append(f"enabled = {str(rule.enabled).lower()}")
 
-    for connector, assigned_playlist in session.displays.all():
+    assignments = session.displays.all()
+    if not assignments and settings.output:
+        assignments = ((settings.output, default),)
+    for connector, assigned_playlist in assignments:
         if assigned_playlist not in existing_ids:
             continue
         lines.extend(

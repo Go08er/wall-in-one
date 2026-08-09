@@ -36,3 +36,16 @@ absent time window mean “any”. Rules stay ordered because the last match win
 This file contains configuration only. Cursor, pause state, shuffle order, the
 manual playlist override, renderer PIDs, and current status are runtime state
 and never get written into it.
+
+Display assignments are the baseline when no schedule rule matches. A matching
+schedule rule overrides assignments for its window, and a manual
+`playlist-use` overrides both until `schedule-follow`. Each connector owns its
+own mpvpaper or linux-wallpaperengine child; switching one does not stop a
+renderer owned for another connector. Noctalia's colour palette is global, so
+when displays show different entries the last applied connector's palette is
+the shell-wide palette.
+
+`status` retains its top-level active playlist for compact bar clients and also
+returns a `displays` array with the effective playlist and entry for every
+connector (`ALL` when the config has no explicit assignments). This avoids
+pretending that a multi-display baseline has one wallpaper.

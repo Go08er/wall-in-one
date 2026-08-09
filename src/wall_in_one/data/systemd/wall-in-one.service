@@ -6,8 +6,8 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=wall-in-one --service
-Restart=on-failure
+ExecStart=wall-in-one-service
+Restart=on-abnormal
 RestartSec=2
 
 [Install]

@@ -207,6 +207,13 @@ impl Config {
         if self.settings.cycle_interval_seconds < 5 {
             return invalid("cycle_interval_seconds must be at least 5");
         }
+        if self.renderer.video_volume > 100 || self.renderer.scene_volume > 100 {
+            return invalid("renderer volume must be between 0 and 100");
+        }
+        if self.renderer.scene_fps == 0 || self.renderer.scene_fps > 240 {
+            return invalid("scene_fps must be between 1 and 240");
+        }
+        nonempty("renderer layer", &self.renderer.layer)?;
         for (label, path) in [
             ("noctalia_program", &self.renderer.noctalia_program),
             ("mpvpaper_program", &self.renderer.mpvpaper_program),

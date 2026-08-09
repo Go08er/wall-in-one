@@ -63,7 +63,8 @@ The result contains PNG screenshots named `wall-in-one-media.png`,
 `wall-in-one-schedules.png`. The test also verifies that:
 
 - niri exposes a visible output and Noctalia loads the companion plugin;
-- `wall-in-one --service` owns a responsive control socket;
+- `wall-in-one-service` starts from a handwritten resolved config and owns a
+  responsive runtime socket without importing Python;
 - Media, Pairings, Playlists, and Display schedules open in the running app;
 - closing the GUI leaves the same service process alive and rotation advances;
 - a control-socket playlist switch changes the active media;

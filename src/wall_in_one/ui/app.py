@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sys
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -57,7 +58,7 @@ SCHEDULE_TICK_SECONDS: Final = 60
 class Application(Adw.Application):
     """Owns app-wide state: settings, the live palette, and the CSS provider."""
 
-    def __init__(self, *, service: bool = False) -> None:
+    def __init__(self, *, service: bool = False, initial_page: str | None = None) -> None:
         super().__init__(
             application_id=paths.APPLICATION_ID,
             # IS_SERVICE suppresses the initial activation, so `--service`
@@ -69,6 +70,7 @@ class Application(Adw.Application):
             ),
         )
         self._service_start = service
+        self._initial_page = initial_page
         self._held = False
         self._settings = config.load()
         self._window: MainWindow | None = None
@@ -88,8 +90,9 @@ class Application(Adw.Application):
         # The process, rather than the last window, owns rotation and the
         # calendar. Exactly one hold is released by `ctl quit`; closing every
         # window therefore leaves the service and its timers alive.
-        self.hold()
-        self._held = True
+        if self._service_start:
+            self.hold()
+            self._held = True
         display = Gdk.Display.get_default()
         if display is not None:
             Gtk.StyleContext.add_provider_for_display(
@@ -130,6 +133,10 @@ class Application(Adw.Application):
         self.refresh_library()
         assert self._window is not None
         self._window.present()
+        if self._initial_page is not None:
+            page = "schedules" if self._initial_page == "displays" else self._initial_page
+            self._window.show_page(page)
+            self._initial_page = None
 
     def do_shutdown(self) -> None:
         self._stop_cycle()
@@ -240,6 +247,7 @@ class Application(Adw.Application):
         self._publish_runtime()
         if self._window is not None:
             self._window.show_library(self._session)
+            self._runtime_is_running()
         self._make_missing_stills()
 
     def _publish_runtime(self) -> None:
@@ -254,9 +262,18 @@ class Application(Adw.Application):
 
     def _runtime_is_running(self) -> bool:
         try:
-            return client.send_runtime("status", timeout=0.25).ok
+            response = client.send_runtime("status", timeout=0.25)
         except client.ControlError:
             return False
+        if response.ok and self._window is not None:
+            try:
+                status = json.loads(response.message)
+            except ValueError:
+                pass
+            else:
+                if isinstance(status, dict):
+                    self._window.show_runtime_status(status)
+        return response.ok
 
     def runtime_action(self, verb: str) -> Response:
         """Drive the Rust runtime, retaining Python application as fallback."""
@@ -585,11 +602,11 @@ class Application(Adw.Application):
 class _Commands:
     """Control-socket verb implementations.
 
-    Thin on purpose: each verb is one call into the session plus a sentence
-    describing what happened. The first nine are the whole surface the Noctalia
-    plugin drives; the library six and the browsing three are for a terminal.
-    The browsing three are the only ones that answer later rather than at once,
-    because they wait on a website.
+    Thin on purpose: each verb is one call into the authoring session plus a
+    sentence describing what happened. Runtime controls go directly to the
+    Rust socket; this socket retains library, pairing, playlist, schedule and
+    provider authoring. The browsing verbs are the only ones that answer later
+    rather than at once, because they wait on a website.
 
     What is thin here is not the same as easy. Every verb below that takes a
     path hands it to `control.server` to be resolved against the library before
@@ -1015,10 +1032,15 @@ class _Commands:
         return Response.success("quitting")
 
 
-def run(argv: list[str] | None = None, *, service: bool = False) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    service: bool = False,
+    initial_page: str | None = None,
+) -> int:
     # GtkApplication overwrites prgname with the application id on Wayland, so
     # setting it here would be cosmetic at best and misleading at worst. The
     # Wayland app-id comes from paths.APPLICATION_ID; see docs/niri.md.
     GLib.set_application_name("Wall-in-One")
-    application = Application(service=service)
+    application = Application(service=service, initial_page=initial_page)
     return application.run(argv if argv is not None else [])

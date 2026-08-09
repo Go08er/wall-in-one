@@ -2,6 +2,7 @@ use chrono::Local;
 use std::env;
 use std::fs;
 use std::io::BufReader;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,7 @@ fn parse() -> Result<Options, String> {
 }
 
 fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let mut reader = BufReader::new(&stream);
     let response = match read_request(&mut reader) {
         Ok(request) => runtime.handle(request, Local::now().naive_local()),
@@ -87,9 +89,9 @@ fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) {
     let _ = write_response(&mut writer, &response);
 }
 
-fn fingerprint(path: &Path) -> Option<(u64, SystemTime)> {
+fn fingerprint(path: &Path) -> Option<(u64, u64, SystemTime)> {
     let metadata = fs::metadata(path).ok()?;
-    Some((metadata.len(), metadata.modified().ok()?))
+    Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
 }
 
 fn run() -> Result<(), String> {
@@ -153,11 +155,13 @@ fn run() -> Result<(), String> {
                     },
                     Local::now().naive_local(),
                 );
-                if response.ok {
-                    known = current;
-                } else {
+                if !response.ok {
                     eprintln!("wall-in-one-service: reload: {}", response.message);
                 }
+                // A broken generation is reported once. The next atomic
+                // rename changes the inode and gets another attempt; polling
+                // the same bad bytes forever would only spam the journal.
+                known = current;
             }
             next_config_check = now + Duration::from_secs(1);
         }

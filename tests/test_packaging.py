@@ -144,8 +144,8 @@ def test_the_systemd_unit_runs_the_windowless_service() -> None:
     parser.read_string(SYSTEMD_PATH.read_text(encoding="utf-8"))
     service = parser["Service"]
     assert service["Type"] == "simple"
-    assert service["ExecStart"] == "wall-in-one --service"
-    assert service["Restart"] == "on-failure"
+    assert service["ExecStart"] == "wall-in-one-service"
+    assert service["Restart"] == "on-abnormal"
     assert parser["Install"]["WantedBy"] == "graphical-session.target"
 
 

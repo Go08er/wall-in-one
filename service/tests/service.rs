@@ -4,11 +4,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::Config;
 use wall_in_one_service::protocol::Response;
 use wall_in_one_service::renderer::{SystemDriver, WallpaperDriver};
+use wall_in_one_service::runtime::Runtime;
 
 fn directory(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -123,7 +125,7 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
     let config_path = root.join("runtime.toml");
     let socket = root.join("runtime.sock");
     let harmless = root.join("harmless");
-    fs::write(&harmless, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+    fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
@@ -155,6 +157,15 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
         "shuffle on"
     );
     assert_eq!(request(&socket, "schedule-follow", None)["ok"], true);
+    fs::write(&config_path, "schema_version = 99\n").unwrap();
+    assert_eq!(request(&socket, "reload", None)["ok"], false);
+    let status = request(&socket, "status", None);
+    let status: serde_json::Value =
+        serde_json::from_str(status["message"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        status["playlist_id"], "day",
+        "failed reload keeps valid runtime state"
+    );
     stop(&mut child, &socket);
     fs::remove_dir_all(root).unwrap();
 }
@@ -201,4 +212,75 @@ fn schedule_clock_remains_injectable_in_the_runtime_layer() {
         .and_hms_opt(23, 0, 0)
         .unwrap();
     assert_eq!(at.format("%H:%M").to_string(), "23:00");
+}
+
+#[derive(Clone)]
+struct RecordingDriver(Arc<Mutex<Vec<(String, String)>>>);
+
+impl WallpaperDriver for RecordingDriver {
+    fn apply(
+        &mut self,
+        entry: &wall_in_one_service::config::Entry,
+        output: &str,
+        _settings: &wall_in_one_service::config::Settings,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((output.into(), entry.id.clone()));
+        Ok(())
+    }
+    fn set_paused(&mut self, _paused: bool) {}
+    fn reconfigure(&mut self, _settings: wall_in_one_service::config::RendererSettings) {}
+    fn stop(&mut self) {}
+}
+
+#[test]
+fn display_assignment_is_the_baseline_and_manual_override_wins() {
+    let mut parsed: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    parsed.schedules.clear();
+    parsed.validate().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RecordingDriver(events.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        &[("DP-1".into(), "scene-three".into())]
+    );
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    assert_eq!(status["displays"][0]["connector"], "DP-1");
+    assert_eq!(status["displays"][0]["playlist_id"], "night");
+    assert_eq!(status["displays"][0]["entry_id"], "scene-three");
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "playlist-use".into(),
+            argument: Some("day".into()),
+        },
+        at,
+    );
+    assert_eq!(
+        events.lock().unwrap().last(),
+        Some(&("DP-1".into(), "still-one".into()))
+    );
 }

@@ -32,9 +32,9 @@
         # spelled once here so the three names cannot drift apart.
         applicationId = "dev.goober.WallInOne";
 
-        # Runtime tools the app shells out to. noctalia is deliberately *not*
-        # here: the app degrades gracefully without it, and hard-depending on
-        # it would force a shell install on someone who only wants the manager.
+        # Runtime tools bundled with the app. Noctalia remains the selected
+        # shell endpoint rather than another copy in this closure: authoring
+        # works without it, while runtime status reports application failures.
         runtimeTools = [
           pkgs.mpvpaper
           # True Wallpaper Engine scenes and their full-resolution stills.
@@ -46,6 +46,28 @@
           # library accepts with one code path.
           pkgs.ffmpeg
         ];
+
+        wall-in-one-service = pkgs.rustPlatform.buildRustPackage {
+          pname = "wall-in-one-service";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ./service;
+            fileset = pkgs.lib.fileset.unions [
+              ./service/Cargo.toml
+              ./service/Cargo.lock
+              ./service/src
+              ./service/tests
+            ];
+          };
+          cargoLock.lockFile = ./service/Cargo.lock;
+          doCheck = true;
+          meta = with pkgs.lib; {
+            description = "Small session runtime for Wall-in-One";
+            mainProgram = "wall-in-one-service";
+            platforms = platforms.linux;
+            license = licenses.mit;
+          };
+        };
 
         wall-in-one = python.pkgs.buildPythonApplication {
           pname = "wall-in-one";
@@ -103,10 +125,13 @@
               $out/share/icons/hicolor/scalable/apps/${applicationId}.svg
             install -Dm644 src/wall_in_one/data/systemd/wall-in-one.service \
               $out/lib/systemd/user/wall-in-one.service
+            install -Dm755 ${wall-in-one-service}/bin/wall-in-one-service \
+              $out/bin/wall-in-one-service
             substituteInPlace $out/share/applications/${applicationId}.desktop \
               --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
             substituteInPlace $out/lib/systemd/user/wall-in-one.service \
-              --replace-fail "ExecStart=wall-in-one" "ExecStart=$out/bin/wall-in-one"
+              --replace-fail "ExecStart=wall-in-one-service" \
+              "ExecStart=$out/bin/wall-in-one-service"
           '';
 
           # buildPythonApplication's wrapper and wrapGAppsHook4's wrapper both
@@ -128,7 +153,7 @@
       {
         packages = {
           default = wall-in-one;
-          inherit wall-in-one;
+          inherit wall-in-one wall-in-one-service;
         };
 
         apps =
@@ -141,7 +166,7 @@
           };
 
         checks = {
-          inherit wall-in-one;
+          inherit wall-in-one wall-in-one-service;
 
           mypy =
             pkgs.runCommand "wall-in-one-mypy"
@@ -223,6 +248,10 @@
             pkgs.gobject-introspection
             pkgs.gsettings-desktop-schemas
             pkgs.ruff
+            pkgs.cargo
+            pkgs.clippy
+            pkgs.rustc
+            pkgs.rustfmt
           ] ++ runtimeTools;
 
           shellHook = ''

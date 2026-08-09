@@ -104,6 +104,9 @@ verb. This preserves the one-way app-to-service configuration boundary.
 
 Started by the Noctalia plugin, owned by the shell session, exits with it. The
 plugin prefers `wall-in-one.service` and falls back to `wall-in-one --service`.
+The packaged unit now starts `wall-in-one-service`; the Python `--service`
+command remains a compatibility fallback until the plugin can prefer the Rust
+binary explicitly when no user unit exists.
 
 ---
 
@@ -121,6 +124,12 @@ Measured RSS of the windowless Python service on the development machine:
 31 MB of that is a GUI toolkit loaded into a process with no window. CPU is
 irrelevant — it sleeps and wakes once a minute. This is a memory argument only.
 Target: single-digit MB.
+
+The packaged release service, running by itself from the handwritten schema-1
+fixture, measured **about 2.8 MB RSS** (repeat probes: `2784–2800 kB`; virtual
+size: `3764–3768 kB`) on the same development machine. That is about 4% of the
+former 71.1 MB process. The measurement deliberately did not start or import
+the Python application.
 
 **Rejected: dropping GTK from the Python service** (~25 MB, a 3x win for a
 small change). Worth knowing as a fallback, but the user wants an always-on
@@ -170,23 +179,20 @@ it's quite efficient, the issue is with its backend."* This machine has nvidia
 (`/dev/nvidia0` and `nvidia-smi` both present) with a single output, so the
 nvidia half of that applies even though the multi-monitor half does not yet.
 
-**"Drop-in" does not hold for how this app invokes mpvpaper.** The post says a
-symlink is enough and the same commands work. That is true for simple use and
-false for ours. This app runs:
+The launch surface is closer to mpvpaper than an earlier review recorded.
+`--layer`, `--auto-pause`, and `--auto-stop` are identical. Its `-o` is
+`--gst-options`, the direct analogue of mpvpaper's mpv-options string, so these
+flags are not in themselves a migration blocker. The current implementation
+runs:
 
     mpvpaper --layer background [--auto-pause] -o "<mpv options>" ALL <video>
 
-In mpvpaper `-o` takes a *string of mpv options*. In gSlapper `-o` selects a
-*scaling mode* (`fill`, `stretch`, `original`, `panscan`). Same flag, different
-meaning. Worse, the options this app pushes through `-o` include
-`--input-ipc-server`, which is how mute and volume are changed on a wallpaper
-that is already playing. gSlapper has its own socket for pause/resume, and its
-README does not mention volume at all.
-
-So gSlapper is a **second renderer implementation behind the seam**, not a
-symlink swap. The service's video renderer is being written behind a small
-interface (start, stop, pause, volume, target an output) so that adding it
-later is cheap.
+The real functional gap is audio. gSlapper has no volume control; audio is
+only on/off at launch through `-o "no-audio"`, while Wall-in-One preserves and
+changes mpv volume live. It therefore remains a **second renderer
+implementation behind the seam**, not a symlink swap. The Rust service's video
+renderer interface is start, stop, pause, volume and target-output, with
+mpvpaper as its only implementation for now.
 
 **The efficiency claim is unquantified.** The README says "lower CPU, RAM and
 GPU use than mpvpaper on any Wayland compositor" and gives no numbers. Before

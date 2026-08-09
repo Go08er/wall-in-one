@@ -19,6 +19,17 @@ pub struct Status<'a> {
     pub shuffle: bool,
     pub cycle_enabled: bool,
     pub last_error: &'a str,
+    pub displays: Vec<DisplayStatus<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DisplayStatus<'a> {
+    pub connector: &'a str,
+    pub playlist_id: &'a str,
+    pub playlist: &'a str,
+    pub entry_id: &'a str,
+    pub kind: &'a str,
+    pub still: String,
 }
 
 pub struct Runtime<D: WallpaperDriver> {
@@ -27,6 +38,7 @@ pub struct Runtime<D: WallpaperDriver> {
     driver: D,
     manual_playlist: Option<String>,
     active_playlist: String,
+    schedule_overrode_default: bool,
     order: Vec<usize>,
     cursor: usize,
     paused: bool,
@@ -44,9 +56,10 @@ impl<D: WallpaperDriver> Runtime<D> {
         driver: D,
         at: NaiveDateTime,
     ) -> Result<Self, String> {
-        let active = schedule::resolve(&config.schedules, &config.default_playlist, at)
-            .map_err(|error| error.to_string())?
-            .to_string();
+        let scheduled =
+            schedule::resolve_override(&config.schedules, at).map_err(|error| error.to_string())?;
+        let schedule_overrode_default = scheduled.is_some();
+        let active = scheduled.unwrap_or(&config.default_playlist).to_string();
         let shuffle = config.settings.shuffle;
         let mut runtime = Self {
             config_path,
@@ -54,6 +67,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             driver,
             manual_playlist: None,
             active_playlist: active,
+            schedule_overrode_default,
             order: vec![],
             cursor: 0,
             paused: false,
@@ -101,7 +115,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             "shuffle" => self.set_shuffle(request.argument.as_deref()),
             "next" => self.move_by(1),
-            "previous" | "prev" => self.move_by(-1),
+            "previous" => self.move_by(-1),
             "random" => self.random_entry(),
             "status" => {
                 return match self.status_json() {
@@ -125,15 +139,18 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     pub fn tick(&mut self, at: NaiveDateTime, now: Instant) {
         if self.manual_playlist.is_none() {
-            if let Ok(wanted) =
-                schedule::resolve(&self.config.schedules, &self.config.default_playlist, at)
-            {
+            if let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at) {
+                let overrode = scheduled.is_some();
+                let wanted = scheduled
+                    .unwrap_or(&self.config.default_playlist)
+                    .to_string();
                 if wanted != self.active_playlist {
-                    self.active_playlist = wanted.to_string();
+                    self.active_playlist = wanted;
                     if self.rebuild_order(None).is_ok() {
                         let _ = self.apply_current();
                     }
                 }
+                self.schedule_overrode_default = overrode;
             }
         }
         if !self.paused
@@ -147,20 +164,52 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
-        let entry = self
+        let current = self
             .current_entry()
             .cloned()
             .ok_or("active playlist is empty")?;
-        let result = self.driver.apply(&entry, "", &self.config.settings);
-        match result {
-            Ok(()) => {
-                self.last_error.clear();
-                Ok(format!("playing {}", entry.id))
+        let mut targets = Vec::new();
+        if self.config.displays.is_empty() {
+            targets.push((current.clone(), String::new()));
+        } else {
+            for display in &self.config.displays {
+                let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
+                {
+                    &self.active_playlist
+                } else {
+                    &display.playlist
+                };
+                let playlist = self.config.playlist(reference).ok_or_else(|| {
+                    format!("display {} names a missing playlist", display.connector)
+                })?;
+                if !playlist.entries.is_empty() {
+                    targets.push((
+                        playlist.entries[self.cursor % playlist.entries.len()].clone(),
+                        display.connector.clone(),
+                    ));
+                }
             }
-            Err(error) => {
-                self.last_error = error.clone();
-                Err(error)
+        }
+        if targets.is_empty() {
+            return Err("active display playlists are empty".into());
+        }
+        let mut errors = Vec::new();
+        for (entry, output) in targets {
+            if let Err(error) = self.driver.apply(&entry, &output, &self.config.settings) {
+                errors.push(if output.is_empty() {
+                    error
+                } else {
+                    format!("{output}: {error}")
+                });
             }
+        }
+        if errors.is_empty() {
+            self.last_error.clear();
+            Ok(format!("playing {}", current.id))
+        } else {
+            let error = errors.join("; ");
+            self.last_error = error.clone();
+            Err(error)
         }
     }
 
@@ -175,30 +224,32 @@ impl<D: WallpaperDriver> Runtime<D> {
             .ok_or_else(|| format!("no such playlist {reference:?}"))?;
         self.manual_playlist = Some(playlist.id.clone());
         self.active_playlist = playlist.id.clone();
+        self.schedule_overrode_default = false;
         self.rebuild_order(None)?;
         self.apply_current()
     }
 
     fn follow_schedule(&mut self, at: NaiveDateTime) -> Result<String, String> {
         self.manual_playlist = None;
-        self.active_playlist =
-            schedule::resolve(&self.config.schedules, &self.config.default_playlist, at)
-                .map_err(|error| error.to_string())?
-                .to_string();
+        let scheduled = schedule::resolve_override(&self.config.schedules, at)
+            .map_err(|error| error.to_string())?;
+        self.schedule_overrode_default = scheduled.is_some();
+        self.active_playlist = scheduled
+            .unwrap_or(&self.config.default_playlist)
+            .to_string();
         self.rebuild_order(None)?;
         self.apply_current()
     }
 
     fn set_shuffle(&mut self, value: Option<&str>) -> Result<String, String> {
         self.shuffle = match value
-            .unwrap_or("toggle")
+            .ok_or("usage: shuffle on|off")?
             .trim()
             .to_ascii_lowercase()
             .as_str()
         {
             "on" | "true" | "1" => true,
             "off" | "false" | "0" => false,
-            "toggle" => !self.shuffle,
             _ => return Err("usage: shuffle on|off".into()),
         };
         let current = self.current_entry().map(|entry| entry.id.clone());
@@ -243,10 +294,14 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
         self.active_playlist = if let Some(manual) = &self.manual_playlist {
+            self.schedule_overrode_default = false;
             manual.clone()
         } else {
-            schedule::resolve(&self.config.schedules, &self.config.default_playlist, at)
-                .map_err(|error| error.to_string())?
+            let scheduled = schedule::resolve_override(&self.config.schedules, at)
+                .map_err(|error| error.to_string())?;
+            self.schedule_overrode_default = scheduled.is_some();
+            scheduled
+                .unwrap_or(&self.config.default_playlist)
                 .to_string()
         };
         self.rebuild_order(old_entry.as_deref())?;
@@ -287,11 +342,43 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn status_json(&self) -> Result<String, String> {
         let playlist = self.playlist()?;
         let entry = self.current_entry();
-        let kind = entry.map(|entry| match entry.kind {
-            crate::config::EntryKind::Still => "still",
-            crate::config::EntryKind::Video => "video",
-            crate::config::EntryKind::Scene => "scene",
-        });
+        let kind = entry.map(|entry| entry_kind(entry.kind));
+        let mut displays = Vec::new();
+        if self.config.displays.is_empty() {
+            if let Some(entry) = entry {
+                displays.push(DisplayStatus {
+                    connector: "ALL",
+                    playlist_id: &playlist.id,
+                    playlist: &playlist.name,
+                    entry_id: &entry.id,
+                    kind: entry_kind(entry.kind),
+                    still: entry.still.display().to_string(),
+                });
+            }
+        } else {
+            for display in &self.config.displays {
+                let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
+                {
+                    &self.active_playlist
+                } else {
+                    &display.playlist
+                };
+                let effective = self.config.playlist(reference).ok_or_else(|| {
+                    format!("display {} names a missing playlist", display.connector)
+                })?;
+                if !effective.entries.is_empty() {
+                    let entry = &effective.entries[self.cursor % effective.entries.len()];
+                    displays.push(DisplayStatus {
+                        connector: &display.connector,
+                        playlist_id: &effective.id,
+                        playlist: &effective.name,
+                        entry_id: &entry.id,
+                        kind: entry_kind(entry.kind),
+                        still: entry.still.display().to_string(),
+                    });
+                }
+            }
+        }
         serde_json::to_string(&Status {
             playlist_id: &playlist.id,
             playlist: &playlist.name,
@@ -307,8 +394,17 @@ impl<D: WallpaperDriver> Runtime<D> {
             shuffle: self.shuffle,
             cycle_enabled: self.config.settings.cycle_enabled,
             last_error: &self.last_error,
+            displays,
         })
         .map_err(|error| error.to_string())
+    }
+}
+
+fn entry_kind(kind: crate::config::EntryKind) -> &'static str {
+    match kind {
+        crate::config::EntryKind::Still => "still",
+        crate::config::EntryKind::Video => "video",
+        crate::config::EntryKind::Scene => "scene",
     }
 }
 

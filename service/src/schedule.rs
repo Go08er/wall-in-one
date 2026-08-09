@@ -16,10 +16,17 @@ pub fn resolve<'a>(
     fallback: &'a str,
     at: NaiveDateTime,
 ) -> Result<&'a str, ConfigError> {
-    let mut chosen = fallback;
+    Ok(resolve_override(rules, at)?.unwrap_or(fallback))
+}
+
+pub fn resolve_override(
+    rules: &[ScheduleRule],
+    at: NaiveDateTime,
+) -> Result<Option<&str>, ConfigError> {
+    let mut chosen = None;
     for rule in rules {
         if matches(rule, at)? {
-            chosen = &rule.playlist;
+            chosen = Some(rule.playlist.as_str());
         }
     }
     Ok(chosen)

@@ -72,6 +72,57 @@ let
     }
   );
 
+  runtimeConfig = pkgs.writeText "wall-in-one-vm-runtime.toml" ''
+    schema_version = 1
+    default_playlist = "day"
+
+    [settings]
+    cycle_interval_seconds = 5
+    cycle_enabled = true
+    shuffle = false
+    dynamics_enabled = true
+
+    [renderer]
+    noctalia_program = "${lib.getExe pkgs.noctalia}"
+    mpvpaper_program = "${lib.getExe pkgs.mpvpaper}"
+    linux_wallpaperengine_program = "${lib.getExe pkgs.linux-wallpaperengine}"
+    own_scene_renderer = false
+    layer = "background"
+    video_when_hidden = "pause"
+    video_hardware_decode = true
+    video_muted = true
+    video_volume = 0
+    scene_fps = 30
+    scene_muted = true
+    scene_volume = 0
+    scene_pause_when_covered = true
+    scene_scaling = ""
+    scene_clamp = ""
+
+    [[playlists]]
+    id = "day"
+    name = "Day samples"
+    [[playlists.entries]]
+    id = "day-grid"
+    kind = "still"
+    still = "${mediaDir}/colour-grid.png"
+    palette = { kind = "keep", mode = "keep" }
+    [[playlists.entries]]
+    id = "day-bars"
+    kind = "still"
+    still = "${mediaDir}/colour-bars.png"
+    palette = { kind = "keep", mode = "keep" }
+
+    [[playlists]]
+    id = "night"
+    name = "Night samples"
+    [[playlists.entries]]
+    id = "night-grid"
+    kind = "still"
+    still = "${mediaDir}/night-grid.png"
+    palette = { kind = "keep", mode = "keep" }
+  '';
+
   noctaliaSettings = pkgs.writeText "wall-in-one-vm-noctalia.toml" ''
     config_version = 8
 
@@ -238,8 +289,8 @@ in
     # instead of silently degrading to wallpaper-only application.
     path = [ pkgs.noctalia ];
     serviceConfig = {
-      ExecStart = "${wallInOnePackage}/bin/wall-in-one --service";
-      Restart = "on-failure";
+      ExecStart = "${wallInOnePackage}/bin/wall-in-one-service";
+      Restart = "on-abnormal";
       RestartSec = 2;
     };
   };
@@ -263,6 +314,7 @@ in
       install -m 0644 ${appSettings} "${home}/.config/wall-in-one/settings.toml"
       install -m 0644 ${playlists} "${home}/.local/state/wall-in-one/playlists.json"
       install -m 0644 ${schedules} "${home}/.local/state/wall-in-one/schedules.json"
+      install -m 0644 ${runtimeConfig} "${home}/.local/state/wall-in-one/runtime.toml"
       install -m 0644 ${noctaliaSettings} "${home}/.local/state/noctalia/settings.toml"
       touch "${home}/.local/state/noctalia/.setup-complete"
       cp --no-preserve=mode,ownership ${sampleMedia}/* "${mediaDir}/"

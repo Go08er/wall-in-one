@@ -122,6 +122,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._pairings_page = PairingsPage(application)
         self._playlists_page = PlaylistsPage(application)
         self._schedules_page = SchedulesPage(application)
+        self._runtime_summary = ""
 
         self.set_content(self._build_content())
         self.connect("destroy", self._on_destroy)
@@ -461,7 +462,20 @@ class MainWindow(Adw.ApplicationWindow):
         summary = self._summary
         if self._query.narrows:
             summary = f"Showing {self._grid.visible_count} of {self._playable} - {summary}"
+        if self._runtime_summary:
+            summary += f" · {self._runtime_summary}"
         self._subtitle.set_subtitle(summary)
+
+    def show_runtime_status(self, status: dict[str, object]) -> None:
+        """Show service-owned truth rather than only the last authored choice."""
+        playlist = status.get("playlist")
+        source = status.get("source")
+        paused = status.get("paused")
+        if not isinstance(playlist, str) or not isinstance(source, str):
+            return
+        state = "paused" if paused is True else "playing"
+        self._runtime_summary = f"{state} {playlist} ({source})"
+        self._update_subtitle()
 
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:
         """Star or unstar one wallpaper, and tell the user if it did not stick."""

@@ -2,6 +2,7 @@ use crate::config::{
     Entry, EntryKind, Palette, PaletteSource, RendererSettings, ThemeMode, VideoWhenHidden,
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -161,34 +162,35 @@ impl VideoRenderer for Mpvpaper {
     }
 }
 
-pub struct SystemDriver<V: VideoRenderer = Mpvpaper> {
+pub struct SystemDriver {
     settings: RendererSettings,
-    video: V,
-    scene: Option<Child>,
+    videos: HashMap<String, Mpvpaper>,
+    scenes: HashMap<String, Child>,
 }
 
-impl SystemDriver<Mpvpaper> {
+impl SystemDriver {
     pub fn new(settings: RendererSettings) -> Self {
         Self {
             settings,
-            video: Mpvpaper::new(),
-            scene: None,
-        }
-    }
-}
-
-impl<V: VideoRenderer> SystemDriver<V> {
-    #[cfg(test)]
-    pub fn with_video(settings: RendererSettings, video: V) -> Self {
-        Self {
-            settings,
-            video,
-            scene: None,
+            videos: HashMap::new(),
+            scenes: HashMap::new(),
         }
     }
 
-    fn stop_scene(&mut self) {
-        if let Some(mut child) = self.scene.take() {
+    fn key(output: &str) -> String {
+        if output.is_empty() {
+            "ALL".into()
+        } else {
+            output.into()
+        }
+    }
+
+    fn stop_output(&mut self, output: &str) {
+        let key = Self::key(output);
+        if let Some(mut video) = self.videos.remove(&key) {
+            video.stop();
+        }
+        if let Some(mut child) = self.scenes.remove(&key) {
             stop_group(&mut child);
         }
     }
@@ -286,16 +288,15 @@ impl<V: VideoRenderer> SystemDriver<V> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
-        self.scene = Some(
-            command
-                .spawn()
-                .map_err(|error| format!("cannot start linux-wallpaperengine: {error}"))?,
-        );
+        let child = command
+            .spawn()
+            .map_err(|error| format!("cannot start linux-wallpaperengine: {error}"))?;
+        self.scenes.insert(Self::key(output), child);
         Ok(())
     }
 }
 
-impl<V: VideoRenderer> WallpaperDriver for SystemDriver<V> {
+impl WallpaperDriver for SystemDriver {
     fn apply(
         &mut self,
         entry: &Entry,
@@ -303,8 +304,7 @@ impl<V: VideoRenderer> WallpaperDriver for SystemDriver<V> {
         runtime: &crate::config::Settings,
     ) -> Result<(), String> {
         // Break before make. A refused scene must expose its already-applied still.
-        self.video.stop();
-        self.stop_scene();
+        self.stop_output(output);
         self.still(entry, output)?;
         self.palette(&entry.palette);
         if !runtime.dynamics_enabled {
@@ -312,14 +312,21 @@ impl<V: VideoRenderer> WallpaperDriver for SystemDriver<V> {
         }
         match entry.kind {
             EntryKind::Still => Ok(()),
-            EntryKind::Video => self.video.start(entry, output, &self.settings),
+            EntryKind::Video => {
+                let mut video = Mpvpaper::new();
+                video.start(entry, output, &self.settings)?;
+                self.videos.insert(Self::key(output), video);
+                Ok(())
+            }
             EntryKind::Scene => self.start_scene(entry, output),
         }
     }
 
     fn set_paused(&mut self, paused: bool) {
-        let _ = self.video.set_paused(paused);
-        if let Some(child) = &self.scene {
+        for video in self.videos.values_mut() {
+            let _ = video.set_paused(paused);
+        }
+        for child in self.scenes.values() {
             unsafe {
                 libc::kill(
                     -(child.id() as i32),
@@ -330,16 +337,21 @@ impl<V: VideoRenderer> WallpaperDriver for SystemDriver<V> {
     }
 
     fn reconfigure(&mut self, settings: RendererSettings) {
+        self.stop();
         self.settings = settings;
     }
 
     fn stop(&mut self) {
-        self.video.stop();
-        self.stop_scene();
+        for (_, mut video) in self.videos.drain() {
+            video.stop();
+        }
+        for (_, mut child) in self.scenes.drain() {
+            stop_group(&mut child);
+        }
     }
 }
 
-impl<V: VideoRenderer> Drop for SystemDriver<V> {
+impl Drop for SystemDriver {
     fn drop(&mut self) {
         self.stop();
     }

@@ -106,21 +106,28 @@ option because a packaged application must not make scene support depend on
 how the desktop happened to launch it. A checkout/non-Nix launch reports the
 renderer status under **Settings -> Playback**.
 
-Noctalia is deliberately *not* a dependency. Without it the app falls back to a
-neutral palette and everything except colour sync still works.
+Noctalia is the wallpaper-and-colour application endpoint. The library and
+authoring screens still open without it, but applying a resolved entry requires
+a running Noctalia shell; renderer failures remain visible in runtime status.
 
 ### Keep rotation running after the window closes
 
-The window is a configuration surface; the service owns the control socket,
-playlist timer, and schedule timer. Start it without a window with:
+The Python window is a configuration surface. It resolves the library,
+pairings, playlists and schedules into
+`$XDG_STATE_HOME/wall-in-one/runtime.toml`; the small Rust service reads only
+that file and owns the playlist timer, schedule timer, renderer children and
+runtime socket. Start the packaged service with:
 
 ```console
-$ wall-in-one --service
+$ wall-in-one-service
 ```
 
-Opening `wall-in-one` later attaches to that same process and presents the
-window. Closing the window leaves the service running. Stop it deliberately
-with `wall-in-one ctl quit`.
+Run `wall-in-one` once to configure a library and produce the first runtime
+file. The service deliberately refuses a missing or unknown schema rather than
+guessing. Opening and closing `wall-in-one` later has no effect on rotation.
+The retained `wall-in-one --service` is a compatibility fallback during this
+transition, not the packaged unit's implementation. Stop the Rust runtime
+deliberately with `wall-in-one ctl quit`.
 
 The Nix package also installs `share/systemd/user/wall-in-one.service`. To start
 the service with the graphical session:
@@ -129,10 +136,10 @@ the service with the graphical session:
 $ systemctl --user enable --now wall-in-one.service
 ```
 
-The checked-in unit uses the bare `wall-in-one` command so it remains useful
+The checked-in unit uses the bare `wall-in-one-service` command so it remains useful
 outside Nix; the Nix package rewrites `ExecStart` to its wrapped store path.
 If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
-`wall-in-one` is on the user manager's `PATH`, then run
+`wall-in-one-service` is on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.
 
 ### Test it away from your desktop
@@ -299,21 +306,22 @@ niri 26.04 that is a four-line window rule. See [`docs/niri.md`](docs/niri.md)
 -- it covers the app-id to match, the xray caveat that matters when a video
 wallpaper is running, and what to do on older niri.
 
-## Control socket
+## Control sockets
 
-Every verb is one line of JSON over a socket in `$XDG_RUNTIME_DIR`, created at
-mode 0600. The Noctalia plugin drives the app entirely through these, so no
-socket code has to live in Luau.
+Every verb is one line of JSON over a mode-0600 socket in `$XDG_RUNTIME_DIR`.
+Runtime commands go directly to `wall-in-one-runtime.sock`; authoring and
+provider commands go to the Python app's `wall-in-one.sock`. `wall-in-one ctl`
+routes between them, so the Noctalia plugin needs no socket code in Luau.
 
 ```console
 $ wall-in-one ctl next
-$ wall-in-one ctl prev
+$ wall-in-one ctl previous
 $ wall-in-one ctl random
-$ wall-in-one ctl shuffle on|off|toggle
-$ wall-in-one ctl cycle on|off|toggle
-$ wall-in-one ctl cycle-interval 600
-$ wall-in-one ctl dynamics on|off|toggle
-$ wall-in-one ctl reload-palette
+$ wall-in-one ctl play|pause|toggle
+$ wall-in-one ctl shuffle on|off
+$ wall-in-one ctl playlist-use Evening
+$ wall-in-one ctl schedule-follow
+$ wall-in-one ctl reload
 $ wall-in-one ctl status
 $ wall-in-one ctl providers
 $ wall-in-one ctl search wallhaven aurora borealis
@@ -333,7 +341,8 @@ $ wall-in-one ctl playlists [name]
 $ wall-in-one ctl playlist-new Evening
 $ wall-in-one ctl playlist-add Evening /path/to/wallpaper.png
 $ wall-in-one ctl playlist-remove Evening <entry-id>
-$ wall-in-one ctl playlist-use Evening|none
+$ wall-in-one ctl playlist-use Evening
+$ wall-in-one ctl schedule-follow
 $ wall-in-one ctl playlist-delete Evening
 $ wall-in-one ctl schedule
 $ wall-in-one ctl open media|pairings|playlists|schedules|displays
@@ -342,11 +351,13 @@ $ wall-in-one ctl schedule-remove <rule-id>
 $ wall-in-one ctl quit
 ```
 
-`quit` is intentional service shutdown: it releases the application's lifetime
-hold and exits even when no window is open. Merely closing the window does not
-stop rotation or schedules.
+`quit` is intentional Rust-service shutdown. Merely closing the Python window
+does not stop rotation or schedules. `status` is JSON describing the active
+playlist and entry, whether the source is `manual` or `schedule`, pause and
+shuffle state, and the last renderer error.
 
-`open` presents the requested workflow in the existing service process. The
+`open` presents the requested workflow in an existing app process, or launches
+the app when only the Rust service is running. The
 `displays` spelling is an alias for the Display schedules page, so a shell or
 panel integration does not have to know that both concepts share one screen.
 
@@ -375,7 +386,7 @@ reaches everything you have not spoken for. `pairing` shows one; `still` and
 the right, so a wallpaper directory with a space in its name needs no quoting.
 
 A **playlist** is a named, ordered list, and `playlist-use` plays one now as a
-temporary override. `playlist-use none` returns control to the calendar. A
+temporary override. `schedule-follow` returns control to the calendar. A
 manual override lasts until it is released or the service restarts; it does
 not erase or disable schedule rules. Entries have identities of their own, printed by `playlists <name>`
 and taken back by `playlist-remove`, so reordering never renumbers anything and

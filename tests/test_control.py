@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import types
 from collections.abc import Callable, Sequence
@@ -232,18 +233,70 @@ def test_service_mode_reaches_the_windowless_application(
     """The CLI flag must survive the lazy GTK import unchanged."""
     from wall_in_one import cli
 
-    calls: list[bool] = []
+    calls: list[tuple[bool, str | None]] = []
     fake = types.ModuleType("wall_in_one.ui.app")
 
-    def run(_argv: list[str] | None = None, *, service: bool = False) -> int:
-        calls.append(service)
+    def run(
+        _argv: list[str] | None = None,
+        *,
+        service: bool = False,
+        initial_page: str | None = None,
+    ) -> int:
+        calls.append((service, initial_page))
         return 17
 
     fake.run = run  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wall_in_one.ui.app", fake)
 
     assert cli.main(["--service"]) == 17
-    assert calls == [True]
+    assert calls == [(True, None)]
+
+
+def test_open_page_reaches_the_gui_application(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wall_in_one import cli
+
+    calls: list[tuple[bool, str | None]] = []
+    fake = types.ModuleType("wall_in_one.ui.app")
+
+    def run(
+        _argv: list[str] | None = None,
+        *,
+        service: bool = False,
+        initial_page: str | None = None,
+    ) -> int:
+        calls.append((service, initial_page))
+        return 0
+
+    fake.run = run  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wall_in_one.ui.app", fake)
+
+    assert cli.main(["--open-page", "schedules"]) == 0
+    assert calls == [(False, "schedules")]
+
+
+def test_open_launches_the_gui_when_only_the_runtime_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one.control import client
+
+    launched: list[tuple[list[str], dict[str, object]]] = []
+
+    def absent(*_args: object, **_kwargs: object) -> Response:
+        raise client.NotRunningError("authoring app is closed")
+
+    def launch(arguments: list[str], **kwargs: object) -> object:
+        launched.append((arguments, kwargs))
+        return object()
+
+    monkeypatch.setattr(client, "send", absent)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(sys, "argv", ["/nix/store/example/bin/wall-in-one"])
+
+    assert client.dispatch("open", "playlists") == 0
+    assert capsys.readouterr().out == "opened playlists\n"
+    assert launched[0][0] == ["/nix/store/example/bin/wall-in-one", "--open-page", "playlists"]
+    assert launched[0][1]["start_new_session"] is True
 
 
 def test_handle_dispatches_and_passes_the_argument() -> None:

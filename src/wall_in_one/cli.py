@@ -88,6 +88,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the wallpaper service without opening a window",
     )
+    parser.add_argument(
+        "--open-page",
+        choices=("media", "pairings", "playlists", "schedules", "displays"),
+        help="present the GUI on one workflow page",
+    )
 
     maintenance = parser.add_argument_group("Noctalia integration")
     maintenance.add_argument(
@@ -209,7 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from wall_in_one.ui.app import run
 
-    return run(service=options.service)
+    return run(service=options.service, initial_page=options.open_page)
 
 
 if __name__ == "__main__":

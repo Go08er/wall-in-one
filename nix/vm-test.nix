@@ -42,6 +42,7 @@ pkgs.testers.runNixOSTest {
         "XDG_CACHE_HOME=${home}/.cache "
         "XDG_DATA_HOME=${home}/.local/share "
         "XDG_RUNTIME_DIR=${runtimeDir} "
+        "WAYLAND_DISPLAY=wayland-1 "
         "DBUS_SESSION_BUS_ADDRESS=unix:path=${runtimeDir}/bus "
         "XDG_DATA_DIRS=/run/current-system/sw/share "
         "LANG=C.UTF-8 "
@@ -68,10 +69,10 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("test -S ${runtimeDir}/wayland-1", timeout=30)
     machine.wait_until_succeeds(as_user("systemctl --user is-active wall-in-one.service"), timeout=30)
     machine.wait_until_succeeds(as_user("systemctl --user is-active noctalia.service"), timeout=30)
-    machine.wait_for_file("${runtimeDir}/wall-in-one.sock")
+    machine.wait_for_file("${runtimeDir}/wall-in-one-runtime.sock")
 
     with subtest("headless service owns a responsive socket"):
-        assert "cycle=on" in ctl("status")
+        machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.cycle_enabled == true'"))
         service_pid = machine.succeed(
             as_user("systemctl --user show -p MainPID --value wall-in-one.service")
         ).strip()
@@ -108,8 +109,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("closing the GUI does not stop service rotation"):
         ctl("playlist-use day")
-        ctl("cycle on")
-        before = ctl("status")
+        before = machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")).strip()
         niri("action close-window")
         machine.wait_until_succeeds(
             as_user(
@@ -119,30 +119,32 @@ pkgs.testers.runNixOSTest {
             timeout=20,
         )
         for _attempt in range(20):
-            if ctl("status") != before:
+            current = machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")).strip()
+            if current != before:
                 break
             machine.sleep(1)
         else:
             raise AssertionError("cycle timer did not advance after the GUI closed")
-        assert "cycle=on" in ctl("status")
+        machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.cycle_enabled == true'"))
 
     with subtest("the socket switches the active playlist"):
-        ctl("cycle off")
-        assert ctl("playlist-use night") == "playing Night samples"
-        assert "night-grid.png" in ctl("status")
-        assert ctl("playlist-use day") == "playing Day samples"
-        assert "night-grid.png" not in ctl("status")
+        assert ctl("playlist-use night") == "playing night-grid"
+        assert machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .still")).strip().endswith("night-grid.png")
+        assert ctl("playlist-use day").startswith("playing day-")
+        assert not machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .still")).strip().endswith("night-grid.png")
 
     with subtest("a timer observes a schedule boundary on an injected clock"):
+        ctl("open schedules")
+        machine.wait_for_file("${runtimeDir}/wall-in-one.sock")
         machine.succeed("date -s '2031-01-06 11:00:00'")
-        assert ctl("playlist-use none") == "following the display schedule"
-        assert "night-grid.png" not in ctl("status")
+        ctl("schedule-follow")
+        assert not machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .still")).strip().endswith("night-grid.png")
         assert ctl("schedule-add night from=12:00 to=13:00").startswith(
             "Night samples scheduled:"
         )
         machine.succeed("date -s '2031-01-06 12:00:00'")
         machine.wait_until_succeeds(
-            as_user("${app} ctl status | grep -F 'night-grid.png'"),
+            as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.still | endswith(\"night-grid.png\")'"),
             timeout=70,
         )
         listing = ctl("playlists")

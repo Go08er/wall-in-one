@@ -9,7 +9,9 @@ from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
 
 
-def _session(tmp_path: Path) -> tuple[config.Settings, Session]:
+def _session(
+    tmp_path: Path, *, display_assignments: dict[str, str] | None = None
+) -> tuple[config.Settings, Session]:
     still = tmp_path / "still.png"
     video = tmp_path / "video.mp4"
     representative = tmp_path / "video-still.png"
@@ -51,7 +53,9 @@ def _session(tmp_path: Path) -> tuple[config.Settings, Session]:
                 ),
             )
         ),
-        display_store=displays.Store({"DP-1": "evening"}),
+        display_store=displays.Store(
+            {"DP-1": "evening"} if display_assignments is None else display_assignments
+        ),
     )
     session.refresh()
     return settings, session
@@ -97,3 +101,27 @@ def test_unresolved_playlist_entries_are_omitted_not_looked_up(tmp_path: Path) -
     document = tomllib.loads(runtime_config.render(settings, session))
     entries = document["playlists"][1]["entries"]
     assert [entry["id"] for entry in entries] == ["entry-video"]
+
+
+def test_playlist_with_no_resolved_entries_is_not_exported(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    empty = session.playlists.create("Empty")
+    session.playlists.add(empty.id, tmp_path / "not-in-library.mp4")
+    settings = config.Settings(roots=settings.roots, active_playlist=empty.id)
+    document = tomllib.loads(runtime_config.render(settings, session))
+    assert [playlist["id"] for playlist in document["playlists"]] == [
+        "all-media",
+        "evening",
+    ]
+    assert document["default_playlist"] == "all-media"
+
+
+def test_legacy_single_output_becomes_a_resolved_display_assignment(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path, display_assignments={})
+    settings = config.Settings(
+        roots=settings.roots,
+        active_playlist="evening",
+        output="eDP-1",
+    )
+    document = tomllib.loads(runtime_config.render(settings, session))
+    assert document["displays"] == [{"connector": "eDP-1", "playlist": "evening"}]

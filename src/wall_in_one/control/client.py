@@ -7,6 +7,7 @@ This is what the Noctalia plugin reaches: every plugin control is one
 from __future__ import annotations
 
 import socket
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -141,6 +142,20 @@ def dispatch(verb: str, argument: str | None) -> int:
         else:
             response = send(Request(verb=verb, argument=argument))
     except NotRunningError as error:
+        if verb == "open" and argument:
+            try:
+                subprocess.Popen(
+                    [sys.argv[0], "--open-page", argument],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as launch_error:
+                print(f"error: cannot open Wall-in-One: {launch_error}", file=sys.stderr)
+                return 1
+            print(f"opened {argument}")
+            return 0
         print(f"{error}", file=sys.stderr)
         return EXIT_NOT_RUNNING
     except ControlError as error:

@@ -181,6 +181,41 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
 }
 
 #[test]
+fn systemd_mode_waits_quietly_for_the_first_config() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let root = directory("wait-for-config");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let stderr_path = root.join("stderr");
+    let harmless = root.join("harmless");
+    fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
+    let stderr = fs::File::create(&stderr_path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--wait-for-config")
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!socket.exists());
+    assert_eq!(fs::read_to_string(&stderr_path).unwrap(), "");
+
+    fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
+    let reply = request(&socket, "status", None);
+    assert_eq!(reply["ok"], true);
+    stop(&mut child, &socket);
+    assert_eq!(fs::read_to_string(&stderr_path).unwrap(), "");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn explicit_reload_is_not_repeated_by_the_file_watcher() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("single-reload");

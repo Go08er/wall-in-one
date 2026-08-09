@@ -112,11 +112,22 @@ an override names the application precisely to bypass `PATH`. The Python
 `--service` command stays as the fallback, so an installation predating the
 Rust runtime still starts rather than refusing to.
 
+The systemd unit adds `--wait-for-config`: a first installation quietly polls
+for the app's initial atomic document instead of failing into a five-second
+journal loop. This mode waits only for absence. A present but invalid document
+is still a hard error and the service's schema/version refusal remains visible.
+
 An ordinary Python GUI owns no cycle or schedule timer. Only the explicit
 legacy `--service` process may create those compatibility timers, and even it
 defers whenever the runtime socket has an owner. A timeout or malformed status
 reply is not treated as proof that Rust is absent; otherwise a temporarily busy
 runtime would grant Python permission to double-drive the wallpaper.
+
+The Python `--service` compatibility mode retires only after the companion
+plugin no longer invokes it **and** a release containing that plugin migration
+has shipped. Removing it before both conditions would strand installations
+whose app package predates the Rust binary. Until then it remains explicitly
+legacy and is not the packaged systemd lifetime.
 
 Generated configuration is compared as complete bytes: an unchanged document
 is not renamed into place. A changed document is reloaded explicitly, and that

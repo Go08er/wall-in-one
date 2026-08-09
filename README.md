@@ -136,12 +136,14 @@ the service with the graphical session:
 $ systemctl --user enable --now wall-in-one.service
 ```
 
-The unit retries a missing first configuration every five seconds, without a
-start-limit, so enabling it before the app's first run is safe: the first GUI
-scan writes the document and the next attempt starts. A deliberate `ctl quit`
-is a clean exit and is not restarted. The checked-in unit uses the bare
-`wall-in-one-service` command so it remains useful outside Nix; the Nix package
-rewrites `ExecStart` to its wrapped store path.
+The unit starts the runtime with `--wait-for-config`. Before the app's first
+scan it waits silently, without creating a socket or filling the journal; once
+the atomic document appears it starts normally. Invalid bytes still fail
+loudly, because waiting forever on a present but broken contract would hide an
+app/runtime version mismatch. A deliberate `ctl quit` is a clean exit and is
+not restarted. The checked-in unit uses the bare `wall-in-one-service` command
+so it remains useful outside Nix; the Nix package rewrites `ExecStart` to its
+wrapped store path.
 If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 `wall-in-one-service` is on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.

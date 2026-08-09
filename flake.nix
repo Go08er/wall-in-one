@@ -213,7 +213,7 @@
                     -o "rendered-$size.png"
                 done
                 unit=${wall-in-one}/share/systemd/user/wall-in-one.service
-                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service' "$unit"
+                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service --wait-for-config' "$unit"
                 test -x ${wall-in-one}/bin/wall-in-one-service
                 touch $out
               '';

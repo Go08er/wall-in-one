@@ -23,6 +23,7 @@ extern "C" fn terminate(_: libc::c_int) {
 struct Options {
     config: PathBuf,
     socket: PathBuf,
+    wait_for_config: bool,
 }
 
 fn xdg(variable: &str, fallback: PathBuf) -> PathBuf {
@@ -41,6 +42,7 @@ fn defaults() -> Options {
     Options {
         config: state.join("wall-in-one/runtime.toml"),
         socket: runtime.join("wall-in-one-runtime.sock"),
+        wait_for_config: false,
     }
 }
 
@@ -61,12 +63,15 @@ fn parse() -> Result<Options, String> {
                     .map(PathBuf::from)
                     .ok_or("--socket needs a path")?
             }
+            Some("--wait-for-config") => options.wait_for_config = true,
             Some("--version") => {
                 println!("wall-in-one-service {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             Some("--help") => {
-                println!("usage: wall-in-one-service [--config PATH] [--socket PATH]");
+                println!(
+                    "usage: wall-in-one-service [--config PATH] [--socket PATH] [--wait-for-config]"
+                );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument {}", argument.to_string_lossy())),
@@ -101,8 +106,37 @@ fn fingerprint(path: &Path) -> Option<(u64, u64, SystemTime)> {
     Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
 }
 
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTERM, terminate as *const () as usize);
+        libc::signal(libc::SIGINT, terminate as *const () as usize);
+    }
+}
+
+fn wait_for_config(path: &Path) -> Result<bool, String> {
+    while !TERMINATE.load(Ordering::Relaxed) {
+        match fs::metadata(path) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect config path {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn run() -> Result<(), String> {
     let options = parse()?;
+    install_signal_handlers();
+    if options.wait_for_config && !wait_for_config(&options.config)? {
+        return Ok(());
+    }
     let config = Config::load(&options.config).map_err(|error| error.to_string())?;
     let driver = SystemDriver::new(config.renderer.clone());
     let mut runtime = Runtime::new(
@@ -136,11 +170,6 @@ fn run() -> Result<(), String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
-    unsafe {
-        libc::signal(libc::SIGTERM, terminate as *const () as usize);
-        libc::signal(libc::SIGINT, terminate as *const () as usize);
-    }
-
     let mut known = fingerprint(&options.config);
     let mut next_config_check = Instant::now() + Duration::from_secs(1);
     while !runtime.should_quit() && !TERMINATE.load(Ordering::Relaxed) {

@@ -289,7 +289,7 @@ in
     # instead of silently degrading to wallpaper-only application.
     path = [ pkgs.noctalia ];
     serviceConfig = {
-      ExecStart = "${wallInOnePackage}/bin/wall-in-one-service";
+      ExecStart = "${wallInOnePackage}/bin/wall-in-one-service --wait-for-config";
       Restart = "on-failure";
       RestartSec = 5;
     };

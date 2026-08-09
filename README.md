@@ -136,8 +136,12 @@ the service with the graphical session:
 $ systemctl --user enable --now wall-in-one.service
 ```
 
-The checked-in unit uses the bare `wall-in-one-service` command so it remains useful
-outside Nix; the Nix package rewrites `ExecStart` to its wrapped store path.
+The unit retries a missing first configuration every five seconds, without a
+start-limit, so enabling it before the app's first run is safe: the first GUI
+scan writes the document and the next attempt starts. A deliberate `ctl quit`
+is a clean exit and is not restarted. The checked-in unit uses the bare
+`wall-in-one-service` command so it remains useful outside Nix; the Nix package
+rewrites `ExecStart` to its wrapped store path.
 If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 `wall-in-one-service` is on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.
@@ -354,7 +358,9 @@ $ wall-in-one ctl quit
 `quit` is intentional Rust-service shutdown. Merely closing the Python window
 does not stop rotation or schedules. `status` is JSON describing the active
 playlist and entry, whether the source is `manual` or `schedule`, pause and
-shuffle state, and the last renderer error.
+shuffle state, the playlist inventory, each display's effective entry, and the
+last renderer error. An open GUI is not accepted as a substitute for that
+runtime status: exit code 3 still means automation is not running.
 
 `open` presents the requested workflow in an existing app process, or launches
 the app when only the Rust service is running. The
@@ -423,8 +429,9 @@ start wraps midnight -- `from=22:00 to=06:00` is one window. The **last**
 matching rule wins, so adding a rule is how you carve an exception out of an
 earlier one. When nothing matches, the configured default playlist applies.
 An on-demand playlist choice sits above the calendar until **Follow schedule**
-is selected. The calendar is re-read once a minute, and a changed result is
-applied even while the GUI is closed.
+is selected. The Rust runtime evaluates the local-time rules while the GUI is
+closed; the rules themselves have one-minute resolution, and a boundary change
+is applied without waiting for the Python app.
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

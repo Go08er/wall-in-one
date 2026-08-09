@@ -103,13 +103,26 @@ verb. This preserves the one-way app-to-service configuration boundary.
 ### Lifetime: session-scoped, not a system daemon
 
 Started by the Noctalia plugin, owned by the shell session, exits with it. The
-plugin prefers `wall-in-one.service` and falls back to `wall-in-one --service`.
+plugin prefers `wall-in-one.service`, then the Rust executable, and retains
+`wall-in-one --service` only for installations that predate the Rust runtime.
 The packaged unit starts `wall-in-one-service`, and as of the plugin's
 `fdaf4d1` the non-systemd path prefers it too: it derives the runtime as a
 sibling of the configured application binary before searching `PATH`, because
 an override names the application precisely to bypass `PATH`. The Python
 `--service` command stays as the fallback, so an installation predating the
 Rust runtime still starts rather than refusing to.
+
+An ordinary Python GUI owns no cycle or schedule timer. Only the explicit
+legacy `--service` process may create those compatibility timers, and even it
+defers whenever the runtime socket has an owner. A timeout or malformed status
+reply is not treated as proof that Rust is absent; otherwise a temporarily busy
+runtime would grant Python permission to double-drive the wallpaper.
+
+Generated configuration is compared as complete bytes: an unchanged document
+is not renamed into place. A changed document is reloaded explicitly, and that
+request advances the watcher's known fingerprint so one edit produces one
+renderer hand-over rather than an immediate reload plus a second watched
+reload. The watcher remains for recovery when socket delivery fails.
 
 ---
 
@@ -124,8 +137,9 @@ Measured RSS of the windowless Python service on the development machine:
 | + GTK4 + libadwaita | 55.8 MB |
 | **the service as it was** | **71.1 MB** |
 
-31 MB of that is a GUI toolkit loaded into a process with no window. CPU is
-irrelevant — it sleeps and wakes once a minute. This is a memory argument only.
+31 MB of that is a GUI toolkit loaded into a process with no window. CPU was
+irrelevant in the measurement — both implementations spend nearly all their
+time sleeping. This is a memory argument only.
 Target: single-digit MB.
 
 The packaged release service, running by itself from the handwritten schema-1
@@ -150,6 +164,12 @@ much smaller than a port of the whole model would have been.
   so the still already applied is what remains on screen. Apply order is still
   → mode → palette → renderer, because Noctalia derives adaptive colours from
   whatever wallpaper is currently set.
+
+Per-display assignments carry independent playlist cursors and shuffle orders.
+A manual or scheduled override still intentionally replaces every display for
+its duration; without one, advancing moves each distinct assigned playlist by
+one entry rather than indexing all of them through the default playlist's
+cursor.
 
 ---
 

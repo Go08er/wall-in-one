@@ -12,6 +12,13 @@ Every claim in the *Findings* section below was verified against
 Noctalia `5.0.0-beta.7` and niri `26.04` on a live machine, not inferred.
 Sources are cited so they can be re-checked when either project moves.
 
+> [!NOTE]
+> This is a chronological engineering record. Early **Architecture** and
+> **Plan** sections describe the Python-only design that was measured and then
+> replaced. [`DECISIONS.md`](DECISIONS.md) and
+> [`docs/runtime-config.md`](docs/runtime-config.md) are authoritative for the
+> current Python-authoring/Rust-runtime split.
+
 ---
 
 ## Why the rewrite
@@ -284,6 +291,9 @@ first commit. The existing backend is already written with
 
 ## Architecture
 
+The layout below is the original rewrite plan, retained to explain the
+measurements that follow. It is not the deployed lifetime or socket topology.
+
 ```
 wall-in-one/                    ← this repo (standalone app)
   src/wall_in_one/
@@ -305,13 +315,14 @@ This is the seam that makes colour sync free:
 - **Static wallpapers go through Noctalia.** The app calls
   `noctalia msg wallpaper-set`, so Noctalia's own engine does the transition
   *and* regenerates the palette, which fires our template's `post_hook`.
-- **Video wallpapers the app owns**, driven directly via mpvpaper.
+- **Video wallpapers the runtime owns**, driven through the Rust mpvpaper
+  renderer seam after the Python app resolves their pairings into the config.
 
 The "pause dynamics" control is exactly the toggle between those two paths:
 stop video, show each entry's paired still, resume later. Still/video pairing
 and `capture-still` already exist in the old implementation.
 
-### Plugin control surface
+### Original plugin control surface
 
 | plugin control | invocation |
 |---|---|
@@ -322,9 +333,10 @@ and `capture-still` already exist in the old implementation.
 | cycle on/off | `wall-in-one ctl cycle toggle` |
 | cycle duration | `wall-in-one ctl cycle-interval <sec>` |
 
-No socket client in Luau — the plugin only ever `runAsync`es a CLI verb. The
-app owns a Unix socket at `$XDG_RUNTIME_DIR/wall-in-one.sock`; `ctl` is a thin
-client for it.
+No socket client lives in Luau — the plugin only ever `runAsync`es a CLI verb.
+The current system has two sockets: Rust runtime commands and status use
+`wall-in-one-runtime.sock`; Python authoring/provider commands use
+`wall-in-one.sock`; `ctl` routes between them.
 
 The plugin **ships** `palette.json.tmpl` as a data file (plugins already ship
 `scripts/`, `translations/`, `thumbnail.webp`, all materialized under
@@ -366,9 +378,9 @@ Ordered so the riskiest integration is proven before any bulk code moves.
       across all 10 generators, custom palette editing.
 - [x] **8. Socket + `ctl`.** Then shrink the Noctalia plugin to widget +
       shortcut and ship `palette.json.tmpl` alongside it. Done in the plugin
-      repo: 51,628 lines out, 653 in. Never loaded into a running shell, so
-      the host-API surface is matched by pattern against a working plugin
-      rather than executed -- that is the outstanding risk.
+      repo: 51,628 lines out, 653 in. At this point it had only been audited
+      against working host-API patterns; the later NixOS VM load closed that
+      compatibility risk.
 
 Steps 1–3 are the vertical slice that proves the colour pipeline. Nothing else
 starts until that is green.
@@ -449,8 +461,10 @@ still could not do rather than by extending the plan.
       routes. The monitor list comes from `Gdk.Display` rather than from `niri
       msg -j outputs`, so the core is not tied to one compositor.
 
-Still not done: the plugin has never been loaded into a running shell. It has
-since been audited statically, which narrows the risk without closing it:
+This was the open risk at this point in the chronology. It is now closed by the
+NixOS VM test: Noctalia 5.0.0-beta.7 logs that all four companion-plugin entries
+loaded from an isolated path source before the four app pages are exercised.
+The static evidence recorded at the time was:
 
 - Every one of the **19 host API symbols** the new plugin uses -- `noctalia.tr`,
   `noctalia.state`, `noctalia.runAsync`, `ui.button` and the rest -- also
@@ -465,9 +479,9 @@ since been audited statically, which narrows the risk without closing it:
   load. Everything else installed here is 15 or below. This is the one part of
   the manifest that a static check cannot settle.
 
-The remaining risk is therefore narrower than "the host API is matched by
-pattern": it is whether `plugin_api = 17` loads on 5.0.0-beta.7, and whether
-the four entry points behave once running.
+The VM closes `plugin_api = 17` compatibility and entry loading. It does not
+replace human bar-menu testing; the plugin's current runtime/authoring routing
+still needs that separate review.
 
 ### What the rewrite has not carried across
 
@@ -572,8 +586,9 @@ each step is independently useful if the next never happens.
       request rather than two code paths. The order matters and is tested:
       Noctalia derives adaptive colours from whatever wallpaper is set, so
       asking before the still lands generates them from the previous picture.
-      A palette that will not apply is never fatal -- the wallpaper is already
-      on screen by then.
+      A palette failure leaves the already-applied still on screen and is
+      reported as the runtime's last error; claiming the whole entry applied
+      while its requested colours failed would be a lie.
 - [x] **11. Manual still override.** A picker over indexed stills plus an
       absolute-path escape hatch. `library/stills.py` already writes the
       sidecar that records one, so this is UI and a verb, not new machinery.
@@ -582,12 +597,13 @@ each step is independently useful if the next never happens.
       `Playlist` becomes the runtime cursor over whichever list is active,
       which is roughly what it already is.
 - [x] **13. Schedules.** Month, weekday and local-time rules evaluated in
-      visible order, lowest match winning, with a pinned default when none
-      match. Resolution must be pure and testable without a clock; the timer
-      belongs in the UI layer, as the cycle timer already does.
-- [x] **14. Per-display assignment.** *Done, with one caveat — see below.* Each output gets a default playlist and
-      its own schedule and engine settings. Requires the leader-display rule
-      above for palettes, and turns the single `output` setting into a map.
+      visible order, **last match winning**, with a pinned default when none
+      match. Resolution is pure and clock-injectable; the later Rust split
+      moved both schedule and cycle timers out of the UI process.
+- [x] **14. Per-display assignment.** *Done, with one caveat — see below.* Each
+      output gets a baseline playlist and its own runtime cursor. Renderer
+      settings remain global, and a matching schedule or manual override
+      intentionally replaces every display. Noctalia's palette is global.
 - [x] **15. Wallpaper Engine.** The survey moved the goalposts in a good
       direction, and both halves are in.
       **Surveyed first, against the 49 items installed here.** 45 of them are

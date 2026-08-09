@@ -166,6 +166,16 @@ class Application(Adw.Application):
             self._held = False
         self.quit()
 
+    def present_page(self, page: str) -> None:
+        """Present the singleton window with one primary workflow page visible."""
+        # In service mode there is no window yet. Activating this same
+        # GApplication constructs one locally; an ordinary second invocation
+        # is forwarded here by Gio for the same reason.
+        self.activate()
+        if self._window is None:  # pragma: no cover - a broken GTK invariant
+            raise RuntimeError("Wall-in-One could not create its window")
+        self._window.show_page(page)
+
     # -- palette ---------------------------------------------------------
 
     def reload_palette(self) -> source.ResolvedPalette:
@@ -562,6 +572,22 @@ class _Commands:
     def reload_palette(self) -> Response:
         resolved = self._app.reload_palette()
         return Response.success(f"palette reloaded ({resolved.origin.value})")
+
+    def open_page(self, value: str | None) -> Response:
+        """Present the configuration window on one named workflow page."""
+        requested = (value or "").strip().casefold()
+        aliases = {
+            "media": "media",
+            "pairings": "pairings",
+            "playlists": "playlists",
+            "schedules": "schedules",
+            "displays": "schedules",
+        }
+        page = aliases.get(requested)
+        if page is None:
+            return Response.failure("usage: open <media|pairings|playlists|schedules|displays>")
+        self._app.present_page(page)
+        return Response.success(f"opened {page}")
 
     def report_status(self) -> Response:
         return Response.success(self._app.session.describe())

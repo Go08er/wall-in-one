@@ -134,6 +134,9 @@ class _StubCommands:
     def reload_palette(self) -> Response:
         return self._record("reload-palette")
 
+    def open_page(self, value: str | None) -> Response:
+        return self._record("open", value)
+
     def report_status(self) -> Response:
         return self._record("status")
 
@@ -857,6 +860,7 @@ class _FakeApp:
         self.relisted = 0
         self.rescheduled = 0
         self.settings_written: list[dict[str, object]] = []
+        self.presented_pages: list[str] = []
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         return Response.success(action().describe())
@@ -887,6 +891,9 @@ class _FakeApp:
     def resume_schedule(self) -> Response:
         self.session.resume_schedule()
         return self.apply(self.session.apply_current)
+
+    def present_page(self, page: str) -> None:
+        self.presented_pages.append(page)
 
 
 @pytest.fixture
@@ -922,6 +929,41 @@ def _commands(sandbox: Path, items: Sequence[MediaItem]) -> tuple[_Commands, _Fa
     session.refresh()
     app = _FakeApp(session)
     return _Commands(cast("Application", app)), app
+
+
+@pytest.mark.parametrize(
+    ("requested", "shown"),
+    [
+        ("media", "media"),
+        ("pairings", "pairings"),
+        ("playlists", "playlists"),
+        ("schedules", "schedules"),
+        ("displays", "schedules"),
+        (" SCHEDULES ", "schedules"),
+    ],
+)
+def test_open_presents_the_singleton_on_the_requested_page(
+    sandbox: Path, requested: str, shown: str
+) -> None:
+    commands, app = _commands(sandbox, [])
+
+    response = commands.open_page(requested)
+
+    assert response == Response.success(f"opened {shown}")
+    assert app.presented_pages == [shown]
+
+
+@pytest.mark.parametrize("requested", [None, "", "settings", "schedules now"])
+def test_open_rejects_unknown_pages_without_presenting(
+    sandbox: Path, requested: str | None
+) -> None:
+    commands, app = _commands(sandbox, [])
+
+    response = commands.open_page(requested)
+
+    assert not response.ok
+    assert response.message == "usage: open <media|pairings|playlists|schedules|displays>"
+    assert app.presented_pages == []
 
 
 def test_the_listing_reports_what_the_session_is_holding(sandbox: Path) -> None:

@@ -424,6 +424,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._management_session = session
         self._refresh_visible_page()
 
+    def show_page(self, page: str) -> None:
+        """Show a primary workflow page after the caller validates its name."""
+        self._stack.set_visible_child_name(page)
+        # GTK normally emits notify synchronously. Calling this explicitly is
+        # cheap and keeps a remotely opened page populated even if a backend
+        # defers that notification until the next frame.
+        self._refresh_visible_page()
+
     def _on_page_changed(self, _stack: Adw.ViewStack, _property: object) -> None:
         self._refresh_visible_page()
 

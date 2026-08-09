@@ -31,6 +31,7 @@ CTL_VERBS: Final[tuple[str, ...]] = (
     "cycle-interval",
     "dynamics",
     "reload-palette",
+    "open",
     "status",
     "list",
     "select",

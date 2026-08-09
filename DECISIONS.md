@@ -124,6 +124,31 @@ scaling modes (`fill`, `stretch`, `original`, `panscan`), and images as well as
 video. CLI shape is `gslapper -o loop DP-1 /path/to/video.mp4`, with `'*'` for
 every output.
 
+**The author's stated problem applies to this machine.** From the release post:
+*"The issue with libmpv is it performs pretty bad on nvidia and multi-monitor
+setups, was getting high memory use and low FPS. It's not mpvpaper's fault,
+it's quite efficient, the issue is with its backend."* This machine has nvidia
+(`/dev/nvidia0` and `nvidia-smi` both present) with a single output, so the
+nvidia half of that applies even though the multi-monitor half does not yet.
+
+**"Drop-in" does not hold for how this app invokes mpvpaper.** The post says a
+symlink is enough and the same commands work. That is true for simple use and
+false for ours. This app runs:
+
+    mpvpaper --layer background [--auto-pause] -o "<mpv options>" ALL <video>
+
+In mpvpaper `-o` takes a *string of mpv options*. In gSlapper `-o` selects a
+*scaling mode* (`fill`, `stretch`, `original`, `panscan`). Same flag, different
+meaning. Worse, the options this app pushes through `-o` include
+`--input-ipc-server`, which is how mute and volume are changed on a wallpaper
+that is already playing. gSlapper has its own socket for pause/resume, and its
+README does not mention volume at all.
+
+So gSlapper is a **second renderer implementation behind the seam**, not a
+symlink swap. The service's video renderer is being written behind a small
+interface (start, stop, pause, volume, target an output) so that adding it
+later is cheap.
+
 **The efficiency claim is unquantified.** The README says "lower CPU, RAM and
 GPU use than mpvpaper on any Wayland compositor" and gives no numbers. Before
 porting anything, measure both playing the same video: RSS, CPU, and GPU if it

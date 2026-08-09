@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import paths
-from wall_in_one.control.protocol import MAX_MESSAGE_BYTES, ProtocolError, Request, Response
+from wall_in_one.control.protocol import (
+    MAX_MESSAGE_BYTES,
+    MAX_RUNTIME_MESSAGE_BYTES,
+    ProtocolError,
+    Request,
+    Response,
+)
 
 #: The app answers control messages from its main loop, so a slow answer means
 #: a busy UI, not a dead one. Still bounded -- `ctl` must never hang a plugin
@@ -76,6 +82,9 @@ class NotRunningError(ControlError):
 
 def send(request: Request, *, path: Path | None = None, timeout: float | None = None) -> Response:
     target = path if path is not None else paths.socket_path()
+    max_reply = (
+        MAX_RUNTIME_MESSAGE_BYTES if target == paths.runtime_socket_path() else MAX_MESSAGE_BYTES
+    )
     wait = timeout if timeout is not None else TIMEOUTS.get(request.verb, TIMEOUT)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(wait)
@@ -89,7 +98,7 @@ def send(request: Request, *, path: Path | None = None, timeout: float | None = 
 
         try:
             connection.sendall(request.encode())
-            line = _read_line(connection)
+            line = _read_line(connection, max_bytes=max_reply)
         except TimeoutError as error:
             raise ControlError(f"timed out after {wait}s") from error
         except OSError as error:
@@ -100,12 +109,12 @@ def send(request: Request, *, path: Path | None = None, timeout: float | None = 
     if not line:
         raise ControlError("instance closed the connection without replying")
     try:
-        return Response.decode(line)
+        return Response.decode(line, max_bytes=max_reply)
     except ProtocolError as error:
         raise ControlError(str(error)) from error
 
 
-def _read_line(connection: socket.socket) -> bytes:
+def _read_line(connection: socket.socket, *, max_bytes: int = MAX_MESSAGE_BYTES) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -116,7 +125,7 @@ def _read_line(connection: socket.socket) -> bytes:
         total += len(chunk)
         if b"\n" in chunk:
             break
-        if total > MAX_MESSAGE_BYTES:
+        if total > max_bytes:
             raise ControlError("reply exceeded the message size limit")
     return b"".join(chunks).split(b"\n", 1)[0]
 

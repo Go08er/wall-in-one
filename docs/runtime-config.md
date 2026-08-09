@@ -69,3 +69,12 @@ It also returns a `playlists` inventory so a runtime-only client can switch
 lists without opening the Python authoring socket. Each assigned playlist owns
 an independent cursor and shuffle order; a baseline playlist with more entries
 than the global default is not truncated by the default's cursor.
+
+The same atomic snapshot carries `schedule` (whether the calendar is being
+followed, the playlist it currently selects, and the last matching rule), the
+complete read-only `schedules` array, and each display's configured assignment
+alongside its currently effective playlist. There are deliberately no separate
+runtime listing verbs: combining independent replies could mix two config
+generations, while display assignment itself belongs only in this generated
+file. Runtime status replies are bounded at 1 MiB; runtime requests and the
+Python authoring protocol remain bounded at 64 KiB.

@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+// A status snapshot can legitimately contain the configured maximum of 512
+// playlists and 512 schedule rules. Replies get a larger independent ceiling;
+// requests remain at the deliberately small line-protocol bound above.
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -50,7 +54,7 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Request, String> {
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index + 1);
         if bytes.len() + count > MAX_MESSAGE_BYTES {
-            return Err("request exceeds 65536 bytes".into());
+            return Err(format!("request exceeds {MAX_MESSAGE_BYTES} bytes"));
         }
         bytes.extend_from_slice(&available[..count]);
         reader.consume(count);
@@ -67,8 +71,8 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Request, String> {
 pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<(), String> {
     let mut encoded = serde_json::to_vec(response).map_err(|error| error.to_string())?;
     encoded.push(b'\n');
-    if encoded.len() > MAX_MESSAGE_BYTES {
-        return Err("response exceeds 65536 bytes".into());
+    if encoded.len() > MAX_RESPONSE_BYTES {
+        return Err(format!("response exceeds {MAX_RESPONSE_BYTES} bytes"));
     }
     writer
         .write_all(&encoded)

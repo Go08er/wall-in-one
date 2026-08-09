@@ -124,6 +124,15 @@ request advances the watcher's known fingerprint so one edit produces one
 renderer hand-over rather than an immediate reload plus a second watched
 reload. The watcher remains for recovery when socket delivery fails.
 
+Runtime discovery is one atomic `status` snapshot, not a family of listing
+verbs. It includes every playlist, every schedule rule and the last matching
+rule, plus configured and effective display assignments. A bar client can
+therefore render a coherent menu while the Python app is closed, without
+mixing generations from several round trips. Display assignment remains
+configuration and is never writable through the runtime socket. Runtime
+replies have a separate 1 MiB ceiling so the documented 512-playlist and
+512-rule maxima fit; requests and Python authoring replies retain 64 KiB.
+
 ---
 
 ## Why the service is being rewritten in Rust

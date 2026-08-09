@@ -13,11 +13,12 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final, Self
 
-#: A request is a verb and at most one argument, and the largest reply is a page
-#: of search results -- forty-eight lines of a few hundred bytes -- so this is
-#: generous for both. It exists to stop a confused writer from making us buffer
-#: without bound.
+#: Authoring requests and replies stay small and are often handled in a GTK
+#: callback, so keep their original tight bound.
 MAX_MESSAGE_BYTES: Final = 64 * 1024
+#: A runtime status snapshot may contain the configured maximum of 512
+#: playlists and 512 schedule rules. It remains bounded independently.
+MAX_RUNTIME_MESSAGE_BYTES: Final = 1024 * 1024
 
 ENCODING: Final = "utf-8"
 
@@ -68,8 +69,8 @@ class Response:
         return _encode(payload)
 
     @classmethod
-    def decode(cls, line: bytes) -> Self:
-        payload = _decode(line)
+    def decode(cls, line: bytes, *, max_bytes: int = MAX_MESSAGE_BYTES) -> Self:
+        payload = _decode(line, max_bytes=max_bytes)
         ok = payload.get("ok")
         if not isinstance(ok, bool):
             raise ProtocolError("response has no ok flag")
@@ -102,9 +103,9 @@ def _encode(payload: dict[str, Any]) -> bytes:
     return encoded
 
 
-def _decode(line: bytes) -> dict[str, Any]:
-    if len(line) > MAX_MESSAGE_BYTES:
-        raise ProtocolError(f"message is {len(line)} bytes, over the {MAX_MESSAGE_BYTES} limit")
+def _decode(line: bytes, *, max_bytes: int = MAX_MESSAGE_BYTES) -> dict[str, Any]:
+    if len(line) > max_bytes:
+        raise ProtocolError(f"message is {len(line)} bytes, over the {max_bytes} limit")
     try:
         payload = json.loads(line.decode(ENCODING))
     except (UnicodeDecodeError, ValueError) as error:

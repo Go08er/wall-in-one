@@ -763,7 +763,7 @@ def _crowded(count: int) -> tuple[MediaItem, ...]:
 
 
 def test_a_library_too_large_for_one_reply_is_cut_between_rows() -> None:
-    """Six hundred wallpapers with long names do not fit in a 64 KB frame, and
+    """Six hundred wallpapers with long names do not fit the authoring frame, and
     a size error instead of a listing would be a poor way to find that out."""
     lines = render_library(_crowded(600), Query(), ()).splitlines()
 

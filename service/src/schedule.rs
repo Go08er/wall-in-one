@@ -23,10 +23,17 @@ pub fn resolve_override(
     rules: &[ScheduleRule],
     at: NaiveDateTime,
 ) -> Result<Option<&str>, ConfigError> {
+    Ok(resolve_rule(rules, at)?.map(|rule| rule.playlist.as_str()))
+}
+
+pub fn resolve_rule(
+    rules: &[ScheduleRule],
+    at: NaiveDateTime,
+) -> Result<Option<&ScheduleRule>, ConfigError> {
     let mut chosen = None;
     for rule in rules {
         if matches(rule, at)? {
-            chosen = Some(rule.playlist.as_str());
+            chosen = Some(rule);
         }
     }
     Ok(chosen)

@@ -359,8 +359,12 @@ $ wall-in-one ctl quit
 does not stop rotation or schedules. `status` is JSON describing the active
 playlist and entry, whether the source is `manual` or `schedule`, pause and
 shuffle state, the playlist inventory, each display's effective entry, and the
-last renderer error. An open GUI is not accepted as a substitute for that
-runtime status: exit code 3 still means automation is not running.
+last renderer error. The same snapshot includes every schedule rule, the rule
+currently selected by the calendar, and configured versus effective display
+assignments, so a bar menu does not need the Python app. These are read-only;
+assignment and rule edits still belong in the app-generated configuration. An
+open GUI is not accepted as a substitute for runtime status: exit code 3 still
+means automation is not running.
 
 `open` presents the requested workflow in an existing app process, or launches
 the app when only the Rust service is running. The

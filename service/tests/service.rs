@@ -142,6 +142,16 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
         serde_json::from_str(reply["message"].as_str().unwrap()).unwrap();
     assert_eq!(status["playlist_id"], "day");
     assert_eq!(status["source"], "schedule");
+    assert_eq!(status["playlists"].as_array().unwrap().len(), 2);
+    assert_eq!(status["playlists"][0]["id"], "day");
+    assert_eq!(status["playlists"][0]["entries"], 2);
+    assert_eq!(status["playlists"][0]["active"], true);
+    assert_eq!(status["schedule"]["following"], true);
+    assert_eq!(status["schedule"]["playlist_id"], "day");
+    assert_eq!(status["schedule"]["rule_id"], serde_json::Value::Null);
+    assert_eq!(status["schedules"][0]["id"], "night-rule");
+    assert_eq!(status["schedules"][0]["selected"], false);
+    assert_eq!(status["displays"][0]["assigned_playlist_id"], "day");
 
     // The manual override still takes effect, but the scene honestly reports
     // that motion was refused; its still has already been applied.
@@ -342,6 +352,7 @@ fn display_assignment_is_the_baseline_and_manual_override_wins() {
     assert_eq!(status["playlist_id"], "night");
     assert_eq!(status["playlist"], "Night");
     assert_eq!(status["displays"][0]["connector"], "DP-1");
+    assert_eq!(status["displays"][0]["assigned_playlist_id"], "night");
     assert_eq!(status["displays"][0]["playlist_id"], "night");
     assert_eq!(status["displays"][0]["entry_id"], "scene-three");
     assert_eq!(status["playlists"][1]["entries"], 3);

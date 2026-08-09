@@ -1,4 +1,4 @@
-use crate::config::{Config, Entry, Playlist};
+use crate::config::{Config, Entry, Playlist, ScheduleRule};
 use crate::protocol::{Request, Response};
 use crate::renderer::WallpaperDriver;
 use crate::schedule;
@@ -21,6 +21,8 @@ pub struct Status<'a> {
     pub cycle_enabled: bool,
     pub last_error: &'a str,
     pub playlists: Vec<PlaylistStatus<'a>>,
+    pub schedule: ScheduleStatus<'a>,
+    pub schedules: Vec<ScheduleRuleStatus<'a>>,
     pub displays: Vec<DisplayStatus<'a>>,
 }
 
@@ -33,8 +35,32 @@ pub struct PlaylistStatus<'a> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ScheduleStatus<'a> {
+    pub following: bool,
+    pub playlist_id: &'a str,
+    pub playlist: &'a str,
+    pub rule_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleRuleStatus<'a> {
+    pub id: &'a str,
+    pub playlist_id: &'a str,
+    pub playlist: &'a str,
+    pub months: &'a [u8],
+    pub weekdays: &'a [u8],
+    pub start: Option<&'a str>,
+    pub end: Option<&'a str>,
+    pub enabled: bool,
+    pub selected: bool,
+    pub in_force: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DisplayStatus<'a> {
     pub connector: &'a str,
+    pub assigned_playlist_id: &'a str,
+    pub assigned_playlist: &'a str,
     pub playlist_id: &'a str,
     pub playlist: &'a str,
     pub entry_id: &'a str,
@@ -132,7 +158,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             "previous" => self.move_by(-1),
             "random" => self.random_entry(),
             "status" => {
-                return match self.status_json() {
+                return match self.status_json(at) {
                     Ok(status) => Response::success(status),
                     Err(error) => Response::failure(error),
                 }
@@ -442,7 +468,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         Err(error)
     }
 
-    fn status_json(&self) -> Result<String, String> {
+    fn status_json(&self, at: NaiveDateTime) -> Result<String, String> {
         let active_playlist = self.playlist()?;
         let effective_ids = self.effective_playlist_ids();
         let summary_playlist = if self.manual_playlist.is_some()
@@ -469,11 +495,29 @@ impl<D: WallpaperDriver> Runtime<D> {
                 active: active_ids.contains(&playlist.id),
             })
             .collect();
+        let selected_rule = schedule::resolve_rule(&self.config.schedules, at)
+            .map_err(|error| error.to_string())?;
+        let scheduled_playlist = self
+            .config
+            .playlist(
+                selected_rule
+                    .map(|rule| rule.playlist.as_str())
+                    .unwrap_or(&self.config.default_playlist),
+            )
+            .ok_or("the selected schedule names a missing playlist")?;
+        let schedules = self
+            .config
+            .schedules
+            .iter()
+            .map(|rule| self.schedule_rule_status(rule, selected_rule))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut displays = Vec::new();
         if self.config.displays.is_empty() {
             if let Some(entry) = entry {
                 displays.push(DisplayStatus {
                     connector: "ALL",
+                    assigned_playlist_id: &active_playlist.id,
+                    assigned_playlist: &active_playlist.name,
                     playlist_id: &active_playlist.id,
                     playlist: &active_playlist.name,
                     entry_id: &entry.id,
@@ -483,6 +527,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         } else {
             for display in &self.config.displays {
+                let assigned = self.config.playlist(&display.playlist).ok_or_else(|| {
+                    format!("display {} names a missing playlist", display.connector)
+                })?;
                 let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
                 {
                     &self.active_playlist
@@ -495,6 +542,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 if let Some(entry) = self.current_entry_for(&effective.id) {
                     displays.push(DisplayStatus {
                         connector: &display.connector,
+                        assigned_playlist_id: &assigned.id,
+                        assigned_playlist: &assigned.name,
                         playlist_id: &effective.id,
                         playlist: &effective.name,
                         entry_id: &entry.id,
@@ -521,9 +570,40 @@ impl<D: WallpaperDriver> Runtime<D> {
             cycle_enabled: self.config.settings.cycle_enabled,
             last_error: &self.last_error,
             playlists,
+            schedule: ScheduleStatus {
+                following: self.manual_playlist.is_none(),
+                playlist_id: &scheduled_playlist.id,
+                playlist: &scheduled_playlist.name,
+                rule_id: selected_rule.map(|rule| rule.id.as_str()),
+            },
+            schedules,
             displays,
         })
         .map_err(|error| error.to_string())
+    }
+
+    fn schedule_rule_status<'a>(
+        &'a self,
+        rule: &'a ScheduleRule,
+        selected: Option<&ScheduleRule>,
+    ) -> Result<ScheduleRuleStatus<'a>, String> {
+        let playlist = self
+            .config
+            .playlist(&rule.playlist)
+            .ok_or_else(|| format!("schedule {} names a missing playlist", rule.id))?;
+        let is_selected = selected.is_some_and(|chosen| chosen.id == rule.id);
+        Ok(ScheduleRuleStatus {
+            id: &rule.id,
+            playlist_id: &playlist.id,
+            playlist: &playlist.name,
+            months: &rule.months,
+            weekdays: &rule.weekdays,
+            start: rule.start.as_deref(),
+            end: rule.end.as_deref(),
+            enabled: rule.enabled,
+            selected: is_selected,
+            in_force: is_selected && self.manual_playlist.is_none(),
+        })
     }
 }
 

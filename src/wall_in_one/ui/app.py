@@ -18,9 +18,9 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config, paths
+from wall_in_one import config, paths, runtime_config
 from wall_in_one.browse import Browser
-from wall_in_one.control import server
+from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import favourites, pairings, playlists, schedules
 from wall_in_one.library import filter as library_filter
@@ -209,6 +209,7 @@ class Application(Adw.Application):
     def _on_settings_changed(self, settings: config.Settings) -> None:
         self._settings = settings
         self._session.update_settings(settings)
+        self._publish_runtime()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
 
@@ -236,9 +237,52 @@ class Application(Adw.Application):
         """Rescan, then line the cursor up with the wallpaper already on screen."""
         self._session.refresh()
         self._session.sync_with_noctalia()
+        self._publish_runtime()
         if self._window is not None:
             self._window.show_library(self._session)
         self._make_missing_stills()
+
+    def _publish_runtime(self) -> None:
+        """Compile authoring state, then ask a running Rust service to reload."""
+        try:
+            runtime_config.write(self._settings, self._session)
+        except runtime_config.RuntimeConfigError as error:
+            self.window_report(str(error))
+            return
+        with contextlib.suppress(client.ControlError):
+            client.send_runtime("reload")
+
+    def _runtime_is_running(self) -> bool:
+        try:
+            return client.send_runtime("status", timeout=0.25).ok
+        except client.ControlError:
+            return False
+
+    def runtime_action(self, verb: str) -> Response:
+        """Drive the Rust runtime, retaining Python application as fallback."""
+        try:
+            response = client.send_runtime(verb)
+        except client.NotRunningError:
+            actions: dict[str, Callable[[], Applied]] = {
+                "next": self._session.next,
+                "previous": self._session.previous,
+                "random": self._session.random,
+            }
+            return self.apply(actions[verb])
+        except client.ControlError as error:
+            return Response.failure(str(error))
+        if response.ok:
+            # Keep the visible cursor close to the runtime without applying a
+            # second wallpaper from the GUI process.
+            if verb == "next":
+                self._session.playlist.next()
+            elif verb == "previous":
+                self._session.playlist.previous()
+            elif verb == "random":
+                self._session.playlist.random()
+            if self._window is not None:
+                self._window.show_current(self._session)
+        return response
 
     def _make_missing_stills(self) -> None:
         """Fill in the stills for videos that have none, in the background.
@@ -313,13 +357,22 @@ class Application(Adw.Application):
         self._session.playlists_changed()
         GLib.idle_add(self.refresh_library)
 
+    def runtime_config_changed(self) -> None:
+        """Publish a light authoring change that does not require a rescan."""
+        self._publish_runtime()
+
     def activate_playlist(self, reference: str) -> Response:
         """Switch immediately to a named playlist and apply its first entry."""
         try:
             chosen = self._session.use_playlist(reference)
         except playlists.PlaylistError as error:
             return Response.failure(str(error))
-        response = self.apply(self._session.apply_current)
+        try:
+            response = client.send_runtime("playlist-use", chosen.id)
+        except client.NotRunningError:
+            response = self.apply(self._session.apply_current)
+        except client.ControlError as error:
+            response = Response.failure(str(error))
         if self._window is not None:
             self._window.show_library(self._session)
         if response.ok:
@@ -329,13 +382,22 @@ class Application(Adw.Application):
     def resume_schedule(self) -> Response:
         """Release a manual playlist choice and apply the scheduled/default list."""
         self._session.resume_schedule()
-        response = self.apply(self._session.apply_current)
+        try:
+            response = client.send_runtime("schedule-follow")
+        except client.NotRunningError:
+            response = self.apply(self._session.apply_current)
+        except client.ControlError as error:
+            response = Response.failure(str(error))
         if self._window is not None:
             self._window.show_library(self._session)
         return response
 
     def schedule_edited(self) -> None:
         """Take a changed calendar into account now rather than at the next tick."""
+        self._publish_runtime()
+        if self._runtime_is_running():
+            GLib.idle_add(self.refresh_library)
+            return
         if self._session.schedule_changed():
             self.apply(self._session.apply_current)
         GLib.idle_add(self.refresh_library)
@@ -444,6 +506,8 @@ class Application(Adw.Application):
         )
 
     def _on_cycle_tick(self) -> bool:
+        if self._runtime_is_running():
+            return GLib.SOURCE_CONTINUE
         # A failure here is nearly always an empty library or a missing file;
         # neither is a reason to stop cycling, so keep the timer alive.
         self.apply(self._session.next)
@@ -466,6 +530,8 @@ class Application(Adw.Application):
         )
 
     def _on_schedule_tick(self) -> bool:
+        if self._runtime_is_running():
+            return GLib.SOURCE_CONTINUE
         # Only redraws when the calendar actually asks for a different
         # playlist, so a quiet minute costs one comparison.
         if self._session.schedule_changed():
@@ -499,6 +565,7 @@ class Application(Adw.Application):
         self._settings = replace(self._settings, **changes).validated()
         config.save(self._settings)
         self._session.update_settings(self._settings)
+        self._publish_runtime()
         self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
@@ -687,6 +754,7 @@ class _Commands:
 
     def make_playlist(self, value: str | None) -> Response:
         made = self._app.session.playlists.create(value or "")
+        self._app.runtime_config_changed()
         return Response.success(f"made {made.name}")
 
     def drop_playlist(self, value: str | None) -> Response:
@@ -744,6 +812,7 @@ class _Commands:
             return Response.failure("usage: display-assign <connector> <playlist>")
         playlist = session.playlists.find(wanted.strip())
         session.displays.assign(connector, playlist.id)
+        self._app.runtime_config_changed()
         return Response.success(f"{connector} shows {playlist.name}")
 
     def clear_display(self, value: str | None) -> Response:
@@ -753,6 +822,7 @@ class _Commands:
             return Response.failure("usage: display-clear <connector>")
         if not self._app.session.displays.unassign(connector):
             return Response.failure(f"{connector} was already following the default")
+        self._app.runtime_config_changed()
         return Response.success(f"{connector} follows the default again")
 
     def add_to_playlist(self, value: str | None) -> Response:

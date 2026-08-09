@@ -84,6 +84,16 @@ def socket_path() -> Path:
     return runtime_dir() / f"{APP_ID}.sock"
 
 
+def runtime_socket_path() -> Path:
+    """The Rust runtime socket; the Python app keeps the authoring socket."""
+    return runtime_dir() / f"{APP_ID}-runtime.sock"
+
+
+def runtime_config_path() -> Path:
+    """The sole configuration input consumed by the Rust runtime."""
+    return app_state_dir() / "runtime.toml"
+
+
 def noctalia_state_dir() -> Path:
     return state_home() / "noctalia"
 

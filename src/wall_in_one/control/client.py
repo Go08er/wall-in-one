@@ -36,6 +36,30 @@ TIMEOUTS: Final[Mapping[str, float]] = {
     "download": DOWNLOAD_TIMEOUT,
 }
 
+RUNTIME_VERBS: Final[frozenset[str]] = frozenset(
+    {
+        "playlist-use",
+        "schedule-follow",
+        "play",
+        "pause",
+        "toggle",
+        "shuffle",
+        "next",
+        "previous",
+        "prev",
+        "random",
+        "status",
+        "reload",
+        "quit",
+    }
+)
+
+# Verbs the retained Python --service mode already understands. They are a
+# compatibility bridge while installations move to the Rust runtime.
+PYTHON_RUNTIME_FALLBACKS: Final[frozenset[str]] = frozenset(
+    {"playlist-use", "shuffle", "next", "prev", "random", "status", "quit"}
+)
+
 #: Exit code for "the app is not running". Distinct from a failed command so a
 #: caller can react by launching it.
 EXIT_NOT_RUNNING: Final = 3
@@ -98,8 +122,24 @@ def _read_line(connection: socket.socket) -> bytes:
 
 def dispatch(verb: str, argument: str | None) -> int:
     """Run one `ctl` verb and turn the outcome into an exit code."""
+    request_verb = "previous" if verb == "prev" else verb
+    request_argument = argument
+    if verb == "playlist-use" and (argument or "").strip().casefold() in ("", "none"):
+        request_verb = "schedule-follow"
+        request_argument = None
     try:
-        response = send(Request(verb=verb, argument=argument))
+        if verb in RUNTIME_VERBS:
+            try:
+                response = send(
+                    Request(verb=request_verb, argument=request_argument),
+                    path=paths.runtime_socket_path(),
+                )
+            except NotRunningError:
+                if verb not in PYTHON_RUNTIME_FALLBACKS:
+                    raise
+                response = send(Request(verb=verb, argument=argument))
+        else:
+            response = send(Request(verb=verb, argument=argument))
     except NotRunningError as error:
         print(f"{error}", file=sys.stderr)
         return EXIT_NOT_RUNNING
@@ -115,3 +155,14 @@ def dispatch(verb: str, argument: str | None) -> int:
         # the reason rather than read it.
         print(response.message, file=stream)
     return 0 if response.ok else 1
+
+
+def send_runtime(
+    verb: str, argument: str | None = None, *, timeout: float | None = None
+) -> Response:
+    """Talk to the Rust runtime directly, without an authoring-socket fallback."""
+    return send(
+        Request(verb=verb, argument=argument),
+        path=paths.runtime_socket_path(),
+        timeout=timeout,
+    )

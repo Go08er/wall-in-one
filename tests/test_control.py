@@ -220,10 +220,10 @@ class _StubCommands:
 
 
 def test_verb_table_covers_the_documented_cli_surface() -> None:
-    from wall_in_one.cli import CTL_VERBS
+    from wall_in_one.cli import CTL_VERBS, RUNTIME_ONLY_VERBS
 
     verbs = build_verb_table(_StubCommands())
-    assert set(verbs) == set(CTL_VERBS)
+    assert set(verbs) | set(RUNTIME_ONLY_VERBS) == set(CTL_VERBS)
 
 
 def test_service_mode_reaches_the_windowless_application(
@@ -861,6 +861,7 @@ class _FakeApp:
         self.rescheduled = 0
         self.settings_written: list[dict[str, object]] = []
         self.presented_pages: list[str] = []
+        self.runtime_publications = 0
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         return Response.success(action().describe())
@@ -876,6 +877,9 @@ class _FakeApp:
 
     def playlists_changed(self) -> None:
         self.relisted += 1
+
+    def runtime_config_changed(self) -> None:
+        self.runtime_publications += 1
 
     def schedule_edited(self) -> None:
         self.rescheduled += 1

@@ -275,6 +275,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             except displays.DisplayError as error:
                 self._app.window_report(str(error))
                 return
+            self._app.runtime_config_changed()
             self._app.window_report(f"Updated {connector}")
 
         return changed

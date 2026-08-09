@@ -22,11 +22,26 @@ from typing import Final
 
 from wall_in_one import __version__, paths
 
+RUNTIME_ONLY_VERBS: Final[tuple[str, ...]] = (
+    "previous",
+    "play",
+    "pause",
+    "toggle",
+    "schedule-follow",
+    "reload",
+)
+
 CTL_VERBS: Final[tuple[str, ...]] = (
     "next",
     "prev",
+    "previous",
     "random",
+    "play",
+    "pause",
+    "toggle",
     "shuffle",
+    "schedule-follow",
+    "reload",
     "cycle",
     "cycle-interval",
     "dynamics",

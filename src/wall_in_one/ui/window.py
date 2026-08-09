@@ -295,9 +295,9 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _make_navigator(self, verb: str) -> Callable[[], None]:
         def navigate() -> None:
-            # The application owns the session and the error handling; the
-            # window only says which direction.
-            response = self._app.apply(getattr(self._app.session, verb))
+            # Runtime state belongs to the Rust service. The application keeps
+            # a compatibility fallback until every installation has it.
+            response = self._app.runtime_action(verb)
             if not response.ok:
                 self.report(response.message)
 

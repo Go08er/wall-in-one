@@ -85,6 +85,21 @@ It ships in the app's repository and Nix package; it is not a separate product.
 service validates*, rather than the service sniffing for an installed app —
 same protection, still testable.
 
+### Schema 1 is strict TOML
+
+The resolved runtime document is TOML, documented in
+`docs/runtime-config.md`. TOML makes the standalone contract test genuinely
+standalone: a person can read and hand-write it without the Python app or a
+serializer, while both sides have bounded parsers. Schema 1 rejects unknown
+fields as well as unknown versions, so mismatched app and service builds fail
+out loud instead of silently ignoring a renderer setting.
+
+All executable and media paths are absolute. The service performs no PATH
+lookup, glob, library lookup or provider lookup. The app writes through a
+same-directory temporary file, fsync and rename. A bad reload keeps the last
+valid document in force; the runtime socket also exposes an explicit `reload`
+verb. This preserves the one-way app-to-service configuration boundary.
+
 ### Lifetime: session-scoped, not a system daemon
 
 Started by the Noctalia plugin, owned by the shell session, exits with it. The

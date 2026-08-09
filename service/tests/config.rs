@@ -4,12 +4,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{Config, ConfigError, EntryKind, Palette};
 
 fn temp_file(name: &str) -> PathBuf {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    std::env::temp_dir().join(format!("wall-in-one-service-{name}-{}-{nonce}.toml", std::process::id()))
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "wall-in-one-service-{name}-{}-{nonce}.toml",
+        std::process::id()
+    ))
 }
 
 fn document(schema: u32) -> String {
-    format!(r#"schema_version = {schema}
+    format!(
+        r#"schema_version = {schema}
 default_playlist = "day"
 [settings]
 cycle_interval_seconds = 300
@@ -55,7 +62,8 @@ end = "06:00"
 [[displays]]
 connector = "eDP-1"
 playlist = "day"
-"#)
+"#
+    )
 }
 
 #[test]
@@ -65,7 +73,10 @@ fn handwritten_config_loads_without_python_or_app_state() {
     let loaded = Config::load(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(loaded.playlists[0].entries[1].kind, EntryKind::Video);
-    assert!(matches!(loaded.playlists[0].entries[0].palette, Palette::Adaptive { .. }));
+    assert!(matches!(
+        loaded.playlists[0].entries[0].palette,
+        Palette::Adaptive { .. }
+    ));
 }
 
 #[test]
@@ -86,4 +97,3 @@ fn relative_resolved_path_is_refused() {
     fs::remove_file(path).unwrap();
     assert!(error.to_string().contains("absolute path"));
 }
-

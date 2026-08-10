@@ -474,10 +474,10 @@ def test_showing_the_library_repushes_the_favourites(
     application.session.shutdown()
 
 
-def test_main_window_exposes_the_four_management_steps(
+def test_main_window_keeps_pairings_inside_the_media_workflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rich stores are application pages, not terminal-only features."""
+    """Pairings are edited from Media rather than duplicated as another tab."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -505,10 +505,10 @@ def test_main_window_exposes_the_four_management_steps(
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
 
-    for page in ("media", "pairings", "playlists", "schedules"):
+    for page in ("media", "playlists", "schedules"):
         assert window._stack.get_child_by_name(page) is not None
-        window._stack.set_visible_child_name(page)
-        assert window._stack.get_visible_child_name() == page
+    assert window._stack.get_child_by_name("pairings") is None
+    assert window._content_stack.get_child_by_name("pairing-editor") is window._pairings_page
 
     window.destroy()
     application.session.shutdown()
@@ -556,11 +556,14 @@ def test_management_pages_render_real_pairing_playlist_and_schedule_data(
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
 
-    for page in ("pairings", "playlists", "schedules"):
+    window._on_tile_activated(application.session.library.items[0])
+    assert window._content_stack.get_visible_child_name() == "pairing-editor"
+    assert window._pairings_page._selected is not None
+
+    window._close_pairing_editor()
+    for page in ("playlists", "schedules"):
         window._stack.set_visible_child_name(page)
         assert window._stack.get_visible_child_name() == page
-
-    assert window._pairings_page._selected is not None
     assert window._playlists_page._selected == made.id
     assert application.session.schedules.rules[0].describe() == "sat 22:00-06:00"
     window.destroy()

@@ -149,8 +149,11 @@ class WallpaperTile(Gtk.Box):
                 button.set_menu_model(build(self.item))
 
         self._menu.set_create_popup_func(create)
+
+    def connect_secondary(self, on_activate: Callable[[MediaItem], None]) -> None:
+        """Make a secondary click the quick-play gesture for this item."""
         gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
-        gesture.connect("pressed", lambda *_arguments: self._menu.popup())
+        gesture.connect("released", lambda *_arguments: on_activate(self.item))
         self.add_controller(gesture)
 
     def connect_favourite(self, on_toggle: Callable[[MediaItem, bool], None]) -> None:
@@ -180,10 +183,12 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         on_activate: Callable[[MediaItem], None],
         on_favourite: Callable[[MediaItem, bool], None] | None = None,
         menu_for: Callable[[MediaItem], Gio.MenuModel] | None = None,
+        on_secondary: Callable[[MediaItem], None] | None = None,
     ) -> None:
         super().__init__()
         self._loader = loader
         self._on_activate = on_activate
+        self._on_secondary = on_secondary
         self._on_favourite = on_favourite
         # The window builds the menus, because the window owns the actions they
         # point at. The grid only knows where to hang one.
@@ -271,6 +276,8 @@ class WallpaperGrid(Gtk.ScrolledWindow):
                 tile.connect_favourite(self._on_favourite)
             if self._menu_for is not None:
                 tile.set_menu(self._menu_for)
+            if self._on_secondary is not None:
+                tile.connect_secondary(self._on_secondary)
             tile.set_favourite(item.path in self._favourites)
             self._tiles[item.path] = tile
             self._flow.append(tile)

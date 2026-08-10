@@ -1018,7 +1018,7 @@ def _commands(sandbox: Path, items: Sequence[MediaItem]) -> tuple[_Commands, _Fa
     ("requested", "shown"),
     [
         ("media", "media"),
-        ("pairings", "pairings"),
+        ("pairings", "media"),
         ("playlists", "playlists"),
         ("schedules", "schedules"),
         ("displays", "schedules"),

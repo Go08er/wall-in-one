@@ -9,6 +9,7 @@ an actions menu.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,9 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-gi.require_version("Pango", "1.0")
-
-from gi.repository import Adw, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one.library import pairings
 from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
@@ -40,50 +39,16 @@ _MODES: tuple[tuple[str, pairings.Mode], ...] = (
 
 
 class PairingsPage(Gtk.Box):
-    """Browse every implicit pairing and customize one in place."""
+    """A full-size editor reached from one item in the Media grid."""
 
-    def __init__(self, application: Application) -> None:
+    def __init__(self, application: Application, on_back: Callable[[], None]) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._app = application
+        self._on_back = on_back
         self._session: Session | None = None
         self._selected: MediaItem | None = None
-        self._rows: dict[Path, Gtk.ListBoxRow] = {}
-        self._items_by_row: dict[Gtk.ListBoxRow, MediaItem] = {}
         self._preview_loader = SchemePreviewLoader(max_workers=2)
         self._adaptive_boxes: dict[str, Gtk.Box] = {}
-
-        split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        split.set_position(310)
-        split.set_shrink_start_child(False)
-        split.set_shrink_end_child(False)
-
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        sidebar.set_margin_top(12)
-        sidebar.set_margin_bottom(12)
-        sidebar.set_margin_start(12)
-        sidebar.set_margin_end(6)
-        heading = Gtk.Label(label="Pairings", xalign=0.0)
-        heading.add_css_class("title-2")
-        sidebar.append(heading)
-        explanation = Gtk.Label(
-            label=(
-                "Every media item already has a pairing. Select one to change its still or colours."
-            ),
-            xalign=0.0,
-            wrap=True,
-        )
-        explanation.add_css_class("dim-label")
-        sidebar.append(explanation)
-        self._search = Gtk.SearchEntry(placeholder_text="Find a pairing")
-        self._search.connect("search-changed", self._on_search_changed)
-        sidebar.append(self._search)
-        listing = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self._list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
-        self._list.add_css_class("boxed-list")
-        self._list.set_filter_func(self._filter_row)
-        self._list.connect("row-selected", self._on_row_selected)
-        listing.set_child(self._list)
-        sidebar.append(listing)
 
         self._editor_scroll = Gtk.ScrolledWindow(vexpand=True)
         self._editor = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -93,75 +58,28 @@ class PairingsPage(Gtk.Box):
         self._editor.set_margin_end(24)
         self._editor_scroll.set_child(self._editor)
 
-        split.set_start_child(sidebar)
-        split.set_end_child(self._editor_scroll)
-        self.append(split)
+        self.append(self._editor_scroll)
         self._show_empty()
 
     def shutdown(self) -> None:
         self._preview_loader.shutdown()
 
     def refresh(self, session: Session) -> None:
-        """Show ``session`` without losing the item currently being edited."""
-        wanted = self._selected.path if self._selected is not None else None
+        """Refresh the item being edited without inventing a second item list."""
         self._session = session
-        while (row := self._list.get_first_child()) is not None:
-            self._list.remove(row)
-        self._rows.clear()
-        self._items_by_row.clear()
-
-        for item in session.library.items:
-            row = Gtk.ListBoxRow()
-            self._items_by_row[row] = item
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            box.set_margin_top(8)
-            box.set_margin_bottom(8)
-            box.set_margin_start(10)
-            box.set_margin_end(10)
-            title = Gtk.Label(label=item.name, xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
-            title.add_css_class("heading")
-            bundle = session.pairings.resolve(item, session.library.roots)
-            summary = Gtk.Label(
-                label=self._summary(item, bundle),
-                xalign=0.0,
-                ellipsize=Pango.EllipsizeMode.END,
-            )
-            summary.add_css_class("caption")
-            summary.add_css_class("dim-label")
-            box.append(title)
-            box.append(summary)
-            row.set_child(box)
-            self._list.append(row)
-            self._rows[item.path] = row
-
-        target = self._rows.get(wanted) if wanted is not None else None
-        if target is None and self._rows:
-            target = next(iter(self._rows.values()))
-        self._list.select_row(target)
-        self._list.invalidate_filter()
-
-    @staticmethod
-    def _summary(item: MediaItem, bundle: pairings.Pairing) -> str:
-        still = bundle.still.name if bundle.still is not None else "no representative still"
-        changed = "custom" if bundle.customized else "automatic"
-        return f"{item.kind.value} · {still} · {bundle.palette.encode()} · {changed}"
-
-    def _filter_row(self, row: Gtk.ListBoxRow) -> bool:
-        item = self._items_by_row.get(row)
-        if not isinstance(item, MediaItem):
-            return True
-        query = self._search.get_text().strip().casefold()
-        return not query or query in item.name.casefold() or query in str(item.path).casefold()
-
-    def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
-        self._list.invalidate_filter()
-
-    def _on_row_selected(self, _box: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
-        item = self._items_by_row.get(row) if row is not None else None
-        if not isinstance(item, MediaItem):
+        if self._selected is None:
+            return
+        current = session.library.find(self._selected.path)
+        if current is None:
             self._selected = None
             self._show_empty()
-            return
+        else:
+            self._selected = current
+            self._show_editor(current)
+
+    def edit(self, session: Session, item: MediaItem) -> None:
+        """Open ``item`` as the one implicit pairing it already represents."""
+        self._session = session
         self._selected = item
         self._show_editor(item)
 
@@ -173,8 +91,8 @@ class PairingsPage(Gtk.Box):
     def _show_empty(self) -> None:
         self._clear_editor()
         status = Adw.StatusPage(
-            title="Choose a pairing",
-            description="Select an item on the left to see its still and colour policy.",
+            title="Choose media first",
+            description="Return to Media/Pairings and choose an item to configure.",
             icon_name="image-x-generic-symbolic",
         )
         status.set_vexpand(True)
@@ -186,6 +104,11 @@ class PairingsPage(Gtk.Box):
             return
         self._clear_editor()
         bundle = session.pairings.resolve(item, session.library.roots)
+
+        back = Gtk.Button(label="Back to Media/Pairings", icon_name="go-previous-symbolic")
+        back.set_halign(Gtk.Align.START)
+        back.connect("clicked", lambda _button: self._on_back())
+        self._editor.append(back)
 
         title = Gtk.Label(label=item.name, xalign=0.0, selectable=True)
         title.add_css_class("title-1")

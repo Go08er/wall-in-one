@@ -115,11 +115,15 @@ class MainWindow(Adw.ApplicationWindow):
         # disagree.
         self._favourites = application.session.favourites
         self._grid = WallpaperGrid(
-            self._loader, self._on_tile_activated, self._on_favourite, self._menu_for
+            self._loader,
+            self._on_tile_activated,
+            self._on_favourite,
+            self._menu_for,
+            self._quick_apply,
         )
         self._grid.set_favourites(self._favourites.paths)
         self._toast = Adw.ToastOverlay()
-        self._pairings_page = PairingsPage(application)
+        self._pairings_page = PairingsPage(application, self._close_pairing_editor)
         self._playlists_page = PlaylistsPage(application)
         self._schedules_page = SchedulesPage(application)
         self._runtime_summary = ""
@@ -211,12 +215,8 @@ class MainWindow(Adw.ApplicationWindow):
         media.append(self._build_library_bar())
         self._toast.set_child(self._grid)
         media.append(self._toast)
-        self._stack.add_titled_with_icon(media, "media", "Media", "image-x-generic-symbolic")
         self._stack.add_titled_with_icon(
-            self._pairings_page,
-            "pairings",
-            "Pairings",
-            "preferences-color-symbolic",
+            media, "media", "Media/Pairings", "image-x-generic-symbolic"
         )
         self._stack.add_titled_with_icon(
             self._playlists_page,
@@ -231,9 +231,13 @@ class MainWindow(Adw.ApplicationWindow):
             "video-display-symbolic",
         )
         switcher = Adw.ViewSwitcherBar(stack=self._stack, reveal=True)
+        self._switcher = switcher
         self._stack.connect("notify::visible-child-name", self._on_page_changed)
         toolbar.add_bottom_bar(switcher)
-        toolbar.set_content(self._stack)
+        self._content_stack = Gtk.Stack()
+        self._content_stack.add_named(self._stack, "primary")
+        self._content_stack.add_named(self._pairings_page, "pairing-editor")
+        toolbar.set_content(self._content_stack)
         return toolbar
 
     def _build_library_bar(self) -> Gtk.Widget:
@@ -341,7 +345,18 @@ class MainWindow(Adw.ApplicationWindow):
     # -- behaviour -------------------------------------------------------
 
     def _on_tile_activated(self, item: MediaItem) -> None:
-        """Play Media through the explicit one-entry ``Quick choice`` list."""
+        """Open the item's implicit pairing as a full editing surface."""
+        self._pairings_page.edit(self._app.session, item)
+        self._content_stack.set_visible_child_name("pairing-editor")
+        self._switcher.set_reveal(False)
+
+    def _close_pairing_editor(self) -> None:
+        self._content_stack.set_visible_child_name("primary")
+        self._stack.set_visible_child_name("media")
+        self._switcher.set_reveal(True)
+
+    def _quick_apply(self, item: MediaItem) -> None:
+        """Right-click Media through the explicit one-entry Quick choice list."""
         response = self._app.play_item(item)
         if not response.ok:
             self.report(response.message)
@@ -443,7 +458,7 @@ class MainWindow(Adw.ApplicationWindow):
         if session is None:
             return
         shown = self._stack.get_visible_child_name()
-        if shown == "pairings":
+        if self._content_stack.get_visible_child_name() == "pairing-editor":
             self._pairings_page.refresh(session)
         elif shown == "playlists":
             self._playlists_page.refresh(session)

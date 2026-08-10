@@ -749,7 +749,9 @@ class _Commands:
         requested = (value or "").strip().casefold()
         aliases = {
             "media": "media",
-            "pairings": "pairings",
+            # Compatibility for callers from before pairings became the
+            # per-item editor reached from Media/Pairings.
+            "pairings": "media",
             "playlists": "playlists",
             "schedules": "schedules",
             "displays": "schedules",

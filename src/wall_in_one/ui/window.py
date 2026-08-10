@@ -520,6 +520,19 @@ class MainWindow(Adw.ApplicationWindow):
         self._management_session = session
         self._refresh_visible_page()
 
+    def playlists_changed(self, session: Session) -> None:
+        """Refresh only playlist authoring after a playlist-store mutation.
+
+        The media library did not change, and schedules only need the new
+        inventory when their page is next shown. Keeping this signal narrow
+        avoids a filesystem scan and, more importantly, does not disturb an
+        unrelated page's in-progress interaction.
+        """
+        self._management_session = session
+        self.show_current(session)
+        if self._stack.get_visible_child_name() == "playlists":
+            self._playlists_page.refresh(session)
+
     def show_page(self, page: str) -> None:
         """Show a primary workflow page after the caller validates its name."""
         self._content_stack.set_visible_child_name("primary")

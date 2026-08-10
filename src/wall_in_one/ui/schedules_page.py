@@ -60,6 +60,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._session: Session | None = None
         self._loading = False
         self._editing_rule = ""
+        self._built = False
+        self._fingerprint: object = None
+        self._rule_rows: list[Gtk.Widget] = []
         self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self._content.set_margin_top(18)
         self._content.set_margin_bottom(24)
@@ -68,7 +71,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self.set_child(self._content)
 
     def refresh(self, session: Session) -> None:
+        fingerprint = self._state_fingerprint(session)
         self._session = session
+        if self._built and fingerprint == self._fingerprint:
+            return
+        scroll = self.get_vadjustment().get_value()
         self._loading = True
         try:
             while (child := self._content.get_first_child()) is not None:
@@ -91,8 +98,22 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._content.append(self._build_displays(session))
             self._content.append(self._build_rules(session))
             self._content.append(self._build_new_rule(session))
+            self._built = True
+            self._fingerprint = fingerprint
         finally:
             self._loading = False
+        self.get_vadjustment().set_value(scroll)
+
+    @staticmethod
+    def _state_fingerprint(session: Session) -> object:
+        return (
+            session.settings.active_playlist,
+            session.manual_playlist,
+            session.playlists.all(),
+            session.displays.all(),
+            session.schedules.rules,
+            _connected_outputs(),
+        )
 
     def _build_playback(self, session: Session) -> Gtk.Widget:
         """The on-demand switch, kept above calendar configuration."""
@@ -178,14 +199,21 @@ class SchedulesPage(Gtk.ScrolledWindow):
         return group
 
     def _build_rules(self, session: Session) -> Gtk.Widget:
-        group = Adw.PreferencesGroup(
+        self._rules_group = Adw.PreferencesGroup(
             title="Scheduled overrides",
             description="Lower rules have higher priority when times overlap.",
         )
+        self._populate_rules(session)
+        return self._rules_group
+
+    def _populate_rules(self, session: Session) -> None:
+        self._rule_rows.clear()
         names = {playlist.id: playlist.name for playlist in session.playlists.all()}
         if not session.schedules.rules:
-            group.add(Adw.ActionRow(title="No scheduled overrides"))
-            return group
+            empty = Adw.ActionRow(title="No scheduled overrides")
+            self._rules_group.add(empty)
+            self._rule_rows.append(empty)
+            return
         total = len(session.schedules.rules)
         for index, rule in enumerate(session.schedules.rules):
             row = Adw.SwitchRow(
@@ -212,8 +240,17 @@ class SchedulesPage(Gtk.ScrolledWindow):
             edit.add_css_class("flat")
             edit.connect("clicked", lambda _button, chosen=rule: self._edit_rule(chosen))
             row.add_suffix(edit)
-            group.add(row)
-        return group
+            self._rules_group.add(row)
+            self._rule_rows.append(row)
+
+    def _refresh_rules(self) -> None:
+        session = self._session
+        if session is None:
+            return
+        for row in self._rule_rows:
+            self._rules_group.remove(row)
+        self._populate_rules(session)
+        self._fingerprint = self._state_fingerprint(session)
 
     def _build_new_rule(self, session: Session) -> Gtk.Widget:
         group = Adw.PreferencesGroup(
@@ -312,6 +349,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             )
             if not response.ok:
                 self._app.window_report(response.message)
+            self._fingerprint = self._state_fingerprint(self._app.session)
 
         return changed
 
@@ -323,6 +361,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             wanted = choices[index - 1].id if 0 < index <= len(choices) else ""
             self._app.update_settings(active_playlist=wanted)
             self._app.schedule_edited()
+            self._fingerprint = self._state_fingerprint(self._app.session)
 
         return changed
 
@@ -341,6 +380,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return
             self._app.runtime_config_changed()
             self._app.window_report(f"Updated {connector}")
+            self._fingerprint = self._state_fingerprint(self._app.session)
 
         return changed
 
@@ -354,6 +394,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 self._app.window_report(str(error))
                 return
             self._app.schedule_edited()
+            self._fingerprint = self._state_fingerprint(self._app.session)
 
         return changed
 
@@ -365,6 +406,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 self._app.window_report(str(error))
                 return
             self._app.schedule_edited()
+            self._refresh_rules()
 
         return move
 
@@ -372,6 +414,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         def remove(_button: Gtk.Button) -> None:
             self._app.session.schedules.remove(rule_id)
             self._app.schedule_edited()
+            self._refresh_rules()
 
         return remove
 
@@ -418,6 +461,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             return
         self._editing_rule = ""
         self._app.schedule_edited()
+        self._clear_rule_editor()
+        self._refresh_rules()
 
     def _edit_rule(self, rule: schedules.Rule) -> None:
         choices = self._session.playlists.all() if self._session is not None else ()

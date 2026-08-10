@@ -393,7 +393,7 @@ class Application(Adw.Application):
         except client.ControlError as error:
             response = Response.failure(str(error))
         if self._window is not None:
-            self._window.show_library(self._session)
+            self._window.playlists_changed(self._session)
         return response
 
     def _make_missing_stills(self) -> None:
@@ -466,9 +466,11 @@ class Application(Adw.Application):
         GLib.idle_add(self.refresh_library)
 
     def playlists_changed(self) -> None:
-        """Re-narrow the rotation and redraw after a list was edited."""
+        """Publish one playlist edit without turning it into a library rescan."""
         self._session.playlists_changed()
-        GLib.idle_add(self.refresh_library)
+        self._publish_runtime()
+        if self._window is not None:
+            self._window.playlists_changed(self._session)
 
     def runtime_config_changed(self) -> None:
         """Publish a light authoring change that does not require a rescan."""
@@ -487,7 +489,7 @@ class Application(Adw.Application):
         except client.ControlError as error:
             response = Response.failure(str(error))
         if self._window is not None:
-            self._window.show_library(self._session)
+            self._window.playlists_changed(self._session)
         if response.ok:
             return Response.success(f"playing {chosen.name}")
         return response
@@ -502,18 +504,18 @@ class Application(Adw.Application):
         except client.ControlError as error:
             response = Response.failure(str(error))
         if self._window is not None:
-            self._window.show_library(self._session)
+            self._window.playlists_changed(self._session)
         return response
 
     def schedule_edited(self) -> None:
         """Take a changed calendar into account now rather than at the next tick."""
         self._publish_runtime()
         if self._runtime_is_running():
-            GLib.idle_add(self.refresh_library)
             return
         if self._session.schedule_changed():
             self.apply(self._session.apply_current)
-        GLib.idle_add(self.refresh_library)
+        if self._window is not None:
+            self._window.show_current(self._session)
 
     def pairing_changed(self, item: MediaItem) -> None:
         """Make the window agree after a pairing moved over the socket.

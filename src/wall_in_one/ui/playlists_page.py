@@ -85,8 +85,17 @@ class PlaylistsPage(Gtk.Box):
         self._session: Session | None = None
         self._selected = ""
         self._playlist_rows: dict[Gtk.ListBoxRow, str] = {}
+        self._playlist_rows_by_id: dict[str, tuple[Gtk.ListBoxRow, Gtk.Label, Gtk.Label]] = {}
+        self._playlist_positions: dict[str, int] = {}
         self._loader = ThumbnailLoader()
         self._source_cards: dict[_MediaCard, MediaItem] = {}
+        self._source_cards_by_path: dict[Path, _MediaCard] = {}
+        self._source_positions: dict[Path, int] = {}
+        self._entry_cards: dict[str, Gtk.Widget] = {}
+        self._entry_items: dict[str, MediaItem | None] = {}
+        self._entry_ids: dict[Gtk.Widget, str] = {}
+        self._entry_positions: dict[str, int] = {}
+        self._editor_id = ""
 
         split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         split.set_position(300)
@@ -134,58 +143,114 @@ class PlaylistsPage(Gtk.Box):
         add_box.append(add)
         sidebar.append(add_box)
 
-        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self._sidebar_scroll = Gtk.ScrolledWindow(
+            vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
+        )
         self._list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self._list.add_css_class("boxed-list")
+        self._list.set_sort_func(self._compare_playlist_rows)
         self._list.connect("row-selected", self._on_selected)
-        scroll.set_child(self._list)
-        sidebar.append(scroll)
+        self._sidebar_scroll.set_child(self._list)
+        sidebar.append(self._sidebar_scroll)
         return sidebar
 
     def refresh(self, session: Session) -> None:
+        """Diff authoring state without replacing the editor under the user.
+
+        Playlist edits are frequent, small changes. Rebuilding this page used
+        to destroy the search entry and all three scroll adjustments after
+        every add, remove, rename, or drag. Rows and cards are keyed by their
+        stable model identities instead, exactly like the main media grid.
+        """
         self._session = session
-        while (row := self._list.get_first_child()) is not None:
-            self._list.remove(row)
-        self._playlist_rows.clear()
-        selected_row: Gtk.ListBoxRow | None = None
-        for playlist in session.playlists.all():
-            row = Gtk.ListBoxRow()
-            self._playlist_rows[row] = playlist.id
-            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            content.set_margin_top(8)
-            content.set_margin_bottom(8)
-            content.set_margin_start(10)
-            content.set_margin_end(10)
-            name = Gtk.Label(label=playlist.name, xalign=0.0)
-            name.add_css_class("heading")
-            detail = Gtk.Label(
-                label=(
-                    f"{len(playlist)} item{'s' if len(playlist) != 1 else ''}"
-                    + (" · playing" if playlist.id == session.active_playlist() else "")
-                    + (" · default" if playlist.id == session.settings.active_playlist else "")
-                ),
-                xalign=0.0,
-            )
-            detail.add_css_class("caption")
-            detail.add_css_class("dim-label")
-            content.append(name)
-            content.append(detail)
-            row.set_child(content)
-            self._list.append(row)
-            if playlist.id == self._selected:
-                selected_row = row
-        if selected_row is None and self._playlist_rows:
-            selected_row = next(iter(self._playlist_rows))
+        available = session.playlists.all()
+        incoming = {playlist.id: playlist for playlist in available}
+        for identifier, (row, _name, _detail) in list(self._playlist_rows_by_id.items()):
+            if identifier not in incoming:
+                self._list.remove(row)
+                self._playlist_rows.pop(row, None)
+                del self._playlist_rows_by_id[identifier]
+
+        self._playlist_positions = {playlist.id: index for index, playlist in enumerate(available)}
+        for playlist in available:
+            existing = self._playlist_rows_by_id.get(playlist.id)
+            if existing is None:
+                row, name, detail = self._new_playlist_row()
+                self._playlist_rows[row] = playlist.id
+                self._playlist_rows_by_id[playlist.id] = (row, name, detail)
+                self._list.append(row)
+            else:
+                row, name, detail = existing
+            name.set_label(playlist.name)
+            detail.set_label(self._playlist_detail(session, playlist))
+        self._list.invalidate_sort()
+
+        wanted = self._selected if self._selected in incoming else ""
+        if not wanted and available:
+            wanted = available[0].id
+        selected_record = self._playlist_rows_by_id.get(wanted)
+        selected_row = selected_record[0] if selected_record is not None else None
         self._list.select_row(selected_row)
+        if wanted != self._selected:
+            self._selected = wanted
+            self._show_editor()
+        elif wanted:
+            self._sync_editor()
+        else:
+            self._show_empty()
+
+    @staticmethod
+    def _new_playlist_row() -> tuple[Gtk.ListBoxRow, Gtk.Label, Gtk.Label]:
+        row = Gtk.ListBoxRow()
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        name = Gtk.Label(xalign=0.0)
+        name.add_css_class("heading")
+        detail = Gtk.Label(xalign=0.0)
+        detail.add_css_class("caption")
+        detail.add_css_class("dim-label")
+        content.append(name)
+        content.append(detail)
+        row.set_child(content)
+        return row, name, detail
+
+    @staticmethod
+    def _playlist_detail(session: Session, playlist: playlists.Playlist) -> str:
+        return (
+            f"{len(playlist)} item{'s' if len(playlist) != 1 else ''}"
+            + (" · playing" if playlist.id == session.active_playlist() else "")
+            + (" · default" if playlist.id == session.settings.active_playlist else "")
+        )
+
+    def _compare_playlist_rows(self, first: Gtk.ListBoxRow, second: Gtk.ListBoxRow) -> int:
+        first_id = self._playlist_rows.get(first, "")
+        second_id = self._playlist_rows.get(second, "")
+        end = len(self._playlist_positions)
+        return self._playlist_positions.get(first_id, end) - self._playlist_positions.get(
+            second_id, end
+        )
 
     def _on_selected(self, _box: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
-        self._selected = self._playlist_rows.get(row, "") if row is not None else ""
+        selected = self._playlist_rows.get(row, "") if row is not None else ""
+        if selected == self._selected and self._editor_id == selected:
+            return
+        self._selected = selected
         self._show_editor()
 
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:
             self._editor.remove(child)
         self._source_cards.clear()
+        self._source_cards_by_path.clear()
+        self._source_positions.clear()
+        self._entry_cards.clear()
+        self._entry_items.clear()
+        self._entry_ids.clear()
+        self._entry_positions.clear()
+        self._editor_id = ""
 
     def _show_empty(self) -> None:
         self._clear_editor()
@@ -204,38 +269,25 @@ class PlaylistsPage(Gtk.Box):
             self._show_empty()
             return
         self._clear_editor()
+        self._editor_id = playlist.id
 
         title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        name = Gtk.Entry(text=playlist.name, hexpand=True)
-        name.add_css_class("title-2")
-        title_row.append(name)
+        self._name_entry = Gtk.Entry(text=playlist.name, hexpand=True)
+        self._name_entry.add_css_class("title-2")
+        title_row.append(self._name_entry)
         rename = Gtk.Button(label="Rename")
-        rename.connect("clicked", lambda _button: self._rename(name.get_text()))
+        rename.connect("clicked", lambda _button: self._rename(self._name_entry.get_text()))
         title_row.append(rename)
         self._editor.append(title_row)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        play = Gtk.Button(
-            label=(
-                "Playing now"
-                if playlist.id == session.manual_playlist
-                else "Play this playlist now"
-            )
-        )
-        play.add_css_class("suggested-action")
-        play.set_sensitive(bool(playlist.entries) and playlist.id != session.manual_playlist)
-        play.connect("clicked", lambda _button: self._play_now())
-        actions.append(play)
-        default = Gtk.Button(
-            label=(
-                "Schedule default"
-                if playlist.id == session.settings.active_playlist
-                else "Use as schedule default"
-            )
-        )
-        default.set_sensitive(playlist.id != session.settings.active_playlist)
-        default.connect("clicked", lambda _button: self._set_default())
-        actions.append(default)
+        self._play_button = Gtk.Button()
+        self._play_button.add_css_class("suggested-action")
+        self._play_button.connect("clicked", lambda _button: self._play_now())
+        actions.append(self._play_button)
+        self._default_button = Gtk.Button()
+        self._default_button.connect("clicked", lambda _button: self._set_default())
+        actions.append(self._default_button)
         delete = Gtk.Button(label="Delete playlist")
         delete.add_css_class("destructive-action")
         delete.connect("clicked", lambda _button: self._delete())
@@ -246,37 +298,36 @@ class PlaylistsPage(Gtk.Box):
         arranger.set_position(390)
         arranger.set_shrink_start_child(False)
         arranger.set_shrink_end_child(False)
-        arranger.set_start_child(self._build_source_pane(session))
-        arranger.set_end_child(self._build_playlist_pane(session, playlist))
+        arranger.set_start_child(self._build_source_pane())
+        arranger.set_end_child(self._build_playlist_pane())
         arranger.set_vexpand(True)
         self._editor.append(arranger)
+        self._sync_editor()
 
-    def _build_source_pane(self, session: Session) -> Gtk.Widget:
+    def _build_source_pane(self) -> Gtk.Widget:
         pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         pane.set_margin_end(8)
         heading = Gtk.Label(label="Media/Pairings", xalign=0.0)
         heading.add_css_class("title-3")
         pane.append(heading)
-        search = Gtk.SearchEntry(placeholder_text="Search pairings")
-        pane.append(search)
-        flow = self._new_flow()
-        flow.set_filter_func(lambda child: self._source_visible(child, search.get_text()))
-        search.connect("search-changed", lambda _entry: flow.invalidate_filter())
-        for item in session.library.items:
-            card = _MediaCard(
-                item,
-                f"{SOURCE_PREFIX}{item.path}",
-                self._make_add(item),
-            )
-            self._source_cards[card] = item
-            flow.append(card)
-            self._loader.request(item, card.show_thumbnail)
-        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        scroll.set_child(flow)
-        pane.append(scroll)
+        self._source_search = Gtk.SearchEntry(placeholder_text="Search pairings")
+        pane.append(self._source_search)
+        self._source_flow = self._new_flow()
+        self._source_flow.set_filter_func(
+            lambda child: self._source_visible(child, self._source_search.get_text())
+        )
+        self._source_flow.set_sort_func(self._compare_source_cards)
+        self._source_search.connect(
+            "search-changed", lambda _entry: self._source_flow.invalidate_filter()
+        )
+        self._source_scroll = Gtk.ScrolledWindow(
+            vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
+        )
+        self._source_scroll.set_child(self._source_flow)
+        pane.append(self._source_scroll)
         return pane
 
-    def _build_playlist_pane(self, session: Session, playlist: playlists.Playlist) -> Gtk.Widget:
+    def _build_playlist_pane(self) -> Gtk.Widget:
         pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         pane.set_margin_start(8)
         heading = Gtk.Label(label="Playlist order", xalign=0.0)
@@ -289,30 +340,118 @@ class PlaylistsPage(Gtk.Box):
         )
         note.add_css_class("dim-label")
         pane.append(note)
-        flow = self._new_flow()
-        for entry in playlist.entries:
-            item = session.library.find(Path(entry.source))
-            if item is None:
-                missing = Gtk.Label(label=f"Missing · {Path(entry.source).name}")
-                missing.add_css_class("card")
-                flow.append(missing)
-                continue
-            card = _MediaCard(
-                item,
-                f"{ENTRY_PREFIX}{entry.id}",
-                self._make_remove(entry.id),
-                self._make_drop(entry.id),
-                self._make_remove(entry.id),
-            )
-            flow.append(card)
-            self._loader.request(item, card.show_thumbnail)
+        self._order_flow = self._new_flow()
+        self._order_flow.set_sort_func(self._compare_entry_cards)
         target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
         target.connect("drop", self._drop_at_end)
-        flow.add_controller(target)
-        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        scroll.set_child(flow)
-        pane.append(scroll)
+        self._order_flow.add_controller(target)
+        self._order_scroll = Gtk.ScrolledWindow(
+            vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
+        )
+        self._order_scroll.set_child(self._order_flow)
+        pane.append(self._order_scroll)
         return pane
+
+    def _sync_editor(self) -> None:
+        session = self._session
+        playlist = session.playlists.get(self._selected) if session is not None else None
+        if session is None or playlist is None:
+            self._show_empty()
+            return
+        if self._editor_id != playlist.id:
+            self._show_editor()
+            return
+        if not self._name_entry.has_focus() and self._name_entry.get_text() != playlist.name:
+            self._name_entry.set_text(playlist.name)
+        self._play_button.set_label(
+            "Playing now" if playlist.id == session.manual_playlist else "Play this playlist now"
+        )
+        self._play_button.set_sensitive(
+            bool(playlist.entries) and playlist.id != session.manual_playlist
+        )
+        self._default_button.set_label(
+            "Schedule default"
+            if playlist.id == session.settings.active_playlist
+            else "Use as schedule default"
+        )
+        self._default_button.set_sensitive(playlist.id != session.settings.active_playlist)
+        self._sync_source_cards(session)
+        self._sync_entry_cards(session, playlist)
+
+    def _sync_source_cards(self, session: Session) -> None:
+        incoming = {item.path: item for item in session.library.items}
+        for path, card in list(self._source_cards_by_path.items()):
+            replacement = incoming.get(path)
+            if replacement is None or replacement != card.item:
+                self._source_flow.remove(card)
+                self._source_cards.pop(card, None)
+                del self._source_cards_by_path[path]
+        self._source_positions = {
+            item.path: index for index, item in enumerate(session.library.items)
+        }
+        for item in session.library.items:
+            if item.path in self._source_cards_by_path:
+                continue
+            card = _MediaCard(item, f"{SOURCE_PREFIX}{item.path}", self._make_add(item))
+            self._source_cards[card] = item
+            self._source_cards_by_path[item.path] = card
+            self._source_flow.append(card)
+            self._loader.request(item, card.show_thumbnail)
+        self._source_flow.invalidate_sort()
+        self._source_flow.invalidate_filter()
+
+    def _sync_entry_cards(self, session: Session, playlist: playlists.Playlist) -> None:
+        wanted = {entry.id: session.library.find(Path(entry.source)) for entry in playlist.entries}
+        for identifier, existing_card in list(self._entry_cards.items()):
+            if identifier not in wanted or self._entry_items.get(identifier) != wanted[identifier]:
+                self._order_flow.remove(existing_card)
+                self._entry_ids.pop(existing_card, None)
+                self._entry_items.pop(identifier, None)
+                del self._entry_cards[identifier]
+        self._entry_positions = {entry.id: index for index, entry in enumerate(playlist.entries)}
+        for entry in playlist.entries:
+            if entry.id in self._entry_cards:
+                continue
+            item = wanted[entry.id]
+            if item is None:
+                card: Gtk.Widget = Gtk.Label(label=f"Missing · {Path(entry.source).name}")
+                card.add_css_class("card")
+            else:
+                card = _MediaCard(
+                    item,
+                    f"{ENTRY_PREFIX}{entry.id}",
+                    self._make_remove(entry.id),
+                    self._make_drop(entry.id),
+                    self._make_remove(entry.id),
+                )
+                self._loader.request(item, card.show_thumbnail)
+            self._entry_cards[entry.id] = card
+            self._entry_items[entry.id] = item
+            self._entry_ids[card] = entry.id
+            self._order_flow.append(card)
+        self._order_flow.invalidate_sort()
+
+    def _compare_source_cards(self, first: Gtk.FlowBoxChild, second: Gtk.FlowBoxChild) -> int:
+        first_card = first.get_child()
+        second_card = second.get_child()
+        first_item = (
+            self._source_cards.get(first_card) if isinstance(first_card, _MediaCard) else None
+        )
+        second_item = (
+            self._source_cards.get(second_card) if isinstance(second_card, _MediaCard) else None
+        )
+        end = len(self._source_positions)
+        first_rank = self._source_positions.get(first_item.path, end) if first_item else end
+        second_rank = self._source_positions.get(second_item.path, end) if second_item else end
+        return first_rank - second_rank
+
+    def _compare_entry_cards(self, first: Gtk.FlowBoxChild, second: Gtk.FlowBoxChild) -> int:
+        first_card = first.get_child()
+        second_card = second.get_child()
+        first_id = self._entry_ids.get(first_card, "") if first_card is not None else ""
+        second_id = self._entry_ids.get(second_card, "") if second_card is not None else ""
+        end = len(self._entry_positions)
+        return self._entry_positions.get(first_id, end) - self._entry_positions.get(second_id, end)
 
     @staticmethod
     def _new_flow() -> Gtk.FlowBox:

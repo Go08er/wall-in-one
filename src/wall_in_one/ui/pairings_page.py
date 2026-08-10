@@ -47,6 +47,7 @@ class PairingsPage(Gtk.Box):
         self._on_back = on_back
         self._session: Session | None = None
         self._selected: MediaItem | None = None
+        self._rendered: tuple[MediaItem, pairings.Pairing] | None = None
         self._preview_loader = SchemePreviewLoader(max_workers=2)
         self._adaptive_boxes: dict[str, Gtk.Box] = {}
 
@@ -75,13 +76,17 @@ class PairingsPage(Gtk.Box):
             self._show_empty()
         else:
             self._selected = current
-            self._show_editor(current)
+            bundle = session.pairings.resolve(current, session.library.roots)
+            if self._rendered != (current, bundle):
+                self._show_editor(current, bundle=bundle)
 
     def edit(self, session: Session, item: MediaItem) -> None:
         """Open ``item`` as the one implicit pairing it already represents."""
         self._session = session
         self._selected = item
-        self._show_editor(item)
+        bundle = session.pairings.resolve(item, session.library.roots)
+        if self._rendered != (item, bundle):
+            self._show_editor(item, bundle=bundle)
 
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:
@@ -90,6 +95,7 @@ class PairingsPage(Gtk.Box):
 
     def _show_empty(self) -> None:
         self._clear_editor()
+        self._rendered = None
         status = Adw.StatusPage(
             title="Choose media first",
             description="Return to Media/Pairings and choose an item to configure.",
@@ -98,12 +104,21 @@ class PairingsPage(Gtk.Box):
         status.set_vexpand(True)
         self._editor.append(status)
 
-    def _show_editor(self, item: MediaItem) -> None:
+    def _show_editor(
+        self,
+        item: MediaItem,
+        *,
+        bundle: pairings.Pairing | None = None,
+        restore_focus: str = "",
+    ) -> None:
         session = self._session
         if session is None:
             return
+        scroll = self._editor_scroll.get_vadjustment().get_value()
         self._clear_editor()
-        bundle = session.pairings.resolve(item, session.library.roots)
+        bundle = bundle or session.pairings.resolve(item, session.library.roots)
+        rendered_item = item.with_still(bundle.still) if item.is_moving else item
+        self._rendered = (rendered_item, bundle)
 
         back = Gtk.Button(label="Back to Media/Pairings", icon_name="go-previous-symbolic")
         back.set_halign(Gtk.Align.START)
@@ -126,16 +141,18 @@ class PairingsPage(Gtk.Box):
         )
         stills = tuple(session.library.stills)
         labels = ["Automatic default", *(candidate.name for candidate in stills)]
-        still_row = Adw.ComboRow(title="Still from your library", model=Gtk.StringList.new(labels))
+        self._still_row = Adw.ComboRow(
+            title="Still from your library", model=Gtk.StringList.new(labels)
+        )
         selected = 0
         if bundle.still is not None:
             for index, candidate in enumerate(stills, start=1):
                 if candidate.path == bundle.still:
                     selected = index
                     break
-        still_row.set_selected(selected)
-        still_row.connect("notify::selected", self._make_still_changed(item, stills))
-        still_group.add(still_row)
+        self._still_row.set_selected(selected)
+        self._still_row.connect("notify::selected", self._make_still_changed(item, stills))
+        still_group.add(self._still_row)
 
         manual = Adw.ActionRow(
             title="Choose another image…",
@@ -224,12 +241,12 @@ class PairingsPage(Gtk.Box):
         colour_group.add(policy_list)
         self._editor.append(colour_group)
 
-        reset = Gtk.Button(label="Reset this pairing to automatic defaults")
-        reset.add_css_class("destructive-action")
-        reset.set_halign(Gtk.Align.START)
-        reset.set_sensitive(bundle.customized)
-        reset.connect("clicked", lambda _button: self._reset(item))
-        self._editor.append(reset)
+        self._reset_button = Gtk.Button(label="Reset this pairing to automatic defaults")
+        self._reset_button.add_css_class("destructive-action")
+        self._reset_button.set_halign(Gtk.Align.START)
+        self._reset_button.set_sensitive(bundle.customized)
+        self._reset_button.connect("clicked", lambda _button: self._reset(item))
+        self._editor.append(self._reset_button)
 
         if bundle.still is not None and bundle.still.is_file():
             for scheme in noctalia.ALL_SCHEMES:
@@ -238,6 +255,15 @@ class PairingsPage(Gtk.Box):
                     scheme,
                     self._on_adaptive_preview,
                 )
+        GLib.idle_add(self._restore_interaction, scroll, restore_focus)
+
+    def _restore_interaction(self, scroll: float, focus: str) -> bool:
+        self._editor_scroll.get_vadjustment().set_value(scroll)
+        if focus == "still":
+            self._still_row.grab_focus()
+        elif focus == "reset":
+            self._reset_button.grab_focus()
+        return GLib.SOURCE_REMOVE
 
     def _policies(
         self, bundle: pairings.Pairing
@@ -307,7 +333,7 @@ class PairingsPage(Gtk.Box):
                 self._app.window_report(str(error))
                 return
             self._app.pairing_changed(item)
-            self._show_editor(item)
+            self._show_editor(item, restore_focus="still")
 
         return changed
 
@@ -342,6 +368,10 @@ class PairingsPage(Gtk.Box):
             self._app.window_report(str(error))
             return
         self._app.pairing_changed(item)
+        session = self._app.session
+        bundle = session.pairings.resolve(item, session.library.roots)
+        rendered_item = item.with_still(bundle.still) if item.is_moving else item
+        self._rendered = (rendered_item, bundle)
 
     def _choose_manual_still(self, item: MediaItem) -> None:
         dialog = Gtk.FileDialog(title=f"Choose a still for {item.name}", modal=True)
@@ -374,7 +404,7 @@ class PairingsPage(Gtk.Box):
                 self._app.window_report(str(error))
                 return
             self._app.pairing_changed(item)
-            self._show_editor(item)
+            self._show_editor(item, restore_focus="still")
 
         return chosen
 
@@ -385,7 +415,7 @@ class PairingsPage(Gtk.Box):
             self._app.window_report(str(error))
             return
         self._app.pairing_changed(item)
-        self._show_editor(item)
+        self._show_editor(item, restore_focus="reset")
 
     def _regenerate_scene(self, item: MediaItem) -> None:
         if self._app.regenerate_scene_still(item):

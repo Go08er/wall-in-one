@@ -248,7 +248,64 @@ Nothing plays a single item ad hoc.
 
 ## Open questions
 
-### gSlapper instead of mpvpaper — unresolved, needs measuring
+### gSlapper instead of mpvpaper — DECIDED: stay on mpvpaper, low priority
+
+The user, after seeing the crash evidence below: *"currently as it stands
+gstreamer has no real data proclaiming its actual efficency and isnt in the nix
+repository so imma put it as low priority and probably keep using mpvpaper."*
+
+Two reasons, both checked:
+
+- **The efficiency claim is still unquantified.** The README asserts lower CPU,
+  RAM and GPU than mpvpaper and publishes no numbers.
+- **It is not in nixpkgs.** Confirmed — `nix eval nixpkgs#gslapper` suggests
+  *clapper*. It ships its own flake, so adopting it means a flake input or a
+  custom derivation. That is real friction for an app distributed as a flake,
+  against an unmeasured benefit.
+
+Supporting *both* remains open and is the shape the code already allows: the
+video renderer sits behind a trait with mpvpaper as the only implementation.
+Nothing further is planned.
+
+**Evidence that this is a real trade rather than a hypothetical**, kept because
+it is the strongest argument on the other side. Four mpvpaper crashes on this
+machine — 2026-08-05 20:10:23, 20:10:24, and 2026-08-09 18:45:01, 18:53:26 —
+are byte-for-byte the same signature:
+
+    #0  _glGetString          (libnvidia-eglcore.so.595.84 + 0x8f58fa)
+    #1  mpgl_load_functions2  (libmpv.so.2)
+    #2  init                  (libmpv.so.2)
+    #4  mpv_render_context_create
+    #5  main
+
+That is libmpv's GL loader crashing inside the nvidia EGL driver during
+**context creation, in `main`, before a frame is decoded** — not a decoder
+fault and not the wallpaper's fault. It is precisely the failure gSlapper's
+author describes when he says libmpv "performs pretty bad on nvidia" and that
+"the issue is with its backend"; GStreamer never takes that path.
+
+The user's judgement is that the crashes are not affecting anything in
+practice, so this stays low priority. Two cheap mitigations are noted rather
+than taken:
+
+- `--auto-stop` respawns mpvpaper whenever the wallpaper is hidden, so every
+  occlusion is another attempt at the fragile nvidia context creation.
+  `--auto-pause` freezes instead and would attempt it far less often.
+- The mpv IPC socket is currently `wall-in-one-mpv-.sock` — a dangling dash
+  where an output name belongs, so every output would share one socket.
+
+### Retry policy has two cases, not one
+
+Renderer supervision does **zero retries**, decided because some Workshop scenes
+deterministically crash `linux-wallpaperengine`, where retrying loops forever.
+The mpvpaper crash above is the opposite character: transient, at startup, and
+very likely to succeed on a second attempt. If retries are ever revisited, the
+split is: retry once on a *startup* failure, never retry a renderer that ran
+successfully and then died, and never retry a scene already known to crash the
+engine this session.
+
+### Superseded: the original open question
+
 
 <https://github.com/Nomadcxx/gSlapper>, and a Noctalia plugin wrapper at
 `Nomadcxx/noctalia-gslapper`. GStreamer rather than libmpv. GPL-3.0. Packaged

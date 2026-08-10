@@ -68,6 +68,19 @@ class PlaylistError(Exception):
         return f"{self.kind}: {super().__str__()}"
 
 
+def drop_position(entry_ids: tuple[str, ...], moving: str, before: str | None) -> int:
+    """Insertion position for dragging ``moving`` before ``before``.
+
+    This is deliberately independent of GTK. Entry identity, duplicate media,
+    and the adjustment caused by removing the moving entry first are model
+    concerns and can be tested without a display server.
+    """
+    remaining = [entry_id for entry_id in entry_ids if entry_id != moving]
+    if before is None or before not in remaining:
+        return len(remaining)
+    return remaining.index(before)
+
+
 def new_id() -> str:
     """A short opaque identifier.
 

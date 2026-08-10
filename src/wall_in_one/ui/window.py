@@ -403,6 +403,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_destroy(self, _window: Gtk.Window) -> None:
         self._loader.shutdown()
         self._pairings_page.shutdown()
+        self._playlists_page.shutdown()
 
     @property
     def settings(self) -> config.Settings:

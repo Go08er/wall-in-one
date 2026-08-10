@@ -11,14 +11,69 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Adw, Gtk, Pango
+from gi.repository import Adw, Gdk, Gtk, Pango
 
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
+from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 if TYPE_CHECKING:
     from wall_in_one.session import Session
     from wall_in_one.ui.app import Application
+
+
+SOURCE_PREFIX = "media:"
+ENTRY_PREFIX = "entry:"
+
+
+class _MediaCard(Gtk.Box):
+    """A pairing thumbnail that can be dragged, clicked, or removed."""
+
+    def __init__(
+        self,
+        item: MediaItem,
+        payload: str,
+        on_activate: Any,
+        on_drop: Any | None = None,
+        on_remove: Any | None = None,
+    ) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.item = item
+        self.add_css_class("card")
+        self.set_size_request(180, -1)
+
+        self.picture = Gtk.Picture(width_request=180, height_request=102)
+        self.picture.set_content_fit(Gtk.ContentFit.COVER)
+        self.append(self.picture)
+        title = Gtk.Label(label=item.name, ellipsize=Pango.EllipsizeMode.END)
+        title.add_css_class("caption")
+        self.append(title)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        actions.set_halign(Gtk.Align.CENTER)
+        add = Gtk.Button(
+            icon_name="list-add-symbolic" if on_remove is None else "list-remove-symbolic",
+            tooltip_text="Add to playlist" if on_remove is None else "Remove from playlist",
+        )
+        add.add_css_class("flat")
+        add.connect("clicked", on_activate if on_remove is None else on_remove)
+        actions.append(add)
+        self.append(actions)
+
+        drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        drag.connect(
+            "prepare",
+            lambda *_arguments: Gdk.ContentProvider.new_for_value(payload),
+        )
+        self.add_controller(drag)
+
+        if on_drop is not None:
+            target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+            target.connect("drop", on_drop)
+            self.add_controller(target)
+
+    def show_thumbnail(self, _item: MediaItem, texture: Gdk.Texture | None) -> None:
+        self.picture.set_paintable(texture)
 
 
 class PlaylistsPage(Gtk.Box):
@@ -30,7 +85,8 @@ class PlaylistsPage(Gtk.Box):
         self._session: Session | None = None
         self._selected = ""
         self._playlist_rows: dict[Gtk.ListBoxRow, str] = {}
-        self._media_rows: dict[Gtk.ListBoxRow, MediaItem] = {}
+        self._loader = ThumbnailLoader()
+        self._source_cards: dict[_MediaCard, MediaItem] = {}
 
         split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         split.set_position(300)
@@ -48,6 +104,9 @@ class PlaylistsPage(Gtk.Box):
         split.set_end_child(self._editor_scroll)
         self.append(split)
         self._show_empty()
+
+    def shutdown(self) -> None:
+        self._loader.shutdown()
 
     def _sidebar(self) -> Gtk.Widget:
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -126,7 +185,7 @@ class PlaylistsPage(Gtk.Box):
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:
             self._editor.remove(child)
-        self._media_rows.clear()
+        self._source_cards.clear()
 
     def _show_empty(self) -> None:
         self._clear_editor()
@@ -183,100 +242,137 @@ class PlaylistsPage(Gtk.Box):
         actions.append(delete)
         self._editor.append(actions)
 
-        entries = Adw.PreferencesGroup(
-            title="Rotation order",
-            description=(
-                "Entry IDs stay stable when you reorder them. Missing files remain listed so "
-                "removable drives can come back."
-            ),
-        )
-        if not playlist.entries:
-            entries.add(Adw.ActionRow(title="This playlist is empty"))
-        for index, entry in enumerate(playlist.entries):
-            item = session.library.find(Path(entry.source))
-            row = Adw.ActionRow(
-                title=item.name if item is not None else Path(entry.source).name,
-                subtitle=(
-                    f"{index + 1} · {item.kind.value if item is not None else 'missing'} · "
-                    f"entry {entry.id}"
-                ),
-            )
-            row.add_prefix(
-                Gtk.Image(
-                    icon_name=(
-                        "video-x-generic-symbolic"
-                        if item is not None and item.kind.moves
-                        else "image-x-generic-symbolic"
-                    )
-                )
-            )
-            up = Gtk.Button(icon_name="go-up-symbolic", tooltip_text="Move earlier")
-            up.set_sensitive(index > 0)
-            up.add_css_class("flat")
-            up.connect("clicked", self._make_move(entry.id, index - 1))
-            row.add_suffix(up)
-            down = Gtk.Button(icon_name="go-down-symbolic", tooltip_text="Move later")
-            down.set_sensitive(index + 1 < len(playlist.entries))
-            down.add_css_class("flat")
-            down.connect("clicked", self._make_move(entry.id, index + 1))
-            row.add_suffix(down)
-            remove = Gtk.Button(icon_name="list-remove-symbolic", tooltip_text="Remove entry")
-            remove.add_css_class("flat")
-            remove.connect("clicked", self._make_remove(entry.id))
-            row.add_suffix(remove)
-            entries.add(row)
-        self._editor.append(entries)
+        arranger = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True)
+        arranger.set_position(390)
+        arranger.set_shrink_start_child(False)
+        arranger.set_shrink_end_child(False)
+        arranger.set_start_child(self._build_source_pane(session))
+        arranger.set_end_child(self._build_playlist_pane(session, playlist))
+        arranger.set_vexpand(True)
+        self._editor.append(arranger)
 
-        picker = Adw.PreferencesGroup(
-            title="Add from Media",
-            description="Search the same library shown on the Media page, then add one item.",
-        )
-        search = Gtk.SearchEntry(placeholder_text="Find media")
-        picker.add(search)
-        scroller = Gtk.ScrolledWindow(
-            min_content_height=220,
-            max_content_height=380,
-            hscrollbar_policy=Gtk.PolicyType.NEVER,
-        )
-        listing = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        listing.add_css_class("boxed-list")
-        listing.set_filter_func(lambda row: self._filter_media(row, search.get_text()))
-        search.connect("search-changed", lambda _entry: listing.invalidate_filter())
+    def _build_source_pane(self, session: Session) -> Gtk.Widget:
+        pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        pane.set_margin_end(8)
+        heading = Gtk.Label(label="Media/Pairings", xalign=0.0)
+        heading.add_css_class("title-3")
+        pane.append(heading)
+        search = Gtk.SearchEntry(placeholder_text="Search pairings")
+        pane.append(search)
+        flow = self._new_flow()
+        flow.set_filter_func(lambda child: self._source_visible(child, search.get_text()))
+        search.connect("search-changed", lambda _entry: flow.invalidate_filter())
         for item in session.library.items:
-            media_row = Gtk.ListBoxRow(activatable=False)
-            self._media_rows[media_row] = item
-            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            content.set_margin_top(7)
-            content.set_margin_bottom(7)
-            content.set_margin_start(10)
-            content.set_margin_end(10)
-            icon = Gtk.Image(
-                icon_name=(
-                    "video-x-generic-symbolic" if item.kind.moves else "image-x-generic-symbolic"
-                )
+            card = _MediaCard(
+                item,
+                f"{SOURCE_PREFIX}{item.path}",
+                self._make_add(item),
             )
-            content.append(icon)
-            label = Gtk.Label(
-                label=item.name,
-                xalign=0.0,
-                hexpand=True,
-                ellipsize=Pango.EllipsizeMode.END,
-            )
-            label.set_tooltip_text(str(item.path))
-            content.append(label)
-            add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add to playlist")
-            add.connect("clicked", self._make_add(item))
-            content.append(add)
-            media_row.set_child(content)
-            listing.append(media_row)
-        scroller.set_child(listing)
-        picker.add(scroller)
-        self._editor.append(picker)
+            self._source_cards[card] = item
+            flow.append(card)
+            self._loader.request(item, card.show_thumbnail)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.set_child(flow)
+        pane.append(scroll)
+        return pane
 
-    def _filter_media(self, row: Gtk.ListBoxRow, raw: str) -> bool:
-        item = self._media_rows.get(row)
+    def _build_playlist_pane(self, session: Session, playlist: playlists.Playlist) -> Gtk.Widget:
+        pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        pane.set_margin_start(8)
+        heading = Gtk.Label(label="Playlist order", xalign=0.0)
+        heading.add_css_class("title-3")
+        pane.append(heading)
+        note = Gtk.Label(
+            label="Drag pairings here. Drag cards to reorder; duplicates are allowed.",
+            xalign=0.0,
+            wrap=True,
+        )
+        note.add_css_class("dim-label")
+        pane.append(note)
+        flow = self._new_flow()
+        for entry in playlist.entries:
+            item = session.library.find(Path(entry.source))
+            if item is None:
+                missing = Gtk.Label(label=f"Missing · {Path(entry.source).name}")
+                missing.add_css_class("card")
+                flow.append(missing)
+                continue
+            card = _MediaCard(
+                item,
+                f"{ENTRY_PREFIX}{entry.id}",
+                self._make_remove(entry.id),
+                self._make_drop(entry.id),
+                self._make_remove(entry.id),
+            )
+            flow.append(card)
+            self._loader.request(item, card.show_thumbnail)
+        target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        target.connect("drop", self._drop_at_end)
+        flow.add_controller(target)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.set_child(flow)
+        pane.append(scroll)
+        return pane
+
+    @staticmethod
+    def _new_flow() -> Gtk.FlowBox:
+        flow = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            homogeneous=True,
+            column_spacing=10,
+            row_spacing=10,
+            min_children_per_line=1,
+            max_children_per_line=3,
+            valign=Gtk.Align.START,
+        )
+        flow.set_margin_top(6)
+        flow.set_margin_bottom(6)
+        return flow
+
+    def _source_visible(self, child: Gtk.FlowBoxChild, raw: str) -> bool:
+        card = child.get_child()
+        item = self._source_cards.get(card) if isinstance(card, _MediaCard) else None
         query = raw.strip().casefold()
         return item is None or not query or query in item.name.casefold()
+
+    def _make_drop(self, before: str) -> Any:
+        def drop(_target: Gtk.DropTarget, value: object, _x: float, _y: float) -> bool:
+            return self._accept_drop(value, before)
+
+        return drop
+
+    def _drop_at_end(self, _target: Gtk.DropTarget, value: object, _x: float, _y: float) -> bool:
+        return self._accept_drop(value, None)
+
+    def _accept_drop(self, value: object, before: str | None) -> bool:
+        """Apply one card drop, preserving entry ids and allowing duplicates."""
+        if not isinstance(value, str) or not self._selected:
+            return False
+        session = self._app.session
+        playlist = session.playlists.get(self._selected)
+        if playlist is None:
+            return False
+        try:
+            if value.startswith(SOURCE_PREFIX):
+                source = Path(value.removeprefix(SOURCE_PREFIX))
+                if session.library.find(source) is None:
+                    return False
+                updated = session.playlists.add(self._selected, source)
+                moving = updated.entries[-1].id
+            elif value.startswith(ENTRY_PREFIX):
+                moving = value.removeprefix(ENTRY_PREFIX)
+            else:
+                return False
+            current = session.playlists.find(self._selected)
+            position = playlists.drop_position(
+                tuple(entry.id for entry in current.entries), moving, before
+            )
+            session.playlists.move_entry(self._selected, moving, position)
+        except playlists.PlaylistError as error:
+            self._app.window_report(str(error))
+            return False
+        self._app.playlists_changed()
+        return True
 
     def _create(self, *_arguments: object) -> None:
         session = self._session

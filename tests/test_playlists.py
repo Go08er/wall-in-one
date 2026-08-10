@@ -371,3 +371,11 @@ def test_playlists_are_listed_by_name(store: Store) -> None:
     for name in ("zebra", "apple", "Mango"):
         store.create(name)
     assert [one.name for one in store.all()] == ["apple", "Mango", "zebra"]
+
+
+def test_drop_position_accounts_for_removing_the_dragged_entry() -> None:
+    ids = ("a", "b", "c", "d")
+
+    assert playlists.drop_position(ids, "d", "b") == 1
+    assert playlists.drop_position(ids, "a", "d") == 2
+    assert playlists.drop_position(ids, "b", None) == 3

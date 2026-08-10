@@ -77,6 +77,12 @@ class _MediaCard(Gtk.Box):
 
         if on_drop is not None:
             target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+            # Without this the payload is only read once a drop has been
+            # accepted, so `get_value` is None for every motion event -- and a
+            # motion handler that cannot see the payload refuses the drag, which
+            # stops the drop from ever being delivered. The payload here is a
+            # short string, so reading it early costs nothing.
+            target.set_preload(True)
             target.connect("drop", on_drop)
             if on_motion is not None:
                 target.connect("motion", on_motion)
@@ -383,6 +389,8 @@ class PlaylistsPage(Gtk.Box):
         self._order_flow = self._new_flow(homogeneous=False)
         self._order_flow.set_sort_func(self._compare_entry_cards)
         target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        # See `_MediaCard`: motion cannot read the payload without this.
+        target.set_preload(True)
         target.connect("drop", self._drop_at_end)
         target.connect("motion", self._motion_at_end)
         target.connect("leave", self._leave_drop_target)
@@ -558,7 +566,18 @@ class PlaylistsPage(Gtk.Box):
     ) -> Gdk.DragAction:
         session = self._session
         playlist = session.playlists.get(self._selected) if session is not None else None
-        if not isinstance(value, str) or playlist is None:
+        if playlist is None:
+            self._clear_drop_gap()
+            return Gdk.DragAction(0)
+        if value is None:
+            # The payload has not arrived yet. Refusing here would be refusing
+            # the whole drag -- GTK never delivers a drop to a target whose
+            # motion handler answered zero -- so say yes and let the next motion
+            # event, or the drop itself, decide on the real value. This is only
+            # reachable if preloading fails; it is a fail-open, not a fallback
+            # anybody should rely on.
+            return Gdk.DragAction.COPY | Gdk.DragAction.MOVE
+        if not isinstance(value, str):
             self._clear_drop_gap()
             return Gdk.DragAction(0)
         if value.startswith(ENTRY_PREFIX):

@@ -455,3 +455,23 @@ worth depending on. The hard requirement on it is that the gap can never get
 stuck — it is cleared on drop, leave, cancel and editor teardown, and a test
 pins that a cancelled drag restores the original child count. A playlist left
 with a permanent hole would be worse than no feedback at all.
+
+### The drop target has to preload
+
+The first attempt at the gap shipped a working drag image and a completely dead
+drop: nothing reordered at all. `Gtk.DropTarget.preload` defaults to false, so
+the payload is only read once a drop has been accepted, and `get_value()` is
+`None` for every motion event. The motion handler read that `None`, decided the
+payload was not a string it understood, and answered `Gdk.DragAction(0)` —
+which tells GTK the target refuses the drag, so no drop was ever delivered.
+
+Two rules came out of it:
+
+- **Preload on any drop target whose motion handler inspects the payload.**
+- **A motion handler fails open.** Refusing is not recoverable later in the same
+  drag, so "I cannot see the payload yet" must answer yes, not no.
+
+The lesson for the tests is the sharper one. Every drag test called the handlers
+directly, so the suite was green while the feature did not work at all. Motion
+and acceptance are now pinned separately, and the preload test was checked by
+removing the fix and watching it fail.

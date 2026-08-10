@@ -20,7 +20,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import playlists, schedules  # noqa: E402
@@ -179,6 +179,54 @@ def test_cancelled_playlist_drag_removes_the_animated_gap(
 
     assert page._drop_gap is None
     assert _child_count(page._order_flow) == original_count
+    session.shutdown()
+
+
+def _drop_targets(widget: Gtk.Widget) -> list[Gtk.DropTarget]:
+    found = [
+        controller
+        for controller in widget.observe_controllers()
+        if isinstance(controller, Gtk.DropTarget)
+    ]
+    child = widget.get_first_child()
+    while child is not None:
+        found.extend(_drop_targets(child))
+        child = child.get_next_sibling()
+    return found
+
+
+def test_reorder_drop_targets_preload_their_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without preloading, the payload is unreadable until a drop is accepted.
+
+    Which is fatal rather than cosmetic: the motion handler decides whether the
+    target accepts the drag, it decides that by looking at the payload, and a
+    motion handler that answers zero means GTK never delivers a drop at all. The
+    whole gesture dies silently, and every direct-call test still passes -- which
+    is exactly how it shipped once.
+    """
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+
+    targets = _drop_targets(page._order_flow)
+    assert targets, "the playlist order flow has no drop targets at all"
+    assert all(target.get_preload() for target in targets)
+    session.shutdown()
+
+
+def test_motion_accepts_a_payload_that_has_not_arrived_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail open. A refusal here cannot be recovered from later in the drag."""
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+
+    assert page._preview_drop(None, "first") != Gdk.DragAction(0)
     session.shutdown()
 
 

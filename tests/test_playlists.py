@@ -547,14 +547,28 @@ def test_flip_deltas_measure_first_minus_last_and_ignore_subpixel_noise() -> Non
 @pytest.mark.parametrize(
     ("pointer_y", "viewport_height", "expected"),
     [
-        (0.0, 600.0, -16.0),
-        (46.0, 600.0, -8.0),
+        (-100.0, 600.0, -300.0),
+        (0.0, 600.0, -300.0),
+        (46.0, 600.0, -150.0),
+        (92.0, 600.0, 0.0),
         (300.0, 600.0, 0.0),
-        (554.0, 600.0, 8.0),
-        (600.0, 600.0, 16.0),
+        (508.0, 600.0, 0.0),
+        (554.0, 600.0, 150.0),
+        (600.0, 600.0, 300.0),
+        (700.0, 600.0, 300.0),
     ],
 )
 def test_auto_scroll_uses_reference_edge_band_and_linear_speed(
     pointer_y: float, viewport_height: float, expected: float
 ) -> None:
     assert playlists.edge_scroll_speed(pointer_y, viewport_height) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("refresh_rate", [30, 60, 144])
+def test_auto_scroll_distance_per_second_is_refresh_rate_independent(
+    refresh_rate: int,
+) -> None:
+    speed = playlists.edge_scroll_speed(46.0, 600.0)
+    distance = sum(speed / refresh_rate for _frame in range(refresh_rate))
+
+    assert distance == pytest.approx(-150.0)

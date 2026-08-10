@@ -352,7 +352,7 @@ def _drag_gestures(widget: Gtk.Widget) -> list[Gtk.GestureDrag]:
     return found
 
 
-def test_reorder_gesture_is_measured_by_the_stable_list_container(
+def test_reorder_gesture_is_measured_by_the_non_scrolling_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
@@ -376,13 +376,8 @@ def test_reorder_gesture_is_measured_by_the_stable_list_container(
     ]
     assert not _drag_sources(row)
     assert not _drag_gestures(row)
-    gestures = [
-        controller
-        for controller in page._order_list.observe_controllers()
-        if isinstance(controller, Gtk.GestureDrag)
-    ]
-    assert gestures == [page._order_list.reorder_gesture]
-    assert gestures[0].get_widget() is page._order_list
+    assert page._order_list.reorder_gesture is not None
+    assert page._order_list.reorder_gesture.get_widget() is page._order_scroll
     session.shutdown()
 
 
@@ -403,20 +398,24 @@ def test_reorder_press_must_hit_a_handle_and_claims_that_sequence(
     )
 
     class GestureState:
-        def __init__(self) -> None:
+        def __init__(self, widget: Gtk.Widget) -> None:
             self.states: list[Gtk.EventSequenceState] = []
+            self.widget = widget
 
         def set_state(self, state: Gtk.EventSequenceState) -> None:
             self.states.append(state)
 
-    missed = GestureState()
+        def get_widget(self) -> Gtk.Widget:
+            return self.widget
+
+    missed = GestureState(page._order_scroll)
     monkeypatch.setattr(page._order_list, "_handle_row_at", lambda _x, _y: None)
     page._order_list._drag_begin(missed, 180.0, 20.0)  # type: ignore[arg-type]
 
     assert missed.states == [Gtk.EventSequenceState.DENIED]
     assert not started
 
-    claimed = GestureState()
+    claimed = GestureState(page._order_scroll)
     monkeypatch.setattr(page._order_list, "_handle_row_at", lambda _x, _y: row)
     page._order_list._drag_begin(claimed, 20.0, 28.0)  # type: ignore[arg-type]
 

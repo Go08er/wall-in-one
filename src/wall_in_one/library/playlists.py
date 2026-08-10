@@ -235,9 +235,12 @@ def flip_deltas(
 
 
 def edge_scroll_speed(pointer_y: float, viewport_height: float) -> float:
-    """Reference auto-scroll speed for a pointer inside a 92 px edge band."""
+    """Auto-scroll pixels per second for a pointer inside a 92 px edge band."""
     edge = 92.0
-    maximum = 16.0
+    # The prototype used 16 px per pointer event, but a frame-clock callback
+    # runs even while the pointer is still. A per-second cap keeps that steady
+    # scrolling useful without racing through a long playlist.
+    maximum = 300.0
     if pointer_y < edge:
         return max(-maximum * (1.0 - pointer_y / edge), -maximum)
     if pointer_y > viewport_height - edge:

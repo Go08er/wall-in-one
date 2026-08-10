@@ -667,3 +667,29 @@ confidence than the fix:
 
 The honest summary: the first change should make the second unreachable, and the
 second exists because "should" was doing too much work in the first sentence.
+
+### Measure a gesture where nothing it causes can move
+
+Twice now the same mistake with a different widget. First the reorder gesture was on
+the handle, which the drag translates, so tracking ran at half speed and destabilised.
+Moving it to the list container fixed that -- and broke edge auto-scroll, because the
+container is what a scroll moves. Auto-scrolling slid it under a stationary pointer,
+the gesture reported a growing offset, that pushed the pointer deeper into the edge
+band, which scrolled faster. The view ran to the end and retracting the mouse could
+not beat the loop.
+
+The gesture now lives on the `Gtk.ScrolledWindow`, which moves for neither a row nor a
+scroll. **The rule, stated once so a third instance is not needed: a gesture must be
+measured in a coordinate space that nothing the gesture causes can move.** The
+structural test is one assertion -- the reorder gesture's widget is the scrolled
+window, not the list and not inside a row -- and it would have caught both bugs.
+
+The speed was wrong independently. `edge_scroll_speed` returned up to 16 px per call
+and a frame-clock tick calls it every frame: 960 px/s at 60 Hz, and 2304 px/s on a
+144 Hz display. The 16 came from the user's prototype, where it was called from
+`pointermove` -- so a still pointer scrolled nothing and the number meant something
+else entirely. It is now 300 px/s at the very edge, eased from zero at the band's
+inner boundary and integrated against `Gdk.FrameClock`, so a 144 Hz display and a
+30 Hz one travel the same distance.
+
+Borrowing a number from a reference implementation means borrowing what calls it.

@@ -54,17 +54,19 @@ class _ReorderList(Gtk.Widget):
         self._on_drag_started: Any = None
         self._on_drag_updated: Any = None
         self._on_drag_finished: Any = None
+        self.reorder_gesture: Gtk.GestureDrag | None = None
 
-        # GestureDrag offsets are expressed in the controller widget's
-        # coordinates. This container never moves during a live sort, whereas
-        # every row does, so it is the only safe place to measure the pointer.
+    def attach_reorder_gesture(self, scrolled_window: Gtk.ScrolledWindow) -> None:
+        # Measure a gesture in a coordinate space that nothing it causes can
+        # move. Rows move during sorting and this list moves while scrolling;
+        # the enclosing scrolled window moves for neither operation.
         self.reorder_gesture = Gtk.GestureDrag()
         self.reorder_gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self.reorder_gesture.connect("drag-begin", self._drag_begin)
         self.reorder_gesture.connect("drag-update", self._drag_update)
         self.reorder_gesture.connect("drag-end", self._drag_end)
         self.reorder_gesture.connect("cancel", self._drag_cancel)
-        self.add_controller(self.reorder_gesture)
+        scrolled_window.add_controller(self.reorder_gesture)
 
     def set_reorder_handlers(
         self,
@@ -86,7 +88,15 @@ class _ReorderList(Gtk.Widget):
         return None
 
     def _drag_begin(self, gesture: Gtk.GestureDrag, start_x: float, start_y: float) -> None:
-        row = self._handle_row_at(start_x, start_y)
+        point = Graphene.Point()
+        point.init(start_x, start_y)
+        controller_widget = gesture.get_widget()
+        translated = (
+            controller_widget.compute_point(self, point)
+            if controller_widget is not None
+            else (False, point)
+        )
+        row = self._handle_row_at(translated[1].x, translated[1].y) if translated[0] else None
         if row is None or self._on_drag_started is None:
             gesture.set_state(Gtk.EventSequenceState.DENIED)
             return
@@ -95,7 +105,7 @@ class _ReorderList(Gtk.Widget):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
         self._gesture_row = row
         row.handle.set_cursor(Gdk.Cursor.new_from_name("grabbing", None))
-        self._on_drag_started(row, start_x, start_y)
+        self._on_drag_started(row, translated[1].x, translated[1].y)
 
     def _drag_update(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
         if self._gesture_row is not None and self._on_drag_updated is not None:
@@ -660,6 +670,7 @@ class PlaylistsPage(Gtk.Box):
         self._drag_pointer_y: float | None = None
         self._drag_start_scroll = 0.0
         self._autoscroll_tick = 0
+        self._autoscroll_frame_time: int | None = None
         self._editor_id = ""
 
         split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -945,6 +956,7 @@ class PlaylistsPage(Gtk.Box):
             vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
         )
         self._order_scroll.set_child(self._order_drop_area)
+        self._order_list.attach_reorder_gesture(self._order_scroll)
         pane.append(self._order_scroll)
         return pane
 
@@ -1185,6 +1197,7 @@ class PlaylistsPage(Gtk.Box):
             self._drag_heights[self._drag_source_index],
         )
         if self._autoscroll_tick == 0:
+            self._autoscroll_frame_time = None
             self._autoscroll_tick = self._order_scroll.add_tick_callback(
                 self._scroll_while_row_dragged
             )
@@ -1229,20 +1242,29 @@ class PlaylistsPage(Gtk.Box):
         )
         self._order_list.animate_siblings(row, sibling_offsets)
 
-    def _scroll_while_row_dragged(self, _widget: Gtk.Widget, _clock: Gdk.FrameClock) -> bool:
+    def _scroll_while_row_dragged(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
         row = self._dragged_row
         pointer_start = self._drag_pointer_y
         if row is None or pointer_start is None:
             self._autoscroll_tick = 0
+            self._autoscroll_frame_time = None
             return False
+        frame_time = clock.get_frame_time()
+        previous_time = self._autoscroll_frame_time
+        self._autoscroll_frame_time = frame_time
+        if previous_time is None:
+            return True
         pointer_y = pointer_start + self._drag_pointer_offset
         viewport_height = float(self._order_scroll.get_height())
         speed = playlists.edge_scroll_speed(pointer_y, viewport_height)
+        # The helper returns pixels per second, so frame-clock integration
+        # keeps motion equally calm on 30, 60, and high-refresh displays.
         if speed == 0.0:
             return True
+        elapsed = max(frame_time - previous_time, 0) / 1_000_000.0
         adjustment = self._order_scroll.get_vadjustment()
         maximum = max(adjustment.get_upper() - adjustment.get_page_size(), 0.0)
-        value = min(max(adjustment.get_value() + speed, 0.0), maximum)
+        value = min(max(adjustment.get_value() + speed * elapsed, 0.0), maximum)
         if value != adjustment.get_value():
             adjustment.set_value(value)
             self._apply_row_drag()
@@ -1254,6 +1276,7 @@ class PlaylistsPage(Gtk.Box):
         if self._autoscroll_tick != 0:
             self._order_scroll.remove_tick_callback(self._autoscroll_tick)
             self._autoscroll_tick = 0
+        self._autoscroll_frame_time = None
         if not cancelled:
             self._drag_pointer_offset = pointer_offset
             self._apply_row_drag()

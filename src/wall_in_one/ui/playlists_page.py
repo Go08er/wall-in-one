@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import math
+from functools import cmp_to_key
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import gi
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gsk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Adw, Gdk, Gtk, Pango
+from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk, Pango
 
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
@@ -23,7 +26,367 @@ if TYPE_CHECKING:
 
 
 SOURCE_PREFIX = "media:"
-ENTRY_PREFIX = "entry:"
+FLIP_CURVE = (0.20, 0.75, 0.18, 1.0)
+SETTLE_CURVE = (0.18, 0.82, 0.22, 1.0)
+CSS_EASE_CURVE = (0.25, 0.10, 0.25, 1.0)
+
+
+class _ReorderList(Gtk.Widget):
+    """A vertical container whose children move without changing membership."""
+
+    def __init__(self) -> None:
+        super().__init__(valign=Gtk.Align.START)
+        self._rows: list[Gtk.Widget] = []
+        self._layout_offsets: dict[Gtk.Widget, float] = {}
+        self._flip_offsets: dict[Gtk.Widget, float] = {}
+        self._scales: dict[Gtk.Widget, float] = {}
+        self._sort_func: Any = None
+        self._lifted: Gtk.Widget | None = None
+        self._row_tops: tuple[float, ...] = ()
+        self._row_heights: tuple[float, ...] = ()
+        self._flip_animations: dict[Gtk.Widget, Adw.Animation] = {}
+        self._scale_animation: Adw.Animation | None = None
+        self._settle_animation: Adw.Animation | None = None
+        self._placeholder_source = -1
+        self._placeholder_target = -1
+        self._placeholder_height = 0.0
+
+    def append(self, row: Gtk.Widget) -> None:
+        self._rows.append(row)
+        self._layout_offsets[row] = 0.0
+        self._flip_offsets[row] = 0.0
+        self._scales[row] = 1.0
+        row.set_parent(self)
+        self.queue_resize()
+
+    def remove(self, row: Gtk.Widget) -> None:
+        self._rows.remove(row)
+        self._layout_offsets.pop(row, None)
+        self._flip_offsets.pop(row, None)
+        self._scales.pop(row, None)
+        animation = self._flip_animations.pop(row, None)
+        if animation is not None:
+            animation.pause()
+        row.unparent()
+        self.queue_resize()
+
+    def set_sort_func(self, sort_func: Any) -> None:
+        self._sort_func = sort_func
+
+    def invalidate_sort(self) -> None:
+        if self._sort_func is not None:
+            self._rows.sort(key=cmp_to_key(self._sort_func))
+        # Cached heights are in row order. A keyboard sort changes that order
+        # even though the same stable widgets remain children.
+        self._row_tops = ()
+        self._row_heights = ()
+        self.queue_allocate()
+        self.queue_draw()
+
+    def get_row_at_index(self, position: int) -> Gtk.Widget | None:
+        if 0 <= position < len(self._rows):
+            return self._rows[position]
+        return None
+
+    def rows(self) -> tuple[Gtk.Widget, ...]:
+        return tuple(self._rows)
+
+    def row_heights(self) -> tuple[float, ...]:
+        if len(self._row_heights) == len(self._rows):
+            return self._row_heights
+        width = max(self.get_width(), 1)
+        return tuple(float(row.measure(Gtk.Orientation.VERTICAL, width)[1]) for row in self._rows)
+
+    def row_bounds(self, top: float) -> tuple[tuple[float, float], ...]:
+        heights = self.row_heights()
+        if len(self._row_tops) == len(heights):
+            tops = self._row_tops
+        else:
+            natural = 0.0
+            built: list[float] = []
+            for height in heights:
+                built.append(natural)
+                natural += height
+            tops = tuple(built)
+        return tuple((top + y, top + y + height) for y, height in zip(tops, heights, strict=True))
+
+    def set_lifted(self, row: Gtk.Widget | None) -> None:
+        self._lifted = row
+        if row is not None:
+            self._animate_scale(row, 1.018, 140, CSS_EASE_CURVE)
+        self.queue_draw()
+
+    def set_offset(self, row: Gtk.Widget, offset: float) -> None:
+        if self._layout_offsets.get(row) == offset:
+            return
+        self._layout_offsets[row] = offset
+        self.queue_allocate()
+
+    def animate_siblings(self, lifted: Gtk.Widget, targets: tuple[float, ...]) -> None:
+        tops = self._natural_tops()
+        first = tuple(
+            top + self._layout_offsets.get(row, 0.0) + self._flip_offsets.get(row, 0.0)
+            for row, top in zip(self._rows, tops, strict=True)
+        )
+        old_layout = tuple(self._layout_offsets.get(row, 0.0) for row in self._rows)
+        for row, target in zip(self._rows, targets, strict=True):
+            if row is not lifted:
+                self._layout_offsets[row] = target
+        last = tuple(
+            top + self._layout_offsets.get(row, 0.0)
+            for row, top in zip(self._rows, tops, strict=True)
+        )
+        deltas = playlists.flip_deltas(first, last)
+        for row, old, new, delta in zip(self._rows, old_layout, targets, deltas, strict=True):
+            # A row whose layout slot did not move keeps its current animation;
+            # canceling it would create the stale-animation snap FLIP avoids.
+            if row is not lifted and abs(old - new) > 0.5:
+                self._start_flip(row, delta)
+        self.queue_allocate()
+
+    def capture_positions(self) -> dict[Gtk.Widget, float]:
+        """Capture current presentation y, including an interrupted FLIP."""
+        return {
+            row: top + self._layout_offsets.get(row, 0.0) + self._flip_offsets.get(row, 0.0)
+            for row, top in zip(self._rows, self._natural_tops(), strict=True)
+        }
+
+    def animate_from(self, first: dict[Gtk.Widget, float]) -> None:
+        """Play the same measured FLIP path after a keyboard reorder."""
+        tops = self._natural_tops()
+        rows = tuple(row for row in self._rows if row in first)
+        last_by_row = {
+            row: top + self._layout_offsets.get(row, 0.0)
+            for row, top in zip(self._rows, tops, strict=True)
+        }
+        deltas = playlists.flip_deltas(
+            tuple(first[row] for row in rows), tuple(last_by_row[row] for row in rows)
+        )
+        for row, delta in zip(rows, deltas, strict=True):
+            if delta != 0.0:
+                self._start_flip(row, delta)
+        self.queue_allocate()
+
+    def set_placeholder(self, source: int, target: int, height: float) -> None:
+        self._placeholder_source = source
+        self._placeholder_target = target
+        self._placeholder_height = height
+        self.queue_draw()
+
+    def _animations_enabled(self) -> bool:
+        settings = Gtk.Settings.get_default()
+        return settings is None or bool(settings.get_property("gtk-enable-animations"))
+
+    def _start_flip(self, row: Gtk.Widget, delta: float) -> None:
+        previous = self._flip_animations.pop(row, None)
+        if previous is not None:
+            previous.pause()
+        self._flip_offsets[row] = 0.0 if not self._animations_enabled() else delta
+        if self._flip_offsets[row] == 0.0:
+            return
+
+        def apply(progress: float) -> None:
+            eased = playlists.cubic_bezier(progress, *FLIP_CURVE)
+            self._flip_offsets[row] = delta * (1.0 - eased)
+            self.queue_allocate()
+
+        target = Adw.CallbackAnimationTarget.new(apply)
+        animation = Adw.TimedAnimation.new(self, 0.0, 1.0, 230, target)
+        animation.set_easing(Adw.Easing.LINEAR)
+        self._flip_animations[row] = animation
+        animation.play()
+
+    def _animate_scale(
+        self,
+        row: Gtk.Widget,
+        wanted: float,
+        duration: int,
+        curve: tuple[float, float, float, float],
+    ) -> None:
+        if self._scale_animation is not None:
+            self._scale_animation.pause()
+        start = self._scales.get(row, 1.0)
+        if not self._animations_enabled():
+            self._scales[row] = wanted
+            self.queue_draw()
+            return
+
+        def apply(progress: float) -> None:
+            eased = playlists.cubic_bezier(progress, *curve)
+            self._scales[row] = start + (wanted - start) * eased
+            self.queue_draw()
+
+        target = Adw.CallbackAnimationTarget.new(apply)
+        animation = Adw.TimedAnimation.new(self, 0.0, 1.0, duration, target)
+        animation.set_easing(Adw.Easing.LINEAR)
+        self._scale_animation = animation
+        animation.play()
+
+    def settle_lifted(self, row: Gtk.Widget, target: float, on_done: Any) -> None:
+        if self._settle_animation is not None:
+            self._settle_animation.pause()
+        if self._scale_animation is not None:
+            self._scale_animation.pause()
+        start = self._layout_offsets.get(row, 0.0)
+        distance = target - start
+        self._scales[row] = 1.018
+
+        if not self._animations_enabled() or abs(distance) <= 0.5:
+            self._layout_offsets[row] = target
+            self._scales[row] = 1.0
+            self.queue_allocate()
+            self.queue_draw()
+            on_done(None)
+            return
+
+        def apply(progress: float) -> None:
+            eased = playlists.cubic_bezier(progress, *SETTLE_CURVE)
+            self._layout_offsets[row] = start + distance * eased
+            self._scales[row] = 1.018 + (1.0 - 1.018) * eased
+            self.queue_allocate()
+            self.queue_draw()
+
+        animation_target = Adw.CallbackAnimationTarget.new(apply)
+        animation = Adw.TimedAnimation.new(self, 0.0, 1.0, 260, animation_target)
+        animation.set_easing(Adw.Easing.LINEAR)
+        animation.connect("done", on_done)
+        self._settle_animation = animation
+        animation.play()
+
+    def clear_motion(self) -> None:
+        for animation in self._flip_animations.values():
+            animation.pause()
+        if self._scale_animation is not None:
+            self._scale_animation.pause()
+        if self._settle_animation is not None:
+            self._settle_animation.pause()
+        self._flip_animations.clear()
+        self._scale_animation = None
+        self._settle_animation = None
+        for row in self._rows:
+            self._layout_offsets[row] = 0.0
+            self._flip_offsets[row] = 0.0
+            self._scales[row] = 1.0
+        self._lifted = None
+        self._placeholder_source = -1
+        self._placeholder_target = -1
+        self._placeholder_height = 0.0
+        self.queue_allocate()
+        self.queue_draw()
+
+    def _natural_tops(self) -> tuple[float, ...]:
+        tops: list[float] = []
+        top = 0.0
+        for height in self.row_heights():
+            tops.append(top)
+            top += height
+        return tuple(tops)
+
+    def do_measure(self, orientation: Gtk.Orientation, for_size: int) -> tuple[int, int, int, int]:
+        measured = [row.measure(orientation, for_size) for row in self._rows]
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            minimum = max((size[0] for size in measured), default=0)
+            natural = max((size[1] for size in measured), default=0)
+        else:
+            minimum = sum(size[0] for size in measured)
+            natural = sum(size[1] for size in measured)
+        return minimum, natural, -1, -1
+
+    def do_size_allocate(self, width: int, _height: int, _baseline: int) -> None:
+        heights = tuple(
+            max(row.measure(Gtk.Orientation.VERTICAL, width)[1], 1) for row in self._rows
+        )
+        natural = 0.0
+        tops: list[float] = []
+        for row, height in zip(self._rows, heights, strict=True):
+            tops.append(natural)
+            point = Graphene.Point()
+            point.init(
+                0.0,
+                natural + self._layout_offsets.get(row, 0.0) + self._flip_offsets.get(row, 0.0),
+            )
+            row.allocate(width, height, -1, Gsk.Transform().translate(point))
+            natural += height
+        self._row_tops = tuple(tops)
+        self._row_heights = tuple(float(height) for height in heights)
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        self._snapshot_placeholder(snapshot)
+        for row in self._rows:
+            if row is not self._lifted:
+                self._snapshot_row(row, snapshot)
+        if self._lifted is not None:
+            self._snapshot_row(self._lifted, snapshot)
+
+    def _snapshot_row(self, row: Gtk.Widget, snapshot: Gtk.Snapshot) -> None:
+        scale = self._scales.get(row, 1.0)
+        if abs(scale - 1.0) < 0.0001:
+            self.snapshot_child(row, snapshot)
+            return
+        index = self._rows.index(row)
+        y = (
+            self._natural_tops()[index]
+            + self._layout_offsets.get(row, 0.0)
+            + self._flip_offsets.get(row, 0.0)
+        )
+        height = self.row_heights()[index]
+        centre = Graphene.Point()
+        centre.init(float(self.get_width()) / 2.0, y + height / 2.0)
+        inverse = Graphene.Point()
+        inverse.init(-centre.x, -centre.y)
+        snapshot.save()
+        snapshot.translate(centre)
+        snapshot.scale(scale, scale)
+        snapshot.translate(inverse)
+        self.snapshot_child(row, snapshot)
+        snapshot.restore()
+
+    def _snapshot_placeholder(self, snapshot: Gtk.Snapshot) -> None:
+        if self._placeholder_source < 0 or self._placeholder_target < 0:
+            return
+        tops = self._natural_tops()
+        if self._placeholder_source >= len(tops):
+            return
+        y = tops[self._placeholder_source] + playlists.live_sort_settle_offset(
+            self.row_heights(), self._placeholder_source, self._placeholder_target
+        )
+        bounds = Graphene.Rect()
+        bounds.init(
+            1.0,
+            y + 1.0,
+            max(float(self.get_width()) - 2.0, 0.0),
+            self._placeholder_height - 2.0,
+        )
+        context = snapshot.append_cairo(bounds)
+        radius = min(24.0, bounds.size.width / 2.0, bounds.size.height / 2.0)
+        left = bounds.origin.x
+        top = bounds.origin.y
+        right = left + bounds.size.width
+        bottom = top + bounds.size.height
+        context.new_sub_path()
+        context.arc(right - radius, top + radius, radius, -math.pi / 2.0, 0.0)
+        context.arc(right - radius, bottom - radius, radius, 0.0, math.pi / 2.0)
+        context.arc(left + radius, bottom - radius, radius, math.pi / 2.0, math.pi)
+        context.arc(left + radius, top + radius, radius, math.pi, math.pi * 1.5)
+        context.close_path()
+        found, accent = self.get_style_context().lookup_color("accent_color")
+        if not found:
+            accent = self.get_color()
+        context.set_source_rgba(accent.red, accent.green, accent.blue, 0.06)
+        context.fill_preserve()
+        context.set_source_rgba(accent.red, accent.green, accent.blue, 0.44)
+        context.set_line_width(2.0)
+        context.set_dash((8.0, 7.0))
+        context.stroke()
+
+    def do_dispose(self) -> None:
+        for row in tuple(self._rows):
+            row.unparent()
+        self._rows.clear()
+        self._layout_offsets.clear()
+        self._flip_offsets.clear()
+        self._scales.clear()
+        Gtk.Widget.do_dispose(self)  # type: ignore[attr-defined]
 
 
 class _MediaCard(Gtk.Box):
@@ -100,7 +463,7 @@ class _MediaCard(Gtk.Box):
 
 
 class _PlaylistEntryRow(Gtk.ListBoxRow):
-    """A stable sortable row whose handle is its only drag gesture."""
+    """A stable sortable row whose handle owns the only reorder gesture."""
 
     def __init__(
         self,
@@ -110,9 +473,11 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         on_remove: Any,
         on_key: Any,
         on_drag_started: Any,
+        on_drag_updated: Any,
         on_drag_finished: Any,
     ) -> None:
         super().__init__(selectable=False, activatable=False, focusable=True)
+        self.add_css_class("wio-reorder-row")
         self.identifier = identifier
         self.item = item
 
@@ -134,10 +499,25 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         content.set_margin_end(8)
 
         self.handle = Gtk.Button(
-            icon_name="list-drag-handle-symbolic",
             tooltip_text="Drag to reorder",
+            width_request=46,
+            height_request=72,
         )
         self.handle.add_css_class("flat")
+        self.handle.add_css_class("wio-reorder-handle")
+        grip = Gtk.DrawingArea(width_request=21, height_request=32)
+
+        def draw_grip(widget: Gtk.DrawingArea, context: Any, _width: int, _height: int) -> None:
+            colour = widget.get_color()
+            context.set_source_rgba(colour.red, colour.green, colour.blue, colour.alpha)
+            for x in (4.0, 17.0):
+                for y in (3.0, 16.0, 29.0):
+                    context.arc(x, y, 3.0, 0.0, math.tau)
+                    context.fill()
+
+        grip.set_draw_func(draw_grip)
+        self.handle.set_child(grip)
+        self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
         content.append(self.handle)
 
         self.picture = Gtk.Picture(width_request=96, height_request=54)
@@ -157,15 +537,14 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         body.append(content)
         self.set_child(body)
 
-        drag = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
-        drag.connect(
-            "prepare",
-            lambda *_arguments: Gdk.ContentProvider.new_for_value(f"{ENTRY_PREFIX}{identifier}"),
-        )
+        drag = Gtk.GestureDrag()
+        drag.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         drag.connect("drag-begin", self._drag_begin)
-        drag.connect("drag-cancel", self._drag_cancel)
+        drag.connect("drag-update", self._drag_update)
         drag.connect("drag-end", self._drag_end)
+        drag.connect("cancel", self._drag_cancel)
         self._on_drag_started = on_drag_started
+        self._on_drag_updated = on_drag_updated
         self._on_drag_finished = on_drag_finished
         self.handle.add_controller(drag)
 
@@ -173,21 +552,20 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         keys.connect("key-pressed", on_key)
         self.add_controller(keys)
 
-    def _drag_begin(self, source: Gtk.DragSource, _drag: Gdk.Drag) -> None:
-        self._on_drag_started()
-        paintable = self.picture.get_paintable()
-        if paintable is None:
-            paintable = Gtk.WidgetPaintable.new(self)
-        source.set_icon(paintable, 48, 27)
+    def _drag_begin(self, _gesture: Gtk.GestureDrag, start_x: float, start_y: float) -> None:
+        self.handle.set_cursor(Gdk.Cursor.new_from_name("grabbing", None))
+        self._on_drag_started(self, start_x, start_y)
 
-    def _drag_cancel(
-        self, _source: Gtk.DragSource, _drag: Gdk.Drag, _reason: Gdk.DragCancelReason
-    ) -> bool:
-        self._on_drag_finished()
-        return False
+    def _drag_update(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
+        self._on_drag_updated(self, offset_y)
 
-    def _drag_end(self, _source: Gtk.DragSource, _drag: Gdk.Drag, _delete_data: bool) -> None:
-        self._on_drag_finished()
+    def _drag_end(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
+        self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        self._on_drag_finished(self, offset_y, False)
+
+    def _drag_cancel(self, _gesture: Gtk.GestureDrag, _sequence: Gdk.EventSequence) -> None:
+        self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        self._on_drag_finished(self, 0.0, True)
 
     def show_thumbnail(self, _item: MediaItem, texture: Gdk.Texture | None) -> None:
         self.picture.set_paintable(texture)
@@ -217,6 +595,15 @@ class PlaylistsPage(Gtk.Box):
         self._revealed_slot = -1
         self._dragging = False
         self._playlist_change_after_drag = False
+        self._dragged_row: _PlaylistEntryRow | None = None
+        self._drag_source_index = -1
+        self._drag_target_slot = -1
+        self._drag_heights: tuple[float, ...] = ()
+        self._drag_pointer_offset = 0.0
+        self._drag_grab_offset_y = 0.0
+        self._drag_pointer_y: float | None = None
+        self._drag_start_scroll = 0.0
+        self._autoscroll_tick = 0
         self._editor_id = ""
 
         split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -468,10 +855,7 @@ class PlaylistsPage(Gtk.Box):
         pane.append(note)
 
         self._order_drop_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
-        self._order_list = Gtk.ListBox(
-            selection_mode=Gtk.SelectionMode.NONE,
-            valign=Gtk.Align.START,
-        )
+        self._order_list = _ReorderList()
         self._order_list.add_css_class("boxed-list")
         self._order_list.set_sort_func(self._compare_entry_rows)
         self._order_drop_area.append(self._order_list)
@@ -578,8 +962,9 @@ class PlaylistsPage(Gtk.Box):
                 Path(entry.source),
                 self._make_remove(entry.id),
                 self._make_reorder_key(entry.id),
-                self._begin_drag,
-                self._finish_drag,
+                self._begin_row_drag,
+                self._update_row_drag,
+                self._end_row_drag,
             )
             if item is not None:
                 self._loader.request(item, row.show_thumbnail)
@@ -603,7 +988,7 @@ class PlaylistsPage(Gtk.Box):
         second_rank = self._source_positions.get(second_item.path, end) if second_item else end
         return first_rank - second_rank
 
-    def _compare_entry_rows(self, first: Gtk.ListBoxRow, second: Gtk.ListBoxRow) -> int:
+    def _compare_entry_rows(self, first: Gtk.Widget, second: Gtk.Widget) -> int:
         end = len(self._entry_positions)
         first_id = first.identifier if isinstance(first, _PlaylistEntryRow) else ""
         second_id = second.identifier if isinstance(second, _PlaylistEntryRow) else ""
@@ -643,14 +1028,7 @@ class PlaylistsPage(Gtk.Box):
 
     def _row_bounds(self) -> tuple[tuple[float, float], ...]:
         list_top = float(self._order_list.get_allocation().y)
-        bounds: list[tuple[float, float]] = []
-        position = 0
-        while (row := self._order_list.get_row_at_index(position)) is not None:
-            allocation = row.get_allocation()
-            top = list_top + float(allocation.y)
-            bounds.append((top, top + float(allocation.height)))
-            position += 1
-        return tuple(bounds)
+        return self._order_list.row_bounds(list_top)
 
     def _slot_anchor(self, slot: int) -> str | None:
         session = self._session
@@ -693,18 +1071,14 @@ class PlaylistsPage(Gtk.Box):
         if not isinstance(value, str):
             self._clear_drop_slot()
             return Gdk.DragAction(0)
-        if value.startswith(ENTRY_PREFIX):
-            action = Gdk.DragAction.MOVE
-        elif value.startswith(SOURCE_PREFIX):
-            action = Gdk.DragAction.COPY
-        else:
+        if not value.startswith(SOURCE_PREFIX):
             self._clear_drop_slot()
             return Gdk.DragAction(0)
         entry_ids = tuple(entry.id for entry in playlist.entries)
         if slot is None:
             slot = entry_ids.index(anchor) + int(after) if anchor in entry_ids else len(entry_ids)
         self._show_drop_slot(slot)
-        return action
+        return Gdk.DragAction.COPY
 
     def _show_drop_slot(self, slot: int) -> None:
         slot = min(max(slot, 0), len(self._entry_rows))
@@ -726,6 +1100,136 @@ class PlaylistsPage(Gtk.Box):
 
     def _leave_drop_target(self, _target: Gtk.DropTarget) -> None:
         self._clear_drop_slot()
+
+    def _begin_row_drag(self, row: _PlaylistEntryRow, start_x: float, start_y: float) -> None:
+        self._begin_drag()
+        children = self._order_list.rows()
+        self._dragged_row = row
+        self._drag_source_index = children.index(row)
+        self._drag_target_slot = self._drag_source_index
+        self._drag_heights = tuple(max(height, 1.0) for height in self._order_list.row_heights())
+        self._drag_pointer_offset = 0.0
+        point = Graphene.Point()
+        point.init(start_x, start_y)
+        translated, row_point = row.handle.compute_point(row, point)
+        self._drag_grab_offset_y = row_point.y if translated else start_y
+        adjustment = self._order_scroll.get_vadjustment()
+        self._drag_start_scroll = adjustment.get_value()
+        translated, scroll_point = row.handle.compute_point(self._order_scroll, point)
+        self._drag_pointer_y = scroll_point.y if translated else None
+        row.add_css_class("wio-reorder-lifted")
+        self._order_list.set_lifted(row)
+        self._order_list.set_placeholder(
+            self._drag_source_index,
+            self._drag_source_index,
+            self._drag_heights[self._drag_source_index],
+        )
+        if self._autoscroll_tick == 0:
+            self._autoscroll_tick = self._order_scroll.add_tick_callback(
+                self._scroll_while_row_dragged
+            )
+
+    def _update_row_drag(self, row: _PlaylistEntryRow, pointer_offset: float) -> None:
+        if row is not self._dragged_row:
+            return
+        self._drag_pointer_offset = pointer_offset
+        self._apply_row_drag()
+
+    def _apply_row_drag(self) -> None:
+        row = self._dragged_row
+        if row is None:
+            return
+        scrolled = self._order_scroll.get_vadjustment().get_value() - self._drag_start_scroll
+        offset = self._drag_pointer_offset + scrolled
+        self._order_list.set_offset(row, offset)
+        bounds: list[tuple[float, float]] = []
+        top = 0.0
+        for height in self._drag_heights:
+            bounds.append((top, top + height))
+            top += height
+        source_top = bounds[self._drag_source_index][0]
+        target = playlists.live_sort_slot_change(
+            tuple(bounds),
+            self._drag_source_index,
+            source_top + self._drag_grab_offset_y + offset,
+            self._drag_grab_offset_y,
+            self._drag_heights[self._drag_source_index],
+            self._drag_target_slot,
+        )
+        if target is None:
+            return
+        self._drag_target_slot = target
+        self._order_list.set_placeholder(
+            self._drag_source_index,
+            target,
+            self._drag_heights[self._drag_source_index],
+        )
+        sibling_offsets = playlists.live_sort_sibling_offsets(
+            self._drag_heights, self._drag_source_index, target
+        )
+        self._order_list.animate_siblings(row, sibling_offsets)
+
+    def _scroll_while_row_dragged(self, _widget: Gtk.Widget, _clock: Gdk.FrameClock) -> bool:
+        row = self._dragged_row
+        pointer_start = self._drag_pointer_y
+        if row is None or pointer_start is None:
+            self._autoscroll_tick = 0
+            return False
+        pointer_y = pointer_start + self._drag_pointer_offset
+        viewport_height = float(self._order_scroll.get_height())
+        speed = playlists.edge_scroll_speed(pointer_y, viewport_height)
+        if speed == 0.0:
+            return True
+        adjustment = self._order_scroll.get_vadjustment()
+        maximum = max(adjustment.get_upper() - adjustment.get_page_size(), 0.0)
+        value = min(max(adjustment.get_value() + speed, 0.0), maximum)
+        if value != adjustment.get_value():
+            adjustment.set_value(value)
+            self._apply_row_drag()
+        return True
+
+    def _end_row_drag(self, row: _PlaylistEntryRow, pointer_offset: float, cancelled: bool) -> None:
+        if row is not self._dragged_row:
+            return
+        if self._autoscroll_tick != 0:
+            self._order_scroll.remove_tick_callback(self._autoscroll_tick)
+            self._autoscroll_tick = 0
+        if not cancelled:
+            self._drag_pointer_offset = pointer_offset
+            self._apply_row_drag()
+        source = self._drag_source_index
+        target = source if cancelled else self._drag_target_slot
+        settle = playlists.live_sort_settle_offset(self._drag_heights, source, target)
+        self._dragged_row = None
+        self._drag_pointer_y = None
+        # Shadow and opacity fade when the gesture ends; the custom snapshot
+        # keeps scale on the reference's longer 260 ms settle curve.
+        row.remove_css_class("wio-reorder-lifted")
+        self._order_list.settle_lifted(
+            row,
+            settle,
+            lambda _animation: self._commit_row_drag(row, source, target),
+        )
+
+    def _commit_row_drag(self, row: _PlaylistEntryRow, source: int, target: int) -> None:
+        changed = target != source
+        if changed:
+            try:
+                self._app.session.playlists.move_entry(self._selected, row.identifier, target)
+            except playlists.PlaylistError as error:
+                self._app.window_report(str(error))
+                changed = False
+        self._order_list.clear_motion()
+        row.remove_css_class("wio-reorder-lifted")
+        self._drag_source_index = -1
+        self._drag_target_slot = -1
+        self._drag_heights = ()
+        self._drag_pointer_offset = 0.0
+        self._drag_grab_offset_y = 0.0
+        self._drag_start_scroll = 0.0
+        self._dragging = False
+        if changed:
+            self._app.playlists_changed()
 
     def _begin_drag(self) -> None:
         self._assert_not_dragging()
@@ -764,8 +1268,6 @@ class PlaylistsPage(Gtk.Box):
                     return False
                 updated = session.playlists.add(self._selected, source)
                 moving = updated.entries[-1].id
-            elif value.startswith(ENTRY_PREFIX):
-                moving = value.removeprefix(ENTRY_PREFIX)
             else:
                 return False
             current = session.playlists.find(self._selected)
@@ -883,15 +1385,17 @@ class PlaylistsPage(Gtk.Box):
             current = entry_ids.index(entry_id)
             position = min(max(current + step, 0), len(entry_ids) - 1)
             if position != current:
+                first = self._order_list.capture_positions()
                 try:
                     self._app.session.playlists.move_entry(self._selected, entry_id, position)
                 except playlists.PlaylistError as error:
                     self._app.window_report(str(error))
                     return True
                 self._app.playlists_changed()
+                self._order_list.animate_from(first)
 
             # The keyed diff keeps this exact row alive. Reclaiming focus after
-            # the synchronous sort makes repeated Ctrl+Arrow presses reliable.
+            # the synchronous FLIP sort makes repeated Ctrl+Arrow presses reliable.
             row = self._entry_rows.get(entry_id)
             if row is not None:
                 row.grab_focus()

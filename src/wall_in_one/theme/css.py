@@ -129,6 +129,25 @@ window.background.csd {{
     border-color: {outline.hex};
 }}
 
+/* A live-sort row is still the real row, not a drag icon. These transitions
+   soften only lift/drop state; position and scale use the measured FLIP path. */
+.wio-reorder-handle {{
+    min-width: 46px;
+    min-height: 72px;
+    padding: 0;
+}}
+
+.wio-reorder-row {{
+    transition: box-shadow 140ms ease, opacity 140ms ease;
+}}
+
+.wio-reorder-lifted {{
+    background-color: @card_bg_color;
+    border-radius: 12px;
+    box-shadow: 0 22px 48px alpha(@shade_color, 0.42);
+    opacity: 0.98;
+}}
+
 /* The wallpaper grid. Tiles are images, so they take their colour from the
    palette only at their edges and in the "this one is up" marker. */
 .wio-tile-image {{

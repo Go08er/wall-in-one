@@ -526,3 +526,79 @@ it is:
 
 What still cannot be verified here: the physical gesture through the compositor.
 Handle ergonomics, how the animation feels, and real drop delivery need a human.
+
+## Reordering is a live sortable list, not drag-and-drop
+
+The handle-driven DnD version worked but looked wrong: a detached drag image
+follows the cursor, which reads as "pick up and put down". The user asked for the
+pattern modern sortable lists use and wrote a working HTML prototype of it,
+`preview.html`, which is the reference these numbers come from.
+
+Two gestures now, deliberately different because they mean different things:
+
+- **Library to playlist is still drag-and-drop.** It is a transfer across a
+  boundary: something leaves one surface and has to be accepted by another. The
+  thumbnail travelling with the cursor is the correct picture of that, and the
+  drop target still preloads and still fails open in motion.
+- **Reordering inside the playlist is not.** Nothing is transferred and nothing
+  needs accepting; a row only changes position. So it is a `Gtk.GestureDrag` on
+  the handle over a custom container that lays rows out at
+  `y = natural position + offset`. Reordering is arithmetic on offsets.
+
+The prototype's real lesson was the animation. Siblings move by **FLIP** -- the
+slot changes instantly, then each displaced row is animated from where it was to
+where it now is. That is not the same as shifting a row by one row-height, and
+the difference is what stops the list teleporting when the pointer crosses
+several slots quickly. In-flight animations are cancelled per row, which the
+prototype's own comment calls out.
+
+Taken from the reference rather than invented: 230 ms `cubic-bezier(.20,.75,.18,1)`
+for the glide, 260 ms `cubic-bezier(.18,.82,.22,1)` with a 1.018 to 1.0 scale for
+the settle, the grab point preserved so the row does not centre itself on the
+cursor, midpoint slot selection with hysteresis, and a 92 px auto-scroll band.
+`Adw.TimedAnimation` cannot take an arbitrary bezier, so the curve is a pure
+function driven by a linear animation -- which also puts it somewhere testable.
+
+One deliberate divergence: the prototype inserts a placeholder element. We draw
+it instead, because inserting a widget mid-drag is what segfaulted this app. The
+commit is deferred until the settle animation finishes, which is what stops the
+visible jump at the end.
+
+## The palette followed Noctalia, but the chrome did not
+
+Reported as "the app's colors only update on launch", with a screenshot showing
+the Settings swatches in the new colours while the whole window stayed in the
+old ones. That split is the diagnosis: swatches are drawn from the resolved
+palette object, the chrome is drawn from CSS.
+
+The pipeline was healthy end to end -- template installed, `palette.json`
+re-rendered on every change, the post-hook reaching the running app,
+`reload_palette` re-resolving and re-applying. The loss was **CSS precedence**.
+The app registered its provider at `PRIORITY_APPLICATION` (600). GTK loads
+`~/.config/gtk-4.0/gtk.css` at `PRIORITY_USER` (800), and Noctalia's gtk4
+template writes the libadwaita colour names into `noctalia.css`, which that file
+imports. The app defines the same names and was simply outranked.
+
+Why it looked right at launch and never again: on a palette change Noctalia
+rewrites the *imported* file and leaves `gtk.css` untouched, so GTK -- which
+watches `gtk.css` -- sees no reason to reload and keeps its startup copy. Ours
+refreshed and lost.
+
+Two plausible explanations were measured and rejected before changing anything,
+which is the only reason a rewrite was avoided:
+
+- **`@define-color` being deprecated in GTK 4.16+.** Reloading a provider with
+  new `@define-color` values restyles already-realized widgets correctly. Not it.
+- **A missing file watcher.** The hook does arrive. Not it either.
+
+So: register at `PRIORITY_USER + 1`. Both stylesheets carry the same Noctalia
+palette and ours is the only copy guaranteed current, since it is refreshed on
+the hook while GTK's is read once at startup.
+
+A file monitor was added as well, for a separate hole: the hook resolves the
+socket through `XDG_RUNTIME_DIR`, and a hook spawned without it fails silently
+(`no instance listening on ~/.cache/wall-in-one.sock`, exit 3) because nothing
+checks the exit code. The monitor watches the containing directory, because the
+file is replaced by rename and a monitor on the file alone goes deaf after one
+render. `template.py`'s old "No polling, no inotify, no drift" comment was
+corrected rather than left contradicting the code.

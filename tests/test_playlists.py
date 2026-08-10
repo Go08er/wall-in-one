@@ -427,3 +427,134 @@ def test_drop_slot_uses_each_vertical_row_midpoint(pointer_y: float, expected: i
 
 def test_drop_slot_accepts_an_empty_list() -> None:
     assert playlists.drop_slot((), 25.0) == 0
+
+
+@pytest.mark.parametrize(
+    ("source", "pointer_offset", "expected"),
+    [
+        (0, -100.0, 0),
+        (0, 29.9, 0),
+        (0, 30.0, 1),
+        (0, 69.9, 1),
+        (0, 70.0, 2),
+        (1, -30.1, 0),
+        (1, -30.0, 1),
+        (1, 39.9, 1),
+        (1, 40.0, 2),
+        (2, -70.1, 0),
+        (2, -70.0, 1),
+        (2, 100.0, 2),
+    ],
+)
+def test_live_sort_slot_crosses_sibling_centres(
+    source: int, pointer_offset: float, expected: int
+) -> None:
+    assert playlists.live_sort_slot((40.0, 20.0, 60.0), source, pointer_offset) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [
+        (0, 0, (0.0, 0.0, 0.0, 0.0)),
+        (0, 2, (0.0, -40.0, -40.0, 0.0)),
+        (1, 3, (0.0, 0.0, -20.0, -20.0)),
+        (2, 0, (60.0, 60.0, 0.0, 0.0)),
+        (3, 1, (0.0, 30.0, 30.0, 0.0)),
+    ],
+)
+def test_live_sort_sibling_offsets_open_the_target_without_membership_changes(
+    source: int, target: int, expected: tuple[float, ...]
+) -> None:
+    heights = (40.0, 20.0, 60.0, 30.0)
+
+    assert playlists.live_sort_sibling_offsets(heights, source, target) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [(0, 2, 80.0), (1, 3, 90.0), (2, 0, -60.0), (3, 1, -80.0), (2, 2, 0.0)],
+)
+def test_live_sort_settle_offset_accounts_for_unequal_rows(
+    source: int, target: int, expected: float
+) -> None:
+    assert playlists.live_sort_settle_offset((40.0, 20.0, 60.0, 30.0), source, target) == expected
+
+
+@pytest.mark.parametrize(
+    ("curve", "midpoint"),
+    [
+        ((0.20, 0.75, 0.18, 1.0), 0.9408709681),
+        ((0.18, 0.82, 0.22, 1.0), 0.9477138390),
+    ],
+)
+def test_reference_cubic_beziers_have_exact_endpoints_and_midpoints(
+    curve: tuple[float, float, float, float], midpoint: float
+) -> None:
+    assert playlists.cubic_bezier(0.0, *curve) == 0.0
+    assert playlists.cubic_bezier(0.5, *curve) == pytest.approx(midpoint)
+    assert playlists.cubic_bezier(1.0, *curve) == 1.0
+
+
+@pytest.mark.parametrize(
+    "curve",
+    [(0.20, 0.75, 0.18, 1.0), (0.18, 0.82, 0.22, 1.0)],
+)
+def test_reference_cubic_beziers_are_monotonic(
+    curve: tuple[float, float, float, float],
+) -> None:
+    values = tuple(playlists.cubic_bezier(step / 100.0, *curve) for step in range(101))
+
+    assert values == tuple(sorted(values))
+
+
+@pytest.mark.parametrize(
+    ("pointer_y", "current_slot", "expected"),
+    [
+        (7.0, 0, None),
+        (36.9, 0, None),
+        (37.0, 0, 1),
+        (76.9, 1, None),
+        (77.0, 1, 2),
+        (100.0, 2, None),
+    ],
+)
+def test_live_sort_slot_preserves_grab_point_and_reports_only_slot_changes(
+    pointer_y: float, current_slot: int, expected: int | None
+) -> None:
+    # The first row is 40 px tall and was grabbed 7 px below its top. Its
+    # centre therefore reaches sibling centres at pointer y 37 and 77.
+    assert (
+        playlists.live_sort_slot_change(
+            ((0.0, 40.0), (40.0, 60.0), (60.0, 120.0)),
+            0,
+            pointer_y,
+            7.0,
+            40.0,
+            current_slot,
+        )
+        == expected
+    )
+
+
+def test_flip_deltas_measure_first_minus_last_and_ignore_subpixel_noise() -> None:
+    assert playlists.flip_deltas((10.0, 20.4, 80.0), (30.0, 20.0, 50.0)) == (
+        -20.0,
+        0.0,
+        30.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("pointer_y", "viewport_height", "expected"),
+    [
+        (0.0, 600.0, -16.0),
+        (46.0, 600.0, -8.0),
+        (300.0, 600.0, 0.0),
+        (554.0, 600.0, 8.0),
+        (600.0, 600.0, 16.0),
+    ],
+)
+def test_auto_scroll_uses_reference_edge_band_and_linear_speed(
+    pointer_y: float, viewport_height: float, expected: float
+) -> None:
+    assert playlists.edge_scroll_speed(pointer_y, viewport_height) == pytest.approx(expected)

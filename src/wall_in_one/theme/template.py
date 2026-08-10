@@ -7,7 +7,9 @@ writes rather than dropping it.
 
 Registering one gets us push-based palette sync: Noctalia re-renders the
 template on every palette change and then runs its `post_hook`, which tells the
-running app to reload. No polling, no inotify, no drift.
+running app to reload. The app also monitors the rendered file because a hook
+without XDG_RUNTIME_DIR cannot find its socket, and because nothing checks a
+failed hook's exit status.
 
 The plugin cannot do this itself -- the Luau host API has `writeFile` and
 `getConfig` but no config setter -- so it shells out to

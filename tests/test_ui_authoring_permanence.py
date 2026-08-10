@@ -190,7 +190,7 @@ def test_playlist_refresh_does_not_replace_focused_search(
     session.shutdown()
 
 
-def test_cancelled_playlist_drag_only_toggles_permanent_spacers(
+def test_cancelled_source_drag_only_toggles_permanent_spacers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
@@ -208,8 +208,7 @@ def test_cancelled_playlist_drag_only_toggles_permanent_spacers(
     assert sum(spacer.get_reveal_child() for spacer in spacers) == 1
     assert _children(page._order_list) == original_children
 
-    row = page._entry_rows["first"]
-    row._drag_cancel(None, None, None)  # type: ignore[arg-type]
+    page._finish_drag()
 
     assert not page._dragging
     assert not any(spacer.get_reveal_child() for spacer in spacers)
@@ -232,6 +231,72 @@ def test_order_row_membership_guard_is_loud_during_a_drag(
 
     assert _children(page._order_list) == (row,)
     page._finish_drag()
+    session.shutdown()
+
+
+def test_live_reorder_motion_keeps_the_exact_child_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _session(tmp_path)
+    session.playlists.add(playlist.id, items[1].path, entry_id="second")
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    original_children = _children(page._order_list)
+    row = page._entry_rows["first"]
+
+    page._begin_row_drag(row, 0.0, 0.0)
+    page._update_row_drag(row, 200.0)
+
+    assert _is_dragging(page)
+    assert _children(page._order_list) == original_children
+
+    source = page._drag_source_index
+    page._end_row_drag(row, 0.0, True)
+    page._commit_row_drag(row, source, source)
+    assert not _is_dragging(page)
+    assert _children(page._order_list) == original_children
+    session.shutdown()
+
+
+def test_live_reorder_commits_only_after_the_row_has_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _session(tmp_path)
+    session.playlists.add(playlist.id, items[1].path, entry_id="second")
+    application = PlaylistApp(session)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+    children = _children(page._order_list)
+    row = page._entry_rows["first"]
+    finished: list[Any] = []
+
+    def hold_settle(_row: Gtk.Widget, _target: float, on_done: Any) -> None:
+        finished.append(on_done)
+
+    monkeypatch.setattr(page._order_list, "settle_lifted", hold_settle)
+    page._begin_row_drag(row, 0.0, 0.0)
+    page._update_row_drag(row, 1000.0)
+    page._end_row_drag(row, 1000.0, False)
+
+    assert tuple(entry.id for entry in session.playlists.find(playlist.id).entries) == (
+        "first",
+        "second",
+    )
+    assert _is_dragging(page)
+    assert _children(page._order_list) == children
+
+    finished[0](None)
+
+    assert tuple(entry.id for entry in session.playlists.find(playlist.id).entries) == (
+        "second",
+        "first",
+    )
+    assert application.published == 1
+    assert not _is_dragging(page)
+    assert _children(page._order_list) == children
     session.shutdown()
 
 
@@ -274,7 +339,20 @@ def _drag_sources(widget: Gtk.Widget) -> list[Gtk.DragSource]:
     return found
 
 
-def test_only_the_six_dot_handle_has_the_reorder_drag_source(
+def _drag_gestures(widget: Gtk.Widget) -> list[Gtk.GestureDrag]:
+    found = [
+        controller
+        for controller in widget.observe_controllers()
+        if isinstance(controller, Gtk.GestureDrag)
+    ]
+    child = widget.get_first_child()
+    while child is not None:
+        found.extend(_drag_gestures(child))
+        child = child.get_next_sibling()
+    return found
+
+
+def test_only_the_six_dot_handle_has_the_live_reorder_gesture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
@@ -283,14 +361,18 @@ def test_only_the_six_dot_handle_has_the_reorder_drag_source(
     page.refresh(session)
     row = page._entry_rows["first"]
 
-    assert row.handle.get_icon_name() == "list-drag-handle-symbolic"
+    assert row.handle.get_size_request() == (46, 72)
+    grip = row.handle.get_child()
+    assert grip is not None
+    assert grip.get_size_request() == (21, 32)
     assert not [
         controller
         for controller in row.observe_controllers()
         if isinstance(controller, Gtk.DragSource)
     ]
-    assert len(_drag_sources(row)) == 1
-    assert len(_drag_sources(row.handle)) == 1
+    assert not _drag_sources(row)
+    assert len(_drag_gestures(row)) == 1
+    assert len(_drag_gestures(row.handle)) == 1
     session.shutdown()
 
 
@@ -307,7 +389,7 @@ def _drop_targets(widget: Gtk.Widget) -> list[Gtk.DropTarget]:
     return found
 
 
-def test_reorder_drop_targets_preload_their_payload(
+def test_source_drop_targets_preload_their_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without preloading, the payload is unreadable until a drop is accepted.

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
@@ -97,6 +98,184 @@ def drop_slot(row_bounds: tuple[tuple[float, float], ...], pointer_y: float) -> 
         if pointer_y < top + (bottom - top) / 2:
             return position
     return len(row_bounds)
+
+
+def cubic_bezier(progress: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Map linear ``progress`` through a CSS cubic-bezier timing function.
+
+    CSS curves describe both coordinates parametrically, so evaluating y at
+    ``progress`` directly is subtly wrong. Newton iteration finds the curve's
+    x parameter quickly; bisection is the dependable fallback for flat slopes.
+    """
+    if progress <= 0.0:
+        return 0.0
+    if progress >= 1.0:
+        return 1.0
+
+    def coordinate(parameter: float, first: float, second: float) -> float:
+        inverse = 1.0 - parameter
+        return (
+            3.0 * inverse * inverse * parameter * first
+            + 3.0 * inverse * parameter * parameter * second
+            + parameter * parameter * parameter
+        )
+
+    def x_slope(parameter: float) -> float:
+        inverse = 1.0 - parameter
+        return (
+            3.0 * inverse * inverse * x1
+            + 6.0 * inverse * parameter * (x2 - x1)
+            + 3.0 * parameter * parameter * (1.0 - x2)
+        )
+
+    parameter = progress
+    for _attempt in range(8):
+        difference = coordinate(parameter, x1, x2) - progress
+        if abs(difference) < 1e-7:
+            return coordinate(parameter, y1, y2)
+        slope = x_slope(parameter)
+        if abs(slope) < 1e-7:
+            break
+        candidate = parameter - difference / slope
+        if not 0.0 <= candidate <= 1.0:
+            break
+        parameter = candidate
+
+    lower = 0.0
+    upper = 1.0
+    for _attempt in range(24):
+        parameter = (lower + upper) / 2.0
+        x = coordinate(parameter, x1, x2)
+        if math.isclose(x, progress, abs_tol=1e-7):
+            break
+        if x < progress:
+            lower = parameter
+        else:
+            upper = parameter
+    return coordinate(parameter, y1, y2)
+
+
+def live_sort_target(
+    row_bounds: tuple[tuple[float, float], ...],
+    source_index: int,
+    pointer_y: float,
+    grab_offset_y: float,
+    dragged_height: float,
+) -> int:
+    """Choose a slot using the lifted row's centre and sibling midpoints.
+
+    ``grab_offset_y`` is deliberately explicit: preserving the initial point
+    under the pointer is what prevents a handle grab from centring the row.
+    """
+    dragged_centre = pointer_y - grab_offset_y + dragged_height / 2.0
+    slot = 0
+    for index, (top, bottom) in enumerate(row_bounds):
+        if index == source_index:
+            continue
+        if dragged_centre < top + (bottom - top) * 0.5:
+            return slot
+        slot += 1
+    return slot
+
+
+def live_sort_slot(row_heights: tuple[float, ...], source_index: int, pointer_offset: float) -> int:
+    """Final row index selected by a lifted row's centre.
+
+    The pointer offset is measured from the gesture's starting point, so the
+    lifted centre begins at its natural position. Comparing it with every
+    *other* centre avoids making the vacated row into a phantom drop target.
+    """
+    source_top = sum(row_heights[:source_index])
+    bounds: list[tuple[float, float]] = []
+    top = 0.0
+    for height in row_heights:
+        bounds.append((top, top + height))
+        top += height
+    return live_sort_target(
+        tuple(bounds),
+        source_index,
+        source_top + pointer_offset,
+        0.0,
+        row_heights[source_index],
+    )
+
+
+def live_sort_slot_change(
+    row_bounds: tuple[tuple[float, float], ...],
+    source_index: int,
+    pointer_y: float,
+    grab_offset_y: float,
+    dragged_height: float,
+    current_slot: int,
+) -> int | None:
+    """Return a new slot, or ``None`` while the remembered slot is unchanged.
+
+    This is the prototype's hysteresis: there is no invented dead band around
+    a midpoint, just no layout work until the chosen slot actually changes.
+    """
+    chosen = live_sort_target(row_bounds, source_index, pointer_y, grab_offset_y, dragged_height)
+    return None if chosen == current_slot else chosen
+
+
+def flip_deltas(
+    first_positions: tuple[float, ...], last_positions: tuple[float, ...]
+) -> tuple[float, ...]:
+    """FLIP inversions from current visual y to the new layout y.
+
+    Sub-pixel noise below the prototype's threshold should neither wake an
+    animation nor cancel one that is already carrying a row into place.
+    """
+    if len(first_positions) != len(last_positions):
+        raise ValueError("FLIP position lists must have the same length")
+    deltas: list[float] = []
+    for first, last in zip(first_positions, last_positions, strict=True):
+        delta = first - last
+        deltas.append(delta if abs(delta) > 0.5 else 0.0)
+    return tuple(deltas)
+
+
+def edge_scroll_speed(pointer_y: float, viewport_height: float) -> float:
+    """Reference auto-scroll speed for a pointer inside a 92 px edge band."""
+    edge = 92.0
+    maximum = 16.0
+    if pointer_y < edge:
+        return max(-maximum * (1.0 - pointer_y / edge), -maximum)
+    if pointer_y > viewport_height - edge:
+        return min(maximum * ((pointer_y - (viewport_height - edge)) / edge), maximum)
+    return 0.0
+
+
+def live_sort_sibling_offsets(
+    row_heights: tuple[float, ...], source_index: int, target_slot: int
+) -> tuple[float, ...]:
+    """Vertical offsets that open ``target_slot`` without changing children.
+
+    A live sort must leave GTK's child sequence untouched for the whole
+    gesture. Rows crossed by the lifted one therefore occupy its old space by
+    translating exactly one lifted-row height in the opposite direction.
+    """
+    source_height = row_heights[source_index]
+    target = min(max(target_slot, 0), len(row_heights) - 1)
+    offsets = [0.0] * len(row_heights)
+    if target > source_index:
+        for index in range(source_index + 1, target + 1):
+            offsets[index] = -source_height
+    elif target < source_index:
+        for index in range(target, source_index):
+            offsets[index] = source_height
+    return tuple(offsets)
+
+
+def live_sort_settle_offset(
+    row_heights: tuple[float, ...], source_index: int, target_slot: int
+) -> float:
+    """Distance from a row's natural top to its chosen live-sort slot."""
+    target = min(max(target_slot, 0), len(row_heights) - 1)
+    if target > source_index:
+        return sum(row_heights[source_index + 1 : target + 1])
+    if target < source_index:
+        return -sum(row_heights[target:source_index])
+    return 0.0
 
 
 def new_id() -> str:

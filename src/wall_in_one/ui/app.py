@@ -54,6 +54,12 @@ def download_root(settings: config.Settings) -> Path | None:
 #: resolution schedule rules are written at.
 SCHEDULE_TICK_SECONDS: Final = 60
 RUNTIME_STATUS_TICK_SECONDS: Final = 2
+PALETTE_RELOAD_DEBOUNCE_MS: Final = 75
+
+# GTK reads Noctalia's imported gtk.css at user priority only at startup, while
+# this provider is refreshed after every palette render. Both carry the same
+# palette, so the copy we can guarantee is current must win inside this process.
+APPLICATION_STYLE_PRIORITY: Final = Gtk.STYLE_PROVIDER_PRIORITY_USER + 1
 
 
 class Application(Adw.Application):
@@ -82,6 +88,8 @@ class Application(Adw.Application):
         self._cycle_source: int = 0
         self._schedule_source: int = 0
         self._runtime_status_source: int = 0
+        self._palette_monitor: Gio.FileMonitor | None = None
+        self._palette_reload_source: int = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
         self._stills = StillMaker()
 
@@ -100,8 +108,9 @@ class Application(Adw.Application):
             Gtk.StyleContext.add_provider_for_display(
                 display,
                 self._provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+                APPLICATION_STYLE_PRIORITY,
             )
+        self._start_palette_monitor()
         self._install_accelerators()
         # Only the explicitly requested legacy service owns Python timers.
         # An ordinary GUI is an authoring client of the Rust runtime and must
@@ -149,6 +158,7 @@ class Application(Adw.Application):
             self._initial_page = None
 
     def do_shutdown(self) -> None:
+        self._stop_palette_monitor()
         self._stop_cycle()
         if self._schedule_source:
             GLib.source_remove(self._schedule_source)
@@ -202,12 +212,68 @@ class Application(Adw.Application):
 
     # -- palette ---------------------------------------------------------
 
+    def _start_palette_monitor(self) -> None:
+        """Watch the palette's directory so atomic replacement stays visible.
+
+        Noctalia renders through a temporary file and rename. Watching the
+        palette inode itself would therefore work once and then go deaf.
+        """
+        palette_path = paths.palette_path()
+        paths.ensure_directory(palette_path.parent)
+        directory = Gio.File.new_for_path(str(palette_path.parent))
+        try:
+            monitor = directory.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+        except GLib.Error as error:
+            # The post-hook remains a complete fast path, so an unavailable
+            # monitor should cost redundancy rather than application startup.
+            print(f"warning: palette monitor unavailable: {error}", file=sys.stderr)
+            return
+        monitor.connect("changed", self._on_palette_directory_changed)
+        self._palette_monitor = monitor
+
+    def _stop_palette_monitor(self) -> None:
+        if self._palette_reload_source:
+            GLib.source_remove(self._palette_reload_source)
+            self._palette_reload_source = 0
+        if self._palette_monitor is not None:
+            self._palette_monitor.cancel()
+            self._palette_monitor = None
+
+    def _on_palette_directory_changed(
+        self,
+        _monitor: Gio.FileMonitor,
+        changed: Gio.File,
+        other: Gio.File | None,
+        _event_type: Gio.FileMonitorEvent,
+    ) -> None:
+        target = str(paths.palette_path())
+        if target not in (changed.get_path(), other.get_path() if other is not None else None):
+            return
+        # One atomic render can emit created, moved and changes-done events.
+        # Restarting a short trailing timeout turns that burst into one repaint.
+        if self._palette_reload_source:
+            GLib.source_remove(self._palette_reload_source)
+        self._palette_reload_source = GLib.timeout_add(
+            PALETTE_RELOAD_DEBOUNCE_MS, self._reload_monitored_palette
+        )
+
+    def _reload_monitored_palette(self) -> bool:
+        self._palette_reload_source = 0
+        self.reload_palette()
+        return GLib.SOURCE_REMOVE
+
     def reload_palette(self) -> source.ResolvedPalette:
         """Resolve and apply the current palette.
 
         Idempotent by design: Noctalia runs our template's post-hook on every
         successful render, not only when the colours actually changed.
         """
+        if self._palette_reload_source:
+            # The post-hook normally reaches us before the monitor debounce.
+            # Let that lower-latency path replace the queued repaint rather
+            # than applying the same rendered palette twice.
+            GLib.source_remove(self._palette_reload_source)
+            self._palette_reload_source = 0
         resolved = source.resolve(scheme=self._settings.preview_scheme)
         self._resolved = resolved
         self._apply_stylesheet(resolved)

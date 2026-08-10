@@ -19,6 +19,23 @@ if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
 
 
+MONTH_LABELS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
 def _connected_outputs() -> tuple[str, ...]:
     """Connector names already known by GTK, without blocking on a subprocess."""
     display = Gdk.Display.get_default()
@@ -213,16 +230,46 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         self._rule_playlist.set_sensitive(bool(choices))
         group.add(self._rule_playlist)
-        self._months = Adw.EntryRow(title="Months, comma-separated (1-12)")
-        group.add(self._months)
-        self._weekdays = Adw.EntryRow(title="Weekdays (mon,tue,wed…)")
-        group.add(self._weekdays)
-        time_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._start = Gtk.Entry(placeholder_text="From 22:00", hexpand=True)
-        self._end = Gtk.Entry(placeholder_text="To 06:00", hexpand=True)
-        time_box.append(self._start)
-        time_box.append(self._end)
-        group.add(time_box)
+        group.add(self._label("Months (none selected means all year)"))
+        month_grid = Gtk.Grid(column_spacing=6, row_spacing=6)
+        self._months: list[Gtk.ToggleButton] = []
+        for index, label in enumerate(MONTH_LABELS):
+            button = Gtk.ToggleButton(label=label, hexpand=True)
+            month_grid.attach(button, index % 6, index // 6, 1, 1)
+            self._months.append(button)
+        group.add(month_grid)
+
+        group.add(self._label("Days of week (none selected means every day)"))
+        weekday_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        weekday_box.set_homogeneous(True)
+        self._weekdays: list[Gtk.ToggleButton] = []
+        for label in WEEKDAY_LABELS:
+            button = Gtk.ToggleButton(label=label)
+            weekday_box.append(button)
+            self._weekdays.append(button)
+        group.add(weekday_box)
+
+        self._time_enabled = Adw.SwitchRow(
+            title="Use a time window",
+            subtitle="The end is exclusive; an earlier end time wraps past midnight",
+        )
+        self._time_enabled.connect("notify::active", self._time_window_changed)
+        group.add(self._time_enabled)
+        self._time_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._start_hour = self._number_picker(24)
+        self._start_minute = self._number_picker(60)
+        self._end_hour = self._number_picker(24)
+        self._end_minute = self._number_picker(60)
+        self._time_box.append(self._label("From"))
+        self._time_box.append(self._start_hour)
+        self._time_box.append(Gtk.Label(label=":"))
+        self._time_box.append(self._start_minute)
+        self._time_box.append(self._label("Until"))
+        self._time_box.append(self._end_hour)
+        self._time_box.append(Gtk.Label(label=":"))
+        self._time_box.append(self._end_minute)
+        self._time_box.set_sensitive(False)
+        group.add(self._time_box)
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._rule_commit = Gtk.Button(label="Add scheduled override")
         self._rule_commit.add_css_class("suggested-action")
@@ -235,6 +282,23 @@ class SchedulesPage(Gtk.ScrolledWindow):
         buttons.append(self._rule_cancel)
         group.add(buttons)
         return group
+
+    @staticmethod
+    def _label(text: str) -> Gtk.Label:
+        label = Gtk.Label(label=text, xalign=0.0, wrap=True)
+        label.add_css_class("dim-label")
+        return label
+
+    @staticmethod
+    def _number_picker(limit: int) -> Gtk.DropDown:
+        return Gtk.DropDown.new_from_strings([f"{value:02d}" for value in range(limit)])
+
+    def _time_window_changed(self, row: Adw.SwitchRow, _property: object) -> None:
+        self._time_box.set_sensitive(row.get_active())
+
+    @staticmethod
+    def _clock_value(hour: Gtk.DropDown, minute: Gtk.DropDown) -> str:
+        return f"{hour.get_selected():02d}:{minute.get_selected():02d}"
 
     def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
@@ -315,11 +379,23 @@ class SchedulesPage(Gtk.ScrolledWindow):
         index = self._rule_playlist.get_selected()
         if index >= len(choices):
             return
-        months = [one for one in self._months.get_text().split(",") if one.strip()]
-        weekdays = [one for one in self._weekdays.get_text().split(",") if one.strip()]
+        months = [index for index, button in enumerate(self._months, 1) if button.get_active()]
+        weekdays = [
+            schedules.WEEKDAY_NAMES[index]
+            for index, button in enumerate(self._weekdays)
+            if button.get_active()
+        ]
         try:
-            start = self._start.get_text().strip()
-            end = self._end.get_text().strip()
+            start = (
+                self._clock_value(self._start_hour, self._start_minute)
+                if self._time_enabled.get_active()
+                else ""
+            )
+            end = (
+                self._clock_value(self._end_hour, self._end_minute)
+                if self._time_enabled.get_active()
+                else ""
+            )
             if self._editing_rule:
                 self._app.session.schedules.update(
                     self._editing_rule,
@@ -349,21 +425,30 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if playlist.id == rule.playlist:
                 self._rule_playlist.set_selected(index)
                 break
-        self._months.set_text(",".join(str(month) for month in sorted(rule.months)))
-        self._weekdays.set_text(
-            ",".join(schedules.WEEKDAY_NAMES[day] for day in sorted(rule.weekdays))
-        )
-        self._start.set_text(schedules.format_time(rule.start) if rule.start is not None else "")
-        self._end.set_text(schedules.format_time(rule.end) if rule.end is not None else "")
+        for index, button in enumerate(self._months, 1):
+            button.set_active(index in rule.months)
+        for index, button in enumerate(self._weekdays):
+            button.set_active(index in rule.weekdays)
+        timed = rule.start is not None and rule.end is not None
+        self._time_enabled.set_active(timed)
+        if timed:
+            assert rule.start is not None and rule.end is not None
+            self._start_hour.set_selected(rule.start // 60)
+            self._start_minute.set_selected(rule.start % 60)
+            self._end_hour.set_selected(rule.end // 60)
+            self._end_minute.set_selected(rule.end % 60)
         self._editing_rule = rule.id
         self._rule_commit.set_label("Save scheduled override")
         self._rule_cancel.set_visible(True)
 
     def _clear_rule_editor(self) -> None:
         self._editing_rule = ""
-        self._months.set_text("")
-        self._weekdays.set_text("")
-        self._start.set_text("")
-        self._end.set_text("")
+        for button in (*self._months, *self._weekdays):
+            button.set_active(False)
+        self._time_enabled.set_active(False)
+        self._start_hour.set_selected(0)
+        self._start_minute.set_selected(0)
+        self._end_hour.set_selected(0)
+        self._end_minute.set_selected(0)
         self._rule_commit.set_label("Add scheduled override")
         self._rule_cancel.set_visible(False)

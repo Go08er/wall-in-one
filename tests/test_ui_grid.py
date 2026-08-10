@@ -566,5 +566,11 @@ def test_management_pages_render_real_pairing_playlist_and_schedule_data(
         assert window._stack.get_visible_child_name() == page
     assert window._playlists_page._selected == made.id
     assert application.session.schedules.rules[0].describe() == "sat 22:00-06:00"
+    schedule_editor = window._schedules_page
+    assert len(schedule_editor._months) == 12
+    assert len(schedule_editor._weekdays) == 7
+    assert all(isinstance(button, Gtk.ToggleButton) for button in schedule_editor._months)
+    assert isinstance(schedule_editor._start_hour, Gtk.DropDown)
+    assert isinstance(schedule_editor._start_minute, Gtk.DropDown)
     window.destroy()
     application.session.shutdown()

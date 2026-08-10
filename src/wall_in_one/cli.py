@@ -90,7 +90,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--open-page",
-        choices=("media", "pairings", "playlists", "schedules", "displays"),
+        choices=(
+            "browse",
+            "media",
+            "pairings",
+            "playlists",
+            "schedules",
+            "displays",
+            "settings",
+        ),
         help="present the GUI on one workflow page",
     )
 

@@ -1,4 +1,4 @@
-"""Settings dialog.
+"""Settings page and compatibility dialog.
 
 Everything that used to be the whole window lives here now, plus the four
 controls that previously existed only as `ctl` verbs: shuffle, cycle, cycle
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
 
 
-class PreferencesDialog(Adw.PreferencesDialog):
+class PreferencesPage(Adw.PreferencesPage):
     """Playback, colour, and appearance settings."""
 
     def __init__(self, application: Application) -> None:
@@ -65,14 +65,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # programmatic changes do not read as user edits and write back.
         self._loading = False
 
-        self.set_title("Settings")
-        page = Adw.PreferencesPage()
-        page.add(self._build_library_group())
-        page.add(self._build_playback_group())
-        page.add(self._build_providers_group())
-        page.add(self._build_colour_group())
-        page.add(self._build_appearance_group())
-        self.add(page)
+        self.add(self._build_library_group())
+        self.add(self._build_playback_group())
+        self.add(self._build_providers_group())
+        self.add(self._build_colour_group())
+        self.add(self._build_appearance_group())
 
         self._load(application.settings)
         self._refresh_roots()
@@ -517,7 +514,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._report("Wallhaven API key removed" if removed else "There was no saved key")
 
     def _report(self, message: str) -> None:
-        self.add_toast(Adw.Toast.new(message))
+        self._app.window_report(message)
 
     def _on_reload_palette(self, _button: Gtk.Button) -> None:
         self.show_palette(self._app.reload_palette())
@@ -540,3 +537,16 @@ class PreferencesDialog(Adw.PreferencesDialog):
             colour = palette.colours.get(token)
             if colour is not None:
                 self._swatches.append(swatch(colour, label))
+
+
+class PreferencesDialog(Adw.PreferencesDialog):
+    """Compatibility wrapper for callers that still request a dialog."""
+
+    def __init__(self, application: Application) -> None:
+        super().__init__()
+        self.set_title("Settings")
+        self.page = PreferencesPage(application)
+        self.add(self.page)
+
+    def show_palette(self, resolved: source.ResolvedPalette | None) -> None:
+        self.page.show_palette(resolved)

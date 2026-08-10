@@ -1,9 +1,4 @@
-"""The main window: a grid of wallpapers, and the controls to move through it.
-
-The wallpapers are the content. Settings live in a dialog behind the header bar
-menu, because a wallpaper manager whose main view is a preferences page is a
-settings app wearing a costume.
-"""
+"""The five-stage Wall-in-One workspace and per-item pairing editor."""
 
 from __future__ import annotations
 
@@ -25,12 +20,12 @@ from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import palettes, source
-from wall_in_one.ui.browse_dialog import BrowseDialog
+from wall_in_one.ui.browse_dialog import BrowsePage
 from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.pairings_page import PairingsPage
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.playlists_page import PlaylistsPage
-from wall_in_one.ui.preferences import PreferencesDialog
+from wall_in_one.ui.preferences import PreferencesPage
 from wall_in_one.ui.schedules_page import SchedulesPage
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
@@ -94,9 +89,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._app = application
         self._settings = settings
         self._loader = ThumbnailLoader()
-        self._preferences: PreferencesDialog | None = None
         self._palettes: PaletteBrowserDialog | None = None
-        self._browse: BrowseDialog | None = None
         # How the library is being looked at. Deliberately not in
         # `config.Settings`: a search is about the next thirty seconds, and
         # reopening the app to yesterday's filter still applied -- with most of
@@ -124,8 +117,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._grid.set_favourites(self._favourites.paths)
         self._toast = Adw.ToastOverlay()
         self._pairings_page = PairingsPage(application, self._close_pairing_editor)
+        self._browse_page = BrowsePage(application)
         self._playlists_page = PlaylistsPage(application)
         self._schedules_page = SchedulesPage(application)
+        self._settings_page = PreferencesPage(application)
         self._runtime_summary = ""
         self._runtime_error = ""
 
@@ -216,6 +211,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast.set_child(self._grid)
         media.append(self._toast)
         self._stack.add_titled_with_icon(
+            self._browse_page,
+            "browse",
+            "Browse",
+            "system-search-symbolic",
+        )
+        self._stack.add_titled_with_icon(
             media, "media", "Media/Pairings", "image-x-generic-symbolic"
         )
         self._stack.add_titled_with_icon(
@@ -227,9 +228,16 @@ class MainWindow(Adw.ApplicationWindow):
         self._stack.add_titled_with_icon(
             self._schedules_page,
             "schedules",
-            "Display schedules",
+            "Schedules",
             "video-display-symbolic",
         )
+        self._stack.add_titled_with_icon(
+            self._settings_page,
+            "settings",
+            "Settings",
+            "preferences-system-symbolic",
+        )
+        self._stack.set_visible_child_name("media")
         switcher = Adw.ViewSwitcherBar(stack=self._stack, reveal=True)
         self._switcher = switcher
         self._stack.connect("notify::visible-child-name", self._on_page_changed)
@@ -362,13 +370,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.report(response.message)
 
     def open_preferences(self) -> None:
-        dialog = PreferencesDialog(self._app)
-        self._preferences = dialog
-        dialog.connect("closed", self._on_preferences_closed)
-        dialog.present(self)
-
-    def _on_preferences_closed(self, _dialog: Adw.PreferencesDialog) -> None:
-        self._preferences = None
+        self.show_page("settings")
 
     def open_palette_browser(self) -> None:
         dialog = PaletteBrowserDialog(self._app)
@@ -380,21 +382,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._palettes = None
 
     def open_browse(self) -> None:
-        """Open the search-and-download dialog, one at a time.
-
-        Reusing the open one keeps its results and its preview cache, so
-        pressing the button again does not throw away a page of downloads.
-        """
-        if self._browse is not None:
-            self._browse.present(self)
-            return
-        dialog = BrowseDialog(self._app)
-        self._browse = dialog
-        dialog.connect("closed", self._on_browse_closed)
-        dialog.present(self)
-
-    def _on_browse_closed(self, _dialog: Adw.Dialog) -> None:
-        self._browse = None
+        self.show_page("browse")
+        self._browse_page.focus_search()
 
     def report(self, message: str) -> None:
         """Surface a failure where the user will actually see it."""
@@ -404,6 +393,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._loader.shutdown()
         self._pairings_page.shutdown()
         self._playlists_page.shutdown()
+        self._browse_page.shutdown()
 
     @property
     def settings(self) -> config.Settings:
@@ -444,6 +434,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def show_page(self, page: str) -> None:
         """Show a primary workflow page after the caller validates its name."""
+        self._content_stack.set_visible_child_name("primary")
+        self._switcher.set_reveal(True)
         self._stack.set_visible_child_name(page)
         # GTK normally emits notify synchronously. Calling this explicitly is
         # cheap and keeps a remotely opened page populated even if a backend
@@ -775,7 +767,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._grid.set_current(cursor.path if cursor else None)
 
     def show_palette(self, resolved: source.ResolvedPalette) -> None:
-        if self._preferences is not None:
-            self._preferences.show_palette(resolved)
+        self._settings_page.show_palette(resolved)
         if self._palettes is not None:
             self._palettes.show_palette()

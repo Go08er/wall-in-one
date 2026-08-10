@@ -141,7 +141,10 @@ class Application(Adw.Application):
         self._window.present()
         self._start_runtime_status_timer()
         if self._initial_page is not None:
-            page = "schedules" if self._initial_page == "displays" else self._initial_page
+            page = {
+                "displays": "schedules",
+                "pairings": "media",
+            }.get(self._initial_page, self._initial_page)
             self._window.show_page(page)
             self._initial_page = None
 
@@ -748,6 +751,7 @@ class _Commands:
         """Present the configuration window on one named workflow page."""
         requested = (value or "").strip().casefold()
         aliases = {
+            "browse": "browse",
             "media": "media",
             # Compatibility for callers from before pairings became the
             # per-item editor reached from Media/Pairings.
@@ -755,10 +759,13 @@ class _Commands:
             "playlists": "playlists",
             "schedules": "schedules",
             "displays": "schedules",
+            "settings": "settings",
         }
         page = aliases.get(requested)
         if page is None:
-            return Response.failure("usage: open <media|pairings|playlists|schedules|displays>")
+            return Response.failure(
+                "usage: open <browse|media|pairings|playlists|schedules|displays|settings>"
+            )
         self._app.present_page(page)
         return Response.success(f"opened {page}")
 

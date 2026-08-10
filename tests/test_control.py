@@ -1018,10 +1018,12 @@ def _commands(sandbox: Path, items: Sequence[MediaItem]) -> tuple[_Commands, _Fa
     ("requested", "shown"),
     [
         ("media", "media"),
+        ("browse", "browse"),
         ("pairings", "media"),
         ("playlists", "playlists"),
         ("schedules", "schedules"),
         ("displays", "schedules"),
+        ("settings", "settings"),
         (" SCHEDULES ", "schedules"),
     ],
 )
@@ -1036,7 +1038,7 @@ def test_open_presents_the_singleton_on_the_requested_page(
     assert app.presented_pages == [shown]
 
 
-@pytest.mark.parametrize("requested", [None, "", "settings", "schedules now"])
+@pytest.mark.parametrize("requested", [None, "", "schedules now"])
 def test_open_rejects_unknown_pages_without_presenting(
     sandbox: Path, requested: str | None
 ) -> None:
@@ -1045,7 +1047,9 @@ def test_open_rejects_unknown_pages_without_presenting(
     response = commands.open_page(requested)
 
     assert not response.ok
-    assert response.message == "usage: open <media|pairings|playlists|schedules|displays>"
+    assert response.message == (
+        "usage: open <browse|media|pairings|playlists|schedules|displays|settings>"
+    )
     assert app.presented_pages == []
 
 

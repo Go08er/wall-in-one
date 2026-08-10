@@ -505,7 +505,7 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
 
-    for page in ("media", "playlists", "schedules"):
+    for page in ("browse", "media", "playlists", "schedules", "settings"):
         assert window._stack.get_child_by_name(page) is not None
     assert window._stack.get_child_by_name("pairings") is None
     assert window._content_stack.get_child_by_name("pairing-editor") is window._pairings_page

@@ -418,6 +418,7 @@ class BrowseDialog(Adw.Dialog):
         self._detail_dialogs: dict[str, DetailDialog] = {}
         self._searching = False
         self._closed = False
+        self._presentation_parent: Gtk.Widget = self
 
         self.set_title("Browse")
         self.set_content_width(1000)
@@ -506,6 +507,7 @@ class BrowseDialog(Adw.Dialog):
     def _build_content(self) -> Gtk.Widget:
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
+        self._header = header
         header.set_title_widget(Adw.WindowTitle(title="Browse", subtitle="Wallhaven, MotionBGS"))
         header.pack_end(self._build_workshop_button())
         toolbar.add_top_bar(header)
@@ -1029,7 +1031,7 @@ class BrowseDialog(Adw.Dialog):
         detail.connect(
             "closed", lambda _dialog: self._detail_dialogs.pop(candidate.identifier, None)
         )
-        detail.present(self)
+        detail.present(self._presentation_parent)
 
     def _on_download(self, candidate: WallpaperCandidate, variant: str = "") -> None:
         card = self._card_for(candidate)
@@ -1105,6 +1107,33 @@ class BrowseDialog(Adw.Dialog):
         # name and renames, so an interrupted one leaves nothing behind, and a
         # finished one is already in the library.
         self._downloads.shutdown(wait=False, cancel_futures=True)
+
+
+class BrowsePage(Gtk.Box):
+    """The established browser surface embedded as a primary application tab.
+
+    ``BrowseDialog`` remains the tested implementation and compatibility
+    surface. Its child is reparented here before either widget is presented;
+    callbacks continue to own their worker pools while detail dialogs are
+    parented to this visible page.
+    """
+
+    def __init__(self, application: Application) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self._surface = BrowseDialog(application)
+        content = self._surface.get_child()
+        self._surface.set_child(None)
+        if content is not None:
+            self.append(content)
+        self._surface._presentation_parent = self
+        self._surface._header.set_visible(False)
+
+    def focus_search(self) -> None:
+        self._surface._focus_search()
+
+    def shutdown(self) -> None:
+        if not self._surface._closed:
+            self._surface._on_closed(self._surface)
 
 
 # -- small widgets -------------------------------------------------------

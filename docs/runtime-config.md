@@ -55,9 +55,11 @@ Times are local `HH:MM`, inclusive at the start and exclusive at the end. An
 end earlier than its start wraps midnight. Empty month/weekday lists and an
 absent time window mean “any”. Rules stay ordered because the last match wins.
 
-This file contains configuration only. Cursor, pause state, shuffle order, the
-manual playlist override, renderer PIDs, and current status are runtime state
-and never get written into it.
+This file contains configuration only. Cursor, playing/paused/stopped state,
+shuffle order, the manual playlist and cycle overrides, renderer PIDs, and
+current status are runtime state and never get written into it. The configured
+`cycle_enabled` is the session default. `cycle on|off` overrides it until the
+service exits or `cycle default` drops the override.
 
 Display assignments are the baseline when no schedule rule matches. A matching
 schedule rule overrides assignments for its window, and a manual
@@ -93,3 +95,9 @@ attributed `last_error`; it never restarts the child automatically. A scene
 that crashed linux-wallpaperengine is suppressed for the rest of the service
 session, while a video may be attempted again only if rotation later revisits
 it.
+
+The top-level snapshot reports `playback_state` as `playing`, `paused`, or
+`stopped`; the older `paused` boolean remains for compatibility and `stopped`
+is also explicit. It reports effective `cycle_enabled`, authored
+`cycle_default`, and `cycle_source` (`config` or `manual`) so clients never have
+to infer which switch is actually in force.

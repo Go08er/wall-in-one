@@ -124,6 +124,41 @@ pkgs.testers.runNixOSTest {
             timeout=30,
         )
 
+    with subtest("runtime cycle and stop controls remain independent"):
+        before = machine.succeed(
+            as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")
+        ).strip()
+        assert ctl("cycle off") == "cycle off (manual)"
+        machine.sleep(7)
+        held = machine.succeed(
+            as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")
+        ).strip()
+        assert held == before, (before, held)
+        machine.succeed(
+            as_user(
+                "${app} ctl status | ${lib.getExe pkgs.jq} "
+                "-e '.cycle_enabled == false and .cycle_default == true "
+                "and .cycle_source == \"manual\" and .playback_state == \"playing\"'"
+            )
+        )
+        assert ctl("stop") == "stopped; paired still remains active"
+        machine.succeed(
+            as_user(
+                "${app} ctl status | ${lib.getExe pkgs.jq} "
+                "-e '.playback_state == \"stopped\" and .stopped == true "
+                "and .paused == false and .motion_active == false'"
+            )
+        )
+        assert ctl("play") == "playing"
+        assert ctl("cycle default") == "cycle on (config)"
+        machine.succeed(
+            as_user(
+                "${app} ctl status | ${lib.getExe pkgs.jq} "
+                "-e '.playback_state == \"playing\" and .cycle_enabled == true "
+                "and .cycle_source == \"config\"'"
+            )
+        )
+
     with subtest("every workflow page renders"):
         for page in ("browse", "media", "playlists", "schedules", "settings"):
             assert ctl(f"open {page}") == f"opened {page}"

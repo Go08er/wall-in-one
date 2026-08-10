@@ -321,6 +321,27 @@ def test_status_does_not_accept_a_plain_gui_as_the_runtime(
     assert "runtime is not running" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("verb", "argument"), [("cycle", "off"), ("stop", None)])
+def test_live_cycle_and_stop_are_sent_to_the_runtime_socket(
+    verb: str,
+    argument: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one import paths
+    from wall_in_one.control import client
+
+    seen: list[tuple[Request, Path | None]] = []
+
+    def answer(request: Request, *, path: Path | None = None, **_kwargs: object) -> Response:
+        seen.append((request, path))
+        return Response.success("ok")
+
+    monkeypatch.setattr(client, "send", answer)
+
+    assert client.dispatch(verb, argument) == 0
+    assert seen == [(Request(verb, argument), paths.runtime_socket_path())]
+
+
 def test_handle_dispatches_and_passes_the_argument() -> None:
     commands = _StubCommands()
     verbs = build_verb_table(commands)

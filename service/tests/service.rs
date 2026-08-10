@@ -563,6 +563,287 @@ impl WallpaperDriver for RecordingDriver {
     fn stop(&mut self) {}
 }
 
+#[derive(Default)]
+struct RuntimeDriverState {
+    applies: Vec<(String, bool)>,
+    pauses: Vec<bool>,
+    stops: usize,
+    motion_active: bool,
+    fail_apply: bool,
+}
+
+#[derive(Clone)]
+struct RuntimeDriver(Arc<Mutex<RuntimeDriverState>>);
+
+impl WallpaperDriver for RuntimeDriver {
+    fn apply(
+        &mut self,
+        entry: &wall_in_one_service::config::Entry,
+        _output: &str,
+        settings: &wall_in_one_service::config::Settings,
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        state
+            .applies
+            .push((entry.id.clone(), settings.dynamics_enabled));
+        if state.fail_apply {
+            return Err("renderer refused resume".into());
+        }
+        state.motion_active = settings.dynamics_enabled
+            && entry.kind != wall_in_one_service::config::EntryKind::Still;
+        Ok(())
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.0.lock().unwrap().pauses.push(paused);
+    }
+
+    fn reconfigure(&mut self, _settings: wall_in_one_service::config::RendererSettings) {}
+
+    fn motion_active(&self, _output: &str) -> bool {
+        self.0.lock().unwrap().motion_active
+    }
+
+    fn stop(&mut self) {
+        let mut state = self.0.lock().unwrap();
+        state.stops += 1;
+        state.motion_active = false;
+    }
+}
+
+fn status(runtime: &mut Runtime<RuntimeDriver>, at: chrono::NaiveDateTime) -> serde_json::Value {
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(response.ok, "{}", response.message);
+    serde_json::from_str(&response.message).unwrap()
+}
+
+#[test]
+fn cycle_runtime_override_stops_advancement_without_stopping_motion() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "next".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert!(state.lock().unwrap().motion_active);
+    let entry_before = status(&mut runtime, at)["entry_id"].clone();
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "cycle".into(),
+            argument: Some("off".into()),
+        },
+        at,
+    );
+    assert_eq!(response.message, "cycle off (manual)");
+    runtime.tick(at, Instant::now() + Duration::from_secs(600));
+    let stopped_cycle = status(&mut runtime, at);
+    assert_eq!(stopped_cycle["entry_id"], entry_before);
+    assert_eq!(stopped_cycle["motion_active"], true);
+    assert_eq!(stopped_cycle["cycle_enabled"], false);
+    assert_eq!(stopped_cycle["cycle_default"], true);
+    assert_eq!(stopped_cycle["cycle_source"], "manual");
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "cycle".into(),
+            argument: Some("default".into()),
+        },
+        at,
+    );
+    assert_eq!(response.message, "cycle on (config)");
+    let following = status(&mut runtime, at);
+    assert_eq!(following["cycle_enabled"], true);
+    assert_eq!(following["cycle_source"], "config");
+    runtime.tick(at, Instant::now() + Duration::from_secs(600));
+    assert_ne!(status(&mut runtime, at)["entry_id"], entry_before);
+}
+
+#[test]
+fn stop_releases_motion_while_pause_keeps_it_resident_and_play_resumes() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "next".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(state.lock().unwrap().motion_active);
+
+    assert_eq!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "pause".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .message,
+        "paused"
+    );
+    let paused = status(&mut runtime, at);
+    assert_eq!(paused["playback_state"], "paused");
+    assert_eq!(paused["paused"], true);
+    assert_eq!(paused["stopped"], false);
+    assert!(state.lock().unwrap().motion_active);
+
+    assert_eq!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "stop".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .message,
+        "stopped; paired still remains active"
+    );
+    let stopped = status(&mut runtime, at);
+    assert_eq!(stopped["playback_state"], "stopped");
+    assert_eq!(stopped["paused"], false);
+    assert_eq!(stopped["stopped"], true);
+    assert_eq!(stopped["motion_active"], false);
+    {
+        let recorded = state.lock().unwrap();
+        assert_eq!(recorded.pauses, vec![true, false]);
+        assert_eq!(recorded.stops, 1);
+    }
+
+    // Moving while stopped changes the still but never launches its motion.
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "previous".into(),
+            argument: None,
+        },
+        at,
+    );
+    let last = state.lock().unwrap().applies.last().cloned().unwrap();
+    assert_eq!(last, ("still-one".into(), false));
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "next".into(),
+            argument: None,
+        },
+        at,
+    );
+    let last = state.lock().unwrap().applies.last().cloned().unwrap();
+    assert_eq!(last, ("video-two".into(), false));
+
+    assert_eq!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "toggle".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .message,
+        "playing"
+    );
+    let resumed = status(&mut runtime, at);
+    assert_eq!(resumed["playback_state"], "playing");
+    assert_eq!(resumed["motion_active"], true);
+    assert_eq!(
+        state.lock().unwrap().applies.last(),
+        Some(&("video-two".into(), true))
+    );
+}
+
+#[test]
+fn failed_resume_stays_stopped_and_reports_the_renderer_error() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "stop".into(),
+            argument: None,
+        },
+        at,
+    );
+    state.lock().unwrap().fail_apply = true;
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "play".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(!response.ok);
+    assert_eq!(response.message, "renderer refused resume");
+    let stopped = status(&mut runtime, at);
+    assert_eq!(stopped["playback_state"], "stopped");
+    assert_eq!(stopped["stopped"], true);
+    assert_eq!(stopped["motion_active"], false);
+    assert_eq!(stopped["last_error"], "renderer refused resume");
+}
+
 #[test]
 fn display_assignment_is_the_baseline_and_manual_override_wins() {
     let mut parsed: Config = toml::from_str(&format!(

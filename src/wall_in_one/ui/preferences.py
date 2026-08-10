@@ -173,18 +173,24 @@ class PreferencesPage(Adw.PreferencesPage):
         self._report(f"Scanning {added.name}")
 
     def _build_playback_group(self) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(title="Playback")
+        group = Adw.PreferencesGroup(
+            title="Playback defaults",
+            description=(
+                "Saved defaults for the service. Use the header playback menu "
+                "to change cycle, shuffle, pause or stop for this running session."
+            ),
+        )
 
         self._shuffle = Adw.SwitchRow(
-            title="Shuffle",
-            subtitle="Visit every wallpaper once before repeating",
+            title="Shuffle by default",
+            subtitle="Initial order when the service starts",
         )
         self._shuffle.connect("notify::active", self._on_changed)
         group.add(self._shuffle)
 
         self._cycle = Adw.SwitchRow(
-            title="Cycle",
-            subtitle="Change wallpaper on a timer",
+            title="Cycle by default",
+            subtitle="Initial timer state when the service starts",
         )
         self._cycle.connect("notify::active", self._on_changed)
         group.add(self._cycle)

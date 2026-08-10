@@ -552,6 +552,86 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
     application.session.shutdown()
 
 
+def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    from wall_in_one import config
+    from wall_in_one.control.protocol import Response
+    from wall_in_one.library.model import Library
+    from wall_in_one.session import Session
+    from wall_in_one.theme import source
+    from wall_in_one.ui.window import MainWindow
+
+    calls: list[tuple[str, str | None]] = []
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.RuntimeControlsTest")
+            self.settings = config.Settings(cycle_enabled=False, shuffle=False)
+            self.resolved_palette = source.resolve()
+            self.session = Session(
+                self.settings,
+                scanner=lambda _roots: Library(roots=(), items=()),
+            )
+            self.session.refresh()
+            self.refreshes = 0
+
+        def refresh_library(self) -> None: ...
+
+        def runtime_action(self, verb: str, argument: str | None = None) -> Response:
+            calls.append((verb, argument))
+            return Response.success()
+
+        def refresh_runtime_status(self) -> bool:
+            self.refreshes += 1
+            return True
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_runtime_status(
+        {
+            "playlist": "Evening",
+            "source": "manual",
+            "playback_state": "playing",
+            "paused": False,
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": "",
+        }
+    )
+
+    assert window._runtime_cycle.get_active()
+    assert not window._runtime_shuffle.get_active()
+    assert calls == [], "status refreshes must not echo commands back to the service"
+    window._runtime_cycle.set_active(False)
+    window._runtime_stop.emit("clicked")
+    assert calls == [("cycle", "off"), ("stop", None)]
+    assert application.refreshes == 2
+
+    window.show_runtime_status(
+        {
+            "playlist": "Evening",
+            "source": "manual",
+            "playback_state": "stopped",
+            "paused": False,
+            "cycle_enabled": False,
+            "shuffle": False,
+            "last_error": "",
+        }
+    )
+    window._runtime_play.emit("clicked")
+    assert calls[-1] == ("play", None)
+    window.show_runtime_unavailable()
+    assert not window._runtime_controls.get_sensitive()
+
+    window.destroy()
+    application.session.shutdown()
+
+
 def test_management_pages_render_real_pairing_playlist_and_schedule_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

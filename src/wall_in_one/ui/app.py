@@ -341,17 +341,26 @@ class Application(Adw.Application):
         # do not turn a protocol failure into permission for a second driver.
         return True
 
-    def runtime_action(self, verb: str) -> Response:
+    def refresh_runtime_status(self) -> bool:
+        """Refresh service-owned state after an explicit GUI control."""
+        return self._runtime_is_running()
+
+    def runtime_action(self, verb: str, argument: str | None = None) -> Response:
         """Drive the Rust runtime, retaining Python application as fallback."""
         try:
-            response = client.send_runtime(verb)
+            response = client.send_runtime(verb, argument)
         except client.NotRunningError:
             actions: dict[str, Callable[[], Applied]] = {
                 "next": self._session.next,
                 "previous": self._session.previous,
                 "random": self._session.random,
             }
-            return self.apply(actions[verb])
+            action = actions.get(verb)
+            if action is None:
+                return Response.failure(
+                    f"the wallpaper runtime is unavailable; cannot {verb} playback"
+                )
+            return self.apply(action)
         except client.ControlError as error:
             return Response.failure(str(error))
         if response.ok:

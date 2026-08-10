@@ -328,7 +328,8 @@ routes between them, so the Noctalia plugin needs no socket code in Luau.
 $ wall-in-one ctl next
 $ wall-in-one ctl previous
 $ wall-in-one ctl random
-$ wall-in-one ctl play|pause|toggle
+$ wall-in-one ctl play|pause|stop|toggle
+$ wall-in-one ctl cycle on|off|default
 $ wall-in-one ctl shuffle on|off
 $ wall-in-one ctl playlist-use Evening
 $ wall-in-one ctl schedule-follow
@@ -363,10 +364,17 @@ $ wall-in-one ctl quit
 ```
 
 `quit` is intentional Rust-service shutdown. Merely closing the Python window
-does not stop rotation or schedules. `status` is JSON describing the active
-playlist and entry, whether the source is `manual` or `schedule`, pause and
-shuffle state, the playlist inventory, each display's effective entry, and the
-last renderer error. The same snapshot includes every schedule rule, the rule
+does not stop rotation or schedules. `pause` freezes a resident renderer and
+also holds the playlist cursor; `stop` tears motion down while leaving the
+paired still visible, and `play` resumes either state. A stopped runtime can
+still rotate through static pairings when cycle remains on. `cycle on|off` is a
+session override and `cycle default` returns to the authored setting.
+
+`status` is JSON describing the active playlist and entry, whether the source
+is `manual` or `schedule`, the explicit `playing` / `paused` / `stopped` state,
+effective cycle value and its `config` or `manual` source, shuffle state, the
+playlist inventory, each display's effective entry, and the last renderer
+error. The same snapshot includes every schedule rule, the rule
 currently selected by the calendar, and configured versus effective display
 assignments, so a bar menu does not need the Python app. These are read-only;
 assignment and rule edits still belong in the app-generated configuration. An

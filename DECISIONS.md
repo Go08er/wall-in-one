@@ -66,8 +66,8 @@ Neither crosses.
 
 - **Conf**, written only by the app: playlists with fully resolved entries,
   pairing decisions, schedule rules, display assignments, renderer settings.
-- **Socket**, spoken by the app and the plugin: play/pause/toggle,
-  next/previous/random, shuffle, `playlist-use` as a manual override,
+- **Socket**, spoken by the app and the plugin: play/pause/stop/toggle,
+  next/previous/random, shuffle, cycle, `playlist-use` as a manual override,
   `schedule-follow` to drop it, `status`, `reload`, `quit`.
 
 **Rejected: conf-only, with the plugin editing basic settings in the file.**
@@ -241,6 +241,22 @@ deliberately session-scoped: an engine update may make that scene work, and the
 runtime must not write compatibility judgements back into app-owned data.
 Videos also fall back with no immediate retry, but are eligible when a later
 rotation revisits them because an mpvpaper exit is more plausibly transient.
+
+### Pause, stop and cycle are separate runtime controls
+
+Pause freezes the renderer in place and keeps its memory and GPU allocations;
+it also suspends timed advancement. Stop tears every owned renderer down and
+leaves the paired still on screen. A stopped runtime may continue advancing
+through playlist stills when cycle is on, but it does not launch motion again
+until `play`. This keeps "free the renderer resources" independent from "hold
+this playlist entry".
+
+`play` unfreezes a paused renderer or reapplies the current stopped entry with
+motion enabled. `toggle` pauses while playing and resumes from either paused or
+stopped. `cycle on|off` is a session override over the config default;
+`cycle default` drops that override. Turning it back on starts a fresh interval
+instead of treating time spent off as an overdue advance. None of these runtime
+choices is written into the app-owned configuration.
 
 ---
 

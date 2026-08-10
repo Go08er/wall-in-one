@@ -123,6 +123,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._settings_page = PreferencesPage(application)
         self._runtime_summary = ""
         self._runtime_error = ""
+        self._runtime_controls_loading = False
+        self._playback_state = "playing"
 
         self.set_content(self._build_content())
         self.connect("destroy", self._on_destroy)
@@ -148,6 +150,7 @@ class MainWindow(Adw.ApplicationWindow):
             button.connect("clicked", lambda _button, run=navigate: run())
             navigation.append(button)
         header.pack_start(navigation)
+        header.pack_start(self._build_runtime_controls())
 
         refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Rescan the library")
         refresh.connect("clicked", lambda _button: self._app.refresh_library())
@@ -247,6 +250,91 @@ class MainWindow(Adw.ApplicationWindow):
         self._content_stack.add_named(self._pairings_page, "pairing-editor")
         toolbar.set_content(self._content_stack)
         return toolbar
+
+    def _build_runtime_controls(self) -> Gtk.MenuButton:
+        """Compact, live controls for state owned by the Rust runtime."""
+        content = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=10,
+            margin_top=12,
+            margin_bottom=12,
+            margin_start=12,
+            margin_end=12,
+        )
+        title = Gtk.Label(label="Runtime playback", xalign=0)
+        title.add_css_class("heading")
+        content.append(title)
+        self._runtime_control_status = Gtk.Label(label="Checking service…", xalign=0)
+        self._runtime_control_status.add_css_class("dim-label")
+        content.append(self._runtime_control_status)
+
+        transport = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, homogeneous=True)
+        for icon, tooltip, verb in (
+            ("go-previous-symbolic", "Previous wallpaper", "previous"),
+            ("media-playlist-shuffle-symbolic", "Random wallpaper", "random"),
+        ):
+            button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
+            button.connect("clicked", self._make_runtime_button(verb))
+            transport.append(button)
+        self._runtime_play = Gtk.Button(
+            icon_name="media-playback-pause-symbolic",
+            tooltip_text="Pause motion",
+        )
+        self._runtime_play.connect("clicked", self._on_runtime_play)
+        transport.append(self._runtime_play)
+        self._runtime_stop = Gtk.Button(
+            icon_name="media-playback-stop-symbolic",
+            tooltip_text="Stop motion and release its resources",
+        )
+        self._runtime_stop.connect("clicked", self._make_runtime_button("stop"))
+        transport.append(self._runtime_stop)
+        next_button = Gtk.Button(icon_name="go-next-symbolic", tooltip_text="Next wallpaper")
+        next_button.connect("clicked", self._make_runtime_button("next"))
+        transport.append(next_button)
+        content.append(transport)
+
+        content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        self._runtime_cycle = self._runtime_switch_row(content, "Cycle", "cycle")
+        self._runtime_shuffle = self._runtime_switch_row(content, "Shuffle", "shuffle")
+        self._runtime_controls = content
+        popover = Gtk.Popover()
+        popover.set_child(content)
+        self._runtime_menu = Gtk.MenuButton(
+            icon_name="media-playback-start-symbolic",
+            tooltip_text="Runtime playback controls",
+        )
+        self._runtime_menu.set_popover(popover)
+        return self._runtime_menu
+
+    def _runtime_switch_row(self, parent: Gtk.Box, label: str, verb: str) -> Gtk.Switch:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        text = Gtk.Label(label=label, xalign=0, hexpand=True)
+        switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        switch.connect("notify::active", self._on_runtime_switch, verb)
+        row.append(text)
+        row.append(switch)
+        parent.append(row)
+        return switch
+
+    def _make_runtime_button(self, verb: str) -> Callable[[Gtk.Button], None]:
+        def activate(_button: Gtk.Button) -> None:
+            self._run_runtime_action(verb)
+
+        return activate
+
+    def _on_runtime_play(self, _button: Gtk.Button) -> None:
+        self._run_runtime_action("pause" if self._playback_state == "playing" else "play")
+
+    def _on_runtime_switch(self, switch: Gtk.Switch, _property: object, verb: str) -> None:
+        if self._runtime_controls_loading:
+            return
+        self._run_runtime_action(verb, "on" if switch.get_active() else "off")
+
+    def _run_runtime_action(self, verb: str, argument: str | None = None) -> None:
+        response = self._app.runtime_action(verb, argument)
+        if not response.ok:
+            self.report(response.message)
+        self._app.refresh_runtime_status()
 
     def _build_library_bar(self) -> Gtk.Widget:
         """Search, kind, and sort, on a row of their own under the header.
@@ -482,7 +570,44 @@ class MainWindow(Adw.ApplicationWindow):
         paused = status.get("paused")
         if not isinstance(playlist, str) or not isinstance(source, str):
             return
-        state = "paused" if paused is True else "playing"
+        reported_state = status.get("playback_state")
+        state = (
+            reported_state
+            if isinstance(reported_state, str)
+            and reported_state in ("playing", "paused", "stopped")
+            else ("paused" if paused is True else "playing")
+        )
+        self._playback_state = state
+        cycle = status.get("cycle_enabled")
+        shuffle = status.get("shuffle")
+        self._runtime_controls_loading = True
+        try:
+            if isinstance(cycle, bool):
+                self._runtime_cycle.set_active(cycle)
+            if isinstance(shuffle, bool):
+                self._runtime_shuffle.set_active(shuffle)
+        finally:
+            self._runtime_controls_loading = False
+        self._runtime_controls.set_sensitive(True)
+        if state == "playing":
+            self._runtime_play.set_icon_name("media-playback-pause-symbolic")
+            self._runtime_play.set_tooltip_text("Pause motion")
+            self._runtime_menu.set_icon_name("media-playback-start-symbolic")
+        else:
+            self._runtime_play.set_icon_name("media-playback-start-symbolic")
+            self._runtime_play.set_tooltip_text(
+                "Resume motion" if state == "stopped" else "Resume playback"
+            )
+            self._runtime_menu.set_icon_name(
+                "media-playback-stop-symbolic"
+                if state == "stopped"
+                else "media-playback-pause-symbolic"
+            )
+        cycle_text = "on" if cycle is True else "off"
+        shuffle_text = "on" if shuffle is True else "off"
+        self._runtime_control_status.set_text(
+            f"{state.capitalize()} · cycle {cycle_text} · shuffle {shuffle_text}"
+        )
         last_error = status.get("last_error")
         if isinstance(last_error, str) and last_error:
             self._runtime_summary = f"static fallback · {last_error}"
@@ -498,6 +623,8 @@ class MainWindow(Adw.ApplicationWindow):
         """Say plainly that authoring works but automation currently does not."""
         self._runtime_error = ""
         self._runtime_summary = "runtime unavailable"
+        self._runtime_controls.set_sensitive(False)
+        self._runtime_control_status.set_text("Runtime unavailable")
         self._update_subtitle()
 
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:

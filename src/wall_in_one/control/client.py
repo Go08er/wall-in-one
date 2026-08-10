@@ -49,8 +49,10 @@ RUNTIME_VERBS: Final[frozenset[str]] = frozenset(
         "schedule-follow",
         "play",
         "pause",
+        "stop",
         "toggle",
         "shuffle",
+        "cycle",
         "next",
         "previous",
         "prev",
@@ -64,7 +66,7 @@ RUNTIME_VERBS: Final[frozenset[str]] = frozenset(
 # Verbs the retained Python --service mode already understands. They are a
 # compatibility bridge while installations move to the Rust runtime.
 PYTHON_RUNTIME_FALLBACKS: Final[frozenset[str]] = frozenset(
-    {"playlist-use", "shuffle", "next", "prev", "random", "status", "quit"}
+    {"playlist-use", "shuffle", "cycle", "next", "prev", "random", "status", "quit"}
 )
 
 #: Exit code for "the app is not running". Distinct from a failed command so a

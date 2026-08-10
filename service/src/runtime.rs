@@ -17,9 +17,13 @@ pub struct Status<'a> {
     pub kind: Option<&'a str>,
     pub still: Option<String>,
     pub motion_active: Option<bool>,
+    pub playback_state: &'a str,
     pub paused: bool,
+    pub stopped: bool,
     pub shuffle: bool,
     pub cycle_enabled: bool,
+    pub cycle_default: bool,
+    pub cycle_source: &'a str,
     pub last_error: &'a str,
     pub playlists: Vec<PlaylistStatus<'a>>,
     pub schedule: ScheduleStatus<'a>,
@@ -76,6 +80,13 @@ struct PlaylistCursor {
     position: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaybackState {
+    Playing,
+    Paused,
+    Stopped,
+}
+
 pub struct Runtime<D: WallpaperDriver> {
     config_path: PathBuf,
     config: Config,
@@ -84,8 +95,9 @@ pub struct Runtime<D: WallpaperDriver> {
     active_playlist: String,
     schedule_overrode_default: bool,
     cursors: HashMap<String, PlaylistCursor>,
-    paused: bool,
+    playback_state: PlaybackState,
     shuffle: bool,
+    cycle_override: Option<bool>,
     rng: XorShift64,
     last_cycle: Instant,
     last_error: String,
@@ -112,8 +124,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             active_playlist: active,
             schedule_overrode_default,
             cursors: HashMap::new(),
-            paused: false,
+            playback_state: PlaybackState::Playing,
             shuffle,
+            cycle_override: None,
             rng: XorShift64::seeded(),
             last_cycle: Instant::now(),
             last_error: String::new(),
@@ -136,26 +149,12 @@ impl<D: WallpaperDriver> Runtime<D> {
         let result = match request.verb.as_str() {
             "playlist-use" => self.use_playlist(request.argument.as_deref()),
             "schedule-follow" => self.follow_schedule(at),
-            "play" => {
-                self.paused = false;
-                self.driver.set_paused(false);
-                Ok("playing".into())
-            }
-            "pause" => {
-                self.paused = true;
-                self.driver.set_paused(true);
-                Ok("paused".into())
-            }
-            "toggle" => {
-                self.paused = !self.paused;
-                self.driver.set_paused(self.paused);
-                Ok(if self.paused {
-                    "paused".into()
-                } else {
-                    "playing".into()
-                })
-            }
+            "play" => self.play(),
+            "pause" => self.pause(),
+            "toggle" => self.toggle(),
+            "stop" => self.stop_motion(),
             "shuffle" => self.set_shuffle(request.argument.as_deref()),
+            "cycle" => self.set_cycle(request.argument.as_deref()),
             "next" => self.move_by(1),
             "previous" => self.move_by(-1),
             "random" => self.random_entry(),
@@ -198,8 +197,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.schedule_overrode_default = overrode;
             }
         }
-        if !self.paused
-            && self.config.settings.cycle_enabled
+        if self.playback_state != PlaybackState::Paused
+            && self.cycle_enabled()
             && now.duration_since(self.last_cycle)
                 >= Duration::from_secs(self.config.settings.cycle_interval_seconds)
         {
@@ -215,14 +214,21 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let played = targets[0].0.id.clone();
         let mut errors = Vec::new();
+        let mut settings = self.config.settings.clone();
+        if self.playback_state == PlaybackState::Stopped {
+            settings.dynamics_enabled = false;
+        }
         for (entry, output) in targets {
-            if let Err(error) = self.driver.apply(&entry, &output, &self.config.settings) {
+            if let Err(error) = self.driver.apply(&entry, &output, &settings) {
                 errors.push(if output.is_empty() {
                     error
                 } else {
                     format!("{output}: {error}")
                 });
             }
+        }
+        if self.playback_state == PlaybackState::Paused {
+            self.driver.set_paused(true);
         }
         if errors.is_empty() {
             self.last_error.clear();
@@ -302,6 +308,89 @@ impl<D: WallpaperDriver> Runtime<D> {
             "shuffle {}",
             if self.shuffle { "on" } else { "off" }
         ))
+    }
+
+    fn cycle_enabled(&self) -> bool {
+        self.cycle_override
+            .unwrap_or(self.config.settings.cycle_enabled)
+    }
+
+    fn set_cycle(&mut self, value: Option<&str>) -> Result<String, String> {
+        let before = self.cycle_enabled();
+        self.cycle_override = match value
+            .ok_or("usage: cycle on|off|default")?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "on" | "true" | "1" => Some(true),
+            "off" | "false" | "0" => Some(false),
+            "default" | "config" | "follow" => None,
+            _ => return Err("usage: cycle on|off|default".into()),
+        };
+        let enabled = self.cycle_enabled();
+        if enabled && !before {
+            // Time spent explicitly off is not a debt: turning cycling back on
+            // starts a fresh interval instead of immediately skipping ahead.
+            self.last_cycle = Instant::now();
+        }
+        Ok(format!(
+            "cycle {} ({})",
+            if enabled { "on" } else { "off" },
+            if self.cycle_override.is_some() {
+                "manual"
+            } else {
+                "config"
+            }
+        ))
+    }
+
+    fn play(&mut self) -> Result<String, String> {
+        match self.playback_state {
+            PlaybackState::Playing => {}
+            PlaybackState::Paused => {
+                self.driver.set_paused(false);
+                self.playback_state = PlaybackState::Playing;
+            }
+            PlaybackState::Stopped => {
+                self.playback_state = PlaybackState::Playing;
+                if let Err(error) = self.apply_current() {
+                    // A failed resume did not restore motion. Keep status honest
+                    // and retain the released/still-only state for another try.
+                    self.playback_state = PlaybackState::Stopped;
+                    return Err(error);
+                }
+            }
+        }
+        Ok("playing".into())
+    }
+
+    fn pause(&mut self) -> Result<String, String> {
+        if self.playback_state == PlaybackState::Stopped {
+            return Ok("stopped; use play to resume motion".into());
+        }
+        self.playback_state = PlaybackState::Paused;
+        self.driver.set_paused(true);
+        Ok("paused".into())
+    }
+
+    fn toggle(&mut self) -> Result<String, String> {
+        if self.playback_state == PlaybackState::Playing {
+            self.pause()
+        } else {
+            self.play()
+        }
+    }
+
+    fn stop_motion(&mut self) -> Result<String, String> {
+        if self.playback_state == PlaybackState::Paused {
+            // linux-wallpaperengine is process-frozen for pause. Let it receive
+            // SIGTERM rather than waiting for the supervisor's SIGKILL timeout.
+            self.driver.set_paused(false);
+        }
+        self.driver.stop();
+        self.playback_state = PlaybackState::Stopped;
+        Ok("stopped; paired still remains active".into())
     }
 
     fn move_by(&mut self, delta: isize) -> Result<String, String> {
@@ -583,9 +672,21 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .any(|display| self.driver.motion_active(&display.connector))
                 }
             }),
-            paused: self.paused,
+            playback_state: match self.playback_state {
+                PlaybackState::Playing => "playing",
+                PlaybackState::Paused => "paused",
+                PlaybackState::Stopped => "stopped",
+            },
+            paused: self.playback_state == PlaybackState::Paused,
+            stopped: self.playback_state == PlaybackState::Stopped,
             shuffle: self.shuffle,
-            cycle_enabled: self.config.settings.cycle_enabled,
+            cycle_enabled: self.cycle_enabled(),
+            cycle_default: self.config.settings.cycle_enabled,
+            cycle_source: if self.cycle_override.is_some() {
+                "manual"
+            } else {
+                "config"
+            },
             last_error: &self.last_error,
             playlists,
             schedule: ScheduleStatus {

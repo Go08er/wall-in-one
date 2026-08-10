@@ -402,3 +402,28 @@ def test_drop_position_knows_both_sides_and_preserves_self_drops(
 
     assert actual == position
     assert tuple(remaining) == expected
+
+
+@pytest.mark.parametrize(
+    ("pointer_y", "expected"),
+    [
+        (-10.0, 0),
+        (0.0, 0),
+        (19.9, 0),
+        (20.0, 1),
+        (49.9, 1),
+        (50.0, 2),
+        (80.0, 2),
+        (94.9, 2),
+        (95.0, 3),
+        (200.0, 3),
+    ],
+)
+def test_drop_slot_uses_each_vertical_row_midpoint(pointer_y: float, expected: int) -> None:
+    bounds = ((0.0, 40.0), (40.0, 60.0), (70.0, 120.0))
+
+    assert playlists.drop_slot(bounds, pointer_y) == expected
+
+
+def test_drop_slot_accepts_an_empty_list() -> None:
+    assert playlists.drop_slot((), 25.0) == 0

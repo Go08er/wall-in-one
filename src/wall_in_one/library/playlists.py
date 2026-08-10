@@ -86,6 +86,19 @@ def drop_position(
     return position + 1 if after else position
 
 
+def drop_slot(row_bounds: tuple[tuple[float, float], ...], pointer_y: float) -> int:
+    """The insertion slot nearest a pointer on a vertical sortable list.
+
+    Bounds are ``(top, bottom)`` pairs in visual order. Keeping this decision
+    independent of GTK matters: direct signal-handler tests cannot prove that
+    a real compositor will deliver the motion events a drag depends on.
+    """
+    for position, (top, bottom) in enumerate(row_bounds):
+        if pointer_y < top + (bottom - top) / 2:
+            return position
+    return len(row_bounds)
+
+
 def new_id() -> str:
     """A short opaque identifier.
 

@@ -48,6 +48,23 @@ class QuietLoader:
     def shutdown(self) -> None: ...
 
 
+class PlaylistApp:
+    """Refresh the visible page the same synchronous way the real window does."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.page: playlists_page.PlaylistsPage | None = None
+        self.published = 0
+
+    def playlists_changed(self) -> None:
+        self.session.playlists_changed()
+        self.published += 1
+        if self.page is not None:
+            self.page.refresh(self.session)
+
+    def window_report(self, _message: str) -> None: ...
+
+
 def _item(name: str) -> MediaItem:
     return MediaItem(
         path=Path("/test-media") / f"{name}.png",
@@ -93,6 +110,20 @@ def _child_count(widget: Gtk.Widget) -> int:
         count += 1
         child = child.get_next_sibling()
     return count
+
+
+def _children(widget: Gtk.Widget) -> tuple[Gtk.Widget, ...]:
+    found: list[Gtk.Widget] = []
+    child = widget.get_first_child()
+    while child is not None:
+        found.append(child)
+        child = child.get_next_sibling()
+    return tuple(found)
+
+
+def _is_dragging(page: playlists_page.PlaylistsPage) -> bool:
+    """Read mutable signal state without teaching mypy that it stays literal."""
+    return page._dragging
 
 
 def test_playlist_entry_edit_diffs_widgets_and_keeps_interaction_state(
@@ -159,26 +190,107 @@ def test_playlist_refresh_does_not_replace_focused_search(
     session.shutdown()
 
 
-def test_cancelled_playlist_drag_removes_the_animated_gap(
+def test_cancelled_playlist_drag_only_toggles_permanent_spacers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
     session, _playlist, _items = _session(tmp_path)
     page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
     page.refresh(session)
-    original_count = _child_count(page._order_flow)
+    original_children = _children(page._order_list)
 
-    page._show_drop_gap(1, "")
-    gap = page._drop_gap
-    assert gap is not None
-    assert _child_count(page._order_flow) == original_count + 1
+    page._begin_drag()
+    page._show_drop_slot(1)
+    spacers = (
+        *(row.spacer for row in page._entry_rows.values()),
+        page._order_end_spacer,
+    )
+    assert sum(spacer.get_reveal_child() for spacer in spacers) == 1
+    assert _children(page._order_list) == original_children
 
-    card = page._entry_cards["first"]
-    assert isinstance(card, playlists_page._MediaCard)
-    card._drag_cancel(None, None, None)  # type: ignore[arg-type]
+    row = page._entry_rows["first"]
+    row._drag_cancel(None, None, None)  # type: ignore[arg-type]
 
-    assert page._drop_gap is None
-    assert _child_count(page._order_flow) == original_count
+    assert not page._dragging
+    assert not any(spacer.get_reveal_child() for spacer in spacers)
+    assert _children(page._order_list) == original_children
+    session.shutdown()
+
+
+def test_order_row_membership_guard_is_loud_during_a_drag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    row = page._entry_rows["first"]
+    page._begin_drag()
+
+    with pytest.raises(AssertionError, match="membership changed during a drag"):
+        page._remove_order_row(row)
+
+    assert _children(page._order_list) == (row,)
+    page._finish_drag()
+    session.shutdown()
+
+
+def test_source_drop_defers_new_row_until_the_drag_has_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, items = _session(tmp_path)
+    application = PlaylistApp(session)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+    original_children = _children(page._order_list)
+
+    page._begin_drag()
+    assert page._accept_drop(f"{playlists_page.SOURCE_PREFIX}{items[1].path}", None)
+
+    assert _is_dragging(page)
+    assert application.published == 0
+    assert _children(page._order_list) == original_children
+
+    page._finish_drag()
+
+    assert application.published == 1
+    assert not _is_dragging(page)
+    assert len(_children(page._order_list)) == len(original_children) + 1
+    session.shutdown()
+
+
+def _drag_sources(widget: Gtk.Widget) -> list[Gtk.DragSource]:
+    found = [
+        controller
+        for controller in widget.observe_controllers()
+        if isinstance(controller, Gtk.DragSource)
+    ]
+    child = widget.get_first_child()
+    while child is not None:
+        found.extend(_drag_sources(child))
+        child = child.get_next_sibling()
+    return found
+
+
+def test_only_the_six_dot_handle_has_the_reorder_drag_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    row = page._entry_rows["first"]
+
+    assert row.handle.get_icon_name() == "list-drag-handle-symbolic"
+    assert not [
+        controller
+        for controller in row.observe_controllers()
+        if isinstance(controller, Gtk.DragSource)
+    ]
+    assert len(_drag_sources(row)) == 1
+    assert len(_drag_sources(row.handle)) == 1
     session.shutdown()
 
 
@@ -211,8 +323,8 @@ def test_reorder_drop_targets_preload_their_payload(
     page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
     page.refresh(session)
 
-    targets = _drop_targets(page._order_flow)
-    assert targets, "the playlist order flow has no drop targets at all"
+    targets = _drop_targets(page._order_drop_area)
+    assert targets, "the playlist order list has no drop targets at all"
     assert all(target.get_preload() for target in targets)
     session.shutdown()
 
@@ -227,6 +339,44 @@ def test_motion_accepts_a_payload_that_has_not_arrived_yet(
     page.refresh(session)
 
     assert page._preview_drop(None, "first") != Gdk.DragAction(0)
+    session.shutdown()
+
+
+def test_ctrl_arrows_reorder_repeatedly_and_keep_the_row_focused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _session(tmp_path)
+    session.playlists.add(playlist.id, items[1].path, entry_id="second")
+    application = PlaylistApp(session)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+    root = Gtk.Window()
+    root.set_child(page)
+    row = page._entry_rows["first"]
+    focused = row.grab_focus()
+    reorder = page._make_reorder_key("first")
+
+    assert reorder(Gtk.EventControllerKey(), Gdk.KEY_Down, 0, Gdk.ModifierType.CONTROL_MASK)
+    assert tuple(entry.id for entry in session.playlists.find(playlist.id).entries) == (
+        "second",
+        "first",
+    )
+    assert page._entry_rows["first"] is row
+    if focused:
+        assert root.get_focus() is row
+
+    assert reorder(Gtk.EventControllerKey(), Gdk.KEY_Up, 0, Gdk.ModifierType.CONTROL_MASK)
+    assert tuple(entry.id for entry in session.playlists.find(playlist.id).entries) == (
+        "first",
+        "second",
+    )
+    if focused:
+        assert root.get_focus() is row
+
+    root.set_child(None)
+    root.destroy()
     session.shutdown()
 
 

@@ -475,3 +475,54 @@ The lesson for the tests is the sharper one. Every drag test called the handlers
 directly, so the suite was green while the feature did not work at all. Motion
 and acceptance are now pinned separately, and the preload test was checked by
 removing the fix and watching it fail.
+
+## Reordering is a handle-driven vertical list
+
+The placeholder-in-a-`Gtk.FlowBox` design crashed. From the coredump, read
+bottom-up:
+
+    g_sequence_remove                  <- SIGSEGV
+      gtk_flow_box_remove              <- the gap is removed a second time
+        [python signal handler]
+          g_object_notify_by_pspec
+            gtk_revealer_unmap         <- unmaps as it is unparented
+              gtk_widget_unparent
+                gtk_flow_box_remove    <- we remove the gap
+
+Removing the placeholder unparents it, which unmaps its revealer, which fires a
+notify, which re-enters our handler, which removes it again while GTK is still
+mutating the flow box's child sequence.
+
+**Ruling: no widget is added to or removed from the order list while a drag is in
+progress.** Every row owns a permanent spacer revealer that is never inserted or
+unparented; opening a landing slot toggles `reveal-child` and nothing else. A
+`_dragging` flag guards the membership path, and additions arriving mid-drag —
+a drop from the source pane — are deferred to `drag-end`. The invariant is what
+prevents the crash; the guard only makes a violation loud instead of fatal.
+
+The shape came from the user, who asked for the pattern modern sortable lists
+use: a vertical list, a six-dot handle, rows sliding apart rather than the item
+flying under the cursor. It happens to be the safer structure as well — with the
+drag source on the handle alone, dragging or clicking a row body cannot start a
+reorder, which is what made the card grid ambiguous.
+
+### Three failures, one blind spot
+
+This feature shipped broken twice before this. Wrong maths that made nudging a
+card one slot a no-op; then a drop target that refused every drag because
+`preload` defaults to false and a motion handler that cannot see the payload
+answers zero. Both passed a green suite, because every test called the drop
+handlers directly and none went through GTK's acceptance path.
+
+There is no pointer injection available here — `wtype` is keyboard-only, and
+installing `ydotool` is a system change. So the response is not "test harder",
+it is:
+
+- put the decisions in pure, GTK-free helpers and test them with tables;
+- pin the GTK-facing preconditions that direct calls skip — targets preload,
+  motion never answers zero, membership is stable across a drag;
+- offer **Ctrl+Up/Ctrl+Down** reordering, which reaches the same model path with
+  no pointer at all, and is an accessibility win besides.
+
+What still cannot be verified here: the physical gesture through the compositor.
+Handle ergonomics, how the animation feels, and real drop delivery need a human.

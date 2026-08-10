@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from typing import Final
 
 import gi
@@ -52,6 +53,8 @@ class ThumbnailLoader:
     def __init__(self, max_workers: int = MAX_WORKERS) -> None:
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb")
         self._pending: dict[Path, Future[Gdk.Texture | None]] = {}
+        self._waiters: dict[Path, list[Callback]] = {}
+        self._lock = Lock()
         self._closed = False
         # Bound the cache once at startup, on the pool rather than here. A user
         # who moves their wallpaper collection elsewhere generates nothing new,
@@ -66,12 +69,20 @@ class ThumbnailLoader:
         Everything happens on the pool: the cache lookup, the ffmpeg call if
         it misses, and the decode either way. Nothing here touches a widget.
         """
-        if self._closed or item.path in self._pending:
-            return
-
-        future = self._pool.submit(self._texture_for, item)
-        self._pending[item.path] = future
-        future.add_done_callback(lambda done: self._finish(item, done, callback))
+        with self._lock:
+            if self._closed:
+                return
+            callbacks = self._waiters.get(item.path)
+            if callbacks is not None:
+                # The same pairing can be visible in the source drawer and in
+                # the playlist order. Coalesce the expensive decode, not the
+                # consumers: every visible card still needs the result.
+                callbacks.append(callback)
+                return
+            future = self._pool.submit(self._texture_for, item)
+            self._pending[item.path] = future
+            self._waiters[item.path] = [callback]
+        future.add_done_callback(lambda done: self._finish(item, done))
 
     @staticmethod
     def _texture_for(item: MediaItem) -> Gdk.Texture | None:
@@ -94,12 +105,12 @@ class ThumbnailLoader:
             # its name still under it.
             return None
 
-    def _finish(
-        self, item: MediaItem, future: Future[Gdk.Texture | None], callback: Callback
-    ) -> None:
-        self._pending.pop(item.path, None)
-        if self._closed:
-            return
+    def _finish(self, item: MediaItem, future: Future[Gdk.Texture | None]) -> None:
+        with self._lock:
+            self._pending.pop(item.path, None)
+            callbacks = self._waiters.pop(item.path, [])
+            if self._closed:
+                return
         try:
             result = future.result()
         except Exception:
@@ -108,15 +119,18 @@ class ThumbnailLoader:
 
         def deliver() -> bool:
             if not self._closed:
-                callback(item, result)
+                for callback in callbacks:
+                    callback(item, result)
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(deliver)
 
     def shutdown(self) -> None:
         """Stop delivering results and let the pool drain."""
-        self._closed = True
-        self._pending.clear()
+        with self._lock:
+            self._closed = True
+            self._pending.clear()
+            self._waiters.clear()
         # Not waiting: an ffmpeg call can take seconds and quitting should be
         # immediate. The workers write to a temp name and rename, so a thumbnail
         # interrupted here leaves nothing half-written behind.

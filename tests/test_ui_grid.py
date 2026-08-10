@@ -424,6 +424,44 @@ def test_a_wallpaper_that_cannot_be_thumbnailed_is_a_blank_tile(
     assert Loader._texture_for(item("a")) is None
 
 
+def test_one_thumbnail_request_delivers_to_every_visible_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing shown in both playlist panes shares work, not its callback."""
+    from threading import Event
+
+    from wall_in_one.ui.thumbnails import ThumbnailLoader as Loader
+
+    started = Event()
+    release = Event()
+    texture = object()
+
+    def load(_item: MediaItem) -> object:
+        started.set()
+        assert release.wait(2)
+        return texture
+
+    monkeypatch.setattr(Loader, "_texture_for", staticmethod(load))
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.GLib.idle_add", lambda callback: callback())
+    loader = Loader(max_workers=1)
+    wallpaper = item("shared")
+    delivered: list[object | None] = []
+    complete = Event()
+
+    def receive(_item: MediaItem, result: object | None) -> None:
+        delivered.append(result)
+        if len(delivered) == 2:
+            complete.set()
+
+    loader.request(wallpaper, receive)
+    assert started.wait(2)
+    loader.request(wallpaper, receive)
+    release.set()
+    assert complete.wait(2)
+    loader.shutdown()
+    assert delivered == [texture, texture]
+
+
 # -- the window and the store ---------------------------------------------
 
 

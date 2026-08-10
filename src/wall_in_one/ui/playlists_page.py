@@ -50,6 +50,74 @@ class _ReorderList(Gtk.Widget):
         self._placeholder_source = -1
         self._placeholder_target = -1
         self._placeholder_height = 0.0
+        self._gesture_row: _PlaylistEntryRow | None = None
+        self._on_drag_started: Any = None
+        self._on_drag_updated: Any = None
+        self._on_drag_finished: Any = None
+
+        # GestureDrag offsets are expressed in the controller widget's
+        # coordinates. This container never moves during a live sort, whereas
+        # every row does, so it is the only safe place to measure the pointer.
+        self.reorder_gesture = Gtk.GestureDrag()
+        self.reorder_gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self.reorder_gesture.connect("drag-begin", self._drag_begin)
+        self.reorder_gesture.connect("drag-update", self._drag_update)
+        self.reorder_gesture.connect("drag-end", self._drag_end)
+        self.reorder_gesture.connect("cancel", self._drag_cancel)
+        self.add_controller(self.reorder_gesture)
+
+    def set_reorder_handlers(
+        self,
+        on_drag_started: Any,
+        on_drag_updated: Any,
+        on_drag_finished: Any,
+    ) -> None:
+        self._on_drag_started = on_drag_started
+        self._on_drag_updated = on_drag_updated
+        self._on_drag_finished = on_drag_finished
+
+    def _handle_row_at(self, x: float, y: float) -> _PlaylistEntryRow | None:
+        picked = self.pick(x, y, Gtk.PickFlags.DEFAULT)
+        while picked is not None and picked is not self:
+            for row in self._rows:
+                if isinstance(row, _PlaylistEntryRow) and picked is row.handle:
+                    return row
+            picked = picked.get_parent()
+        return None
+
+    def _drag_begin(self, gesture: Gtk.GestureDrag, start_x: float, start_y: float) -> None:
+        row = self._handle_row_at(start_x, start_y)
+        if row is None or self._on_drag_started is None:
+            gesture.set_state(Gtk.EventSequenceState.DENIED)
+            return
+        # The list is inside a kinetic scroller. Claim before changing any
+        # visual state so its drag gesture cannot take this same sequence.
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        self._gesture_row = row
+        row.handle.set_cursor(Gdk.Cursor.new_from_name("grabbing", None))
+        self._on_drag_started(row, start_x, start_y)
+
+    def _drag_update(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
+        if self._gesture_row is not None and self._on_drag_updated is not None:
+            self._on_drag_updated(self._gesture_row, offset_y)
+
+    def _drag_end(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
+        row = self._gesture_row
+        self._gesture_row = None
+        if row is None:
+            return
+        row.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        if self._on_drag_finished is not None:
+            self._on_drag_finished(row, offset_y, False)
+
+    def _drag_cancel(self, _gesture: Gtk.GestureDrag, _sequence: Gdk.EventSequence) -> None:
+        row = self._gesture_row
+        self._gesture_row = None
+        if row is None:
+            return
+        row.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        if self._on_drag_finished is not None:
+            self._on_drag_finished(row, 0.0, True)
 
     def append(self, row: Gtk.Widget) -> None:
         self._rows.append(row)
@@ -342,14 +410,9 @@ class _ReorderList(Gtk.Widget):
         snapshot.restore()
 
     def _snapshot_placeholder(self, snapshot: Gtk.Snapshot) -> None:
-        if self._placeholder_source < 0 or self._placeholder_target < 0:
+        y = self._placeholder_top()
+        if y is None:
             return
-        tops = self._natural_tops()
-        if self._placeholder_source >= len(tops):
-            return
-        y = tops[self._placeholder_source] + playlists.live_sort_settle_offset(
-            self.row_heights(), self._placeholder_source, self._placeholder_target
-        )
         bounds = Graphene.Rect()
         bounds.init(
             1.0,
@@ -378,6 +441,22 @@ class _ReorderList(Gtk.Widget):
         context.set_line_width(2.0)
         context.set_dash((8.0, 7.0))
         context.stroke()
+
+    def _placeholder_top(self) -> float | None:
+        if self._placeholder_source < 0 or self._placeholder_target < 0:
+            return None
+        tops = self._natural_tops()
+        if self._placeholder_source >= len(tops):
+            return None
+        heights = self.row_heights()
+        target = min(max(self._placeholder_target, 0), len(tops) - 1)
+        # Describe the landing slot from the target row's natural allocation,
+        # not from the lifted row's transient position. For a downward move the
+        # gap follows the target row after it slides up by the source height.
+        y = tops[target]
+        if target > self._placeholder_source:
+            y += heights[target] - heights[self._placeholder_source]
+        return y
 
     def do_dispose(self) -> None:
         for row in tuple(self._rows):
@@ -463,7 +542,7 @@ class _MediaCard(Gtk.Box):
 
 
 class _PlaylistEntryRow(Gtk.ListBoxRow):
-    """A stable sortable row whose handle owns the only reorder gesture."""
+    """A stable sortable row with one passive reorder affordance."""
 
     def __init__(
         self,
@@ -472,12 +551,8 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         source: Path,
         on_remove: Any,
         on_key: Any,
-        on_drag_started: Any,
-        on_drag_updated: Any,
-        on_drag_finished: Any,
     ) -> None:
         super().__init__(selectable=False, activatable=False, focusable=True)
-        self.add_css_class("wio-reorder-row")
         self.identifier = identifier
         self.item = item
 
@@ -492,18 +567,19 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         self.spacer.set_child(Gtk.Box(height_request=24))
         body.append(self.spacer)
 
-        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        content.set_margin_top(8)
-        content.set_margin_bottom(8)
-        content.set_margin_start(8)
-        content.set_margin_end(8)
+        self.surface = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.surface.add_css_class("wio-reorder-row")
+        self.surface.set_margin_top(8)
+        self.surface.set_margin_bottom(8)
+        self.surface.set_margin_start(8)
+        self.surface.set_margin_end(8)
 
-        self.handle = Gtk.Button(
-            tooltip_text="Drag to reorder",
-            width_request=46,
-            height_request=72,
-        )
-        self.handle.add_css_class("flat")
+        # A button brings a competing click gesture and also aligned the grip
+        # against its own button chrome. The passive centre box remains the
+        # same generous hit target while centring the six dots in the row.
+        self.handle = Gtk.CenterBox(width_request=46, height_request=72)
+        self.handle.set_tooltip_text("Drag to reorder")
+        self.handle.set_valign(Gtk.Align.CENTER)
         self.handle.add_css_class("wio-reorder-handle")
         grip = Gtk.DrawingArea(width_request=21, height_request=32)
 
@@ -516,56 +592,36 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
                     context.fill()
 
         grip.set_draw_func(draw_grip)
-        self.handle.set_child(grip)
+        grip.set_halign(Gtk.Align.CENTER)
+        grip.set_valign(Gtk.Align.CENTER)
+        grip.set_can_target(False)
+        self.handle.set_center_widget(grip)
         self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
-        content.append(self.handle)
+        self.surface.append(self.handle)
 
         self.picture = Gtk.Picture(width_request=96, height_request=54)
         self.picture.set_content_fit(Gtk.ContentFit.COVER)
-        content.append(self.picture)
+        self.surface.append(self.picture)
 
         name = item.name if item is not None else f"Missing · {source.name}"
-        title = Gtk.Label(label=name, xalign=0.0, hexpand=True)
-        title.set_ellipsize(Pango.EllipsizeMode.END)
-        title.add_css_class("heading")
-        content.append(title)
+        self.title = Gtk.Label(label=name, xalign=0.0, hexpand=True)
+        self.title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.title.set_lines(2)
+        self.title.set_wrap(True)
+        self.title.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.title.add_css_class("heading")
+        self.surface.append(self.title)
 
         remove = Gtk.Button(icon_name="list-remove-symbolic", tooltip_text="Remove from playlist")
         remove.add_css_class("flat")
         remove.connect("clicked", on_remove)
-        content.append(remove)
-        body.append(content)
+        self.surface.append(remove)
+        body.append(self.surface)
         self.set_child(body)
-
-        drag = Gtk.GestureDrag()
-        drag.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        drag.connect("drag-begin", self._drag_begin)
-        drag.connect("drag-update", self._drag_update)
-        drag.connect("drag-end", self._drag_end)
-        drag.connect("cancel", self._drag_cancel)
-        self._on_drag_started = on_drag_started
-        self._on_drag_updated = on_drag_updated
-        self._on_drag_finished = on_drag_finished
-        self.handle.add_controller(drag)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", on_key)
         self.add_controller(keys)
-
-    def _drag_begin(self, _gesture: Gtk.GestureDrag, start_x: float, start_y: float) -> None:
-        self.handle.set_cursor(Gdk.Cursor.new_from_name("grabbing", None))
-        self._on_drag_started(self, start_x, start_y)
-
-    def _drag_update(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
-        self._on_drag_updated(self, offset_y)
-
-    def _drag_end(self, _gesture: Gtk.GestureDrag, _offset_x: float, offset_y: float) -> None:
-        self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
-        self._on_drag_finished(self, offset_y, False)
-
-    def _drag_cancel(self, _gesture: Gtk.GestureDrag, _sequence: Gdk.EventSequence) -> None:
-        self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
-        self._on_drag_finished(self, 0.0, True)
 
     def show_thumbnail(self, _item: MediaItem, texture: Gdk.Texture | None) -> None:
         self.picture.set_paintable(texture)
@@ -805,7 +861,9 @@ class PlaylistsPage(Gtk.Box):
         self._editor.append(actions)
 
         arranger = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True)
-        arranger.set_position(390)
+        # Playlist names need enough width to distinguish similarly prefixed
+        # entries; the source cards remain usable as a single 180 px column.
+        arranger.set_position(330)
         arranger.set_shrink_start_child(False)
         arranger.set_shrink_end_child(False)
         arranger.set_start_child(self._build_source_pane())
@@ -858,6 +916,11 @@ class PlaylistsPage(Gtk.Box):
         self._order_list = _ReorderList()
         self._order_list.add_css_class("boxed-list")
         self._order_list.set_sort_func(self._compare_entry_rows)
+        self._order_list.set_reorder_handlers(
+            self._begin_row_drag,
+            self._update_row_drag,
+            self._end_row_drag,
+        )
         self._order_drop_area.append(self._order_list)
         # Source drags need one more slot than there are rows. This permanent
         # sibling represents "after the last row" without making a fake list
@@ -962,9 +1025,6 @@ class PlaylistsPage(Gtk.Box):
                 Path(entry.source),
                 self._make_remove(entry.id),
                 self._make_reorder_key(entry.id),
-                self._begin_row_drag,
-                self._update_row_drag,
-                self._end_row_drag,
             )
             if item is not None:
                 self._loader.request(item, row.show_thumbnail)
@@ -1109,15 +1169,15 @@ class PlaylistsPage(Gtk.Box):
         self._drag_target_slot = self._drag_source_index
         self._drag_heights = tuple(max(height, 1.0) for height in self._order_list.row_heights())
         self._drag_pointer_offset = 0.0
+        source_top = sum(self._drag_heights[: self._drag_source_index])
+        self._drag_grab_offset_y = start_y - source_top
         point = Graphene.Point()
         point.init(start_x, start_y)
-        translated, row_point = row.handle.compute_point(row, point)
-        self._drag_grab_offset_y = row_point.y if translated else start_y
         adjustment = self._order_scroll.get_vadjustment()
         self._drag_start_scroll = adjustment.get_value()
-        translated, scroll_point = row.handle.compute_point(self._order_scroll, point)
+        translated, scroll_point = self._order_list.compute_point(self._order_scroll, point)
         self._drag_pointer_y = scroll_point.y if translated else None
-        row.add_css_class("wio-reorder-lifted")
+        row.surface.add_css_class("wio-reorder-lifted")
         self._order_list.set_lifted(row)
         self._order_list.set_placeholder(
             self._drag_source_index,
@@ -1204,7 +1264,7 @@ class PlaylistsPage(Gtk.Box):
         self._drag_pointer_y = None
         # Shadow and opacity fade when the gesture ends; the custom snapshot
         # keeps scale on the reference's longer 260 ms settle curve.
-        row.remove_css_class("wio-reorder-lifted")
+        row.surface.remove_css_class("wio-reorder-lifted")
         self._order_list.settle_lifted(
             row,
             settle,
@@ -1220,7 +1280,7 @@ class PlaylistsPage(Gtk.Box):
                 self._app.window_report(str(error))
                 changed = False
         self._order_list.clear_motion()
-        row.remove_css_class("wio-reorder-lifted")
+        row.surface.remove_css_class("wio-reorder-lifted")
         self._drag_source_index = -1
         self._drag_target_slot = -1
         self._drag_heights = ()

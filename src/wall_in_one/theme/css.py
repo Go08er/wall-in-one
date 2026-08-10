@@ -135,6 +135,7 @@ window.background.csd {{
     min-width: 46px;
     min-height: 72px;
     padding: 0;
+    border-radius: 9px;
 }}
 
 .wio-reorder-row {{

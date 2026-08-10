@@ -20,7 +20,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gdk, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gtk, Pango  # noqa: E402
 
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import playlists, schedules  # noqa: E402
@@ -352,7 +352,7 @@ def _drag_gestures(widget: Gtk.Widget) -> list[Gtk.GestureDrag]:
     return found
 
 
-def test_only_the_six_dot_handle_has_the_live_reorder_gesture(
+def test_reorder_gesture_is_measured_by_the_stable_list_container(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
@@ -362,18 +362,86 @@ def test_only_the_six_dot_handle_has_the_live_reorder_gesture(
     row = page._entry_rows["first"]
 
     assert row.handle.get_size_request() == (46, 72)
-    grip = row.handle.get_child()
+    grip = row.handle.get_center_widget()
     assert grip is not None
     assert grip.get_size_request() == (21, 32)
+    assert type(row.handle) is Gtk.CenterBox
+    assert row.handle.get_valign() == Gtk.Align.CENTER
+    assert row.title.get_ellipsize() == Pango.EllipsizeMode.MIDDLE
+    assert row.title.get_lines() == 2
     assert not [
         controller
         for controller in row.observe_controllers()
         if isinstance(controller, Gtk.DragSource)
     ]
     assert not _drag_sources(row)
-    assert len(_drag_gestures(row)) == 1
-    assert len(_drag_gestures(row.handle)) == 1
+    assert not _drag_gestures(row)
+    gestures = [
+        controller
+        for controller in page._order_list.observe_controllers()
+        if isinstance(controller, Gtk.GestureDrag)
+    ]
+    assert gestures == [page._order_list.reorder_gesture]
+    assert gestures[0].get_widget() is page._order_list
     session.shutdown()
+
+
+def test_reorder_press_must_hit_a_handle_and_claims_that_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    row = page._entry_rows["first"]
+    started: list[tuple[playlists_page._PlaylistEntryRow, float, float]] = []
+    finished: list[tuple[playlists_page._PlaylistEntryRow, float, bool]] = []
+    page._order_list.set_reorder_handlers(
+        lambda found, x, y: started.append((found, x, y)),
+        lambda *_arguments: None,
+        lambda found, offset, cancelled: finished.append((found, offset, cancelled)),
+    )
+
+    class GestureState:
+        def __init__(self) -> None:
+            self.states: list[Gtk.EventSequenceState] = []
+
+        def set_state(self, state: Gtk.EventSequenceState) -> None:
+            self.states.append(state)
+
+    missed = GestureState()
+    monkeypatch.setattr(page._order_list, "_handle_row_at", lambda _x, _y: None)
+    page._order_list._drag_begin(missed, 180.0, 20.0)  # type: ignore[arg-type]
+
+    assert missed.states == [Gtk.EventSequenceState.DENIED]
+    assert not started
+
+    claimed = GestureState()
+    monkeypatch.setattr(page._order_list, "_handle_row_at", lambda _x, _y: row)
+    page._order_list._drag_begin(claimed, 20.0, 28.0)  # type: ignore[arg-type]
+
+    assert claimed.states == [Gtk.EventSequenceState.CLAIMED]
+    assert started == [(row, 20.0, 28.0)]
+    page._order_list._drag_cancel(claimed, object())  # type: ignore[arg-type]
+    assert finished == [(row, 0.0, True)]
+    session.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [(0, 0, 0.0), (0, 2, 80.0), (1, 3, 130.0), (2, 0, 0.0), (3, 1, 40.0)],
+)
+def test_landing_placeholder_uses_the_target_slot_natural_top(
+    source: int, target: int, expected: float
+) -> None:
+    order = playlists_page._ReorderList()
+    for _index in range(4):
+        order.append(Gtk.Box())
+    order._row_heights = (40.0, 20.0, 60.0, 30.0)
+    order._row_tops = (0.0, 40.0, 60.0, 120.0)
+    order.set_placeholder(source, target, order._row_heights[source])
+
+    assert order._placeholder_top() == expected
 
 
 def _drop_targets(widget: Gtk.Widget) -> list[Gtk.DropTarget]:

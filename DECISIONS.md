@@ -602,3 +602,33 @@ checks the exit code. The monitor watches the containing directory, because the
 file is replaced by rename and a monitor on the file alone goes deaf after one
 render. `template.py`'s old "No polling, no inotify, no drift" comment was
 corrected rather than left contradicting the code.
+
+### Never attach a drag gesture to a widget the drag moves
+
+The live sortable list tracked the pointer at roughly half speed and grew steadily
+more unstable the longer a drag was held. Measured off a screencast the user
+recorded, the gap between cursor and tile was 58 px, then 147, then 183 -- growing,
+not constant, so it was never a wrong grab offset.
+
+The reorder `Gtk.GestureDrag` was attached to the handle. The handle is inside the
+row, and the row is the widget the drag translates. `GestureDrag` reports its offset
+in the coordinate space of the widget it is attached to, so moving that widget slides
+the gesture's own origin out from under the pointer and the next event under-reports
+by exactly the distance just travelled. Position fed back into the measurement that
+decided position: steady state near half speed, and unstable, so the error compounded
+against the in-flight FLIP animations.
+
+**Rule: measure a gesture in a coordinate space the gesture does not move.** The
+gesture now lives on the `_ReorderList` container, which never moves, and hit-tests
+the press to find which row's handle was grabbed. The handle is still the only thing
+that starts a reorder; only the measurement moved.
+
+Two things came with it. The sequence is now claimed the moment a real handle press
+is recognised, because the list sits in a kinetic `Gtk.ScrolledWindow` whose own drag
+gesture would otherwise compete for it. And the handle stopped being a `Gtk.Button`,
+which brought a click gesture of its own to the same fight; it is a passive centred
+box that only looks like a control.
+
+The regression test is structural rather than behavioural, because there is still no
+pointer to test with: the reorder gesture's widget must not be a descendant of any
+row. That single assertion is the whole bug.

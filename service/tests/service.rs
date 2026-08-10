@@ -12,6 +12,33 @@ use wall_in_one_service::protocol::Response;
 use wall_in_one_service::renderer::{SystemDriver, WallpaperDriver};
 use wall_in_one_service::runtime::Runtime;
 
+/// Run `attempt` until the kernel stops calling the freshly written program busy.
+///
+/// These tests write a small shell script and then have the service exec it.
+/// `fs::write` closes its own handle, so the file is quiet by the time we ask --
+/// but a *different* test thread forking at that instant hands its child a copy
+/// of the still-open write descriptor, and Linux refuses to exec a file anybody
+/// holds open for writing. Some of these tests spawn the real service binary,
+/// which lives for seconds, so an inherited descriptor is not a momentary
+/// window: it lasts as long as that child does.
+///
+/// The tests are also run one at a time (`RUST_TEST_THREADS` in the flake),
+/// which removes the concurrent fork and therefore the cause. This is the
+/// second line of defence, kept because the failure it guards against was
+/// reproducible on a user's machine and never once here, so the diagnosis
+/// deserves less confidence than the fix.
+fn without_text_file_busy<T>(mut attempt: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match attempt() {
+            Err(error) if error.contains("Text file busy") && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
 fn directory(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -279,9 +306,10 @@ fn renderer_applies_still_then_mode_then_palette_then_motion() {
     let video = parsed.playlists[0].entries[1].clone();
     let scene = parsed.playlists[1].entries[0].clone();
     let mut driver = SystemDriver::new(parsed.renderer.clone());
-    driver.apply(&video, "eDP-1", &parsed.settings).unwrap();
+    without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
     thread::sleep(Duration::from_millis(100));
-    let error = driver.apply(&scene, "eDP-1", &parsed.settings).unwrap_err();
+    let error =
+        without_text_file_busy(|| driver.apply(&scene, "eDP-1", &parsed.settings)).unwrap_err();
     assert!(error.contains("paired still remains applied"));
     thread::sleep(Duration::from_millis(100));
     let events = fs::read_to_string(&log).unwrap();
@@ -332,7 +360,7 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
     let scene = parsed.playlists[1].entries[0].clone();
     let mut driver = SystemDriver::new(parsed.renderer.clone());
 
-    driver.apply(&scene, "", &parsed.settings).unwrap();
+    without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
     thread::sleep(Duration::from_millis(100));
 
     let launched = fs::read_to_string(&events).unwrap();
@@ -370,7 +398,7 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     let entry = parsed.playlists[0].entries[0].clone();
     let mut driver = SystemDriver::new(parsed.renderer.clone());
 
-    let error = driver.apply(&entry, "", &parsed.settings).unwrap_err();
+    let error = without_text_file_busy(|| driver.apply(&entry, "", &parsed.settings)).unwrap_err();
 
     assert!(
         error.contains("noctalia exited"),
@@ -510,7 +538,7 @@ fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
     let mut driver = SystemDriver::new(parsed.renderer.clone());
 
     for _visit in 0..2 {
-        driver.apply(&video, "eDP-1", &parsed.settings).unwrap();
+        without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
         thread::sleep(Duration::from_millis(100));
         let failures = driver.poll_failures();
         assert_eq!(failures.len(), 1);

@@ -64,6 +64,22 @@
           };
           cargoLock.lockFile = ./service/Cargo.lock;
           doCheck = true;
+
+          # The integration tests write small shell scripts and then have the
+          # service exec them. Run in parallel, that is a race the tests cannot
+          # win: `fs::write` closes its own handle, but a *different* test thread
+          # forking at that instant hands its child a copy of the still-open
+          # write descriptor, and Linux refuses to exec a file anybody holds open
+          # for writing. It surfaces as "cannot run noctalia: Text file busy
+          # (os error 26)" in whichever test happened to be exec'ing, nowhere
+          # near the one that caused it, and only under the right scheduling --
+          # it survived 37 consecutive runs here and still broke a real rebuild.
+          #
+          # One thread means no concurrent fork, which removes the race rather
+          # than narrowing it. The binary is fourteen tests and under two
+          # seconds; running them at once buys nothing worth this.
+          RUST_TEST_THREADS = "1";
+
           meta = with pkgs.lib; {
             description = "Small session runtime for Wall-in-One";
             mainProgram = "wall-in-one-service";

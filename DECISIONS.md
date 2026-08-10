@@ -632,3 +632,38 @@ box that only looks like a control.
 The regression test is structural rather than behavioural, because there is still no
 pointer to test with: the reorder gesture's widget must not be a descendant of any
 row. That single assertion is the whole bug.
+
+### The service tests run one at a time
+
+A user's system rebuild failed, twice in a row, on
+
+    cannot run noctalia: Text file busy (os error 26)
+
+ETXTBSY means the kernel refused to exec a file somebody holds open for writing.
+The tests write a small shell script and have the service exec it; `fs::write`
+closes its own handle, and each test's directory is unique (label, pid and a
+nanosecond nonce), so nothing in the test itself holds it.
+
+What does is another thread. `cargo test` runs these in parallel, and a fork
+inherits every descriptor open at that instant. Several of these tests spawn the
+real service binary, which lives for seconds -- so a descriptor inherited from a
+neighbour's in-flight `fs::write` is not a microsecond window, it lasts as long
+as that child. That is how a failure can be reliable on one machine and absent on
+another.
+
+Absent is the word: it was never reproduced here. 47 `cargo test` runs, some at
+32 threads and some under 24 busy cores, plus a direct rebuild of the user's exact
+failing derivation -- which succeeded. Same derivation hash, same inputs, opposite
+outcome, so the nondeterminism is real even though the trigger was never caught.
+
+Two defences, because a diagnosis that cannot be reproduced deserves less
+confidence than the fix:
+
+- `RUST_TEST_THREADS = "1"` in the flake removes the concurrent fork, and with it
+  the cause. Fourteen tests, under two seconds; parallelism was buying nothing.
+- `without_text_file_busy` retries an exec that reports the file busy, for up to
+  five seconds, at the handful of call sites that exec a script they just wrote.
+  If the first defence is right this never fires.
+
+The honest summary: the first change should make the second unreachable, and the
+second exists because "should" was doing too much work in the first sentence.

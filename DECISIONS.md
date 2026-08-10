@@ -387,3 +387,71 @@ built at all.
 Every real bug found so far — scenes with no stills, blank scene tiles,
 pixelated wallpapers, MotionBGS truncated at 36 — was found by running the
 thing, not by its test suite. Assume running it longer finds more.
+
+## Filters are inline, not a popover
+
+The browse screen froze the whole app: open Filters, pick a MotionBGS browse
+mode, and every click was ignored until the window lost and regained focus.
+
+That recovery-on-focus-change is the tell. A compute hang does not behave that
+way, and measurement confirmed there was none — the whole sequence was driven
+programmatically, and 45 pages of live results were loaded, with a worst
+main-loop gap of 0.55 s, all of it process startup.
+
+It was a **stale input grab**. The Filters button was a `Gtk.MenuButton`, so its
+popover took a grab; the `Gtk.DropDown`s inside it each opened *their own*
+popover and took another. Then the selection handlers hid sibling rows —
+`_on_mode_changed` on the genre row, `_sync_top_range` on the top-range row —
+from inside signal emission, forcing the outer popover to re-measure and its
+Wayland surface to resize while the inner popup still held the grab. The grab
+was never handed back.
+
+**Ruling: no configuration lives in a popover on this screen.** The filters are
+a `Gtk.Revealer` under the search bar. Nested autohide popovers are the hazard,
+and the only reliable way to not have the bug is to not nest them. This also
+matches the standing preference already stated for pairings ("should happen in
+a new screen. not a pop up"), and filters are more useful visible beside the
+results anyway.
+
+Rejected: keeping the popover and deferring the visibility change to an idle
+callback. It would probably have worked, but it leaves the nesting in place and
+makes correctness depend on GTK's grab bookkeeping across a resize — untestable
+here, and it would have to be rediscovered by whoever next adds a control.
+
+## Browsing is capped at 600 results, and the number is a requirement
+
+Infinite scroll released nothing. Measured on a real listing: 36 cards cost
+232 MB RSS and 483 cost 488 MB, climbing at roughly 0.6 MB a card, with the
+preview queue growing monotonically — 239 outstanding after 14 pages, so the
+four workers were fetching thumbnails for cards scrolled past minutes earlier
+while the visible ones waited behind them.
+
+Both are now bounded, and re-measured: 483 cards cost 279 MB rather than 488,
+the queue drains to zero, and growth is about 0.11 MB a card.
+
+**The ceiling is 600, and it is set by a requirement rather than by the
+memory.** A MotionBGS search returning about 250 results has to fit entirely,
+because "if motionbg returns 250 results for naruto, i should have a way to view
+more than just 36" is the complaint this grid exists to answer. A first pass set
+it to 240 and would have quietly reintroduced that. Anything below ~300 is
+wrong no matter how good it looks in a memory graph.
+
+## Reordering knows both sides of a card
+
+Playlist drag-reorder only understood "insert *before* this card" and discarded
+the pointer's x, so which half you released over was never examined. Running the
+model over every combination of a four-card playlist showed what that costs:
+
+    drag A onto B -> ABCD   (nudging one slot right: a guaranteed no-op)
+    drag A onto A -> BCDA   (an aborted drag silently jumps to the end)
+
+`drop_position` now takes an explicit side, and dropping a card on itself is a
+no-op instead of a move to the end. The table is pinned in `tests/test_playlists.py`,
+because a table is what caught this and prose would not have.
+
+Drop feedback is a real placeholder child in a `Gtk.Revealer` rather than an
+animated CSS margin: margin animation inside a homogeneous `Gtk.FlowBox` was not
+worth depending on. The hard requirement on it is that the gap can never get
+stuck — it is cleared on drop, leave, cancel and editor teardown, and a test
+pins that a cancelled drag restores the original child count. A playlist left
+with a permanent hole would be worse than no feedback at all.

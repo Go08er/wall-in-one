@@ -11,7 +11,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Adw, Gdk, Gtk, Pango
+from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
@@ -36,6 +36,10 @@ class _MediaCard(Gtk.Box):
         on_activate: Any,
         on_drop: Any | None = None,
         on_remove: Any | None = None,
+        *,
+        on_motion: Any | None = None,
+        on_leave: Any | None = None,
+        on_drag_finished: Any | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.item = item
@@ -65,12 +69,40 @@ class _MediaCard(Gtk.Box):
             "prepare",
             lambda *_arguments: Gdk.ContentProvider.new_for_value(payload),
         )
+        drag.connect("drag-begin", self._drag_begin)
+        drag.connect("drag-cancel", self._drag_cancel)
+        drag.connect("drag-end", self._drag_end)
+        self._on_drag_finished = on_drag_finished
         self.add_controller(drag)
 
         if on_drop is not None:
             target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
             target.connect("drop", on_drop)
+            if on_motion is not None:
+                target.connect("motion", on_motion)
+            if on_leave is not None:
+                target.connect("leave", on_leave)
             self.add_controller(target)
+
+    def _drag_begin(self, source: Gtk.DragSource, _drag: Gdk.Drag) -> None:
+        """Keep the gesture visually tied to the image the person grabbed."""
+        paintable = self.picture.get_paintable()
+        if paintable is None:
+            paintable = Gtk.WidgetPaintable.new(self)
+        source.set_icon(paintable, 90, 51)
+
+    def _drag_cancel(
+        self, _source: Gtk.DragSource, _drag: Gdk.Drag, _reason: Gdk.DragCancelReason
+    ) -> bool:
+        self._finish_drag()
+        return False
+
+    def _drag_end(self, _source: Gtk.DragSource, _drag: Gdk.Drag, _delete_data: bool) -> None:
+        self._finish_drag()
+
+    def _finish_drag(self) -> None:
+        if self._on_drag_finished is not None:
+            self._on_drag_finished()
 
     def show_thumbnail(self, _item: MediaItem, texture: Gdk.Texture | None) -> None:
         self.picture.set_paintable(texture)
@@ -95,6 +127,11 @@ class PlaylistsPage(Gtk.Box):
         self._entry_items: dict[str, MediaItem | None] = {}
         self._entry_ids: dict[Gtk.Widget, str] = {}
         self._entry_positions: dict[str, int] = {}
+        self._drop_gap: Gtk.Revealer | None = None
+        self._gap_position = -1
+        self._gap_display_position = -1
+        self._gap_moving = ""
+        self._gap_display_positions: dict[Gtk.Revealer, int] = {}
         self._editor_id = ""
 
         split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -241,6 +278,7 @@ class PlaylistsPage(Gtk.Box):
         self._show_editor()
 
     def _clear_editor(self) -> None:
+        self._clear_drop_gap(animate=False)
         while (child := self._editor.get_first_child()) is not None:
             self._editor.remove(child)
         self._source_cards.clear()
@@ -340,10 +378,14 @@ class PlaylistsPage(Gtk.Box):
         )
         note.add_css_class("dim-label")
         pane.append(note)
-        self._order_flow = self._new_flow()
+        # A transient narrow placeholder needs to keep its own width; making
+        # every child homogeneous would turn it into a full card-sized hole.
+        self._order_flow = self._new_flow(homogeneous=False)
         self._order_flow.set_sort_func(self._compare_entry_cards)
         target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
         target.connect("drop", self._drop_at_end)
+        target.connect("motion", self._motion_at_end)
+        target.connect("leave", self._leave_drop_target)
         self._order_flow.add_controller(target)
         self._order_scroll = Gtk.ScrolledWindow(
             vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
@@ -392,7 +434,12 @@ class PlaylistsPage(Gtk.Box):
         for item in session.library.items:
             if item.path in self._source_cards_by_path:
                 continue
-            card = _MediaCard(item, f"{SOURCE_PREFIX}{item.path}", self._make_add(item))
+            card = _MediaCard(
+                item,
+                f"{SOURCE_PREFIX}{item.path}",
+                self._make_add(item),
+                on_drag_finished=self._finish_card_drag,
+            )
             self._source_cards[card] = item
             self._source_cards_by_path[item.path] = card
             self._source_flow.append(card)
@@ -423,6 +470,9 @@ class PlaylistsPage(Gtk.Box):
                     self._make_remove(entry.id),
                     self._make_drop(entry.id),
                     self._make_remove(entry.id),
+                    on_motion=self._make_motion(entry.id),
+                    on_leave=self._leave_drop_target,
+                    on_drag_finished=self._finish_card_drag,
                 )
                 self._loader.request(item, card.show_thumbnail)
             self._entry_cards[entry.id] = card
@@ -448,16 +498,23 @@ class PlaylistsPage(Gtk.Box):
     def _compare_entry_cards(self, first: Gtk.FlowBoxChild, second: Gtk.FlowBoxChild) -> int:
         first_card = first.get_child()
         second_card = second.get_child()
-        first_id = self._entry_ids.get(first_card, "") if first_card is not None else ""
-        second_id = self._entry_ids.get(second_card, "") if second_card is not None else ""
-        end = len(self._entry_positions)
-        return self._entry_positions.get(first_id, end) - self._entry_positions.get(second_id, end)
+        if isinstance(first_card, Gtk.Revealer) and first_card in self._gap_display_positions:
+            first_rank = self._gap_display_positions[first_card] * 2 - 1
+        else:
+            first_id = self._entry_ids.get(first_card, "") if first_card is not None else ""
+            first_rank = self._entry_positions.get(first_id, len(self._entry_positions)) * 2
+        if isinstance(second_card, Gtk.Revealer) and second_card in self._gap_display_positions:
+            second_rank = self._gap_display_positions[second_card] * 2 - 1
+        else:
+            second_id = self._entry_ids.get(second_card, "") if second_card is not None else ""
+            second_rank = self._entry_positions.get(second_id, len(self._entry_positions)) * 2
+        return first_rank - second_rank
 
     @staticmethod
-    def _new_flow() -> Gtk.FlowBox:
+    def _new_flow(*, homogeneous: bool = True) -> Gtk.FlowBox:
         flow = Gtk.FlowBox(
             selection_mode=Gtk.SelectionMode.NONE,
-            homogeneous=True,
+            homogeneous=homogeneous,
             column_spacing=10,
             row_spacing=10,
             min_children_per_line=1,
@@ -474,17 +531,141 @@ class PlaylistsPage(Gtk.Box):
         query = raw.strip().casefold()
         return item is None or not query or query in item.name.casefold()
 
-    def _make_drop(self, before: str) -> Any:
-        def drop(_target: Gtk.DropTarget, value: object, _x: float, _y: float) -> bool:
-            return self._accept_drop(value, before)
+    def _make_drop(self, anchor: str) -> Any:
+        def drop(target: Gtk.DropTarget, value: object, x: float, _y: float) -> bool:
+            widget = target.get_widget()
+            after = widget is not None and x >= widget.get_width() / 2
+            return self._accept_drop(value, anchor, after=after)
 
         return drop
 
     def _drop_at_end(self, _target: Gtk.DropTarget, value: object, _x: float, _y: float) -> bool:
         return self._accept_drop(value, None)
 
-    def _accept_drop(self, value: object, before: str | None) -> bool:
+    def _make_motion(self, anchor: str) -> Any:
+        def motion(target: Gtk.DropTarget, x: float, _y: float) -> Gdk.DragAction:
+            widget = target.get_widget()
+            after = widget is not None and x >= widget.get_width() / 2
+            return self._preview_drop(target.get_value(), anchor, after=after)
+
+        return motion
+
+    def _motion_at_end(self, target: Gtk.DropTarget, _x: float, _y: float) -> Gdk.DragAction:
+        return self._preview_drop(target.get_value(), None)
+
+    def _preview_drop(
+        self, value: object, anchor: str | None, *, after: bool = False
+    ) -> Gdk.DragAction:
+        session = self._session
+        playlist = session.playlists.get(self._selected) if session is not None else None
+        if not isinstance(value, str) or playlist is None:
+            self._clear_drop_gap()
+            return Gdk.DragAction(0)
+        if value.startswith(ENTRY_PREFIX):
+            moving = value.removeprefix(ENTRY_PREFIX)
+            action = Gdk.DragAction.MOVE
+        elif value.startswith(SOURCE_PREFIX):
+            moving = ""
+            action = Gdk.DragAction.COPY
+        else:
+            self._clear_drop_gap()
+            return Gdk.DragAction(0)
+        if anchor == moving:
+            self._clear_drop_gap()
+            return action
+        entry_ids = tuple(entry.id for entry in playlist.entries)
+        position = playlists.drop_position(entry_ids, moving, anchor, after=after)
+        self._show_drop_gap(position, moving)
+        return action
+
+    def _show_drop_gap(self, position: int, moving: str) -> None:
+        if (
+            self._drop_gap is not None
+            and position == self._gap_position
+            and moving == self._gap_moving
+        ):
+            return
+        self._clear_drop_gap()
+        original = self._entry_positions.get(moving)
+        display_position = position + int(original is not None and original < position)
+        gap = Gtk.Revealer()
+        gap.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
+        gap.set_transition_duration(160)
+        spacer = Gtk.Box(width_request=32, height_request=138)
+        gap.set_child(spacer)
+        gap.connect("notify::child-revealed", self._gap_reveal_changed)
+        target = Gtk.DropTarget.new(str, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        target.connect("drop", self._make_gap_drop(position))
+        target.connect("motion", self._motion_over_gap)
+        target.connect("leave", self._leave_drop_target)
+        gap.add_controller(target)
+        self._drop_gap = gap
+        self._gap_position = position
+        self._gap_display_position = display_position
+        self._gap_moving = moving
+        self._gap_display_positions[gap] = display_position
+        self._order_flow.append(gap)
+        self._order_flow.invalidate_sort()
+        gap.set_reveal_child(True)
+
+    def _clear_drop_gap(self, *_arguments: object, animate: bool = True) -> None:
+        gap = self._drop_gap
+        if gap is None:
+            return
+        self._drop_gap = None
+        self._gap_position = -1
+        self._gap_display_position = -1
+        self._gap_moving = ""
+        gap.set_reveal_child(False)
+        if not animate or not gap.get_child_revealed():
+            self._remove_gap(gap)
+            return
+        # The signal normally removes it after the slide closes. The timeout
+        # is a belt-and-braces cleanup for an interrupted or unmapped widget.
+        GLib.timeout_add(gap.get_transition_duration() + 50, self._remove_gap, gap)
+
+    def _gap_reveal_changed(self, gap: Gtk.Revealer, _parameter: object) -> None:
+        if not gap.get_reveal_child() and not gap.get_child_revealed():
+            self._remove_gap(gap)
+
+    def _remove_gap(self, gap: Gtk.Revealer) -> bool:
+        wrapper = gap.get_parent()
+        flow = wrapper.get_parent() if isinstance(wrapper, Gtk.FlowBoxChild) else None
+        if isinstance(flow, Gtk.FlowBox):
+            flow.remove(gap)
+        self._gap_display_positions.pop(gap, None)
+        return False
+
+    def _leave_drop_target(self, _target: Gtk.DropTarget) -> None:
+        self._clear_drop_gap()
+
+    def _finish_card_drag(self) -> None:
+        self._clear_drop_gap(animate=False)
+
+    def _make_gap_drop(self, position: int) -> Any:
+        def drop(_target: Gtk.DropTarget, value: object, _x: float, _y: float) -> bool:
+            return self._accept_drop(value, None, position=position)
+
+        return drop
+
+    def _motion_over_gap(self, target: Gtk.DropTarget, _x: float, _y: float) -> Gdk.DragAction:
+        value = target.get_value()
+        if isinstance(value, str) and value.startswith(ENTRY_PREFIX):
+            return Gdk.DragAction.MOVE
+        if isinstance(value, str) and value.startswith(SOURCE_PREFIX):
+            return Gdk.DragAction.COPY
+        return Gdk.DragAction(0)
+
+    def _accept_drop(
+        self,
+        value: object,
+        anchor: str | None,
+        *,
+        after: bool = False,
+        position: int | None = None,
+    ) -> bool:
         """Apply one card drop, preserving entry ids and allowing duplicates."""
+        self._clear_drop_gap(animate=False)
         if not isinstance(value, str) or not self._selected:
             return False
         session = self._app.session
@@ -502,10 +683,11 @@ class PlaylistsPage(Gtk.Box):
                 moving = value.removeprefix(ENTRY_PREFIX)
             else:
                 return False
-            current = session.playlists.find(self._selected)
-            position = playlists.drop_position(
-                tuple(entry.id for entry in current.entries), moving, before
-            )
+            if position is None:
+                current = session.playlists.find(self._selected)
+                position = playlists.drop_position(
+                    tuple(entry.id for entry in current.entries), moving, anchor, after=after
+                )
             session.playlists.move_entry(self._selected, moving, position)
         except playlists.PlaylistError as error:
             self._app.window_report(str(error))

@@ -373,9 +373,32 @@ def test_playlists_are_listed_by_name(store: Store) -> None:
     assert [one.name for one in store.all()] == ["apple", "Mango", "zebra"]
 
 
-def test_drop_position_accounts_for_removing_the_dragged_entry() -> None:
+@pytest.mark.parametrize(
+    ("moving", "anchor", "after", "position", "expected"),
+    [
+        ("d", "b", False, 1, ("a", "d", "b", "c")),
+        ("a", "d", False, 2, ("b", "c", "a", "d")),
+        ("a", "b", True, 1, ("b", "a", "c", "d")),
+        ("b", "c", True, 2, ("a", "c", "b", "d")),
+        ("c", "d", True, 3, ("a", "b", "d", "c")),
+        ("c", "c", False, 2, ("a", "b", "c", "d")),
+        ("c", "c", True, 2, ("a", "b", "c", "d")),
+        ("b", None, False, 3, ("a", "c", "d", "b")),
+        ("b", "missing", True, 3, ("a", "c", "d", "b")),
+    ],
+)
+def test_drop_position_knows_both_sides_and_preserves_self_drops(
+    moving: str,
+    anchor: str | None,
+    after: bool,
+    position: int,
+    expected: tuple[str, ...],
+) -> None:
     ids = ("a", "b", "c", "d")
+    remaining = [entry_id for entry_id in ids if entry_id != moving]
 
-    assert playlists.drop_position(ids, "d", "b") == 1
-    assert playlists.drop_position(ids, "a", "d") == 2
-    assert playlists.drop_position(ids, "b", None) == 3
+    actual = playlists.drop_position(ids, moving, anchor, after=after)
+    remaining.insert(actual, moving)
+
+    assert actual == position
+    assert tuple(remaining) == expected

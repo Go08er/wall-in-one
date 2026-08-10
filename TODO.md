@@ -80,3 +80,18 @@ a file does not.
   hold for how this app invokes mpvpaper.
 - **Full click-action configurability in the plugin** was deliberately not built;
   the minimal branch was taken. The user has asked about it once.
+
+## Left open after the browse and drag fixes
+
+- **Previews below the fold are now fetched lazily**, within one screen of the
+  viewport. Verified that the queue drains and memory is bounded, but *not*
+  verified by actually scrolling a long listing by hand — the probe never
+  scrolls. Watch for a card that stays blank after scrolling to it.
+- **The iOS-style drop gap has not been seen by a human.** Its tests pin that it
+  appears at the right index and is always cleared; nobody has yet watched it
+  animate. Whether it *feels* like iOS is a judgement only the user can make.
+- **Ctrl+F / Ctrl+A / Ctrl+D were dead** in the browse page — the shortcut
+  controller was attached to the `Adw.Dialog` that `BrowsePage` strips for parts
+  and never presents. Now attached to the reparented content. Worth a glance
+  for the same mistake elsewhere: any other controller added to `self` in a
+  class whose widgets get reparented has the same problem.

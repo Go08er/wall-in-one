@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -24,7 +26,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from wall_in_one.browse import Downloaded  # noqa: E402
+from wall_in_one.browse import Browser, Downloaded  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
 from wall_in_one.providers import registry, wallhaven  # noqa: E402
 from wall_in_one.providers.base import (  # noqa: E402
@@ -309,7 +311,7 @@ def dialog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> browse_dialog.Bro
     )
     built = browse_dialog.BrowseDialog(_StubApp(tmp_path))  # type: ignore[arg-type]
     # No previews: they would open sockets, and nothing here is about pictures.
-    monkeypatch.setattr(built._loader, "request", lambda *_arguments: None)
+    monkeypatch.setattr(built._loader, "prioritize", lambda *_arguments: None)
     return built
 
 
@@ -328,6 +330,66 @@ def _answer(
 
     monkeypatch.setattr(dialog._browser, "search", search)
     return asked
+
+
+# -- filters -------------------------------------------------------------
+
+
+def test_filters_expand_inline_without_a_popover(dialog: browse_dialog.BrowseDialog) -> None:
+    assert isinstance(dialog._filters, Gtk.ToggleButton)
+    assert isinstance(dialog._filter_revealer.get_child(), Gtk.Box)
+    assert not isinstance(dialog._filter_revealer.get_child(), Gtk.Popover)
+
+    dialog._filters.set_active(True)
+
+    assert dialog._filter_revealer.get_reveal_child()
+
+
+def test_opening_inline_filters_refreshes_nsfw_availability(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert dialog._purity._checks[2].get_sensitive()
+    monkeypatch.setattr(
+        registry,
+        "describe",
+        lambda: (
+            SimpleNamespace(
+                name="wallhaven",
+                title="Wallhaven",
+                usable=True,
+                limitations=("save an API key to include NSFW results",),
+            ),
+            SimpleNamespace(name="motionbgs", title="MotionBGS", usable=True, limitations=()),
+        ),
+    )
+
+    dialog._filters.set_active(True)
+
+    assert not dialog._purity._checks[2].get_sensitive()
+
+
+def test_motionbgs_browse_mode_is_disabled_while_searching(
+    dialog: browse_dialog.BrowseDialog,
+) -> None:
+    dialog._providers.set_selected(1)
+    dialog._entry.set_text("naruto")
+
+    assert not dialog._mode.get_sensitive()
+    assert not dialog._genre.get_sensitive()
+    assert dialog._motionbgs_hint.get_visible()
+    assert "clear the search box" in dialog._motionbgs_hint.get_label()
+
+
+def test_clearing_motionbgs_search_immediately_restores_browse_mode(
+    dialog: browse_dialog.BrowseDialog,
+) -> None:
+    dialog._providers.set_selected(1)
+    dialog._entry.set_text("naruto")
+    dialog._entry.set_text("")
+
+    assert dialog._mode.get_sensitive()
+    assert dialog._genre.get_sensitive()
+    assert not dialog._motionbgs_hint.get_visible()
 
 
 def test_a_first_page_that_says_there_is_more_asks_for_it(
@@ -449,6 +511,129 @@ def test_the_summary_counts_everything_on_screen_not_the_last_page(
     dialog.start_search(page=1)
     assert _settle(lambda: len(dialog._cards) == 3)
     assert dialog._summary.get_label().startswith("3 results")
+
+
+def test_the_grid_stops_at_a_reported_retention_limit(
+    dialog: browse_dialog.BrowseDialog,
+) -> None:
+    identifiers = tuple(f"item-{index}" for index in range(browse_dialog.MAX_RETAINED_RESULTS + 1))
+    dialog._show_result(_result(*identifiers, has_next=True), page=1)
+
+    assert len(dialog._cards) == browse_dialog.MAX_RETAINED_RESULTS
+    assert len(dialog._shown) == browse_dialog.MAX_RETAINED_RESULTS
+    assert not dialog._has_next
+    assert dialog._summary.get_label().startswith(
+        f"showing the first {browse_dialog.MAX_RETAINED_RESULTS} results"
+    )
+
+
+def test_an_unlaid_out_grid_only_queues_a_viewport_sized_preview_window(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidates = tuple(
+        WallpaperCandidate(
+            provider="wallhaven",
+            identifier=f"item-{index}",
+            title=f"item-{index}",
+            kind=Kind.STILL,
+            page_url=f"https://wallhaven.cc/w/item-{index}",
+            thumbnail_url=f"https://example.invalid/{index}.jpg",
+        )
+        for index in range(browse_dialog.PREVIEW_FALLBACK_CARDS + 10)
+    )
+    result = SearchResult(
+        provider="wallhaven",
+        query_url="https://wallhaven.cc/api/v1/search",
+        items=candidates,
+        page=1,
+        has_next=False,
+    )
+    queued: list[tuple[WallpaperCandidate, float]] = []
+    monkeypatch.setattr(
+        dialog._loader,
+        "prioritize",
+        lambda candidates, _callback: queued.extend(candidates),
+    )
+
+    dialog._show_result(result, page=1)
+    dialog._refresh_previews()
+
+    assert [candidate.identifier for candidate, _priority in queued][
+        -browse_dialog.PREVIEW_FALLBACK_CARDS :
+    ] == [f"item-{index}" for index in range(browse_dialog.PREVIEW_FALLBACK_CARDS)]
+
+
+def test_preview_queue_prefers_nearby_cards_and_drops_stale_work() -> None:
+    class RecordingPool:
+        def __init__(self) -> None:
+            self.submitted: list[str] = []
+
+        def submit(
+            self,
+            _function: Callable[[WallpaperCandidate], bytes],
+            candidate: WallpaperCandidate,
+        ) -> Future[bytes]:
+            self.submitted.append(candidate.identifier)
+            return Future()
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            pass
+
+    def preview_candidate(index: int) -> WallpaperCandidate:
+        return WallpaperCandidate(
+            provider="wallhaven",
+            identifier=f"item-{index}",
+            title=f"item-{index}",
+            kind=Kind.STILL,
+            page_url=f"https://wallhaven.cc/w/item-{index}",
+            thumbnail_url=f"https://example.invalid/{index}.jpg",
+        )
+
+    loader = browse_dialog.PreviewLoader(cast(Browser, SimpleNamespace()), max_workers=2)
+    loader._pool.shutdown(wait=False, cancel_futures=True)
+    pool = RecordingPool()
+    loader._pool = pool  # type: ignore[assignment]
+    try:
+        far, near, middle, current = (preview_candidate(index) for index in range(4))
+        loader.prioritize(((far, 50.0), (near, 0.0), (middle, 20.0)), lambda *_args: None)
+
+        assert pool.submitted == ["item-1", "item-2"]
+
+        loader.prioritize(((current, 0.0),), lambda *_args: None)
+
+        assert tuple(loader._waiting) == (current.thumbnail_url,)
+        assert far.thumbnail_url not in loader._waiting
+    finally:
+        loader.shutdown()
+
+
+def test_the_preview_memory_cache_evicts_the_least_recently_used() -> None:
+    loader = browse_dialog.PreviewLoader(
+        cast(Browser, SimpleNamespace()), max_workers=1, max_cache_entries=2
+    )
+    delivered: list[str] = []
+    try:
+        for index in range(3):
+            candidate = WallpaperCandidate(
+                provider="wallhaven",
+                identifier=f"item-{index}",
+                title=f"item-{index}",
+                kind=Kind.STILL,
+                page_url=f"https://wallhaven.cc/w/item-{index}",
+                thumbnail_url=f"https://example.invalid/{index}.jpg",
+            )
+            future: Future[bytes] = Future()
+            future.set_result(str(index).encode())
+            loader._desired.add(candidate.thumbnail_url)
+            loader._active.add(candidate.thumbnail_url)
+            loader._finish(candidate, future, lambda item, _data: delivered.append(item.identifier))
+
+        assert tuple(loader._cache) == (
+            "https://example.invalid/1.jpg",
+            "https://example.invalid/2.jpg",
+        )
+    finally:
+        loader.shutdown()
 
 
 # -- picking several, and the queue --------------------------------------
@@ -744,3 +929,21 @@ def test_control_f_reaches_the_search_box(
     dialog._focus_search()
 
     assert focused == [True]
+
+
+def test_shortcuts_are_attached_to_the_reparented_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        registry,
+        "describe",
+        lambda: (
+            SimpleNamespace(name="wallhaven", title="Wallhaven", usable=True, limitations=()),
+            SimpleNamespace(name="motionbgs", title="MotionBGS", usable=True, limitations=()),
+        ),
+    )
+    page = browse_dialog.BrowsePage(_StubApp(tmp_path))  # type: ignore[arg-type]
+    try:
+        assert page._surface._shortcuts.get_widget() is page.get_first_child()
+    finally:
+        page.shutdown()

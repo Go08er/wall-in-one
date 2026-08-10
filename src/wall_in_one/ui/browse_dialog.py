@@ -10,8 +10,11 @@ on a worker and comes back through `GLib.idle_add`, the same arrangement
 from __future__ import annotations
 
 import contextlib
+import threading
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from typing import TYPE_CHECKING, Final
 
 import gi
@@ -41,6 +44,28 @@ if TYPE_CHECKING:
 #: Previews are small and independent, so a handful of workers saturates the
 #: connection without turning a page of results into a thundering herd.
 MAX_WORKERS: Final = 4
+
+#: Enough decoded previews to make a short scroll back instant without keeping
+#: every image seen during a long browse alive for the rest of the session.
+MAX_PREVIEW_CACHE_ENTRIES: Final = 64
+
+#: A long MotionBGS listing reaches thousands of videos, and nothing here is ever
+#: released: measured on a real listing, 36 cards cost 232 MB of RSS and 483 cost
+#: 488 MB, climbing linearly at roughly 0.6 MB a card between the two. So there has
+#: to be a ceiling, or scrolling a 7,380-item listing crowds out the desktop.
+#:
+#: The number is set by the search that prompted all this rather than by the memory.
+#: A MotionBGS query returning around 250 results has to fit entirely, with room to
+#: spare, because being unable to reach the end of your own search is the complaint
+#: this grid exists to answer -- so a ceiling of 240 would have reintroduced it. That
+#: puts the limit here and the worst case near 600 MB, which is only reached by
+#: somebody deliberately scrolling that far.
+MAX_RETAINED_RESULTS: Final = 600
+
+#: Cards within one screen on either side of the viewport are worth fetching.
+#: Anything farther away can wait until scrolling makes it relevant.
+PREVIEW_LOOKAHEAD_SCREENS: Final = 1.0
+PREVIEW_FALLBACK_CARDS: Final = 24
 
 #: Card geometry, 16:9 like the library grid so the two views agree.
 CARD_WIDTH: Final = 300
@@ -121,30 +146,73 @@ PreviewCallback = Callable[[WallpaperCandidate, bytes], None]
 class PreviewLoader:
     """Fetches candidate thumbnails off-thread and decodes them for GTK."""
 
-    def __init__(self, browser: Browser, max_workers: int = MAX_WORKERS) -> None:
+    def __init__(
+        self,
+        browser: Browser,
+        max_workers: int = MAX_WORKERS,
+        max_cache_entries: int = MAX_PREVIEW_CACHE_ENTRIES,
+    ) -> None:
         self._browser = browser
+        self._max_workers = max_workers
+        self._max_cache_entries = max_cache_entries
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="preview")
-        self._cache: dict[str, bytes] = {}
-        self._pending: set[str] = set()
+        self._cache: OrderedDict[str, bytes] = OrderedDict()
+        self._waiting: dict[str, tuple[float, int, WallpaperCandidate, PreviewCallback]] = {}
+        self._active: set[str] = set()
+        self._desired: set[str] = set()
+        self._sequence = 0
+        self._lock = threading.RLock()
         self._closed = False
 
-    def request(self, candidate: WallpaperCandidate, callback: PreviewCallback) -> None:
-        """Ask for ``candidate``'s preview. ``callback`` runs on the main thread."""
-        if self._closed:
-            return
-        url = candidate.thumbnail_url
-        if not url:
-            return
-        cached = self._cache.get(url)
-        if cached is not None:
-            # Paging back to a page already seen should not re-download it.
-            callback(candidate, cached)
-            return
-        if url in self._pending:
-            return
-        self._pending.add(url)
-        future = self._pool.submit(self._fetch, candidate)
-        future.add_done_callback(lambda done: self._finish(candidate, done, callback))
+    def prioritize(
+        self,
+        candidates: Sequence[tuple[WallpaperCandidate, float]],
+        callback: PreviewCallback,
+    ) -> None:
+        """Fetch only the current viewport neighbourhood, nearest cards first.
+
+        Work already using a network connection is allowed to finish, but a
+        queued card that has fallen far outside the viewport is forgotten. At
+        most one worker-width of stale work can therefore delay what somebody
+        is looking at now.
+        """
+        cached: list[tuple[WallpaperCandidate, bytes]] = []
+        with self._lock:
+            if self._closed:
+                return
+            wanted = {candidate.thumbnail_url for candidate, _priority in candidates}
+            wanted.discard("")
+            self._desired = wanted
+            self._waiting = {
+                url: request for url, request in self._waiting.items() if url in wanted
+            }
+            for candidate, priority in candidates:
+                url = candidate.thumbnail_url
+                if not url:
+                    continue
+                hit = self._cache.pop(url, None)
+                if hit is not None:
+                    # Moving a hit to the end makes the in-memory tier a real
+                    # LRU rather than an insertion-order bound.
+                    self._cache[url] = hit
+                    cached.append((candidate, hit))
+                    continue
+                if url in self._active:
+                    continue
+                self._sequence += 1
+                self._waiting[url] = (priority, self._sequence, candidate, callback)
+            self._pump_locked()
+        for candidate, data in cached:
+            callback(candidate, data)
+
+    def _pump_locked(self) -> None:
+        while not self._closed and len(self._active) < self._max_workers and self._waiting:
+            url, request = min(self._waiting.items(), key=lambda item: (item[1][0], item[1][1]))
+            _priority, _sequence, candidate, callback = request
+            del self._waiting[url]
+            self._active.add(url)
+            future = self._pool.submit(self._fetch, candidate)
+            future.add_done_callback(partial(self._finish, candidate, callback=callback))
 
     def _fetch(self, candidate: WallpaperCandidate) -> bytes:
         url = candidate.thumbnail_url
@@ -171,27 +239,37 @@ class PreviewLoader:
     def _finish(
         self, candidate: WallpaperCandidate, future: Future[bytes], callback: PreviewCallback
     ) -> None:
-        self._pending.discard(candidate.thumbnail_url)
-        if self._closed:
-            return
         try:
             data = future.result()
         except Exception:
             # Broad on purpose: a worker must never take the app down.
             data = b""
-        self._cache[candidate.thumbnail_url] = data
+        with self._lock:
+            url = candidate.thumbnail_url
+            self._active.discard(url)
+            if self._closed:
+                return
+            self._cache.pop(url, None)
+            self._cache[url] = data
+            while len(self._cache) > self._max_cache_entries:
+                self._cache.popitem(last=False)
+            deliver_requested = url in self._desired
+            self._pump_locked()
 
         def deliver() -> bool:
-            if not self._closed:
+            if not self._closed and deliver_requested:
                 callback(candidate, data)
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(deliver)
 
     def shutdown(self) -> None:
-        self._closed = True
-        self._pending.clear()
-        self._cache.clear()
+        with self._lock:
+            self._closed = True
+            self._desired.clear()
+            self._waiting.clear()
+            self._active.clear()
+            self._cache.clear()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 
@@ -405,6 +483,7 @@ class BrowseDialog(Adw.Dialog):
         #: Identifiers already on screen, so an overlapping page cannot show
         #: the same wallpaper twice.
         self._shown: set[str] = set()
+        self._capped = False
         #: Batch progress. Counts every download this dialog started, not just
         #: the picked ones, so a single-card download that lands mid-batch does
         #: not make the count read wrong.
@@ -459,7 +538,13 @@ class BrowseDialog(Adw.Dialog):
                     action=Gtk.CallbackAction.new(_shortcut(action)),
                 )
             )
-        self.add_controller(shortcuts)
+        content = self.get_child()
+        if content is not None:
+            # `BrowsePage` reparents this widget and never presents the dialog.
+            # Keeping the controller with the content keeps the shortcuts in
+            # the hierarchy in both the dialog and embedded-page forms.
+            content.add_controller(shortcuts)
+        self._shortcuts = shortcuts
 
     def _focus_search(self) -> None:
         self._entry.grab_focus()
@@ -554,6 +639,7 @@ class BrowseDialog(Adw.Dialog):
         return toolbar
 
     def _build_search_bar(self) -> Gtk.Widget:
+        area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bar.set_margin_top(6)
         bar.set_margin_bottom(6)
@@ -568,19 +654,29 @@ class BrowseDialog(Adw.Dialog):
         self._entry = Gtk.SearchEntry(hexpand=True)
         self._entry.set_placeholder_text("Search")
         self._entry.connect("activate", lambda _entry: self.start_search(page=1))
+        # `search-changed` is deliberately debounced for remote queries. This
+        # control is local state, so `changed` keeps it honest on every edit.
+        self._entry.connect("changed", self._on_search_changed)
         bar.append(self._entry)
 
-        self._filters = Gtk.MenuButton(icon_name="view-filter-symbolic", tooltip_text="Filters")
-        self._filters.set_popover(self._build_filters())
+        self._filters = Gtk.ToggleButton(icon_name="view-filter-symbolic", tooltip_text="Filters")
+        self._filters.connect("toggled", self._on_filters_toggled)
         bar.append(self._filters)
 
         search = Gtk.Button(label="Search")
         search.add_css_class("suggested-action")
         search.connect("clicked", lambda _button: self.start_search(page=1))
         bar.append(search)
-        return bar
+        area.append(bar)
 
-    def _build_filters(self) -> Gtk.Popover:
+        self._filter_revealer = Gtk.Revealer()
+        self._filter_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._filter_revealer.set_child(self._build_filters())
+        self._filter_revealer.connect("notify::reveal-child", self._on_filters_shown)
+        area.append(self._filter_revealer)
+        return area
+
+    def _build_filters(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
@@ -629,21 +725,30 @@ class BrowseDialog(Adw.Dialog):
         self._genre = Gtk.Entry(placeholder_text="Genre, e.g. anime")
         self._genre_row = _labelled("Genre", self._genre)
         self._motionbgs_filters.append(self._genre_row)
+        self._motionbgs_hint = Gtk.Label(xalign=0.0, wrap=True)
+        self._motionbgs_hint.set_label(
+            "MotionBGS browses or searches; clear the search box to browse 4K, HD, "
+            "latest, or by genre."
+        )
+        self._motionbgs_hint.add_css_class("dim-label")
+        self._motionbgs_hint.add_css_class("caption")
+        self._motionbgs_filters.append(self._motionbgs_hint)
         box.append(self._motionbgs_filters)
 
-        popover = Gtk.Popover()
-        popover.set_child(box)
-        # Re-asked every time the popover opens rather than once at
+        # Re-asked every time the inline controls open rather than once at
         # construction: the settings dialogue can store a key while this dialog
         # is alive, and the window keeps one browse dialog for the session, so
         # a value read at construction would stay stale until it is closed.
-        popover.connect("notify::visible", self._on_filters_shown)
         self._sync_nsfw_toggle()
         self._sync_top_range()
-        return popover
+        self._sync_motionbgs_mode()
+        return box
 
-    def _on_filters_shown(self, popover: Gtk.Popover, _parameter: object) -> None:
-        if popover.get_visible():
+    def _on_filters_toggled(self, button: Gtk.ToggleButton) -> None:
+        self._filter_revealer.set_reveal_child(button.get_active())
+
+    def _on_filters_shown(self, revealer: Gtk.Revealer, _parameter: object) -> None:
+        if revealer.get_reveal_child():
             self._sync_nsfw_toggle()
 
     def _on_sorting_changed(self, _dropdown: Gtk.DropDown, _parameter: object) -> None:
@@ -788,8 +893,17 @@ class BrowseDialog(Adw.Dialog):
     def _on_provider_changed(self, *_arguments: object) -> None:
         self._sync_provider_controls()
 
+    def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
+        self._sync_motionbgs_mode()
+
     def _on_mode_changed(self, *_arguments: object) -> None:
         self._genre_row.set_visible(MODES[self._mode.get_selected()][0] == "genre")
+
+    def _sync_motionbgs_mode(self) -> None:
+        searching = bool(self._entry.get_text().strip())
+        self._mode.set_sensitive(not searching)
+        self._genre.set_sensitive(not searching)
+        self._motionbgs_hint.set_visible(searching)
 
     def _sync_provider_controls(self) -> None:
         """Show only the filters the selected provider actually understands."""
@@ -798,6 +912,7 @@ class BrowseDialog(Adw.Dialog):
         self._motionbgs_filters.set_visible(not is_wallhaven)
         if not is_wallhaven:
             self._on_mode_changed()
+        self._sync_motionbgs_mode()
         self._entry.set_placeholder_text("Search Wallhaven" if is_wallhaven else "Search MotionBGS")
 
     def _read_filters(self) -> browse.Filters:
@@ -918,6 +1033,7 @@ class BrowseDialog(Adw.Dialog):
         if not append:
             self._clear()
             self._shown.clear()
+            self._capped = False
 
         # Asked once per page rather than once per card, and safe to touch from
         # the main loop because `Browser.search` warmed it on the worker that
@@ -932,6 +1048,10 @@ class BrowseDialog(Adw.Dialog):
             # whenever the site reorders between two requests.
             if candidate.identifier in self._shown:
                 continue
+            if len(self._cards) >= MAX_RETAINED_RESULTS:
+                self._capped = True
+                self._has_next = False
+                break
             self._shown.add(candidate.identifier)
             card = _CandidateCard(
                 candidate, self._on_download, self._open_detail, self._on_pick_changed
@@ -940,8 +1060,11 @@ class BrowseDialog(Adw.Dialog):
                 card.mark_downloaded()
             self._cards.append(card)
             self._flow.append(card)
-            self._loader.request(candidate, self._on_preview)
             added += 1
+
+        if len(self._cards) >= MAX_RETAINED_RESULTS and result.has_next:
+            self._capped = True
+            self._has_next = False
 
         if not self._cards:
             self._stack.set_visible_child_name("empty")
@@ -951,6 +1074,7 @@ class BrowseDialog(Adw.Dialog):
             self._stack.set_visible_child_name("results")
 
         self._summary.set_label(self._describe(result))
+        GLib.idle_add(self._refresh_previews)
         if append and added == 0 and result.has_next:
             # Every result on this page was already shown. Asking for the next
             # one immediately would spin through the whole catalogue at scroll
@@ -964,7 +1088,10 @@ class BrowseDialog(Adw.Dialog):
 
     def _describe(self, result: SearchResult) -> str:
         shown = len(self._cards)
-        parts = [f"{shown} result{'' if shown == 1 else 's'}"]
+        if self._capped:
+            parts = [f"showing the first {shown} results"]
+        else:
+            parts = [f"{shown} result{'' if shown == 1 else 's'}"]
         if result.total_hint:
             parts.append(f"of about {result.total_hint}")
         if result.dropped:
@@ -978,7 +1105,41 @@ class BrowseDialog(Adw.Dialog):
     # -- loading more as the grid is scrolled ------------------------------
 
     def _on_scrolled(self, _adjustment: Gtk.Adjustment) -> None:
+        self._refresh_previews()
         self._maybe_load_more()
+
+    def _refresh_previews(self) -> bool:
+        """Keep only a viewport-sized, distance-ordered preview queue."""
+        if self._closed or not self._cards:
+            self._loader.prioritize((), self._on_preview)
+            return GLib.SOURCE_REMOVE
+        adjustment = self._scroller.get_vadjustment()
+        value = adjustment.get_value()
+        page_size = adjustment.get_page_size()
+        upper = adjustment.get_upper()
+        if page_size <= 1.0 or upper <= 1.0:
+            nearby = [
+                (card.candidate, float(index))
+                for index, card in enumerate(self._cards[:PREVIEW_FALLBACK_CARDS])
+            ]
+        else:
+            start = max(0.0, value - page_size * PREVIEW_LOOKAHEAD_SCREENS)
+            end = value + page_size * (1.0 + PREVIEW_LOOKAHEAD_SCREENS)
+            centre = value + page_size / 2.0
+            nearby = []
+            for card in self._cards:
+                child = card.get_parent()
+                if child is None:
+                    continue
+                allocation = child.get_allocation()
+                top = float(allocation.y)
+                bottom = top + float(allocation.height)
+                if bottom < start or top > end:
+                    continue
+                priority = abs((top + bottom) / 2.0 - centre)
+                nearby.append((card.candidate, priority))
+        self._loader.prioritize(nearby, self._on_preview)
+        return GLib.SOURCE_REMOVE
 
     def _maybe_load_more(self) -> bool:
         """Ask for the next page when the end of this one comes into view.
@@ -1000,6 +1161,7 @@ class BrowseDialog(Adw.Dialog):
         return GLib.SOURCE_REMOVE
 
     def _clear(self) -> None:
+        self._loader.prioritize((), self._on_preview)
         for card in self._cards:
             self._flow.remove(card)
         self._cards.clear()

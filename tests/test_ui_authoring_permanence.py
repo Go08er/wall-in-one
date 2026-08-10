@@ -86,6 +86,15 @@ def _put_scroll_at(scroller: Gtk.ScrolledWindow, value: float) -> None:
     scroller.get_vadjustment().configure(value, 0.0, 200.0, 1.0, 10.0, 20.0)
 
 
+def _child_count(widget: Gtk.Widget) -> int:
+    count = 0
+    child = widget.get_first_child()
+    while child is not None:
+        count += 1
+        child = child.get_next_sibling()
+    return count
+
+
 def test_playlist_entry_edit_diffs_widgets_and_keeps_interaction_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +156,29 @@ def test_playlist_refresh_does_not_replace_focused_search(
         assert root.get_focus() is focused_widget
     root.set_child(None)
     root.destroy()
+    session.shutdown()
+
+
+def test_cancelled_playlist_drag_removes_the_animated_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    original_count = _child_count(page._order_flow)
+
+    page._show_drop_gap(1, "")
+    gap = page._drop_gap
+    assert gap is not None
+    assert _child_count(page._order_flow) == original_count + 1
+
+    card = page._entry_cards["first"]
+    assert isinstance(card, playlists_page._MediaCard)
+    card._drag_cancel(None, None, None)  # type: ignore[arg-type]
+
+    assert page._drop_gap is None
+    assert _child_count(page._order_flow) == original_count
     session.shutdown()
 
 

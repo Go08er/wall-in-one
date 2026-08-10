@@ -359,15 +359,20 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("palette-failure");
     let script = root.join("selective-failure");
-    fs::write(&script, "#!/bin/sh\n[ \"$2\" != color-scheme-set ]\n").unwrap();
+    let mut executable = fs::File::create(&script).unwrap();
+    executable
+        .write_all(b"#!/bin/sh\n[ \"$2\" != color-scheme-set ]\n")
+        .unwrap();
+    executable.sync_all().unwrap();
+    drop(executable);
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    let parsed: Config = toml::from_str(&config(&script, &script, false)).unwrap();
+    let parsed: Config = toml::from_str(&config(&script, Path::new("/bin/true"), false)).unwrap();
     let entry = parsed.playlists[0].entries[0].clone();
     let mut driver = SystemDriver::new(parsed.renderer.clone());
 
     let error = driver.apply(&entry, "", &parsed.settings).unwrap_err();
 
-    assert!(error.contains("noctalia exited"));
+    assert!(error.contains("noctalia exited"), "unexpected error: {error}");
     fs::remove_dir_all(root).unwrap();
 }
 

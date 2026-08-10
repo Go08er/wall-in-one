@@ -1,12 +1,14 @@
 """Command line entry point.
 
-Four modes:
+Five modes:
 
 * no arguments -- launch the GUI
 * ``--service`` -- legacy Python compatibility service for installations that
   predate ``wall-in-one-service``
 * ``ctl <verb>`` -- talk to a running instance (this is what the Noctalia
   plugin uses; every plugin control is one ``runAsync`` of a verb)
+* ``--write-config`` -- compile authoring state for the Rust service without
+  importing GTK or opening a window
 * maintenance flags such as ``--install-theme-template``
 
 The GTK import is deliberately deferred so that ``ctl`` and the maintenance
@@ -100,6 +102,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "settings",
         ),
         help="present the GUI on one workflow page",
+    )
+    parser.add_argument(
+        "--write-config",
+        action="store_true",
+        help="compile the resolved runtime config without opening the GUI",
     )
 
     maintenance = parser.add_argument_group("Noctalia integration")
@@ -206,6 +213,26 @@ def _run_maintenance(options: argparse.Namespace) -> int | None:
     return None
 
 
+def _write_runtime_config() -> int:
+    """Compile authoring state for Rust without constructing a GTK application."""
+    from wall_in_one import config, runtime_config
+    from wall_in_one.session import Session
+
+    settings = config.load()
+    session = Session(settings)
+    try:
+        session.refresh()
+        changed = runtime_config.update(settings, session)
+    except runtime_config.RuntimeConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    finally:
+        session.shutdown()
+    state = "wrote" if changed else "already current"
+    print(f"{state}: {paths.runtime_config_path()}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     options = parser.parse_args(argv)
@@ -215,6 +242,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         words: list[str] = options.argument
         return client.dispatch(options.verb, " ".join(words) if words else None)
+
+    if options.write_config:
+        return _write_runtime_config()
 
     maintenance = _run_maintenance(options)
     if maintenance is not None:

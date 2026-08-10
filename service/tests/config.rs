@@ -88,6 +88,7 @@ fn wrong_schema_is_refused() {
     fs::remove_file(path).unwrap();
     assert!(matches!(error, ConfigError::Invalid(_)));
     assert!(error.to_string().contains("expected 2"));
+    assert!(error.to_string().contains("wall-in-one --write-config"));
 }
 
 #[test]

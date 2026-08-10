@@ -1,13 +1,39 @@
 from __future__ import annotations
 
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from wall_in_one import config, runtime_config
 from wall_in_one.library import displays, pairings, playlists, schedules
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
+
+
+def test_write_config_upgrades_v1_without_importing_the_gui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one import cli, paths
+
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "wallpaper.png").write_bytes(b"fixture")
+    config.save(config.Settings(roots=(media,), scan_workshop=False))
+    target = paths.runtime_config_path()
+    target.parent.mkdir(parents=True)
+    target.write_text('schema_version = 1\nupgrade_fixture = "old"\n')
+    monkeypatch.delitem(sys.modules, "wall_in_one.ui.app", raising=False)
+
+    assert cli.main(["--write-config"]) == 0
+
+    document = tomllib.loads(target.read_text())
+    assert document["schema_version"] == 2
+    assert "upgrade_fixture" not in document
+    assert document["playlists"][0]["entries"][0]["still"] == str(media / "wallpaper.png")
+    assert "wall_in_one.ui.app" not in sys.modules
 
 
 def _session(

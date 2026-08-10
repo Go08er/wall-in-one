@@ -372,7 +372,10 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
 
     let error = driver.apply(&entry, "", &parsed.settings).unwrap_err();
 
-    assert!(error.contains("noctalia exited"), "unexpected error: {error}");
+    assert!(
+        error.contains("noctalia exited"),
+        "unexpected error: {error}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

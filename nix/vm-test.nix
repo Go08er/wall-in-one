@@ -78,6 +78,30 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds(as_user("systemctl --user is-active noctalia.service"), timeout=30)
     machine.wait_for_file("${runtimeDir}/wall-in-one-runtime.sock")
 
+    with subtest("a v1 runtime config is regenerated headlessly during upgrade"):
+        machine.succeed(
+            "grep -Fx 'schema_version = 2' ${home}/.local/state/wall-in-one/runtime.toml"
+        )
+        machine.fail("grep -F 'upgrade_fixture' ${home}/.local/state/wall-in-one/runtime.toml")
+        assert "dev.goober.WallInOne" not in niri("windows")
+        machine.wait_until_succeeds(
+            as_user(
+                "${app} ctl status | ${lib.getExe pkgs.jq} "
+                "-e '.playlist_id == \"day\" and .last_error == \"\"'"
+            ),
+            timeout=20,
+        )
+        machine.wait_for_file("${driverLog}")
+        upgrade_pid = machine.succeed(
+            as_user("systemctl --user show -p MainPID --value wall-in-one.service")
+        ).strip()
+        applications = machine.succeed("cat ${driverLog}").splitlines()
+        assert applications, applications
+        for application in applications:
+            parent, command = application.split("\t", 1)
+            assert parent == upgrade_pid, (parent, upgrade_pid, command)
+            assert command.startswith("msg wallpaper-set "), command
+
     with subtest("headless service owns a responsive socket"):
         machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.cycle_enabled == true'"))
         service_pid = machine.succeed(

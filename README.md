@@ -122,9 +122,12 @@ runtime socket. Start the packaged service with:
 $ wall-in-one-service
 ```
 
-Run `wall-in-one` once to configure a library and produce the first runtime
-file. The service deliberately refuses a missing or unknown schema rather than
-guessing. Opening and closing `wall-in-one` later has no effect on rotation.
+`wall-in-one --write-config` performs the same compilation without importing
+GTK or opening a window. The packaged user unit runs it before every service
+start, so an upgrade regenerates an older schema without waiting for somebody
+to open the GUI. The service itself still refuses a missing or unknown schema
+rather than guessing or becoming a second writer. Opening and closing
+`wall-in-one` later has no effect on rotation.
 The retained `wall-in-one --service` is a compatibility fallback during this
 transition, not the packaged unit's implementation. Stop the Rust runtime
 deliberately with `wall-in-one ctl quit`.
@@ -136,16 +139,16 @@ the service with the graphical session:
 $ systemctl --user enable --now wall-in-one.service
 ```
 
-The unit starts the runtime with `--wait-for-config`. Before the app's first
-scan it waits silently, without creating a socket or filling the journal; once
-the atomic document appears it starts normally. Invalid bytes still fail
-loudly, because waiting forever on a present but broken contract would hide an
-app/runtime version mismatch. A deliberate `ctl quit` is a clean exit and is
-not restarted. The checked-in unit uses the bare `wall-in-one-service` command
-so it remains useful outside Nix; the Nix package rewrites `ExecStart` to its
-wrapped store path.
+The unit first runs `wall-in-one --write-config`, then starts the runtime with
+`--wait-for-config`. An outdated document is therefore atomically replaced by
+the only component allowed to write it; malformed authoring data or an invalid
+generated document still fails loudly. The wait flag remains useful if the
+document disappears between those two steps. A deliberate `ctl quit` is a
+clean exit and is not restarted. The checked-in unit uses bare commands so it
+remains useful outside Nix; the Nix package rewrites both to wrapped store
+paths.
 If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
-`wall-in-one-service` is on the user manager's `PATH`, then run
+both `wall-in-one` and `wall-in-one-service` are on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.
 
 ### Test it away from your desktop

@@ -85,12 +85,12 @@ It ships in the app's repository and Nix package; it is not a separate product.
 service validates*, rather than the service sniffing for an installed app —
 same protection, still testable.
 
-### Schema 1 is strict TOML
+### Schema 2 is strict TOML
 
 The resolved runtime document is TOML, documented in
 `docs/runtime-config.md`. TOML makes the standalone contract test genuinely
 standalone: a person can read and hand-write it without the Python app or a
-serializer, while both sides have bounded parsers. Schema 1 rejects unknown
+serializer, while both sides have bounded parsers. Schema 2 rejects unknown
 fields as well as unknown versions, so mismatched app and service builds fail
 out loud instead of silently ignoring a renderer setting.
 
@@ -116,6 +116,13 @@ The systemd unit adds `--wait-for-config`: a first installation quietly polls
 for the app's initial atomic document instead of failing into a five-second
 journal loop. This mode waits only for absence. A present but invalid document
 is still a hard error and the service's schema/version refusal remains visible.
+
+The unit also runs `wall-in-one --write-config` as `ExecStartPre`. Schema
+upgrades must not depend on a human opening GTK: the headless command loads the
+app-owned settings, library and authoring stores, compiles the current contract
+atomically, and exits before Rust starts. This preserves both invariants: the
+Python app remains the only configuration writer, and the service continues to
+refuse unknown bytes rather than attempting migrations itself.
 
 An ordinary Python GUI owns no cycle or schedule timer. Only the explicit
 legacy `--service` process may create those compatibility timers, and even it

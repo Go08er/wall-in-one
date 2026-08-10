@@ -133,6 +133,8 @@
             substituteInPlace $out/share/applications/${applicationId}.desktop \
               --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
             substituteInPlace $out/share/systemd/user/wall-in-one.service \
+              --replace-fail "ExecStartPre=wall-in-one" \
+              "ExecStartPre=$out/bin/wall-in-one" \
               --replace-fail "ExecStart=wall-in-one-service" \
               "ExecStart=$out/bin/wall-in-one-service"
           '';
@@ -216,6 +218,7 @@
                     -o "rendered-$size.png"
                 done
                 unit=${wall-in-one}/share/systemd/user/wall-in-one.service
+                grep -F 'ExecStartPre=${wall-in-one}/bin/wall-in-one --write-config' "$unit"
                 grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service --wait-for-config' "$unit"
                 test -x ${wall-in-one}/bin/wall-in-one-service
                 touch $out

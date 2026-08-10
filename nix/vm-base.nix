@@ -14,8 +14,6 @@ let
   home = "/home/${user}";
   mediaDir = "${home}/Pictures/Wallpapers";
   runtimeDir = "/run/user/1000";
-  runtimeNoctalia =
-    if noctaliaProbe == null then lib.getExe pkgs.noctalia else "${noctaliaProbe}/bin/noctalia";
 
   appSettings = pkgs.writeText "wall-in-one-vm-settings.toml" ''
     roots = ["${mediaDir}"]
@@ -75,56 +73,12 @@ let
     }
   );
 
-  runtimeConfig = pkgs.writeText "wall-in-one-vm-runtime.toml" ''
-    schema_version = 2
-    default_playlist = "day"
-
-    [settings]
-    cycle_interval_seconds = 5
-    cycle_enabled = true
-    shuffle = false
-    dynamics_enabled = true
-
-    [renderer]
-    noctalia_program = "${runtimeNoctalia}"
-    niri_program = "${lib.getExe pkgs.niri}"
-    mpvpaper_program = "${lib.getExe pkgs.mpvpaper}"
-    linux_wallpaperengine_program = "${lib.getExe pkgs.linux-wallpaperengine}"
-    own_scene_renderer = false
-    layer = "background"
-    video_when_hidden = "pause"
-    video_hardware_decode = true
-    video_muted = true
-    video_volume = 0
-    scene_fps = 30
-    scene_muted = true
-    scene_volume = 0
-    scene_pause_when_covered = true
-    scene_scaling = ""
-    scene_clamp = ""
-
-    [[playlists]]
-    id = "day"
-    name = "Day samples"
-    [[playlists.entries]]
-    id = "day-grid"
-    kind = "still"
-    still = "${mediaDir}/colour-grid.png"
-    palette = { kind = "keep", mode = "keep" }
-    [[playlists.entries]]
-    id = "day-bars"
-    kind = "still"
-    still = "${mediaDir}/colour-bars.png"
-    palette = { kind = "keep", mode = "keep" }
-
-    [[playlists]]
-    id = "night"
-    name = "Night samples"
-    [[playlists.entries]]
-    id = "night-grid"
-    kind = "still"
-    still = "${mediaDir}/night-grid.png"
-    palette = { kind = "keep", mode = "keep" }
+  # Deliberately the previously shipped contract. ExecStartPre must replace
+  # these bytes from the authoring stores before schema-2 Rust is allowed to
+  # start; otherwise this VM reproduces the real upgrade outage.
+  runtimeConfig = pkgs.writeText "wall-in-one-vm-runtime-v1.toml" ''
+    schema_version = 1
+    upgrade_fixture = "must be replaced headlessly"
   '';
 
   noctaliaSettings = pkgs.writeText "wall-in-one-vm-noctalia.toml" ''
@@ -291,8 +245,9 @@ in
     # this desktop is specifically a Noctalia integration environment. Put the
     # shell CLI on the service PATH so playlist changes exercise that boundary
     # instead of silently degrading to wallpaper-only application.
-    path = [ pkgs.noctalia ];
+    path = [ (if noctaliaProbe == null then pkgs.noctalia else noctaliaProbe) ];
     serviceConfig = {
+      ExecStartPre = "${wallInOnePackage}/bin/wall-in-one --write-config";
       ExecStart = "${wallInOnePackage}/bin/wall-in-one-service --wait-for-config";
       Restart = "on-failure";
       RestartSec = 5;

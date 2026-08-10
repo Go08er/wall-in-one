@@ -201,7 +201,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.schema_version != SCHEMA_VERSION {
             return invalid(format!(
-                "schema_version {} is unsupported; expected {SCHEMA_VERSION}",
+                "schema_version {} is unsupported; expected {SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
                 self.schema_version
             ));
         }

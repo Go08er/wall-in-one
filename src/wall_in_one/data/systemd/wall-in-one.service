@@ -7,6 +7,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+ExecStartPre=wall-in-one --write-config
 ExecStart=wall-in-one-service --wait-for-config
 Restart=on-failure
 RestartSec=5

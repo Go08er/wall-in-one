@@ -101,7 +101,7 @@ pkgs.testers.runNixOSTest {
         )
 
     with subtest("every workflow page renders"):
-        for page in ("media", "pairings", "playlists", "schedules"):
+        for page in ("browse", "media", "playlists", "schedules", "settings"):
             assert ctl(f"open {page}") == f"opened {page}"
             machine.wait_until_succeeds(
                 as_user(

@@ -168,10 +168,10 @@ class PalettePolicy:
     """Which colours a wallpaper asks Noctalia for, and in which mode.
 
     `kind` is `ADAPTIVE`, `KEEP`, or one of Noctalia's own palette sources --
-    `builtin`, `community`, `custom` -- with `name` naming one within it. The
-    wire form is `kind` or `kind:name`, which is what keeps a record readable
-    and lets a source Noctalia adds later survive a round trip through a build
-    that predates it.
+    `builtin`, `community`, `custom`. For adaptive, `name` optionally pins one
+    generator; for a named source it names the palette. The wire form is
+    `kind` or `kind:name`, which keeps a record readable and lets a source
+    Noctalia adds later survive a round trip through an older build.
     """
 
     kind: str = ADAPTIVE

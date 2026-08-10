@@ -58,14 +58,16 @@ It can also be built on its own:
 $ nix build -L .#checks.x86_64-linux.vm-test
 ```
 
-The result contains PNG screenshots named `wall-in-one-media.png`,
-`wall-in-one-pairings.png`, `wall-in-one-playlists.png`, and
-`wall-in-one-schedules.png`. The test also verifies that:
+The result contains PNG screenshots named `wall-in-one-browse.png`,
+`wall-in-one-media.png`, `wall-in-one-playlists.png`,
+`wall-in-one-schedules.png`, and `wall-in-one-settings.png`. The test also
+verifies that:
 
 - niri exposes a visible output and Noctalia loads the companion plugin;
 - `wall-in-one-service` starts from a handwritten resolved config and owns a
   responsive runtime socket without importing Python;
-- Media, Pairings, Playlists, and Display schedules open in the running app;
+- Browse, Media/Pairings, Playlists, Schedules, and Settings open in the
+  running app;
 - closing the GUI leaves the same service process alive and rotation advances;
 - an isolated Noctalia probe observes exactly one `wallpaper-set` for that
   advance and records the Rust service as its parent, proving the GUI did not
@@ -86,5 +88,5 @@ installed, no Workshop content is copied into it, and no Wallpaper Engine scene
 is available to render. The app therefore reports an empty scene library and
 degrades normally. The VM proves the application/service lifecycle, ordinary
 still and video library wiring, Noctalia/plugin integration, schedule control,
-and the four GTK pages. It does **not** prove GPU rendering, Wallpaper Engine
+and the five GTK tabs. It does **not** prove GPU rendering, Wallpaper Engine
 scene playback, Steam integration, or multi-monitor behavior.

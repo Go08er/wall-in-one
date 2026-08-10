@@ -183,6 +183,17 @@ hot-plugging can change them while the GTK authoring app is closed. If niri
 cannot provide at least one connector, the service refuses to open a preview
 window and leaves the already-applied paired still visible.
 
+### Adaptive generators belong to pairings
+
+An adaptive palette policy may name one of Noctalia's ten generators. The old
+bare `adaptive` value remains valid and follows the application default;
+`adaptive:<scheme>` pins the choice for that media item. Preview generation is
+lazy and cached by representative still plus scheme, so opening an editor does
+not run ten CLI calls on the GTK thread. Community and custom palette files are
+previewed directly. Built-in palette colours remain blank until Noctalia
+exposes a reliable read API; invented swatches would be worse than an honest
+unknown, and applying a palette merely to discover it would mutate the desktop.
+
 **Rejected: dropping GTK from the Python service** (~25 MB, a 3x win for a
 small change). Worth knowing as a fallback, but the user wants an always-on
 component that is properly cheap, and the conf split makes the Rust version

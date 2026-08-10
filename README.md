@@ -151,7 +151,7 @@ If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 ### Test it away from your desktop
 
 The flake includes a bootable niri + Noctalia development desktop and an
-automated NixOS test that saves screenshots of all four workflow pages:
+automated NixOS test that saves screenshots of all five workflow tabs:
 
 ```console
 $ nix run .#vm
@@ -166,27 +166,29 @@ software-rendering/Steam/multi-monitor limits.
 
 ## Using it
 
-The window follows the same path as the data: **Media -> Pairings -> Playlists
--> Display schedules**. The navigation bar at the bottom switches between four real
-pages:
+The window follows the same path as the data: **Browse -> Media/Pairings ->
+Playlists -> Schedules -> Settings**. The bottom navigation switches between
+five real pages:
 
-- **Media** is the complete crafting library, independent of what is currently
-  playing. Clicking a tile updates and plays the visible one-entry **Quick
-  choice** playlist; there is no separate direct-wallpaper playback path.
-  Search, kind and sort narrow the library; the tile menu handles removal.
-- **Pairings** gives every library item a full-page editor for its representative
-  still and colour policy. Adaptive colours are generated from that still in
-  the background, while installed community and custom palettes show their
-  stored colour swatches. Built-in palettes can be selected, but Noctalia does
-  not expose their colours without applying them, so the app says so instead of
-  inventing a preview.
+- **Browse** searches and downloads from Wallhaven and MotionBGS without
+  leaving the main window.
+- **Media/Pairings** is the complete crafting library, independent of what is
+  currently playing. Left-clicking a tile opens that item's full-size pairing
+  editor; right-clicking plays it through the visible one-entry **Quick choice**
+  playlist. Adaptive colours offer all ten Noctalia generators with real,
+  lazily cached previews. Community and custom palettes show their stored
+  colours. Built-ins remain honestly unpreviewed because Noctalia does not
+  expose their colours without applying them.
 - **Playlists** creates, renames and deletes ordered rotations. Add media from
-  the searchable library, remove it, move it earlier or later, and switch to it
-  immediately; the entry's stable id is not changed by reordering.
-- **Display schedules** switches the active playlist, resumes calendar control,
-  chooses the default playlist, assigns a playlist to a connector, and edits
-  month, weekday and local-time overrides in place. Rules lower in the list
-  have higher priority: the last matching rule wins.
+  the searchable thumbnail pane by clicking or dragging, and drag cards within
+  the playlist to reorder them. The entry's stable id is not changed and the
+  same pairing may appear more than once.
+- **Schedules** switches the active playlist, resumes calendar control, chooses
+  the default playlist, assigns a playlist to a connector, and edits months,
+  weekdays and local-time windows with visual selectors. Rules lower in the
+  list have higher priority: the last matching rule wins.
+- **Settings** keeps library roots, playback, providers, colour and appearance
+  controls visible as part of the main workflow rather than another window.
 
 [`docs/library.md`](docs/library.md) is the detail: multiple library folders,
 how a video finds the still that stands behind it, how search matches, what
@@ -245,7 +247,7 @@ not been shown to do.
 ## Finding wallpapers
 
 The search button in the header -- or **Find wallpapers** in the menu, or
-`Ctrl+B` -- opens a dialog that searches [Wallhaven](https://wallhaven.cc) for
+`Ctrl+B` -- opens the Browse tab, which searches [Wallhaven](https://wallhaven.cc) for
 stills and [MotionBGS](https://motionbgs.com) for video wallpapers. Downloads
 land under the first library root, and the library is rescanned when one
 finishes, so the file shows up in the grid without being asked for.
@@ -351,7 +353,7 @@ $ wall-in-one ctl playlist-use Evening
 $ wall-in-one ctl schedule-follow
 $ wall-in-one ctl playlist-delete Evening
 $ wall-in-one ctl schedule
-$ wall-in-one ctl open media|pairings|playlists|schedules|displays
+$ wall-in-one ctl open browse|media|pairings|playlists|schedules|displays|settings
 $ wall-in-one ctl schedule-add Evening days=sat,sun from=22:00 to=06:00
 $ wall-in-one ctl schedule-remove <rule-id>
 $ wall-in-one ctl quit
@@ -380,8 +382,8 @@ the app when only the Rust service is running. The
 `displays` spelling is an alias for the Display schedules page, so a shell or
 panel integration does not have to know that both concepts share one screen.
 
-`providers`, `search` and `download` reach the same provider code the browse
-dialog uses, so a wallpaper can be found and pulled into the library without
+`providers`, `search` and `download` reach the same provider code the Browse
+tab uses, so a wallpaper can be found and pulled into the library without
 opening the window. `providers` and `search` print tab-separated rows with `#`
 comment lines around them, which is what `cut -f1` and `while read` already
 understand; the identifier comes first because it is the field `download` takes
@@ -424,7 +426,7 @@ uses the target display's physical mode (or a 2560x1440 fallback), because the
 engine's default window produces a small portrait screenshot. Managed scene
 stills with the old portrait/wrong-resolution shape are regenerated
 automatically and atomically; custom still choices are never overwritten. A
-manual **Regenerate** control is also available on a scene's Pairings page.
+manual **Regenerate** control is also available in a scene's pairing editor.
 
 **Play Wallpaper Engine scenes** is on by default and is visible under
 **Settings -> Playback**. The engine is single-instance per output and other
@@ -459,7 +461,7 @@ react by launching it instead of reporting a failure.
 
 ## Settings
 
-`~/.config/wall-in-one/settings.toml`, written by the Settings dialog and safe
+`~/.config/wall-in-one/settings.toml`, written by the Settings tab and safe
 to edit by hand. Anything out of range is clamped rather than rejected: a bad
 settings file should degrade to something usable, not stop the app starting.
 

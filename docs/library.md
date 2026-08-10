@@ -37,13 +37,13 @@ way to say so.
 Three properties of the list are worth knowing:
 
 - **Order is kept, and the first one is special.** Downloads and generated
-  stills land under the first root. It is marked in the settings dialogue with
+  stills land under the first root. It is marked in the Settings tab with
   a download icon.
 - **Duplicates are dropped.** Paths are expanded and made absolute first, so
   `~/Pictures` and `/home/you/Pictures` count as one entry rather than putting
   every wallpaper in it into the rotation twice.
 - **A root that is not there right now is kept, not removed.** An unmounted
-  drive shows in the settings dialogue as `-- not there right now` and comes
+  drive shows in the Settings tab as `-- not there right now` and comes
   back when the drive does.
 
 Changing the list rescans immediately; nothing else notices otherwise, and a

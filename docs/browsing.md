@@ -2,7 +2,8 @@
 
 Wall-in-One can pull wallpapers from two sites: **Wallhaven** for stills and
 **MotionBGS** for video wallpapers. The search button in the window header, and
-**Find wallpapers** in the menu, both open the same dialog.
+**Browse** in the bottom navigation and **Find wallpapers** in the menu both
+open the same main-window tab.
 
 The two sites are not alike, and the difference shows up everywhere below.
 Wallhaven has a documented JSON API, so the work is in refusing to believe the
@@ -26,7 +27,7 @@ the next search, and two searches at once would only fight over the cache.
 Each answer is capped at 48 results per page whatever the site returns, and each
 provider keeps a small in-process cache of recent pages with a fifteen-minute
 expiry. Paging back to somewhere you have already been is answered from that
-cache rather than re-fetched, and the summary line at the bottom of the dialog
+cache rather than re-fetched, and the summary line at the bottom of the Browse tab
 says `cached` when it was.
 
 That summary line is worth reading:
@@ -47,11 +48,11 @@ what the code branches on; the message is for you.
 
 Previews come from the sites' own CDNs, fetched by up to four workers, bounded
 at 4 MB each with a ten-second timeout, and cached by URL for the life of the
-dialog. MotionBGS serves WebP, which this closure's GdkPixbuf cannot decode, so
+tab. MotionBGS serves WebP, which this closure's GdkPixbuf cannot decode, so
 previews are transcoded through ffmpeg before they reach GTK. Without ffmpeg
 installed those cards keep a blank frame; the download button still works.
 
-The dialog is a single instance. Pressing the search button again while it is
+The Browse tab is a single instance. Pressing the search button again while it is
 open re-presents the one that exists, keeping its results and its preview cache
 instead of throwing away a page of downloads. Closing it does not cancel a
 download in flight: the provider stages bytes under a temporary name and links
@@ -61,7 +62,7 @@ finished one is already in the library.
 ## Browsing without the window
 
 The same three operations are on the control socket, so a running instance can
-be searched and downloaded from without opening the dialog:
+be searched and downloaded from without opening the window:
 
 ```
 wall-in-one ctl providers
@@ -72,7 +73,7 @@ wall-in-one ctl download <provider> <identifier> [hd|4k]
 The query is everything after the provider name, spaces and all, so quoting it
 is optional: `ctl search wallhaven aurora over the fjord` is one query, not four
 arguments. The variant on `download` is MotionBGS's quality; left off, the
-provider takes the best it is offered, which is what the dialog's download
+provider takes the best it is offered, which is what the Browse tab's download
 button does too.
 
 Output is **one row per line with tab-separated fields**, and everything that is
@@ -96,7 +97,7 @@ $ wall-in-one ctl download wallhaven o5jvv1
 downloaded wallhaven-o5jvv1.jpg (2.4 MB) -> /home/you/Pictures/Wallpapers/Wall-in-One/Wallhaven/wallhaven-o5jvv1.jpg
 ```
 
-The summary comment is word-for-word the one under the dialog's grid, including
+The summary comment is word-for-word the one under the Browse grid, including
 `unreadable` and `cached`. An empty field prints as `-`, and a result with no
 title prints its identifier instead, exactly as the cards do. `ctl providers`
 prints `name, media, usable, limitations` the same way, which is how a script
@@ -105,30 +106,30 @@ finds out that NSFW results are unreachable before asking for them.
 Only the first page is reachable: the protocol carries one argument per request,
 and spending it on a page number would cost the query its spaces. There is no
 filter surface either — categories, purity, sorting and MotionBGS's browse modes
-are the dialog's, not the socket's.
+are the Browse tab's, not the socket's.
 
 **Nothing blocks the window.** The control server answers from the GTK main
 loop, so a handler that waited for a website would freeze every frame the app
 draws for as long as the site took. `search` and `download` therefore answer
 *later*: the verb hands its work to a single-worker pool, returns without a
 response, and the reply is written when the worker comes back through
-`GLib.idle_add` — the same arrangement the dialog uses, for the same two calls.
+`GLib.idle_add` — the same arrangement the Browse tab uses, for the same two calls.
 The client's connection simply stays open until then, which costs one file
 descriptor and keeps `ctl search` an ordinary blocking command that prints its
 results. `ctl` allows a minute for a search and ten for a download, against five
 seconds for every other verb.
 
 A failure comes back on stderr with a non-zero exit, reading `kind: message` —
-the same sentence the dialog toasts. The kind also travels as its own field in
+the same sentence the Browse tab toasts. The kind also travels as its own field in
 the reply, so a client can branch on `rate-limit` without parsing the English
 next to it. An unreachable network is a failed response, never a traceback and
 never a dead app: whatever the transport raises is caught on the worker and
 turned into one.
 
-Downloads from here are indistinguishable from downloads from the dialog. They
+Downloads from here are indistinguishable from downloads from the Browse tab. They
 run the provider's own install path, so the directory marker and the per-file
 sidecar come out identical, and they land in the first configured root for the
-same reason the dialog's do. A finished one rescans the library, so the file is
+same reason the Browse tab's do. A finished one rescans the library, so the file is
 in the grid of an open window without being asked for.
 
 ## Driving the library from the socket
@@ -276,7 +277,7 @@ A comma-separated list must round-trip unchanged after normalisation, so
 `1920x1080,` and `01920x1080` are errors rather than filters that quietly become
 something else.
 
-The dialog exposes four of these: sort, categories, rating, and a minimum size
+The Browse tab exposes four of these: sort, categories, rating, and a minimum size
 box that fills in `atleast`. The rest are reachable from `SearchQuery.options`
 in code; there is no settings key or command-line flag for them.
 
@@ -306,7 +307,7 @@ someone else's page.
   slug. Passing `genre` in any other mode is an error, as is passing query text
   in any mode other than `search`.
 
-The dialog's mode dropdown offers Latest, 4K, HD and Genre — `search` is not
+The Browse tab's mode dropdown offers Latest, 4K, HD and Genre — `search` is not
 listed, because typing into the box is what selects it. Whenever the box is
 non-empty the request goes out as a search regardless of the dropdown, since
 MotionBGS rejects a query and a browse mode together. The genre field only

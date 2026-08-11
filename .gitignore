@@ -11,3 +11,10 @@ service/target/
 
 # Agent worktrees, created by the harness for parallel work.
 .claude/
+
+# Engineering records kept on the author's machine, not in the published
+# repository: a decision log, a work tracker, and measured facts about
+# Noctalia and niri. Useful while building this, noise for anyone reading it.
+DECISIONS.md
+TODO.md
+NOTES.local.md

@@ -4,9 +4,8 @@ The library is every wallpaper the app can see, and everything it knows about
 them beyond the pixels: which still stands behind which video, which files are
 ours to delete, and which ones you starred.
 
-This page is the detail behind the README's summary. It is about what the app
-does; [`DESIGN.md`](../DESIGN.md) is about why each decision went that way and
-what it was checked against.
+This page is the detail behind the README's summary: what the app does, the
+limits it enforces, and the behaviour its tests and live use actually check.
 
 ## What counts as a wallpaper
 

@@ -390,7 +390,7 @@ absent — if it is a symlink, not a regular file, larger than 4096 bytes, or if
 its first line is not 1–256 characters of `A-Za-z0-9_-`. A malformed key file
 must not stop the app starting, so Wallhaven simply runs unauthenticated and
 reports that as a limitation, which is what greys out the NSFW checkbox in the
-filter popover and gives it a tooltip saying why.
+inline filter revealer under the search bar and gives it a tooltip saying why.
 
 The key travels as an `X-API-Key` request header. It is never put on a command
 line: the previous implementation shelled out to `curl` and had to pass the key

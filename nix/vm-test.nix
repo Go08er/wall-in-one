@@ -110,9 +110,24 @@ pkgs.testers.runNixOSTest {
         assert int(service_pid) > 1, service_pid
 
     with subtest("companion plugin loads from an isolated path source"):
+        # Deliberately not asserting the entry count. It used to insist on
+        # "(4 entries)", which broke the moment the plugin dropped its Control
+        # Center shortcut in another repository -- a change this repository has
+        # no say in and no reason to track. An exact count here means every
+        # plugin restructure fails the app's own test suite for no defect.
+        #
+        # What is worth pinning is that the plugin loads at all, and that the
+        # one entry the app actually depends on comes up: the singleton service
+        # is what drives `wall-in-one ctl`, so a widget or panel may come and go
+        # but this must not.
         machine.wait_until_succeeds(
             "journalctl -b _SYSTEMD_USER_UNIT=noctalia.service --no-pager "
-            "| grep -F \"loaded plugin 'goober/wall-in-one' (4 entries)\"",
+            "| grep -F \"loaded plugin 'goober/wall-in-one'\"",
+            timeout=60,
+        )
+        machine.wait_until_succeeds(
+            "journalctl -b _SYSTEMD_USER_UNIT=noctalia.service --no-pager "
+            "| grep -F \"started service 'goober/wall-in-one:control'\"",
             timeout=60,
         )
 

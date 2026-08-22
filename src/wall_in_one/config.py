@@ -1,8 +1,9 @@
 """Application settings, persisted as TOML.
 
-Deliberately small and flat. Anything Noctalia already owns -- the palette, the
-theme mode, the wallpaper directory -- is read from Noctalia rather than
-duplicated here, so there is only ever one source of truth.
+Deliberately small and flat. Noctalia remains the source of truth for the live
+palette and theme mode. Library roots are app-owned because downloads and still
+generation need an explicit write destination; Noctalia's path is only a
+first-run suggestion.
 """
 
 from __future__ import annotations
@@ -137,11 +138,10 @@ class Settings:
     #: leave nothing to rotate through -- see `session._rotation`.
     cycle_favourites_only: bool = False
 
-    #: Directories to scan for wallpapers. Empty means "whatever
-    #: `library.scan.default_roots` decides", which follows Noctalia's own
-    #: `wallpaper.directory`. That is the right default and the wrong thing to
-    #: be stuck with: Noctalia has exactly one, so a library spread across two
-    #: places was previously half invisible with no way to say so.
+    #: Directories to scan for wallpapers. Empty means not configured: the GUI
+    #: asks once before it scans, downloads, or generates files.  Noctalia's
+    #: wallpaper directory is offered as an explicit first-run choice rather
+    #: than silently becoming a write destination.
     roots: tuple[Path, ...] = ()
 
     def validated(self) -> Self:
@@ -253,12 +253,12 @@ class Settings:
 def _roots_line(roots: Sequence[Path]) -> str:
     """The `roots` array, written so a person can edit it by hand.
 
-    Empty is written as an empty array with the default spelled out beside it,
+    Empty is written as an empty array with its meaning spelled out beside it,
     rather than omitted: a setting nobody can see is a setting nobody knows
     they have.
     """
     if not roots:
-        return "# empty follows Noctalia's own wallpaper directory\nroots = []"
+        return "# empty means the library folder is not configured\nroots = []"
     # A TOML basic string takes the same escapes a JSON string does, which is
     # what keeps a directory with a quote or a backslash in its name writable.
     inner = ", ".join(json.dumps(str(root)) for root in roots)

@@ -12,7 +12,7 @@ login while still letting the Settings screen open for repair.
 
 | key | meaning | default |
 |---|---|---|
-| `roots` | Folders scanned for wallpapers. Empty follows Noctalia's own `[wallpaper] directory`. The first one receives downloads and generated stills. | `[]` |
+| `roots` | Folders scanned for wallpapers. Empty is unconfigured and triggers the graphical first-run choice; the first chosen root receives downloads and generated stills. | `[]` |
 | `opacity` | Window background opacity; `1.0` is fully opaque. Clamped to a floor of `0.30`, below which the window stops being legible. | `1.0` |
 | `preview_scheme` | Palette generator used when a palette is derived from a wallpaper. One of Noctalia's ten schemes. | `"m3-tonal-spot"` |
 | `follow_noctalia_palette` | Apply Noctalia's palette to the app's own chrome. | `true` |

@@ -65,21 +65,15 @@ def test_an_explicit_root_wins(tmp_path: Path) -> None:
     assert browser(root=tmp_path).download_root() == tmp_path
 
 
-def test_the_root_comes_from_noctalia_when_unset(
+def test_an_unconfigured_root_is_an_error_even_when_noctalia_has_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Downloads land in the directory Noctalia already calls the library."""
+    """Detection feeds the first-run prompt, never a silent write target."""
     monkeypatch.setattr("wall_in_one.library.scan.default_roots", lambda: (tmp_path,))
-    assert browser().download_root() == tmp_path
-
-
-def test_no_root_anywhere_is_an_error_not_a_guess(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Writing to an invented directory would scatter files somewhere the user
-    # never asked for, which is worse than refusing.
-    monkeypatch.setattr("wall_in_one.library.scan.default_roots", tuple)
     with pytest.raises(ProviderError) as caught:
         browser().download_root()
     assert caught.value.kind == "no-root"
+    assert "Settings" in str(caught.value)
 
 
 def test_reconfiguring_roots_retargets_downloads_and_owned_index(tmp_path: Path) -> None:

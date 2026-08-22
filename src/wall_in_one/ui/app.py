@@ -24,7 +24,7 @@ from wall_in_one import config, paths, runtime_config
 from wall_in_one.browse import Browser
 from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
-from wall_in_one.library import favourites, pairings, playlists, schedules
+from wall_in_one.library import favourites, pairings, playlists, scan, schedules
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
@@ -38,14 +38,13 @@ from wall_in_one.wallpaper.applier import Applied, ApplyError
 
 
 def download_root(settings: config.Settings) -> Path | None:
-    """Where a download from the control socket lands, or None to let the browser decide.
+    """Where a download from the control socket lands, or None to refuse it.
 
     The first configured root, because that is the one the user put first --
     which is exactly what `ui.browse_dialog` does with its own `Browser`, and
     the two paths have to agree or the same wallpaper would arrive in different
-    directories depending on which of them asked for it. With none configured
-    the `Browser` asks `library.scan`, which is the directory being read from
-    anyway.
+    directories depending on which of them asked for it. With none configured,
+    Browser reports that Settings needs a choice instead of inferring one.
     """
     configured = settings.roots
     return configured[0] if configured else None
@@ -83,6 +82,11 @@ class Application(Adw.Application):
         self._held = False
         self._settings = config.load()
         self._window: MainWindow | None = None
+        # An unresolved first run is asked once per graphical process. A real
+        # choice persists naturally as the first configured root; dismissing
+        # does not invent a durable "asked" bit and is offered again next run.
+        self._library_root_prompt: Adw.AlertDialog | None = None
+        self._library_root_prompted = False
         self._provider = Gtk.CssProvider()
         self._control: server.SocketServer | None = None
         self._resolved: source.ResolvedPalette | None = None
@@ -185,7 +189,6 @@ class Application(Adw.Application):
             if self._runtime_status is not None:
                 window.show_runtime_status(self._runtime_status)
         self.reload_palette()
-        self.refresh_library()
         assert self._window is not None
         self._window.present()
         self._start_runtime_status_timer()
@@ -196,6 +199,92 @@ class Application(Adw.Application):
             }.get(self._initial_page, self._initial_page)
             self._window.show_page(page)
             self._initial_page = None
+        if self._settings.roots:
+            self.refresh_library()
+        else:
+            self._prompt_for_library_root()
+
+    def _prompt_for_library_root(self) -> None:
+        """Ask before treating any detected directory as our write target."""
+        if (
+            self._window is None
+            or self._settings.roots
+            or self._library_root_prompted
+            or self._library_root_prompt is not None
+        ):
+            return
+        self._library_root_prompted = True
+        suggested = next(iter(scan.default_roots()), None)
+        destination = (
+            f"\n\nSuggested folder:\n{suggested}"
+            if suggested is not None
+            else "\n\nNo wallpaper folder was detected, so choose one manually."
+        )
+        dialog = Adw.AlertDialog(
+            heading="Choose a library folder",
+            body=(
+                "Wall-in-One has not been configured with a wallpaper folder. "
+                "It will not download wallpapers or generate stills until you "
+                f"choose where those files belong.{destination}"
+            ),
+        )
+        dialog.add_response("later", "Not now")
+        dialog.add_response("manual", "Choose folder manually")
+        if suggested is not None:
+            # Keep a long filesystem path in the selectable body rather than
+            # turning it into an enormous button label.
+            dialog.add_response("default", "Use default")
+            dialog.set_response_appearance("default", Adw.ResponseAppearance.SUGGESTED)
+            dialog.set_default_response("default")
+        else:
+            dialog.set_response_appearance("manual", Adw.ResponseAppearance.SUGGESTED)
+            dialog.set_default_response("manual")
+        dialog.set_close_response("later")
+        dialog.connect("response", self._on_library_root_response, suggested)
+        self._library_root_prompt = dialog
+        dialog.present(self._window)
+
+    def _on_library_root_response(
+        self,
+        _dialog: Adw.AlertDialog,
+        response: str,
+        suggested: Path | None,
+    ) -> None:
+        self._library_root_prompt = None
+        if response == "default" and suggested is not None:
+            self._save_initial_library_root(suggested)
+        elif response == "manual":
+            self._choose_initial_library_root()
+
+    def _choose_initial_library_root(self) -> None:
+        if self._window is None:
+            return
+        chooser = Gtk.FileDialog(title="Choose your wallpaper folder", modal=True)
+        chooser.select_folder(self._window, None, self._on_initial_library_root_chosen)
+
+    def _on_initial_library_root_chosen(
+        self,
+        chooser: Gtk.FileDialog,
+        result: Gio.AsyncResult,
+    ) -> None:
+        try:
+            chosen = chooser.select_folder_finish(result)
+        except GLib.Error:
+            return
+        raw = chosen.get_path() if chosen is not None else None
+        if raw is None:
+            self.window_report("That folder is not on this machine's filesystem")
+            return
+        self._save_initial_library_root(Path(raw))
+
+    def _save_initial_library_root(self, root: Path) -> None:
+        """Persist consent before the scan/download/still paths can use it."""
+        try:
+            self.update_settings(roots=(root,))
+        except config.ConfigError as error:
+            self.window_report(f"Library folder was not saved; nothing changed: {error}")
+            return
+        self.window_report(f"Using {root} as the wallpaper library")
 
     def do_shutdown(self) -> None:
         self._stop_palette_monitor()
@@ -984,10 +1073,13 @@ class Application(Adw.Application):
         keeps dropping out of the rotation when dynamics are off, and keeps
         leaving Noctalia's palette derived from whatever was on screen before.
         """
-        # The root the scan actually read from, rather than `download_root`'s
-        # answer: that one is allowed to be None so the Browser can decide for
-        # itself, and a still has to go somewhere `pairing` will look, which
-        # means somewhere the library is read from.
+        # The root the accepted scan actually read from. A still has to go
+        # somewhere `pairing` will look, which means inside that library
+        # snapshot rather than merely beside a configured-but-missing path.
+        # Never turn a discovered-but-unconfirmed Noctalia directory into a
+        # write target.  Only Settings.roots records the first-run choice.
+        if not self._settings.roots:
+            return
         roots = self._session.library.roots
         if not roots:
             return
@@ -995,6 +1087,9 @@ class Application(Adw.Application):
 
     def regenerate_scene_still(self, item: MediaItem) -> bool:
         """Queue an explicit scene recapture; return whether it could start."""
+        if not self._settings.roots:
+            self.window_report("Choose a library folder in Settings before generating stills")
+            return False
         roots = self._session.library.roots
         if not roots or not item.scene:
             return False

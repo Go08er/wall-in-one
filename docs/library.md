@@ -27,11 +27,12 @@ as skipped rather than silently dropped.
 Roots are the folders that get scanned, and they are the `roots` key in the
 settings file -- **Settings -> Library** is the same list with an Add button.
 
-With none listed, the app follows Noctalia's own `[wallpaper] directory`, so
-the two agree about what the library is without configuring it twice. That is
-the right default and the wrong thing to be stuck with: Noctalia has exactly
-one, so a collection spread across two places used to be half invisible with no
-way to say so.
+With none listed, the library is not configured. On first graphical launch the
+app shows the exact directory detected from Noctalia (or the local fallback)
+and asks whether to use it or open a folder chooser. Detection is a suggestion,
+not permission to write: until a root is chosen the scan is empty, downloads
+are refused, and generated stills stay disabled. Choosing either route saves
+the root, so configured users are not asked again.
 
 Three properties of the list are worth knowing:
 

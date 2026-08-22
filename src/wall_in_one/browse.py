@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
-from wall_in_one.library import owned, scan
+from wall_in_one.library import owned
 from wall_in_one.providers import http, registry
 from wall_in_one.providers.base import (
     CandidateDetail,
@@ -238,7 +238,7 @@ class Browser:
             # Walking a large library can take long enough for somebody to
             # change the configured roots. Do that work outside the lock, then
             # publish it only if it still describes the current settings.
-            built = owned.read(roots or scan.default_roots())
+            built = owned.read(roots)
             with self._roots_lock:
                 if generation != self._roots_generation:
                     continue
@@ -296,21 +296,18 @@ class Browser:
     def download_root(self) -> Path:
         """The directory downloads are installed under.
 
-        Noctalia's own wallpaper directory by default, so a download appears in
-        the library -- and in Noctalia -- without the user configuring the same
-        path twice. The provider adds its own `Wall-in-One/<Provider>` beneath
-        this; nothing is written directly here.
+        It must be an explicit user choice. The first-run prompt offers
+        Noctalia's wallpaper directory, but the Browser never adopts that path
+        on its own. The provider adds its own `Wall-in-One/<Provider>` beneath
+        the chosen root; nothing is written directly here.
         """
         with self._roots_lock:
             configured = self._root
         if configured is not None:
             return configured
-        roots = scan.default_roots()
-        if roots:
-            return roots[0]
         raise ProviderError(
             "no-root",
-            "no wallpaper directory is configured, so there is nowhere to download to",
+            "no library folder is configured; choose one in Settings before downloading",
         )
 
     # -- verbs -------------------------------------------------------------

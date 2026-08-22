@@ -223,7 +223,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
 
         self._empty = Adw.StatusPage(
             title="No wallpapers found",
-            description="Nothing under the configured roots. Check Noctalia's wallpaper directory.",
+            description="Nothing under the configured roots. Choose or check them in Settings.",
             icon_name="image-x-generic-symbolic",
         )
 

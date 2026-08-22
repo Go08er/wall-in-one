@@ -572,7 +572,9 @@ def test_an_empty_root_list_survives_the_round_trip(tmp_path: Path) -> None:
     setting nobody knows they have."""
     written = tmp_path / "settings.toml"
     config.save(config.Settings(), written)
-    assert "roots = []" in written.read_text(encoding="utf-8")
+    document = written.read_text(encoding="utf-8")
+    assert "roots = []" in document
+    assert "not configured" in document
     assert config.load(written).roots == ()
 
 

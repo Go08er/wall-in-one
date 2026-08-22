@@ -188,11 +188,11 @@ class Session:
     def refresh(self, roots: Sequence[Path] | None = None) -> Library:
         """Rescan and rebuild the play order, keeping our place if we can.
 
-        With no roots given, the configured ones are used, and only when there
-        are none does `library.scan` fall back to asking Noctalia. Resolving it
-        here rather than at each call site is what makes every path into a
-        rescan -- startup, the refresh button, a finished download -- honour
-        the setting without having to remember to.
+        With no roots given, the configured ones are used. An empty configured
+        list is deliberately passed through as empty: first run must ask the
+        person where writes belong instead of silently adopting Noctalia's
+        wallpaper directory. Resolving it here rather than at each call site
+        makes startup, refresh and completed-download scans agree.
         """
         return self.adopt_library(self.prepare_scan(roots).run())
 
@@ -203,10 +203,13 @@ class Session:
         elsewhere.  Keeping the snapshot here means the synchronous and async
         paths cannot quietly disagree about configured roots or pairings.
         """
-        if roots is None and self._settings.roots:
+        if roots is None:
             roots = self._settings.roots
-        resolved_roots = tuple(roots) if roots is not None else None
-        include_workshop = self._settings.scan_workshop
+        resolved_roots = tuple(roots)
+        # Scene/video stills need an app-owned destination too. Until the
+        # first root is chosen, do not quietly make the real Steam tree the
+        # apparent library and then fail every operation which needs a still.
+        include_workshop = self._settings.scan_workshop and bool(self._settings.roots)
         return LibraryScan(
             roots=resolved_roots,
             records=dict(self._pairings.records),

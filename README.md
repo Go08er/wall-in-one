@@ -216,6 +216,12 @@ five real pages:
 - **Settings** keeps library roots, playback, providers, colour and appearance
   controls visible as part of the main workflow rather than another window.
 
+On first run, Wall-in-One does not silently turn a detected Noctalia wallpaper
+directory into a place it may write. A one-time prompt shows the exact detected
+default and offers either **Use default** or a folder chooser. Until one is
+chosen, scans are empty and downloads and generated stills stay disabled.
+Existing configured roots are left alone.
+
 [`docs/library.md`](docs/library.md) is the detail: multiple library folders,
 how a video finds the still that stands behind it, how search matches, what
 favourites do to the rotation, which removal verb you get and why, and where
@@ -296,8 +302,10 @@ not been shown to do.
 The search button in the header -- or **Find wallpapers** in the menu, or
 `Ctrl+B` -- opens the Browse tab, which searches [Wallhaven](https://wallhaven.cc) for
 stills and [MotionBGS](https://motionbgs.com) for video wallpapers. Downloads
-land under the first library root, and the library is rescanned when one
-finishes, so the file shows up in the grid without being asked for.
+land under the explicitly chosen first library root, and the library is
+rescanned when one finishes, so the file shows up in the grid without being
+asked for. With no root configured, Browse refuses the download and points to
+Settings instead of guessing a destination.
 
 Wallhaven works without an API key. The one thing a key buys is NSFW results.
 Supply one through `WALLHAVEN_API_KEY`, or save it in **Settings -> Providers**,

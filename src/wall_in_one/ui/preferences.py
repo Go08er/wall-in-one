@@ -88,9 +88,8 @@ class PreferencesPage(Adw.PreferencesPage):
         group = Adw.PreferencesGroup(
             title="Library",
             description=(
-                "Folders scanned for wallpapers. With none listed, Noctalia's "
-                "own wallpaper directory is used. Downloads and generated "
-                "stills go into the first one."
+                "Folders scanned for wallpapers. Downloads and generated stills "
+                "go into the first one; Wall-in-One never chooses it silently."
             ),
         )
         add = Gtk.Button(icon_name="folder-new-symbolic", tooltip_text="Add a folder")
@@ -120,7 +119,7 @@ class PreferencesPage(Adw.PreferencesPage):
         roots = self._app.settings.roots
         if not roots:
             row = Adw.ActionRow(
-                title="Following Noctalia",
+                title="Not configured",
                 subtitle=self._noctalia_root_subtitle(),
             )
             self._roots_group.add(row)
@@ -156,7 +155,11 @@ class PreferencesPage(Adw.PreferencesPage):
 
     def _noctalia_root_subtitle(self) -> str:
         found = scan.default_roots()
-        return str(found[0]) if found else "no wallpaper directory found"
+        return (
+            f"Suggested folder: {found[0]}"
+            if found
+            else "Choose a folder before downloading or generating stills"
+        )
 
     def _make_root_remover(self, root: Path) -> Any:
         def remove(_button: Gtk.Button) -> None:

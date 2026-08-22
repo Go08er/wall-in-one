@@ -393,8 +393,10 @@ def test_a_rescan_uses_the_configured_roots(applied_paths: list[Path]) -> None:
     assert asked == [(Path("/one"), Path("/two"))]
 
 
-def test_no_configured_roots_leaves_the_scanner_to_decide(applied_paths: list[Path]) -> None:
-    """`None` is what makes `library.scan` fall back to asking Noctalia."""
+def test_no_configured_roots_scans_nothing_until_the_user_chooses(
+    applied_paths: list[Path],
+) -> None:
+    """Noctalia detection is a prompt suggestion, not implicit consent."""
     asked: list[object] = []
 
     def scanner(roots: Sequence[Path] | None) -> Library:
@@ -406,8 +408,11 @@ def test_no_configured_roots_leaves_the_scanner_to_decide(applied_paths: list[Pa
         applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
         scanner=scanner,
     )
-    session.refresh()
-    assert asked == [None]
+    request = session.prepare_scan()
+    session.adopt_library(request.run())
+    assert asked == [()]
+    assert request.include_workshop is False
+    assert request.workshop_roots == ()
 
 
 def test_an_explicit_root_still_wins_over_the_configured_ones(

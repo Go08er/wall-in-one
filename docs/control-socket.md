@@ -65,7 +65,10 @@ is `manual`, `schedule`, or (for divergent independent routes) `mixed`, the
 explicit `playing` / `paused` / `stopped` / `mixed` state,
 effective cycle value and its `config` or `manual` source, shuffle state, the
 playlist inventory, each display's effective entry, and the last renderer
-error. The same snapshot includes every schedule rule, the rule currently
+error. Top-level `renderer_failed` is true when the mirrored renderer is
+degraded, or when any currently connected independent route is degraded;
+detached route history remains visible in its row without poisoning the live
+aggregate. The same snapshot includes every schedule rule, the rule currently
 selected by the calendar, and configured versus effective display assignments,
 so a bar menu does not need the Python app. `config_generation` and the
 normalized absolute `config_path` identify the exact compiled document behind

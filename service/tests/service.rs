@@ -1764,6 +1764,7 @@ fn independent_renderer_crash_is_attributed_without_poisoning_a_healthy_route() 
         .iter()
         .find(|row| row["connector"] == "HDMI-A-1")
         .unwrap();
+    assert_eq!(snapshot["renderer_failed"], true);
     assert_eq!(dp["playback_state"], "playing");
     assert_eq!(dp["motion_active"], true);
     assert_eq!(dp["renderer_failed"], false);
@@ -1782,6 +1783,19 @@ fn independent_renderer_crash_is_attributed_without_poisoning_a_healthy_route() 
         state.lock().unwrap().stage_events.is_empty(),
         "Play on the healthy route must not reapply either wallpaper"
     );
+
+    state.lock().unwrap().connected_outputs = Some(vec!["DP-1".into()]);
+    runtime.tick(at, Instant::now() + Duration::from_secs(6));
+    let detached_failure = status(&mut runtime, at);
+    assert_eq!(detached_failure["renderer_failed"], false);
+    let hdmi = detached_failure["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(hdmi["connected"], false);
+    assert_eq!(hdmi["renderer_failed"], true);
 }
 
 #[test]
@@ -2775,6 +2789,8 @@ fn renderer_crash_is_attributed_and_never_enters_the_apply_retry_machine() {
     let snapshot = status(&mut runtime, winter);
     assert_eq!(state.lock().unwrap().applies.len(), applies_before);
     assert!(snapshot["automatic_retry"].is_null());
+    assert_eq!(snapshot["playback_state"], "playing");
+    assert_eq!(snapshot["renderer_failed"], true);
     assert_eq!(snapshot["taboo_entries"][0]["entry_id"], "scene-three");
     assert_eq!(snapshot["taboo_entries"][0]["scene_id"], "12345");
     assert_eq!(snapshot["taboo_entries"][0]["source"], "renderer-crash");

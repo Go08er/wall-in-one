@@ -96,6 +96,10 @@ pub struct Status<'a> {
     pub kind: Option<&'a str>,
     pub still: Option<String>,
     pub motion_active: Option<bool>,
+    /// Aggregate renderer degradation for compact clients. In independent
+    /// mode this is true when any currently connected route is degraded;
+    /// detached retained route history cannot poison the live summary.
+    pub renderer_failed: bool,
     pub playback_state: &'a str,
     pub paused: bool,
     pub stopped: bool,
@@ -3838,6 +3842,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .any(|output| self.driver.motion_active(output))
                 }
             }),
+            renderer_failed: self.renderer_failed,
             playback_state: playback_state(self.playback_state),
             paused: self.playback_state == PlaybackState::Paused,
             stopped: self.playback_state == PlaybackState::Stopped,
@@ -4167,6 +4172,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .iter()
                     .any(|output| self.driver.motion_active(output)),
             ),
+            renderer_failed: route_states.iter().any(|route| route.renderer_failed),
             playback_state: common_state.map_or("mixed", playback_state),
             paused: common_state == Some(PlaybackState::Paused),
             stopped: common_state == Some(PlaybackState::Stopped),

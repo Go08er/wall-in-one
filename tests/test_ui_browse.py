@@ -240,30 +240,6 @@ def test_a_download_that_fails_gives_the_button_back() -> None:
     assert dialog._download.get_label() == "Download"
 
 
-# -- loading more as the grid is scrolled --------------------------------
-
-
-@pytest.mark.parametrize(
-    ("value", "upper", "page_size", "expected"),
-    [
-        # Fresh grid, one screen of results: nothing scrolled yet, nothing more.
-        (0.0, 400.0, 400.0, True),
-        # Three screens of results, sitting at the top: plenty left.
-        (0.0, 1200.0, 400.0, False),
-        # Scrolled to within one screen of the bottom.
-        (400.0, 1200.0, 400.0, True),
-        # One pixel outside that.
-        (399.0, 1200.0, 400.0, False),
-        # All the way down.
-        (800.0, 1200.0, 400.0, True),
-    ],
-)
-def test_the_load_more_threshold_leaves_a_screen_of_slack(
-    value: float, upper: float, page_size: float, expected: bool
-) -> None:
-    assert browse_dialog.near_the_end(value=value, upper=upper, page_size=page_size) is expected
-
-
 class _StubApp:
     """The two things `BrowseDialog` asks of its application."""
 
@@ -393,14 +369,10 @@ def test_clearing_motionbgs_search_immediately_restores_browse_mode(
     assert not dialog._motionbgs_hint.get_visible()
 
 
-def test_a_first_page_that_says_there_is_more_asks_for_it(
+def test_a_first_page_waits_for_explicit_next_before_asking_for_more(
     dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The grid is not realised, so it never fills the window and never scrolls.
-
-    That is exactly the short-first-page case: without the idle check after
-    the first result, the second page would never be requested at all.
-    """
+    """Scrolling stays local; a clearly labelled Next owns remote paging."""
     asked = _answer(
         dialog,
         monkeypatch,
@@ -411,9 +383,15 @@ def test_a_first_page_that_says_there_is_more_asks_for_it(
     )
 
     dialog.start_search(page=1)
-    assert _settle(lambda: len(dialog._cards) == 3)
+    assert _settle(lambda: len(dialog._cards) == 2)
+    assert asked == [1]
+    assert dialog._next_results.get_sensitive()
+
+    dialog._show_next_page()
+    assert _settle(lambda: [card.candidate.identifier for card in dialog._cards] == ["ccc333"])
     assert asked == [1, 2]
     assert not dialog._has_next
+    assert dialog._previous_results.get_sensitive()
 
 
 def test_an_overlapping_page_does_not_show_a_wallpaper_twice(
@@ -430,8 +408,15 @@ def test_an_overlapping_page_does_not_show_a_wallpaper_twice(
     )
 
     dialog.start_search(page=1)
+    assert _settle(lambda: not dialog._searching)
+    dialog._show_next_page()
     assert _settle(lambda: not dialog._has_next and not dialog._searching)
-    assert [card.candidate.identifier for card in dialog._cards] == ["aaa111", "bbb222", "ccc333"]
+    assert tuple(candidate.identifier for candidate in dialog._candidates) == (
+        "aaa111",
+        "bbb222",
+        "ccc333",
+    )
+    assert [card.candidate.identifier for card in dialog._cards] == ["ccc333"]
 
 
 def test_a_page_that_is_entirely_repeats_stops_the_loading(
@@ -452,6 +437,8 @@ def test_a_page_that_is_entirely_repeats_stops_the_loading(
     )
 
     dialog.start_search(page=1)
+    assert _settle(lambda: not dialog._searching)
+    dialog._show_next_page()
     assert _settle(lambda: len(asked) >= 2 and not dialog._searching)
     assert len(dialog._cards) == 1
     assert not dialog._has_next
@@ -598,6 +585,8 @@ def test_failing_to_load_more_keeps_what_is_already_shown(
     monkeypatch.setattr(dialog._browser, "search", search)
 
     dialog.start_search(page=1)
+    assert _settle(lambda: not dialog._searching)
+    dialog._show_next_page()
     assert _settle(lambda: len(calls) >= 2 and not dialog._searching)
 
     assert len(dialog._cards) == 2
@@ -608,7 +597,7 @@ def test_failing_to_load_more_keeps_what_is_already_shown(
 def test_the_summary_counts_everything_on_screen_not_the_last_page(
     dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With paging gone, "3 results" has to mean the grid, not the last request."""
+    """The count covers retained metadata, not only forty materialised cards."""
     _answer(
         dialog,
         monkeypatch,
@@ -619,22 +608,121 @@ def test_the_summary_counts_everything_on_screen_not_the_last_page(
     )
 
     dialog.start_search(page=1)
-    assert _settle(lambda: len(dialog._cards) == 3)
+    assert _settle(lambda: not dialog._searching)
+    dialog._show_next_page()
+    assert _settle(lambda: len(dialog._candidates) == 3)
     assert dialog._summary.get_label().startswith("3 results")
 
 
-def test_the_grid_stops_at_a_reported_retention_limit(
+def test_six_hundred_results_keep_only_one_bounded_widget_page_and_the_last_is_reachable(
     dialog: browse_dialog.BrowseDialog,
 ) -> None:
-    identifiers = tuple(f"item-{index}" for index in range(browse_dialog.MAX_RETAINED_RESULTS + 1))
+    identifiers = tuple(f"item-{index}" for index in range(600))
+    dialog._show_result(_result(*identifiers), page=1)
+
+    assert len(dialog._candidates) == 600
+    assert len(dialog._shown) == 600
+    assert len(dialog._cards) == browse_dialog.MAX_MATERIALIZED_RESULTS
+    assert len(dialog._result_pages) == 15
+    for _page in range(14):
+        dialog._show_next_page()
+
+    assert dialog._result_page == 14
+    assert len(dialog._cards) == browse_dialog.MAX_MATERIALIZED_RESULTS
+    assert dialog._cards[-1].candidate.identifier == "item-599"
+    assert dialog._result_page_label.get_label() == "Page 15 of 15"
+
+
+def test_candidate_metadata_has_an_honest_independent_ceiling(
+    dialog: browse_dialog.BrowseDialog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(browse_dialog, "MAX_RETAINED_CANDIDATES", 50)
+    identifiers = tuple(f"item-{index}" for index in range(51))
+
     dialog._show_result(_result(*identifiers, has_next=True), page=1)
 
-    assert len(dialog._cards) == browse_dialog.MAX_RETAINED_RESULTS
-    assert len(dialog._shown) == browse_dialog.MAX_RETAINED_RESULTS
+    assert len(dialog._candidates) == 50
+    assert len(dialog._cards) == browse_dialog.MAX_MATERIALIZED_RESULTS
     assert not dialog._has_next
-    assert dialog._summary.get_label().startswith(
-        f"showing the first {browse_dialog.MAX_RETAINED_RESULTS} results"
+    assert dialog._summary.get_label().startswith("showing the first 50 results")
+
+
+def test_turning_pages_preserves_search_cursor_filter_state_selection_and_focus(
+    dialog: browse_dialog.BrowseDialog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifiers = tuple(f"item-{index}" for index in range(80))
+    dialog._entry.set_text("naruto wallpapers")
+    dialog._entry.set_position(6)
+    dialog._filters.set_active(True)
+    dialog._show_result(_result(*identifiers), page=1)
+    dialog._cards[3].set_picked(True)
+    focused: list[str] = []
+
+    def record_focus(card: browse_dialog._CandidateCard) -> bool:
+        focused.append(card.candidate.identifier)
+        return True
+
+    monkeypatch.setattr(
+        browse_dialog._CandidateCard,
+        "grab_focus",
+        record_focus,
     )
+
+    dialog._show_next_page()
+    assert _settle(lambda: "item-40" in focused)
+    assert dialog._cards[0].candidate.identifier == "item-40"
+    assert dialog._entry.get_text() == "naruto wallpapers"
+    assert dialog._entry.get_position() == 6
+    assert dialog._filters.get_active()
+    assert dialog._picked.get_label() == "1 selected"
+
+    focused.clear()
+    dialog._show_previous_page()
+    assert _settle(lambda: "item-0" in focused)
+    assert dialog._cards[3].picked
+    assert dialog._entry.get_position() == 6
+    assert focused[-1] == "item-0"
+
+
+def test_a_stale_preview_completion_cannot_mutate_a_recreated_card(
+    dialog: browse_dialog.BrowseDialog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dialog._show_result(_result("same-id"), page=1)
+    old_generation = dialog._preview_generation
+    dialog._show_result(_result("same-id"), page=1)
+    card = dialog._cards[0]
+    delivered: list[bytes] = []
+    monkeypatch.setattr(card, "set_preview", lambda data: delivered.append(data))
+
+    dialog._on_preview(old_generation, card.candidate, b"stale")
+    assert delivered == []
+
+    dialog._on_preview(dialog._preview_generation, card.candidate, b"current")
+    assert delivered == [b"current"]
+
+
+def test_a_newly_materialized_page_rebuilds_owned_and_in_flight_badges(
+    dialog: browse_dialog.BrowseDialog,
+) -> None:
+    identifiers = tuple(f"item-{index}" for index in range(80))
+    dialog._show_result(_result(*identifiers), page=1)
+    held = dialog._candidates[41]
+    dialog._browser.owned.add(held, Path("/offline/held-item"))
+    busy = dialog._candidates[42]
+    dialog._downloads_in_flight.add(browse_dialog._candidate_key(busy))
+
+    dialog._show_next_page()
+
+    held_card = dialog._cards[1]
+    busy_card = dialog._cards[2]
+    assert held_card.candidate.identifier == "item-41"
+    assert not held_card._button.get_sensitive()
+    assert held_card._button.get_tooltip_text() == "In your library"
+    assert not busy_card._button.get_sensitive()
+    assert busy_card._button.get_tooltip_text() == "Downloading"
 
 
 def test_an_unlaid_out_grid_only_queues_a_viewport_sized_preview_window(
@@ -1039,13 +1127,28 @@ def test_an_unclaimed_key_is_left_alone(
 def test_select_all_takes_everything_on_screen(
     dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """On a grid that grows as it scrolls, "all" can only mean what is shown."""
+    """On a paged photo grid, "all" means the current bounded page."""
     _three(dialog, monkeypatch)
 
     dialog._pick_all()
 
     assert all(card.picked for card in dialog._cards)
     assert dialog._picked.get_label() == "3 selected"
+
+
+def test_select_all_is_page_bounded_and_keeps_earlier_page_picks(
+    dialog: browse_dialog.BrowseDialog,
+) -> None:
+    identifiers = tuple(f"item-{index}" for index in range(80))
+    dialog._show_result(_result(*identifiers), page=1)
+
+    dialog._pick_all()
+    assert len(dialog._picked_keys) == browse_dialog.MAX_MATERIALIZED_RESULTS
+
+    dialog._show_next_page()
+    assert not any(card.picked for card in dialog._cards)
+    dialog._pick_all()
+    assert len(dialog._picked_keys) == 80
 
 
 def test_select_all_skips_what_is_already_in_the_library(

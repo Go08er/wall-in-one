@@ -28,21 +28,17 @@ class ThemeSource:
 def resolve_theme_source(
     configured: str,
     connected: Iterable[str],
-    *,
-    primary: str = "",
 ) -> ThemeSource:
     """Choose the live colour source without rewriting ``configured``.
 
-    A present saved connector always wins.  When it is detached, use the
-    compositor's primary connector when that is known and live, otherwise the
-    first live connector in the caller's stable output order.  The returned
+    A present saved connector always wins. When it is detached, use the first
+    connector in lexical order, exactly as the Rust service does. The returned
     ``configured`` value remains the detached name so reconnecting a dock
     restores the user's explicit choice.
     """
     saved = configured.strip()
-    ordered = tuple(dict.fromkeys(name.strip() for name in connected if name.strip()))
+    ordered = tuple(sorted({name.strip() for name in connected if name.strip()}))
     if saved and saved in ordered:
         return ThemeSource(saved, saved, True)
-    preferred = primary.strip()
-    effective = preferred if preferred in ordered else ordered[0] if ordered else ""
+    effective = ordered[0] if ordered else ""
     return ThemeSource(saved, effective, not saved)

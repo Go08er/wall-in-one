@@ -12,7 +12,9 @@ every path is under `tmp_path`.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,25 @@ def video(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"\x00" * 32)
     return path
+
+
+def _write_palette_from_stale_process(
+    target: str,
+    picture: str,
+    ready: Connection,
+    proceed: Connection,
+) -> None:
+    """Open before another process writes, then mutate that stale Store."""
+    store = Store.open(Path(target))
+    ready.send(True)
+    proceed.recv()
+    store.choose_palette(item(Path(picture)), PalettePolicy("builtin", "Nord"))
+
+
+def _hold_pairings_lock(target: str, ready: Connection, release: Connection) -> None:
+    with pairings._mutation_lock(Path(target)):
+        ready.send(True)
+        release.recv()
 
 
 # -- identity -------------------------------------------------------------
@@ -403,6 +424,64 @@ def test_a_store_write_failure_does_not_change_its_in_memory_record(
     assert on_disk is not None and on_disk.palette.name == "First"
 
 
+def test_a_stale_store_rebases_its_mutation_across_processes(tmp_path: Path) -> None:
+    """Headless health and the GUI must not replace each other's valid write."""
+    target = tmp_path / "pairings.json"
+    picture = png(tmp_path / "paper.png")
+    parent = Store.open(target)
+    context = multiprocessing.get_context("spawn")
+    ready_parent, ready_child = context.Pipe()
+    proceed_parent, proceed_child = context.Pipe()
+    process = context.Process(
+        target=_write_palette_from_stale_process,
+        args=(str(target), str(picture), ready_child, proceed_child),
+    )
+    process.start()
+    try:
+        assert ready_parent.poll(5), "child did not open its stale Store"
+        assert ready_parent.recv() is True
+        assert parent.mark_borked(item(picture), "renderer crashed", "automatic-apply")
+        proceed_parent.send(True)
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+    record = Store.open(target).get(Identity.of(item(picture)))
+    assert record is not None
+    assert record.health.is_borked
+    assert record.palette == PalettePolicy("builtin", "Nord")
+
+
+def test_pairings_mutation_lock_is_exclusive_between_processes(tmp_path: Path) -> None:
+    target = tmp_path / "pairings.json"
+    context = multiprocessing.get_context("spawn")
+    ready_parent, ready_child = context.Pipe()
+    release_parent, release_child = context.Pipe()
+    process = context.Process(
+        target=_hold_pairings_lock,
+        args=(str(target), ready_child, release_child),
+    )
+    process.start()
+    try:
+        assert ready_parent.poll(5), "child did not acquire the mutation lock"
+        assert ready_parent.recv() is True
+        with (
+            pytest.raises(PairingError, match="timed out"),
+            pairings._mutation_lock(target, timeout=0.05),
+        ):
+            raise AssertionError("two processes entered the pairings transaction")
+    finally:
+        release_parent.send(True)
+        process.join(5)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+    assert process.exitcode == 0
+
+
 def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) -> None:
     target = tmp_path / "pairings.json"
     target.write_text("not json but somebody's choices", encoding="utf-8")
@@ -411,6 +490,20 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     store.choose_palette(item(png(tmp_path / "a.png")), PalettePolicy(kind=pairings.KEEP))
     kept = target.with_name(target.name + pairings.BROKEN_SUFFIX)
     assert kept.read_text(encoding="utf-8") == "not json but somebody's choices"
+
+
+def test_runtime_health_refuses_a_fault_that_appeared_after_store_open(tmp_path: Path) -> None:
+    target = tmp_path / "pairings.json"
+    picture = png(tmp_path / "paper.png")
+    store = Store.open(target)
+    original = "not json but somebody's choices"
+    target.write_text(original, encoding="utf-8")
+
+    with pytest.raises(PairingError, match="unreadable pairings file was left untouched"):
+        store.mark_borked(item(picture), "renderer crashed", "automatic-apply")
+
+    assert target.read_text(encoding="utf-8") == original
+    assert not target.with_name(target.name + pairings.BROKEN_SUFFIX).exists()
 
 
 def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(

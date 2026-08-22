@@ -50,18 +50,18 @@ MAX_WORKERS: Final = 4
 #: every image seen during a long browse alive for the rest of the session.
 MAX_PREVIEW_CACHE_ENTRIES: Final = 64
 
-#: A long MotionBGS listing reaches thousands of videos, and nothing here is ever
-#: released: measured on a real listing, 36 cards cost 232 MB of RSS and 483 cost
-#: 488 MB, climbing linearly at roughly 0.6 MB a card between the two. So there has
-#: to be a ceiling, or scrolling a 7,380-item listing crowds out the desktop.
-#:
-#: The number is set by the search that prompted all this rather than by the memory.
-#: A MotionBGS query returning around 250 results has to fit entirely, with room to
-#: spare, because being unable to reach the end of your own search is the complaint
-#: this grid exists to answer -- so a ceiling of 240 would have reintroduced it. That
-#: puts the limit here and the worst case near 600 MB, which is only reached by
-#: somebody deliberately scrolling that far.
-MAX_RETAINED_RESULTS: Final = 600
+#: Only this many heavyweight GTK cards exist at once.  A real MotionBGS run
+#: measured roughly 0.6 MB of additional RSS per retained card, so keeping 600
+#: widgets made Browse approach 600 MB.  Forty preserves the site's natural
+#: photo-page size and gives a useful scroll surface without retaining every
+#: result somebody has passed on the way to page fifteen.
+MAX_MATERIALIZED_RESULTS: Final = 40
+
+#: Candidate metadata is cheap, but it is still remote-controlled input.  Keep
+#: enough page descriptions for the whole currently measured MotionBGS 4K
+#: catalogue (7,380 entries) while retaining an honest finite ceiling.  The
+#: widgets and decoded preview cache have their own much smaller bounds above.
+MAX_RETAINED_CANDIDATES: Final = 10_000
 
 #: Cards within one screen on either side of the viewport are worth fetching.
 #: Anything farther away can wait until scrolling makes it relevant.
@@ -132,19 +132,6 @@ def _shortcut(action: Callable[[], None]) -> Callable[[Gtk.Widget, object], bool
         return True
 
     return run
-
-
-def near_the_end(*, value: float, upper: float, page_size: float) -> bool:
-    """Whether the scrolled view is close enough to the bottom to load more.
-
-    A whole screen of slack, so the next page is already arriving by the time
-    somebody reaches the bottom rather than starting when they get there.
-
-    A grid that does not fill its window has `upper == page_size`, which lands
-    here as "at the end" -- which is right, and is how a short first page still
-    goes on to ask for a second.
-    """
-    return (upper - value - page_size) <= page_size
 
 
 # -- off-thread previews -------------------------------------------------
@@ -294,7 +281,7 @@ class _CandidateCard(Gtk.Box):
         candidate: WallpaperCandidate,
         on_download: Callable[[WallpaperCandidate], None],
         on_open: Callable[[WallpaperCandidate], None] | None = None,
-        on_pick: Callable[[], None] | None = None,
+        on_pick: Callable[[WallpaperCandidate, bool], None] | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.candidate = candidate
@@ -391,7 +378,7 @@ class _CandidateCard(Gtk.Box):
 
     def _on_toggled(self, _check: Gtk.CheckButton) -> None:
         if self._on_pick is not None:
-            self._on_pick()
+            self._on_pick(self.candidate, self.picked)
 
     def _on_clicked(self, _button: Gtk.Button) -> None:
         self._on_download(self.candidate)
@@ -490,7 +477,21 @@ class BrowseDialog(Adw.Dialog):
         self._searches = ThreadPoolExecutor(max_workers=1, thread_name_prefix="search")
         self._downloads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="download")
         self._infos = self._browser.available
+        #: Only the current explicit page.  Keeping this list bounded is the
+        #: memory contract: `_CandidateCard` owns several GTK widgets and a
+        #: decoded texture, while candidate records below are plain metadata.
         self._cards: list[_CandidateCard] = []
+        self._candidates: list[WallpaperCandidate] = []
+        self._candidate_by_key: dict[CandidateKey, WallpaperCandidate] = {}
+        self._result_pages: list[tuple[WallpaperCandidate, ...]] = []
+        self._result_page = 0
+        self._advance_after_load = False
+        self._picked_keys: set[CandidateKey] = set()
+        #: A preview completion carries the materialisation generation which
+        #: requested it.  Turning a page invalidates that token, so a late
+        #: thumbnail cannot paint a newly-created card that happens to reuse
+        #: the same provider identifier.
+        self._preview_generation = 0
         self._result: SearchResult | None = None
         self._page = 1
         #: Whether the provider said there is another page. Also the switch
@@ -549,9 +550,9 @@ class BrowseDialog(Adw.Dialog):
 
         Escape is left to `Adw.Dialog`, which already closes on it.
 
-        Ctrl+A is the one worth a second thought: on a grid that grows as it
-        scrolls, "all" can only honestly mean what is on screen. It does, and
-        that is also the only set the user has seen.
+        Ctrl+A selects the current explicit photo page. Picks made on earlier
+        pages remain selected and the footer gives the combined count; it must
+        never turn one shortcut into thousands of surprise downloads.
         """
         shortcuts = Gtk.ShortcutController()
         shortcuts.set_scope(Gtk.ShortcutScope.LOCAL)
@@ -578,12 +579,11 @@ class BrowseDialog(Adw.Dialog):
         self._entry.grab_focus()
 
     def _pick_all(self) -> None:
-        # Only what is pickable: a wallpaper already in the library has its box
-        # disabled, and "select all" must not appear to tick it.
-        for card in self._cards:
-            if card.can_pick:
-                card.set_picked(True)
-        self._on_pick_changed()
+        self._picked_keys.update(
+            _candidate_key(card.candidate) for card in self._cards if card.can_pick
+        )
+        self._sync_visible_picks()
+        self._update_pick_controls()
 
     # -- construction ----------------------------------------------------
 
@@ -641,10 +641,9 @@ class BrowseDialog(Adw.Dialog):
 
         self._scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         self._scroller.set_child(self._flow)
-        # Watching the adjustment rather than the scroll events: a scroll event
-        # says the wheel turned, and what matters is where the view ended up,
-        # which is also reached by dragging the bar or by the grid growing
-        # underneath it.
+        # Scrolling only reprioritises previews. Provider/result paging is an
+        # explicit footer action, so a slow wheel cannot materialise hundreds
+        # of heavyweight cards behind the viewport.
         self._scroller.get_vadjustment().connect("value-changed", self._on_scrolled)
 
         self._status = Adw.StatusPage(
@@ -817,13 +816,7 @@ class BrowseDialog(Adw.Dialog):
             self._purity.set_hint(2, limitations[0])
 
     def _build_pager(self) -> Gtk.Widget:
-        """The footer. Not a pager any more -- a count and a loading hint.
-
-        Pages were a way to bound the work per request, and nothing bounds it
-        now: results load as the grid is scrolled. What is left is worth
-        keeping, because "19 results of about 400" is the difference between a
-        short answer and a broken one.
-        """
+        """A real bounded pager plus count, batch state, and loading hint."""
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bar.set_margin_top(6)
         bar.set_margin_bottom(6)
@@ -833,6 +826,28 @@ class BrowseDialog(Adw.Dialog):
         self._summary = Gtk.Label(label="", xalign=0.0, hexpand=True)
         self._summary.add_css_class("dim-label")
         bar.append(self._summary)
+
+        self._previous_results = Gtk.Button(
+            icon_name="go-previous-symbolic",
+            tooltip_text="Previous results page",
+        )
+        self._previous_results.add_css_class("flat")
+        self._previous_results.set_sensitive(False)
+        self._previous_results.connect("clicked", lambda _button: self._show_previous_page())
+        bar.append(self._previous_results)
+
+        self._result_page_label = Gtk.Label(label="")
+        self._result_page_label.add_css_class("caption")
+        bar.append(self._result_page_label)
+
+        self._next_results = Gtk.Button(
+            icon_name="go-next-symbolic",
+            tooltip_text="Next results page",
+        )
+        self._next_results.add_css_class("flat")
+        self._next_results.set_sensitive(False)
+        self._next_results.connect("clicked", lambda _button: self._show_next_page())
+        bar.append(self._next_results)
 
         self._more = Gtk.Label(label="")
         self._more.add_css_class("dim-label")
@@ -868,16 +883,28 @@ class BrowseDialog(Adw.Dialog):
 
     # -- picking several ---------------------------------------------------
 
-    def _on_pick_changed(self) -> None:
-        count = sum(1 for card in self._cards if card.picked)
+    def _on_pick_changed(self, candidate: WallpaperCandidate, picked: bool) -> None:
+        key = _candidate_key(candidate)
+        if picked:
+            self._picked_keys.add(key)
+        else:
+            self._picked_keys.discard(key)
+        self._update_pick_controls()
+
+    def _update_pick_controls(self) -> None:
+        count = len(self._picked_keys)
         self._picked.set_label(f"{count} selected")
         for widget in (self._picked, self._clear_picked, self._download_picked):
             widget.set_visible(count > 0)
 
-    def _unpick_all(self) -> None:
+    def _sync_visible_picks(self) -> None:
         for card in self._cards:
-            card.set_picked(False)
-        self._on_pick_changed()
+            card.set_picked(_candidate_key(card.candidate) in self._picked_keys)
+
+    def _unpick_all(self) -> None:
+        self._picked_keys.clear()
+        self._sync_visible_picks()
+        self._update_pick_controls()
 
     def _download_all_picked(self) -> None:
         """Queue everything picked, then let go of the selection.
@@ -890,7 +917,11 @@ class BrowseDialog(Adw.Dialog):
         request has been made, and leaving the boxes ticked would invite
         pressing Download again and queueing the whole batch twice.
         """
-        picked = [card.candidate for card in self._cards if card.picked]
+        picked = [
+            candidate
+            for candidate in self._candidates
+            if _candidate_key(candidate) in self._picked_keys
+        ]
         if not picked:
             return
         for candidate in picked:
@@ -960,6 +991,7 @@ class BrowseDialog(Adw.Dialog):
         self._has_next = False
         self._shown.clear()
         self._capped = False
+        self._advance_after_load = False
         self._seed = ""
         self._more.set_label("")
         self._summary.set_label("")
@@ -1071,9 +1103,11 @@ class BrowseDialog(Adw.Dialog):
         self._active_search_fingerprint = fingerprint
         self._searching = True
         if append:
-            # The grid stays. Swapping to the full-page spinner would throw
-            # away the results being scrolled and jump the view to the top.
-            self._more.set_label("Loading more…")
+            # The current bounded page stays while the next provider page is
+            # fetched.  Swapping to the full-page spinner would throw away the
+            # user's scroll/focus context.
+            self._more.set_label("Loading next page…")
+            self._update_pager()
         else:
             self._stack.set_visible_child_name("busy")
 
@@ -1142,10 +1176,12 @@ class BrowseDialog(Adw.Dialog):
 
     def _show_failure(self, message: str, append: bool = False) -> None:
         if append:
-            # Failing to load *more* must not throw away what is on screen.
-            # The results already there are still results; say so and stop
-            # asking for further pages until something changes.
+            # Failing to load the next explicit page must not throw away what
+            # is on screen. Stop offering a dead Next button until a new
+            # search, while retaining every page already reached.
             self._has_next = False
+            self._advance_after_load = False
+            self._update_pager()
             self.report(message)
             return
         self._stack.set_visible_child_name("empty")
@@ -1162,62 +1198,50 @@ class BrowseDialog(Adw.Dialog):
             self._shown.clear()
             self._capped = False
 
-        # Asked once per page rather than once per card, and safe to touch from
-        # the main loop because `Browser.search` warmed it on the worker that
-        # produced these results.
-        held = self._browser.owned
-        added = 0
+        added: list[WallpaperCandidate] = []
         for candidate in result.items:
-            # A page that overlaps the one before it would otherwise put the
-            # same wallpaper on screen twice, and leave `_card_for` picking
-            # whichever copy it met first. Wallhaven does this whenever a
-            # random search runs unseeded, and a scraped listing can do it
-            # whenever the site reorders between two requests.
+            # A provider page may overlap the one before it. Retain only one
+            # metadata record, so moving backwards cannot show a duplicate.
             key = _candidate_key(candidate)
             if key in self._shown:
                 continue
-            if len(self._cards) >= MAX_RETAINED_RESULTS:
+            if len(self._candidates) >= MAX_RETAINED_CANDIDATES:
                 self._capped = True
                 self._has_next = False
                 break
             self._shown.add(key)
-            card = _CandidateCard(
-                candidate, self._on_download, self._open_detail, self._on_pick_changed
-            )
-            if held.holds(candidate):
-                card.mark_downloaded()
-            elif key in self._downloads_in_flight:
-                card.set_busy(True)
-            self._cards.append(card)
-            self._flow.append(card)
-            added += 1
+            self._candidates.append(candidate)
+            self._candidate_by_key[key] = candidate
+            added.append(candidate)
 
-        if len(self._cards) >= MAX_RETAINED_RESULTS and result.has_next:
+        if len(self._candidates) >= MAX_RETAINED_CANDIDATES and result.has_next:
             self._capped = True
             self._has_next = False
 
-        if not self._cards:
+        for start in range(0, len(added), MAX_MATERIALIZED_RESULTS):
+            self._result_pages.append(tuple(added[start : start + MAX_MATERIALIZED_RESULTS]))
+
+        if not self._result_pages:
             self._stack.set_visible_child_name("empty")
             self._status.set_title("No results")
             self._status.set_description("Nothing came back for that query.")
         else:
             self._stack.set_visible_child_name("results")
+            if not append:
+                self._materialize_page(0)
+            elif self._advance_after_load and self._result_page + 1 < len(self._result_pages):
+                self._materialize_page(self._result_page + 1, focus=True)
 
         self._summary.set_label(self._describe(result))
-        GLib.idle_add(self._refresh_previews)
-        if append and added == 0 and result.has_next:
-            # Every result on this page was already shown. Asking for the next
-            # one immediately would spin through the whole catalogue at scroll
-            # speed, so stop here and let the user search again.
+        if append and not added and result.has_next:
+            # A provider that repeats a page must not turn each press of Next
+            # into another request with no visible progress.
             self._has_next = False
-        elif not append:
-            # A short first page may not fill the window, in which case no
-            # scroll will ever happen and the next page would never be asked
-            # for. Checking once after layout settles closes that gap.
-            GLib.idle_add(self._maybe_load_more)
+        self._advance_after_load = False
+        self._update_pager()
 
     def _describe(self, result: SearchResult) -> str:
-        shown = len(self._cards)
+        shown = len(self._candidates)
         if self._capped:
             parts = [f"showing the first {shown} results"]
         else:
@@ -1232,16 +1256,86 @@ class BrowseDialog(Adw.Dialog):
             parts.append("cached")
         return " - ".join(parts)
 
-    # -- loading more as the grid is scrolled ------------------------------
+    # -- bounded result pages ----------------------------------------------
 
     def _on_scrolled(self, _adjustment: Gtk.Adjustment) -> None:
         self._refresh_previews()
-        self._maybe_load_more()
+
+    def _show_previous_page(self) -> None:
+        if self._result_page > 0:
+            self._materialize_page(self._result_page - 1, focus=True)
+
+    def _show_next_page(self) -> None:
+        if self._searching:
+            return
+        if self._result_page + 1 < len(self._result_pages):
+            self._materialize_page(self._result_page + 1, focus=True)
+            return
+        if not self._has_next:
+            return
+        self._advance_after_load = True
+        self.start_search(page=self._page + 1, append=True)
+        if not self._searching:
+            self._advance_after_load = False
+        self._update_pager()
+
+    def _materialize_page(self, page: int, *, focus: bool = False) -> None:
+        """Replace only the bounded card page; metadata and interaction state stay."""
+        if page < 0 or page >= len(self._result_pages):
+            return
+        self._clear_materialized_cards()
+        self._result_page = page
+        held = self._browser.owned
+        for candidate in self._result_pages[page]:
+            key = _candidate_key(candidate)
+            card = _CandidateCard(
+                candidate,
+                self._on_download,
+                self._open_detail,
+                self._on_pick_changed,
+            )
+            if held.holds(candidate):
+                self._picked_keys.discard(key)
+                card.mark_downloaded()
+            elif key in self._downloads_in_flight:
+                self._picked_keys.discard(key)
+                card.set_busy(True)
+            elif key in self._picked_keys:
+                card.set_picked(True)
+            self._cards.append(card)
+            self._flow.append(card)
+        self._update_pick_controls()
+        self._update_pager()
+
+        def settle_page() -> bool:
+            adjustment = self._scroller.get_vadjustment()
+            adjustment.set_value(adjustment.get_lower())
+            self._refresh_previews()
+            if focus and self._cards:
+                self._cards[0].grab_focus()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(settle_page)
+
+    def _update_pager(self) -> None:
+        pages = len(self._result_pages)
+        if pages == 0:
+            self._result_page_label.set_label("")
+            self._previous_results.set_sensitive(False)
+            self._next_results.set_sensitive(False)
+            return
+        suffix = " · more online" if self._has_next else ""
+        self._result_page_label.set_label(f"Page {self._result_page + 1} of {pages}{suffix}")
+        self._previous_results.set_sensitive(not self._searching and self._result_page > 0)
+        self._next_results.set_sensitive(
+            not self._searching and (self._result_page + 1 < pages or self._has_next)
+        )
 
     def _refresh_previews(self) -> bool:
         """Keep only a viewport-sized, distance-ordered preview queue."""
+        callback = partial(self._on_preview, self._preview_generation)
         if self._closed or not self._cards:
-            self._loader.prioritize((), self._on_preview)
+            self._loader.prioritize((), callback)
             return GLib.SOURCE_REMOVE
         adjustment = self._scroller.get_vadjustment()
         value = adjustment.get_value()
@@ -1268,38 +1362,43 @@ class BrowseDialog(Adw.Dialog):
                     continue
                 priority = abs((top + bottom) / 2.0 - centre)
                 nearby.append((card.candidate, priority))
-        self._loader.prioritize(nearby, self._on_preview)
-        return GLib.SOURCE_REMOVE
-
-    def _maybe_load_more(self) -> bool:
-        """Ask for the next page when the end of this one comes into view.
-
-        Returns `GLib.SOURCE_REMOVE` so it can also be used as an idle
-        callback, which is how the short-first-page case is covered.
-        """
-        if self._closed or self._searching or not self._has_next:
-            return GLib.SOURCE_REMOVE
-        if self._stack.get_visible_child_name() != "results":
-            return GLib.SOURCE_REMOVE
-        adjustment = self._scroller.get_vadjustment()
-        if near_the_end(
-            value=adjustment.get_value(),
-            upper=adjustment.get_upper(),
-            page_size=adjustment.get_page_size(),
-        ):
-            self.start_search(page=self._page + 1, append=True)
+        self._loader.prioritize(nearby, callback)
         return GLib.SOURCE_REMOVE
 
     def _clear(self) -> None:
-        self._loader.prioritize((), self._on_preview)
+        self._clear_materialized_cards()
+        self._candidates.clear()
+        self._candidate_by_key.clear()
+        self._result_pages.clear()
+        self._result_page = 0
+        self._advance_after_load = False
+        self._picked_keys.clear()
+        self._update_pick_controls()
+        self._update_pager()
+
+    def _clear_materialized_cards(self) -> None:
+        self._preview_generation += 1
+        self._loader.prioritize(
+            (),
+            partial(self._on_preview, self._preview_generation),
+        )
         for card in self._cards:
             self._flow.remove(card)
         self._cards.clear()
-        # The selection went with the cards. Leaving "3 selected" over an empty
-        # grid would offer a Download button with nothing behind it.
-        self._on_pick_changed()
 
-    def _on_preview(self, candidate: WallpaperCandidate, data: bytes) -> None:
+    def _on_preview(
+        self,
+        generation: int,
+        candidate: WallpaperCandidate,
+        data: bytes,
+    ) -> None:
+        if generation != self._preview_generation:
+            # The loader has cached this completion already. If a recreated
+            # card wants the same URL, ask again on the next main-loop turn so
+            # it receives the cache hit under the current generation instead
+            # of remaining blank.
+            GLib.idle_add(self._refresh_previews)
+            return
         for card in self._cards:
             if _candidate_key(card.candidate) == _candidate_key(candidate):
                 card.set_preview(data)
@@ -1362,13 +1461,16 @@ class BrowseDialog(Adw.Dialog):
         return None
 
     def _set_download_busy(self, candidate: WallpaperCandidate, busy: bool) -> None:
+        key = _candidate_key(candidate)
+        if busy:
+            self._picked_keys.discard(key)
         card = self._card_for(candidate)
         if card is not None:
             card.set_busy(busy)
-        detail = self._detail_dialogs.get(_candidate_key(candidate))
+        detail = self._detail_dialogs.get(key)
         if detail is not None:
             detail.set_busy(busy)
-        self._on_pick_changed()
+        self._update_pick_controls()
 
     def _downloaded(self, candidate: WallpaperCandidate, future: Future[Downloaded]) -> None:
         try:
@@ -1395,10 +1497,12 @@ class BrowseDialog(Adw.Dialog):
                 self._set_download_busy(candidate, False)
                 self.report(message)
             else:
+                self._picked_keys.discard(_candidate_key(candidate))
                 if card is not None:
                     card.mark_downloaded()
                 if detail is not None:
                     detail.downloaded()
+                self._update_pick_controls()
                 self.report(done.describe())
                 # The file is in the library directory but not in the library
                 # until something looks again.

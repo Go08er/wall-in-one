@@ -23,6 +23,7 @@ dropped.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import secrets
@@ -42,8 +43,12 @@ STATE_FILENAME: Final = "playlists.json"
 #: but faulted so this build cannot silently compile or rewrite them.
 FORMAT_VERSION: Final = 1
 
-#: Ceilings, so a file that grew a zero cannot be read forever.
-MAX_PLAYLISTS: Final = 512
+#: Ceilings, so a file that grew a zero cannot be read forever. People retain
+#: the existing 512 authored-list budget; generated playback sources have
+#: separate bounded headroom (one global and up to one per supported display).
+MAX_AUTHORED_PLAYLISTS: Final = 512
+MAX_DISPLAY_QUICK_CHOICES: Final = 64
+MAX_PLAYLISTS: Final = MAX_AUTHORED_PLAYLISTS + MAX_DISPLAY_QUICK_CHOICES + 1
 MAX_ENTRIES: Final = 10_000
 MAX_STATE_BYTES: Final = 8 * 1024 * 1024
 
@@ -62,6 +67,9 @@ RESERVED_IDENTITIES: Final = (
     ("all-media", "All media"),
     ("quick-choice", "Quick choice"),
 )
+DISPLAY_QUICK_CHOICE_ID_PREFIX: Final = "quick-choice:"
+DISPLAY_QUICK_CHOICE_NAME_PREFIX: Final = "Quick choice · "
+MAX_DISPLAY_CONNECTOR_BYTES: Final = 256
 
 #: Where a file we could not parse is moved before it would be overwritten.
 BROKEN_SUFFIX: Final = ".broken"
@@ -303,6 +311,43 @@ def new_id() -> str:
     return secrets.token_hex(8)
 
 
+def display_quick_choice_id(connector: str) -> str:
+    """Deterministic reserved singleton id for one connector."""
+    _display_connector(connector)
+    digest = hashlib.sha256(connector.encode("utf-8")).hexdigest()[:16]
+    return f"{DISPLAY_QUICK_CHOICE_ID_PREFIX}{digest}"
+
+
+def display_quick_choice_name(connector: str) -> str:
+    """Human label paired with :func:`display_quick_choice_id`."""
+    identifier = display_quick_choice_id(connector)
+    if len(DISPLAY_QUICK_CHOICE_NAME_PREFIX) + len(connector) <= MAX_NAME_LENGTH:
+        return f"{DISPLAY_QUICK_CHOICE_NAME_PREFIX}{connector}"
+    suffix = f" · {identifier.removeprefix(DISPLAY_QUICK_CHOICE_ID_PREFIX)}"
+    available = MAX_NAME_LENGTH - len(DISPLAY_QUICK_CHOICE_NAME_PREFIX) - len(suffix)
+    return f"{DISPLAY_QUICK_CHOICE_NAME_PREFIX}{connector[:available]}{suffix}"
+
+
+def _display_connector(connector: str) -> None:
+    try:
+        encoded = connector.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise PlaylistError("identity-conflict", "display connector must be valid UTF-8") from error
+    if not connector:
+        raise PlaylistError("identity-conflict", "display connector cannot be empty")
+    if len(encoded) > MAX_DISPLAY_CONNECTOR_BYTES:
+        raise PlaylistError(
+            "identity-conflict",
+            f"display connector must be at most {MAX_DISPLAY_CONNECTOR_BYTES} UTF-8 bytes",
+        )
+    if any(character.isspace() for character in connector):
+        raise PlaylistError("identity-conflict", "display connector cannot contain whitespace")
+    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector):
+        raise PlaylistError(
+            "identity-conflict", "display connector cannot contain control characters"
+        )
+
+
 def tidy_name(raw: str) -> str:
     """The name as it will be stored, or raise if it is not one.
 
@@ -321,6 +366,13 @@ def tidy_name(raw: str) -> str:
 def _fold_identity(value: str) -> str:
     """The comparison used by the human-facing id-or-name lookup surface."""
     return value.casefold()
+
+
+def _is_generated_playlist_id(identifier: str) -> bool:
+    folded = _fold_identity(identifier)
+    return folded == _fold_identity("quick-choice") or folded.startswith(
+        _fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)
+    )
 
 
 def _identifier(raw: str) -> str:
@@ -613,6 +665,7 @@ class Store:
         *,
         replacing: str | None = None,
         generated: bool = False,
+        generated_display: bool = False,
     ) -> None:
         """Keep every id-or-name reference unambiguous before it reaches Rust.
 
@@ -626,9 +679,12 @@ class Store:
         candidate_name = _fold_identity(name)
         reserved = {_fold_identity(token) for pair in RESERVED_IDENTITIES for token in pair}
         canonical_generated = (identifier, name) in RESERVED_IDENTITIES
-        if not (generated and canonical_generated):
+        reserved_display = candidate_id.startswith(
+            _fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)
+        ) or candidate_name.startswith(_fold_identity(DISPLAY_QUICK_CHOICE_NAME_PREFIX))
+        if not (generated and canonical_generated) and not generated_display:
             for label, token in (("id", candidate_id), ("name", candidate_name)):
-                if token in reserved:
+                if token in reserved or reserved_display:
                     raise PlaylistError(
                         "identity-conflict",
                         f"playlist {label} {identifier if label == 'id' else name!r} is "
@@ -658,8 +714,11 @@ class Store:
 
     def create(self, name: str, entry_id: str | None = None) -> Playlist:
         """A new, empty playlist with an unambiguous id and display name."""
-        if len(self._playlists) >= MAX_PLAYLISTS:
-            raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+        authored = sum(not _is_generated_playlist_id(identifier) for identifier in self._playlists)
+        if authored >= MAX_AUTHORED_PLAYLISTS:
+            raise PlaylistError(
+                "full", f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists"
+            )
         identifier = new_id() if entry_id is None else _identifier(entry_id)
         tidy = tidy_name(name)
         self._validate_identity(identifier, tidy)
@@ -673,7 +732,7 @@ class Store:
             return playlist
         if _fold_identity(playlist.id) in {
             _fold_identity(generated_id) for generated_id, _name in RESERVED_IDENTITIES
-        }:
+        } or _fold_identity(playlist.id).startswith(_fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)):
             raise PlaylistError(
                 "identity-conflict",
                 f"{playlist.name} is generated automatically and cannot be renamed",
@@ -712,14 +771,63 @@ class Store:
         and the choice can be inspected or edited on the Playlists page.
         """
         existing = self.get(identifier)
-        if existing is None and len(self._playlists) >= MAX_PLAYLISTS:
+        generated_global = (identifier, name) in RESERVED_IDENTITIES
+        authored = sum(not _is_generated_playlist_id(found) for found in self._playlists)
+        if existing is None and generated_global and len(self._playlists) >= MAX_PLAYLISTS:
             raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+        if existing is None and not generated_global and authored >= MAX_AUTHORED_PLAYLISTS:
+            raise PlaylistError(
+                "full", f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists"
+            )
         identifier = _identifier(identifier)
         tidy = tidy_name(name)
         self._validate_identity(identifier, tidy, replacing=identifier, generated=True)
         entry = Entry(id=entry_id or new_id(), source=str(source))
         playlist = Playlist(id=identifier, name=tidy, entries=(entry,))
         return self._commit(playlist)
+
+    def set_display_singleton(
+        self,
+        connector: str,
+        source: Path,
+        *,
+        entry_id: str | None = None,
+    ) -> Playlist:
+        """Create or replace only the generated singleton owned by a display.
+
+        Keeping the connector-to-identity derivation inside the Store closes a
+        destructive edge: a caller cannot claim that an arbitrary
+        ``quick-choice:<hash>`` playlist is generated and overwrite a user's
+        older row with the same id.
+        """
+        identifier = display_quick_choice_id(connector)
+        name = display_quick_choice_name(connector)
+        existing = self.get(identifier)
+        if existing is not None and existing.name != name:
+            raise PlaylistError(
+                "identity-conflict",
+                f"generated playlist id {identifier!r} is already owned by "
+                f"{existing.name!r}; nothing was overwritten",
+            )
+        generated_displays = sum(
+            _fold_identity(found).startswith(_fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX))
+            for found in self._playlists
+        )
+        if existing is None and generated_displays >= MAX_DISPLAY_QUICK_CHOICES:
+            raise PlaylistError(
+                "full",
+                f"there are already {MAX_DISPLAY_QUICK_CHOICES} display Quick choices",
+            )
+        if existing is None and len(self._playlists) >= MAX_PLAYLISTS:
+            raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+        self._validate_identity(
+            identifier,
+            name,
+            replacing=identifier,
+            generated_display=True,
+        )
+        entry = Entry(id=entry_id or new_id(), source=str(source))
+        return self._commit(Playlist(id=identifier, name=name, entries=(entry,)))
 
     def remove_entry(self, identifier: str, entry: str) -> Playlist:
         return self._commit(self.find(identifier).without(entry))

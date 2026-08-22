@@ -2904,8 +2904,8 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
     assert_eq!(after_reload["config_epoch"], 2);
     assert_eq!(after_reload["taboo_entries"][0]["entry_id"], "video-two");
     assert_eq!(
-        after_reload["taboo_entries"][0]["observed_config_epoch"], 1,
-        "a retained session finding must not be relabelled as the reloaded config"
+        after_reload["taboo_entries"][0]["observed_config_epoch"], 2,
+        "a finding for unchanged resolved media must be attributable to the adopted config"
     );
 
     state
@@ -2982,6 +2982,77 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
         &("video-two".into(), true)
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reload_reconciles_session_findings_by_resolved_media_identity() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    for (label, updated, expected_entry) in [
+        (
+            "rebound",
+            ("motion = \"/tmp/two.mp4\"", "motion = \"/tmp/rebound.mp4\""),
+            None,
+        ),
+        (
+            "moved",
+            ("id = \"video-two\"", "id = \"video-moved\""),
+            Some("video-moved"),
+        ),
+    ] {
+        let root = directory(&format!("taboo-identity-{label}"));
+        let config_path = root.join("runtime.toml");
+        let original = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+        fs::write(&config_path, &original).unwrap();
+        let parsed = Config::load(&config_path).unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+        let mut runtime = Runtime::new(
+            config_path.clone(),
+            parsed,
+            RuntimeDriver(state.clone()),
+            at,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        assert!(runtime_command(&mut runtime, at, "next", None).ok);
+        state
+            .lock()
+            .unwrap()
+            .renderer_failures
+            .push(RendererFailure {
+                entry_id: "video-two".into(),
+                kind: wall_in_one_service::config::EntryKind::Video,
+                scene_id: None,
+                output: String::new(),
+                message: "video-two crashed and its still is active".into(),
+                permanent_for_session: true,
+            });
+        runtime.tick(at, Instant::now());
+        assert_eq!(
+            status(&mut runtime, at)["taboo_entries"][0]["entry_id"],
+            "video-two"
+        );
+
+        fs::write(&config_path, original.replace(updated.0, updated.1)).unwrap();
+        assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+        let snapshot = status(&mut runtime, at);
+        assert_eq!(snapshot["config_epoch"], 2);
+        let records = snapshot["taboo_entries"].as_array().unwrap();
+        if let Some(expected_entry) = expected_entry {
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["entry_id"], expected_entry);
+            assert_eq!(records[0]["observed_config_epoch"], 2);
+            assert_eq!(records[0]["durable"], false);
+        } else {
+            assert!(
+                records.is_empty(),
+                "an entry id rebound to different resolved media must not inherit its old taboo"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

@@ -58,6 +58,39 @@ It can also be built on its own:
 $ nix build -L .#checks.x86_64-linux.vm-test
 ```
 
+The default checks also include a process-level memory contract for the Rust
+runtime:
+
+```console
+$ nix build -L .#checks.x86_64-linux.service-rss
+$ cat result/summary.txt
+```
+
+That check starts three fresh one-display services and three fresh
+three-display services from handwritten resolved configs, warms every
+connector through the public runtime socket, and samples each service's own
+`VmRSS` 20 times. A one-display run must stay at or below 5 MiB; a
+three-display run must stay at or below 10 MiB. Each run also records the
+service's CPU-tick delta over six idle seconds after warm-up. The interval is
+long enough to include the five-second compositor poll, but CPU is reported
+without a brittle CI threshold.
+
+A separate launch discovers the supported ceiling of 64 synthetic connectors,
+routes commands to all of them, and validates the resulting atomic status
+snapshot. That is a correctness stress, not a memory promise for a normal
+desktop. `samples-kib.tsv`, `idle-cpu.tsv`, `summary.json`, the status snapshots,
+and service logs are retained in the result for review. The Python app and GUI
+are never started; a small isolated Python client only speaks the public socket
+and validates the returned JSON.
+
+The 2026-08-22 release-package measurement was flat across all 20 samples in
+each run: the one-display peaks were `3660, 3660, 3660 KiB` (3.574 MiB), and
+the three-display peaks were `3668, 3668, 3668 KiB` (3.582 MiB). Six-second
+idle windows consumed zero or one scheduler tick: at most 0.166% of one CPU in
+this test environment. These numbers document that build rather than replacing
+the gates; CI repeats the measurement because libc, allocator, and toolchain
+updates can change RSS.
+
 The result contains PNG screenshots named `wall-in-one-browse.png`,
 `wall-in-one-media.png`, `wall-in-one-playlists.png`,
 `wall-in-one-schedules.png`, and `wall-in-one-settings.png`. The test also
@@ -98,3 +131,10 @@ schedule control, the five GTK tabs, and mpvpaper's process/argument lifecycle
 through an instrumented renderer substitute. It does **not** prove actual video
 decoding or GPU rendering, Wallpaper Engine scene playback, Steam integration,
 or multi-monitor behavior.
+
+The RSS check's 64-connector stress exercises bounded per-connector runtime state,
+targeted socket routing, status serialization, and compositor hotplug input.
+They are synthetic names returned by a test double, not 64 virtual monitors.
+Consequently that check is useful for the memory ceiling and headless routing
+contract, but it does not weaken the desktop VM's honest one-output limitation
+or prove compositor behavior across physical displays.

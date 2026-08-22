@@ -10,6 +10,7 @@ mounted this morning is not somebody deleting their list.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -157,6 +158,83 @@ def test_the_generated_quick_choice_cannot_be_renamed(store: Store) -> None:
 
     with pytest.raises(PlaylistError, match="generated automatically"):
         store.rename(quick.id, "Something else")
+
+
+def test_display_quick_choice_identity_is_deterministic_and_store_owned(store: Store) -> None:
+    connector = "DP-1"
+    digest = hashlib.sha256(connector.encode()).hexdigest()[:16]
+
+    first = store.set_display_singleton(connector, Path("/w/a.png"), entry_id="a")
+    second = store.set_display_singleton(connector, Path("/w/b.png"), entry_id="b")
+
+    assert first.id == second.id == f"quick-choice:{digest}"
+    assert first.name == second.name == "Quick choice · DP-1"
+    assert [entry.path for entry in second.entries] == [Path("/w/b.png")]
+    with pytest.raises(PlaylistError, match="generated automatically"):
+        store.rename(second.id, "Mine")
+
+
+@pytest.mark.parametrize(
+    ("name", "identifier"),
+    (
+        ("Ordinary", "quick-choice:0123456789abcdef"),
+        ("Quick choice · DP-1", "ordinary"),
+    ),
+)
+def test_display_quick_choice_identity_shape_is_reserved(
+    store: Store, name: str, identifier: str
+) -> None:
+    with pytest.raises(PlaylistError, match="reserved for a generated playlist"):
+        store.create(name, entry_id=identifier)
+
+    with pytest.raises(PlaylistError, match="reserved for a generated playlist"):
+        store.set_singleton(identifier, name, Path("/w/a.png"))
+
+
+def test_display_quick_choice_never_overwrites_a_legacy_identity_collision(
+    tmp_path: Path,
+) -> None:
+    identifier = playlists.display_quick_choice_id("DP-1")
+    legacy = Playlist(id=identifier, name="My old playlist")
+    store = Store({identifier: legacy}, path=tmp_path / "playlists.json")
+
+    with pytest.raises(PlaylistError, match="nothing was overwritten"):
+        store.set_display_singleton("DP-1", Path("/w/a.png"))
+
+    assert store.get(identifier) is legacy
+
+
+def test_generated_quick_choices_have_headroom_beyond_authored_playlist_limit(
+    tmp_path: Path,
+) -> None:
+    authored = {
+        f"authored-{index}": Playlist(id=f"authored-{index}", name=f"Authored {index}")
+        for index in range(playlists.MAX_AUTHORED_PLAYLISTS)
+    }
+    store = Store(authored, path=tmp_path / "playlists.json")
+
+    with pytest.raises(PlaylistError, match="authored playlists"):
+        store.create("One too many")
+    generated = store.set_display_singleton("DP-1", Path("/w/a.png"))
+
+    assert generated.id.startswith("quick-choice:")
+    assert len(store) == playlists.MAX_AUTHORED_PLAYLISTS + 1
+
+
+def test_display_quick_choice_headroom_is_bounded_to_supported_connectors(
+    tmp_path: Path,
+) -> None:
+    generated = {
+        playlists.display_quick_choice_id(f"DP-{index}"): Playlist(
+            id=playlists.display_quick_choice_id(f"DP-{index}"),
+            name=playlists.display_quick_choice_name(f"DP-{index}"),
+        )
+        for index in range(playlists.MAX_DISPLAY_QUICK_CHOICES)
+    }
+    store = Store(generated, path=tmp_path / "playlists.json")
+
+    with pytest.raises(PlaylistError, match="display Quick choices"):
+        store.set_display_singleton("one-too-many", Path("/w/a.png"))
 
 
 def test_deleting_reports_whether_there_was_one(store: Store) -> None:

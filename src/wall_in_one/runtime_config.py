@@ -37,7 +37,7 @@ FALLBACK_PLAYLIST_NAME: Final = "All media"
 # installation: publishing syntactically valid TOML that the service rejects
 # would stop rotation while destroying the previous working document.
 MAX_RUNTIME_CONFIG_BYTES: Final = 8 * 1024 * 1024
-MAX_PLAYLISTS: Final = 513
+MAX_PLAYLISTS: Final = 578
 MAX_ENTRIES_PER_PLAYLIST: Final = 10_000
 MAX_SCHEDULES: Final = 512
 MAX_DISPLAYS: Final = 64
@@ -48,6 +48,11 @@ MAX_CONNECTOR_BYTES: Final = 256
 MAX_OPTION_BYTES: Final = 256
 MAX_PATH_BYTES: Final = 4096
 CONFIG_GENERATION_HEX_CHARS: Final = 64
+MAX_RUNTIME_RESPONSE_BYTES: Final = 1024 * 1024
+STATUS_STRUCTURAL_RESERVE_BYTES: Final = 256 * 1024
+STATUS_DIAGNOSTIC_RESERVE_BYTES: Final = 64 * 1024
+STATUS_JSON_ESCAPE_FACTOR: Final = 4
+MAX_LIVE_OUTPUTS: Final = 64
 COMPILER_LOCK_TIMEOUT_SECONDS: Final = 5.0
 COMPILER_LOCK_POLL_SECONDS: Final = 0.025
 
@@ -262,6 +267,114 @@ def _semantic_generation(document_without_generation: str) -> str:
     return hashlib.sha256(document_without_generation.encode("utf-8")).hexdigest()
 
 
+def _validate_status_budget(document_without_generation: str) -> None:
+    """Mirror Rust's conservative bound for the atomic JSON status snapshot.
+
+    A runtime document may fit the 8 MiB configuration limit while its expanded
+    playlist/schedule/display inventory cannot fit one protocol response.  The
+    compiler must reject that document *before* replacing the last-known-good
+    file; otherwise reload rolls back only in memory and the next service start
+    refuses the bytes left on disk.
+    """
+    try:
+        decoded = tomllib.loads(document_without_generation)
+    except tomllib.TOMLDecodeError as error:  # pragma: no cover - compiler invariant
+        raise RuntimeConfigError(
+            f"cannot parse generated runtime configuration: {error}"
+        ) from error
+
+    raw_playlists = decoded.get("playlists", [])
+    raw_schedules = decoded.get("schedules", [])
+    raw_displays = decoded.get("displays", [])
+    if (
+        not isinstance(raw_playlists, list)
+        or not isinstance(raw_schedules, list)
+        or not isinstance(raw_displays, list)
+    ):
+        raise RuntimeConfigError("generated runtime inventory has an invalid shape")
+
+    configured_text = 0
+    largest_playlist_identity = 0
+    largest_entry = 0
+    playlist_identity: dict[str, tuple[str, str]] = {}
+    for raw in raw_playlists:
+        if not isinstance(raw, dict):
+            raise RuntimeConfigError("generated playlist inventory has an invalid shape")
+        identifier = raw.get("id")
+        name = raw.get("name")
+        entries = raw.get("entries", [])
+        if (
+            not isinstance(identifier, str)
+            or not isinstance(name, str)
+            or not isinstance(entries, list)
+        ):
+            raise RuntimeConfigError("generated playlist inventory has an invalid shape")
+        identity_bytes = _encoded_length(identifier, label="playlist id") + _encoded_length(
+            name, label="playlist name"
+        )
+        configured_text += identity_bytes
+        largest_playlist_identity = max(largest_playlist_identity, identity_bytes)
+        playlist_identity[identifier] = (identifier, name)
+        playlist_identity[name] = (identifier, name)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeConfigError("generated entry inventory has an invalid shape")
+            entry_id = entry.get("id")
+            still = entry.get("still")
+            if not isinstance(entry_id, str) or not isinstance(still, str):
+                raise RuntimeConfigError("generated entry inventory has an invalid shape")
+            largest_entry = max(
+                largest_entry,
+                _encoded_length(entry_id, label="entry id")
+                + _encoded_length(still, label="entry still"),
+            )
+
+    for raw in raw_schedules:
+        if not isinstance(raw, dict):
+            raise RuntimeConfigError("generated schedule inventory has an invalid shape")
+        identifier = raw.get("id")
+        reference = raw.get("playlist")
+        connector = raw.get("connector", "")
+        start = raw.get("start", "")
+        end = raw.get("end", "")
+        playlist = playlist_identity.get(reference) if isinstance(reference, str) else None
+        if (
+            not isinstance(identifier, str)
+            or not isinstance(connector, str)
+            or not isinstance(start, str)
+            or not isinstance(end, str)
+            or playlist is None
+        ):
+            raise RuntimeConfigError("generated schedule inventory has an invalid shape")
+        configured_text += sum(
+            _encoded_length(value, label="schedule status text")
+            for value in (identifier, connector, playlist[0], playlist[1], start, end)
+        )
+
+    largest_connector = MAX_CONNECTOR_BYTES
+    for raw in raw_displays:
+        if not isinstance(raw, dict) or not isinstance(raw.get("connector"), str):
+            raise RuntimeConfigError("generated display inventory has an invalid shape")
+        largest_connector = max(
+            largest_connector,
+            _encoded_length(raw["connector"], label="display connector"),
+        )
+
+    per_display = largest_connector + largest_playlist_identity * 2 + largest_entry
+    configured_text += per_display * (MAX_LIVE_OUTPUTS + MAX_DISPLAYS)
+    configured_text += largest_playlist_identity + largest_entry
+    encoded_bound = (
+        configured_text * STATUS_JSON_ESCAPE_FACTOR
+        + STATUS_STRUCTURAL_RESERVE_BYTES
+        + STATUS_DIAGNOSTIC_RESERVE_BYTES
+    )
+    if encoded_bound > MAX_RUNTIME_RESPONSE_BYTES:
+        raise RuntimeConfigError(
+            "runtime status could exceed the "
+            f"{MAX_RUNTIME_RESPONSE_BYTES}-byte protocol response limit"
+        )
+
+
 def document_generation(document: str) -> str:
     """Return a strictly validated generation token from compiled TOML bytes."""
     try:
@@ -453,11 +566,6 @@ def _validate_settings_wire(settings: config.Settings) -> None:
 def render(settings: config.Settings, session: Session) -> str:
     """Return schema-4 TOML with every currently executable decision resolved."""
     _validate_settings_wire(settings)
-    if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
-        raise RuntimeConfigError(
-            "schema 4 records independent display authoring, but this service build does not "
-            "execute it yet; the existing mirrored runtime configuration was left untouched"
-        )
     faults = session.authoring_faults()
     if faults:
         details = "; ".join(f"{name}: {fault}" for name, fault in faults)
@@ -581,13 +689,14 @@ def render(settings: config.Settings, session: Session) -> str:
         for compiled_entry in entries:
             lines.extend(("", *compiled_entry))
 
-    # Connector-targeted rules remain dormant until the runtime executes the
-    # schema-4 per-display semantics. Emitting one to today's global resolver
-    # would silently broaden it to every display.
+    # Mirrored mode deliberately preserves connector rules in authoring but
+    # leaves them dormant on the wire. Independent mode emits the complete
+    # authored order: Rust evaluates the shared and connector-exact rules
+    # together, so the established last-match-wins rule remains literal.
     emitted_schedules = [
         (rule, runtime_playlist(rule.playlist, owner=f"schedule {rule.id!r}"))
         for rule in session.schedules.rules
-        if not rule.connector
+        if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT or not rule.connector
     ]
     if len(emitted_schedules) > MAX_SCHEDULES:
         raise RuntimeConfigError(f"no more than {MAX_SCHEDULES} schedule rules are supported")
@@ -624,10 +733,12 @@ def render(settings: config.Settings, session: Session) -> str:
             lines.append(f'end = "{rule.end // 60:02d}:{rule.end % 60:02d}"')
         lines.append(f"enabled = {str(rule.enabled).lower()}")
 
-    # Mirrored is deliberately one route. The display store and legacy Output
-    # value stay app-owned and preserved, but cannot alter the executable
-    # target set until the next commit implements schema-4 per-display state.
-    assignments: tuple[tuple[str, str], ...] = ()
+    # Mirrored is deliberately one route. Saved dock assignments remain
+    # app-owned and dormant there; independent mode compiles them as the
+    # baseline beneath matching schedule rules and runtime manual overrides.
+    assignments = (
+        session.displays.all() if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT else ()
+    )
     emitted_assignments = [
         (
             connector,
@@ -663,6 +774,7 @@ def render(settings: config.Settings, session: Session) -> str:
             )
         )
     semantic_document = "\n".join(lines) + "\n"
+    _validate_status_budget(semantic_document)
     generation = _semantic_generation(semantic_document)
     # Keep this top-level field before the first TOML table. It deliberately
     # does not hash itself: the token identifies the compiled semantic body,

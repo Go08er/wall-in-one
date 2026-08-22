@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import gi
@@ -37,10 +38,32 @@ MONTH_LABELS = (
 )
 WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
-# The schema-4 contract records independent authoring, but this staged service
-# build deliberately refuses to execute it. Keep controls which would claim
-# realtime per-display behavior unavailable until the Rust routes land.
-INDEPENDENT_RUNTIME_READY = False
+
+@dataclass
+class _DisplayControls:
+    row: Adw.ExpanderRow
+    playlist: Adw.ComboRow
+    play: Gtk.Button
+    stop: Gtk.Button
+    modes: Adw.ActionRow
+    shuffle: Gtk.ToggleButton
+    cycle: Gtk.ToggleButton
+    mode_defaults: Gtk.Button
+
+
+@dataclass(frozen=True)
+class _RuleEditorState:
+    editing_rule: str
+    connector: str
+    playlist_id: str
+    months: tuple[bool, ...]
+    weekdays: tuple[bool, ...]
+    time_enabled: bool
+    start_hour: int
+    start_minute: int
+    end_hour: int
+    end_minute: int
+    focus: str | None
 
 
 def _connected_outputs() -> tuple[str, ...]:
@@ -70,8 +93,16 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._built = False
         self._fingerprint: object = None
         self._rule_rows: list[Gtk.Widget] = []
+        self._rule_choices: tuple[Any, ...] = ()
         self._playback_row: Adw.ComboRow | None = None
         self._playback_choices: tuple[Any, ...] = ()
+        self._playback_group: Adw.PreferencesGroup | None = None
+        self._playback_widgets: list[Gtk.Widget] = []
+        self._display_playback_rows: dict[str, _DisplayControls] = {}
+        self._display_selected_echo: dict[str, int] = {}
+        self._playback_truth: runtime_truth.RuntimeTruth | None = None
+        self._palette_playback_row: Adw.ActionRow | None = None
+        self._playback_placeholder: Adw.ActionRow | None = None
         self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self._content.set_margin_top(18)
         self._content.set_margin_bottom(24)
@@ -80,10 +111,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self.set_child(self._content)
 
     def refresh(self, session: Session) -> None:
-        fingerprint = self._state_fingerprint(session)
+        fingerprint = self._authoring_fingerprint(session)
         self._session = session
         if self._built and fingerprint == self._fingerprint:
             return
+        editor_state = self._capture_rule_editor()
         scroll = self.get_vadjustment().get_value()
         self._loading = True
         try:
@@ -114,6 +146,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                     self._content.append(self._build_dormant_displays(dormant))
             self._content.append(self._build_rules(session))
             self._content.append(self._build_new_rule(session))
+            self._restore_rule_editor(editor_state, session)
             self._built = True
             self._fingerprint = fingerprint
         finally:
@@ -122,40 +155,39 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
     def runtime_status_changed(self, session: Session) -> None:
         """Update the live selector without rebuilding schedule authoring."""
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        if session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
+            # Taboo inventory is intentionally not part of RuntimeTruth's
+            # authoring/playback identity, but it changes whether a failed
+            # route can be retried. Reconcile these stable widgets even when
+            # the route fields themselves are unchanged.
+            self._loading = True
+            try:
+                self._populate_independent_playback(session, truth)
+            finally:
+                self._loading = False
+            return
         row = self._playback_row
         if not self._built or row is None:
             return
-        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         self._loading = True
         try:
-            if (
-                session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
-                and not INDEPENDENT_RUNTIME_READY
-            ):
-                row.set_sensitive(False)
-                row.set_subtitle(
-                    "Independent authoring is saved, but realtime display routing needs the "
-                    "schema-4 service update."
-                )
-            else:
-                row.set_sensitive(True)
-                row.set_subtitle(self._playback_description(session, truth))
-                row.set_selected(self._playback_selected(session, self._playback_choices, truth))
+            row.set_sensitive(True)
+            row.set_subtitle(self._playback_description(session, truth))
+            row.set_selected(self._playback_selected(session, self._playback_choices, truth))
         finally:
             self._loading = False
-        self._fingerprint = self._state_fingerprint(session)
 
-    def _state_fingerprint(self, session: Session) -> object:
-        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+    def _authoring_fingerprint(self, session: Session) -> object:
+        """State whose widgets are rebuilt; live playback truth is separate."""
         return (
             session.settings.active_playlist,
             session.settings.display_mode,
             session.settings.theme_source_connector,
-            truth if truth is not None else session.manual_playlist,
             session.playlists.all(),
             session.displays.all(),
             session.schedules.rules,
-            _connected_outputs(),
+            self._live_connectors(),
         )
 
     def _build_playback(self, session: Session) -> Gtk.Widget:
@@ -167,28 +199,355 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 "A manual choice lasts until you resume the schedule or restart the service."
             ),
         )
-        choices = session.playlists.all()
+        self._playback_group = group
+        self._playback_widgets = []
+        self._display_playback_rows = {}
+        self._display_selected_echo.clear()
+        self._palette_playback_row = None
+        self._playback_placeholder = None
         truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        if session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
+            self._populate_independent_playback(session, truth)
+            return group
+        choices = session.playlists.all()
         row = Adw.ComboRow(
             title="Active playlist",
             subtitle=self._playback_description(session, truth),
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
         )
         row.set_selected(self._playback_selected(session, choices, truth))
-        if (
-            session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
-            and not INDEPENDENT_RUNTIME_READY
-        ):
-            row.set_sensitive(False)
-            row.set_subtitle(
-                "Independent authoring is saved, but realtime display routing needs the "
-                "schema-4 service update."
-            )
         self._playback_row = row
         self._playback_choices = choices
         row.connect("notify::selected", self._make_playback_changed(choices))
         group.add(row)
+        self._playback_widgets.append(row)
+        self._playback_truth = truth
         return group
+
+    def _populate_independent_playback(
+        self,
+        session: Session,
+        truth: runtime_truth.RuntimeTruth | None,
+    ) -> None:
+        """Reconcile only live playback rows; authoring widgets stay untouched."""
+        group = self._playback_group
+        if group is None:
+            return
+        self._playback_row = None
+        self._playback_choices = ()
+        self._playback_truth = truth
+
+        if truth is None or truth.status_version != 2 or truth.display_mode != "independent":
+            self._remove_independent_live_rows(group)
+            if self._playback_placeholder is None:
+                self._playback_placeholder = Adw.ActionRow()
+                self._playback_placeholder.add_prefix(
+                    Gtk.Image(icon_name="dialog-warning-symbolic")
+                )
+                group.add(self._playback_placeholder)
+            self._playback_placeholder.set_title("Per-display playback unavailable")
+            self._playback_placeholder.set_subtitle(
+                "Waiting for a version-2 runtime snapshot. No authored Session state is "
+                "shown as if it were live."
+            )
+            self._playback_widgets = [self._playback_placeholder]
+            return
+
+        if self._playback_placeholder is not None:
+            group.remove(self._playback_placeholder)
+            self._playback_placeholder = None
+        palette = truth.theme_source
+        if palette is not None:
+            configured = palette.configured or "Automatic"
+            if palette.effective is None:
+                palette_subtitle = f"{configured} is designated; no live source is available"
+            elif palette.fallback:
+                palette_subtitle = (
+                    f"{configured} is detached; colours temporarily follow {palette.effective}"
+                )
+            else:
+                palette_subtitle = f"Noctalia colours currently follow {palette.effective}"
+            if self._palette_playback_row is None:
+                self._palette_playback_row = Adw.ActionRow(title="Shell-wide colours")
+                self._palette_playback_row.add_prefix(
+                    Gtk.Image(icon_name="applications-graphics-symbolic")
+                )
+                group.add(self._palette_playback_row)
+            self._palette_playback_row.set_subtitle(palette_subtitle)
+
+        choices = session.playlists.all()
+        live = tuple(record for record in truth.displays if record.connected)
+        if not live:
+            for controls in self._display_playback_rows.values():
+                group.remove(controls.row)
+            self._display_playback_rows = {}
+            if self._playback_placeholder is None:
+                self._playback_placeholder = Adw.ActionRow()
+                group.add(self._playback_placeholder)
+            self._playback_placeholder.set_title("No connected displays")
+            self._playback_placeholder.set_subtitle(
+                "Saved detached assignments remain below and will return on reconnect."
+            )
+            self._playback_widgets = [
+                widget
+                for widget in (self._palette_playback_row, self._playback_placeholder)
+                if widget is not None
+            ]
+            return
+
+        wanted = {display.connector for display in live}
+        for connector in tuple(self._display_playback_rows):
+            if connector not in wanted:
+                group.remove(self._display_playback_rows.pop(connector).row)
+                self._display_selected_echo.pop(connector, None)
+        for display in live:
+            found_controls = self._display_playback_rows.get(display.connector)
+            if found_controls is None:
+                found_controls = self._new_display_controls(display.connector, choices)
+                self._display_playback_rows[display.connector] = found_controls
+                group.add(found_controls.row)
+            self._update_display_controls(found_controls, display, choices, truth)
+        self._playback_widgets = [
+            widget
+            for widget in (
+                self._palette_playback_row,
+                *(controls.row for controls in self._display_playback_rows.values()),
+            )
+            if widget is not None
+        ]
+
+    def _remove_independent_live_rows(self, group: Adw.PreferencesGroup) -> None:
+        if self._palette_playback_row is not None:
+            group.remove(self._palette_playback_row)
+            self._palette_playback_row = None
+        for controls in self._display_playback_rows.values():
+            group.remove(controls.row)
+        self._display_playback_rows = {}
+        self._display_selected_echo.clear()
+
+    def _new_display_controls(
+        self,
+        connector: str,
+        choices: tuple[Any, ...],
+    ) -> _DisplayControls:
+        row = Adw.ExpanderRow(title=connector)
+        playlist = Adw.ComboRow(
+            title="Active playlist",
+            model=Gtk.StringList.new(
+                ["Follow this display's schedule", *(one.name for one in choices)]
+            ),
+        )
+        playlist.connect(
+            "notify::selected",
+            self._make_display_playback_changed(connector, choices),
+        )
+        row.add_row(playlist)
+
+        transport = Adw.ActionRow(
+            title="Playback",
+            subtitle="Pause freezes motion; Stop releases renderer resources and keeps the still",
+        )
+        for icon, tooltip, verb in (
+            ("go-previous-symbolic", "Previous wallpaper", "previous"),
+            ("applications-games-symbolic", "Random wallpaper", "random"),
+            ("go-next-symbolic", "Next wallpaper", "next"),
+        ):
+            button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
+            button.add_css_class("flat")
+            button.connect("clicked", self._make_display_action(connector, verb))
+            transport.add_suffix(button)
+        play = Gtk.Button(icon_name="media-playback-pause-symbolic")
+        play.add_css_class("flat")
+        play.connect("clicked", self._make_display_play_action(connector))
+        transport.add_suffix(play)
+        stop = Gtk.Button(
+            icon_name="media-playback-stop-symbolic",
+            tooltip_text="Stop motion and release its resources",
+        )
+        stop.add_css_class("flat")
+        stop.connect("clicked", self._make_display_action(connector, "stop"))
+        transport.add_suffix(stop)
+        row.add_row(transport)
+
+        modes = Adw.ActionRow(
+            title="Rotation modes",
+            subtitle="Cycle advances automatically; Shuffle changes that order",
+        )
+        shuffle = Gtk.ToggleButton(label="Shuffle")
+        shuffle.connect("toggled", self._make_display_mode_changed(connector, "shuffle"))
+        modes.add_suffix(shuffle)
+        cycle = Gtk.ToggleButton(label="Cycle")
+        cycle.connect("toggled", self._make_display_mode_changed(connector, "cycle"))
+        modes.add_suffix(cycle)
+        mode_defaults = Gtk.Button(
+            label="Use saved defaults",
+            tooltip_text="Clear this display's temporary Cycle and Shuffle choices",
+        )
+        mode_defaults.add_css_class("flat")
+        mode_defaults.connect("clicked", self._make_display_mode_defaults(connector))
+        modes.add_suffix(mode_defaults)
+        row.add_row(modes)
+        return _DisplayControls(
+            row,
+            playlist,
+            play,
+            stop,
+            modes,
+            shuffle,
+            cycle,
+            mode_defaults,
+        )
+
+    def _update_display_controls(
+        self,
+        controls: _DisplayControls,
+        display: runtime_truth.DisplayRuntimeTruth,
+        choices: tuple[Any, ...],
+        truth: runtime_truth.RuntimeTruth,
+    ) -> None:
+        description = self._display_playback_description(display, truth)
+        controls.row.set_subtitle(description)
+        diagnostic = (
+            display.automatic_retry.reason
+            if display.automatic_retry is not None
+            else display.last_error
+        )
+        controls.row.set_tooltip_text(diagnostic or None)
+        # Keep the live routing decision visible while the expander is open.
+        # The selector is where a person changes that decision, so leaving its
+        # subtitle blank makes a manual override look like authored state.
+        controls.playlist.set_subtitle(description)
+        self._set_display_selected(
+            display.connector,
+            controls.playlist,
+            self._display_playback_selected(display, choices),
+        )
+        taboo = display.renderer_failed and runtime_truth.entry_is_taboo(
+            getattr(self._app, "runtime_status", None),
+            display.playlist_id,
+            display.entry_id,
+        )
+        # A renderer failure leaves the resolved still on screen and may keep
+        # the route's logical playback state as ``playing``. A transient
+        # failure can be retried with Play. A session-taboo entry cannot: its
+        # recovery action lives on the Media/Pairings health surface.
+        playing = display.playback_state == "playing" and not display.renderer_failed
+        controls.play.set_icon_name(
+            "dialog-warning-symbolic"
+            if taboo
+            else "media-playback-pause-symbolic"
+            if playing
+            else "media-playback-start-symbolic"
+        )
+        if taboo:
+            controls.play.set_tooltip_text(
+                "Borked wallpaper: open it in Media/Pairings to clear taboo and retry"
+            )
+        elif display.renderer_failed:
+            controls.play.set_tooltip_text("Retry motion on this display")
+        else:
+            controls.play.set_tooltip_text(
+                "Pause this display" if playing else "Resume this display"
+            )
+        controls.stop.set_sensitive(display.playback_state != "stopped")
+        controls.modes.set_subtitle(self._display_modes_description(display))
+        controls.shuffle.set_active(display.shuffle)
+        controls.shuffle.set_tooltip_text(
+            f"Shuffle is {'on' if display.shuffle else 'off'} ({display.shuffle_source})"
+        )
+        controls.cycle.set_active(display.cycle_enabled)
+        controls.cycle.set_tooltip_text(
+            f"Cycle is {'on' if display.cycle_enabled else 'off'} ({display.cycle_source})"
+        )
+        controls.mode_defaults.set_visible(
+            display.shuffle_source == "manual" or display.cycle_source == "manual"
+        )
+
+    @staticmethod
+    def _display_playback_selected(
+        display: runtime_truth.DisplayRuntimeTruth,
+        choices: tuple[Any, ...],
+    ) -> int:
+        if not display.manual_override:
+            return 0
+        for index, playlist in enumerate(choices, start=1):
+            if playlist.id == display.playlist_id:
+                return index
+        return 0
+
+    @staticmethod
+    def _display_playback_description(
+        display: runtime_truth.DisplayRuntimeTruth,
+        truth: runtime_truth.RuntimeTruth,
+    ) -> str:
+        if display.automatic_retry is not None:
+            retry = display.automatic_retry
+            return (
+                f"Retry {retry.attempt}/{retry.maximum_attempts} · {display.playlist} · "
+                f"{SchedulesPage._bounded_diagnostic(retry.reason)}"
+            )
+        if display.renderer_failed:
+            detail = SchedulesPage._bounded_diagnostic(
+                display.last_error or "the motion renderer exited"
+            )
+            return f"Static fallback · {display.playlist} · {detail}"
+        if display.route_source == "manual":
+            route = "Manual override"
+        elif display.route_source == "schedule":
+            route = (
+                f"Schedule rule {display.schedule_rule_id}"
+                if display.schedule_rule_id
+                else "Scheduled override"
+            )
+        elif display.route_source == "assignment":
+            route = "Assigned baseline"
+        else:
+            route = "Default rotation"
+        playback = (
+            "Playing motion"
+            if display.playback_state == "playing" and display.motion_active
+            else "Playing still"
+            if display.playback_state == "playing"
+            else display.playback_state.capitalize()
+        )
+        parts = [route, display.playlist, playback]
+        if truth.theme_source is not None and truth.theme_source.effective == display.connector:
+            parts.append("Colours source")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _bounded_diagnostic(value: str, maximum: int = 220) -> str:
+        """Keep subprocess stderr from turning one schedule row into a page."""
+        clean = " ".join(value.split())
+        if len(clean) <= maximum:
+            return clean
+        marker = " … "
+        prefix = (maximum - len(marker)) * 3 // 5
+        suffix = maximum - len(marker) - prefix
+        return clean[:prefix] + marker + clean[-suffix:]
+
+    @staticmethod
+    def _display_modes_description(display: runtime_truth.DisplayRuntimeTruth) -> str:
+        def describe(label: str, active: bool, default: bool, source: str) -> str:
+            state = "on" if active else "off"
+            if source == "manual":
+                saved = "on" if default else "off"
+                return f"{label} {state} — manual (saved default {saved})"
+            return f"{label} {state} — saved default"
+
+        return " · ".join(
+            (
+                describe(
+                    "Cycle",
+                    display.cycle_enabled,
+                    display.cycle_default,
+                    display.cycle_source,
+                ),
+                describe(
+                    "Shuffle", display.shuffle, display.shuffle_default, display.shuffle_source
+                ),
+            )
+        )
 
     @staticmethod
     def _build_dormant_displays(records: int) -> Gtk.Widget:
@@ -272,7 +631,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 "visible so dock setups are not forgotten."
             ),
         )
-        connected = set(_connected_outputs())
+        connected = set(self._live_connectors())
         assigned = dict(session.displays.all())
         connectors = self._schedule_connectors(session)
         if not connectors:
@@ -355,7 +714,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         for row in self._rule_rows:
             self._rules_group.remove(row)
         self._populate_rules(session)
-        self._fingerprint = self._state_fingerprint(session)
+        self._fingerprint = self._authoring_fingerprint(session)
 
     def _build_new_rule(self, session: Session) -> Gtk.Widget:
         group = Adw.PreferencesGroup(
@@ -366,6 +725,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             ),
         )
         choices = session.playlists.all()
+        self._rule_choices = choices
         self._rule_connectors = self._schedule_connectors(session)
         self._rule_target = Adw.ComboRow(
             title="Displays",
@@ -442,13 +802,122 @@ class SchedulesPage(Gtk.ScrolledWindow):
         group.add(buttons)
         return group
 
+    def _capture_rule_editor(self) -> _RuleEditorState | None:
+        if not self._built:
+            return None
+        target_index = self._rule_target.get_selected()
+        connector = (
+            self._rule_connectors[target_index - 1]
+            if 0 < target_index <= len(self._rule_connectors)
+            else ""
+        )
+        playlist_index = self._rule_playlist.get_selected()
+        playlist_id = (
+            self._rule_choices[playlist_index].id
+            if playlist_index < len(self._rule_choices)
+            else ""
+        )
+        focus = self._rule_editor_focus()
+        return _RuleEditorState(
+            editing_rule=self._editing_rule,
+            connector=connector,
+            playlist_id=playlist_id,
+            months=tuple(button.get_active() for button in self._months),
+            weekdays=tuple(button.get_active() for button in self._weekdays),
+            time_enabled=self._time_enabled.get_active(),
+            start_hour=self._start_hour.get_selected(),
+            start_minute=self._start_minute.get_selected(),
+            end_hour=self._end_hour.get_selected(),
+            end_minute=self._end_minute.get_selected(),
+            focus=focus,
+        )
+
+    def _rule_editor_focus(self) -> str | None:
+        root = self.get_root()
+        focused = root.get_focus() if isinstance(root, Gtk.Window) else None
+        if focused is None:
+            return None
+        for name in (
+            "_rule_target",
+            "_rule_playlist",
+            "_time_enabled",
+            "_start_hour",
+            "_start_minute",
+            "_end_hour",
+            "_end_minute",
+            "_rule_commit",
+            "_rule_cancel",
+        ):
+            widget = getattr(self, name, None)
+            if isinstance(widget, Gtk.Widget) and (
+                focused is widget or focused.is_ancestor(widget)
+            ):
+                return name
+        return None
+
+    def _restore_rule_editor(
+        self,
+        state: _RuleEditorState | None,
+        session: Session,
+    ) -> None:
+        if state is None:
+            return
+        target = (
+            self._rule_connectors.index(state.connector) + 1
+            if state.connector in self._rule_connectors
+            else 0
+        )
+        self._rule_target.set_selected(target)
+        playlist = next(
+            (
+                index
+                for index, choice in enumerate(self._rule_choices)
+                if choice.id == state.playlist_id
+            ),
+            0,
+        )
+        self._rule_playlist.set_selected(playlist)
+        for button, active in zip(self._months, state.months, strict=False):
+            button.set_active(active)
+        for button, active in zip(self._weekdays, state.weekdays, strict=False):
+            button.set_active(active)
+        self._time_enabled.set_active(state.time_enabled)
+        self._time_box.set_sensitive(state.time_enabled)
+        self._start_hour.set_selected(state.start_hour)
+        self._start_minute.set_selected(state.start_minute)
+        self._end_hour.set_selected(state.end_hour)
+        self._end_minute.set_selected(state.end_minute)
+        self._editing_rule = (
+            state.editing_rule
+            if any(rule.id == state.editing_rule for rule in session.schedules.rules)
+            else ""
+        )
+        self._rule_commit.set_label(
+            "Save scheduled override" if self._editing_rule else "Add scheduled override"
+        )
+        self._rule_cancel.set_visible(bool(self._editing_rule))
+        if state.focus is not None:
+            widget = getattr(self, state.focus, None)
+            if isinstance(widget, Gtk.Widget):
+                widget.grab_focus()
+
     def _schedule_connectors(self, session: Session) -> tuple[str, ...]:
-        connected = set(_connected_outputs())
+        connected = set(self._live_connectors())
         saved = {connector for connector, _playlist in session.displays.all()}
         targeted = {rule.connector for rule in session.schedules.rules if rule.connector}
         if session.settings.theme_source_connector:
             targeted.add(session.settings.theme_source_connector)
         return tuple(sorted(connected | saved | targeted))
+
+    def _live_connectors(self) -> tuple[str, ...]:
+        """Merge GTK monitor names with Rust's authoritative niri snapshot."""
+        found = list(_connected_outputs())
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        if truth is not None and truth.status_version == 2:
+            for display in truth.displays:
+                if display.connected and display.connector not in found:
+                    found.append(display.connector)
+        return tuple(found)
 
     @staticmethod
     def _target_label(connector: str) -> str:
@@ -479,13 +948,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         def changed(row: Adw.ComboRow, _property: object) -> None:
             if self._loading:
                 return
-            if (
-                self._app.session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
-                and not INDEPENDENT_RUNTIME_READY
-            ):
-                return
             index = row.get_selected()
-            started = (
+            (
                 self._app.activate_playlist_async(choices[index - 1].id)
                 if 0 < index <= len(choices)
                 else self._app.resume_schedule_async()
@@ -500,12 +964,122 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 row.set_selected(self._playback_selected(self._app.session, choices, truth))
             finally:
                 self._loading = False
-            if started:
-                # Force the next accepted status to reconcile this row even
-                # when the runtime rejected the requested transition.
-                self._fingerprint = None
+            # The next accepted status reconciles this row.  Do not invalidate
+            # the authored fingerprint: doing so would rebuild unrelated
+            # schedule controls on the next refresh and discard editor state.
 
         return changed
+
+    def _make_display_playback_changed(
+        self,
+        connector: str,
+        choices: tuple[Any, ...],
+    ) -> Any:
+        def changed(row: Adw.ComboRow, _property: object) -> None:
+            index = row.get_selected()
+            if self._display_selected_echo.get(connector) == index:
+                self._display_selected_echo.pop(connector, None)
+                return
+            if self._loading:
+                return
+            started = (
+                self._app.activate_playlist_on_async(connector, choices[index - 1].id)
+                if 0 < index <= len(choices)
+                else self._app.resume_schedule_on_async(connector)
+            )
+            # Runtime truth owns this selector. Revert the optimistic GTK
+            # change immediately; the next atomic snapshot advances it only
+            # after Rust has accepted and applied the route transition.
+            truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+            display = truth.display(connector) if truth is not None else None
+            self._loading = True
+            try:
+                self._set_display_selected(
+                    connector,
+                    row,
+                    self._display_playback_selected(display, choices) if display is not None else 0,
+                )
+            finally:
+                self._loading = False
+            if started:
+                self._playback_truth = None
+
+        return changed
+
+    def _set_display_selected(
+        self,
+        connector: str,
+        row: Adw.ComboRow,
+        selected: int,
+    ) -> None:
+        """Set service-owned selection without echoing it as a user command."""
+        if row.get_selected() == selected:
+            return
+        self._display_selected_echo[connector] = selected
+        row.set_selected(selected)
+
+    def _make_display_action(self, connector: str, verb: str) -> Any:
+        def activate(_button: Gtk.Button) -> None:
+            self._app.runtime_action_on_async(connector, verb)
+
+        return activate
+
+    def _make_display_play_action(self, connector: str) -> Any:
+        def activate(_button: Gtk.Button) -> None:
+            truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+            display = truth.display(connector) if truth is not None else None
+            if display is None:
+                return
+            if display.renderer_failed and runtime_truth.entry_is_taboo(
+                getattr(self._app, "runtime_status", None),
+                display.playlist_id,
+                display.entry_id,
+            ):
+                self._app.present_page("media")
+                return
+            verb = (
+                "pause"
+                if display.playback_state == "playing" and not display.renderer_failed
+                else "play"
+            )
+            self._app.runtime_action_on_async(connector, verb)
+
+        return activate
+
+    def _make_display_mode_changed(self, connector: str, verb: str) -> Any:
+        def changed(button: Gtk.ToggleButton) -> None:
+            if self._loading:
+                return
+            wanted = button.get_active()
+            self._app.runtime_action_on_async(connector, verb, "on" if wanted else "off")
+            # A mode button is still runtime truth, not an optimistic local
+            # setting. Put it back until the next atomic status confirms the
+            # service accepted the request.
+            truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+            display = truth.display(connector) if truth is not None else None
+            current = (
+                display.shuffle
+                if display is not None and verb == "shuffle"
+                else display.cycle_enabled
+                if display is not None
+                else False
+            )
+            self._loading = True
+            try:
+                button.set_active(current)
+            finally:
+                self._loading = False
+
+        return changed
+
+    def _make_display_mode_defaults(self, connector: str) -> Any:
+        def reset(_button: Gtk.Button) -> None:
+            # Application serialises both requests under one busy state. Keep
+            # these widgets on the last atomic snapshot until Rust reports the
+            # result, including a possible partial refusal.
+            self._app.reset_display_modes_on_async(connector)
+
+        return reset
 
     def _make_default_changed(self, choices: tuple[Any, ...]) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
@@ -521,7 +1095,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 self.refresh(self._app.session)
                 return
             self._app.schedule_edited()
-            self._fingerprint = self._state_fingerprint(self._app.session)
+            self._fingerprint = self._authoring_fingerprint(self._app.session)
 
         return changed
 
@@ -540,7 +1114,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return
             self._app.runtime_config_changed()
             self._app.window_report(f"Updated {connector}")
-            self._fingerprint = self._state_fingerprint(self._app.session)
+            self._fingerprint = self._authoring_fingerprint(self._app.session)
 
         return changed
 
@@ -554,7 +1128,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 self._app.window_report(str(error))
                 return
             self._app.schedule_edited()
-            self._fingerprint = self._state_fingerprint(self._app.session)
+            self._fingerprint = self._authoring_fingerprint(self._app.session)
 
         return changed
 

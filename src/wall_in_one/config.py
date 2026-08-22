@@ -141,10 +141,9 @@ class Settings:
 
     #: ``mirrored`` is the cheap, predictable default: every attached display
     #: follows one cursor and one schedule. ``independent`` unlocks authored
-    #: connector assignments and connector-targeted calendar rules. The Rust
-    #: runtime contract is being versioned separately; keeping this choice in
-    #: the app-owned settings first lets authoring data migrate without ever
-    #: sending half-resolved configuration over the socket.
+    #: connector assignments, targeted calendar rules, cursors and renderers.
+    #: The compiler resolves that app-owned authoring into the Rust schema;
+    #: configuration never travels over the runtime command socket.
     display_mode: str = DISPLAY_MODE_MIRRORED
 
     #: Which display's wallpaper feeds Noctalia's one shell-wide palette while

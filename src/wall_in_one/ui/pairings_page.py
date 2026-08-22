@@ -19,7 +19,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-from wall_in_one.library import pairings
+from wall_in_one.library import manage, pairings
 from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
 from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Mode as PaletteMode
@@ -75,10 +75,16 @@ class _StillCard(Gtk.ToggleButton):
 class PairingsPage(Gtk.Box):
     """A full-size editor reached from one item in the Media grid."""
 
-    def __init__(self, application: Application, on_back: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        application: Application,
+        on_back: Callable[[], None],
+        on_remove: Callable[[MediaItem], None] | None = None,
+    ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._app = application
         self._on_back = on_back
+        self._on_remove = on_remove
         self._session: Session | None = None
         self._selected: MediaItem | None = None
         self._rendered: tuple[MediaItem, pairings.Pairing] | None = None
@@ -189,27 +195,42 @@ class PairingsPage(Gtk.Box):
         self._editor.append(source)
 
         self._health_group: Adw.PreferencesGroup | None = None
-        self._retry_button: Gtk.Button | None = None
+        self._health_action: Gtk.Button | None = None
         if bundle.health.is_borked:
             self._health_group = Adw.PreferencesGroup(
                 title="Borked wallpaper · automatic playback is taboo",
                 description=(
                     f"{bundle.health.reason}\n\n"
-                    "The service keeps using the paired still and skips this wallpaper "
-                    "during automatic rotation. Clear the judgement only when you want "
-                    "to try the renderer again."
+                    "Playback and Quick choice are disabled. The service keeps the paired "
+                    "still visible and skips this wallpaper during automatic rotation."
                 ),
             )
             self._health_group.add_css_class("error")
             health_row = Adw.ActionRow(
-                title="Static fallback is active",
-                subtitle=f"Reported by {bundle.health.source or 'the runtime'}",
+                title="Playback disabled · static fallback only",
             )
-            self._retry_button = Gtk.Button(label="Clear taboo and retry now")
-            self._retry_button.add_css_class("suggested-action")
-            self._retry_button.set_valign(Gtk.Align.CENTER)
-            self._retry_button.connect("clicked", lambda _button: self._app.retry_borked(item))
-            health_row.add_suffix(self._retry_button)
+            removable = manage.is_removable(item, session.library.roots)
+            if removable and self._on_remove is not None:
+                health_row.set_subtitle(
+                    f"Reported by {bundle.health.source or 'the runtime'} · "
+                    "removing it clears the Borked marker"
+                )
+                self._health_action = Gtk.Button(
+                    label="Delete wallpaper…" if item.deletable else "Move to Trash"
+                )
+                self._health_action.add_css_class("destructive-action")
+                self._health_action.set_valign(Gtk.Align.CENTER)
+                self._health_action.connect(
+                    "clicked", lambda _button: self._on_remove(item) if self._on_remove else None
+                )
+                health_row.add_suffix(self._health_action)
+            else:
+                unavailable = (
+                    "Delete unavailable here; uninstall this Workshop item in Steam, then rescan"
+                    if item.kind is Kind.SCENE or item.provider == "workshop"
+                    else "Delete unavailable here; remove it from its source, then rescan"
+                )
+                health_row.set_subtitle(unavailable)
             self._health_group.add(health_row)
             self._editor.append(self._health_group)
 

@@ -22,11 +22,13 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 from wall_in_one import __version__, paths
 
 RUNTIME_ONLY_VERBS: Final[tuple[str, ...]] = (
+    "on",
     "previous",
     "play",
     "pause",
@@ -37,6 +39,7 @@ RUNTIME_ONLY_VERBS: Final[tuple[str, ...]] = (
 )
 
 CTL_VERBS: Final[tuple[str, ...]] = (
+    "on",
     "next",
     "prev",
     "previous",
@@ -254,44 +257,53 @@ def _sync_runtime_health() -> int:
     from wall_in_one.library import pairings
     from wall_in_one.session import Session
 
-    try:
-        response = client.send_runtime("status")
-    except client.NotRunningError as error:
-        print(error, file=sys.stderr)
-        return client.EXIT_NOT_RUNNING
-    except client.ControlError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    if not response.ok:
-        print(f"error: runtime rejected status: {response.message}", file=sys.stderr)
-        return 1
-    try:
-        status = runtime_health.parse_status(response.message)
-    except runtime_health.RuntimeHealthError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-
-    raw_reports = status.get("taboo_entries", [])
-    omitted = status.get("taboo_entries_omitted", 0)
-    assert isinstance(raw_reports, list)
-    assert type(omitted) is int
-    if not raw_reports:
-        if omitted:
-            print(
-                f"warning: runtime omitted {omitted} older taboo entries; none were cleared",
-                file=sys.stderr,
-            )
-        print("runtime reported no visible wallpaper health changes")
-        return 0
-
     session: Session | None = None
+    omitted = 0
     changed = 0
     document_changed = False
+    reload_needed = False
+    refresh_only = False
+    health_present = False
+    mapped = 0
+    unmapped = 0
+    stale = 0
     try:
-        # Hold the compiler gate from the first authoring read through the
-        # generated document. This command is another app invocation, never a
-        # second writer implementation; Rust remains read-only.
+        # The status request itself is part of the compiler transaction. A GUI
+        # Clear+retry takes this same gate around its Pairings write and nested
+        # publication, so neither side can observe the other's half-finished
+        # state and then persist an obsolete runtime finding.
         with runtime_config.compiler_lock():
+            try:
+                response = client.send_runtime("status")
+            except client.NotRunningError as error:
+                print(error, file=sys.stderr)
+                return client.EXIT_NOT_RUNNING
+            except client.ControlError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 1
+            if not response.ok:
+                print(f"error: runtime rejected status: {response.message}", file=sys.stderr)
+                return 1
+            try:
+                status = runtime_health.parse_status(response.message)
+            except runtime_health.RuntimeHealthError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 1
+            raw_reports = status.get("taboo_entries", [])
+            omitted_value = status.get("taboo_entries_omitted", 0)
+            assert isinstance(raw_reports, list)
+            assert type(omitted_value) is int
+            omitted = omitted_value
+            if not raw_reports:
+                if omitted:
+                    print(
+                        f"warning: runtime omitted {omitted} older taboo entries; "
+                        "none were cleared",
+                        file=sys.stderr,
+                    )
+                print("runtime reported no visible wallpaper health changes")
+                return 0
+
             settings = config.load_strict()
             session = Session(settings)
             session.refresh()
@@ -302,22 +314,67 @@ def _sync_runtime_health() -> int:
                     "cannot sync runtime health because authoring state is "
                     f"unreadable ({details}); no health marker was written"
                 )
-            inventory = runtime_health.taboo_inventory(
-                status,
-                session.playlists.all(),
-                session.library.items,
+            expected_path = paths.runtime_config_path().absolute()
+            status_path = status.get("config_path")
+            status_generation = status.get("config_generation")
+            assert isinstance(status_path, str)
+            assert isinstance(status_generation, str)
+            if Path(status_path) != expected_path:
+                raise runtime_config.RuntimeConfigError(
+                    "runtime health came from configuration "
+                    f"{status_path}, not the app-managed {expected_path}; "
+                    "no health marker was written"
+                )
+            installed_generation = runtime_config.read_config_generation(expected_path)
+            if status_generation != installed_generation:
+                raise runtime_config.RuntimeConfigError(
+                    "runtime status is from configuration generation "
+                    f"{status_generation}, but {expected_path} contains "
+                    f"{installed_generation}; reload the runtime and retry; "
+                    "no health marker was written"
+                )
+            authored_generation = runtime_config.document_generation(
+                runtime_config.render(settings, session)
             )
-            for report in inventory.reports:
-                if session.pairings.mark_borked(
-                    report.item,
-                    report.reason,
-                    report.source,
-                ):
-                    changed += 1
-            if changed:
+            if status_generation != authored_generation:
+                # The stores changed before their generated document landed,
+                # or a prior health sync saved Pairings but failed to compile.
+                # Publish that newer authoring truth, but never consume an old
+                # runtime observation: it may be precisely what Clear+retry
+                # was intended to retract.
                 document_changed = runtime_config.update(settings, session)
+                reload_needed = True
+                refresh_only = True
+            else:
+                inventory = runtime_health.taboo_inventory(
+                    status,
+                    session.playlists.all(),
+                    session.library.items,
+                )
+                mapped = len(inventory.reports)
+                unmapped = inventory.unmapped
+                stale = inventory.stale
+                if mapped:
+                    changed = session.pairings.mark_borked_many(
+                        (report.item, report.reason, report.source) for report in inventory.reports
+                    )
+                    health_present = True
+                    # Always render, even when every marker was already in the
+                    # store. This repairs the split state left by a previous
+                    # compiler failure instead of pinning it forever.
+                    document_changed = runtime_config.update(settings, session)
+                    reload_needed = document_changed or any(
+                        not report.durable for report in inventory.reports
+                    )
     except (config.ConfigError, pairings.PairingError, runtime_config.RuntimeConfigError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        if health_present:
+            print(
+                f"error: runtime health is saved, but its runtime configuration "
+                f"could not be compiled: {error}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 1
     finally:
         if session is not None:
@@ -328,25 +385,65 @@ def _sync_runtime_health() -> int:
             f"warning: runtime omitted {omitted} older taboo entries; none were cleared",
             file=sys.stderr,
         )
-    if document_changed:
+    if reload_needed:
+        saved_subject = "current authoring configuration" if refresh_only else "runtime health"
         try:
             reload_response = client.send_runtime("reload")
         except client.NotRunningError:
             # Persistence is complete. A later service start will read the
             # generated metadata, so disappearance between status and reload
             # does not turn successful authoring into failure.
-            print("warning: runtime stopped before reload; saved health will apply at next start")
+            print(
+                f"warning: runtime stopped before reload; saved {saved_subject} "
+                "will apply at next start"
+            )
         except client.ControlError as error:
-            print(f"error: runtime health was saved but reload failed: {error}", file=sys.stderr)
+            print(f"error: {saved_subject} was saved but reload failed: {error}", file=sys.stderr)
             return 1
         else:
             if not reload_response.ok:
                 print(
-                    f"error: runtime health was saved but reload was rejected: "
+                    f"error: {saved_subject} was saved but reload was rejected: "
                     f"{reload_response.message}",
                     file=sys.stderr,
                 )
                 return 1
+    if refresh_only:
+        state = "published" if document_changed else "confirmed"
+        print(
+            "error: runtime status was older than current authoring; "
+            f"{state} the current runtime configuration without consuming the stale "
+            "health snapshot. Retry after the runtime reports the new generation.",
+            file=sys.stderr,
+        )
+        return 1
+    if unmapped or stale:
+        problems: list[str] = []
+        if stale:
+            problems.append(f"{stale} stale-generation runtime report{'s' if stale != 1 else ''}")
+        if unmapped:
+            problems.append(
+                f"{unmapped} runtime report{'s' if unmapped != 1 else ''} "
+                "which no longer map to current authoring"
+            )
+        saved = (
+            f"saved {mapped} current wallpaper health report{'s' if mapped != 1 else ''}"
+            if mapped
+            else "saved no wallpaper health reports"
+        )
+        print(
+            f"error: {saved}; skipped {' and '.join(problems)}; retry after the runtime "
+            "reports the current configuration generation",
+            file=sys.stderr,
+        )
+        return 1
+    if not mapped:
+        print(
+            "error: runtime reported wallpaper failures, but none map to current "
+            "authoring; no health marker was written",
+            file=sys.stderr,
+        )
+        return 1
     print(f"saved {changed} new wallpaper health marker{'s' if changed != 1 else ''}")
     return 0
 
@@ -359,6 +456,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         from wall_in_one.control import client
 
         words: list[str] = options.argument
+        if options.verb == "on":
+            if len(words) < 2:
+                return client.dispatch("on", " ".join(words) if words else None)
+            return client.dispatch_on(
+                words[0],
+                words[1],
+                " ".join(words[2:]) if len(words) > 2 else None,
+            )
         return client.dispatch(options.verb, " ".join(words) if words else None)
 
     if options.write_config:

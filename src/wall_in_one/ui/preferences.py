@@ -24,6 +24,7 @@ from wall_in_one.providers.base import ProviderError
 from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.wallpaper import renderer, scenes
 
@@ -40,8 +41,6 @@ _INTERPOLATION_LABELS: dict[str, str] = {
     "oversample": "Oversample (recommended)",
     "linear": "Linear (stronger blending)",
 }
-
-INDEPENDENT_RUNTIME_READY = False
 
 
 def _connected_outputs() -> tuple[str, ...]:
@@ -292,27 +291,13 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._display_mode)
 
         self._theme_connectors: tuple[str, ...] = ()
+        self._theme_attached: frozenset[str] = frozenset()
         self._theme_source = Adw.ComboRow(
             title="Colours follow",
-            subtitle=(
-                "Noctalia has one shell-wide palette. Automatic uses the primary display, "
-                "or the first active display when no primary is reported"
-            ),
+            subtitle="Choose which display drives Noctalia's one shell-wide palette",
         )
         self._theme_source.connect("notify::selected", self._on_changed)
         group.add(self._theme_source)
-
-        self._independent_runtime_note = Adw.ActionRow(
-            title="Independent runtime routing is not active yet",
-            subtitle=(
-                "Schema 4 preserves this authoring choice, while this service build keeps "
-                "its last working mirrored configuration."
-            ),
-        )
-        self._independent_runtime_note.add_prefix(
-            Gtk.Image(icon_name="dialog-information-symbolic")
-        )
-        group.add(self._independent_runtime_note)
 
         self._favourites_only = Adw.SwitchRow(
             title="Cycle favourites only",
@@ -384,7 +369,7 @@ class PreferencesPage(Adw.PreferencesPage):
         return group
 
     def _known_theme_connectors(self, settings: config.Settings) -> tuple[str, ...]:
-        connected = set(_connected_outputs())
+        connected = self._live_theme_connectors()
         session = getattr(self._app, "session", None)
         saved = (
             {connector for connector, _playlist in session.displays.all()}
@@ -400,7 +385,19 @@ class PreferencesPage(Adw.PreferencesPage):
             # candidate without continuing to expose the ambiguous old Output
             # setting as a separate control.
             saved.add(settings.output)
-        return tuple(sorted(connected | saved))
+        ordered = list(connected)
+        ordered.extend(connector for connector in sorted(saved) if connector not in ordered)
+        return tuple(ordered)
+
+    def _live_theme_connectors(self) -> tuple[str, ...]:
+        """Merge GTK monitor names with Rust's authoritative niri snapshot."""
+        found = list(_connected_outputs())
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        if truth is not None and truth.status_version == 2:
+            for display in truth.displays:
+                if display.connected and display.connector not in found:
+                    found.append(display.connector)
+        return tuple(found)
 
     def _watch_output_changes(self) -> None:
         """Refresh connector labels when docking changes without rewriting the choice."""
@@ -422,34 +419,35 @@ class PreferencesPage(Adw.PreferencesPage):
 
     def _selected_theme_connector(self) -> str:
         index = self._theme_source.get_selected()
-        if index == 0 or index > len(self._theme_connectors):
+        if index >= len(self._theme_connectors):
             return ""
-        return self._theme_connectors[index - 1]
+        return self._theme_connectors[index]
 
     def _refresh_display_controls(self, settings: config.Settings) -> None:
         self._theme_connectors = self._known_theme_connectors(settings)
-        connected = _connected_outputs()
+        connected = self._live_theme_connectors()
         attached = set(connected)
-        labels = ["Automatic (primary, otherwise first active)"]
-        labels.extend(
+        self._theme_attached = frozenset(attached)
+        labels = [
             connector if connector in attached else f"{connector} (not attached)"
             for connector in self._theme_connectors
-        )
+        ]
         self._theme_source.set_model(Gtk.StringList.new(labels))
         selected = (
-            self._theme_connectors.index(settings.theme_source_connector) + 1
+            self._theme_connectors.index(settings.theme_source_connector)
             if settings.theme_source_connector in self._theme_connectors
             else 0
         )
         self._theme_source.set_selected(selected)
-        resolved = display_policy.resolve_theme_source(
-            settings.theme_source_connector,
-            connected,
-        )
-        if resolved.is_fallback:
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        reported = truth.theme_source if truth is not None and truth.status_version == 2 else None
+        resolved = display_policy.resolve_theme_source(settings.theme_source_connector, connected)
+        effective = reported.effective if reported is not None else resolved.effective
+        fallback_active = reported.fallback if reported is not None else resolved.is_fallback
+        if fallback_active:
             fallback = (
-                f"Colours temporarily follow {resolved.effective}"
-                if resolved.effective
+                f"Colours temporarily follow {effective}"
+                if effective
                 else "No active display is available for palette changes"
             )
             self._theme_source.set_subtitle(
@@ -461,13 +459,42 @@ class PreferencesPage(Adw.PreferencesPage):
                 "Noctalia has one shell-wide palette; it follows this display"
             )
         else:
-            self._theme_source.set_subtitle(
-                "Noctalia has one shell-wide palette. Automatic uses the primary display, "
-                "or the first active display when no primary is reported"
-            )
+            self._theme_source.set_subtitle("Choose which display drives shell-wide colours")
         independent = settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
         self._theme_source.set_visible(independent)
-        self._independent_runtime_note.set_visible(independent and not INDEPENDENT_RUNTIME_READY)
+
+    def runtime_status_changed(self, settings: config.Settings) -> None:
+        """Adopt niri connector/palette truth without rebuilding other settings."""
+        connectors = self._known_theme_connectors(settings)
+        attached = frozenset(self._live_theme_connectors())
+        if connectors == self._theme_connectors and attached == self._theme_attached:
+            # Effective palette fallback can still move when Rust changes its
+            # designated source, so update the subtitle from the new snapshot
+            # without replacing the focused ComboRow model.
+            truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+            if truth is None or truth.theme_source is None:
+                return
+            effective = truth.theme_source.effective
+            if truth.theme_source.fallback:
+                fallback = (
+                    f"Colours temporarily follow {effective}"
+                    if effective
+                    else "No active display is available for palette changes"
+                )
+                self._theme_source.set_subtitle(
+                    f"{truth.theme_source.configured} is not attached. {fallback}; the saved "
+                    "choice returns when it reconnects"
+                )
+            elif truth.theme_source.configured:
+                self._theme_source.set_subtitle(
+                    "Noctalia has one shell-wide palette; it follows this display"
+                )
+            return
+        self._loading = True
+        try:
+            self._refresh_display_controls(settings)
+        finally:
+            self._loading = False
 
     def _build_providers_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
@@ -640,7 +667,7 @@ class PreferencesPage(Adw.PreferencesPage):
         interpolation_index = self._interpolation.get_selected()
         independent = self._display_mode.get_selected() == 1
         if independent and not self._selected_theme_connector():
-            connected = _connected_outputs()
+            connected = self._live_theme_connectors()
             if not connected:
                 self._loading = True
                 try:
@@ -648,7 +675,6 @@ class PreferencesPage(Adw.PreferencesPage):
                 finally:
                     self._loading = False
                 self._theme_source.set_visible(False)
-                self._independent_runtime_note.set_visible(False)
                 self._report(
                     "Independent display control needs an attached display for Colours "
                     "follow. Connect a display and try again."
@@ -666,11 +692,10 @@ class PreferencesPage(Adw.PreferencesPage):
             if connector in self._theme_connectors:
                 self._loading = True
                 try:
-                    self._theme_source.set_selected(self._theme_connectors.index(connector) + 1)
+                    self._theme_source.set_selected(self._theme_connectors.index(connector))
                 finally:
                     self._loading = False
         self._theme_source.set_visible(independent)
-        self._independent_runtime_note.set_visible(independent and not INDEPENDENT_RUNTIME_READY)
         changes: dict[str, object] = {
             "shuffle": self._shuffle.get_active(),
             "cycle_enabled": self._cycle.get_active(),
@@ -682,7 +707,11 @@ class PreferencesPage(Adw.PreferencesPage):
             "display_mode": (
                 config.DISPLAY_MODE_INDEPENDENT if independent else config.DISPLAY_MODE_MIRRORED
             ),
-            "theme_source_connector": self._selected_theme_connector(),
+            "theme_source_connector": (
+                self._selected_theme_connector()
+                if independent
+                else self._app.settings.theme_source_connector
+            ),
             "video_muted": self._muted.get_active(),
             "video_volume": int(self._volume.get_value()),
             "video_hardware_decode": self._hardware_decode.get_active(),

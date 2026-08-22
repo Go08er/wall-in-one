@@ -70,6 +70,202 @@ def test_multi_display_snapshot_keeps_every_active_playlist() -> None:
     assert not truth.playlist_is_active("spare")
 
 
+def _display_status(
+    connector: str,
+    playlist_id: str,
+    playlist: str,
+    *,
+    route_source: str,
+    manual: bool,
+    rule_id: str | None = None,
+    connected: bool = True,
+) -> dict[str, object]:
+    return {
+        "connector": connector,
+        "connected": connected,
+        "assignment_source": "explicit",
+        "assigned_playlist_id": playlist_id,
+        "assigned_playlist": playlist,
+        "playlist_id": playlist_id,
+        "playlist": playlist,
+        "entry_id": f"entry-{connector}",
+        "kind": "still",
+        "still": f"/library/{connector}.png",
+        "motion_active": False,
+        "route_source": route_source,
+        "manual_override": manual,
+        "schedule_rule_id": rule_id,
+        "playback_state": "playing",
+        "paused": False,
+        "stopped": False,
+        "shuffle": False,
+        "shuffle_default": False,
+        "shuffle_source": "config",
+        "cycle_enabled": True,
+        "cycle_default": True,
+        "cycle_source": "config",
+        "renderer_failed": False,
+        "last_error": "",
+        "automatic_retry": None,
+    }
+
+
+def test_status_v2_preserves_mixed_per_display_truth_and_palette_fallback() -> None:
+    truth = runtime_truth.from_status(
+        {
+            "status_version": 2,
+            "display_mode": "independent",
+            "theme_source": {
+                "configured": "DP-9",
+                "effective": "eDP-1",
+                "fallback": True,
+            },
+            "playlist_id": "",
+            "playlist": "Multiple displays",
+            "source": "mixed",
+            "playlists": [
+                {"id": "day", "active": True},
+                {"id": "night", "active": True},
+            ],
+            "schedules": [
+                {
+                    "id": "work-hours",
+                    "playlist_id": "day",
+                    "playlist": "Day",
+                    "connector": "eDP-1",
+                    "months": [],
+                    "weekdays": [0, 1, 2, 3, 4],
+                    "start": "09:00",
+                    "end": "17:00",
+                    "enabled": True,
+                    "selected": True,
+                    "in_force": True,
+                },
+                {
+                    "id": "global-night",
+                    "playlist_id": "night",
+                    "playlist": "Night",
+                    "connector": None,
+                    "months": [],
+                    "weekdays": [],
+                    "start": None,
+                    "end": None,
+                    "enabled": True,
+                    "selected": False,
+                    "in_force": False,
+                },
+            ],
+            "displays": [
+                _display_status(
+                    "eDP-1",
+                    "day",
+                    "Day",
+                    route_source="schedule",
+                    manual=False,
+                    rule_id="work-hours",
+                ),
+                _display_status("DP-2", "night", "Night", route_source="manual", manual=True),
+            ],
+        }
+    )
+
+    assert truth is not None
+    assert truth.status_version == 2
+    assert truth.source == "mixed"
+    assert truth.is_multi_display
+    assert truth.active_playlist_ids == ("day", "night")
+    laptop = truth.display("eDP-1")
+    external = truth.display("DP-2")
+    assert laptop is not None and laptop.schedule_rule_id == "work-hours"
+    assert external is not None and external.manual_override is True
+    assert truth.theme_source == runtime_truth.ThemeSourceTruth("DP-9", "eDP-1", True)
+    assert truth.schedule_rule("work-hours") == runtime_truth.RuntimeScheduleTruth(
+        "work-hours",
+        "day",
+        "Day",
+        "eDP-1",
+        True,
+        True,
+        True,
+    )
+    global_rule = truth.schedule_rule("global-night")
+    assert global_rule is not None and global_rule.connector is None
+
+
+def test_detached_route_is_inventory_not_current_playback() -> None:
+    first = _item("/library/first.png")
+    second = _item("/library/second.png")
+    day = Playlist(
+        id="day",
+        name="Day",
+        entries=(Entry(id="day-entry", source=str(first.path)),),
+    )
+    night = Playlist(
+        id="night",
+        name="Night",
+        entries=(Entry(id="night-entry", source=str(second.path)),),
+    )
+    live = _display_status("eDP-1", "day", "Day", route_source="schedule", manual=False)
+    live.update({"entry_id": "day-entry", "still": str(first.path)})
+    detached = _display_status(
+        "DP-9",
+        "night",
+        "Night",
+        route_source="manual",
+        manual=True,
+        connected=False,
+    )
+    detached.update({"entry_id": "night-entry", "still": str(second.path)})
+    status: dict[str, object] = {
+        "status_version": 2,
+        "display_mode": "independent",
+        "theme_source": {
+            "configured": "DP-9",
+            "effective": "eDP-1",
+            "fallback": True,
+        },
+        "playlist_id": "",
+        "playlist": "Multiple displays",
+        "source": "mixed",
+        # Inventory flags retain both route states; connector.connected is the
+        # authority for what is actually playing now.
+        "playlists": [
+            {"id": "day", "active": True},
+            {"id": "night", "active": True},
+        ],
+        "displays": [live, detached],
+    }
+
+    truth = runtime_truth.from_status(status)
+    playback = runtime_truth.media_playback(status, (day, night), (first, second))
+
+    assert truth is not None
+    assert truth.active_playlist_ids == ("day",)
+    assert not truth.is_multi_display
+    assert truth.display("DP-9") is not None, "Schedules retains detached routes"
+    assert playback == runtime_truth.MediaPlayback("Day", (first.path,))
+
+
+def test_incomplete_status_v2_never_falls_back_to_stale_session_shape() -> None:
+    display = _display_status("DP-1", "day", "Day", route_source="schedule", manual=False)
+    del display["route_source"]
+
+    assert (
+        runtime_truth.from_status(
+            {
+                "status_version": 2,
+                "display_mode": "independent",
+                "theme_source": {"configured": "DP-1", "effective": "DP-1", "fallback": False},
+                "playlist_id": "day",
+                "playlist": "Day",
+                "source": "schedule",
+                "displays": [display],
+            }
+        )
+        is None
+    )
+
+
 def test_incomplete_status_cannot_displace_authoring_fallback() -> None:
     assert runtime_truth.from_status(None) is None
     assert runtime_truth.from_status({"playlist": "Night", "source": "manual"}) is None
@@ -190,6 +386,9 @@ def test_taboo_inventory_maps_stable_entries_to_media_and_deduplicates_occurrenc
     )
     inventory = runtime_health.taboo_inventory(
         {
+            "config_generation": "a" * runtime_config.CONFIG_GENERATION_HEX_CHARS,
+            "runtime_instance": "b" * runtime_health.RUNTIME_INSTANCE_HEX_CHARS,
+            "config_epoch": 7,
             "taboo_entries_omitted": 7,
             "taboo_entries": [
                 {
@@ -197,18 +396,24 @@ def test_taboo_inventory_maps_stable_entries_to_media_and_deduplicates_occurrenc
                     "entry_id": "first-a",
                     "reason": "decoder rejected it",
                     "source": "automatic-apply",
+                    "durable": True,
+                    "observed_config_epoch": 7,
                 },
                 {
                     "playlist_id": "evening",
                     "entry_id": "first-b",
                     "reason": "same wallpaper, another occurrence",
                     "source": "automatic-apply",
+                    "durable": False,
+                    "observed_config_epoch": 7,
                 },
                 {
                     "playlist_id": runtime_config.FALLBACK_PLAYLIST_ID,
                     "entry_id": runtime_config.entry_id_for_source(second.path),
                     "reason": "scene crashed",
                     "source": "renderer-crash",
+                    "durable": True,
+                    "observed_config_epoch": 7,
                 },
             ],
         },
@@ -217,10 +422,13 @@ def test_taboo_inventory_maps_stable_entries_to_media_and_deduplicates_occurrenc
     )
 
     assert inventory.omitted == 7
+    assert inventory.unmapped == 0
+    assert inventory.stale == 0
     assert [(report.item.path, report.reason) for report in inventory.reports] == [
         (first.path, "decoder rejected it"),
         (second.path, "scene crashed"),
     ]
+    assert [report.durable for report in inventory.reports] == [False, True]
 
 
 def test_missing_taboo_inventory_never_means_that_saved_health_recovered() -> None:

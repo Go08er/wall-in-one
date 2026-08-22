@@ -88,6 +88,27 @@ RUNTIME_APPLY_VERBS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Connector-scoped commands are deliberately narrower than the global runtime
+# surface.  Configuration, reload, status and quit have no meaningful
+# per-display form.  Keeping the allow-list here prevents a typo in GTK from
+# turning into an ambiguous line which a newer daemon might interpret
+# differently.
+TARGETED_RUNTIME_ARGUMENTS: Final[Mapping[str, frozenset[str] | None]] = {
+    "playlist-use": None,
+    "schedule-follow": frozenset(),
+    "play": frozenset(),
+    "pause": frozenset(),
+    "stop": frozenset(),
+    "toggle": frozenset(),
+    "shuffle": frozenset({"on", "off", "default"}),
+    "cycle": frozenset({"on", "off", "default"}),
+    "next": frozenset(),
+    "previous": frozenset(),
+    "random": frozenset(),
+}
+MAX_TARGET_CONNECTOR_BYTES: Final = 256
+MAX_TARGET_ARGUMENT_BYTES: Final = 120 * 4
+
 # Verbs the retained Python --service mode already understands. They are a
 # compatibility bridge while installations move to the Rust runtime.
 PYTHON_RUNTIME_FALLBACKS: Final[frozenset[str]] = frozenset(
@@ -191,7 +212,22 @@ def dispatch(verb: str, argument: str | None) -> int:
         request_verb = "schedule-follow"
         request_argument = None
     try:
-        if verb in RUNTIME_VERBS:
+        if verb == "on":
+            if argument is None:
+                raise ControlError(
+                    "usage: on <connector> <playlist-use|schedule-follow|play|pause|toggle|"
+                    "stop|shuffle|cycle|next|previous|random> [argument]"
+                )
+            words = argument.split(maxsplit=2)
+            if len(words) < 2:
+                raise ControlError(
+                    "usage: on <connector> <playlist-use|schedule-follow|play|pause|toggle|"
+                    "stop|shuffle|cycle|next|previous|random> [argument]"
+                )
+            connector, targeted_verb = words[:2]
+            targeted_argument = words[2] if len(words) == 3 else None
+            response = send_runtime_on(connector, targeted_verb, targeted_argument)
+        elif verb in RUNTIME_VERBS:
             try:
                 response = send(
                     Request(verb=request_verb, argument=request_argument),
@@ -250,6 +286,22 @@ def dispatch(verb: str, argument: str | None) -> int:
     return 0 if response.ok else 1
 
 
+def dispatch_on(connector: str, verb: str, argument: str | None) -> int:
+    """Run one validated connector-scoped ``ctl on`` command."""
+    try:
+        response = send_runtime_on(connector, verb, argument)
+    except NotRunningError as error:
+        print(f"{error}", file=sys.stderr)
+        return EXIT_NOT_RUNNING
+    except ControlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    stream = sys.stdout if response.ok else sys.stderr
+    if response.message:
+        print(response.message, file=stream)
+    return 0 if response.ok else 1
+
+
 def send_runtime(
     verb: str, argument: str | None = None, *, timeout: float | None = None
 ) -> Response:
@@ -259,3 +311,84 @@ def send_runtime(
         path=paths.runtime_socket_path(),
         timeout=timeout,
     )
+
+
+def send_runtime_on(
+    connector: str,
+    verb: str,
+    argument: str | None = None,
+    *,
+    timeout: float | None = None,
+) -> Response:
+    """Send one strictly validated connector-scoped runtime command.
+
+    The Rust wire stays the existing two-field request: ``verb`` is ``on`` and
+    its single argument is ``<connector> <verb> [argument]``.  Connector names
+    and every app-authored runtime identity are protocol tokens, so accepting
+    whitespace here would make the boundary ambiguous before it reached Rust.
+    There is intentionally no Python-service fallback: the retained Python
+    runtime has one global cursor and cannot honestly emulate this operation.
+    """
+    _runtime_token(
+        connector,
+        label="display connector",
+        maximum_bytes=MAX_TARGET_CONNECTOR_BYTES,
+    )
+    allowed_arguments = TARGETED_RUNTIME_ARGUMENTS.get(verb)
+    if verb not in TARGETED_RUNTIME_ARGUMENTS:
+        choices = ", ".join(TARGETED_RUNTIME_ARGUMENTS)
+        raise ControlError(f"unsupported display runtime verb {verb!r}; expected one of {choices}")
+
+    if allowed_arguments is None:
+        if argument is None:
+            raise ControlError(f"display runtime verb {verb!r} needs an argument")
+        _runtime_text(
+            argument,
+            label=f"{verb} argument",
+            maximum_bytes=MAX_TARGET_ARGUMENT_BYTES,
+        )
+    elif not allowed_arguments:
+        if argument is not None:
+            raise ControlError(f"display runtime verb {verb!r} takes no argument")
+    elif argument not in allowed_arguments:
+        choices = "|".join(sorted(allowed_arguments))
+        raise ControlError(f"display runtime verb {verb!r} expects {choices}")
+
+    wire = f"{connector} {verb}" + (f" {argument}" if argument is not None else "")
+    return send_runtime(
+        "on",
+        wire,
+        timeout=RUNTIME_ACTION_TIMEOUT if timeout is None else timeout,
+    )
+
+
+def _runtime_token(value: str, *, label: str, maximum_bytes: int) -> None:
+    """Validate one whitespace-delimited token before building the wire line."""
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ControlError(f"{label} must be valid UTF-8") from error
+    if not value:
+        raise ControlError(f"{label} cannot be empty")
+    if len(encoded) > maximum_bytes:
+        raise ControlError(f"{label} must be at most {maximum_bytes} UTF-8 bytes")
+    if any(character.isspace() for character in value):
+        raise ControlError(f"{label} cannot contain whitespace")
+    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in value):
+        raise ControlError(f"{label} cannot contain control characters")
+
+
+def _runtime_text(value: str, *, label: str, maximum_bytes: int) -> None:
+    """Validate the nonempty final remainder accepted by ``playlist-use``."""
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ControlError(f"{label} must be valid UTF-8") from error
+    if not value:
+        raise ControlError(f"{label} cannot be empty")
+    if value != value.strip():
+        raise ControlError(f"{label} cannot have leading or trailing whitespace")
+    if len(encoded) > maximum_bytes:
+        raise ControlError(f"{label} must be at most {maximum_bytes} UTF-8 bytes")
+    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in value):
+        raise ControlError(f"{label} cannot contain control characters")

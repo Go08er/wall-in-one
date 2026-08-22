@@ -30,6 +30,15 @@ expiry. Paging back to somewhere you have already been is answered from that
 cache rather than re-fetched, and the summary line at the bottom of the Browse tab
 says `cached` when it was.
 
+The GTK result surface is separately paged at no more than 40 live photo cards.
+Previous and Next retain cheap candidate metadata, selections, downloaded/busy
+badges, the search cursor and filter state, while the old page's widgets and
+decoded paintables are released. This is deliberate rather than infinite scroll:
+the former surface retained 600 card trees and could approach 600 MB. Candidate
+metadata has its own 10,000-result ceiling, enough for the measured 7,380-item 4K
+catalogue, and the footer says when that defensive ceiling is reached. The offline
+production-widget probe is `benchmarks/browse_rss.py`.
+
 That summary line is worth reading:
 
 ```
@@ -295,8 +304,8 @@ someone else's page.
 - **Text search normally pages through its tag catalogue.** The site redirects
   searches such as `naruto` to `/tag:naruto/`; Wall-in-One follows that one
   same-origin redirect, validates the final path as exactly
-  `/tag:<lowercase-slug>/`, and uses `/2/`, `/3/` and later pages as the result
-  grid scrolls. If a query does not resolve to a tag route, its direct result is
+  `/tag:<lowercase-slug>/`, and uses `/2/`, `/3/` and later pages when **Next**
+  is pressed. If a query does not resolve to a tag route, its direct result is
   still shown but honestly remains one page.
 - **HD browsing is first page only.** `/hd/` is a single curated page.
 - **`latest`, `genre` and `4k` are paged.** Even there, the previous and next

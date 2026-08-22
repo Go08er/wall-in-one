@@ -34,12 +34,17 @@ in here gets synthesized. This module owns the record, the choice, and the file.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
-from collections.abc import Iterable, Mapping, Sequence
+import os
+import stat
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
 from wall_in_one.library import pairing, state_file
@@ -78,11 +83,23 @@ BORKED: Final = "borked"
 MAX_HEALTH_REASON: Final = 512
 MAX_HEALTH_SOURCE: Final = 64
 
+# The GUI and the headless runtime-health bridge are separate app processes,
+# but pairings.json still has exactly one logical writer. Atomic replacement
+# prevents torn JSON; this companion advisory lock prevents two valid, stale
+# snapshots from replacing each other. It is deliberately never unlinked:
+# unlinking a lock file while another process is waiting on its inode permits a
+# third process to lock a new inode and enter the critical section beside it.
+MUTATION_LOCK_TIMEOUT_SECONDS: Final = 5.0
+MUTATION_LOCK_POLL_SECONDS: Final = 0.025
+
+_LOCAL_MUTATION_GATE = threading.Lock()
+_MutationResult = TypeVar("_MutationResult")
+
 
 class PairingError(Exception):
     """A pairing could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``.
+    Kinds in use: ``local-io``, ``invalid-state``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -358,6 +375,113 @@ def state_path() -> Path:
     return paths.app_state_dir() / STATE_FILENAME
 
 
+def _mutation_lock_path(target: Path) -> Path:
+    return target.absolute().with_name(f".{target.name}.mutation.lock")
+
+
+def _open_mutation_lock(path: Path) -> int:
+    """Open the private lock without following or racing a replacement."""
+    try:
+        paths.ensure_directory(path.parent)
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError as error:
+        raise PairingError(
+            "local-io", f"cannot safely open pairings mutation lock {path}: {error}"
+        ) from error
+
+    try:
+        opened = os.fstat(descriptor)
+        current = path.lstat()
+        if not stat.S_ISREG(opened.st_mode):
+            raise PairingError("local-io", f"pairings mutation lock {path} is not a regular file")
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise PairingError(
+                "local-io", f"pairings mutation lock {path} changed while being opened"
+            )
+        if opened.st_uid != os.getuid() or opened.st_nlink != 1:
+            raise PairingError(
+                "local-io",
+                f"pairings mutation lock {path} is not a private file owned by this user",
+            )
+        os.fchmod(descriptor, 0o600)
+        return descriptor
+    except PairingError:
+        os.close(descriptor)
+        raise
+    except OSError as error:
+        os.close(descriptor)
+        raise PairingError(
+            "local-io", f"cannot verify pairings mutation lock {path}: {error}"
+        ) from error
+
+
+def _verify_open_mutation_lock(path: Path, descriptor: int) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as error:
+        raise PairingError(
+            "local-io", f"cannot verify pairings mutation lock {path}: {error}"
+        ) from error
+    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+        raise PairingError(
+            "local-io", f"pairings mutation lock {path} changed while waiting for it"
+        )
+
+
+@contextlib.contextmanager
+def _mutation_lock(
+    target: Path, *, timeout: float = MUTATION_LOCK_TIMEOUT_SECONDS
+) -> Iterator[None]:
+    """Serialise one read/rebase/write transaction across threads and processes."""
+    if timeout < 0:
+        raise PairingError("local-io", "pairings mutation lock timeout cannot be negative")
+    lock_path = _mutation_lock_path(target)
+    deadline = time.monotonic() + timeout
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _LOCAL_MUTATION_GATE.acquire(timeout=remaining):
+        raise PairingError(
+            "local-io",
+            f"timed out after {timeout:g}s waiting for pairings mutation lock {lock_path}",
+        )
+    descriptor: int | None = None
+    locked = False
+    try:
+        descriptor = _open_mutation_lock(lock_path)
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PairingError(
+                        "local-io",
+                        f"timed out after {timeout:g}s waiting for pairings mutation lock "
+                        f"{lock_path}",
+                    ) from None
+                time.sleep(min(MUTATION_LOCK_POLL_SECONDS, remaining))
+            except OSError as error:
+                raise PairingError(
+                    "local-io", f"cannot acquire pairings mutation lock {lock_path}: {error}"
+                ) from error
+        _verify_open_mutation_lock(lock_path, descriptor)
+        yield
+    finally:
+        if descriptor is not None:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        _LOCAL_MUTATION_GATE.release()
+
+
 def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
     """Every stored record by key, plus why the file was passed over.
 
@@ -612,34 +736,42 @@ class Store:
         what "go back to working it out yourself" means for one field.
         """
         identity = Identity.of(item)
-        existing = self._records.get(identity.key)
-        palette = existing.palette if existing is not None else PalettePolicy()
-        health = existing.health if existing is not None else Health()
-        return self._commit(
-            Pairing(
+
+        def choose(records: dict[str, Pairing]) -> tuple[Pairing, bool]:
+            existing = records.get(identity.key)
+            palette = existing.palette if existing is not None else PalettePolicy()
+            health = existing.health if existing is not None else Health()
+            record = Pairing(
                 identity=identity,
                 still=still,
                 palette=palette,
                 customized=True,
                 health=health,
             )
-        )
+            records[identity.key] = record
+            return record, record != existing
+
+        return self._mutate(choose)
 
     def choose_palette(self, item: MediaItem, palette: PalettePolicy) -> Pairing:
         """Record which colours ``item`` asks for."""
         identity = Identity.of(item)
-        existing = self._records.get(identity.key)
-        still = existing.still if existing is not None else None
-        health = existing.health if existing is not None else Health()
-        return self._commit(
-            Pairing(
+
+        def choose(records: dict[str, Pairing]) -> tuple[Pairing, bool]:
+            existing = records.get(identity.key)
+            still = existing.still if existing is not None else None
+            health = existing.health if existing is not None else Health()
+            record = Pairing(
                 identity=identity,
                 still=still,
                 palette=palette,
                 customized=True,
                 health=health,
             )
-        )
+            records[identity.key] = record
+            return record, record != existing
+
+        return self._mutate(choose)
 
     def mark_borked(self, item: MediaItem, reason: str, source: str) -> bool:
         """Persist one runtime finding without changing pairing choices.
@@ -648,48 +780,77 @@ class Store:
         write marks the wallpaper rather than only the entry which happened to
         expose it.
         """
-        identity = Identity.of(item)
-        health = Health.borked(reason, source)
-        existing = self._records.get(identity.key)
-        if existing is not None and existing.health == health:
-            return False
-        record = (
-            replace(existing, health=health)
-            if existing is not None
-            else Pairing(identity=identity, health=health)
-        )
-        self._commit(record)
-        return True
+        return bool(self.mark_borked_many(((item, reason, source),)))
+
+    def mark_borked_many(
+        self,
+        findings: Iterable[tuple[MediaItem, str, str]],
+    ) -> int:
+        """Persist one atomic runtime-health snapshot and return changed identities.
+
+        The app can receive several renderer findings in one status response.
+        Saving each separately needlessly creates intermediate documents and
+        gives another process more chances to race the transaction. Duplicate
+        identities are collapsed with the last reported finding winning.
+
+        Unlike an interactive customization, health synchronization refuses
+        an unreadable store. An unattended diagnostic must never turn a
+        faulted authoring file into a sparse replacement.
+        """
+        requested: dict[str, tuple[Identity, Health]] = {}
+        for item, reason, source in findings:
+            identity = Identity.of(item)
+            requested[identity.key] = (identity, Health.borked(reason, source))
+        if not requested:
+            return 0
+
+        def mark(records: dict[str, Pairing]) -> tuple[int, bool]:
+            changed = 0
+            for key, (identity, health) in requested.items():
+                existing = records.get(key)
+                if existing is not None and existing.health == health:
+                    continue
+                records[key] = (
+                    replace(existing, health=health)
+                    if existing is not None
+                    else Pairing(identity=identity, health=health)
+                )
+                changed += 1
+            return changed, changed > 0
+
+        return self._mutate(mark, refuse_fault=True)
 
     def clear_borked(self, item: MediaItem) -> bool:
         """Clear the durable judgement while retaining authored choices."""
         identity = Identity.of(item)
-        existing = self._records.get(identity.key)
-        if existing is None or not existing.health.is_borked:
-            return False
-        updated = dict(self._records)
-        if existing.customized:
-            updated[identity.key] = replace(existing, health=Health())
-        else:
-            del updated[identity.key]
-        self._write(updated)
-        self._records = updated
-        return True
+
+        def clear(records: dict[str, Pairing]) -> tuple[bool, bool]:
+            existing = records.get(identity.key)
+            if existing is None or not existing.health.is_borked:
+                return False, False
+            if existing.customized:
+                records[identity.key] = replace(existing, health=Health())
+            else:
+                del records[identity.key]
+            return True, True
+
+        return self._mutate(clear)
 
     def reset(self, item: MediaItem) -> bool:
         """Forget everything chosen for ``item``. True if there was anything."""
         identity = Identity.of(item)
-        if identity.key not in self._records:
-            return False
-        updated = dict(self._records)
-        existing = updated[identity.key]
-        if existing.health.is_borked:
-            updated[identity.key] = Pairing(identity=identity, health=existing.health)
-        else:
-            del updated[identity.key]
-        self._write(updated)
-        self._records = updated
-        return True
+
+        def reset_choices(records: dict[str, Pairing]) -> tuple[bool, bool]:
+            existing = records.get(identity.key)
+            if existing is None:
+                return False, False
+            if existing.health.is_borked:
+                records[identity.key] = Pairing(identity=identity, health=existing.health)
+            else:
+                del records[identity.key]
+            return True, True
+
+        return self._mutate(reset_choices)
 
     def forget_identity(self, identity: Identity) -> bool:
         """Drop a record by identity, for a wallpaper the app has just deleted.
@@ -697,13 +858,14 @@ class Store:
         Records outlive a missing file on purpose -- it may come back -- but
         not one we destroyed ourselves.
         """
-        if identity.key not in self._records:
-            return False
-        updated = dict(self._records)
-        del updated[identity.key]
-        self._write(updated)
-        self._records = updated
-        return True
+
+        def forget(records: dict[str, Pairing]) -> tuple[bool, bool]:
+            if identity.key not in records:
+                return False, False
+            del records[identity.key]
+            return True, True
+
+        return self._mutate(forget)
 
     def forget_path(self, path: Path) -> bool:
         """Drop any record naming ``path`` as its source, whatever the medium.
@@ -712,23 +874,48 @@ class Store:
         caller has a path and no reason to know which. Callers that have the
         `MediaItem` should use `forget_identity`.
         """
-        keys = [Identity(medium, str(path)).key for medium in Medium]
-        present = [key for key in keys if key in self._records]
-        if not present:
-            return False
-        updated = dict(self._records)
-        for key in present:
-            del updated[key]
-        self._write(updated)
-        self._records = updated
-        return True
+        keys = tuple(Identity(medium, str(path)).key for medium in Medium)
 
-    def _commit(self, record: Pairing) -> Pairing:
-        updated = dict(self._records)
-        updated[record.identity.key] = record
-        self._write(updated)
-        self._records = updated
-        return record
+        def forget(records: dict[str, Pairing]) -> tuple[bool, bool]:
+            present = [key for key in keys if key in records]
+            if not present:
+                return False, False
+            for key in present:
+                del records[key]
+            return True, True
+
+        return self._mutate(forget)
+
+    def _mutate(
+        self,
+        operation: Callable[[dict[str, Pairing]], tuple[_MutationResult, bool]],
+        *,
+        refuse_fault: bool = False,
+    ) -> _MutationResult:
+        """Reload, rebase and optionally replace one authoring transaction."""
+        target = self._path if self._path is not None else state_path()
+        with _mutation_lock(target):
+            records, fault = _read(target)
+            if fault is not None and refuse_fault:
+                raise PairingError(
+                    "invalid-state",
+                    f"cannot persist runtime health because {fault}; "
+                    "the unreadable pairings file was left untouched",
+                )
+            updated = dict(records)
+            result, changed = operation(updated)
+            if changed:
+                previous_fault = self._fault
+                self._fault = fault
+                try:
+                    self._write(updated)
+                except PairingError:
+                    self._fault = previous_fault if fault is None else fault
+                    raise
+                fault = None
+            self._records = updated
+            self._fault = fault
+            return result
 
     def _write(self, records: Mapping[str, Pairing]) -> None:
         target = self._path if self._path is not None else state_path()

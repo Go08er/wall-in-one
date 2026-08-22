@@ -33,6 +33,7 @@ jobs:
           nix build -L
           .#checks.x86_64-linux.wall-in-one
           .#checks.x86_64-linux.wall-in-one-service
+          .#checks.x86_64-linux.service-rss
           .#checks.x86_64-linux.gui-tests
           .#checks.x86_64-linux.mypy
           .#checks.x86_64-linux.desktop

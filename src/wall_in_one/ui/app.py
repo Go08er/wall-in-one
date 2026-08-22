@@ -878,12 +878,39 @@ class Application(Adw.Application):
             self._session.playlists.all(),
             self._session.library.items,
         )
-        changed = False
-        for report in inventory.reports:
+        changed = 0
+        if inventory.reports:
             try:
-                changed |= self._session.pairings.mark_borked(
-                    report.item, report.reason, report.source
-                )
+                # A status request can cross an authoring gesture. Take the
+                # same non-blocking compiler gate as the headless bridge and
+                # consume its failure rows only if both disk and the current
+                # in-memory authoring snapshot are still the generation Rust
+                # observed. If another process owns the gate, the next two-
+                # second poll can try again without freezing GTK.
+                with runtime_config.compiler_lock(timeout=0):
+                    status_path = status.get("config_path")
+                    status_generation = status.get("config_generation")
+                    expected_path = paths.runtime_config_path().absolute()
+                    current = (
+                        isinstance(status_path, str)
+                        and isinstance(status_generation, str)
+                        and Path(status_path) == expected_path
+                        and runtime_config.read_config_generation(expected_path)
+                        == status_generation
+                        and runtime_config.document_generation(
+                            runtime_config.render(self._settings, self._session)
+                        )
+                        == status_generation
+                    )
+                    if current:
+                        changed = self._session.pairings.mark_borked_many(
+                            (report.item, report.reason, report.source)
+                            for report in inventory.reports
+                        )
+            except runtime_config.RuntimeConfigError:
+                # A busy compiler or stale snapshot is not a GUI failure. The
+                # status remains visible and the next poll retries safely.
+                pass
             except pairings.PairingError as error:
                 self.window_report(f"Could not save borked wallpaper state: {error}")
         if inventory.omitted > self._taboo_omitted_seen:
@@ -1030,6 +1057,36 @@ class Application(Adw.Application):
             fallback=fallback,
         )
 
+    def runtime_action_on_async(
+        self,
+        connector: str,
+        verb: str,
+        argument: str | None = None,
+    ) -> bool:
+        """Drive exactly one live display, never through the global fallback."""
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime_on(connector, verb, argument),
+        )
+
+    def reset_display_modes_on_async(self, connector: str) -> bool:
+        """Drop both per-display mode overrides in one ordered GUI action."""
+
+        def work() -> Response:
+            cycle = client.send_runtime_on(connector, "cycle", "default")
+            if not cycle.ok:
+                return Response.failure(
+                    f"Cycle default was refused; Shuffle was not changed: {cycle.message}"
+                )
+            shuffle = client.send_runtime_on(connector, "shuffle", "default")
+            if not shuffle.ok:
+                return Response.failure(
+                    "Cycle returned to its saved default, but Shuffle was refused: "
+                    f"{shuffle.message}"
+                )
+            return Response.success("Cycle and Shuffle now use their saved defaults")
+
+        return self._start_gui_runtime_call(work)
+
     def runtime_action(self, verb: str, argument: str | None = None) -> Response:
         """Drive the Rust runtime, retaining Python application as fallback."""
         try:
@@ -1097,6 +1154,43 @@ class Application(Adw.Application):
         return self._start_gui_runtime_call(
             work,
             fallback=lambda: self.apply(self._session.apply_current),
+            on_success=shown,
+        )
+
+    def play_item_on_async(self, item: MediaItem, connector: str) -> bool:
+        """Publish one display's singleton Quick choice, then target only it.
+
+        The connector-derived id is stable across app restarts and choices, so
+        this replaces one inspectable playlist per display instead of filling
+        the authoring store with disposable rows.  A Python fallback would
+        have only one cursor and would therefore be a second, global driver;
+        connector commands fail honestly when Rust is unavailable.
+        """
+        if self._gui_runtime_call_pending():
+            return False
+        if self._session.library.find(item.path) is None:
+            self.window_report(f"Not in the library: {item.path}")
+            return False
+        try:
+            chosen = self._session.playlists.set_display_singleton(
+                connector,
+                item.path,
+                entry_id=runtime_config.entry_id_for_source(item.path),
+            )
+        except playlists.PlaylistError as error:
+            self.window_report(str(error))
+            return False
+        valid, _changed = self._update_runtime_document()
+        if not valid:
+            self.window_report(f"The Quick choice for {connector} could not be published")
+            return False
+
+        def shown(_runtime_answered: bool) -> None:
+            if self._window is not None:
+                self._window.playlists_changed(self._session)
+
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime_on(connector, "playlist-use", chosen.id),
             on_success=shown,
         )
 
@@ -1229,6 +1323,25 @@ class Application(Adw.Application):
             on_success=shown,
         )
 
+    def activate_playlist_on_async(self, connector: str, reference: str) -> bool:
+        """Switch one display without changing any other runtime route."""
+        if self._gui_runtime_call_pending():
+            return False
+        try:
+            chosen = self._session.playlists.find(reference)
+        except playlists.PlaylistError as error:
+            self.window_report(str(error))
+            return False
+
+        def shown(_runtime_answered: bool) -> None:
+            if self._window is not None:
+                self._window.playlists_changed(self._session)
+
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime_on(connector, "playlist-use", chosen.id),
+            on_success=shown,
+        )
+
     def resume_schedule(self) -> Response:
         """Release a manual playlist choice and apply the scheduled/default list."""
         try:
@@ -1258,6 +1371,20 @@ class Application(Adw.Application):
         return self._start_gui_runtime_call(
             lambda: client.send_runtime("schedule-follow"),
             fallback=apply_locally,
+            on_success=shown,
+        )
+
+    def resume_schedule_on_async(self, connector: str) -> bool:
+        """Drop one display's manual override without touching the others."""
+        if self._gui_runtime_call_pending():
+            return False
+
+        def shown(_runtime_answered: bool) -> None:
+            if self._window is not None:
+                self._window.playlists_changed(self._session)
+
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime_on(connector, "schedule-follow"),
             on_success=shown,
         )
 
@@ -1299,17 +1426,22 @@ class Application(Adw.Application):
 
     def retry_borked(self, item: MediaItem) -> bool:
         """Clear one durable taboo judgement and try it as Quick choice now."""
+        if self._gui_runtime_call_pending():
+            return False
         try:
-            self._session.pairings.clear_borked(item)
-        except pairings.PairingError as error:
+            # This is one authoring transaction: clear the durable judgement,
+            # compile Quick choice without it, then queue the runtime command.
+            # The nested runtime_config.update is re-entrant on this thread;
+            # a headless health sync cannot sample the old runtime status in
+            # between the clear and publication and put the marker back.
+            with runtime_config.compiler_lock():
+                self._session.pairings.clear_borked(item)
+                if self._window is not None:
+                    self._window.pairing_health_changed(self._session)
+                return self.play_item_async(item)
+        except (pairings.PairingError, runtime_config.RuntimeConfigError) as error:
             self.window_report(f"Could not clear borked wallpaper state: {error}")
             return False
-        if self._window is not None:
-            self._window.pairing_health_changed(self._session)
-        # Quick choice recompiles after the clear and sends playlist-use on the
-        # same ordered runtime worker. A successful apply can therefore prove
-        # the wallpaper healthy without a local renderer racing Rust.
-        return self.play_item_async(item)
 
     def _reapply_current(self) -> bool:
         self.apply(self._session.apply_current)

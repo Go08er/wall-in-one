@@ -170,6 +170,18 @@ pkgs.testers.runNixOSTest {
             "| grep -F 'outputs=1'",
             timeout=30,
         )
+        machine.wait_until_succeeds(
+            as_user(
+                "${app} ctl status | ${lib.getExe pkgs.jq} -e "
+                "'.status_version == 2 and .display_mode == \"mirrored\" "
+                "and (.displays | length) == 1 "
+                "and .displays[0].connector == \"winit\" "
+                "and .displays[0].connected == true "
+                "and .theme_source.configured == \"\" "
+                "and .theme_source.effective == null'"
+            ),
+            timeout=20,
+        )
 
     with subtest("runtime cycle and stop controls remain independent"):
         before = machine.succeed(

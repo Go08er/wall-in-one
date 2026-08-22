@@ -380,6 +380,55 @@ def _session(
     return settings, session
 
 
+def test_status_inventory_budget_matches_the_rust_protocol_limit() -> None:
+    """A sub-8-MiB TOML document may still expand beyond one status reply."""
+    lines = ['schema_version = 4', 'default_playlist = "p0"']
+    for index in range(513):
+        lines.extend(
+            (
+                "[[playlists]]",
+                f'id = "p{index}"',
+                f'name = "{index:03}{"🐈" * 117}"',
+                "[[playlists.entries]]",
+                'id = "e"',
+                'kind = "still"',
+                'still = "/x"',
+            )
+        )
+    for index in range(512):
+        lines.extend(
+            (
+                "[[schedules]]",
+                f'id = "{"r" * 251}-{index:04}"',
+                f'playlist = "p{index}"',
+                "enabled = true",
+            )
+        )
+    document = "\n".join(lines) + "\n"
+    assert len(document.encode("utf-8")) < runtime_config.MAX_RUNTIME_CONFIG_BYTES
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="protocol response limit"):
+        runtime_config._validate_status_budget(document)
+
+
+def test_status_budget_failure_never_replaces_last_known_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    def reject(_document: str) -> None:
+        raise runtime_config.RuntimeConfigError("runtime status exceeds protocol response limit")
+
+    monkeypatch.setattr(runtime_config, "_validate_status_budget", reject)
+    with pytest.raises(runtime_config.RuntimeConfigError, match="protocol response limit"):
+        runtime_config.update(settings, session, target)
+
+    assert target.read_text(encoding="utf-8") == previous
+
+
 _LOCK_HOLDER = """
 import sys
 import time
@@ -849,23 +898,32 @@ def test_legacy_single_output_is_dormant_under_the_new_mirrored_default(tmp_path
     assert document.get("displays", []) == []
 
 
-def test_independent_authoring_does_not_replace_schema_four_last_known_good(
+def test_independent_authoring_compiles_assignments_and_connector_rules(
     tmp_path: Path,
 ) -> None:
-    settings, session = _session(tmp_path)
+    settings, session = _session(
+        tmp_path,
+        display_assignments={"DP-1": "evening", "DP-2": "evening"},
+    )
     settings = replace(
         settings,
         display_mode=config.DISPLAY_MODE_INDEPENDENT,
         theme_source_connector="DP-1",
     )
-    target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
-    target.write_text(previous, encoding="utf-8")
+    session.schedules.add("evening", connector="DP-2", rule_id="dock")
 
-    with pytest.raises(runtime_config.RuntimeConfigError, match="does not execute it yet"):
-        runtime_config.update(settings, session, target)
+    document = tomllib.loads(runtime_config.render(settings, session))
 
-    assert target.read_text(encoding="utf-8") == previous
+    assert document["settings"]["display_mode"] == "independent"
+    assert document["settings"]["theme_source_connector"] == "DP-1"
+    assert document["displays"] == [
+        {"connector": "DP-1", "playlist": "evening"},
+        {"connector": "DP-2", "playlist": "evening"},
+    ]
+    assert [(rule["id"], rule.get("connector", "")) for rule in document["schedules"]] == [
+        ("night", ""),
+        ("dock", "DP-2"),
+    ]
 
 
 def test_independent_authoring_requires_a_designated_theme_connector(tmp_path: Path) -> None:

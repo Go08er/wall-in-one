@@ -278,10 +278,24 @@ struct TabooEntry {
     /// A later config omission is therefore an explicit app-owned clear;
     /// session-only findings survive unrelated reloads until acknowledged.
     durable: bool,
-    /// In-process config epoch under which the renderer failure was observed
-    /// or the app-authored marker was loaded. A reload must not relabel a
-    /// pending session finding as if it came from newer authoring state.
+    /// In-process config epoch under which the renderer failure was observed,
+    /// safely reconciled by resolved media identity, or loaded from app-owned
+    /// authoring state.
     observed_config_epoch: u64,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum ResolvedMediaIdentity {
+    Still(PathBuf),
+    Video(PathBuf),
+    Scene(String),
+}
+
+#[derive(Default)]
+struct NondurableFindings {
+    records: HashMap<ResolvedMediaIdentity, TabooEntry>,
+    /// Oldest-to-newest identity order for the bounded status inventory.
+    order: Vec<ResolvedMediaIdentity>,
 }
 
 fn configured_taboo(
@@ -1387,25 +1401,29 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn mark_taboo_one(&mut self, key: EntryKey, reason: &str, source: &'static str) {
+        let mut promote = false;
         if let Some(record) = self.taboo.get_mut(&key) {
             if !record.durable {
                 record.reason = truncate_middle(reason, 512);
                 record.source = source.to_string();
                 record.observed_config_epoch = self.config_epoch;
+                promote = true;
             }
+        } else {
+            let record = TabooEntry {
+                reason: truncate_middle(reason, 512),
+                source: source.to_string(),
+                durable: false,
+                observed_config_epoch: self.config_epoch,
+            };
+            self.taboo.insert(key.clone(), record);
+            promote = true;
+        }
+        if !promote {
             return;
         }
-        let record = TabooEntry {
-            reason: truncate_middle(reason, 512),
-            source: source.to_string(),
-            durable: false,
-            observed_config_epoch: self.config_epoch,
-        };
-        if self.taboo_order.len() == MAX_TABOO_STATUS_ENTRIES {
-            self.taboo_order.remove(0);
-        }
-        self.taboo_order.push(key.clone());
-        self.taboo.insert(key, record);
+
+        promote_taboo_status_key(&mut self.taboo_order, key);
     }
 
     fn equivalent_entry_keys(&self, key: &EntryKey) -> Vec<EntryKey> {
@@ -1434,31 +1452,87 @@ impl<D: WallpaperDriver> Runtime<D> {
             .collect()
     }
 
-    fn reconcile_configured_taboo(&mut self) {
-        let (configured, configured_order) = configured_taboo(&self.config, self.config_epoch);
-        self.taboo
-            .retain(|key, record| !record.durable || configured.contains_key(key));
-        self.taboo_order.retain(|key| self.taboo.contains_key(key));
+    fn snapshot_nondurable_findings(&self) -> NondurableFindings {
+        let mut findings = NondurableFindings::default();
+        for (key, record) in &self.taboo {
+            if record.durable {
+                continue;
+            }
+            let Some(identity) = resolved_identity_for_key(&self.config, key) else {
+                continue;
+            };
+            findings.records.insert(identity, record.clone());
+        }
+        for key in &self.taboo_order {
+            let Some(record) = self.taboo.get(key) else {
+                continue;
+            };
+            if record.durable {
+                continue;
+            }
+            let Some(identity) = resolved_identity_for_key(&self.config, key) else {
+                continue;
+            };
+            // Equivalent occurrences share one finding. Keep the last position
+            // so the bounded inventory preserves the newest observed identity.
+            findings.order.retain(|candidate| candidate != &identity);
+            findings.order.push(identity);
+        }
+        findings
+    }
 
-        for (key, configured_record) in &configured {
-            if let Some(record) = self.taboo.get_mut(key) {
-                record.reason.clone_from(&configured_record.reason);
-                record.source.clone_from(&configured_record.source);
-                record.durable = true;
-                record.observed_config_epoch = self.config_epoch;
-                continue;
+    fn reconcile_configured_taboo(&mut self, previous: &NondurableFindings) {
+        let (mut taboo, configured_order) = configured_taboo(&self.config, self.config_epoch);
+        let mut keys_by_identity: HashMap<ResolvedMediaIdentity, Vec<EntryKey>> = HashMap::new();
+
+        for playlist in &self.config.playlists {
+            for entry in &playlist.entries {
+                let Some(identity) = resolved_media_identity(entry) else {
+                    continue;
+                };
+                let key = EntryKey {
+                    playlist_id: playlist.id.clone(),
+                    entry_id: entry.id.clone(),
+                };
+                keys_by_identity
+                    .entry(identity.clone())
+                    .or_default()
+                    .push(key.clone());
+                let Some(previous_record) = previous.records.get(&identity) else {
+                    continue;
+                };
+                // App-authored metadata wins for an exact occurrence. Every
+                // session-only record that survived by resolved identity is
+                // attributable to the newly adopted epoch.
+                taboo.entry(key).or_insert_with(|| {
+                    let mut record = previous_record.clone();
+                    record.durable = false;
+                    record.observed_config_epoch = self.config_epoch;
+                    record
+                });
             }
-            self.taboo.insert(key.clone(), configured_record.clone());
         }
-        for key in configured_order {
-            if self.taboo_order.contains(&key) {
+
+        // Durable rows need no acknowledgement, so keep reconciled session
+        // findings newest in the bounded status inventory. The complete taboo
+        // map remains effective even when an older row is omitted from status.
+        let mut order = configured_order;
+        for identity in &previous.order {
+            let Some(keys) = keys_by_identity.get(identity) else {
                 continue;
+            };
+            for key in keys {
+                if taboo.get(key).is_some_and(|record| !record.durable) {
+                    order.retain(|candidate| candidate != key);
+                    order.push(key.clone());
+                }
             }
-            if self.taboo_order.len() == MAX_TABOO_STATUS_ENTRIES {
-                self.taboo_order.remove(0);
-            }
-            self.taboo_order.push(key.clone());
         }
+        if order.len() > MAX_TABOO_STATUS_ENTRIES {
+            order.drain(..order.len() - MAX_TABOO_STATUS_ENTRIES);
+        }
+        self.taboo = taboo;
+        self.taboo_order = order;
     }
 
     fn is_taboo(&self, playlist_id: &str, entry_id: &str) -> bool {
@@ -3098,6 +3172,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             != self.config.settings.display_mode
             || next.settings.theme_source_connector != self.config.settings.theme_source_connector
             || next.schedules != self.config.schedules;
+        let nondurable_findings = self.snapshot_nondurable_findings();
 
         // Adopt the candidate only in memory until every required driver change
         // succeeds. A valid TOML document can still be unplayable (for example,
@@ -3147,7 +3222,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         // The candidate epoch becomes visible only if this transaction reaches
         // the successful return. Rollback restores the snapshot's epoch.
         self.config_epoch = self.config_epoch.saturating_add(1);
-        self.reconcile_configured_taboo();
+        self.reconcile_configured_taboo(&nondurable_findings);
         if let Err(error) = self.rebuild_cursors(&old_entries) {
             self.restore_reload_snapshot(snapshot);
             return Err(error);
@@ -4259,23 +4334,34 @@ fn entry_kind(kind: crate::config::EntryKind) -> &'static str {
     }
 }
 
-fn equivalent_resolved_entry(left: &Entry, right: &Entry) -> bool {
-    if left.kind != right.kind {
-        return false;
-    }
-    match left.kind {
-        EntryKind::Scene => left
+fn resolved_media_identity(entry: &Entry) -> Option<ResolvedMediaIdentity> {
+    match entry.kind {
+        EntryKind::Scene => entry
             .scene_id
             .as_ref()
-            .zip(right.scene_id.as_ref())
-            .is_some_and(|(left, right)| left == right),
-        EntryKind::Video => left
+            .map(|scene_id| ResolvedMediaIdentity::Scene(scene_id.clone())),
+        EntryKind::Video => entry
             .motion
             .as_ref()
-            .zip(right.motion.as_ref())
-            .is_some_and(|(left, right)| left == right),
-        EntryKind::Still => left.still == right.still,
+            .map(|motion| ResolvedMediaIdentity::Video(motion.clone())),
+        EntryKind::Still => Some(ResolvedMediaIdentity::Still(entry.still.clone())),
     }
+}
+
+fn resolved_identity_for_key(config: &Config, key: &EntryKey) -> Option<ResolvedMediaIdentity> {
+    let entry = config.playlist(&key.playlist_id).and_then(|playlist| {
+        playlist
+            .entries
+            .iter()
+            .find(|entry| entry.id == key.entry_id)
+    })?;
+    resolved_media_identity(entry)
+}
+
+fn equivalent_resolved_entry(left: &Entry, right: &Entry) -> bool {
+    resolved_media_identity(left)
+        .zip(resolved_media_identity(right))
+        .is_some_and(|(left, right)| left == right)
 }
 
 fn targets_equal_ignoring_taboo(left: &[Target], right: &[Target]) -> bool {
@@ -4319,6 +4405,14 @@ fn push_bounded(values: &mut Vec<usize>, value: usize) {
     values.push(value);
 }
 
+fn promote_taboo_status_key(order: &mut Vec<EntryKey>, key: EntryKey) {
+    order.retain(|candidate| candidate != &key);
+    if order.len() == MAX_TABOO_STATUS_ENTRIES {
+        order.remove(0);
+    }
+    order.push(key);
+}
+
 #[derive(Clone, Copy)]
 struct XorShift64(u64);
 impl XorShift64 {
@@ -4355,7 +4449,10 @@ fn _is_absolute(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{push_bounded, PLAYBACK_HISTORY_LIMIT};
+    use super::{
+        promote_taboo_status_key, push_bounded, EntryKey, MAX_TABOO_STATUS_ENTRIES,
+        PLAYBACK_HISTORY_LIMIT,
+    };
 
     #[test]
     fn playback_history_has_a_hard_memory_bound() {
@@ -4366,5 +4463,35 @@ mod tests {
         assert_eq!(history.len(), PLAYBACK_HISTORY_LIMIT);
         assert_eq!(history[0], PLAYBACK_HISTORY_LIMIT * 2);
         assert_eq!(history.last(), Some(&(PLAYBACK_HISTORY_LIMIT * 3 - 1)));
+    }
+
+    #[test]
+    fn revisited_taboo_is_promoted_into_the_newest_status_inventory() {
+        let mut order = Vec::new();
+        for index in 0..=MAX_TABOO_STATUS_ENTRIES {
+            promote_taboo_status_key(
+                &mut order,
+                EntryKey {
+                    playlist_id: "playlist".into(),
+                    entry_id: format!("entry-{index}"),
+                },
+            );
+        }
+        let total_records = MAX_TABOO_STATUS_ENTRIES + 1;
+        assert_eq!(order.len(), MAX_TABOO_STATUS_ENTRIES);
+        assert_eq!(total_records - order.len(), 1);
+        assert_eq!(order.first().unwrap().entry_id, "entry-1");
+
+        promote_taboo_status_key(
+            &mut order,
+            EntryKey {
+                playlist_id: "playlist".into(),
+                entry_id: "entry-0".into(),
+            },
+        );
+        assert_eq!(order.len(), MAX_TABOO_STATUS_ENTRIES);
+        assert_eq!(total_records - order.len(), 1);
+        assert_eq!(order.first().unwrap().entry_id, "entry-2");
+        assert_eq!(order.last().unwrap().entry_id, "entry-0");
     }
 }

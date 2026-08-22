@@ -35,6 +35,12 @@ from wall_in_one.ui.thumbnails import ThumbnailLoader
 #: for a collection that size.
 MAX_PALETTES_PER_ORIGIN: Final = 24
 
+# Renderer stderr is deliberately retained in full by the runtime, but a
+# WindowTitle subtitle is layout rather than a diagnostics viewer.  Keep the
+# visible summary bounded while leaving the complete message on the tooltip
+# and in the application's report/toast path.
+MAX_RUNTIME_ERROR_SUMMARY: Final = 220
+
 #: Accelerator, action, and what to call it in the shortcuts dialogue. One
 #: table, so a key that works and a key the dialogue claims cannot drift apart.
 #:
@@ -68,6 +74,17 @@ _SHORTCUTS: Final = _sections()
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
+
+
+def _bounded_runtime_error(value: str) -> str:
+    """Collapse and bound renderer diagnostics for the window header."""
+    clean = " ".join(value.split())
+    if len(clean) <= MAX_RUNTIME_ERROR_SUMMARY:
+        return clean
+    marker = " … "
+    prefix = (MAX_RUNTIME_ERROR_SUMMARY - len(marker)) * 3 // 5
+    suffix = MAX_RUNTIME_ERROR_SUMMARY - len(marker) - prefix
+    return clean[:prefix] + marker + clean[-suffix:]
 
 
 def _chosen[Choice](dropdown: Gtk.DropDown, choices: tuple[Choice, ...]) -> Choice:
@@ -133,6 +150,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_media_status: dict[str, object] | None = None
         self._runtime_navigation_buttons: list[Gtk.Button] = []
         self._playback_state = "playing"
+        self._renderer_failed = False
+        self._renderer_taboo = False
 
         self.set_content(self._build_content())
         self.connect("destroy", self._on_destroy)
@@ -210,6 +229,10 @@ class MainWindow(Adw.ApplicationWindow):
             targeted = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
             targeted.connect("activate", handler)
             self.add_action(targeted)
+
+        apply_on = Gio.SimpleAction.new("apply-wallpaper-on", GLib.VariantType.new("(ss)"))
+        apply_on.connect("activate", self._on_apply_path_on)
+        self.add_action(apply_on)
 
         # Two strings rather than one: a palette choice is about a wallpaper
         # *and* a policy, and packing them into one string would need an
@@ -334,7 +357,23 @@ class MainWindow(Adw.ApplicationWindow):
         return activate
 
     def _on_runtime_play(self, _button: Gtk.Button) -> None:
-        self._run_runtime_action("pause" if self._playback_state == "playing" else "play")
+        if self._renderer_taboo:
+            # Rust intentionally refuses to retry a session-taboo entry. Lead
+            # the user to the existing health action instead of sending a
+            # command which can only leave the wallpaper static.
+            self.show_page("media")
+            self.report("Open the Borked wallpaper to clear its taboo and retry motion")
+            return
+        verb = (
+            "play"
+            if self._renderer_failed
+            else "toggle"
+            if self._playback_state == "mixed"
+            else "pause"
+            if self._playback_state == "playing"
+            else "play"
+        )
+        self._run_runtime_action(verb)
 
     def _on_runtime_switch(self, switch: Gtk.Switch, _property: object, verb: str) -> None:
         if self._runtime_controls_loading:
@@ -658,6 +697,8 @@ class MainWindow(Adw.ApplicationWindow):
             self._playlists_page.runtime_status_changed(session)
         elif shown == "schedules":
             self._schedules_page.runtime_status_changed(session)
+        elif shown == "settings":
+            self._settings_page.runtime_status_changed(self._settings)
 
     def _update_subtitle(self) -> None:
         """Report what is on screen without misreporting the library.
@@ -721,12 +762,18 @@ class MainWindow(Adw.ApplicationWindow):
         state = (
             reported_state
             if isinstance(reported_state, str)
-            and reported_state in ("playing", "paused", "stopped")
+            and reported_state in ("playing", "paused", "stopped", "mixed")
             else ("paused" if paused is True else "playing")
         )
         self._playback_state = state
+        self._renderer_failed = status.get("renderer_failed") is True
+        self._renderer_taboo = runtime_truth.current_renderer_failure_is_taboo(status)
         cycle = status.get("cycle_enabled")
         shuffle = status.get("shuffle")
+        cycle_source = status.get("cycle_source")
+        shuffle_source = status.get("shuffle_source")
+        cycle_mixed = cycle_source == "mixed"
+        shuffle_mixed = shuffle_source == "mixed"
         self._runtime_controls_loading = True
         try:
             if isinstance(cycle, bool):
@@ -735,46 +782,84 @@ class MainWindow(Adw.ApplicationWindow):
                 self._runtime_shuffle.set_active(shuffle)
         finally:
             self._runtime_controls_loading = False
+        self._runtime_cycle.set_tooltip_text(
+            "Mixed across displays; switching on sets Cycle on everywhere"
+            if cycle_mixed
+            else f"Cycle is {'on' if cycle is True else 'off'} ({cycle_source or 'config'})"
+        )
+        self._runtime_shuffle.set_tooltip_text(
+            "Mixed across displays; switching on sets Shuffle on everywhere"
+            if shuffle_mixed
+            else f"Shuffle is {'on' if shuffle is True else 'off'} ({shuffle_source or 'config'})"
+        )
         self._runtime_available = True
         self._runtime_status_delayed = False
         self._runtime_protocol_error = ""
         self._runtime_controls.set_sensitive(not self._runtime_busy)
-        if state == "playing":
+        if self._renderer_taboo:
+            self._runtime_play.set_icon_name("dialog-warning-symbolic")
+            self._runtime_play.set_tooltip_text(
+                "Borked wallpaper: open it in Media/Pairings to clear taboo and retry"
+            )
+            self._runtime_menu.set_icon_name("dialog-warning-symbolic")
+        elif self._renderer_failed:
+            # Rust deliberately keeps playback_state as playing when a motion
+            # renderer crashes: the paired still remains the active entry and
+            # the user did not press Stop. The primary action nevertheless has
+            # to be Play, which is the daemon's explicit one-shot retry path.
+            self._runtime_play.set_icon_name("media-playback-start-symbolic")
+            self._runtime_play.set_tooltip_text("Retry motion for this wallpaper")
+            self._runtime_menu.set_icon_name("media-playback-start-symbolic")
+        elif state == "playing":
             self._runtime_play.set_icon_name("media-playback-pause-symbolic")
             self._runtime_play.set_tooltip_text("Pause motion")
             self._runtime_menu.set_icon_name("media-playback-start-symbolic")
         else:
             self._runtime_play.set_icon_name("media-playback-start-symbolic")
             self._runtime_play.set_tooltip_text(
-                "Resume motion" if state == "stopped" else "Resume playback"
+                "Resume motion"
+                if state == "stopped"
+                else "Synchronize displays: pause all if any is playing, otherwise play all"
+                if state == "mixed"
+                else "Resume playback"
             )
             self._runtime_menu.set_icon_name(
                 "media-playback-stop-symbolic"
                 if state == "stopped"
+                else "video-display-symbolic"
+                if state == "mixed"
                 else "media-playback-pause-symbolic"
             )
-        cycle_text = "on" if cycle is True else "off"
-        shuffle_text = "on" if shuffle is True else "off"
-        self._runtime_status_text = (
-            f"{state.capitalize()} · cycle {cycle_text} · shuffle {shuffle_text}"
+        cycle_text = "mixed" if cycle_mixed else "on" if cycle is True else "off"
+        shuffle_text = "mixed" if shuffle_mixed else "on" if shuffle is True else "off"
+        state_text = (
+            "Borked · static fallback"
+            if self._renderer_taboo
+            else "Static fallback"
+            if self._renderer_failed
+            else state.capitalize()
         )
+        self._runtime_status_text = f"{state_text} · cycle {cycle_text} · shuffle {shuffle_text}"
         if not self._runtime_busy:
             self._runtime_control_status.set_text(self._runtime_status_text)
         last_error = status.get("last_error")
         output_error = status.get("output_discovery_error")
         if isinstance(last_error, str) and last_error:
-            self._runtime_summary = f"static fallback · {last_error}"
+            self._runtime_summary = f"static fallback · {_bounded_runtime_error(last_error)}"
+            self._subtitle.set_tooltip_text(last_error)
             if last_error != self._runtime_error:
                 self.report(last_error)
             self._runtime_error = last_error
         elif isinstance(output_error, str) and output_error:
             self._runtime_summary = f"{state} {playlist} ({source}) · display discovery degraded"
+            self._subtitle.set_tooltip_text(output_error)
             if output_error != self._runtime_error:
                 self.report(f"Display discovery is degraded: {output_error}")
             self._runtime_error = output_error
         else:
             self._runtime_error = ""
             self._runtime_summary = f"{state} {playlist} ({source})"
+            self._subtitle.set_tooltip_text(None)
         if self._management_session is not None:
             self._show_media_playback(self._management_session)
         else:
@@ -818,6 +903,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_available = False
         self._runtime_status_delayed = False
         self._runtime_protocol_error = ""
+        self._renderer_failed = False
+        self._renderer_taboo = False
         self._runtime_controls.set_sensitive(False)
         self._runtime_status_text = "Runtime unavailable"
         if not self._runtime_busy:
@@ -857,9 +944,24 @@ class MainWindow(Adw.ApplicationWindow):
         """
         menu = Gio.Menu()
         target = GLib.Variant.new_string(str(item.path))
-        apply_item = Gio.MenuItem.new("Play as Quick choice", None)
+        independent = self._settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+        apply_item = Gio.MenuItem.new(
+            "Play on all displays as Quick choice" if independent else "Play as Quick choice",
+            None,
+        )
         apply_item.set_action_and_target_value("win.apply-wallpaper", target)
         menu.append_item(apply_item)
+        connectors = self._quick_choice_connectors() if independent else ()
+        if connectors:
+            per_display = Gio.Menu()
+            for connector in connectors:
+                chosen = Gio.MenuItem.new(connector, None)
+                chosen.set_action_and_target_value(
+                    "win.apply-wallpaper-on",
+                    GLib.Variant("(ss)", (str(item.path), connector)),
+                )
+                per_display.append_item(chosen)
+            menu.append_submenu("Play on one display", per_display)
 
         # Also in the menu, not only on the star. The star is hidden until the
         # tile is hovered or focused, which keeps the grid readable but leaves
@@ -1023,6 +1125,31 @@ class MainWindow(Adw.ApplicationWindow):
         item = self._item_at(raw)
         if item is not None:
             self._quick_apply(item)
+
+    def _on_apply_path_on(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
+        if raw is None:
+            return
+        source, connector = raw.unpack()
+        item = self._app.session.library.find(Path(source))
+        if item is not None:
+            self._app.play_item_on_async(item, connector)
+
+    def _quick_choice_connectors(self) -> tuple[str, ...]:
+        """Live connector routes from one status snapshot, never stale assignments."""
+        status = self._runtime_media_status
+        if status is None or status.get("status_version") != 2:
+            return ()
+        records = status.get("displays")
+        if not isinstance(records, list):
+            return ()
+        found: list[str] = []
+        for record in records:
+            if not isinstance(record, dict) or record.get("connected") is not True:
+                continue
+            connector = record.get("connector")
+            if isinstance(connector, str) and connector and connector not in found:
+                found.append(connector)
+        return tuple(found)
 
     def _on_favourite_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Flip the star from the menu. Same path as clicking it."""

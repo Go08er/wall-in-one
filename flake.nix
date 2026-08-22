@@ -228,6 +228,17 @@
                 touch $out
               '';
 
+          # Keep the always-on Rust half honest as independent display state
+          # grows.  This is a process measurement, not a struct-size estimate:
+          # three fresh one-display runs must stay within 5 MiB RSS and three
+          # three-display runs within 10 MiB.  Idle CPU is recorded, while a
+          # separate 64-route launch exercises the supported ceiling without
+          # turning that synthetic topology into a desktop memory promise.
+          service-rss = import ./nix/runtime-rss.nix {
+            inherit pkgs;
+            wallInOneService = wall-in-one-service;
+          };
+
           # Widget identity, focus, scroll-position and asynchronous GTK
           # delivery regressions need a real display.  Keep those tests out of
           # the package's ordinary checkPhase (which must remain usable in a

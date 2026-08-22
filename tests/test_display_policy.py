@@ -6,7 +6,7 @@ from wall_in_one import display_policy
 
 
 def test_saved_attached_display_owns_the_palette() -> None:
-    choice = display_policy.resolve_theme_source("DP-2", ("eDP-1", "DP-2"), primary="eDP-1")
+    choice = display_policy.resolve_theme_source("DP-2", ("eDP-1", "DP-2"))
 
     assert choice.configured == "DP-2"
     assert choice.effective == "DP-2"
@@ -14,16 +14,16 @@ def test_saved_attached_display_owns_the_palette() -> None:
     assert choice.is_fallback is False
 
 
-def test_detached_choice_is_preserved_while_primary_temporarily_wins() -> None:
-    choice = display_policy.resolve_theme_source("DP-9", ("DP-2", "eDP-1"), primary="eDP-1")
+def test_detached_choice_is_preserved_while_lexical_first_temporarily_wins() -> None:
+    choice = display_policy.resolve_theme_source("DP-9", ("eDP-1", "DP-2"))
 
     assert choice.configured == "DP-9"
-    assert choice.effective == "eDP-1"
+    assert choice.effective == "DP-2"
     assert choice.configured_attached is False
     assert choice.is_fallback is True
 
 
-def test_automatic_and_detached_fallback_use_the_first_stable_live_output() -> None:
+def test_empty_and_detached_fallback_use_the_lexical_first_live_output() -> None:
     automatic = display_policy.resolve_theme_source("", ("DP-2", "eDP-1"))
     detached = display_policy.resolve_theme_source("DP-9", ("DP-2", "eDP-1"))
 

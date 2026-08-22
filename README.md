@@ -219,9 +219,11 @@ five real pages:
   entry's stable id is not changed and the same pairing may appear more than
   once.
 - **Schedules** switches the active playlist, resumes calendar control, chooses
-  the default playlist, assigns a playlist to a connector, and edits months,
-  weekdays and local-time windows with visual selectors. Rules lower in the
-  list have higher priority: the last matching rule wins.
+  the default playlist, assigns playlists to connectors, and edits months,
+  weekdays and local-time windows with visual selectors. Independent mode also
+  exposes each live display's transport, Stop, Cycle and Shuffle controls with
+  their saved-default/manual provenance. Rules lower in the list have higher
+  priority: the last matching rule wins.
 - **Settings** keeps library roots, playback, providers, colour and appearance
   controls visible as part of the main workflow rather than another window.
 
@@ -300,11 +302,16 @@ retuned live and applies to the next video. mpvpaper warns that its automatic
 options "might not work as intended", which is why "Keep playing" stays
 reachable.
 
-**Output** picks the monitor the wallpaper is applied to, or all of them. The
-monitor list comes from GTK rather than from `niri msg`, so it is not tied to
-one compositor, and a connector that is currently unplugged stays selected
-rather than being reset. See the status caveat above for what this has and has
-not been shown to do.
+**Displays** defaults to one mirrored wallpaper, cursor and schedule everywhere.
+Independent mode gives every live connector its own assignment, schedule
+winner, cursor, renderer and temporary playlist/Cycle/Shuffle overrides. GTK
+monitor names are merged with the Rust service's niri snapshot, so a connector
+the compositor knows remains targetable even when GTK cannot name it; detached
+saved assignments and rules remain visible rather than being reset. Noctalia
+still has one shell-wide palette, so **Colours follow** is an explicit display
+choice. When that display is detached the saved choice stays intact and status
+shows the deterministic live fallback actually in force. See the status caveat
+above for what has and has not been watched on physical multi-monitor hardware.
 
 ## Finding wallpapers
 
@@ -315,6 +322,11 @@ land under the explicitly chosen first library root, and the library is
 rescanned when one finishes, so the file shows up in the grid without being
 asked for. With no root configured, Browse refuses the download and points to
 Settings instead of guessing a destination.
+
+Browse uses explicit Previous/Next photo pages with at most 40 heavyweight GTK
+cards alive at once. A 250-result MotionBGS search remains fully reachable, but
+walking it no longer leaves hundreds of decoded card widgets consuming memory;
+search text, cursor, filters and batch picks survive page changes.
 
 Wallhaven works without an API key. The one thing a key buys is NSFW results.
 Supply one through `WALLHAVEN_API_KEY`, or save it in **Settings -> Providers**,

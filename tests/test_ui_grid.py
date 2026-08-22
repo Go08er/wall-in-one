@@ -866,8 +866,10 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     assert not window._runtime_controls.get_sensitive()
     window.show_runtime_status(
         {
+            "playlist_id": "evening",
             "playlist": "Evening",
             "source": "manual",
+            "entry_id": "evening-second",
             "playback_state": "playing",
             "paused": False,
             "cycle_enabled": True,
@@ -925,6 +927,96 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     )
     window._runtime_play.emit("clicked")
     assert calls[-1] == ("play", None)
+    window.show_runtime_status(
+        {
+            "playlist": "Multiple displays",
+            "source": "mixed",
+            "playback_state": "mixed",
+            "paused": False,
+            "cycle_enabled": False,
+            "cycle_source": "mixed",
+            "shuffle": False,
+            "shuffle_source": "mixed",
+            "last_error": "",
+        }
+    )
+    assert "pause all" in (window._runtime_play.get_tooltip_text() or "")
+    assert "cycle mixed" in window._runtime_control_status.get_text()
+    assert "shuffle mixed" in window._runtime_control_status.get_text()
+    assert "sets Cycle on everywhere" in (window._runtime_cycle.get_tooltip_text() or "")
+    assert "sets Shuffle on everywhere" in (window._runtime_shuffle.get_tooltip_text() or "")
+    window._runtime_cycle.set_active(True)
+    assert len(calls) == 4
+    assert calls[3] == ("cycle", "on")
+    window._runtime_play.emit("clicked")
+    assert len(calls) == 5
+    assert calls[4] == ("toggle", None)
+    long_error = "renderer failed " + ("x" * 12_000) + " attributable tail"
+    window.show_runtime_status(
+        {
+            "playlist": "Evening",
+            "source": "manual",
+            "playback_state": "playing",
+            "paused": False,
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": long_error,
+        }
+    )
+    subtitle = window._subtitle.get_subtitle()
+    assert len(subtitle) < 300
+    assert "…" in subtitle
+    assert subtitle.endswith("attributable tail")
+    assert window._subtitle.get_tooltip_text() == long_error
+    window.show_runtime_status(
+        {
+            "playlist": "Evening",
+            "source": "manual",
+            # The still remains the active entry, so Rust does not call this a
+            # user-requested Stop even though its renderer has failed.
+            "playback_state": "playing",
+            "paused": False,
+            "cycle_enabled": True,
+            "shuffle": False,
+            "renderer_failed": True,
+            "last_error": "mpvpaper exited for evening-second",
+        }
+    )
+    assert "Static fallback" in window._runtime_control_status.get_text()
+    assert "Retry motion" in (window._runtime_play.get_tooltip_text() or "")
+    window._runtime_play.emit("clicked")
+    assert calls[-1] == ("play", None)
+    before_taboo = len(calls)
+    window.show_page("settings")
+    window.show_runtime_status(
+        {
+            "playlist_id": "evening",
+            "playlist": "Evening",
+            "source": "manual",
+            "entry_id": "evening-second",
+            "playback_state": "playing",
+            "paused": False,
+            "cycle_enabled": True,
+            "shuffle": False,
+            "renderer_failed": True,
+            "last_error": "mpvpaper repeatedly failed for evening-second",
+            "taboo_entries": [
+                {
+                    "playlist_id": "evening",
+                    "entry_id": "evening-second",
+                    "reason": "mpvpaper repeatedly failed for evening-second",
+                }
+            ],
+        }
+    )
+    assert "Borked" in window._runtime_control_status.get_text()
+    assert "Media/Pairings" in (window._runtime_play.get_tooltip_text() or "")
+    assert window._runtime_play.get_icon_name() == "dialog-warning-symbolic"
+
+    window._runtime_play.emit("clicked")
+
+    assert len(calls) == before_taboo, "taboo entries cannot be retried by Play"
+    assert window._stack.get_visible_child_name() == "media"
     window.show_runtime_unavailable()
     assert not window._runtime_controls.get_sensitive()
 
@@ -1048,6 +1140,44 @@ def test_media_highlights_and_playing_label_follow_atomic_runtime_status(
     assert window._grid._tiles[second_path].has_css_class("wio-tile-current")
     assert "playing Multiple displays" in window._subtitle.get_subtitle()
     assert application.session.cursor is local_cursor
+
+    window.show_runtime_status(
+        {
+            "playlist_id": "",
+            "playlist": "Multiple displays",
+            "source": "schedule",
+            "playback_state": "playing",
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": "",
+            "playlists": [
+                {"id": "day", "active": True},
+                {"id": "evening", "active": True},
+            ],
+            "displays": [
+                {
+                    "connector": "DP-1",
+                    "connected": True,
+                    "playlist_id": "day",
+                    "playlist": "Day",
+                    "entry_id": "day-first",
+                    "still": str(first_path),
+                },
+                {
+                    "connector": "DP-2",
+                    "connected": False,
+                    "playlist_id": "evening",
+                    "playlist": "Evening",
+                    "entry_id": "evening-second",
+                    "still": str(second_path),
+                },
+            ],
+        }
+    )
+
+    assert window._grid._tiles[first_path].has_css_class("wio-tile-current")
+    assert not window._grid._tiles[second_path].has_css_class("wio-tile-current")
+    assert "playing Day" in window._subtitle.get_subtitle()
     window.destroy()
     application.session.shutdown()
 

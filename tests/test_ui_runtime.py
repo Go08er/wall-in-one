@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,9 +25,13 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from wall_in_one import paths, runtime_config, runtime_health  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
-from wall_in_one.library import pairings  # noqa: E402
+from wall_in_one.library import (  # noqa: E402
+    pairings,
+    playlists,
+)
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.window import MainWindow  # noqa: E402
@@ -157,7 +162,13 @@ def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
         "_publish_runtime_for_context",
         publish,
     )
+    assert runtime_config.update(application.settings, application.session)
+    generation = runtime_config.read_config_generation()
     snapshot = {
+        "config_generation": generation,
+        "config_path": str(paths.runtime_config_path().absolute()),
+        "runtime_instance": "a" * runtime_health.RUNTIME_INSTANCE_HEX_CHARS,
+        "config_epoch": 1,
         "playlist_id": playlist.id,
         "playlist": playlist.name,
         "source": "schedule",
@@ -167,6 +178,8 @@ def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
                 "entry_id": "paper-entry",
                 "reason": "renderer rejected this wallpaper",
                 "source": "automatic-apply",
+                "durable": False,
+                "observed_config_epoch": 1,
             }
         ],
         "taboo_entries_omitted": 0,
@@ -185,6 +198,158 @@ def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
         assert health.reason == "renderer rejected this wallpaper"
         assert publishes == [True], "polling the same status must not create a reload loop"
         assert window.health_changes == 1
+    finally:
+        _close(application)
+
+
+def test_retry_borked_holds_compiler_transaction_through_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    path = tmp_path / "library" / "paper.png"
+    item = MediaItem(path=path, kind=Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library(roots=(path.parent,), items=(item,)))
+    application.session.pairings.mark_borked(item, "renderer crashed", "automatic-apply")
+    entered = False
+
+    class ObservedLock:
+        def __enter__(self) -> None:
+            nonlocal entered
+            entered = True
+
+        def __exit__(
+            self,
+            _kind: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: object,
+        ) -> None:
+            nonlocal entered
+            entered = False
+
+    def play(_item: MediaItem) -> bool:
+        assert entered, "Quick choice publication escaped the clear transaction"
+        return True
+
+    monkeypatch.setattr(runtime_config, "compiler_lock", ObservedLock)
+    monkeypatch.setattr(application, "play_item_async", play)
+    try:
+        assert application.retry_borked(item)
+        assert not entered
+        assert not application.session.pairings.health(pairings.Identity.of(item)).is_borked
+    finally:
+        _close(application)
+
+
+def test_display_quick_choice_compiles_reloads_then_targets_only_one_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    path = tmp_path / "library" / "paper.png"
+    item = MediaItem(path=path, kind=Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library(roots=(path.parent,), items=(item,)))
+    independent = replace(
+        application.settings,
+        display_mode="independent",
+        theme_source_connector="DP-1",
+    )
+    application._settings = independent
+    application.session.update_settings(independent, rescan_library=False)
+    calls: list[tuple[str, ...]] = []
+
+    def send_runtime(verb: str, _argument: str | None = None, **_kwargs: object) -> Response:
+        calls.append((verb,))
+        return Response.success("reloaded")
+
+    def send_on(
+        connector: str,
+        verb: str,
+        argument: str | None = None,
+        **_kwargs: object,
+    ) -> Response:
+        calls.append((connector, verb, argument or ""))
+        return Response.success("changed")
+
+    monkeypatch.setattr(client, "send_runtime", send_runtime)
+    monkeypatch.setattr(client, "send_runtime_on", send_on)
+    try:
+        assert application.play_item_on_async(item, "DP-1")
+        _spin_until(lambda: not application._runtime_action_pending)
+
+        identifier = playlists.display_quick_choice_id("DP-1")
+        chosen = application.session.playlists.get(identifier)
+        assert chosen is not None
+        assert [entry.path for entry in chosen.entries] == [path]
+        assert calls == [("reload",), ("DP-1", "playlist-use", identifier)]
+    finally:
+        _close(application)
+
+
+def test_display_mode_defaults_are_one_ordered_gui_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    calls: list[tuple[str, str, str | None]] = []
+
+    def send_on(connector: str, verb: str, argument: str | None = None) -> Response:
+        calls.append((connector, verb, argument))
+        return Response.success(verb)
+
+    monkeypatch.setattr(client, "send_runtime_on", send_on)
+    monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: _status("Only"))
+    try:
+        assert application.reset_display_modes_on_async("DP-1")
+        _spin_until(lambda: window.busy == [True, False])
+
+        assert calls == [
+            ("DP-1", "cycle", "default"),
+            ("DP-1", "shuffle", "default"),
+        ]
+        assert window.reports == []
+    finally:
+        _close(application)
+
+
+@pytest.mark.parametrize(
+    ("refused_verb", "expected_calls", "message"),
+    (
+        ("cycle", ("cycle",), "Shuffle was not changed"),
+        ("shuffle", ("cycle", "shuffle"), "Cycle returned to its saved default"),
+    ),
+)
+def test_display_mode_default_refusal_stops_honestly_and_refreshes_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refused_verb: str,
+    expected_calls: tuple[str, ...],
+    message: str,
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    calls: list[str] = []
+
+    def send_on(_connector: str, verb: str, _argument: str | None = None) -> Response:
+        calls.append(verb)
+        return (
+            Response.failure(f"{verb} refused") if verb == refused_verb else Response.success(verb)
+        )
+
+    monkeypatch.setattr(client, "send_runtime_on", send_on)
+    monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: _status("Only"))
+    try:
+        assert application.reset_display_modes_on_async("DP-1")
+        _spin_until(lambda: window.busy == [True, False])
+        _spin_until(lambda: bool(window.statuses))
+
+        assert tuple(calls) == expected_calls
+        assert len(window.reports) == 1 and message in window.reports[0]
+        # Neither a complete nor partial reset mutates Python settings. The
+        # follow-up status snapshot remains the only visible runtime truth.
+        assert application.settings.cycle_enabled is False
+        assert application.settings.shuffle is False
+        assert window.statuses[-1]["playlist"] == "Only"
     finally:
         _close(application)
 

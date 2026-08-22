@@ -8,6 +8,7 @@ restore-after-rebuild still flickers and still interrupts an edit in progress.
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gdk, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules  # noqa: E402
@@ -231,6 +232,154 @@ def _children(widget: Gtk.Widget) -> tuple[Gtk.Widget, ...]:
 def _is_dragging(page: playlists_page.PlaylistsPage) -> bool:
     """Read mutable signal state without teaching mypy that it stays literal."""
     return page._dragging
+
+
+def _settle(predicate: Any, seconds: float = 2.0) -> bool:
+    """Let Xvfb allocate an adaptive widget without touching the live display."""
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        context.iteration(False)
+        time.sleep(0.005)
+    return bool(predicate())
+
+
+def test_playlist_layout_reserves_full_width_before_collapsing() -> None:
+    assert playlists_page._compact_for_width(playlists_page.COMPACT_WIDTH - 1)
+    assert not playlists_page._compact_for_width(playlists_page.COMPACT_WIDTH)
+
+
+def test_compact_playlist_selection_navigates_to_the_editor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, _playlist, _items = _session(tmp_path)
+    second = session.playlists.create("Second", entry_id="second")
+    application = PlaylistApp(session)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+
+    assert isinstance(page._navigation, Adw.NavigationSplitView)
+    page._navigation.set_collapsed(True)
+    page._navigation.set_show_content(False)
+    page._list.select_row(page._playlist_rows_by_id[second.id][0])
+
+    assert page._navigation.get_show_content()
+    assert page._editor_id == second.id
+    session.shutdown()
+
+
+def test_playlist_editor_is_navigable_and_unclipped_at_800_by_600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, _items = _session(tmp_path)
+    application = PlaylistApp(session)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+    window = Gtk.Window(default_width=800, default_height=600)
+    window.set_child(page)
+    window.present()
+
+    try:
+        assert _settle(
+            lambda: (
+                page._navigation.get_collapsed()
+                and page._navigation.get_show_content()
+                and page._arranger.get_width() > 0
+            )
+        ), (
+            window.get_width(),
+            page.get_width(),
+            page._navigation.get_collapsed(),
+            page._navigation.get_show_content(),
+            page._arranger.get_width(),
+        )
+        # Xvfb without a window manager may allocate a different outer size;
+        # this pins the requested compact geometry and the page's response to
+        # the real (sub-960 px) content allocation above.
+        assert window.get_default_size() == (800, 600)
+        assert page.get_width() < playlists_page.COMPACT_WIDTH
+        assert page._editor_header.get_show_back_button()
+        assert page._arranger.get_width() >= playlists_page.MIN_ARRANGER_WIDTH
+        assert page._source_scroll.get_width() > 0
+        assert page._order_scroll.get_width() > 0
+
+        # This is the same transition the automatic header back button owns.
+        # It must reveal a useful list without destroying the editor behind it.
+        editor = page._editor.get_first_child()
+        search = page._source_search
+        page._navigation.set_show_content(False)
+        assert not page._navigation.get_show_content()
+        assert page._selected == playlist.id
+        assert page._editor_id == playlist.id
+        page._navigation.set_show_content(True)
+        assert page._editor.get_first_child() is editor
+        assert page._source_search is search
+    finally:
+        window.set_child(None)
+        window.destroy()
+        page.shutdown()
+        session.shutdown()
+
+
+def test_compact_playlist_actions_wrap_and_both_panes_scroll_with_large_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    settings = Gtk.Settings.get_default()
+    if settings is None:  # pragma: no cover - Gtk.init guarantees it under Xvfb
+        pytest.skip("no GTK settings")
+    old_font = settings.get_property("gtk-font-name")
+    settings.set_property("gtk-font-name", "Sans 24")
+    session, _playlist, _items = _session(tmp_path)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    window = Gtk.Window(default_width=800, default_height=600)
+    window.set_child(page)
+    window.present()
+
+    try:
+        assert _settle(
+            lambda: (
+                page._navigation.get_collapsed()
+                and page._navigation.get_show_content()
+                and page._actions.get_width() > 0
+            )
+        ), (
+            window.get_width(),
+            page.get_width(),
+            page._navigation.get_collapsed(),
+            page._navigation.get_show_content(),
+            page._actions.get_width(),
+        )
+        assert window.get_default_size() == (800, 600)
+        assert page.get_width() < playlists_page.COMPACT_WIDTH
+        assert isinstance(page._actions, Adw.WrapBox)
+        action_bounds = page._actions.get_allocation()
+        for button in _children(page._actions):
+            allocation = button.get_allocation()
+            assert allocation.width > 0
+            assert allocation.height > 0
+            assert allocation.x >= 0
+            assert allocation.x + allocation.width <= action_bounds.width
+        # Each side owns its adjustment; the outer scroller remains an honest
+        # fallback if font metrics make the two-column arranger wider.
+        assert page._source_scroll.get_vadjustment() is not page._order_scroll.get_vadjustment()
+        assert page._editor_scroll.get_policy() == (
+            Gtk.PolicyType.AUTOMATIC,
+            Gtk.PolicyType.AUTOMATIC,
+        )
+    finally:
+        window.set_child(None)
+        window.destroy()
+        page.shutdown()
+        session.shutdown()
+        settings.set_property("gtk-font-name", old_font)
 
 
 def test_playlist_entry_edit_diffs_widgets_and_keeps_interaction_state(

@@ -29,9 +29,19 @@ if TYPE_CHECKING:
 
 SOURCE_PREFIX = "media:"
 SOURCE_PAGE_SIZE: Final = 48
+COMPACT_WIDTH: Final = 960
+#: Below this, preserving two honest authoring columns is better than letting
+#: GTK crush thumbnails and row controls. The outer editor scroller exposes a
+#: horizontal adjustment on still narrower or large-text layouts.
+MIN_ARRANGER_WIDTH: Final = 600
 FLIP_CURVE = (0.20, 0.75, 0.18, 1.0)
 SETTLE_CURVE = (0.18, 0.82, 0.22, 1.0)
 CSS_EASE_CURVE = (0.25, 0.10, 0.25, 1.0)
+
+
+def _compact_for_width(width: int) -> bool:
+    """At this width the list becomes navigation, not a crushed third pane."""
+    return width < COMPACT_WIDTH
 
 
 def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
@@ -708,22 +718,55 @@ class PlaylistsPage(Gtk.Box):
         self._autoscroll_frame_time: int | None = None
         self._editor_id = ""
 
-        split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        split.set_position(300)
-        split.set_shrink_start_child(False)
-        split.set_shrink_end_child(False)
-        split.set_start_child(self._sidebar())
+        self._navigation = Adw.NavigationSplitView()
+        self._navigation.set_hexpand(True)
+        self._navigation.set_vexpand(True)
+        self._navigation.set_min_sidebar_width(260.0)
+        self._navigation.set_max_sidebar_width(360.0)
+        self._navigation.set_sidebar_width_fraction(0.28)
+        self._navigation.set_sidebar(Adw.NavigationPage.new(self._sidebar(), "Playlists"))
 
-        self._editor_scroll = Gtk.ScrolledWindow(vexpand=True)
+        self._editor_scroll = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+            vscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+        )
         self._editor = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self._editor.set_margin_top(18)
         self._editor.set_margin_bottom(24)
         self._editor.set_margin_start(24)
         self._editor.set_margin_end(24)
         self._editor_scroll.set_child(self._editor)
-        split.set_end_child(self._editor_scroll)
-        self.append(split)
+
+        editor_view = Adw.ToolbarView()
+        self._editor_header = Adw.HeaderBar()
+        self._editor_header.set_show_title(False)
+        # NavigationSplitView supplies the actual back action when collapsed.
+        # Spell out the HeaderBar side so a future global header preference
+        # cannot strand the editor without a route back to the playlist list.
+        self._editor_header.set_show_back_button(True)
+        editor_view.add_top_bar(self._editor_header)
+        editor_view.set_content(self._editor_scroll)
+        self._navigation.set_content(Adw.NavigationPage.new(editor_view, "Playlist editor"))
+        self._responsive = Adw.BreakpointBin()
+        self._responsive.set_child(self._navigation)
+        self._compact_breakpoint = Adw.Breakpoint.new(
+            Adw.BreakpointCondition.new_length(
+                Adw.BreakpointConditionLengthType.MAX_WIDTH,
+                float(COMPACT_WIDTH - 1),
+                Adw.LengthUnit.PX,
+            )
+        )
+        self._compact_breakpoint.add_setter(self._navigation, "collapsed", True)
+        self._responsive.add_breakpoint(self._compact_breakpoint)
+        self._responsive.connect("notify::current-breakpoint", self._breakpoint_changed)
+        self.append(self._responsive)
         self._show_empty()
+
+    def _breakpoint_changed(self, responsive: Adw.BreakpointBin, _property: object) -> None:
+        """Keep the selected editor visible when the native breakpoint folds."""
+        if responsive.get_current_breakpoint() is not None and self._editor_id:
+            self._navigation.set_show_content(True)
 
     def shutdown(self) -> None:
         self._loader.shutdown()
@@ -877,6 +920,8 @@ class PlaylistsPage(Gtk.Box):
             return
         self._selected = selected
         self._show_editor()
+        if selected and self._navigation.get_collapsed():
+            self._navigation.set_show_content(True)
 
     def _clear_editor(self) -> None:
         self._assert_not_dragging()
@@ -920,7 +965,14 @@ class PlaylistsPage(Gtk.Box):
         title_row.append(rename)
         self._editor.append(title_row)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        # These labels grow considerably with large-text accessibility. Wrap
+        # whole controls instead of clipping their text or forcing the entire
+        # editor wider for a row used only for actions.
+        actions = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        actions.set_child_spacing(8)
+        actions.set_line_spacing(8)
+        actions.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._actions = actions
         self._play_button = Gtk.Button()
         self._play_button.add_css_class("suggested-action")
         self._play_button.connect("clicked", lambda _button: self._play_now())
@@ -935,14 +987,20 @@ class PlaylistsPage(Gtk.Box):
         self._editor.append(actions)
 
         arranger = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True)
+        arranger.set_size_request(MIN_ARRANGER_WIDTH, -1)
         # Playlist names need enough width to distinguish similarly prefixed
         # entries; the source cards remain usable as a single 180 px column.
         arranger.set_position(330)
-        arranger.set_shrink_start_child(False)
-        arranger.set_shrink_end_child(False)
+        # The arranger itself carries a 600 px floor. Let Paned shrink each
+        # child's *natural* request down within that honest floor; otherwise
+        # large labels add both natural widths and GTK refuses an 800 px
+        # window before the outer horizontal scroller gets a chance to help.
+        arranger.set_shrink_start_child(True)
+        arranger.set_shrink_end_child(True)
         arranger.set_start_child(self._build_source_pane())
         arranger.set_end_child(self._build_playlist_pane())
         arranger.set_vexpand(True)
+        self._arranger = arranger
         self._editor.append(arranger)
         self._sync_editor()
 

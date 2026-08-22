@@ -558,3 +558,52 @@ def test_keeping_the_mode_is_not_written_out(tmp_path: Path) -> None:
     Store(path=target).choose_palette(item(png(tmp_path / "a.png")), PalettePolicy("builtin", "N"))
     written = json.loads(target.read_text(encoding="utf-8"))
     assert "mode" not in written["pairings"][0]
+
+
+def test_runtime_health_is_durable_without_pretending_to_be_a_customization(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "pairings.json"
+    media = item(png(tmp_path / "paper.png"))
+    store = Store(path=target)
+
+    assert store.mark_borked(media, "mpvpaper exited on this file", "automatic-apply")
+    assert not store.mark_borked(media, "mpvpaper exited on this file", "automatic-apply"), (
+        "an unchanged status poll must not rewrite the authoring store"
+    )
+    identity = Identity.of(media)
+    assert store.health(identity).is_borked
+    assert not store.is_customized(identity)
+
+    reopened = Store.open(target)
+    saved = reopened.get(identity)
+    assert saved is not None
+    assert saved.health.reason == "mpvpaper exited on this file"
+    assert not saved.customized
+    assert json.loads(target.read_text(encoding="utf-8"))["version"] == 2
+
+    assert reopened.clear_borked(media)
+    assert reopened.get(identity) is None
+    assert not reopened.clear_borked(media)
+
+
+def test_pairing_choices_and_borked_health_survive_each_other(tmp_path: Path) -> None:
+    target = tmp_path / "pairings.json"
+    media = item(png(tmp_path / "paper.png"))
+    store = Store(path=target)
+    store.choose_palette(media, PalettePolicy(kind=pairings.KEEP))
+    store.mark_borked(media, "renderer rejected it", "renderer-crash")
+
+    assert store.reset(media), "resetting choices is independent of health"
+    identity = Identity.of(media)
+    record = store.get(identity)
+    assert record is not None and record.health.is_borked
+    assert not record.customized
+
+    store.choose_palette(media, PalettePolicy(pairings.ADAPTIVE, "muted"))
+    assert store.health(identity).is_borked
+    assert store.clear_borked(media)
+    record = store.get(identity)
+    assert record is not None and record.customized
+    assert not record.health.is_borked
+    assert record.palette.name == "muted"

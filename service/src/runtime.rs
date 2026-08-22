@@ -184,7 +184,40 @@ struct EntryKey {
 #[derive(Clone, Debug)]
 struct TabooEntry {
     reason: String,
-    source: &'static str,
+    source: String,
+    /// True only after the app has compiled this finding back into conf.
+    /// A later config omission is therefore an explicit app-owned clear;
+    /// session-only findings survive unrelated reloads until acknowledged.
+    durable: bool,
+}
+
+fn configured_taboo(config: &Config) -> (HashMap<EntryKey, TabooEntry>, Vec<EntryKey>) {
+    let mut records = HashMap::new();
+    let mut order = Vec::new();
+    for playlist in &config.playlists {
+        for entry in &playlist.entries {
+            let Some(taboo) = &entry.taboo else {
+                continue;
+            };
+            let key = EntryKey {
+                playlist_id: playlist.id.clone(),
+                entry_id: entry.id.clone(),
+            };
+            records.insert(
+                key.clone(),
+                TabooEntry {
+                    reason: taboo.reason.clone(),
+                    source: taboo.source.clone(),
+                    durable: true,
+                },
+            );
+            order.push(key);
+        }
+    }
+    if order.len() > MAX_TABOO_STATUS_ENTRIES {
+        order.drain(..order.len() - MAX_TABOO_STATUS_ENTRIES);
+    }
+    (records, order)
 }
 
 #[derive(Clone)]
@@ -296,6 +329,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .map(|display| display.connector.clone())
                 .collect()
         };
+        let (taboo, taboo_order) = configured_taboo(&config);
         let mut runtime = Self {
             config_path,
             config,
@@ -317,12 +351,17 @@ impl<D: WallpaperDriver> Runtime<D> {
             last_error: String::new(),
             last_apply_failures: Vec::new(),
             pending_automatic: None,
-            taboo: HashMap::new(),
-            taboo_order: Vec::new(),
+            taboo,
+            taboo_order,
             authoritative_generation: 0,
             quit: false,
         };
         runtime.rebuild_cursors(&HashMap::new())?;
+        for playlist in runtime.effective_playlist_ids() {
+            // Do not launch motion which the app already knows is borked. If
+            // every entry is taboo, retain the first and apply its still only.
+            let _ = runtime.reset_cursor_automatic(&playlist);
+        }
         Ok(runtime)
     }
 
@@ -670,7 +709,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let record = TabooEntry {
             reason: truncate_middle(reason, 512),
-            source,
+            source: source.to_string(),
+            durable: false,
         };
         if self.taboo_order.len() == MAX_TABOO_STATUS_ENTRIES {
             self.taboo_order.remove(0);
@@ -679,11 +719,46 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.taboo.insert(key, record);
     }
 
+    fn reconcile_configured_taboo(&mut self) {
+        let (configured, configured_order) = configured_taboo(&self.config);
+        self.taboo
+            .retain(|key, record| !record.durable || configured.contains_key(key));
+        self.taboo_order.retain(|key| self.taboo.contains_key(key));
+
+        for (key, configured_record) in &configured {
+            if let Some(record) = self.taboo.get_mut(key) {
+                record.reason.clone_from(&configured_record.reason);
+                record.source.clone_from(&configured_record.source);
+                record.durable = true;
+                continue;
+            }
+            self.taboo.insert(key.clone(), configured_record.clone());
+        }
+        for key in configured_order {
+            if self.taboo_order.contains(&key) {
+                continue;
+            }
+            if self.taboo_order.len() == MAX_TABOO_STATUS_ENTRIES {
+                self.taboo_order.remove(0);
+            }
+            self.taboo_order.push(key.clone());
+        }
+    }
+
     fn is_taboo(&self, playlist_id: &str, entry_id: &str) -> bool {
         self.taboo.contains_key(&EntryKey {
             playlist_id: playlist_id.to_string(),
             entry_id: entry_id.to_string(),
         })
+    }
+
+    fn is_durable_taboo(&self, playlist_id: &str, entry_id: &str) -> bool {
+        self.taboo
+            .get(&EntryKey {
+                playlist_id: playlist_id.to_string(),
+                entry_id: entry_id.to_string(),
+            })
+            .is_some_and(|record| record.durable)
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
@@ -753,11 +828,15 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let played = targets[0].entry.id.clone();
         let mut errors = Vec::new();
-        let mut settings = self.config.settings.clone();
+        let mut base_settings = self.config.settings.clone();
         if self.playback_state == PlaybackState::Stopped {
-            settings.dynamics_enabled = false;
+            base_settings.dynamics_enabled = false;
         }
         for target in targets {
+            let mut settings = base_settings.clone();
+            if self.is_durable_taboo(&target.playlist_id, &target.entry.id) {
+                settings.dynamics_enabled = false;
+            }
             if let Err(error) = self.driver.apply(&target.entry, &target.output, &settings) {
                 self.last_apply_failures.push(ApplyFailure {
                     key: EntryKey {
@@ -1133,6 +1212,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             taboo: self.taboo.clone(),
             taboo_order: self.taboo_order.clone(),
         };
+        self.reconcile_configured_taboo();
         if let Err(error) = self.rebuild_cursors(&old_entries) {
             self.restore_reload_snapshot(snapshot);
             return Err(error);
@@ -1579,7 +1659,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     kind: entry_kind(entry.kind),
                     scene_id: entry.scene_id.as_deref(),
                     reason: &record.reason,
-                    source: record.source,
+                    source: record.source.as_str(),
                 })
             })
             .take(MAX_TABOO_STATUS_ENTRIES)

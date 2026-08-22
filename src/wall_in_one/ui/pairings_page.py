@@ -188,6 +188,31 @@ class PairingsPage(Gtk.Box):
         source.add_css_class("dim-label")
         self._editor.append(source)
 
+        self._health_group: Adw.PreferencesGroup | None = None
+        self._retry_button: Gtk.Button | None = None
+        if bundle.health.is_borked:
+            self._health_group = Adw.PreferencesGroup(
+                title="Borked wallpaper · automatic playback is taboo",
+                description=(
+                    f"{bundle.health.reason}\n\n"
+                    "The service keeps using the paired still and skips this wallpaper "
+                    "during automatic rotation. Clear the judgement only when you want "
+                    "to try the renderer again."
+                ),
+            )
+            self._health_group.add_css_class("error")
+            health_row = Adw.ActionRow(
+                title="Static fallback is active",
+                subtitle=f"Reported by {bundle.health.source or 'the runtime'}",
+            )
+            self._retry_button = Gtk.Button(label="Clear taboo and retry now")
+            self._retry_button.add_css_class("suggested-action")
+            self._retry_button.set_valign(Gtk.Align.CENTER)
+            self._retry_button.connect("clicked", lambda _button: self._app.retry_borked(item))
+            health_row.add_suffix(self._retry_button)
+            self._health_group.add(health_row)
+            self._editor.append(self._health_group)
+
         still_group = self._build_still_picker(item, bundle)
         if item.kind is Kind.SCENE:
             regenerate = Adw.ActionRow(

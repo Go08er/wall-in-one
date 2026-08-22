@@ -31,6 +31,7 @@ from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
 from wall_in_one.theme import css, source
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
 from wall_in_one.wallpaper import outputs
@@ -106,6 +107,7 @@ class Application(Adw.Application):
         # Keep the last valid answer through a transient deadline so the
         # header and authoring pages cannot briefly contradict one another.
         self._runtime_status: dict[str, object] | None = None
+        self._taboo_omitted_seen = 0
         self._runtime_absent_callbacks: list[tuple[int, Callable[[], None]]] = []
         self._runtime_action_pending = False
         self._runtime_reload_pending = False
@@ -809,8 +811,7 @@ class Application(Adw.Application):
                             and isinstance(status.get("playlist"), str)
                             and isinstance(status.get("source"), str)
                         ):
-                            self._runtime_status = status
-                            window.show_runtime_status(status)
+                            self._adopt_runtime_status(status, window)
                         else:
                             window.show_runtime_protocol_error(
                                 "Runtime returned a status reply without playlist state"
@@ -841,28 +842,63 @@ class Application(Adw.Application):
             self._window.show_runtime_protocol_error(
                 f"Runtime rejected its status request: {response.message}"
             )
-        elif response.ok and self._window is not None:
+        elif response.ok:
             try:
                 status: object = json.loads(response.message)
             except ValueError:
-                self._window.show_runtime_protocol_error(
-                    "Runtime returned a status reply that was not valid JSON"
-                )
+                if self._window is not None:
+                    self._window.show_runtime_protocol_error(
+                        "Runtime returned a status reply that was not valid JSON"
+                    )
             else:
                 if (
                     isinstance(status, dict)
                     and isinstance(status.get("playlist"), str)
                     and isinstance(status.get("source"), str)
                 ):
-                    self._runtime_status = status
-                    self._window.show_runtime_status(status)
+                    self._adopt_runtime_status(status, self._window)
                 else:
-                    self._window.show_runtime_protocol_error(
-                        "Runtime returned a status reply without playlist state"
-                    )
+                    if self._window is not None:
+                        self._window.show_runtime_protocol_error(
+                            "Runtime returned a status reply without playlist state"
+                        )
         # Even a rejected status request proves that this socket has an owner;
         # do not turn a protocol failure into permission for a second driver.
         return True
+
+    def _adopt_runtime_status(self, status: dict[str, object], window: MainWindow | None) -> None:
+        """Adopt one atomic snapshot and persist only newly reported faults.
+
+        Missing reports never clear health: Rust deliberately caps the visible
+        inventory, and a later transient status loss says nothing about whether
+        the wallpaper recovered.
+        """
+        self._runtime_status = status
+        inventory = runtime_truth.taboo_inventory(
+            status,
+            self._session.playlists.all(),
+            self._session.library.items,
+        )
+        changed = False
+        for report in inventory.reports:
+            try:
+                changed |= self._session.pairings.mark_borked(
+                    report.item, report.reason, report.source
+                )
+            except pairings.PairingError as error:
+                self.window_report(f"Could not save borked wallpaper state: {error}")
+        if inventory.omitted > self._taboo_omitted_seen:
+            self._taboo_omitted_seen = inventory.omitted
+            self.window_report(
+                f"The runtime has {inventory.omitted} older taboo entries outside its bounded "
+                "status inventory; existing saved health markers were retained"
+            )
+        if changed:
+            self._publish_runtime_for_context()
+            if window is not None:
+                window.pairing_health_changed(self._session)
+        if window is not None:
+            window.show_runtime_status(status)
 
     def refresh_runtime_status(self) -> bool:
         """Synchronously refresh state for non-GUI compatibility callers."""
@@ -1261,6 +1297,20 @@ class Application(Adw.Application):
         elif not self._runtime_is_running() and cursor is not None and cursor.path == item.path:
             GLib.idle_add(self._reapply_current)
         GLib.idle_add(self.refresh_library)
+
+    def retry_borked(self, item: MediaItem) -> bool:
+        """Clear one durable taboo judgement and try it as Quick choice now."""
+        try:
+            self._session.pairings.clear_borked(item)
+        except pairings.PairingError as error:
+            self.window_report(f"Could not clear borked wallpaper state: {error}")
+            return False
+        if self._window is not None:
+            self._window.pairing_health_changed(self._session)
+        # Quick choice recompiles after the clear and sends playlist-use on the
+        # same ordered runtime worker. A successful apply can therefore prove
+        # the wallpaper healthy without a local renderer racing Rust.
+        return self.play_item_async(item)
 
     def _reapply_current(self) -> bool:
         self.apply(self._session.apply_current)

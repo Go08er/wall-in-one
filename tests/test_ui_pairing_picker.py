@@ -56,12 +56,18 @@ class PairingApp:
         self.resolved_palette = None
         self.changes = 0
         self.messages: list[str] = []
+        self.retried: list[Path] = []
 
     def pairing_changed(self, _item: MediaItem) -> None:
         self.changes += 1
 
     def window_report(self, message: str) -> None:
         self.messages.append(message)
+
+    def retry_borked(self, item: MediaItem) -> bool:
+        self.session.pairings.clear_borked(item)
+        self.retried.append(item.path)
+        return True
 
 
 def _item(path: Path, kind: Kind = Kind.STILL) -> MediaItem:
@@ -90,6 +96,31 @@ def _session(
 
 def _put_scroll_at(scroller: Gtk.ScrolledWindow, value: float) -> None:
     scroller.get_vadjustment().configure(value, 0.0, 200.0, 1.0, 10.0, 20.0)
+
+
+def test_borked_pairing_is_obvious_and_can_be_cleared_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    picture = tmp_path / "paper.png"
+    picture.write_bytes(b"image")
+    media = _item(picture)
+    session = _session(tmp_path, item=media, stills=())
+    session.pairings.mark_borked(media, "linux-wallpaperengine crashed", "renderer-crash")
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page.edit(session, media)
+
+    assert page._health_group is not None
+    assert page._retry_button is not None
+    assert "Borked" in page._health_group.get_title()
+    page._retry_button.emit("clicked")
+    assert application.retried == [picture]
+    assert not session.pairings.health(pairings.Identity.of(media)).is_borked
+
+    page.shutdown()
+    session.shutdown()
 
 
 def test_still_picker_is_searchable_bounded_and_survives_refresh(

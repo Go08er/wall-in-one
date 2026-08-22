@@ -48,6 +48,23 @@ class MediaPlayback:
     current: tuple[Path, ...]
 
 
+@dataclass(frozen=True)
+class TabooReport:
+    """One stable runtime entry mapped back to its library wallpaper."""
+
+    item: MediaItem
+    playlist_id: str
+    entry_id: str
+    reason: str
+    source: str
+
+
+@dataclass(frozen=True)
+class TabooInventory:
+    reports: tuple[TabooReport, ...]
+    omitted: int
+
+
 def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     """Return one coherent playback view, or ``None`` for an invalid snapshot."""
     if status is None:
@@ -192,3 +209,70 @@ def media_playback(
 
     label = "Multiple displays" if len(display_playlist_ids) > 1 else truth.playlist
     return MediaPlayback(playlist=label, current=tuple(resolved))
+
+
+def taboo_inventory(
+    status: Mapping[str, object] | None,
+    authored_playlists: Iterable[Playlist],
+    media: Iterable[MediaItem],
+) -> TabooInventory:
+    """Map Rust's bounded taboo inventory to app-owned media identities.
+
+    Named entries use their stable authored id. The generated All-media list
+    uses the same stable source hash as playback truth. Missing and malformed
+    reports are ignored, but absence is never interpreted as recovery: Rust
+    may have omitted older records to keep its atomic status bounded.
+    """
+    omitted = 0
+    if status is None:
+        return TabooInventory((), omitted)
+    raw_omitted = status.get("taboo_entries_omitted")
+    if type(raw_omitted) is int and raw_omitted > 0:
+        omitted = raw_omitted
+
+    items = tuple(media)
+    by_path = {item.path: item for item in items}
+    authored = {playlist.id: playlist for playlist in authored_playlists}
+    generated: dict[str, MediaItem | None] = {}
+    for item in items:
+        identifier = runtime_config.entry_id_for_source(item.path)
+        if identifier not in generated:
+            generated[identifier] = item
+        elif generated[identifier] != item:
+            generated[identifier] = None
+
+    raw_reports = status.get("taboo_entries")
+    if not isinstance(raw_reports, list):
+        return TabooInventory((), omitted)
+    reports: list[TabooReport] = []
+    seen: set[Path] = set()
+    for raw in raw_reports:
+        if not isinstance(raw, Mapping):
+            continue
+        playlist_id = raw.get("playlist_id")
+        entry_id = raw.get("entry_id")
+        reason = raw.get("reason")
+        source = raw.get("source")
+        if not all(
+            isinstance(value, str) and value for value in (playlist_id, entry_id, reason, source)
+        ):
+            continue
+        assert isinstance(playlist_id, str)
+        assert isinstance(entry_id, str)
+        assert isinstance(reason, str)
+        assert isinstance(source, str)
+
+        mapped: MediaItem | None = None
+        if playlist_id == runtime_config.FALLBACK_PLAYLIST_ID:
+            mapped = generated.get(entry_id)
+        else:
+            playlist = authored.get(playlist_id)
+            if playlist is not None:
+                entry = next((entry for entry in playlist.entries if entry.id == entry_id), None)
+                if entry is not None:
+                    mapped = by_path.get(entry.path)
+        if mapped is None or mapped.path in seen:
+            continue
+        seen.add(mapped.path)
+        reports.append(TabooReport(mapped, playlist_id, entry_id, reason, source))
+    return TabooInventory(tuple(reports), omitted)

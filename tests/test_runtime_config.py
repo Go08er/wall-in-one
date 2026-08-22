@@ -623,6 +623,38 @@ def test_compiler_uses_a_pairing_specific_adaptive_generator(tmp_path: Path) -> 
     assert document["playlists"][0]["entries"][0]["palette"]["scheme"] == "m3-rainbow"
 
 
+def test_compiler_marks_every_occurrence_of_a_borked_wallpaper(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    video = next(item for item in session.library.items if item.kind is Kind.VIDEO)
+    session.pairings.mark_borked(
+        video,
+        "mpvpaper rejected this wallpaper",
+        "automatic-apply",
+    )
+
+    document = tomllib.loads(runtime_config.render(settings, session))
+    occurrences = [
+        entry
+        for playlist in document["playlists"]
+        for entry in playlist["entries"]
+        if entry.get("motion") == str(video.path)
+    ]
+
+    assert len(occurrences) == 2, "All media and the authored playlist both carry health"
+    assert {tuple(sorted(entry["taboo"].items())) for entry in occurrences} == {
+        (
+            ("reason", "mpvpaper rejected this wallpaper"),
+            ("source", "automatic-apply"),
+        )
+    }
+
+    session.pairings.clear_borked(video)
+    cleared = tomllib.loads(runtime_config.render(settings, session))
+    assert all(
+        "taboo" not in entry for playlist in cleared["playlists"] for entry in playlist["entries"]
+    )
+
+
 def test_compiler_write_is_atomic_and_leaves_no_temporary(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     target = tmp_path / "state" / "runtime.toml"

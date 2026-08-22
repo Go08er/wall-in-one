@@ -96,6 +96,7 @@ class MainWindow(Adw.ApplicationWindow):
         # Surviving a rescan is enough, and the grid keeps it for that.
         self._query = library_filter.Query()
         self._playable = 0
+        self._borked_count = 0
         self._summary = "No library loaded"
         self._library_scanning = False
         self._management_session: Session | None = None
@@ -511,6 +512,7 @@ class MainWindow(Adw.ApplicationWindow):
         # since we last looked -- `ctl favourite` reaches it without going
         # anywhere near this window.
         self._grid.set_favourites(self._favourites.paths)
+        self._apply_pairing_health(session)
         # Media is the complete crafting library, never a disguised view of
         # whichever playlist happens to be playing. Activating one item makes
         # the visible one-entry Quick choice playlist; it does not bypass the
@@ -520,6 +522,22 @@ class MainWindow(Adw.ApplicationWindow):
         self._playable = len(library)
         self._show_media_playback(session)
         self._refresh_visible_page()
+
+    def _apply_pairing_health(self, session: Session) -> None:
+        borked = {
+            item.path: health.reason
+            for item in session.library.items
+            if (health := session.pairings.health(pairings.Identity.of(item))).is_borked
+        }
+        self._borked_count = len(borked)
+        self._grid.set_borked(borked)
+
+    def pairing_health_changed(self, session: Session) -> None:
+        """Reflect a status-ingested or manually cleared fault in place."""
+        self._apply_pairing_health(session)
+        if self._content_stack.get_visible_child_name() == "pairing-editor":
+            self._pairings_page.refresh(session)
+        self._show_media_playback(session)
 
     @staticmethod
     def _session_playing_label(session: Session) -> str:
@@ -549,6 +567,8 @@ class MainWindow(Adw.ApplicationWindow):
         )
         if library.skipped:
             summary += f" - {len(library.skipped)} skipped"
+        if self._borked_count:
+            summary += f" · {self._borked_count} borked (static fallback)"
         self._summary = summary
         self._update_subtitle()
 

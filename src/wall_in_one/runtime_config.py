@@ -300,6 +300,21 @@ def _resolved_entry(
         f"kind = {_quote(item.kind.value)}",
         f"still = {_quote(bundle.still)}",
     ]
+    if bundle.health.is_borked:
+        _bounded_text(
+            bundle.health.reason,
+            label="taboo reason",
+            maximum_bytes=pairings.MAX_HEALTH_REASON,
+        )
+        _bounded_text(
+            bundle.health.source,
+            label="taboo source",
+            maximum_bytes=pairings.MAX_HEALTH_SOURCE,
+        )
+        lines.append(
+            "taboo = { reason = "
+            f"{_quote(bundle.health.reason)}, source = {_quote(bundle.health.source)} }}"
+        )
     if item.kind is Kind.VIDEO:
         if bundle.motion is None or not bundle.motion.is_absolute():
             return None

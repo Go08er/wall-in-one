@@ -56,7 +56,9 @@ Schema 3 contains `schema_version`, `default_playlist`, `[settings]`,
 paths—including niri for live connector discovery—and media paths are
 absolute. Every playlist entry has a stable `id`, `kind`,
 absolute `still`, and inline `palette`. A video additionally has an absolute
-`motion`; a scene has a numeric `scene_id`.
+`motion`; a scene has a numeric `scene_id`. An entry may also carry app-owned
+`taboo = { reason, source }` metadata. That is a durable compatibility decision,
+not runtime state: Rust never creates or edits it.
 
 The renderer section carries `scene_fps`, which linux-wallpaperengine consumes
 through its native `--fps N` option. `video_hardware_decode` selects mpv's
@@ -81,6 +83,7 @@ video slider must not restart a scene.
 palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "auto" }
 palette = { kind = "named", source = "community", name = "catppuccin", mode = "dark" }
 palette = { kind = "keep", mode = "keep" }
+taboo = { reason = "scene crashed linux-wallpaperengine", source = "renderer-crash" }
 ```
 
 The allowed modes are `keep`, `dark`, `light`, and `auto`; named sources are
@@ -169,13 +172,17 @@ The same snapshot reports `automatic_retry` while a candidate is waiting,
 along with `taboo_entries` containing stable playlist/entry identities, kind,
 scene id where applicable, attributable reason, and source. The most recent 64
 records fit in the bounded atomic reply; `taboo_entries_omitted` counts older
-session records while all current-config taboo entries remain skipped.
+records while the complete loaded set remains skipped. An omitted record is
+intentionally not a recovery signal.
 
 This inventory is also the only persistence hand-off. The service is read-only:
 it never edits this config or an auxiliary blacklist. When the app reconnects,
-it may persist a borked-paper judgement in its authoring data and compile an
-omitted/disabled entry into a later config generation. Until the app does that,
-the finding is deliberately session-scoped and a service restart forgets it.
+it maps stable playlist/entry ids back to the media pairing, persists one health
+marker for that wallpaper, and compiles the marker into every occurrence. A
+service restart seeds its skip set from those optional fields. Removing the
+marker in the app compiles their absence; reload then clears only a previously
+durable record before retrying. An unrelated reload cannot clear a newly found,
+session-only failure which the app has not consumed yet.
 
 The top-level snapshot reports `playback_state` as `playing`, `paused`, or
 `stopped`; the older `paused` boolean remains for compatibility and `stopped`

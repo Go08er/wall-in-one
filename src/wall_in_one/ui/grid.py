@@ -100,6 +100,10 @@ class WallpaperTile(Gtk.Box):
             badges.append(_badge(what if item.paired_still else f"{what} (no still)"))
         if item.ownership is Ownership.MANAGED:
             badges.append(_badge(item.provider))
+        self._health_badge = _badge("Borked · still only")
+        self._health_badge.add_css_class("error")
+        self._health_badge.set_visible(False)
+        badges.append(self._health_badge)
         frame.add_overlay(badges)
 
         caption = Gtk.Label(label=item.name)
@@ -125,6 +129,15 @@ class WallpaperTile(Gtk.Box):
             self.add_css_class("wio-tile-current")
         else:
             self.remove_css_class("wio-tile-current")
+
+    def set_borked(self, reason: str | None) -> None:
+        """Expose a durable runtime incompatibility on the media itself."""
+        self._health_badge.set_visible(reason is not None)
+        self._health_badge.set_tooltip_text(reason)
+        if reason is None:
+            self.remove_css_class("wio-tile-borked")
+        else:
+            self.add_css_class("wio-tile-borked")
 
     def set_favourite(self, favourite: bool) -> None:
         """Show whether this one is starred. Never reads as a click."""
@@ -197,6 +210,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         #: Which paths are starred. Held rather than looked up per tile so the
         #: filter and the tiles cannot disagree within one pass.
         self._favourites: frozenset[Path] = frozenset()
+        self._borked: dict[Path, str] = {}
         self._tiles: dict[Path, WallpaperTile] = {}
         self._items: tuple[MediaItem, ...] = ()
         self._query = library_filter.Query()
@@ -280,6 +294,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             if self._on_secondary is not None:
                 tile.connect_secondary(self._on_secondary)
             tile.set_favourite(item.path in self._favourites)
+            tile.set_borked(self._borked.get(item.path))
             self._tiles[item.path] = tile
             self._flow.append(tile)
             self._loader.request(item, self._on_thumbnail)
@@ -332,6 +347,20 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         # cheap and getting it wrong means a starred wallpaper that will not
         # appear until something else happens to invalidate the filter.
         self._apply_query()
+
+    def set_borked(self, records: dict[Path, str]) -> None:
+        """Update health badges without replacing thumbnails or losing scroll."""
+        changed = self._borked.keys() ^ records.keys()
+        changed.update(
+            path
+            for path in self._borked.keys() & records.keys()
+            if self._borked[path] != records[path]
+        )
+        self._borked = dict(records)
+        for path in changed:
+            tile = self._tiles.get(path)
+            if tile is not None:
+                tile.set_borked(self._borked.get(path))
 
     def _apply_query(self) -> None:
         visible = library_filter.apply(self._items, self._query, self._favourites)

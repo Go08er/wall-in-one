@@ -52,7 +52,8 @@ STATE_FILENAME: Final = "pairings.json"
 #: Bumped only if the shape below changes. A newer marker is recovered for the
 #: interactive UI but reported as a fault, so an older build cannot compile or
 #: rewrite a document whose extra meaning it does not understand.
-FORMAT_VERSION: Final = 1
+FORMAT_VERSION: Final = 2
+LEGACY_FORMAT_VERSIONS: Final = frozenset((1,))
 
 #: A ceiling, so a file that grew a zero cannot be read forever.
 MAX_PAIRINGS: Final = 20_000
@@ -71,6 +72,11 @@ ADAPTIVE: Final = "adaptive"
 #: it exists because "this wallpaper should not disturb my colours" is a real
 #: thing to want, and is not expressible as a choice among palettes.
 KEEP: Final = "keep"
+
+HEALTHY: Final = "healthy"
+BORKED: Final = "borked"
+MAX_HEALTH_REASON: Final = 512
+MAX_HEALTH_SOURCE: Final = 64
 
 
 class PairingError(Exception):
@@ -163,6 +169,45 @@ class Mode(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class Health:
+    """App-owned compatibility judgement for one media identity.
+
+    Rust reports session failures. The app is the sole writer that may turn
+    one into durable authoring state, so this marker lives beside the pairing
+    rather than in a daemon-owned blacklist.
+    """
+
+    state: str = HEALTHY
+    reason: str = ""
+    source: str = ""
+
+    @property
+    def is_borked(self) -> bool:
+        return self.state == BORKED
+
+    @classmethod
+    def borked(cls, reason: str, source: str) -> Health:
+        clean = _health_text(reason, MAX_HEALTH_REASON)
+        origin = _health_text(source, MAX_HEALTH_SOURCE)
+        return cls(
+            BORKED,
+            clean or "Runtime could not apply this wallpaper",
+            origin or "runtime",
+        )
+
+
+def _health_text(value: str, maximum_bytes: int) -> str:
+    """Return one single-line UTF-8 value which fits the runtime wire bound."""
+    clean = " ".join(value.split())
+    encoded = clean.encode("utf-8")[:maximum_bytes]
+    while True:
+        try:
+            return encoded.decode("utf-8")
+        except UnicodeDecodeError as error:
+            encoded = encoded[: error.start]
+
+
+@dataclass(frozen=True, slots=True)
 class PalettePolicy:
     """Which colours a wallpaper asks Noctalia for, and in which mode.
 
@@ -251,20 +296,26 @@ class Pairing:
     #: to the default. The choice is kept -- an unmounted drive is not a
     #: retraction -- and this is how a caller can say so out loud.
     override_missing: bool = False
+    health: Health = Health()
 
     @property
     def is_moving(self) -> bool:
         return self.motion is not None
 
     def to_json(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "identity": self.identity.key,
-            "palette": self.palette.encode(),
-        }
-        if self.palette.mode is not Mode.KEEP:
-            payload["mode"] = self.palette.mode.value
-        if self.still is not None:
-            payload["still"] = str(self.still)
+        payload: dict[str, Any] = {"identity": self.identity.key}
+        if self.customized:
+            payload["palette"] = self.palette.encode()
+            if self.palette.mode is not Mode.KEEP:
+                payload["mode"] = self.palette.mode.value
+            if self.still is not None:
+                payload["still"] = str(self.still)
+        if self.health.is_borked:
+            payload["health"] = {
+                "state": BORKED,
+                "reason": self.health.reason,
+                "source": self.health.source,
+            }
         return payload
 
 
@@ -286,11 +337,20 @@ def _record(raw: object) -> Pairing | None:
     if chosen is not None and not chosen.is_absolute():
         # Nothing to be relative to: the process reading this may run anywhere.
         chosen = None
+    raw_health = raw.get("health")
+    health = Health()
+    if isinstance(raw_health, dict) and raw_health.get("state") == BORKED:
+        reason = raw_health.get("reason")
+        source = raw_health.get("source")
+        if isinstance(reason, str) and isinstance(source, str):
+            health = Health.borked(reason, source)
+    customized = any(key in raw for key in ("still", "palette", "mode"))
     return Pairing(
         identity=identity,
         still=chosen,
         palette=PalettePolicy.decode(raw.get("palette"), raw.get("mode")),
-        customized=True,
+        customized=customized,
+        health=health,
     )
 
 
@@ -309,9 +369,17 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
     )
     if payload is None:
         return {}, fault
-    faults = [
-        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
-    ]
+    version = payload.get("version")
+    version_fault = (
+        None
+        if version is None
+        or (
+            type(version) is int
+            and (version == FORMAT_VERSION or version in LEGACY_FORMAT_VERSIONS)
+        )
+        else state_file.version_fault(path, payload, FORMAT_VERSION)
+    )
+    faults = [found for found in (version_fault,) if found]
     stored = payload.get("pairings")
     if not isinstance(stored, list):
         return {}, f"{path.name} has no pairings in it"
@@ -331,6 +399,7 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
         still = raw.get("still")
         mode = raw.get("mode")
         palette = raw.get("palette")
+        health = raw.get("health")
         if "still" in raw and (
             not isinstance(still, str) or not still.strip() or not Path(still).is_absolute()
         ):
@@ -340,6 +409,13 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
         ):
             malformed += 1
         if "palette" in raw and (not isinstance(palette, str) or not palette.strip()):
+            malformed += 1
+        if "health" in raw and (
+            not isinstance(health, dict)
+            or health.get("state") != BORKED
+            or not isinstance(health.get("reason"), str)
+            or not isinstance(health.get("source"), str)
+        ):
             malformed += 1
         if record.identity.key in found:
             duplicate += 1
@@ -434,8 +510,9 @@ def resolve(
         default,
         still=default.still if chosen is None or missing else chosen,
         palette=saved.palette,
-        customized=True,
+        customized=saved.customized,
         override_missing=missing,
+        health=saved.health,
     )
 
 
@@ -513,7 +590,12 @@ class Store:
         return self._records.get(identity.key)
 
     def is_customized(self, identity: Identity) -> bool:
-        return identity.key in self._records
+        record = self._records.get(identity.key)
+        return record is not None and record.customized
+
+    def health(self, identity: Identity) -> Health:
+        record = self._records.get(identity.key)
+        return record.health if record is not None else Health()
 
     def resolve(self, item: MediaItem, roots: Sequence[Path] = ()) -> Pairing:
         return resolve(item, roots, self._records)
@@ -532,8 +614,15 @@ class Store:
         identity = Identity.of(item)
         existing = self._records.get(identity.key)
         palette = existing.palette if existing is not None else PalettePolicy()
+        health = existing.health if existing is not None else Health()
         return self._commit(
-            Pairing(identity=identity, still=still, palette=palette, customized=True)
+            Pairing(
+                identity=identity,
+                still=still,
+                palette=palette,
+                customized=True,
+                health=health,
+            )
         )
 
     def choose_palette(self, item: MediaItem, palette: PalettePolicy) -> Pairing:
@@ -541,9 +630,51 @@ class Store:
         identity = Identity.of(item)
         existing = self._records.get(identity.key)
         still = existing.still if existing is not None else None
+        health = existing.health if existing is not None else Health()
         return self._commit(
-            Pairing(identity=identity, still=still, palette=palette, customized=True)
+            Pairing(
+                identity=identity,
+                still=still,
+                palette=palette,
+                customized=True,
+                health=health,
+            )
         )
+
+    def mark_borked(self, item: MediaItem, reason: str, source: str) -> bool:
+        """Persist one runtime finding without changing pairing choices.
+
+        All playlist occurrences resolve through the media identity, so one
+        write marks the wallpaper rather than only the entry which happened to
+        expose it.
+        """
+        identity = Identity.of(item)
+        health = Health.borked(reason, source)
+        existing = self._records.get(identity.key)
+        if existing is not None and existing.health == health:
+            return False
+        record = (
+            replace(existing, health=health)
+            if existing is not None
+            else Pairing(identity=identity, health=health)
+        )
+        self._commit(record)
+        return True
+
+    def clear_borked(self, item: MediaItem) -> bool:
+        """Clear the durable judgement while retaining authored choices."""
+        identity = Identity.of(item)
+        existing = self._records.get(identity.key)
+        if existing is None or not existing.health.is_borked:
+            return False
+        updated = dict(self._records)
+        if existing.customized:
+            updated[identity.key] = replace(existing, health=Health())
+        else:
+            del updated[identity.key]
+        self._write(updated)
+        self._records = updated
+        return True
 
     def reset(self, item: MediaItem) -> bool:
         """Forget everything chosen for ``item``. True if there was anything."""
@@ -551,7 +682,11 @@ class Store:
         if identity.key not in self._records:
             return False
         updated = dict(self._records)
-        del updated[identity.key]
+        existing = updated[identity.key]
+        if existing.health.is_borked:
+            updated[identity.key] = Pairing(identity=identity, health=existing.health)
+        else:
+            del updated[identity.key]
         self._write(updated)
         self._records = updated
         return True

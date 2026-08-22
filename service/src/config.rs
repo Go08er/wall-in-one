@@ -22,6 +22,8 @@ const MAX_REFERENCE_BYTES: usize = MAX_PLAYLIST_NAME_CHARS * 4;
 const MAX_CONNECTOR_BYTES: usize = 256;
 const MAX_OPTION_BYTES: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
+const MAX_TABOO_REASON_BYTES: usize = 512;
+const MAX_TABOO_SOURCE_BYTES: usize = 64;
 
 // Status is a single atomic snapshot containing every playlist and schedule.
 // Reserve room for JSON structure and ordinary bounded runtime diagnostics,
@@ -145,7 +147,16 @@ pub struct Entry {
     pub motion: Option<PathBuf>,
     #[serde(default)]
     pub scene_id: Option<String>,
+    #[serde(default)]
+    pub taboo: Option<EntryTaboo>,
     pub palette: Palette,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntryTaboo {
+    pub reason: String,
+    pub source: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -390,6 +401,10 @@ impl Config {
                     Palette::Named { name, .. } => {
                         bounded_nonempty("palette name", name, MAX_OPTION_BYTES)?
                     }
+                }
+                if let Some(taboo) = &entry.taboo {
+                    bounded_nonempty("entry taboo reason", &taboo.reason, MAX_TABOO_REASON_BYTES)?;
+                    bounded_nonempty("entry taboo source", &taboo.source, MAX_TABOO_SOURCE_BYTES)?;
                 }
             }
         }

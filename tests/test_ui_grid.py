@@ -135,6 +135,22 @@ def test_a_reused_tile_is_the_same_widget(grid: WallpaperGrid) -> None:
     assert grid._tiles[items[0].path] is before
 
 
+def test_borked_health_updates_the_existing_tile_in_place(grid: WallpaperGrid) -> None:
+    media = item("a")
+    grid.populate((media,))
+    tile = grid._tiles[media.path]
+
+    grid.set_borked({media.path: "renderer crashed on this wallpaper"})
+    assert grid._tiles[media.path] is tile
+    assert tile._health_badge.get_visible()
+    assert tile._health_badge.get_tooltip_text() == "renderer crashed on this wallpaper"
+    assert tile.has_css_class("wio-tile-borked")
+
+    grid.set_borked({})
+    assert grid._tiles[media.path] is tile
+    assert not tile._health_badge.get_visible()
+
+
 def test_a_removed_wallpaper_loses_its_tile(grid: WallpaperGrid) -> None:
     grid.populate((item("a"), item("b")))
     grid.populate((item("a"),))

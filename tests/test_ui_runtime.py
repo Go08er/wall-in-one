@@ -26,6 +26,8 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
+from wall_in_one.library import pairings  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.window import MainWindow  # noqa: E402
 
@@ -50,6 +52,7 @@ class FakeWindow:
         self.busy: list[bool] = []
         self.reports: list[str] = []
         self.currents = 0
+        self.health_changes = 0
 
     def show_runtime_status(self, status: dict[str, object]) -> None:
         self.statuses.append(status)
@@ -71,6 +74,9 @@ class FakeWindow:
 
     def show_current(self, _session: object) -> None:
         self.currents += 1
+
+    def pairing_health_changed(self, _session: object) -> None:
+        self.health_changes += 1
 
 
 def _application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Application:
@@ -127,6 +133,60 @@ def _status(name: str) -> Response:
             }
         )
     )
+
+
+def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    path = tmp_path / "library" / "paper.png"
+    item = MediaItem(path=path, kind=Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library(roots=(path.parent,), items=(item,)))
+    playlist = application.session.playlists.create("Evening")
+    application.session.playlists.add(playlist.id, path, entry_id="paper-entry")
+    publishes: list[bool] = []
+
+    def publish() -> bool:
+        publishes.append(True)
+        return True
+
+    monkeypatch.setattr(
+        application,
+        "_publish_runtime_for_context",
+        publish,
+    )
+    snapshot = {
+        "playlist_id": playlist.id,
+        "playlist": playlist.name,
+        "source": "schedule",
+        "taboo_entries": [
+            {
+                "playlist_id": playlist.id,
+                "entry_id": "paper-entry",
+                "reason": "renderer rejected this wallpaper",
+                "source": "automatic-apply",
+            }
+        ],
+        "taboo_entries_omitted": 0,
+    }
+    try:
+        real_window = cast(MainWindow, window)
+        application._adopt_runtime_status(snapshot, real_window)
+        application._adopt_runtime_status(snapshot, real_window)
+        application._adopt_runtime_status(
+            {"playlist_id": playlist.id, "playlist": playlist.name, "source": "schedule"},
+            real_window,
+        )
+
+        health = application.session.pairings.health(pairings.Identity.of(item))
+        assert health.is_borked
+        assert health.reason == "renderer rejected this wallpaper"
+        assert publishes == [True], "polling the same status must not create a reload loop"
+        assert window.health_changes == 1
+    finally:
+        _close(application)
 
 
 def test_forgetting_destroyed_media_removes_every_playlist_entry(

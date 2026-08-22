@@ -175,3 +175,56 @@ def test_still_fallback_is_used_only_when_it_identifies_one_source() -> None:
 
     assert resolved == runtime_truth.MediaPlayback("Old playlist", (unique.path,))
     assert ambiguous == runtime_truth.MediaPlayback("Old playlist", ())
+
+
+def test_taboo_inventory_maps_stable_entries_to_media_and_deduplicates_occurrences() -> None:
+    first = _item("/library/first.png")
+    second = _item("/library/second.png")
+    playlist = Playlist(
+        id="evening",
+        name="Evening",
+        entries=(
+            Entry(id="first-a", source=str(first.path)),
+            Entry(id="first-b", source=str(first.path)),
+        ),
+    )
+    inventory = runtime_truth.taboo_inventory(
+        {
+            "taboo_entries_omitted": 7,
+            "taboo_entries": [
+                {
+                    "playlist_id": "evening",
+                    "entry_id": "first-a",
+                    "reason": "decoder rejected it",
+                    "source": "automatic-apply",
+                },
+                {
+                    "playlist_id": "evening",
+                    "entry_id": "first-b",
+                    "reason": "same wallpaper, another occurrence",
+                    "source": "automatic-apply",
+                },
+                {
+                    "playlist_id": runtime_config.FALLBACK_PLAYLIST_ID,
+                    "entry_id": runtime_config.entry_id_for_source(second.path),
+                    "reason": "scene crashed",
+                    "source": "renderer-crash",
+                },
+            ],
+        },
+        (playlist,),
+        (first, second),
+    )
+
+    assert inventory.omitted == 7
+    assert [(report.item.path, report.reason) for report in inventory.reports] == [
+        (first.path, "decoder rejected it"),
+        (second.path, "scene crashed"),
+    ]
+
+
+def test_missing_taboo_inventory_never_means_that_saved_health_recovered() -> None:
+    # The parser reports only observations. Clearing is intentionally absent
+    # from this API because a capped or delayed status reply cannot prove it.
+    assert runtime_truth.taboo_inventory({}, (), ()).reports == ()
+    assert runtime_truth.taboo_inventory(None, (), ()).reports == ()

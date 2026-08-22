@@ -1307,6 +1307,154 @@ fn renderer_crash_is_attributed_and_never_enters_the_apply_retry_machine() {
 }
 
 #[test]
+fn persisted_taboo_is_loaded_before_startup_selects_or_launches_motion() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false).replace(
+        "still = \"/tmp/one.png\"",
+        "still = \"/tmp/one.png\"\n\
+         taboo = { reason = \"known decoder failure\", source = \"automatic-apply\" }",
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["entry_id"], "video-two");
+    assert_eq!(snapshot["taboo_entries"][0]["entry_id"], "still-one");
+    assert_eq!(
+        snapshot["taboo_entries"][0]["reason"],
+        "known decoder failure"
+    );
+    assert_eq!(state.lock().unwrap().applies.last().unwrap().0, "video-two");
+}
+
+#[test]
+fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_retry() {
+    let root = directory("durable-taboo-clear");
+    let config_path = root.join("runtime.toml");
+    let original = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    fs::write(&config_path, &original).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "next".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "video-two".into(),
+            kind: wall_in_one_service::config::EntryKind::Video,
+            scene_id: None,
+            output: String::new(),
+            message: "video-two crashed and its still is active".into(),
+            permanent_for_session: true,
+        });
+    runtime.tick(at, Instant::now());
+    assert_eq!(
+        status(&mut runtime, at)["taboo_entries"][0]["entry_id"],
+        "video-two"
+    );
+
+    // An unrelated compiler reload before the app has consumed status must
+    // not mistake absence for an author-owned clear.
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "reload".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(
+        status(&mut runtime, at)["taboo_entries"][0]["entry_id"],
+        "video-two"
+    );
+
+    let persisted = original.replace(
+        "motion = \"/tmp/two.mp4\"",
+        "motion = \"/tmp/two.mp4\"\n\
+         taboo = { reason = \"video-two crashed and its still is active\", source = \"renderer-crash\" }",
+    );
+    fs::write(&config_path, persisted).unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "reload".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(
+        status(&mut runtime, at)["taboo_entries"][0]["source"],
+        "renderer-crash"
+    );
+    assert_eq!(
+        state.lock().unwrap().applies.last().unwrap(),
+        &("video-two".into(), false)
+    );
+
+    // The app is the sole writer. Removing metadata is its explicit Retry:
+    // Rust drops the durable key before applying the changed entry.
+    fs::write(&config_path, &original).unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "reload".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    let cleared = status(&mut runtime, at);
+    assert!(cleared["taboo_entries"].as_array().unwrap().is_empty());
+    assert_eq!(
+        state.lock().unwrap().applies.last().unwrap(),
+        &("video-two".into(), true)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn shuffle_bag_covers_each_entry_then_reshuffles_without_a_seam_repeat() {
     let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
         .replace("shuffle = false", "shuffle = true");

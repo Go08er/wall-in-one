@@ -99,6 +99,29 @@ fn handwritten_config_loads_without_python_or_app_state() {
 }
 
 #[test]
+fn entry_taboo_metadata_is_optional_bounded_and_backwards_compatible() {
+    let original = document(3);
+    let with_taboo = original.replace(
+        "motion = \"/tmp/two.mp4\"",
+        "motion = \"/tmp/two.mp4\"\n\
+         taboo = { reason = \"mpvpaper rejected this wallpaper\", source = \"automatic-apply\" }",
+    );
+    let parsed: Config = toml::from_str(&with_taboo).unwrap();
+    parsed.validate().unwrap();
+    let taboo = parsed.playlists[0].entries[1].taboo.as_ref().unwrap();
+    assert_eq!(taboo.reason, "mpvpaper rejected this wallpaper");
+    assert_eq!(taboo.source, "automatic-apply");
+
+    let too_long = with_taboo.replace("mpvpaper rejected this wallpaper", &"x".repeat(513));
+    let parsed: Config = toml::from_str(&too_long).unwrap();
+    assert!(parsed
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("taboo reason"));
+}
+
+#[test]
 fn config_loader_refuses_a_final_symlink() {
     let target = temp_file("symlink-target");
     let link = temp_file("symlink");

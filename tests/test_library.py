@@ -538,6 +538,58 @@ def test_roots_default_to_empty_meaning_ask_noctalia() -> None:
     assert config.Settings().roots == ()
 
 
+def test_display_control_defaults_to_one_mirrored_route() -> None:
+    settings = config.Settings()
+
+    assert settings.display_mode == config.DISPLAY_MODE_MIRRORED
+    assert settings.theme_source_connector == ""
+
+
+def test_display_authoring_settings_survive_a_toml_round_trip(tmp_path: Path) -> None:
+    written = tmp_path / "settings.toml"
+    config.save(
+        config.Settings(
+            display_mode=config.DISPLAY_MODE_INDEPENDENT,
+            theme_source_connector="DP-9",
+        ),
+        written,
+    )
+
+    loaded = config.load(written)
+    assert loaded.display_mode == config.DISPLAY_MODE_INDEPENDENT
+    assert loaded.theme_source_connector == "DP-9"
+
+
+def test_interactive_display_settings_recover_without_inventing_a_target() -> None:
+    settings = config.Settings(
+        display_mode="sideways",
+        theme_source_connector="DP-1\x01",
+    ).validated()
+
+    assert settings.display_mode == config.DISPLAY_MODE_MIRRORED
+    assert settings.theme_source_connector == ""
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('display_mode = "sideways"\n', "display_mode must be one of"),
+        ('theme_source_connector = " DP-1"\n', "cannot have leading or trailing whitespace"),
+        (
+            "theme_source_connector = "
+            f"{json.dumps('x' * (config.MAX_RUNTIME_CONNECTOR_BYTES + 1))}\n",
+            "must be at most 256 UTF-8 bytes",
+        ),
+    ],
+)
+def test_unattended_display_settings_are_strict(tmp_path: Path, line: str, message: str) -> None:
+    written = tmp_path / "settings.toml"
+    written.write_text(line, encoding="utf-8")
+
+    with pytest.raises(config.ConfigError, match=message):
+        config.load_strict(written)
+
+
 def test_scene_renderer_is_available_without_hand_editing_settings() -> None:
     assert config.Settings().own_scene_renderer is True
     assert config.Settings.from_mapping({}).own_scene_renderer is True

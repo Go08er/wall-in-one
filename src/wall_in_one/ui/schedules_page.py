@@ -37,6 +37,11 @@ MONTH_LABELS = (
 )
 WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
+# Stage-one authoring support deliberately cannot emit a schema-3 runtime
+# document for independent routing. Keep controls which would claim realtime
+# per-display behavior unavailable until schema 4 and the Rust routes land.
+INDEPENDENT_RUNTIME_READY = False
+
 
 def _connected_outputs() -> tuple[str, ...]:
     """Connector names already known by GTK, without blocking on a subprocess."""
@@ -90,7 +95,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             intro = Gtk.Label(
                 label=(
                     "Pick a normal rotation, then add calendar overrides. Rules are read from "
-                    "top to bottom; the last matching rule wins."
+                    "top to bottom; the last applicable matching rule wins."
                 ),
                 xalign=0.0,
                 wrap=True,
@@ -99,7 +104,14 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._content.append(intro)
             self._content.append(self._build_playback(session))
             self._content.append(self._build_defaults(session))
-            self._content.append(self._build_displays(session))
+            if session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
+                self._content.append(self._build_displays(session))
+            else:
+                dormant = len(session.displays) + sum(
+                    bool(rule.connector) for rule in session.schedules.rules
+                )
+                if dormant:
+                    self._content.append(self._build_dormant_displays(dormant))
             self._content.append(self._build_rules(session))
             self._content.append(self._build_new_rule(session))
             self._built = True
@@ -116,8 +128,19 @@ class SchedulesPage(Gtk.ScrolledWindow):
         truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         self._loading = True
         try:
-            row.set_subtitle(self._playback_description(session, truth))
-            row.set_selected(self._playback_selected(session, self._playback_choices, truth))
+            if (
+                session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+                and not INDEPENDENT_RUNTIME_READY
+            ):
+                row.set_sensitive(False)
+                row.set_subtitle(
+                    "Independent authoring is saved, but realtime display routing needs the "
+                    "schema-4 service update."
+                )
+            else:
+                row.set_sensitive(True)
+                row.set_subtitle(self._playback_description(session, truth))
+                row.set_selected(self._playback_selected(session, self._playback_choices, truth))
         finally:
             self._loading = False
         self._fingerprint = self._state_fingerprint(session)
@@ -126,6 +149,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         return (
             session.settings.active_playlist,
+            session.settings.display_mode,
+            session.settings.theme_source_connector,
             truth if truth is not None else session.manual_playlist,
             session.playlists.all(),
             session.displays.all(),
@@ -150,10 +175,35 @@ class SchedulesPage(Gtk.ScrolledWindow):
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
         )
         row.set_selected(self._playback_selected(session, choices, truth))
+        if (
+            session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+            and not INDEPENDENT_RUNTIME_READY
+        ):
+            row.set_sensitive(False)
+            row.set_subtitle(
+                "Independent authoring is saved, but realtime display routing needs the "
+                "schema-4 service update."
+            )
         self._playback_row = row
         self._playback_choices = choices
         row.connect("notify::selected", self._make_playback_changed(choices))
         group.add(row)
+        return group
+
+    @staticmethod
+    def _build_dormant_displays(records: int) -> Gtk.Widget:
+        """One honest row instead of mirrored mode's inactive connector UI."""
+        group = Adw.PreferencesGroup(title="Independent display setup")
+        noun = "saved item" if records == 1 else "saved items"
+        group.add(
+            Adw.ActionRow(
+                title="Saved and inactive",
+                subtitle=(
+                    f"{records} {noun} are preserved. Enable independent displays in "
+                    "Settings to use them."
+                ),
+            )
+        )
         return group
 
     @staticmethod
@@ -224,7 +274,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         connected = set(_connected_outputs())
         assigned = dict(session.displays.all())
-        connectors = tuple(sorted(connected | set(assigned)))
+        connectors = self._schedule_connectors(session)
         if not connectors:
             group.add(
                 Adw.ActionRow(
@@ -270,9 +320,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
             return
         total = len(session.schedules.rules)
         for index, rule in enumerate(session.schedules.rules):
+            target = rule.connector or "All displays"
             row = Adw.SwitchRow(
                 title=names.get(rule.playlist, f"Missing playlist {rule.playlist}"),
-                subtitle=f"Priority {index + 1} · {rule.describe()}",
+                subtitle=f"{target} · priority {index + 1} · {rule.describe()}",
                 active=rule.enabled,
             )
             row.connect("notify::active", self._make_enabled(rule.id))
@@ -315,6 +366,23 @@ class SchedulesPage(Gtk.ScrolledWindow):
             ),
         )
         choices = session.playlists.all()
+        self._rule_connectors = self._schedule_connectors(session)
+        self._rule_target = Adw.ComboRow(
+            title="Displays",
+            subtitle=(
+                "All displays shares this rule; a connector makes it an independent exception"
+            ),
+            model=Gtk.StringList.new(
+                [
+                    "All displays",
+                    *(self._target_label(connector) for connector in self._rule_connectors),
+                ]
+            ),
+        )
+        self._rule_target.set_sensitive(
+            session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+        )
+        group.add(self._rule_target)
         self._rule_playlist = Adw.ComboRow(
             title="Playlist",
             model=Gtk.StringList.new([one.name for one in choices] or ["Create a playlist first"]),
@@ -374,6 +442,22 @@ class SchedulesPage(Gtk.ScrolledWindow):
         group.add(buttons)
         return group
 
+    def _schedule_connectors(self, session: Session) -> tuple[str, ...]:
+        connected = set(_connected_outputs())
+        saved = {connector for connector, _playlist in session.displays.all()}
+        targeted = {rule.connector for rule in session.schedules.rules if rule.connector}
+        if session.settings.theme_source_connector:
+            targeted.add(session.settings.theme_source_connector)
+        return tuple(sorted(connected | saved | targeted))
+
+    @staticmethod
+    def _target_label(connector: str) -> str:
+        return connector
+
+    def _selected_rule_connector(self) -> str:
+        index = self._rule_target.get_selected()
+        return self._rule_connectors[index - 1] if 0 < index <= len(self._rule_connectors) else ""
+
     @staticmethod
     def _label(text: str) -> Gtk.Label:
         label = Gtk.Label(label=text, xalign=0.0, wrap=True)
@@ -394,6 +478,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
     def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
             if self._loading:
+                return
+            if (
+                self._app.session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+                and not INDEPENDENT_RUNTIME_READY
+            ):
                 return
             index = row.get_selected()
             started = (
@@ -518,6 +607,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                     weekdays=weekdays,
                     start=start,
                     end=end,
+                    connector=self._selected_rule_connector(),
                 )
             else:
                 self._app.session.schedules.add(
@@ -526,6 +616,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                     weekdays=weekdays,
                     start=start,
                     end=end,
+                    connector=self._selected_rule_connector(),
                 )
         except schedules.ScheduleError as error:
             self._app.window_report(str(error))
@@ -541,6 +632,12 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if playlist.id == rule.playlist:
                 self._rule_playlist.set_selected(index)
                 break
+        target_index = (
+            self._rule_connectors.index(rule.connector) + 1
+            if rule.connector in self._rule_connectors
+            else 0
+        )
+        self._rule_target.set_selected(target_index)
         for index, button in enumerate(self._months, 1):
             button.set_active(index in rule.months)
         for index, button in enumerate(self._weekdays):
@@ -562,6 +659,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         for button in (*self._months, *self._weekdays):
             button.set_active(False)
         self._time_enabled.set_active(False)
+        self._rule_target.set_selected(0)
         self._start_hour.set_selected(0)
         self._start_minute.set_selected(0)
         self._end_hour.set_selected(0)

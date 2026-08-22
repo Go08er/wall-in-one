@@ -610,7 +610,7 @@ def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     assert "medium:source" not in text
     assert "pairings.json" not in text
     assert document["schedules"][0]["weekdays"] == [4, 5]
-    assert document["displays"] == [{"connector": "DP-1", "playlist": "evening"}]
+    assert document.get("displays", []) == []
 
 
 def test_compiler_uses_a_pairing_specific_adaptive_generator(tmp_path: Path) -> None:
@@ -744,7 +744,7 @@ def test_compiler_rejects_authored_strings_outside_the_rust_wire_contract(
     assert target.read_text(encoding="utf-8") == previous
 
 
-def test_compiler_rejects_schedule_and_display_strings_outside_wire_bounds(
+def test_compiler_rejects_schedule_strings_outside_wire_bounds(
     tmp_path: Path,
 ) -> None:
     settings, session = _session(
@@ -763,16 +763,14 @@ def test_compiler_rejects_schedule_and_display_strings_outside_wire_bounds(
         runtime_config.update(settings, session, target)
     assert target.read_text(encoding="utf-8") == previous
 
-    # Remove the oversized rule so the next emitted field is examined.
+    # Dormant independent assignments are authoring state, not schema-3 wire
+    # data, so they cannot poison the last working mirrored document.
     session.schedules.remove(session.schedules.rules[-1].id)
-    with pytest.raises(
-        runtime_config.RuntimeConfigError, match="display connector must be at most"
-    ):
-        runtime_config.update(settings, session, target)
-    assert target.read_text(encoding="utf-8") == previous
+    assert runtime_config.update(settings, session, target) is True
+    assert tomllib.loads(target.read_text(encoding="utf-8")).get("displays", []) == []
 
 
-def test_legacy_single_output_becomes_a_resolved_display_assignment(tmp_path: Path) -> None:
+def test_legacy_single_output_is_dormant_under_the_new_mirrored_default(tmp_path: Path) -> None:
     settings, session = _session(tmp_path, display_assignments={})
     settings = config.Settings(
         roots=settings.roots,
@@ -780,7 +778,33 @@ def test_legacy_single_output_becomes_a_resolved_display_assignment(tmp_path: Pa
         output="eDP-1",
     )
     document = tomllib.loads(runtime_config.render(settings, session))
-    assert document["displays"] == [{"connector": "eDP-1", "playlist": "evening"}]
+    assert document.get("displays", []) == []
+
+
+def test_independent_authoring_does_not_replace_schema_three_last_known_good(
+    tmp_path: Path,
+) -> None:
+    settings, session = _session(tmp_path)
+    settings = replace(settings, display_mode=config.DISPLAY_MODE_INDEPENDENT)
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="schema 3"):
+        runtime_config.update(settings, session, target)
+
+    assert target.read_text(encoding="utf-8") == previous
+
+
+def test_connector_schedule_is_not_silently_emitted_as_global_in_mirrored_mode(
+    tmp_path: Path,
+) -> None:
+    settings, session = _session(tmp_path)
+    session.schedules.add("evening", connector="DP-2", rule_id="dock")
+
+    document = tomllib.loads(runtime_config.render(settings, session))
+
+    assert [rule["id"] for rule in document["schedules"]] == ["night"]
 
 
 def test_favourites_only_filters_the_builtin_fallback_playlist(tmp_path: Path) -> None:

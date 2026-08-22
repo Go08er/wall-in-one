@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config
+from wall_in_one import config, display_policy
 from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.providers.base import ProviderError
@@ -40,6 +40,8 @@ _INTERPOLATION_LABELS: dict[str, str] = {
     "oversample": "Oversample (recommended)",
     "linear": "Linear (stronger blending)",
 }
+
+INDEPENDENT_RUNTIME_READY = False
 
 
 def _connected_outputs() -> tuple[str, ...]:
@@ -78,6 +80,7 @@ class PreferencesPage(Adw.PreferencesPage):
         self.add(self._build_appearance_group())
 
         self._load(application.settings)
+        self._watch_output_changes()
         self._refresh_roots()
         self._refresh_api_key_status()
         self.show_palette(application.resolved_palette)
@@ -275,17 +278,41 @@ class PreferencesPage(Adw.PreferencesPage):
         )
         group.add(scene_status)
 
-        # Enumerated through GTK rather than by shelling out to the
-        # compositor: `Gdk.Display` knows the connectors, needs no subprocess,
-        # and does not tie the app to niri the way `niri msg -j outputs` would.
-        self._outputs = _connected_outputs()
-        self._output = Adw.ComboRow(
-            title="Output",
-            subtitle="Which monitor the wallpaper is applied to",
-            model=Gtk.StringList.new(["All outputs", *self._outputs]),
+        self._display_mode = Adw.ComboRow(
+            title="Displays",
+            subtitle=(
+                "Same wallpaper everywhere is lighter; independent mode unlocks connector "
+                "assignments, schedules and separate Quick choices"
+            ),
+            model=Gtk.StringList.new(
+                ["Same wallpaper on every display", "Control displays independently"]
+            ),
         )
-        self._output.connect("notify::selected", self._on_changed)
-        group.add(self._output)
+        self._display_mode.connect("notify::selected", self._on_changed)
+        group.add(self._display_mode)
+
+        self._theme_connectors: tuple[str, ...] = ()
+        self._theme_source = Adw.ComboRow(
+            title="Colours follow",
+            subtitle=(
+                "Noctalia has one shell-wide palette. Automatic uses the primary display, "
+                "or the first active display when no primary is reported"
+            ),
+        )
+        self._theme_source.connect("notify::selected", self._on_changed)
+        group.add(self._theme_source)
+
+        self._independent_runtime_note = Adw.ActionRow(
+            title="Independent runtime routing is not active yet",
+            subtitle=(
+                "This authoring choice is preserved, while the schema-3 service keeps its "
+                "last working mirrored configuration."
+            ),
+        )
+        self._independent_runtime_note.add_prefix(
+            Gtk.Image(icon_name="dialog-information-symbolic")
+        )
+        group.add(self._independent_runtime_note)
 
         self._favourites_only = Adw.SwitchRow(
             title="Cycle favourites only",
@@ -356,12 +383,91 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._when_hidden)
         return group
 
-    def _selected_output(self) -> str:
-        index = self._output.get_selected()
-        # Zero is "All outputs", which is the empty string on disk.
-        if index == 0 or index > len(self._outputs):
+    def _known_theme_connectors(self, settings: config.Settings) -> tuple[str, ...]:
+        connected = set(_connected_outputs())
+        session = getattr(self._app, "session", None)
+        saved = (
+            {connector for connector, _playlist in session.displays.all()}
+            if session is not None
+            else set()
+        )
+        if session is not None:
+            saved.update(rule.connector for rule in session.schedules.rules if rule.connector)
+        if settings.theme_source_connector:
+            saved.add(settings.theme_source_connector)
+        if settings.output:
+            # Kept for the legacy Python service and offered as a migration
+            # candidate without continuing to expose the ambiguous old Output
+            # setting as a separate control.
+            saved.add(settings.output)
+        return tuple(sorted(connected | saved))
+
+    def _watch_output_changes(self) -> None:
+        """Refresh connector labels when docking changes without rewriting the choice."""
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        # The model belongs to the display for the lifetime of this page. A
+        # directory-style diff is unnecessary here: rebuilding one small
+        # StringList leaves the persisted connector untouched, and ComboRow
+        # focus is not an editing surface.
+        display.get_monitors().connect("items-changed", self._on_outputs_changed)
+
+    def _on_outputs_changed(self, *_arguments: object) -> None:
+        self._loading = True
+        try:
+            self._refresh_display_controls(self._app.settings)
+        finally:
+            self._loading = False
+
+    def _selected_theme_connector(self) -> str:
+        index = self._theme_source.get_selected()
+        if index == 0 or index > len(self._theme_connectors):
             return ""
-        return self._outputs[index - 1]
+        return self._theme_connectors[index - 1]
+
+    def _refresh_display_controls(self, settings: config.Settings) -> None:
+        self._theme_connectors = self._known_theme_connectors(settings)
+        connected = _connected_outputs()
+        attached = set(connected)
+        labels = ["Automatic (primary, otherwise first active)"]
+        labels.extend(
+            connector if connector in attached else f"{connector} (not attached)"
+            for connector in self._theme_connectors
+        )
+        self._theme_source.set_model(Gtk.StringList.new(labels))
+        selected = (
+            self._theme_connectors.index(settings.theme_source_connector) + 1
+            if settings.theme_source_connector in self._theme_connectors
+            else 0
+        )
+        self._theme_source.set_selected(selected)
+        resolved = display_policy.resolve_theme_source(
+            settings.theme_source_connector,
+            connected,
+        )
+        if resolved.is_fallback:
+            fallback = (
+                f"Colours temporarily follow {resolved.effective}"
+                if resolved.effective
+                else "No active display is available for palette changes"
+            )
+            self._theme_source.set_subtitle(
+                f"{resolved.configured} is not attached. {fallback}; the saved choice "
+                "returns when it reconnects"
+            )
+        elif resolved.configured:
+            self._theme_source.set_subtitle(
+                "Noctalia has one shell-wide palette; it follows this display"
+            )
+        else:
+            self._theme_source.set_subtitle(
+                "Noctalia has one shell-wide palette. Automatic uses the primary display, "
+                "or the first active display when no primary is reported"
+            )
+        independent = settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+        self._theme_source.set_visible(independent)
+        self._independent_runtime_note.set_visible(independent and not INDEPENDENT_RUNTIME_READY)
 
     def _build_providers_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
@@ -503,15 +609,10 @@ class PreferencesPage(Adw.PreferencesPage):
             self._own_scenes.set_active(settings.own_scene_renderer)
             self._workshop.set_active(settings.scan_workshop)
             self._favourites_only.set_active(settings.cycle_favourites_only)
-            # A monitor that has since been unplugged is offered anyway rather
-            # than silently reset to "All outputs": the setting is still what
-            # the user asked for, and it starts working again when the cable
-            # goes back in.
-            if settings.output and settings.output not in self._outputs:
-                self._outputs = (*self._outputs, settings.output)
-                self._output.set_model(Gtk.StringList.new(["All outputs", *self._outputs]))
-            chosen = self._outputs.index(settings.output) + 1 if settings.output else 0
-            self._output.set_selected(chosen)
+            self._display_mode.set_selected(
+                1 if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT else 0
+            )
+            self._refresh_display_controls(settings)
             self._muted.set_active(settings.video_muted)
             self._volume.set_value(settings.video_volume)
             self._hardware_decode.set_active(settings.video_hardware_decode)
@@ -537,6 +638,9 @@ class PreferencesPage(Adw.PreferencesPage):
         scheme_index = self._scheme.get_selected()
         hidden_index = self._when_hidden.get_selected()
         interpolation_index = self._interpolation.get_selected()
+        independent = self._display_mode.get_selected() == 1
+        self._theme_source.set_visible(independent)
+        self._independent_runtime_note.set_visible(independent and not INDEPENDENT_RUNTIME_READY)
         changes: dict[str, object] = {
             "shuffle": self._shuffle.get_active(),
             "cycle_enabled": self._cycle.get_active(),
@@ -545,7 +649,10 @@ class PreferencesPage(Adw.PreferencesPage):
             "own_scene_renderer": self._own_scenes.get_active(),
             "scan_workshop": self._workshop.get_active(),
             "cycle_favourites_only": self._favourites_only.get_active(),
-            "output": self._selected_output(),
+            "display_mode": (
+                config.DISPLAY_MODE_INDEPENDENT if independent else config.DISPLAY_MODE_MIRRORED
+            ),
+            "theme_source_connector": self._selected_theme_connector(),
             "video_muted": self._muted.get_active(),
             "video_volume": int(self._volume.get_value()),
             "video_hardware_decode": self._hardware_decode.get_active(),

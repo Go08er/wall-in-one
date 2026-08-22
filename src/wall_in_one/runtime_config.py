@@ -372,6 +372,11 @@ def _validate_settings_wire(settings: config.Settings) -> None:
 def render(settings: config.Settings, session: Session) -> str:
     """Return schema-3 TOML with every authoring decision resolved."""
     _validate_settings_wire(settings)
+    if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
+        raise RuntimeConfigError(
+            "independent display authoring is saved but cannot be compiled for runtime "
+            "schema 3; the existing mirrored runtime configuration was left untouched"
+        )
     faults = session.authoring_faults()
     if faults:
         details = "; ".join(f"{name}: {fault}" for name, fault in faults)
@@ -493,9 +498,14 @@ def render(settings: config.Settings, session: Session) -> str:
         for compiled_entry in entries:
             lines.extend(("", *compiled_entry))
 
+    # Connector-targeted rules are dormant in mirrored mode. Emitting one into
+    # schema 3 without its target would silently turn it into a global rule,
+    # which is worse than leaving the valid last-known-good runtime document in
+    # charge until schema 4 understands the target.
     emitted_schedules = [
         (rule, runtime_playlist(rule.playlist, owner=f"schedule {rule.id!r}"))
         for rule in session.schedules.rules
+        if not rule.connector
     ]
     if len(emitted_schedules) > MAX_SCHEDULES:
         raise RuntimeConfigError(f"no more than {MAX_SCHEDULES} schedule rules are supported")
@@ -526,9 +536,10 @@ def render(settings: config.Settings, session: Session) -> str:
             lines.append(f'end = "{rule.end // 60:02d}:{rule.end % 60:02d}"')
         lines.append(f"enabled = {str(rule.enabled).lower()}")
 
-    assignments = session.displays.all()
-    if not assignments and settings.output:
-        assignments = ((settings.output, default),)
+    # Mirrored is deliberately one route. The display store and legacy Output
+    # value stay app-owned and preserved, but cannot alter the schema-3 target
+    # set unless independent mode is eventually compiled as schema 4.
+    assignments: tuple[tuple[str, str], ...] = ()
     emitted_assignments = [
         (
             connector,

@@ -135,6 +135,26 @@ def test_the_last_matching_rule_wins() -> None:
     assert schedules.resolve(rules, FRIDAY_MORNING) == "Weekdays"
 
 
+def test_connector_rule_is_dormant_globally_and_exact_for_its_display() -> None:
+    targeted = Rule(id="external", playlist="Dock", connector="DP-2")
+
+    assert schedules.resolve((targeted,), FRIDAY_MORNING) == ""
+    assert schedules.resolve((targeted,), FRIDAY_MORNING, "DP-2") == "Dock"
+    assert schedules.resolve((targeted,), FRIDAY_MORNING, "eDP-1") == ""
+
+
+def test_global_and_connector_rules_share_one_last_match_wins_order() -> None:
+    rules = (
+        Rule(id="global-first", playlist="Day"),
+        Rule(id="dock-exception", playlist="Dock", connector="DP-2"),
+        Rule(id="global-last", playlist="Night", months=frozenset({12})),
+    )
+
+    assert schedules.resolve(rules, FRIDAY_MORNING, "DP-2") == "Dock"
+    assert schedules.resolve(rules, CHRISTMAS, "DP-2") == "Night"
+    assert schedules.resolve_rule(rules, CHRISTMAS, "DP-2") is rules[-1]
+
+
 def test_a_disabled_rule_does_not_take_priority() -> None:
     rules = [
         Rule(id="a", playlist="Weekdays"),
@@ -217,6 +237,27 @@ def test_a_rule_can_be_edited_without_changing_identity_or_priority(store: Store
     assert updated.describe() == "months 12 sat,sun 22:00-06:00"
 
 
+def test_a_connector_target_survives_add_edit_and_reload(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    store = Store(path=target)
+    rule = store.add("Morning", connector="DP-9", rule_id="dock")
+
+    assert rule.connector == "DP-9"
+    updated = store.update(rule.id, "Evening", connector="DP-9")
+    reopened = Store.open(target)
+    assert updated.connector == "DP-9"
+    assert reopened.rules[0].connector == "DP-9"
+    assert json.loads(target.read_text(encoding="utf-8"))["version"] == 2
+
+
+@pytest.mark.parametrize("connector", ["DP-1\x01", "x" * 257])
+def test_invalid_connector_target_is_refused(store: Store, connector: str) -> None:
+    with pytest.raises(ScheduleError) as caught:
+        store.add("Evening", connector=connector)
+
+    assert caught.value.kind == "invalid-connector"
+
+
 def test_a_rule_can_move_without_changing_identity(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     store = Store(path=target)
@@ -269,6 +310,30 @@ def test_a_rule_outlives_the_process(tmp_path: Path) -> None:
     assert reopened[0].start == schedules.parse_time("22:00")
 
 
+def test_version_one_schedule_migrates_on_the_next_authoring_write(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "rules": [{"id": "old", "playlist": "Evening", "weekdays": ["sat"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = Store.open(target)
+    assert store.fault is None
+    assert store.rules[0].connector == ""
+    store.add("Morning", connector="DP-2", rule_id="new")
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert payload["rules"][0].get("connector") is None
+    assert payload["rules"][1]["connector"] == "DP-2"
+    assert not target.with_name(target.name + schedules.BROKEN_SUFFIX).exists()
+
+
 def test_rules_keep_their_order_across_a_reload(tmp_path: Path) -> None:
     """Order is the priority, so losing it silently changes what is in force."""
     target = tmp_path / "schedules.json"
@@ -308,6 +373,7 @@ def test_one_bad_rule_costs_only_itself(tmp_path: Path) -> None:
                     {"id": "good", "playlist": "Evening"},
                     {"playlist": "no id"},
                     "not even an object",
+                    {"id": "bad-day-type", "playlist": "X", "weekdays": [5]},
                     {"id": "bad-time", "playlist": "X", "start": "99:99", "end": "10:00"},
                     {"id": "also-good", "playlist": "Morning"},
                 ]

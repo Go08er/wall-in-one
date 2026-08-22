@@ -35,7 +35,8 @@ from wall_in_one.library import state_file
 #: The file, under `paths.app_state_dir()`.
 STATE_FILENAME: Final = "schedules.json"
 
-FORMAT_VERSION: Final = 1
+FORMAT_VERSION: Final = 2
+LEGACY_FORMAT_VERSION: Final = 1
 
 #: Ceilings, so a file that grew a zero cannot be read forever.
 MAX_RULES: Final = 512
@@ -48,13 +49,14 @@ BROKEN_SUFFIX: Final = ".broken"
 WEEKDAY_NAMES: Final[tuple[str, ...]] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 MINUTES_IN_A_DAY: Final = 24 * 60
+MAX_CONNECTOR_BYTES: Final = 256
 
 
 class ScheduleError(Exception):
     """A rule could not be made or stored, with a machine-readable reason.
 
     Kinds in use: ``local-io``, ``no-such-rule``, ``invalid-time``,
-    ``invalid-day``, ``invalid-month``, ``full``.
+    ``invalid-day``, ``invalid-month``, ``invalid-connector``, ``full``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -67,6 +69,28 @@ class ScheduleError(Exception):
 
 def new_id() -> str:
     return secrets.token_hex(8)
+
+
+def clean_connector(raw: str) -> str:
+    """A connector target, or the empty global target.
+
+    Connector names are configuration identities rather than display labels:
+    preserve their punctuation and internal spaces exactly, trimming only the
+    accidental whitespace around a hand-edited value.
+    """
+    connector = raw.strip()
+    try:
+        encoded = connector.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ScheduleError("invalid-connector", "connector must be valid UTF-8") from error
+    if len(encoded) > MAX_CONNECTOR_BYTES:
+        raise ScheduleError(
+            "invalid-connector",
+            f"connector must be at most {MAX_CONNECTOR_BYTES} UTF-8 bytes",
+        )
+    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector):
+        raise ScheduleError("invalid-connector", "connector cannot contain control characters")
+    return connector
 
 
 def parse_time(raw: str) -> int:
@@ -125,6 +149,11 @@ class Rule:
 
     id: str
     playlist: str
+    #: Empty targets the shared schedule. A named connector participates only
+    #: when independent display control is enabled; global and matching named
+    #: rules remain in one ordered list so the established last-match-wins
+    #: rule stays literal.
+    connector: str = ""
     months: frozenset[int] = frozenset()
     weekdays: frozenset[int] = frozenset()
     #: Minutes past midnight. ``None`` for either means the whole day.
@@ -132,7 +161,9 @@ class Rule:
     end: int | None = None
     enabled: bool = True
 
-    def matches(self, at: datetime) -> bool:
+    def matches(self, at: datetime, connector: str = "") -> bool:
+        if self.connector and self.connector != connector:
+            return False
         if not self.enabled:
             return False
         if self.months and at.month not in self.months:
@@ -173,6 +204,8 @@ class Rule:
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"id": self.id, "playlist": self.playlist}
+        if self.connector:
+            payload["connector"] = self.connector
         if self.months:
             payload["months"] = sorted(self.months)
         if self.weekdays:
@@ -195,12 +228,19 @@ def _rule(raw: object) -> Rule | None:
         return None
     if not isinstance(playlist, str) or not playlist.strip():
         return None
+    connector_value = raw.get("connector", "")
+    if not isinstance(connector_value, str):
+        return None
+    weekdays_value = raw.get("weekdays")
+    if isinstance(weekdays_value, list) and any(not isinstance(day, str) for day in weekdays_value):
+        return None
     try:
+        connector = clean_connector(connector_value)
+        if "connector" in raw and not connector:
+            return None
         months = parse_months(raw["months"]) if isinstance(raw.get("months"), list) else frozenset()
         weekdays = (
-            parse_weekdays(raw["weekdays"])
-            if isinstance(raw.get("weekdays"), list)
-            else frozenset()
+            parse_weekdays(weekdays_value) if isinstance(weekdays_value, list) else frozenset()
         )
         start = parse_time(raw["start"]) if isinstance(raw.get("start"), str) else None
         end = parse_time(raw["end"]) if isinstance(raw.get("end"), str) else None
@@ -214,6 +254,7 @@ def _rule(raw: object) -> Rule | None:
     return Rule(
         id=identifier.strip(),
         playlist=playlist.strip(),
+        connector=connector,
         months=months,
         weekdays=weekdays,
         start=start,
@@ -222,17 +263,28 @@ def _rule(raw: object) -> Rule | None:
     )
 
 
-def resolve(rules: Sequence[Rule], at: datetime) -> str:
+def resolve_rule(rules: Sequence[Rule], at: datetime, connector: str = "") -> Rule | None:
+    """The final applicable rule for one connector, or none.
+
+    A blank connector means the shared/mirrored schedule and intentionally
+    excludes connector-targeted rules. A named connector considers both global
+    and exactly matching rules in their authored order.
+    """
+    chosen = None
+    for rule in rules:
+        if rule.matches(at, connector):
+            chosen = rule
+    return chosen
+
+
+def resolve(rules: Sequence[Rule], at: datetime, connector: str = "") -> str:
     """The playlist the rules ask for at ``at``, or ``""`` for the default.
 
     The last match wins, so a rule added later carves an exception out of an
     earlier one without either being rewritten.
     """
-    chosen = ""
-    for rule in rules:
-        if rule.matches(at):
-            chosen = rule.playlist
-    return chosen
+    chosen = resolve_rule(rules, at, clean_connector(connector))
+    return chosen.playlist if chosen is not None else ""
 
 
 def state_path() -> Path:
@@ -245,9 +297,15 @@ def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
     )
     if payload is None:
         return (), fault
-    faults = [
-        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
-    ]
+    version = payload.get("version")
+    faults: list[str] = []
+    if version is not None and not (
+        type(version) is int and version in (LEGACY_FORMAT_VERSION, FORMAT_VERSION)
+    ):
+        faults.append(
+            f"{path.name} has unsupported version {version!r}; expected "
+            f"{LEGACY_FORMAT_VERSION} or {FORMAT_VERSION}"
+        )
     stored = payload.get("rules")
     if not isinstance(stored, list):
         return (), f"{path.name} has no rules in it"
@@ -268,6 +326,8 @@ def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
         for key, expected in (("months", list), ("weekdays", list), ("start", str), ("end", str)):
             if key in raw and not isinstance(raw[key], expected):
                 malformed += 1
+        if "connector" in raw and not isinstance(raw["connector"], str):
+            malformed += 1
         if "enabled" in raw and not isinstance(raw["enabled"], bool):
             malformed += 1
         if ("start" in raw) != ("end" in raw):
@@ -337,8 +397,8 @@ class Store:
     def __len__(self) -> int:
         return len(self._rules)
 
-    def resolve(self, at: datetime) -> str:
-        return resolve(self._rules, at)
+    def resolve(self, at: datetime, connector: str = "") -> str:
+        return resolve(self._rules, at, connector)
 
     def add(
         self,
@@ -348,6 +408,7 @@ class Store:
         weekdays: Iterable[str] = (),
         start: str = "",
         end: str = "",
+        connector: str = "",
         rule_id: str | None = None,
     ) -> Rule:
         """Append a rule. Later rules win, so appending is how you override."""
@@ -358,6 +419,7 @@ class Store:
         rule = Rule(
             id=rule_id or new_id(),
             playlist=playlist.strip(),
+            connector=clean_connector(connector),
             months=parse_months(months),
             weekdays=parse_weekdays(weekdays),
             start=parse_time(start) if start else None,
@@ -398,6 +460,7 @@ class Store:
         weekdays: Iterable[str] = (),
         start: str = "",
         end: str = "",
+        connector: str = "",
     ) -> Rule:
         """Edit a rule in place without changing its id or priority."""
         if bool(start) != bool(end):
@@ -410,6 +473,7 @@ class Store:
             updated = Rule(
                 id=rule.id,
                 playlist=playlist.strip(),
+                connector=clean_connector(connector),
                 months=parse_months(months),
                 weekdays=parse_weekdays(weekdays),
                 start=parse_time(start) if start else None,
@@ -470,6 +534,7 @@ def describe(
     active: str,
     at: datetime,
     names: Mapping[str, str] | None = None,
+    connector: str = "",
 ) -> str:
     """The schedule as rows, marking which rule is in force right now.
 
@@ -477,7 +542,7 @@ def describe(
     because a rename must not break a schedule -- but a listing full of
     sixteen-character hex is unreadable, and this is output for a person.
     """
-    winner = resolve(rules, at)
+    winner = resolve(rules, at, connector)
     default = (names or {}).get(active, active) if active else "(All media)"
     lines = [
         f"# schedule: {len(rules)} rules, default {default}",
@@ -486,7 +551,7 @@ def describe(
     # The last match wins, so only the final matching rule is in force.
     last_match = ""
     for rule in rules:
-        if rule.matches(at):
+        if rule.matches(at, connector):
             last_match = rule.id
     known = names or {}
     for rule in rules:
@@ -498,6 +563,6 @@ def describe(
     return "\n".join(lines)
 
 
-def effective(rules: Sequence[Rule], default: str, at: datetime) -> str:
+def effective(rules: Sequence[Rule], default: str, at: datetime, connector: str = "") -> str:
     """The playlist in force: a matching rule, else the pinned default."""
-    return resolve(rules, at) or default
+    return resolve(rules, at, connector) or default

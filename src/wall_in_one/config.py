@@ -35,6 +35,13 @@ MAX_RUNTIME_PATH_BYTES: Final = 4096
 MAX_RUNTIME_REFERENCE_BYTES: Final = 120 * 4
 MAX_RUNTIME_CONNECTOR_BYTES: Final = 256
 
+DISPLAY_MODE_MIRRORED: Final = "mirrored"
+DISPLAY_MODE_INDEPENDENT: Final = "independent"
+DISPLAY_MODES: Final[tuple[str, ...]] = (
+    DISPLAY_MODE_MIRRORED,
+    DISPLAY_MODE_INDEPENDENT,
+)
+
 
 class ConfigError(Exception):
     """The settings file could not be read or was malformed."""
@@ -57,6 +64,26 @@ def _tidy_roots(roots: Sequence[Path]) -> tuple[Path, ...]:
         if str(expanded):
             seen.setdefault(expanded, None)
     return tuple(seen)
+
+
+def _tidy_connector(value: str) -> str:
+    """One optional connector safe for settings and the future runtime wire.
+
+    Interactive settings recovery is deliberately forgiving: an invalid
+    hand-edited connector falls back to automatic palette ownership. The
+    unattended strict loader still rejects the same bytes below rather than
+    quietly compiling a different configuration.
+    """
+    connector = value.strip()
+    try:
+        encoded = connector.encode("utf-8")
+    except UnicodeEncodeError:
+        return ""
+    if len(encoded) > MAX_RUNTIME_CONNECTOR_BYTES or any(
+        ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector
+    ):
+        return ""
+    return connector
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +136,21 @@ class Settings:
     #: Native linux-wallpaperengine rendering limit. Video FPS is deliberately
     #: left alone: mpv's post-decode FPS filter does not reduce decode work.
     scene_fps: int = scenes.DEFAULT_FPS
+
+    #: ``mirrored`` is the cheap, predictable default: every attached display
+    #: follows one cursor and one schedule. ``independent`` unlocks authored
+    #: connector assignments and connector-targeted calendar rules. The Rust
+    #: runtime contract is being versioned separately; keeping this choice in
+    #: the app-owned settings first lets authoring data migrate without ever
+    #: sending half-resolved configuration over the socket.
+    display_mode: str = DISPLAY_MODE_MIRRORED
+
+    #: Which display's wallpaper feeds Noctalia's one shell-wide palette while
+    #: independent displays show different media. Empty means an automatic,
+    #: deterministic live display. A detached named connector is preserved so
+    #: docking again restores the user's choice rather than silently rewriting
+    #: it to whichever display happened to be present.
+    theme_source_connector: str = ""
 
     #: Which output the wallpaper is applied to. Empty means every one of
     #: them, which is what Noctalia's `wallpaper-set` does with no connector
@@ -163,6 +205,10 @@ class Settings:
             if self.video_interpolation in renderer.INTERPOLATION_CHOICES
             else renderer.DEFAULT_INTERPOLATION
         )
+        display_mode = (
+            self.display_mode if self.display_mode in DISPLAY_MODES else DISPLAY_MODE_MIRRORED
+        )
+        theme_source_connector = _tidy_connector(self.theme_source_connector)
         return replace(
             self,
             opacity=opacity,
@@ -172,6 +218,8 @@ class Settings:
             video_when_hidden=hidden,
             video_interpolation=interpolation,
             scene_fps=min(scenes.MAX_FPS, max(scenes.MIN_FPS, self.scene_fps)),
+            display_mode=display_mode,
+            theme_source_connector=theme_source_connector,
             roots=_tidy_roots(self.roots),
         )
 
@@ -215,6 +263,8 @@ class Settings:
             video_interpolation=text("video_interpolation", renderer.DEFAULT_INTERPOLATION),
             video_hardware_decode=boolean("video_hardware_decode", True),
             scene_fps=int(number("scene_fps", scenes.DEFAULT_FPS)),
+            display_mode=text("display_mode", DISPLAY_MODE_MIRRORED),
+            theme_source_connector=text("theme_source_connector", ""),
             cycle_favourites_only=boolean("cycle_favourites_only", False),
             active_playlist=text("active_playlist", ""),
             scan_workshop=boolean("scan_workshop", True),
@@ -241,6 +291,8 @@ class Settings:
             f'video_interpolation = "{self.video_interpolation}"',
             f"video_hardware_decode = {str(self.video_hardware_decode).lower()}",
             f"scene_fps = {self.scene_fps}",
+            f"display_mode = {json.dumps(self.display_mode)}",
+            f"theme_source_connector = {json.dumps(self.theme_source_connector)}",
             f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
             f'active_playlist = "{self.active_playlist}"',
             f"scan_workshop = {str(self.scan_workshop).lower()}",
@@ -366,6 +418,8 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "preview_scheme",
         "video_when_hidden",
         "video_interpolation",
+        "display_mode",
+        "theme_source_connector",
         "active_playlist",
         "output",
     )
@@ -377,6 +431,7 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "preview_scheme": ALL_SCHEMES,
         "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES,
         "video_interpolation": renderer.INTERPOLATION_CHOICES,
+        "display_mode": DISPLAY_MODES,
     }
     for key, allowed in choices.items():
         if key in raw and raw[key] not in allowed:
@@ -386,6 +441,7 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
     for key, maximum in (
         ("active_playlist", MAX_RUNTIME_REFERENCE_BYTES),
         ("output", MAX_RUNTIME_CONNECTOR_BYTES),
+        ("theme_source_connector", MAX_RUNTIME_CONNECTOR_BYTES),
     ):
         if key not in raw:
             continue

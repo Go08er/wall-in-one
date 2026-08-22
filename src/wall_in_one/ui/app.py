@@ -20,7 +20,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config, paths, runtime_config
+from wall_in_one import config, paths, runtime_config, runtime_health
 from wall_in_one.browse import Browser
 from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
@@ -31,7 +31,6 @@ from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
 from wall_in_one.theme import css, source
-from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
 from wall_in_one.wallpaper import outputs
@@ -874,7 +873,7 @@ class Application(Adw.Application):
         the wallpaper recovered.
         """
         self._runtime_status = status
-        inventory = runtime_truth.taboo_inventory(
+        inventory = runtime_health.taboo_inventory(
             status,
             self._session.playlists.all(),
             self._session.library.items,

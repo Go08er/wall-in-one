@@ -130,6 +130,15 @@ start, so an upgrade regenerates an older schema without waiting for somebody
 to open the GUI. The service itself still refuses a missing or unknown schema
 rather than guessing or becoming a second writer. Opening and closing
 `wall-in-one` later has no effect on rotation.
+
+`wall-in-one --sync-runtime-health` is the matching headless persistence bridge.
+It reads one atomic Rust status snapshot, maps newly reported borked entries
+back to app-owned media, writes their pairing health, recompiles, and asks Rust
+to reload. It never opens GTK, never clears a marker merely because a bounded
+snapshot omitted it, and leaves the last-known-good runtime document untouched
+if compilation fails. A shell or bar integration may invoke it after status
+reports a taboo entry; Rust never runs Python or writes authoring data itself.
+
 The retained `wall-in-one --service` is a compatibility fallback during this
 transition, not the packaged unit's implementation. Stop the Rust runtime
 deliberately with `wall-in-one ctl quit`.

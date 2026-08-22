@@ -1,6 +1,6 @@
 """Command line entry point.
 
-Five modes:
+Six modes:
 
 * no arguments -- launch the GUI
 * ``--service`` -- legacy Python compatibility service for installations that
@@ -9,6 +9,8 @@ Five modes:
   plugin uses; every plugin control is one ``runAsync`` of a verb)
 * ``--write-config`` -- compile authoring state for the Rust service without
   importing GTK or opening a window
+* ``--sync-runtime-health`` -- persist Rust's bounded failure inventory through
+  the app-owned authoring/config path, also without GTK
 * maintenance flags such as ``--install-theme-template``
 
 The GTK import is deliberately deferred so that ``ctl`` and the maintenance
@@ -109,6 +111,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--write-config",
         action="store_true",
         help="compile the resolved runtime config without opening the GUI",
+    )
+    parser.add_argument(
+        "--sync-runtime-health",
+        action="store_true",
+        help="persist newly reported runtime wallpaper failures without opening the GUI",
     )
 
     maintenance = parser.add_argument_group("Noctalia integration")
@@ -240,6 +247,110 @@ def _write_runtime_config() -> int:
     return 0
 
 
+def _sync_runtime_health() -> int:
+    """Persist one atomic Rust failure snapshot through the sole app writer."""
+    from wall_in_one import config, runtime_config, runtime_health
+    from wall_in_one.control import client
+    from wall_in_one.library import pairings
+    from wall_in_one.session import Session
+
+    try:
+        response = client.send_runtime("status")
+    except client.NotRunningError as error:
+        print(error, file=sys.stderr)
+        return client.EXIT_NOT_RUNNING
+    except client.ControlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if not response.ok:
+        print(f"error: runtime rejected status: {response.message}", file=sys.stderr)
+        return 1
+    try:
+        status = runtime_health.parse_status(response.message)
+    except runtime_health.RuntimeHealthError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    raw_reports = status.get("taboo_entries", [])
+    omitted = status.get("taboo_entries_omitted", 0)
+    assert isinstance(raw_reports, list)
+    assert type(omitted) is int
+    if not raw_reports:
+        if omitted:
+            print(
+                f"warning: runtime omitted {omitted} older taboo entries; none were cleared",
+                file=sys.stderr,
+            )
+        print("runtime reported no visible wallpaper health changes")
+        return 0
+
+    session: Session | None = None
+    changed = 0
+    document_changed = False
+    try:
+        # Hold the compiler gate from the first authoring read through the
+        # generated document. This command is another app invocation, never a
+        # second writer implementation; Rust remains read-only.
+        with runtime_config.compiler_lock():
+            settings = config.load_strict()
+            session = Session(settings)
+            session.refresh()
+            faults = session.authoring_faults()
+            if faults:
+                details = "; ".join(f"{name}: {fault}" for name, fault in faults)
+                raise runtime_config.RuntimeConfigError(
+                    "cannot sync runtime health because authoring state is "
+                    f"unreadable ({details}); no health marker was written"
+                )
+            inventory = runtime_health.taboo_inventory(
+                status,
+                session.playlists.all(),
+                session.library.items,
+            )
+            for report in inventory.reports:
+                if session.pairings.mark_borked(
+                    report.item,
+                    report.reason,
+                    report.source,
+                ):
+                    changed += 1
+            if changed:
+                document_changed = runtime_config.update(settings, session)
+    except (config.ConfigError, pairings.PairingError, runtime_config.RuntimeConfigError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    finally:
+        if session is not None:
+            session.shutdown()
+
+    if omitted:
+        print(
+            f"warning: runtime omitted {omitted} older taboo entries; none were cleared",
+            file=sys.stderr,
+        )
+    if document_changed:
+        try:
+            reload_response = client.send_runtime("reload")
+        except client.NotRunningError:
+            # Persistence is complete. A later service start will read the
+            # generated metadata, so disappearance between status and reload
+            # does not turn successful authoring into failure.
+            print("warning: runtime stopped before reload; saved health will apply at next start")
+        except client.ControlError as error:
+            print(f"error: runtime health was saved but reload failed: {error}", file=sys.stderr)
+            return 1
+        else:
+            if not reload_response.ok:
+                print(
+                    f"error: runtime health was saved but reload was rejected: "
+                    f"{reload_response.message}",
+                    file=sys.stderr,
+                )
+                return 1
+    print(f"saved {changed} new wallpaper health marker{'s' if changed != 1 else ''}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     options = parser.parse_args(argv)
@@ -252,6 +363,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if options.write_config:
         return _write_runtime_config()
+
+    if options.sync_runtime_health:
+        return _sync_runtime_health()
 
     maintenance = _run_maintenance(options)
     if maintenance is not None:

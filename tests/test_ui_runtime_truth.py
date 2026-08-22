@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from wall_in_one import runtime_config
+from wall_in_one import runtime_config, runtime_health
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.ui import runtime_truth
@@ -188,7 +188,7 @@ def test_taboo_inventory_maps_stable_entries_to_media_and_deduplicates_occurrenc
             Entry(id="first-b", source=str(first.path)),
         ),
     )
-    inventory = runtime_truth.taboo_inventory(
+    inventory = runtime_health.taboo_inventory(
         {
             "taboo_entries_omitted": 7,
             "taboo_entries": [
@@ -226,5 +226,5 @@ def test_taboo_inventory_maps_stable_entries_to_media_and_deduplicates_occurrenc
 def test_missing_taboo_inventory_never_means_that_saved_health_recovered() -> None:
     # The parser reports only observations. Clearing is intentionally absent
     # from this API because a capped or delayed status reply cannot prove it.
-    assert runtime_truth.taboo_inventory({}, (), ()).reports == ()
-    assert runtime_truth.taboo_inventory(None, (), ()).reports == ()
+    assert runtime_health.taboo_inventory({}, (), ()).reports == ()
+    assert runtime_health.taboo_inventory(None, (), ()).reports == ()

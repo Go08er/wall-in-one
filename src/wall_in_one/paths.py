@@ -54,9 +54,18 @@ def runtime_dir() -> Path:
     raw = os.environ.get("XDG_RUNTIME_DIR")
     if raw and Path(raw).is_absolute():
         return Path(raw)
-    # No runtime dir is unusual but survivable; the socket just lives somewhere
-    # less appropriate rather than the app refusing to start.
+    # No runtime dir is unusual but survivable; the authoring socket and legacy
+    # renderer IPC stay in cache rather than making the GUI refuse to start.
     return cache_home()
+
+
+def service_runtime_dir() -> Path:
+    """Rust endpoint directory, including its headless/SSH fallback."""
+    raw = os.environ.get("XDG_RUNTIME_DIR")
+    if raw and Path(raw).is_absolute():
+        return Path(raw)
+    # This is wall-in-one-service's exact default when XDG_RUNTIME_DIR is absent.
+    return state_home() / APP_ID
 
 
 def app_config_dir() -> Path:
@@ -86,7 +95,7 @@ def socket_path() -> Path:
 
 def runtime_socket_path() -> Path:
     """The Rust runtime socket; the Python app keeps the authoring socket."""
-    return runtime_dir() / f"{APP_ID}-runtime.sock"
+    return service_runtime_dir() / f"{APP_ID}-runtime.sock"
 
 
 def runtime_config_path() -> Path:

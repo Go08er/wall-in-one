@@ -8,11 +8,18 @@ imports this module and never reads those source stores.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -39,10 +46,153 @@ MAX_REFERENCE_BYTES: Final = MAX_PLAYLIST_NAME_CHARS * 4
 MAX_CONNECTOR_BYTES: Final = 256
 MAX_OPTION_BYTES: Final = 256
 MAX_PATH_BYTES: Final = 4096
+COMPILER_LOCK_TIMEOUT_SECONDS: Final = 5.0
+COMPILER_LOCK_POLL_SECONDS: Final = 0.025
 
 
 class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
+
+
+@dataclass(slots=True)
+class _HeldCompilerLock:
+    path: Path
+    descriptor: int
+    depth: int = 1
+
+
+class _CompilerLockState(threading.local):
+    held: _HeldCompilerLock | None
+
+    def __init__(self) -> None:
+        self.held = None
+
+
+_LOCAL_COMPILER_GATE = threading.RLock()
+_COMPILER_LOCK_STATE = _CompilerLockState()
+
+
+def _compiler_lock_path(target: Path) -> Path:
+    return target.absolute().with_name(f".{target.name}.compiler.lock")
+
+
+def _lock_timeout(path: Path, seconds: float) -> RuntimeConfigError:
+    return RuntimeConfigError(
+        f"timed out after {seconds:g}s waiting for runtime compiler lock {path}; "
+        "the last-known-good runtime configuration was left untouched"
+    )
+
+
+def _open_compiler_lock(path: Path) -> int:
+    try:
+        paths.ensure_directory(path.parent)
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError as error:
+        raise RuntimeConfigError(
+            f"cannot safely open runtime compiler lock {path}: {error}"
+        ) from error
+
+    try:
+        opened = os.fstat(descriptor)
+        current = path.lstat()
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeConfigError(f"runtime compiler lock {path} is not a regular file")
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise RuntimeConfigError(f"runtime compiler lock {path} changed while being opened")
+        if opened.st_uid != os.getuid() or opened.st_nlink != 1:
+            raise RuntimeConfigError(
+                f"runtime compiler lock {path} is not a private file owned by this user"
+            )
+        os.fchmod(descriptor, 0o600)
+        return descriptor
+    except OSError, RuntimeConfigError:
+        os.close(descriptor)
+        raise
+
+
+def _verify_open_lock(path: Path, descriptor: int) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as error:
+        raise RuntimeConfigError(f"cannot verify runtime compiler lock {path}: {error}") from error
+    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+        raise RuntimeConfigError(f"runtime compiler lock {path} changed while waiting for it")
+
+
+@contextmanager
+def compiler_lock(
+    target: Path | None = None,
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
+    """Serialise every complete authoring-snapshot compilation.
+
+    The headless compiler holds this before it reads settings or authoring
+    stores. ``write`` and ``update`` enter it too, making direct and GUI callers
+    safe while remaining re-entrant on the same thread and target.
+    """
+
+    document = target if target is not None else paths.runtime_config_path()
+    lock_path = _compiler_lock_path(document)
+    wait = COMPILER_LOCK_TIMEOUT_SECONDS if timeout is None else timeout
+    if wait < 0:
+        raise RuntimeConfigError("runtime compiler lock timeout cannot be negative")
+    deadline = time.monotonic() + wait
+
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _LOCAL_COMPILER_GATE.acquire(timeout=remaining):
+        raise _lock_timeout(lock_path, wait)
+    try:
+        held = _COMPILER_LOCK_STATE.held
+        if held is not None:
+            if held.path != lock_path:
+                raise RuntimeConfigError(
+                    f"cannot acquire runtime compiler lock {lock_path} while already holding "
+                    f"{held.path}"
+                )
+            held.depth += 1
+            try:
+                yield
+            finally:
+                held.depth -= 1
+            return
+
+        descriptor = _open_compiler_lock(lock_path)
+        locked = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise _lock_timeout(lock_path, wait) from None
+                    time.sleep(min(COMPILER_LOCK_POLL_SECONDS, remaining))
+                except OSError as error:
+                    raise RuntimeConfigError(
+                        f"cannot acquire runtime compiler lock {lock_path}: {error}"
+                    ) from error
+            _verify_open_lock(lock_path, descriptor)
+            _COMPILER_LOCK_STATE.held = _HeldCompilerLock(lock_path, descriptor)
+            try:
+                yield
+            finally:
+                _COMPILER_LOCK_STATE.held = None
+        finally:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+    finally:
+        _LOCAL_COMPILER_GATE.release()
 
 
 def _encoded_length(value: str, *, label: str) -> int:
@@ -107,7 +257,13 @@ def _program(name: str) -> Path:
     return program
 
 
-def _entry_id(source: Path) -> str:
+def entry_id_for_source(source: Path) -> str:
+    """Stable wire id used for one entry in the generated All media list.
+
+    The runtime reports this id back in its atomic status snapshot. Keeping
+    the derivation public lets read-only clients map that answer to an authored
+    media source without maintaining a second, subtly different hash rule.
+    """
     return hashlib.sha256(os.fsencode(source)).hexdigest()[:16]
 
 
@@ -235,7 +391,7 @@ def render(settings: config.Settings, session: Session) -> str:
 
     fallback_entries: list[tuple[str, ...]] = []
     for item in fallback_items:
-        compiled_lines = _resolved_entry(item, session, _entry_id(item.path))
+        compiled_lines = _resolved_entry(item, session, entry_id_for_source(item.path))
         if compiled_lines is not None:
             fallback_entries.append(compiled_lines)
     playlists.append((FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, tuple(fallback_entries)))
@@ -419,7 +575,8 @@ def render(settings: config.Settings, session: Session) -> str:
 def write(settings: config.Settings, session: Session, path: Path | None = None) -> Path:
     """Compile and install atomically, including the containing directory."""
     target = path if path is not None else paths.runtime_config_path()
-    _install(render(settings, session), target)
+    with compiler_lock(target):
+        _install(render(settings, session), target)
     return target
 
 
@@ -431,15 +588,16 @@ def update(settings: config.Settings, session: Session, path: Path | None = None
     a video or scene for no configuration change.
     """
     target = path if path is not None else paths.runtime_config_path()
-    document = render(settings, session)
-    try:
-        current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
-        if current == document:
-            return False
-    except (OSError, UnicodeDecodeError) as error:
-        raise RuntimeConfigError(f"cannot read {target}: {error}") from error
-    _install(document, target)
-    return True
+    with compiler_lock(target):
+        document = render(settings, session)
+        try:
+            current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+            if current == document:
+                return False
+        except (OSError, UnicodeDecodeError) as error:
+            raise RuntimeConfigError(f"cannot read {target}: {error}") from error
+        _install(document, target)
+        return True
 
 
 def _install(document: str, target: Path) -> None:

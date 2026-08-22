@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,30 @@ def fsync_parent(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def write_atomic_text(path: Path, contents: str) -> None:
+    """Durably replace ``path`` from a private same-directory temporary.
+
+    ``mkstemp`` is important here rather than a name derived from the process
+    id.  The latter lets a pre-created symbolic link redirect the write, and
+    two re-entrant saves in one process select the same temporary.  The file
+    descriptor returned here is opened with exclusive creation, so neither is
+    possible.  The same-directory replace remains atomic, and syncing both the
+    file and its parent preserves the stores' power-loss contract.
+    """
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        fsync_parent(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def preserve_faulted(path: Path) -> Path:

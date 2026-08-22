@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import socket
+import threading
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -281,6 +282,27 @@ def test_time_already_spent_counts_against_the_interval() -> None:
     assert clock.slept == []
 
 
+def test_concurrent_rate_limit_waiters_reserve_separate_intervals() -> None:
+    """Detail, search and download workers must not wake into one request burst."""
+    clock = FrozenClock()
+    limiter = http.RateLimiter(2.0, clock=clock, sleep=clock.sleep)
+    barrier = threading.Barrier(4)
+
+    def wait() -> None:
+        barrier.wait()
+        limiter.wait()
+
+    workers = [threading.Thread(target=wait) for _ in range(3)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert not any(worker.is_alive() for worker in workers)
+    assert clock.slept == [2.0, 2.0]
+
+
 # -- the cache -----------------------------------------------------------
 
 
@@ -299,3 +321,48 @@ def test_the_cache_expires_and_evicts() -> None:
     clock.now += 11.0
     assert cache.get("a") is None
     assert len(cache) == 1
+
+
+def test_cache_clear_cannot_interleave_with_an_expiring_read() -> None:
+    """A detail-cache clear must not make another worker's get raise KeyError."""
+    entered = threading.Event()
+    release = threading.Event()
+    cleared = threading.Event()
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+            assert release.wait(2)
+            return 20.0
+        return 0.0
+
+    cache: TtlCache[str] = TtlCache(ttl=10.0, clock=clock)
+    cache.put("a", "one")
+    errors: list[Exception] = []
+
+    def read() -> None:
+        try:
+            cache.get("a")
+        except Exception as error:  # pragma: no cover - the assertion below reports it
+            errors.append(error)
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    assert entered.wait(2)
+
+    def clear() -> None:
+        cache.clear()
+        cleared.set()
+
+    clearer = threading.Thread(target=clear)
+    clearer.start()
+    assert not cleared.wait(0.05)
+    release.set()
+    reader.join(timeout=2)
+    clearer.join(timeout=2)
+
+    assert errors == []
+    assert cleared.is_set()

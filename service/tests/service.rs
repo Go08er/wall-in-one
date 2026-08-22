@@ -790,6 +790,7 @@ struct RuntimeDriverState {
     motion_active: bool,
     active_outputs: HashSet<String>,
     fail_apply: bool,
+    fail_applies_remaining: usize,
     fail_pause: bool,
     failures: Vec<String>,
     connected_outputs: Option<Vec<String>>,
@@ -824,6 +825,10 @@ impl WallpaperDriver for RuntimeDriver {
         state.applied_outputs.push(output.to_string());
         if state.fail_apply {
             return Err("renderer refused resume".into());
+        }
+        if state.fail_applies_remaining > 0 {
+            state.fail_applies_remaining -= 1;
+            return Err("renderer refused candidate".into());
         }
         state.motion_active = settings.dynamics_enabled
             && entry.kind != wall_in_one_service::config::EntryKind::Still;
@@ -1098,6 +1103,111 @@ fn cycle_runtime_override_stops_advancement_without_stopping_motion() {
 }
 
 #[test]
+fn scheduled_playlist_gets_a_full_residency_interval_before_cycling() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let mut parsed: Config = toml::from_str(&document).unwrap();
+    let mut second = parsed.playlists[1].entries[0].clone();
+    second.id = "scene-four".into();
+    second.scene_id = Some("12346".into());
+    parsed.playlists[1].entries.push(second);
+    let summer = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        summer,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    let transition = Instant::now() + Duration::from_secs(600);
+    runtime.tick(winter, transition);
+    assert_eq!(status(&mut runtime, winter)["entry_id"], "scene-three");
+    runtime.tick(winter, transition + Duration::from_secs(4));
+    assert_eq!(status(&mut runtime, winter)["entry_id"], "scene-three");
+    runtime.tick(winter, transition + Duration::from_secs(5));
+    assert_eq!(status(&mut runtime, winter)["entry_id"], "scene-four");
+}
+
+#[test]
+fn manual_playlist_and_resume_each_start_a_fresh_cycle_interval() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let mut parsed: Config = toml::from_str(&document).unwrap();
+    parsed.schedules.clear();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    let selected_at = Instant::now();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "playlist-use".into(),
+                    argument: Some("day".into()),
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(status(&mut runtime, at)["entry_id"], "still-one");
+    runtime.tick(at, selected_at + Duration::from_secs(4));
+    assert_eq!(status(&mut runtime, at)["entry_id"], "still-one");
+    runtime.tick(at, selected_at + Duration::from_secs(6));
+    assert_eq!(status(&mut runtime, at)["entry_id"], "video-two");
+
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "pause".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    let resumed_at = Instant::now();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "play".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    runtime.tick(at, resumed_at + Duration::from_secs(4));
+    assert_eq!(status(&mut runtime, at)["entry_id"], "video-two");
+    runtime.tick(at, resumed_at + Duration::from_secs(6));
+    assert_eq!(status(&mut runtime, at)["entry_id"], "still-one");
+}
+
+#[test]
 fn shuffle_runtime_override_survives_reload_and_can_follow_config_again() {
     let root = directory("shuffle-reload");
     let config_path = root.join("runtime.toml");
@@ -1243,6 +1353,7 @@ fn target_reconciliation_removes_disconnected_all_and_empty_renderers() {
     fs::write(&config_path, empty_day).unwrap();
     let emptied = Config::load(&config_path).unwrap();
     assert!(emptied.playlist("day").unwrap().entries.is_empty());
+    let before_rejected_reload = status(&mut runtime, at);
     let reply = runtime.handle(
         wall_in_one_service::protocol::Request {
             verb: "reload".into(),
@@ -1251,10 +1362,78 @@ fn target_reconciliation_removes_disconnected_all_and_empty_renderers() {
         at,
     );
     assert!(!reply.ok);
-    assert!(state.lock().unwrap().active_outputs.is_empty());
+    assert!(reply.message.contains("previous configuration restored"));
+    let after_rejected_reload = status(&mut runtime, at);
+    assert_eq!(after_rejected_reload["playlist_id"], "day");
+    assert_eq!(
+        after_rejected_reload["entry_id"],
+        before_rejected_reload["entry_id"]
+    );
+    assert_eq!(
+        after_rejected_reload["playlists"][0]["entries"],
+        before_rejected_reload["playlists"][0]["entries"]
+    );
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from([String::new()])
+    );
     assert_eq!(
         state.lock().unwrap().retained_outputs.last(),
-        Some(&Vec::<String>::new())
+        Some(&vec![String::new()])
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_reload_apply_restores_config_cursor_renderer_settings_and_wallpaper() {
+    let root = directory("transactional-reload");
+    let config_path = root.join("runtime.toml");
+    let original = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    fs::write(&config_path, &original).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let before = status(&mut runtime, at);
+
+    fs::write(
+        &config_path,
+        original
+            .replace("default_playlist = \"day\"", "default_playlist = \"night\"")
+            .replace("layer = \"background\"", "layer = \"bottom\""),
+    )
+    .unwrap();
+    state.lock().unwrap().fail_applies_remaining = 1;
+    let reply = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "reload".into(),
+            argument: None,
+        },
+        at,
+    );
+
+    assert!(!reply.ok);
+    assert!(reply.message.contains("renderer refused candidate"));
+    assert!(reply.message.contains("previous configuration restored"));
+    let after = status(&mut runtime, at);
+    assert_eq!(after["playlist_id"], before["playlist_id"]);
+    assert_eq!(after["entry_id"], before["entry_id"]);
+    let recorded = state.lock().unwrap();
+    assert_eq!(recorded.reconfigures, 2, "candidate then rollback settings");
+    assert_eq!(
+        recorded.applies.last().map(|apply| apply.0.as_str()),
+        Some("still-one"),
+        "the prior entry must be reapplied after the candidate fails"
     );
     fs::remove_dir_all(root).unwrap();
 }

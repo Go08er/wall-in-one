@@ -371,6 +371,11 @@ class Application(Adw.Application):
         self._settings = settings
         async_scan = library_sources_changed and self._window is not None
         self._session.update_settings(settings, rescan_library=not async_scan)
+        if self._window is not None:
+            # The settings document can also move without a Preferences-page
+            # gesture. Keep those persistent widgets on the application-owned
+            # snapshot so their next edit cannot write stale sibling fields.
+            self._window.apply_settings(settings)
         if async_scan:
             self.refresh_library()
         else:
@@ -697,15 +702,30 @@ class Application(Adw.Application):
             if current:
                 window.show_runtime_delayed()
         else:
-            if response.ok and current:
-                try:
-                    status = json.loads(response.message)
-                except ValueError:
-                    pass
+            if current:
+                if not response.ok:
+                    window.show_runtime_protocol_error(
+                        f"Runtime rejected its status request: {response.message}"
+                    )
                 else:
-                    if isinstance(status, dict):
-                        self._runtime_status = status
-                        window.show_runtime_status(status)
+                    try:
+                        status: object = json.loads(response.message)
+                    except ValueError:
+                        window.show_runtime_protocol_error(
+                            "Runtime returned a status reply that was not valid JSON"
+                        )
+                    else:
+                        if (
+                            isinstance(status, dict)
+                            and isinstance(status.get("playlist"), str)
+                            and isinstance(status.get("source"), str)
+                        ):
+                            self._runtime_status = status
+                            window.show_runtime_status(status)
+                        else:
+                            window.show_runtime_protocol_error(
+                                "Runtime returned a status reply without playlist state"
+                            )
         again = self._runtime_status_again
         self._runtime_status_again = False
         if again and self._window is not None and not self._runtime_shutdown:
@@ -728,15 +748,29 @@ class Application(Adw.Application):
             if self._window is not None:
                 self._window.show_runtime_delayed()
             return True
-        if response.ok and self._window is not None:
+        if self._window is not None and not response.ok:
+            self._window.show_runtime_protocol_error(
+                f"Runtime rejected its status request: {response.message}"
+            )
+        elif response.ok and self._window is not None:
             try:
-                status = json.loads(response.message)
+                status: object = json.loads(response.message)
             except ValueError:
-                pass
+                self._window.show_runtime_protocol_error(
+                    "Runtime returned a status reply that was not valid JSON"
+                )
             else:
-                if isinstance(status, dict):
+                if (
+                    isinstance(status, dict)
+                    and isinstance(status.get("playlist"), str)
+                    and isinstance(status.get("source"), str)
+                ):
                     self._runtime_status = status
                     self._window.show_runtime_status(status)
+                else:
+                    self._window.show_runtime_protocol_error(
+                        "Runtime returned a status reply without playlist state"
+                    )
         # Even a rejected status request proves that this socket has an owner;
         # do not turn a protocol failure into permission for a second driver.
         return True
@@ -826,6 +860,13 @@ class Application(Adw.Application):
         except Exception as error:  # pragma: no cover - defensive worker boundary
             response = Response.failure(f"runtime command failed: {error}")
             runtime_answered = True
+        if not runtime_answered:
+            # A definitive missing socket retires the last Rust snapshot before
+            # the compatibility action updates Session. Otherwise show_current
+            # would keep rendering stale service truth over the local fallback.
+            self._runtime_status = None
+            if self._window is not None:
+                self._window.show_runtime_unavailable()
         if not runtime_answered and fallback is not None:
             response = fallback()
         if response.ok and on_success is not None:
@@ -858,26 +899,11 @@ class Application(Adw.Application):
             "random": self._session.random,
         }
 
-        def moved(runtime_answered: bool) -> None:
-            # The Python compatibility action already advanced its own cursor.
-            # Mirror the cursor only when Rust, rather than that fallback,
-            # handled the command.
-            if runtime_answered:
-                if verb == "next":
-                    self._session.playlist.next()
-                elif verb == "previous":
-                    self._session.playlist.previous()
-                elif verb == "random":
-                    self._session.playlist.random()
-            if self._window is not None:
-                self._window.show_current(self._session)
-
         action = actions.get(verb)
         fallback = (lambda: self.apply(action)) if action is not None else None
         return self._start_gui_runtime_call(
             lambda: client.send_runtime(verb, argument),
             fallback=fallback,
-            on_success=moved,
         )
 
     def runtime_action(self, verb: str, argument: str | None = None) -> Response:
@@ -885,6 +911,9 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime(verb, argument)
         except client.NotRunningError:
+            self._runtime_status = None
+            if self._window is not None:
+                self._window.show_runtime_unavailable()
             actions: dict[str, Callable[[], Applied]] = {
                 "next": self._session.next,
                 "previous": self._session.previous,
@@ -898,17 +927,6 @@ class Application(Adw.Application):
             return self.apply(action)
         except client.ControlError as error:
             return Response.failure(str(error))
-        if response.ok:
-            # Keep the visible cursor close to the runtime without applying a
-            # second wallpaper from the GUI process.
-            if verb == "next":
-                self._session.playlist.next()
-            elif verb == "previous":
-                self._session.playlist.previous()
-            elif verb == "random":
-                self._session.playlist.random()
-            if self._window is not None:
-                self._window.show_current(self._session)
         return response
 
     def play_item(self, item: MediaItem) -> Response:
@@ -1300,14 +1318,18 @@ class Application(Adw.Application):
 
     def update_settings(self, **changes: Any) -> config.Settings:
         previous = self._settings
-        self._settings = replace(self._settings, **changes).validated()
-        library_sources_changed = (self._settings.roots, self._settings.scan_workshop) != (
+        candidate = replace(previous, **changes).validated()
+        library_sources_changed = (candidate.roots, candidate.scan_workshop) != (
             previous.roots,
             previous.scan_workshop,
         )
         async_scan = library_sources_changed and self._window is not None
-        config.save(self._settings)
-        self._session.update_settings(self._settings, rescan_library=not async_scan)
+        # Persist before adoption. A failed write must leave the application,
+        # Session, runtime document and visible controls on the same last-known
+        # durable snapshot.
+        config.save(candidate)
+        self._settings = candidate
+        self._session.update_settings(candidate, rescan_library=not async_scan)
         if library_sources_changed and not async_scan:
             self._session.sync_with_noctalia()
         # Do not publish a temporary document which combines new roots with an
@@ -1318,8 +1340,8 @@ class Application(Adw.Application):
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
         if self._window is not None:
-            self._window.apply_settings(self._settings)
-            if self._settings.dynamics_enabled != previous.dynamics_enabled:
+            self._window.apply_settings(candidate)
+            if candidate.dynamics_enabled != previous.dynamics_enabled:
                 # Dynamics changes which wallpapers are playable at all, so the
                 # grid has different contents now, not just a different state.
                 self._window.show_library(self._session)
@@ -1334,7 +1356,7 @@ class Application(Adw.Application):
             or self._settings.follow_noctalia_palette != previous.follow_noctalia_palette
         ):
             self.reload_palette()
-        return self._settings
+        return candidate
 
 
 class _Commands:

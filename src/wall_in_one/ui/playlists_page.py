@@ -16,6 +16,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk, Pango
 
+from wall_in_one import config
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
 from wall_in_one.ui import runtime_truth
@@ -1563,7 +1564,11 @@ class PlaylistsPage(Gtk.Box):
 
     def _set_default(self) -> None:
         if self._selected:
-            self._app.update_settings(active_playlist=self._selected)
+            try:
+                self._app.update_settings(active_playlist=self._selected)
+            except config.ConfigError as error:
+                self._app.window_report(f"Default playlist was not saved; nothing changed: {error}")
+                return
             self._app.playlists_changed()
 
     def _play_now(self) -> None:

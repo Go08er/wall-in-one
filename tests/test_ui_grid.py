@@ -200,6 +200,17 @@ def test_the_highlight_follows_the_current_wallpaper(grid: WallpaperGrid) -> Non
     assert grid._tiles[Path("/w/b.png")].has_css_class("wio-tile-current")
 
 
+def test_every_current_display_wallpaper_is_highlighted(grid: WallpaperGrid) -> None:
+    items = (item("a"), item("b"), item("c"))
+    grid.populate(items)
+
+    grid.set_current_many((Path("/w/a.png"), Path("/w/c.png")))
+
+    assert grid._tiles[Path("/w/a.png")].has_css_class("wio-tile-current")
+    assert not grid._tiles[Path("/w/b.png")].has_css_class("wio-tile-current")
+    assert grid._tiles[Path("/w/c.png")].has_css_class("wio-tile-current")
+
+
 def test_a_new_tile_arrives_already_starred(grid: WallpaperGrid) -> None:
     grid.set_favourites(frozenset({Path("/w/a.png")}))
     grid.populate((item("a"), item("b")))
@@ -563,6 +574,30 @@ def test_changing_roots_requests_a_scan_and_redraw_instead_of_only_a_highlight(
     application._window = None
 
 
+def test_failed_settings_save_is_not_adopted_by_application_or_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one import config
+    from wall_in_one.ui.app import Application
+
+    application = Application()
+    before = application.settings
+
+    def fail(_settings: config.Settings) -> None:
+        raise config.ConfigError("disk full")
+
+    monkeypatch.setattr(config, "save", fail)
+    try:
+        with pytest.raises(config.ConfigError, match="disk full"):
+            application.update_settings(opacity=0.72)
+
+        assert application.settings is before
+        assert application.session.settings is before
+    finally:
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
 def test_showing_the_library_repushes_the_favourites(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -681,6 +716,49 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
     application.session.shutdown()
 
 
+def test_quick_choice_menu_action_really_plays_instead_of_opening_the_editor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the registered Gio action, not a matching string in source."""
+    from wall_in_one import config
+    from wall_in_one.library import scan
+    from wall_in_one.session import Session
+    from wall_in_one.ui.window import MainWindow
+
+    root = tmp_path / "library"
+    root.mkdir()
+    wallpaper = root / "one.png"
+    _png(wallpaper)
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.QuickChoiceActionTest")
+            self.settings = config.Settings(roots=(root,))
+            self.resolved_palette = None
+            self.session = Session(self.settings, scanner=lambda _roots: scan.scan((root,)))
+            self.session.refresh()
+            self.played: list[Path] = []
+
+        def refresh_library(self) -> None: ...
+
+        def play_item_async(self, chosen: MediaItem) -> bool:
+            self.played.append(chosen.path)
+            return True
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_library(application.session)
+    action = window.lookup_action("apply-wallpaper")
+    assert action is not None
+
+    action.activate(GLib.Variant.new_string(str(wallpaper)))
+
+    assert application.played == [wallpaper]
+    assert window._content_stack.get_visible_child_name() == "primary"
+    window.destroy()
+    application.session.shutdown()
+
+
 def test_main_window_keeps_pairings_inside_the_media_workflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -766,6 +844,10 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
 
     application = FakeApp()
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_runtime_protocol_error("Runtime returned status in an unexpected format")
+    assert "invalid status reply" in window._runtime_control_status.get_text()
+    assert "runtime status invalid" in window._subtitle.get_subtitle()
+    assert not window._runtime_controls.get_sensitive()
     window.show_runtime_status(
         {
             "playlist": "Evening",
@@ -780,6 +862,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
 
     assert window._runtime_cycle.get_active()
     assert not window._runtime_shuffle.get_active()
+    assert "invalid status reply" not in window._runtime_control_status.get_text()
     assert calls == [], "status refreshes must not echo commands back to the service"
     window.show_runtime_delayed()
     assert window._runtime_controls.get_sensitive()
@@ -829,6 +912,126 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     window.show_runtime_unavailable()
     assert not window._runtime_controls.get_sensitive()
 
+    window.destroy()
+    application.session.shutdown()
+
+
+def test_media_highlights_and_playing_label_follow_atomic_runtime_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one import config
+    from wall_in_one.library import playlists
+    from wall_in_one.library.model import Library
+    from wall_in_one.session import Session
+    from wall_in_one.theme import source
+    from wall_in_one.ui.window import MainWindow
+
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    _png(first_path)
+    _png(second_path)
+    first = MediaItem(first_path, Kind.STILL, size=1, mtime=1)
+    second = MediaItem(second_path, Kind.STILL, size=1, mtime=1)
+    authored = playlists.Store(
+        {
+            "day": playlists.Playlist(
+                id="day",
+                name="Day",
+                entries=(playlists.Entry("day-first", str(first_path)),),
+            ),
+            "evening": playlists.Playlist(
+                id="evening",
+                name="Evening",
+                entries=(playlists.Entry("evening-second", str(second_path)),),
+            ),
+        },
+        tmp_path / "playlists.json",
+    )
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.RuntimeMediaTruthTest")
+            self.settings = config.Settings(roots=(tmp_path,))
+            self.resolved_palette = source.resolve()
+            self.session = Session(
+                self.settings,
+                scanner=lambda _roots: Library((tmp_path,), (first, second)),
+                playlist_store=authored,
+            )
+            self.session.refresh()
+
+        def refresh_library(self) -> None: ...
+
+        def runtime_action_async(self, _verb: str, _argument: str | None = None) -> bool:
+            return True
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_library(application.session)
+    local_cursor = application.session.cursor
+    assert local_cursor is not None and local_cursor.path == first_path
+
+    window.show_runtime_status(
+        {
+            "playlist_id": "evening",
+            "playlist": "Evening",
+            "source": "manual",
+            "entry_id": "evening-second",
+            "still": str(second_path),
+            "playback_state": "playing",
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": "",
+            "displays": [
+                {
+                    "connector": "DP-1",
+                    "playlist_id": "evening",
+                    "entry_id": "evening-second",
+                    "still": str(second_path),
+                }
+            ],
+        }
+    )
+
+    assert not window._grid._tiles[first_path].has_css_class("wio-tile-current")
+    assert window._grid._tiles[second_path].has_css_class("wio-tile-current")
+    assert "playing Evening" in window._subtitle.get_subtitle()
+    assert application.session.cursor is local_cursor
+
+    window.show_runtime_status(
+        {
+            "playlist_id": "",
+            "playlist": "Multiple displays",
+            "source": "schedule",
+            "playback_state": "playing",
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": "",
+            "playlists": [
+                {"id": "day", "active": True},
+                {"id": "evening", "active": True},
+            ],
+            "displays": [
+                {
+                    "connector": "DP-1",
+                    "playlist_id": "day",
+                    "entry_id": "day-first",
+                    "still": str(first_path),
+                },
+                {
+                    "connector": "DP-2",
+                    "playlist_id": "evening",
+                    "entry_id": "evening-second",
+                    "still": str(second_path),
+                },
+            ],
+        }
+    )
+
+    assert window._grid._tiles[first_path].has_css_class("wio-tile-current")
+    assert window._grid._tiles[second_path].has_css_class("wio-tile-current")
+    assert "playing Multiple displays" in window._subtitle.get_subtitle()
+    assert application.session.cursor is local_cursor
     window.destroy()
     application.session.shutdown()
 

@@ -1,8 +1,12 @@
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, OpenOptions};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{
     Config, ConfigError, DisplayAssignment, EntryKind, Palette, Playlist, ScheduleRule,
+    MAX_CONFIG_BYTES,
 };
 
 fn temp_file(name: &str) -> PathBuf {
@@ -92,6 +96,55 @@ fn handwritten_config_loads_without_python_or_app_state() {
         loaded.playlists[0].entries[0].palette,
         Palette::Adaptive { .. }
     ));
+}
+
+#[test]
+fn config_loader_refuses_a_final_symlink() {
+    let target = temp_file("symlink-target");
+    let link = temp_file("symlink");
+    fs::write(&target, document(3)).unwrap();
+    symlink(&target, &link).unwrap();
+
+    let error = Config::load(&link).unwrap_err();
+
+    fs::remove_file(link).unwrap();
+    fs::remove_file(target).unwrap();
+    assert!(matches!(error, ConfigError::Io(_)));
+}
+
+#[test]
+fn config_loader_refuses_a_fifo_without_blocking() {
+    let path = temp_file("fifo");
+    let encoded = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let created = unsafe { libc::mkfifo(encoded.as_ptr(), 0o600) };
+    assert_eq!(created, 0, "{}", std::io::Error::last_os_error());
+
+    let started = Instant::now();
+    let error = Config::load(&path).unwrap_err();
+    let elapsed = started.elapsed();
+
+    fs::remove_file(path).unwrap();
+    assert!(error.to_string().contains("not a regular file"), "{error}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "FIFO read blocked for {elapsed:?}"
+    );
+}
+
+#[test]
+fn config_loader_rejects_oversized_regular_files_before_decoding() {
+    let path = temp_file("oversized");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    file.set_len(MAX_CONFIG_BYTES + 1).unwrap();
+
+    let error = Config::load(&path).unwrap_err();
+
+    fs::remove_file(path).unwrap();
+    assert!(matches!(error, ConfigError::TooLarge(size) if size == MAX_CONFIG_BYTES + 1));
 }
 
 #[test]

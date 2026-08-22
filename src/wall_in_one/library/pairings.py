@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -361,8 +360,8 @@ def load(path: Path | None = None) -> dict[str, Pairing]:
 def save(records: Mapping[str, Pairing], path: Path | None = None) -> Path:
     """Write the customizations atomically, and return where they went.
 
-    Temporary file in the same directory, then `os.replace`, as `config.save`
-    and `providers.credentials.save_key` do it. A half-written file would read
+    An exclusively-created temporary in the same directory is atomically
+    replaced into place. A half-written file would read
     back as somebody's choices having partly evaporated, which looks like the
     app forgetting rather than like a file that needs attention.
     """
@@ -378,16 +377,11 @@ def save(records: Mapping[str, Pairing], path: Path | None = None) -> Path:
         "version": FORMAT_VERSION,
         "pairings": [records[key].to_json() for key in sorted(records)],
     }
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        state_file.fsync_parent(target)
+        state_file.write_atomic_text(
+            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        )
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise PairingError(
             "local-io", f"could not write {target}: {error.strerror or error}"
         ) from error

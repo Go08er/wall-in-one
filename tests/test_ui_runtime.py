@@ -46,6 +46,7 @@ class FakeWindow:
         self.statuses: list[dict[str, object]] = []
         self.unavailable = 0
         self.delayed = 0
+        self.protocol_errors: list[str] = []
         self.busy: list[bool] = []
         self.reports: list[str] = []
         self.currents = 0
@@ -58,6 +59,9 @@ class FakeWindow:
 
     def show_runtime_delayed(self) -> None:
         self.delayed += 1
+
+    def show_runtime_protocol_error(self, message: str) -> None:
+        self.protocol_errors.append(message)
 
     def set_runtime_busy(self, busy: bool) -> None:
         self.busy.append(busy)
@@ -295,6 +299,58 @@ def test_timeout_never_authorises_the_python_fallback(
         _close(application)
 
 
+@pytest.mark.parametrize(
+    "response",
+    (
+        Response.failure("unsupported status schema"),
+        Response.success("not json"),
+        Response.success("[]"),
+        Response.success("{}"),
+    ),
+)
+def test_invalid_first_status_is_visibly_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response: Response,
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: response)
+    try:
+        assert application.refresh_runtime_status_async()
+        _spin_until(lambda: bool(window.protocol_errors))
+        assert application.runtime_status is None
+        assert window.statuses == []
+        assert window.unavailable == 0
+        assert "status" in window.protocol_errors[-1].casefold()
+    finally:
+        _close(application)
+
+
+def test_invalid_later_status_preserves_the_last_atomic_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    answers = iter((_status("Last known"), Response.success("not json")))
+    monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: next(answers))
+    try:
+        assert application.refresh_runtime_status_async()
+        _spin_until(lambda: len(window.statuses) == 1)
+        remembered = application.runtime_status
+
+        assert application.refresh_runtime_status_async()
+        _spin_until(lambda: bool(window.protocol_errors))
+
+        assert application.runtime_status is remembered
+        assert len(window.statuses) == 1
+        assert window.unavailable == 0
+    finally:
+        _close(application)
+
+
 @pytest.mark.parametrize("verb", ["playlist-use", "schedule-follow"])
 def test_failed_playlist_mode_change_does_not_mutate_python_session(
     tmp_path: Path,
@@ -352,6 +408,55 @@ def test_missing_socket_keeps_the_session_fallback_serialised_on_gtk(
         assert application.runtime_action_async("next")
         _spin_until(lambda: window.busy == [True, False])
         assert applied_on == [main_thread]
+    finally:
+        _close(application)
+
+
+def test_successful_rust_navigation_does_not_advance_the_python_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one.library.model import Kind, Library, MediaItem
+
+    application = _application(tmp_path, monkeypatch)
+    first = MediaItem(tmp_path / "first.png", Kind.STILL, size=1, mtime=1)
+    second = MediaItem(tmp_path / "second.png", Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library((tmp_path,), (first, second)))
+    before = application.session.cursor
+    assert before is first
+    window = FakeWindow()
+    _attach(application, window)
+
+    def runtime(verb: str, _argument: str | None = None, **_kwargs: object) -> Response:
+        return _status("Only") if verb == "status" else Response.success(verb)
+
+    monkeypatch.setattr(client, "send_runtime", runtime)
+    try:
+        assert application.runtime_action_async("next")
+        _spin_until(lambda: window.busy == [True, False])
+        assert application.session.cursor is before
+    finally:
+        _close(application)
+
+
+def test_successful_synchronous_rust_navigation_does_not_advance_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one.library.model import Kind, Library, MediaItem
+
+    application = _application(tmp_path, monkeypatch)
+    first = MediaItem(tmp_path / "first.png", Kind.STILL, size=1, mtime=1)
+    second = MediaItem(tmp_path / "second.png", Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library((tmp_path,), (first, second)))
+    before = application.session.cursor
+    assert before is first
+    monkeypatch.setattr(
+        client,
+        "send_runtime",
+        lambda *_args, **_kwargs: Response.success("advanced in Rust"),
+    )
+    try:
+        assert application.runtime_action("next").ok
+        assert application.session.cursor is before
     finally:
         _close(application)
 

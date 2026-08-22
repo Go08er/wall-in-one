@@ -22,7 +22,6 @@ the alternative is making them write two rules.
 from __future__ import annotations
 
 import json
-import os
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -300,16 +299,11 @@ def save(rules: Sequence[Rule], path: Path | None = None) -> Path:
         ) from error
 
     payload = {"version": FORMAT_VERSION, "rules": [rule.to_json() for rule in rules]}
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        state_file.fsync_parent(target)
+        state_file.write_atomic_text(
+            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        )
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise ScheduleError(
             "local-io", f"could not write {target}: {error.strerror or error}"
         ) from error

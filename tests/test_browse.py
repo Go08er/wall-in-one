@@ -131,6 +131,9 @@ def test_a_download_finishing_after_a_root_change_does_not_pollute_the_new_index
     done = engine.download(wanted)
 
     assert done.root == first
+    assert not done.root_current
+    assert str(first) in done.describe()
+    assert "folders changed mid-download" in done.describe()
     assert not old_index.holds(wanted)
     assert not engine.owned.holds(wanted)
 

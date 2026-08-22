@@ -12,6 +12,7 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Adw, Gdk, Gtk
 
+from wall_in_one import config
 from wall_in_one.library import displays, schedules
 from wall_in_one.ui import runtime_truth
 
@@ -423,7 +424,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return
             index = row.get_selected()
             wanted = choices[index - 1].id if 0 < index <= len(choices) else ""
-            self._app.update_settings(active_playlist=wanted)
+            try:
+                self._app.update_settings(active_playlist=wanted)
+            except config.ConfigError as error:
+                self._app.window_report(f"Default playlist was not saved; nothing changed: {error}")
+                self._fingerprint = None
+                self.refresh(self._app.session)
+                return
             self._app.schedule_edited()
             self._fingerprint = self._state_fingerprint(self._app.session)
 

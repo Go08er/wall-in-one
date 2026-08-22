@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import shutil
+import stat
 import tempfile
 import tomllib
 from dataclasses import dataclass
@@ -56,6 +58,16 @@ class InstallResult:
     detail: str
 
 
+@dataclass(frozen=True, slots=True)
+class _SettingsSnapshot:
+    """One safely-read settings inode and its exact bytes."""
+
+    document: bytes
+    text: str
+    device: int
+    inode: int
+
+
 def bundled_template() -> Path:
     """The template shipped alongside this package.
 
@@ -83,18 +95,66 @@ def installed_template_path() -> Path:
     return paths.app_state_dir() / TEMPLATE_FILENAME
 
 
-def _read_settings_text(path: Path) -> str:
+def _read_settings_snapshot(path: Path) -> _SettingsSnapshot:
+    """Read one bounded regular settings inode without following a link."""
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
-        document = file_io.read_regular_text(path, MAX_NOCTALIA_SETTINGS_BYTES)
-    except OSError as error:
-        raise TemplateInstallError(f"cannot safely read {path}: {error}") from error
-    except UnicodeDecodeError as error:
-        raise TemplateInstallError(f"{path} is not UTF-8 text") from error
-    if document is None:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as error:
         raise TemplateInstallError(
             f"Noctalia settings not found at {path}; is Noctalia installed and has it run once?"
-        )
-    return document
+        ) from error
+    except OSError as error:
+        raise TemplateInstallError(f"cannot safely read {path}: {error}") from error
+
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise TemplateInstallError(f"cannot safely read {path}: it is not a regular file")
+        if opened.st_size > MAX_NOCTALIA_SETTINGS_BYTES:
+            raise TemplateInstallError(
+                f"cannot safely read {path}: it exceeds its "
+                f"{MAX_NOCTALIA_SETTINGS_BYTES}-byte limit"
+            )
+
+        chunks: list[bytes] = []
+        remaining = MAX_NOCTALIA_SETTINGS_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        document = b"".join(chunks)
+        if len(document) > MAX_NOCTALIA_SETTINGS_BYTES:
+            raise TemplateInstallError(
+                f"cannot safely read {path}: it exceeds its "
+                f"{MAX_NOCTALIA_SETTINGS_BYTES}-byte limit"
+            )
+
+        current = path.lstat()
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise TemplateInstallError(f"cannot safely read {path}: it changed while being read")
+    except OSError as error:
+        raise TemplateInstallError(f"cannot safely read {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+
+    try:
+        text = document.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise TemplateInstallError(f"{path} is not UTF-8 text") from error
+    return _SettingsSnapshot(
+        document=document,
+        text=text,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+    )
+
+
+def _read_settings_text(path: Path) -> str:
+    return _read_settings_snapshot(path).text
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -134,14 +194,59 @@ def _render_block(template_path: Path, output_path: Path, post_hook: str) -> str
     )
 
 
-def _backup(path: Path) -> Path:
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
+    """Publish a durable, no-replace recovery copy of ``snapshot``."""
+
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    destination = path.with_name(f"{path.name}.bak-{TEMPLATE_ID}-{stamp}")
-    shutil.copy2(path, destination)
-    return destination
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.backup-stage-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(snapshot.document)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for index in range(10_000):
+            suffix = "" if index == 0 else f".{index}"
+            destination = path.with_name(f"{path.name}.bak-{TEMPLATE_ID}-{stamp}{suffix}")
+            try:
+                os.link(temporary, destination, follow_symlinks=False)
+            except FileExistsError:
+                continue
+            temporary.unlink()
+            _fsync_parent(destination)
+            return destination
+        raise OSError("too many same-second recovery backups")
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise TemplateInstallError(f"cannot back up {path}: {error}") from error
 
 
-def _write_atomically(path: Path, text: str) -> None:
+def _assert_settings_unchanged(path: Path, expected: _SettingsSnapshot) -> None:
+    try:
+        current = _read_settings_snapshot(path)
+    except TemplateInstallError as error:
+        raise TemplateInstallError(
+            f"{path} changed while the template edit was being prepared; "
+            f"settings were not replaced ({error})"
+        ) from error
+    if (current.device, current.inode) != (
+        expected.device,
+        expected.inode,
+    ) or current.document != expected.document:
+        raise TemplateInstallError(
+            f"{path} changed while the template edit was being prepared; settings were not replaced"
+        )
+
+
+def _write_atomically(path: Path, text: str, expected: _SettingsSnapshot) -> None:
     """Replace ``path`` without ever leaving a truncated settings file behind.
 
     Noctalia watches this file, so a partial write is not merely a data risk --
@@ -154,7 +259,15 @@ def _write_atomically(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        # Noctalia owns and rewrites this document too. Compare both the inode
+        # and exact bytes at the last possible point so one of its writes is
+        # never replaced with the stale document prepared above.
+        _assert_settings_unchanged(path, expected)
         os.replace(temporary, path)
+        _fsync_parent(path)
+    except TemplateInstallError:
+        temporary.unlink(missing_ok=True)
+        raise
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise TemplateInstallError(f"cannot write {path}: {error}") from error
@@ -169,6 +282,7 @@ def _write_bytes_atomically(path: Path, document: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_parent(path)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise TemplateInstallError(f"cannot write {path}: {error}") from error
@@ -182,13 +296,17 @@ def _post_hook_command() -> str:
     """
     found = shutil.which("wall-in-one")
     executable = found if found else "wall-in-one"
-    return f"{executable} ctl reload-palette"
+    return shlex.join((executable, "ctl", "reload-palette"))
 
 
 def install(*, reload_config: bool = True) -> InstallResult:
     """Register the template, copying it to a stable location first."""
     settings_path = paths.noctalia_settings_path()
-    settings = _read_settings(settings_path)
+    snapshot = _read_settings_snapshot(settings_path)
+    try:
+        settings = tomllib.loads(snapshot.text)
+    except tomllib.TOMLDecodeError as error:
+        raise TemplateInstallError(f"{settings_path} is not valid TOML: {error}") from error
 
     source = bundled_template()
     destination = installed_template_path()
@@ -226,13 +344,13 @@ def install(*, reload_config: bool = True) -> InstallResult:
             )
         # Rewriting an entry we do not provably own risks clobbering a hand-
         # edited one, so leave it and say what to fix.
-        if _BEGIN_MARKER not in _read_settings_text(settings_path):
+        if _BEGIN_MARKER not in snapshot.text:
             raise TemplateInstallError(
                 f"[theme.templates.user.{TEMPLATE_ID}] already exists in {settings_path} "
                 "but was not written by us; remove it by hand and re-run"
             )
 
-    original = _read_settings_text(settings_path)
+    original = snapshot.text
     if _BEGIN_MARKER in original:
         updated = _replace_managed_block(original, block)
     else:
@@ -241,8 +359,8 @@ def install(*, reload_config: bool = True) -> InstallResult:
         )
         updated = f"{original}{separator}{block}\n"
 
-    backup = _backup(settings_path)
-    _write_atomically(settings_path, updated)
+    backup = _backup(settings_path, snapshot)
+    _write_atomically(settings_path, updated, snapshot)
 
     if reload_config:
         # Not fatal if this fails: the settings file is already correct and
@@ -275,7 +393,8 @@ def _replace_managed_block(text: str, block: str) -> str:
 def uninstall(*, reload_config: bool = True) -> InstallResult:
     """Remove the block we added, leaving anything else untouched."""
     settings_path = paths.noctalia_settings_path()
-    original = _read_settings_text(settings_path)
+    snapshot = _read_settings_snapshot(settings_path)
+    original = snapshot.text
 
     if _BEGIN_MARKER not in original:
         return InstallResult(
@@ -288,8 +407,8 @@ def uninstall(*, reload_config: bool = True) -> InstallResult:
         )
 
     updated = _replace_managed_block(original, "").replace("\n\n\n", "\n\n")
-    backup = _backup(settings_path)
-    _write_atomically(settings_path, updated)
+    backup = _backup(settings_path, snapshot)
+    _write_atomically(settings_path, updated, snapshot)
 
     if reload_config:
         with contextlib.suppress(noctalia.NoctaliaError):

@@ -20,6 +20,7 @@ from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import palettes, source
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.browse_dialog import BrowsePage
 from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.pairings_page import PairingsPage
@@ -127,6 +128,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_busy = False
         self._runtime_status_text = "Checking service…"
         self._runtime_status_delayed = False
+        self._runtime_protocol_error = ""
+        self._runtime_media_status: dict[str, object] | None = None
         self._runtime_navigation_buttons: list[Gtk.Button] = []
         self._playback_state = "playing"
 
@@ -490,6 +493,7 @@ class MainWindow(Adw.ApplicationWindow):
     def apply_settings(self, settings: config.Settings) -> None:
         previous = self._settings
         self._settings = settings
+        self._settings_page.apply_settings(settings)
         if settings.roots != previous.roots:
             self._browse_page.update_library_roots(settings.roots)
 
@@ -497,7 +501,11 @@ class MainWindow(Adw.ApplicationWindow):
 
     def show_library(self, session: Session) -> None:
         library = session.library
-        cursor = session.cursor
+        self._management_session = session
+        # A Media removal or an authoring-socket rescan may have changed which
+        # provider ids exist without going through Browse. Drop its ownership
+        # snapshot so the next search does not keep a deleted result disabled.
+        self._browse_page.library_refreshed()
         # Before `populate`, so a tile built in this pass arrives already
         # starred. The store is the session's and anything may have moved it
         # since we last looked -- `ctl favourite` reaches it without going
@@ -507,11 +515,34 @@ class MainWindow(Adw.ApplicationWindow):
         # whichever playlist happens to be playing. Activating one item makes
         # the visible one-entry Quick choice playlist; it does not bypass the
         # playlist model.
-        self._grid.populate(library.items, cursor.path if cursor else None)
+        self._grid.populate(library.items)
 
         self._playable = len(library)
+        self._show_media_playback(session)
+        self._refresh_visible_page()
+
+    @staticmethod
+    def _session_playing_label(session: Session) -> str:
         active = session.playlists.get(session.active_playlist())
-        playing = active.name if active is not None else "All media"
+        return active.name if active is not None else "All media"
+
+    def _show_media_playback(self, session: Session) -> None:
+        """Render runtime-owned playback truth, or the legacy fallback state."""
+        library = session.library
+        reported = runtime_truth.media_playback(
+            self._runtime_media_status,
+            session.playlists.all(),
+            library.items,
+        )
+        current: tuple[Path, ...]
+        if reported is None:
+            cursor = session.cursor
+            current = () if cursor is None else (cursor.path,)
+            playing = self._session_playing_label(session)
+        else:
+            current = reported.current
+            playing = reported.playlist
+        self._grid.set_current_many(current)
         summary = (
             f"{len(library)} media · playing {playing} "
             f"({len(library.videos)} video, {len(library.stills)} still)"
@@ -520,8 +551,6 @@ class MainWindow(Adw.ApplicationWindow):
             summary += f" - {len(library.skipped)} skipped"
         self._summary = summary
         self._update_subtitle()
-        self._management_session = session
-        self._refresh_visible_page()
 
     def show_library_scanning(self, scanning: bool) -> None:
         """Show scan progress without replacing any interactive widget.
@@ -632,16 +661,23 @@ class MainWindow(Adw.ApplicationWindow):
                 if runtime_summary
                 else "runtime status delayed"
             )
+        if self._runtime_protocol_error and self._runtime_available:
+            runtime_summary = (
+                f"{runtime_summary} · invalid status reply"
+                if runtime_summary
+                else "runtime status invalid"
+            )
         if runtime_summary:
             summary += f" · {runtime_summary}"
         self._subtitle.set_subtitle(summary)
 
     def _runtime_status_display_text(self) -> str:
-        return (
-            f"{self._runtime_status_text} · status delayed"
-            if self._runtime_status_delayed
-            else self._runtime_status_text
-        )
+        suffixes: list[str] = []
+        if self._runtime_status_delayed:
+            suffixes.append("status delayed")
+        if self._runtime_protocol_error:
+            suffixes.append("invalid status reply")
+        return " · ".join((self._runtime_status_text, *suffixes))
 
     def set_runtime_busy(self, busy: bool) -> None:
         """Make one in-flight playback command visible and non-repeatable."""
@@ -660,6 +696,7 @@ class MainWindow(Adw.ApplicationWindow):
         paused = status.get("paused")
         if not isinstance(playlist, str) or not isinstance(source, str):
             return
+        self._runtime_media_status = status
         reported_state = status.get("playback_state")
         state = (
             reported_state
@@ -680,6 +717,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._runtime_controls_loading = False
         self._runtime_available = True
         self._runtime_status_delayed = False
+        self._runtime_protocol_error = ""
         self._runtime_controls.set_sensitive(not self._runtime_busy)
         if state == "playing":
             self._runtime_play.set_icon_name("media-playback-pause-symbolic")
@@ -717,7 +755,10 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self._runtime_error = ""
             self._runtime_summary = f"{state} {playlist} ({source})"
-        self._update_subtitle()
+        if self._management_session is not None:
+            self._show_media_playback(self._management_session)
+        else:
+            self._update_subtitle()
         self._refresh_visible_runtime_state()
 
     def show_runtime_delayed(self) -> None:
@@ -727,17 +768,44 @@ class MainWindow(Adw.ApplicationWindow):
             self._runtime_control_status.set_text(self._runtime_status_display_text())
         self._update_subtitle()
 
+    def show_runtime_protocol_error(self, message: str) -> None:
+        """Keep last-known truth, but make a bad status reply persistent.
+
+        A malformed answer proves that the socket has an owner, so it must not
+        authorise the Python compatibility driver.  It also is not a useful
+        reason to discard the last atomic snapshot: the controls remain valid
+        as last-known state while the header says plainly that freshness is
+        compromised.  On the first poll there is no snapshot to retain, so the
+        controls stay disabled rather than sitting forever at "Checking".
+        """
+        changed = message != self._runtime_protocol_error
+        self._runtime_protocol_error = message
+        if not self._runtime_available:
+            self._runtime_summary = "runtime status invalid"
+            self._runtime_status_text = "Runtime status unavailable"
+            self._runtime_controls.set_sensitive(False)
+        if not self._runtime_busy:
+            self._runtime_control_status.set_text(self._runtime_status_display_text())
+        self._update_subtitle()
+        if changed:
+            self.report(message)
+
     def show_runtime_unavailable(self) -> None:
         """Say plainly that authoring works but automation currently does not."""
+        self._runtime_media_status = None
         self._runtime_error = ""
         self._runtime_summary = "runtime unavailable"
         self._runtime_available = False
         self._runtime_status_delayed = False
+        self._runtime_protocol_error = ""
         self._runtime_controls.set_sensitive(False)
         self._runtime_status_text = "Runtime unavailable"
         if not self._runtime_busy:
             self._runtime_control_status.set_text(self._runtime_status_text)
-        self._update_subtitle()
+        if self._management_session is not None:
+            self._show_media_playback(self._management_session)
+        else:
+            self._update_subtitle()
         self._refresh_visible_runtime_state()
 
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:
@@ -934,7 +1002,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_apply_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         item = self._item_at(raw)
         if item is not None:
-            self._on_tile_activated(item)
+            self._quick_apply(item)
 
     def _on_favourite_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Flip the star from the menu. Same path as clicking it."""
@@ -1008,9 +1076,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._app.refresh_library()
 
     def show_current(self, session: Session) -> None:
-        """Move the highlight without rebuilding the grid."""
-        cursor = session.cursor
-        self._grid.set_current(cursor.path if cursor else None)
+        """Refresh playback truth without rebuilding the Media grid."""
+        self._show_media_playback(session)
 
     def show_palette(self, resolved: source.ResolvedPalette) -> None:
         self._settings_page.show_palette(resolved)

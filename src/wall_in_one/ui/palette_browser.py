@@ -32,6 +32,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
+from wall_in_one import config
 from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Colour, Mode, Palette, PaletteError, PalettePair
 
@@ -508,7 +509,11 @@ class PaletteBrowserDialog(Adw.Dialog):
         return GLib.SOURCE_REMOVE
 
     def _on_use_scheme(self, scheme: str) -> None:
-        self._app.update_settings(preview_scheme=scheme)
+        try:
+            self._app.update_settings(preview_scheme=scheme)
+        except config.ConfigError as error:
+            self.report(f"Scheme preference was not saved; nothing changed: {error}")
+            return
         if self._sync.get_active():
             try:
                 noctalia.message("color-scheme-set", "wallpaper", scheme)

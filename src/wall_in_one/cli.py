@@ -221,19 +221,20 @@ def _write_runtime_config() -> int:
     from wall_in_one.session import Session
 
     try:
-        settings = config.load_strict()
-    except config.ConfigError as error:
+        # This lock begins before the first authoring read. If the GUI publishes
+        # while systemd's preflight is scanning, that newer GUI generation must
+        # land after this older snapshot rather than be rolled back by it.
+        with runtime_config.compiler_lock():
+            settings = config.load_strict()
+            session = Session(settings)
+            try:
+                session.refresh()
+                changed = runtime_config.update(settings, session)
+            finally:
+                session.shutdown()
+    except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    session = Session(settings)
-    try:
-        session.refresh()
-        changed = runtime_config.update(settings, session)
-    except runtime_config.RuntimeConfigError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    finally:
-        session.shutdown()
     state = "wrote" if changed else "already current"
     print(f"{state}: {paths.runtime_config_path()}")
     return 0

@@ -41,7 +41,6 @@ whatever was in there is still recoverable by hand.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,9 +208,9 @@ def load(path: Path | None = None) -> Favourites:
 def save(favourites: Favourites, path: Path | None = None) -> Path:
     """Write ``favourites`` atomically, and return where they went.
 
-    Temporary file in the same directory, then `os.replace`, exactly as
-    `config.save` and `providers.credentials.save_key` do it. A half-written
-    list is the one outcome worth engineering against: it would read back as a
+    An exclusively-created temporary in the same directory is atomically
+    replaced into place. A half-written list is the one outcome worth
+    engineering against: it would read back as a
     shorter list of favourites, which looks like the app silently dropping
     some rather than like a file that needs attention.
     """
@@ -223,16 +222,9 @@ def save(favourites: Favourites, path: Path | None = None) -> Path:
             "local-io", f"could not create {target.parent}: {error.strerror or error}"
         ) from error
 
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(favourites.to_json())
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        state_file.fsync_parent(target)
+        state_file.write_atomic_text(target, favourites.to_json())
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise FavouritesError(
             "local-io", f"could not write {target}: {error.strerror or error}"
         ) from error

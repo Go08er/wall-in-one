@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
+
+from wall_in_one import runtime_config
+from wall_in_one.library.model import MediaItem
+from wall_in_one.library.playlists import Playlist
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,14 @@ class RuntimeTruth:
 
     def playlist_is_active(self, playlist_id: str) -> bool:
         return playlist_id in self.active_playlist_ids
+
+
+@dataclass(frozen=True)
+class MediaPlayback:
+    """What Media can say and highlight from one runtime snapshot."""
+
+    playlist: str
+    current: tuple[Path, ...]
 
 
 def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
@@ -92,3 +105,90 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         schedule_rule_id=schedule_rule_id,
         active_playlist_ids=tuple(active_playlist_ids),
     )
+
+
+def _unique_still_source(still: object, items: tuple[MediaItem, ...]) -> Path | None:
+    """Resolve a representative only when it identifies one media item.
+
+    A pairing still can legitimately be shared. Highlighting every wallpaper
+    that happens to use it would claim they are all playing, so ambiguity
+    deliberately produces no highlight.
+    """
+    if not isinstance(still, str):
+        return None
+    still_path = Path(still)
+    if not still_path.is_absolute():
+        return None
+    candidates = {
+        item.path
+        for item in items
+        if item.path == still_path or item.paired_still == still_path or item.preview == still_path
+    }
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def media_playback(
+    status: Mapping[str, object] | None,
+    authored_playlists: Iterable[Playlist],
+    media: Iterable[MediaItem],
+) -> MediaPlayback | None:
+    """Resolve current runtime entries to Media paths without inventing state.
+
+    Named playlists use their stable authored entry ids. ``All media`` is a
+    generated playlist, so its stable path hash is the only authoring identity
+    available. The resolved still is a final, conservative fallback for an
+    old or just-edited playlist snapshot.
+    """
+    truth = from_status(status)
+    if truth is None or status is None:
+        return None
+
+    items = tuple(media)
+    known_paths = {item.path for item in items}
+    authored = {playlist.id: playlist for playlist in authored_playlists}
+
+    # Detect the astronomically unlikely truncated-hash collision instead of
+    # choosing whichever path happened to be scanned last.
+    generated: dict[str, Path | None] = {}
+    for item in items:
+        identifier = runtime_config.entry_id_for_source(item.path)
+        if identifier not in generated:
+            generated[identifier] = item.path
+        elif generated[identifier] != item.path:
+            generated[identifier] = None
+
+    reported_displays = status.get("displays")
+    records: tuple[Mapping[str, object], ...] = ()
+    if isinstance(reported_displays, list):
+        records = tuple(record for record in reported_displays if isinstance(record, Mapping))
+    if not records:
+        records = (status,)
+
+    resolved: list[Path] = []
+    display_playlist_ids: set[str] = set()
+    for record in records:
+        playlist_id = record.get("playlist_id")
+        entry_id = record.get("entry_id")
+        if isinstance(playlist_id, str) and playlist_id:
+            display_playlist_ids.add(playlist_id)
+
+        source: Path | None = None
+        if isinstance(entry_id, str) and entry_id:
+            if playlist_id == runtime_config.FALLBACK_PLAYLIST_ID:
+                source = generated.get(entry_id)
+            elif isinstance(playlist_id, str):
+                playlist = authored.get(playlist_id)
+                if playlist is not None:
+                    authored_entry = next(
+                        (entry for entry in playlist.entries if entry.id == entry_id),
+                        None,
+                    )
+                    if authored_entry is not None and authored_entry.path in known_paths:
+                        source = authored_entry.path
+        if source is None:
+            source = _unique_still_source(record.get("still"), items)
+        if source is not None and source not in resolved:
+            resolved.append(source)
+
+    label = "Multiple displays" if len(display_playlist_ids) > 1 else truth.playlist
+    return MediaPlayback(playlist=label, current=tuple(resolved))

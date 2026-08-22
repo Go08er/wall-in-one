@@ -201,6 +201,33 @@
         checks = {
           inherit wall-in-one wall-in-one-service;
 
+          # Python and Rust intentionally have different authoring/runtime
+          # sockets. This process-level check catches the seam a unit test
+          # cannot: with no XDG_RUNTIME_DIR, `wall-in-one ctl status` must find
+          # the Rust service at their shared XDG_STATE_HOME fallback.
+          runtime-socket-fallback =
+            pkgs.runCommand "wall-in-one-runtime-socket-fallback"
+              {
+                nativeBuildInputs = [
+                  (python.withPackages (ps: [ ps.pytest ]))
+                ];
+              }
+              ''
+                export HOME="$TMPDIR/home"
+                export XDG_CONFIG_HOME="$TMPDIR/config"
+                export XDG_STATE_HOME="$TMPDIR/state"
+                export XDG_CACHE_HOME="$TMPDIR/cache"
+                export XDG_DATA_HOME="$TMPDIR/data"
+                unset XDG_RUNTIME_DIR
+                export WALL_IN_ONE_SERVICE_BINARY=${wall-in-one-service}/bin/wall-in-one-service
+                export WALL_IN_ONE_TEST_TRUE=${pkgs.coreutils}/bin/true
+                export WALL_IN_ONE_TEST_FALSE=${pkgs.coreutils}/bin/false
+                cd ${./.}
+                PYTHONPATH=$PWD/src pytest tests/test_runtime_socket_fallback.py -q \
+                  -p no:cacheprovider
+                touch $out
+              '';
+
           # Widget identity, focus, scroll-position and asynchronous GTK
           # delivery regressions need a real display.  Keep those tests out of
           # the package's ordinary checkPhase (which must remain usable in a

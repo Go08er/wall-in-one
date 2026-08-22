@@ -2,7 +2,9 @@ use crate::protocol::MAX_RESPONSE_BYTES;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs;
+use std::fs::OpenOptions;
+use std::io::{Error, ErrorKind, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 3;
@@ -230,14 +232,36 @@ fn default_true() -> bool {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let metadata = fs::metadata(path).map_err(ConfigError::Io)?;
+        // Open once, without following a final symlink or waiting on a FIFO,
+        // then inspect and read that exact descriptor. A metadata(path) followed
+        // by read_to_string(path) lets an attacker replace the path between the
+        // two operations; trusting st_size alone also lets a growing file bypass
+        // the wire bound.
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(ConfigError::Io)?;
+        let metadata = file.metadata().map_err(ConfigError::Io)?;
         if !metadata.is_file() {
             return invalid("config path is not a regular file");
         }
         if metadata.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge(metadata.len()));
         }
-        let text = fs::read_to_string(path).map_err(ConfigError::Io)?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(ConfigError::Io)?;
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(ConfigError::TooLarge(bytes.len() as u64));
+        }
+        let text = String::from_utf8(bytes).map_err(|error| {
+            ConfigError::Io(Error::new(
+                ErrorKind::InvalidData,
+                format!("config is not UTF-8: {error}"),
+            ))
+        })?;
         let config: Self = toml::from_str(&text).map_err(ConfigError::Decode)?;
         config.validate()?;
         Ok(config)

@@ -41,6 +41,7 @@ from typing import Final
 from urllib.parse import unquote
 
 from wall_in_one import paths
+from wall_in_one.library import state_file
 from wall_in_one.theme.palette import (
     MAX_PALETTE_BYTES,
     Colour,
@@ -642,15 +643,9 @@ def _write_atomic(target: Path, serialised: str) -> None:
     except OSError as error:
         raise PaletteWriteError(f"cannot create {target.parent}: {error}") from error
 
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(serialised)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        state_file.write_atomic_text(target, serialised)
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise PaletteWriteError(f"cannot write {target}: {error}") from error
 
 

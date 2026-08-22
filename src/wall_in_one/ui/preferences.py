@@ -132,6 +132,15 @@ class PreferencesPage(Adw.PreferencesPage):
             if index == 0:
                 row.add_prefix(Gtk.Image(icon_name="folder-download-symbolic"))
                 row.set_tooltip_text("Downloads and generated stills go here")
+            else:
+                destination = Gtk.Button(
+                    icon_name="folder-download-symbolic",
+                    tooltip_text="Make this the download and generated-still folder",
+                )
+                destination.set_valign(Gtk.Align.CENTER)
+                destination.add_css_class("flat")
+                destination.connect("clicked", self._make_root_primary(root))
+                row.add_suffix(destination)
             if not root.is_dir():
                 # Said plainly rather than dropped: a folder on a drive that is
                 # not mounted should come back when it is, not disappear.
@@ -155,8 +164,20 @@ class PreferencesPage(Adw.PreferencesPage):
 
         return remove
 
+    def _make_root_primary(self, root: Path) -> Any:
+        def make_primary(_button: Gtk.Button) -> None:
+            roots = self._app.settings.roots
+            self._set_roots((root, *(candidate for candidate in roots if candidate != root)))
+
+        return make_primary
+
     def _set_roots(self, roots: tuple[Path, ...]) -> None:
-        self._app.update_settings(roots=roots)
+        try:
+            self._app.update_settings(roots=roots)
+        except config.ConfigError as error:
+            self.apply_settings(self._app.settings)
+            self._report(f"Library folders were not saved; nothing changed: {error}")
+            return
         self._refresh_roots()
 
     def _on_add_root(self, _button: Gtk.Button) -> None:
@@ -458,6 +479,17 @@ class PreferencesPage(Adw.PreferencesPage):
 
     # -- state -----------------------------------------------------------
 
+    def apply_settings(self, settings: config.Settings) -> None:
+        """Reflect an application-owned settings snapshot without writing it.
+
+        Settings can also move through the authoring socket and other pages.
+        Keeping the same widgets preserves focus and text interaction, while
+        reloading their values prevents the next local edit from serialising a
+        stale copy of every unrelated field.
+        """
+        self._load(settings)
+        self._refresh_roots()
+
     def _load(self, settings: config.Settings) -> None:
         self._loading = True
         try:
@@ -502,31 +534,44 @@ class PreferencesPage(Adw.PreferencesPage):
         scheme_index = self._scheme.get_selected()
         hidden_index = self._when_hidden.get_selected()
         interpolation_index = self._interpolation.get_selected()
-        self._app.update_settings(
-            shuffle=self._shuffle.get_active(),
-            cycle_enabled=self._cycle.get_active(),
-            cycle_interval=int(self._interval.get_value()),
-            dynamics_enabled=self._dynamics.get_active(),
-            own_scene_renderer=self._own_scenes.get_active(),
-            scan_workshop=self._workshop.get_active(),
-            cycle_favourites_only=self._favourites_only.get_active(),
-            output=self._selected_output(),
-            video_muted=self._muted.get_active(),
-            video_volume=int(self._volume.get_value()),
-            video_hardware_decode=self._hardware_decode.get_active(),
-            video_interpolation=renderer.INTERPOLATION_CHOICES[interpolation_index]
+        changes: dict[str, object] = {
+            "shuffle": self._shuffle.get_active(),
+            "cycle_enabled": self._cycle.get_active(),
+            "cycle_interval": int(self._interval.get_value()),
+            "dynamics_enabled": self._dynamics.get_active(),
+            "own_scene_renderer": self._own_scenes.get_active(),
+            "scan_workshop": self._workshop.get_active(),
+            "cycle_favourites_only": self._favourites_only.get_active(),
+            "output": self._selected_output(),
+            "video_muted": self._muted.get_active(),
+            "video_volume": int(self._volume.get_value()),
+            "video_hardware_decode": self._hardware_decode.get_active(),
+            "video_interpolation": renderer.INTERPOLATION_CHOICES[interpolation_index]
             if interpolation_index < len(renderer.INTERPOLATION_CHOICES)
             else renderer.DEFAULT_INTERPOLATION,
-            scene_fps=int(self._scene_fps.get_value()),
-            video_when_hidden=renderer.WHEN_HIDDEN_CHOICES[hidden_index]
+            "scene_fps": int(self._scene_fps.get_value()),
+            "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES[hidden_index]
             if hidden_index < len(renderer.WHEN_HIDDEN_CHOICES)
             else renderer.DEFAULT_WHEN_HIDDEN,
-            opacity=round(self._opacity.get_value(), 2),
-            follow_noctalia_palette=self._follow_palette.get_active(),
-            preview_scheme=ALL_SCHEMES[scheme_index]
+            "opacity": round(self._opacity.get_value(), 2),
+            "follow_noctalia_palette": self._follow_palette.get_active(),
+            "preview_scheme": ALL_SCHEMES[scheme_index]
             if scheme_index < len(ALL_SCHEMES)
             else config.Settings().preview_scheme,
-        )
+        }
+        # A failed write restores several widgets. Some GTK controls can emit
+        # a trailing notification after that synchronous restore; do not turn
+        # it into a second write attempt or a duplicate error toast.
+        if all(getattr(self._app.settings, key) == value for key, value in changes.items()):
+            return
+        try:
+            self._app.update_settings(**changes)
+        except config.ConfigError as error:
+            # The application adopts only after a durable write. Put every
+            # control back on that last durable snapshot so a later edit cannot
+            # smuggle the rejected value into an unrelated save.
+            self.apply_settings(self._app.settings)
+            self._report(f"Settings were not saved; nothing changed: {error}")
 
     # -- the Wallhaven key -----------------------------------------------
 

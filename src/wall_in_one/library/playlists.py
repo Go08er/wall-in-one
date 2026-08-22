@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -537,16 +536,11 @@ def save(playlists: Mapping[str, Playlist], path: Path | None = None) -> Path:
         "version": FORMAT_VERSION,
         "playlists": [playlists[key].to_json() for key in sorted(playlists)],
     }
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        state_file.fsync_parent(target)
+        state_file.write_atomic_text(
+            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        )
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise PlaylistError(
             "local-io", f"could not write {target}: {error.strerror or error}"
         ) from error

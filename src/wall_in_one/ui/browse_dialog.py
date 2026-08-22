@@ -72,6 +72,15 @@ PREVIEW_FALLBACK_CARDS: Final = 24
 CARD_WIDTH: Final = 300
 CARD_HEIGHT: Final = 169
 
+type CandidateKey = tuple[str, str]
+type RequestFingerprint = tuple[str, browse.Filters]
+
+
+def _candidate_key(candidate: WallpaperCandidate) -> CandidateKey:
+    """Identity that stays unique when two providers reuse the same id."""
+    return candidate.provider, candidate.identifier
+
+
 #: Wallhaven's sorts, in the order the site itself lists them.
 SORTINGS: Final[tuple[tuple[str, str], ...]] = (
     ("date_added", "Newest"),
@@ -436,6 +445,13 @@ class _CandidateCard(Gtk.Box):
         self._button.set_icon_name(
             "content-loading-symbolic" if busy else "folder-download-symbolic"
         )
+        self._button.set_tooltip_text("Downloading" if busy else "Download")
+        if busy:
+            # Every route into the same download must become unavailable at
+            # once.  Leaving the batch checkbox live is how one click on the
+            # card and one click on the footer used to queue the same file.
+            self._check.set_active(False)
+        self._check.set_sensitive(not busy)
 
     def mark_downloaded(self) -> None:
         self._button.set_sensitive(False)
@@ -483,7 +499,7 @@ class BrowseDialog(Adw.Dialog):
         self._has_next = False
         #: Identifiers already on screen, so an overlapping page cannot show
         #: the same wallpaper twice.
-        self._shown: set[str] = set()
+        self._shown: set[CandidateKey] = set()
         self._capped = False
         #: Batch progress. Counts every download this dialog started, not just
         #: the picked ones, so a single-card download that lands mid-batch does
@@ -499,10 +515,13 @@ class BrowseDialog(Adw.Dialog):
         #: different request.
         self._search_generation = 0
         self._active_search_generation: int | None = None
+        self._active_search_fingerprint: RequestFingerprint | None = None
         self._view_provider = ""
-        #: Open detail views by identifier, so a download started inside one
-        #: can tell it what happened.
-        self._detail_dialogs: dict[str, DetailDialog] = {}
+        #: Open detail views and downloads use provider-qualified identities.
+        #: Wallhaven and MotionBGS are both allowed to call an item ``abc123``;
+        #: an old completion must never mutate the other provider's surface.
+        self._detail_dialogs: dict[CandidateKey, DetailDialog] = {}
+        self._downloads_in_flight: set[CandidateKey] = set()
         self._searching = False
         self._closed = False
         self._presentation_parent: Gtk.Widget = self
@@ -934,6 +953,7 @@ class BrowseDialog(Adw.Dialog):
         """Make every outstanding completion stale and reset the result view."""
         self._search_generation += 1
         self._active_search_generation = None
+        self._active_search_fingerprint = None
         self._searching = False
         self._result = None
         self._page = 1
@@ -1018,8 +1038,20 @@ class BrowseDialog(Adw.Dialog):
         of results to show. They differ only in whether what is already on
         screen survives.
         """
-        if self._searching or page < 1:
+        if page < 1:
             return
+        current_fingerprint = (self.provider_name, self._read_filters())
+        if self._searching:
+            if current_fingerprint == self._active_search_fingerprint:
+                return
+            # The visible controls changed while an older request was in
+            # flight.  Make that completion stale and let the new request join
+            # the single search lane behind it instead of forcing the user to
+            # press Search again after it returns.
+            self._search_generation += 1
+            self._active_search_generation = None
+            self._active_search_fingerprint = None
+            self._searching = False
         if not append:
             # A fresh search re-rolls; loading more within one does not.
             # Without this, asking for random wallpapers twice would return
@@ -1033,8 +1065,10 @@ class BrowseDialog(Adw.Dialog):
             self.report(str(error))
             return
         name = self.provider_name
+        fingerprint = (name, self._read_filters())
         generation = self._search_generation
         self._active_search_generation = generation
+        self._active_search_fingerprint = fingerprint
         self._searching = True
         if append:
             # The grid stays. Swapping to the full-page spinner would throw
@@ -1048,7 +1082,13 @@ class BrowseDialog(Adw.Dialog):
 
         future = self._searches.submit(work)
         future.add_done_callback(
-            lambda done: self._deliver(done, page, append, generation=generation)
+            lambda done: self._deliver(
+                done,
+                page,
+                append,
+                generation=generation,
+                fingerprint=fingerprint,
+            )
         )
 
     def _deliver(
@@ -1058,6 +1098,7 @@ class BrowseDialog(Adw.Dialog):
         append: bool = False,
         *,
         generation: int,
+        fingerprint: RequestFingerprint,
     ) -> None:
         try:
             result: SearchResult | None = future.result()
@@ -1069,18 +1110,32 @@ class BrowseDialog(Adw.Dialog):
             result, message = None, f"search failed: {error}"
 
         def deliver() -> bool:
-            current = (
+            owns_active_request = (
                 generation == self._search_generation
                 and generation == self._active_search_generation
+                and fingerprint == self._active_search_fingerprint
+            )
+            current = owns_active_request and fingerprint == (
+                self.provider_name,
+                self._read_filters(),
             )
             if not self._closed and current:
                 self._searching = False
                 self._active_search_generation = None
+                self._active_search_fingerprint = None
                 self._more.set_label("")
                 if result is None:
                     self._show_failure(message, append)
                 else:
                     self._show_result(result, page, append)
+            elif not self._closed and owns_active_request:
+                # The user edited the visible query or filters but did not
+                # submit them yet.  Never put this old answer underneath those
+                # new controls, and never leave the page saying Searching.
+                self._invalidate_search(
+                    title="Search changed",
+                    description="Press Search to use the current query and filters.",
+                )
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(deliver)
@@ -1118,18 +1173,21 @@ class BrowseDialog(Adw.Dialog):
             # whichever copy it met first. Wallhaven does this whenever a
             # random search runs unseeded, and a scraped listing can do it
             # whenever the site reorders between two requests.
-            if candidate.identifier in self._shown:
+            key = _candidate_key(candidate)
+            if key in self._shown:
                 continue
             if len(self._cards) >= MAX_RETAINED_RESULTS:
                 self._capped = True
                 self._has_next = False
                 break
-            self._shown.add(candidate.identifier)
+            self._shown.add(key)
             card = _CandidateCard(
                 candidate, self._on_download, self._open_detail, self._on_pick_changed
             )
             if held.holds(candidate):
                 card.mark_downloaded()
+            elif key in self._downloads_in_flight:
+                card.set_busy(True)
             self._cards.append(card)
             self._flow.append(card)
             added += 1
@@ -1243,7 +1301,7 @@ class BrowseDialog(Adw.Dialog):
 
     def _on_preview(self, candidate: WallpaperCandidate, data: bytes) -> None:
         for card in self._cards:
-            if card.candidate.identifier == candidate.identifier:
+            if _candidate_key(card.candidate) == _candidate_key(candidate):
                 card.set_preview(data)
 
     # -- downloading -------------------------------------------------------
@@ -1255,22 +1313,36 @@ class BrowseDialog(Adw.Dialog):
         report back: it owns its own button, and a card behind it is not
         necessarily the thing the user is looking at.
         """
+        key = _candidate_key(candidate)
+        existing = self._detail_dialogs.get(key)
+        if existing is not None:
+            existing.present(self._presentation_parent)
+            return
         detail = DetailDialog(
             self._browser,
             candidate,
             self._on_download,
             held=self._browser.owned.holds(candidate),
         )
-        self._detail_dialogs[candidate.identifier] = detail
-        detail.connect(
-            "closed", lambda _dialog: self._detail_dialogs.pop(candidate.identifier, None)
-        )
+        self._detail_dialogs[key] = detail
+
+        def closed(dialog: DetailDialog) -> None:
+            # Do not let an older dialog's close remove a replacement.
+            if self._detail_dialogs.get(key) is dialog:
+                self._detail_dialogs.pop(key, None)
+
+        detail.connect("closed", closed)
+        if key in self._downloads_in_flight:
+            detail.set_busy(True)
         detail.present(self._presentation_parent)
 
     def _on_download(self, candidate: WallpaperCandidate, variant: str = "") -> None:
-        card = self._card_for(candidate)
-        if card is not None:
-            card.set_busy(True)
+        key = _candidate_key(candidate)
+        if key in self._downloads_in_flight:
+            self.report(f"{candidate.title or candidate.identifier} is already downloading")
+            return
+        self._downloads_in_flight.add(key)
+        self._set_download_busy(candidate, True)
         # Counted here rather than in the batch, so the one place a download
         # starts is the one place it is counted. A single card pressed while a
         # batch runs joins that batch's total instead of being invisible.
@@ -1285,9 +1357,18 @@ class BrowseDialog(Adw.Dialog):
 
     def _card_for(self, candidate: WallpaperCandidate) -> _CandidateCard | None:
         for card in self._cards:
-            if card.candidate.identifier == candidate.identifier:
+            if _candidate_key(card.candidate) == _candidate_key(candidate):
                 return card
         return None
+
+    def _set_download_busy(self, candidate: WallpaperCandidate, busy: bool) -> None:
+        card = self._card_for(candidate)
+        if card is not None:
+            card.set_busy(busy)
+        detail = self._detail_dialogs.get(_candidate_key(candidate))
+        if detail is not None:
+            detail.set_busy(busy)
+        self._on_pick_changed()
 
     def _downloaded(self, candidate: WallpaperCandidate, future: Future[Downloaded]) -> None:
         try:
@@ -1300,6 +1381,7 @@ class BrowseDialog(Adw.Dialog):
             done, message = None, f"download failed: {error}"
 
         def deliver() -> bool:
+            self._downloads_in_flight.discard(_candidate_key(candidate))
             if self._closed:
                 return GLib.SOURCE_REMOVE
             # Counted whether it worked or not: a batch of five with one
@@ -1308,12 +1390,9 @@ class BrowseDialog(Adw.Dialog):
             self._finished += 1
             self._report_queue()
             card = self._card_for(candidate)
-            detail = self._detail_dialogs.get(candidate.identifier)
+            detail = self._detail_dialogs.get(_candidate_key(candidate))
             if done is None:
-                if card is not None:
-                    card.set_busy(False)
-                if detail is not None:
-                    detail.failed()
+                self._set_download_busy(candidate, False)
                 self.report(message)
             else:
                 if card is not None:
@@ -1367,6 +1446,10 @@ class BrowsePage(Gtk.Box):
 
     def update_library_roots(self, roots: tuple[Path, ...]) -> None:
         self._surface.update_library_roots(roots)
+
+    def library_refreshed(self) -> None:
+        """Make the next provider result compare against the accepted scan."""
+        self._surface._browser.forget_owned()
 
     def shutdown(self) -> None:
         if not self._surface._closed:
@@ -1724,8 +1807,15 @@ class DetailDialog(Adw.Dialog):
         self._mark_held()
 
     def failed(self) -> None:
-        self._download.set_sensitive(True)
-        self._download.set_label("Download")
+        self.set_busy(False)
+
+    def set_busy(self, busy: bool) -> None:
+        """Reflect one shared candidate download, whichever surface started it."""
+        if self._held:
+            self._mark_held()
+            return
+        self._download.set_sensitive(not busy)
+        self._download.set_label("Downloading…" if busy else "Download")
 
     def _on_closed(self, _dialog: Adw.Dialog) -> None:
         self._closed = True

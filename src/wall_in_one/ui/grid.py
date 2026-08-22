@@ -6,7 +6,7 @@ palette -- is secondary and lives elsewhere.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import gi
@@ -42,6 +42,7 @@ class WallpaperTile(Gtk.Box):
 
         frame = Gtk.Overlay()
         frame.set_child(self._picture)
+        frame.set_tooltip_text("Left-click to edit · right-click to play as Quick choice")
 
         # Until the thumbnail arrives, show something with the right footprint
         # so tiles do not jump around as they load in.
@@ -175,7 +176,7 @@ def _badge(text: str) -> Gtk.Widget:
 
 
 class WallpaperGrid(Gtk.ScrolledWindow):
-    """A scrolling grid of tiles. Activating one applies that wallpaper."""
+    """A scrolling grid: activate to edit, secondary-click to quick-play."""
 
     def __init__(
         self,
@@ -370,5 +371,10 @@ class WallpaperGrid(Gtk.ScrolledWindow):
 
     def set_current(self, current: Path | None) -> None:
         """Move the "this one is up" highlight without rebuilding anything."""
+        self.set_current_many(() if current is None else (current,))
+
+    def set_current_many(self, current: Iterable[Path]) -> None:
+        """Highlight every wallpaper currently shown across the displays."""
+        selected = frozenset(current)
         for path, tile in self._tiles.items():
-            tile.set_current(path == current)
+            tile.set_current(path in selected)

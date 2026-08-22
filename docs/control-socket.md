@@ -1,9 +1,13 @@
 # Control sockets
 
-Every verb is one line of JSON over a mode-0600 socket in `$XDG_RUNTIME_DIR`.
-Runtime commands go directly to `wall-in-one-runtime.sock`; authoring and
-provider commands go to the Python app's `wall-in-one.sock`. `wall-in-one ctl`
-routes between them, so the Noctalia plugin needs no socket code in Luau.
+Every verb is one line of JSON over a mode-0600 socket. With a valid
+`$XDG_RUNTIME_DIR`, runtime commands go directly to
+`$XDG_RUNTIME_DIR/wall-in-one-runtime.sock`; authoring and provider commands go
+to the Python app's `wall-in-one.sock`. Without a runtime directory, both the
+Rust service and Python client use
+`$XDG_STATE_HOME/wall-in-one/wall-in-one-runtime.sock` for the runtime endpoint.
+`wall-in-one ctl` routes between the two services, so the Noctalia plugin needs
+no socket code in Luau.
 
 ```console
 $ wall-in-one ctl next

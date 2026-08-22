@@ -445,6 +445,22 @@ def test_writing_leaves_no_temporary_behind(directories: tuple[Path, Path]) -> N
     assert [path.name for path in custom.iterdir()] == ["Mine.json"]
 
 
+def test_writing_ignores_the_predictable_legacy_temporary_symlink(tmp_path: Path) -> None:
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    target = custom / "Mine.json"
+    sentinel = tmp_path / "outside"
+    sentinel.write_text("do not overwrite", encoding="utf-8")
+    legacy_temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    legacy_temporary.symlink_to(sentinel)
+
+    palettes.write_custom("Mine", _document(), custom)
+
+    assert target.is_file()
+    assert sentinel.read_text(encoding="utf-8") == "do not overwrite"
+    assert legacy_temporary.is_symlink()
+
+
 def test_a_document_that_would_not_parse_is_never_written(directories: tuple[Path, Path]) -> None:
     custom, _ = directories
     with pytest.raises(PaletteError):

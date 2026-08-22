@@ -508,6 +508,62 @@ def test_switching_provider_discards_an_in_flight_old_provider_result(
     assert asked == ["wallhaven", "motionbgs"]
 
 
+def test_editing_the_query_discards_the_in_flight_old_answer(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grid must never describe controls that no longer made its request."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def search(_name: str, _query: object) -> SearchResult:
+        started.set()
+        assert release.wait(2)
+        return _result("old-query", page=1)
+
+    monkeypatch.setattr(dialog._browser, "search", search)
+    dialog._entry.set_text("first")
+    dialog.start_search(page=1)
+    assert started.wait(2)
+
+    dialog._entry.set_text("second")
+    release.set()
+
+    assert _settle(lambda: not dialog._searching)
+    assert dialog._cards == []
+    assert dialog._stack.get_visible_child_name() == "empty"
+    assert dialog._status.get_title() == "Search changed"
+
+
+def test_changed_query_can_queue_behind_an_in_flight_search(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale worker must not force a second click after it eventually returns."""
+    started = threading.Event()
+    release = threading.Event()
+    asked: list[str] = []
+
+    def search(_name: str, query: object) -> SearchResult:
+        text = str(getattr(query, "text", ""))
+        asked.append(text)
+        if text == "first":
+            started.set()
+            assert release.wait(2)
+            return _result("old-query", page=1)
+        return _result("new-query", page=1)
+
+    monkeypatch.setattr(dialog._browser, "search", search)
+    dialog._entry.set_text("first")
+    dialog.start_search(page=1)
+    assert started.wait(2)
+
+    dialog._entry.set_text("second")
+    dialog.start_search(page=1)
+    release.set()
+
+    assert _settle(lambda: [card.candidate.identifier for card in dialog._cards] == ["new-query"])
+    assert asked == ["first", "second"]
+
+
 def test_changing_library_roots_retargets_browse_without_losing_the_query(
     dialog: browse_dialog.BrowseDialog,
     tmp_path: Path,
@@ -837,6 +893,41 @@ def test_a_wallpaper_that_lands_cannot_be_picked_again(
     assert not card.picked
     assert not card._check.get_sensitive()
     assert not dialog._download_picked.get_visible()
+
+
+def test_one_candidate_cannot_be_queued_twice_while_downloading(
+    dialog: browse_dialog.BrowseDialog,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Card, detail and batch controls share one in-flight identity."""
+    _three(dialog, monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    asked: list[str] = []
+
+    def download(candidate: WallpaperCandidate, *, variant: str = "") -> Downloaded:
+        asked.append(candidate.identifier)
+        started.set()
+        assert release.wait(2)
+        return _downloaded(tmp_path, candidate.identifier)
+
+    monkeypatch.setattr(dialog._browser, "download", download)
+    card = dialog._cards[0]
+    card._check.set_active(True)
+    dialog._on_download(card.candidate)
+    assert started.wait(2)
+
+    dialog._on_download(card.candidate, variant="4k")
+
+    assert asked == ["aaa111"]
+    assert not card._button.get_sensitive()
+    assert not card._check.get_sensitive()
+    assert not card.picked
+    assert dialog._queued == 1
+
+    release.set()
+    assert _settle(lambda: not dialog._downloads_in_flight)
 
 
 def test_a_new_search_forgets_the_selection(

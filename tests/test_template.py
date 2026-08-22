@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import tomllib
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -94,6 +97,102 @@ def test_install_is_idempotent(fake_home: Path) -> None:
 
     body = paths.noctalia_settings_path().read_text(encoding="utf-8")
     assert body.count(template._BEGIN_MARKER) == 1
+
+
+def test_install_refuses_to_replace_concurrently_changed_bytes(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    real_backup = template._backup
+    concurrent = SAMPLE_SETTINGS + "\n# written by Noctalia while install was preparing\n"
+
+    def change_after_backup(path: Path, snapshot: template._SettingsSnapshot) -> Path:
+        backup = real_backup(path, snapshot)
+        # Truncate the same inode: identity alone is not a sufficient guard.
+        path.write_text(concurrent, encoding="utf-8")
+        return backup
+
+    monkeypatch.setattr(template, "_backup", change_after_backup)
+
+    with pytest.raises(template.TemplateInstallError, match=r"changed while.*not replaced"):
+        template.install()
+
+    assert settings_path.read_text(encoding="utf-8") == concurrent
+    assert template._BEGIN_MARKER not in concurrent
+    assert not list(settings_path.parent.glob(f".{settings_path.name}.*"))
+
+
+def test_uninstall_refuses_same_bytes_on_a_concurrently_replaced_inode(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    template.install()
+    installed = settings_path.read_bytes()
+    original_inode = settings_path.stat().st_ino
+    real_backup = template._backup
+
+    def replace_after_backup(path: Path, snapshot: template._SettingsSnapshot) -> Path:
+        backup = real_backup(path, snapshot)
+        replacement = path.with_name("settings.concurrent.toml")
+        replacement.write_bytes(snapshot.document)
+        assert replacement.stat().st_ino != original_inode
+        os.replace(replacement, path)
+        return backup
+
+    monkeypatch.setattr(template, "_backup", replace_after_backup)
+
+    with pytest.raises(template.TemplateInstallError, match=r"changed while.*not replaced"):
+        template.uninstall()
+
+    assert settings_path.read_bytes() == installed
+    assert template._BEGIN_MARKER in installed.decode("utf-8")
+
+
+def test_same_second_backups_are_unique_and_never_replace(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    snapshot = template._read_settings_snapshot(settings_path)
+
+    class FrozenDateTime:
+        @staticmethod
+        def now() -> datetime:
+            return datetime(2026, 8, 21, 12, 34, 56)
+
+    monkeypatch.setattr(template, "datetime", FrozenDateTime)
+    first = template._backup(settings_path, snapshot)
+    second = template._backup(settings_path, snapshot)
+
+    assert first != second
+    assert first.read_bytes() == snapshot.document
+    assert second.read_bytes() == snapshot.document
+    assert second.name == first.name + ".1"
+    assert not list(settings_path.parent.glob(f".{settings_path.name}.backup-stage-*"))
+
+
+def test_install_syncs_every_published_directory_entry(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    synced: list[Path] = []
+    monkeypatch.setattr(template, "_fsync_parent", synced.append)
+
+    result = template.install()
+
+    assert result.backup_path is not None
+    assert synced == [template.installed_template_path(), result.backup_path, settings_path]
+
+
+def test_post_hook_quotes_an_executable_path_with_shell_metacharacters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = "/tmp/a helper's directory/wall-in-one"
+    monkeypatch.setattr(shutil, "which", lambda _name: executable)
+
+    command = template._post_hook_command()
+
+    assert shlex.split(command) == [executable, "ctl", "reload-palette"]
+    assert command != f"{executable} ctl reload-palette"
 
 
 def test_install_refuses_to_clobber_a_hand_written_entry(fake_home: Path) -> None:

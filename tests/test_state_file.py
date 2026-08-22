@@ -83,3 +83,57 @@ def test_parent_fsync_opens_the_directory_itself(
 
     assert observed[0][0] == tmp_path
     assert observed[0][1] & os.O_DIRECTORY
+
+
+@pytest.mark.parametrize(
+    "writer",
+    (
+        lambda path: pairings.save({}, path),
+        lambda path: playlists.save({}, path),
+        lambda path: schedules.save((), path),
+        lambda path: displays.save({}, path),
+        lambda path: favourites.save(favourites.Favourites(), path),
+    ),
+    ids=("pairings", "playlists", "schedules", "displays", "favourites"),
+)
+def test_authoring_writers_ignore_the_predictable_legacy_temporary_symlink(
+    tmp_path: Path, writer: Writer
+) -> None:
+    target = tmp_path / "state.json"
+    sentinel = tmp_path / "outside"
+    sentinel.write_text("do not overwrite", encoding="utf-8")
+    legacy_temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    legacy_temporary.symlink_to(sentinel)
+
+    writer(target)
+
+    assert target.is_file()
+    assert sentinel.read_text(encoding="utf-8") == "do not overwrite"
+    assert legacy_temporary.is_symlink()
+
+
+def test_reentrant_atomic_writes_have_distinct_private_temporaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "state.json"
+    sources: list[Path] = []
+    inside_reentrant_write = False
+    real_replace = os.replace
+
+    def replace(source: object, destination: object) -> None:
+        nonlocal inside_reentrant_write
+        sources.append(Path(source))  # type: ignore[arg-type]
+        if not inside_reentrant_write:
+            inside_reentrant_write = True
+            state_file.write_atomic_text(target, "inner\n")
+        real_replace(source, destination)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    state_file.write_atomic_text(target, "outer\n")
+
+    assert len(sources) == 2
+    assert sources[0] != sources[1]
+    assert all(source.parent == target.parent for source in sources)
+    assert target.read_text(encoding="utf-8") == "outer\n"
+    assert list(tmp_path.glob(".*.tmp")) == []

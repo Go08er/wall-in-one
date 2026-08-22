@@ -10,8 +10,6 @@ from __future__ import annotations
 import contextlib
 import json
 import math
-import os
-import tempfile
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -440,17 +438,9 @@ def _validate_runtime_text(
 
 def save(settings: Settings, path: Path | None = None) -> Path:
     target = path if path is not None else paths.settings_path()
-    paths.ensure_directory(target.parent)
-    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-    temporary = Path(name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(settings.validated().to_toml())
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        state_file.fsync_parent(target)
+        paths.ensure_directory(target.parent)
+        state_file.write_atomic_text(target, settings.validated().to_toml())
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise ConfigError(f"cannot write {target}: {error}") from error
     return target

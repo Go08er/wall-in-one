@@ -152,6 +152,24 @@ enum PlaybackState {
     Stopped,
 }
 
+struct ReloadSnapshot {
+    config: Config,
+    manual_playlist: Option<String>,
+    active_playlist: String,
+    schedule_overrode_default: bool,
+    cursors: HashMap<String, PlaylistCursor>,
+    playback_state: PlaybackState,
+    target_outputs: Vec<String>,
+    live_outputs: Option<Vec<String>>,
+    output_discovery_error: String,
+    last_output_probe: Instant,
+    rng: XorShift64,
+    last_cycle: Instant,
+    last_error: String,
+    renderer_failed: bool,
+    authoritative_generation: u64,
+}
+
 pub struct Runtime<D: WallpaperDriver> {
     config_path: PathBuf,
     config: Config,
@@ -241,6 +259,24 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.authoritative_generation = self.authoritative_generation.wrapping_add(1);
     }
 
+    fn restore_reload_snapshot(&mut self, snapshot: ReloadSnapshot) {
+        self.config = snapshot.config;
+        self.manual_playlist = snapshot.manual_playlist;
+        self.active_playlist = snapshot.active_playlist;
+        self.schedule_overrode_default = snapshot.schedule_overrode_default;
+        self.cursors = snapshot.cursors;
+        self.playback_state = snapshot.playback_state;
+        self.target_outputs = snapshot.target_outputs;
+        self.live_outputs = snapshot.live_outputs;
+        self.output_discovery_error = snapshot.output_discovery_error;
+        self.last_output_probe = snapshot.last_output_probe;
+        self.rng = snapshot.rng;
+        self.last_cycle = snapshot.last_cycle;
+        self.last_error = snapshot.last_error;
+        self.renderer_failed = snapshot.renderer_failed;
+        self.authoritative_generation = snapshot.authoritative_generation;
+    }
+
     pub fn shutdown(&mut self) {
         self.driver.stop();
         self.quit = true;
@@ -303,6 +339,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             // suppression and fail with the attributable scene diagnostic.
             self.renderer_failed = true;
         }
+        let mut schedule_transition_attempted = false;
         if self.manual_playlist.is_none() {
             if let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at) {
                 let overrode = scheduled.is_some();
@@ -317,17 +354,23 @@ impl<D: WallpaperDriver> Runtime<D> {
                     self.reset_cursor(&self.active_playlist.clone());
                 }
                 if playlist_changed || routing_changed {
-                    let _ = self.apply_current();
+                    schedule_transition_attempted = true;
+                    if self.apply_current().is_ok() {
+                        // A scheduled route owns a complete residency interval.
+                        // Do not immediately advance it using time accrued by the
+                        // wallpaper that was just replaced.
+                        self.last_cycle = now;
+                    }
                 }
             }
         }
-        if self.playback_state != PlaybackState::Paused
+        if !schedule_transition_attempted
+            && self.playback_state != PlaybackState::Paused
             && self.cycle_enabled()
             && now.duration_since(self.last_cycle)
                 >= Duration::from_secs(self.config.settings.cycle_interval_seconds)
         {
-            let _ = self.move_by(1);
-            self.last_cycle = now;
+            let _ = self.move_by_at(1, now);
         }
         if now.saturating_duration_since(self.last_output_probe) >= OUTPUT_PROBE_INTERVAL {
             self.last_output_probe = now;
@@ -504,7 +547,11 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.active_playlist = playlist_id.clone();
         self.schedule_overrode_default = false;
         self.reset_cursor(&playlist_id);
-        self.apply_current()
+        let result = self.apply_current();
+        if result.is_ok() {
+            self.last_cycle = Instant::now();
+        }
+        result
     }
 
     fn follow_schedule(&mut self, at: NaiveDateTime) -> Result<String, String> {
@@ -516,7 +563,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .unwrap_or(&self.config.default_playlist)
             .to_string();
         self.reset_cursor(&self.active_playlist.clone());
-        self.apply_current()
+        let result = self.apply_current();
+        if result.is_ok() {
+            self.last_cycle = Instant::now();
+        }
+        result
     }
 
     fn set_shuffle(&mut self, value: Option<&str>) -> Result<String, String> {
@@ -593,6 +644,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             PlaybackState::Playing => {
                 if self.renderer_failed {
                     self.apply_current()?;
+                    self.last_cycle = Instant::now();
                 }
             }
             PlaybackState::Paused => {
@@ -609,6 +661,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     return Err(format!("could not resume renderer: {error}{rollback}"));
                 }
                 self.playback_state = PlaybackState::Playing;
+                self.last_cycle = Instant::now();
             }
             PlaybackState::Stopped => {
                 self.playback_state = PlaybackState::Playing;
@@ -618,6 +671,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     self.playback_state = PlaybackState::Stopped;
                     return Err(error);
                 }
+                self.last_cycle = Instant::now();
             }
         }
         Ok("playing".into())
@@ -661,6 +715,10 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn move_by(&mut self, delta: isize) -> Result<String, String> {
+        self.move_by_at(delta, Instant::now())
+    }
+
+    fn move_by_at(&mut self, delta: isize, now: Instant) -> Result<String, String> {
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
             if let Some(cursor) = self.cursors.get_mut(&playlist) {
@@ -674,7 +732,11 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !moved {
             return self.fail("active display playlists are empty");
         }
-        self.apply_current()
+        let result = self.apply_current();
+        if result.is_ok() {
+            self.last_cycle = now;
+        }
+        result
     }
 
     fn random_entry(&mut self) -> Result<String, String> {
@@ -696,13 +758,32 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !moved {
             return self.fail("active display playlists are empty");
         }
-        self.apply_current()
+        let result = self.apply_current();
+        if result.is_ok() {
+            self.last_cycle = Instant::now();
+        }
+        result
     }
 
     fn reload(&mut self, at: NaiveDateTime) -> Result<String, String> {
         let next = Config::load(&self.config_path).map_err(|error| error.to_string())?;
         let old_targets = self.current_targets(&self.target_outputs);
         let old_entries = self.current_entry_ids();
+        let next_manual = self
+            .manual_playlist
+            .as_ref()
+            .filter(|manual| next.playlist(manual).is_some())
+            .cloned();
+        let (next_active, next_schedule_overrode_default) = if let Some(manual) = &next_manual {
+            (manual.clone(), false)
+        } else {
+            let scheduled = schedule::resolve_override(&next.schedules, at)
+                .map_err(|error| error.to_string())?;
+            (
+                scheduled.unwrap_or(&next.default_playlist).to_string(),
+                scheduled.is_some(),
+            )
+        };
         let video_audio_changed = (next.renderer.video_muted, next.renderer.video_volume)
             != (
                 self.config.renderer.video_muted,
@@ -717,44 +798,108 @@ impl<D: WallpaperDriver> Runtime<D> {
         let dynamics_changed =
             next.settings.dynamics_enabled != self.config.settings.dynamics_enabled;
         let displays_changed = next.displays != self.config.displays;
-        let video_audio_result = if renderer_changed {
-            self.driver.reconfigure(next.renderer.clone());
-            None
-        } else if video_audio_changed {
-            Some(
-                self.driver
-                    .set_video_audio(next.renderer.video_muted, next.renderer.video_volume),
-            )
-        } else {
-            None
+
+        // Adopt the candidate only in memory until every required driver change
+        // succeeds. A valid TOML document can still be unplayable (for example,
+        // an empty active playlist or media deleted after compilation), so a
+        // decoded config is not yet the new last-known-good generation.
+        let old_config = std::mem::replace(&mut self.config, next);
+        let old_manual_playlist = std::mem::replace(&mut self.manual_playlist, next_manual);
+        let old_active_playlist = std::mem::replace(&mut self.active_playlist, next_active);
+        let old_schedule_overrode_default = std::mem::replace(
+            &mut self.schedule_overrode_default,
+            next_schedule_overrode_default,
+        );
+        let old_cursors = std::mem::take(&mut self.cursors);
+        let snapshot = ReloadSnapshot {
+            config: old_config,
+            manual_playlist: old_manual_playlist,
+            active_playlist: old_active_playlist,
+            schedule_overrode_default: old_schedule_overrode_default,
+            cursors: old_cursors,
+            playback_state: self.playback_state,
+            target_outputs: self.target_outputs.clone(),
+            live_outputs: self.live_outputs.clone(),
+            output_discovery_error: self.output_discovery_error.clone(),
+            last_output_probe: self.last_output_probe,
+            rng: self.rng,
+            last_cycle: self.last_cycle,
+            last_error: self.last_error.clone(),
+            renderer_failed: self.renderer_failed,
+            authoritative_generation: self.authoritative_generation,
         };
-        self.config = next;
-        if let Some(manual) = &self.manual_playlist {
-            if self.config.playlist(manual).is_none() {
-                self.manual_playlist = None;
+        if let Err(error) = self.rebuild_cursors(&old_entries) {
+            self.restore_reload_snapshot(snapshot);
+            return Err(error);
+        }
+
+        let new_targets = self.current_targets(&self.target_outputs);
+        let residency_changed = snapshot.active_playlist != self.active_playlist
+            || snapshot.manual_playlist != self.manual_playlist
+            || snapshot.schedule_overrode_default != self.schedule_overrode_default
+            || old_targets != new_targets;
+        let apply_needed =
+            renderer_changed || dynamics_changed || displays_changed || old_targets != new_targets;
+        let mut apply_attempted = false;
+        let mut failure = None;
+
+        if renderer_changed {
+            self.driver.reconfigure(self.config.renderer.clone());
+        } else if video_audio_changed {
+            if let Err(error) = self.driver.set_video_audio(
+                self.config.renderer.video_muted,
+                self.config.renderer.video_volume,
+            ) {
+                failure = Some(error);
             }
         }
-        self.active_playlist = if let Some(manual) = &self.manual_playlist {
-            self.schedule_overrode_default = false;
-            manual.clone()
-        } else {
-            let scheduled = schedule::resolve_override(&self.config.schedules, at)
-                .map_err(|error| error.to_string())?;
-            self.schedule_overrode_default = scheduled.is_some();
-            scheduled
-                .unwrap_or(&self.config.default_playlist)
-                .to_string()
-        };
-        self.rebuild_cursors(&old_entries)?;
-        if renderer_changed
-            || dynamics_changed
-            || displays_changed
-            || old_targets != self.current_targets(&self.target_outputs)
-        {
-            self.apply_current()?;
+        if failure.is_none() && apply_needed {
+            apply_attempted = true;
+            if let Err(error) = self.apply_current() {
+                failure = Some(error);
+            }
         }
-        if let Some(result) = video_audio_result {
-            result?;
+
+        if let Some(error) = failure {
+            let previous_last_error = snapshot.last_error.clone();
+            let previous_renderer_failed = snapshot.renderer_failed;
+            self.restore_reload_snapshot(snapshot);
+
+            let mut rollback_errors = Vec::new();
+            if renderer_changed {
+                self.driver.reconfigure(self.config.renderer.clone());
+            } else if video_audio_changed {
+                if let Err(rollback) = self.driver.set_video_audio(
+                    self.config.renderer.video_muted,
+                    self.config.renderer.video_volume,
+                ) {
+                    rollback_errors.push(format!("could not restore video audio: {rollback}"));
+                }
+            }
+            if apply_attempted {
+                if let Err(rollback) = self.apply_current() {
+                    rollback_errors.push(format!("could not restore wallpaper: {rollback}"));
+                }
+            }
+
+            if rollback_errors.is_empty() {
+                self.last_error = previous_last_error;
+                self.renderer_failed = previous_renderer_failed;
+                return Err(format!(
+                    "reload rejected: {error}; previous configuration restored"
+                ));
+            }
+            let rollback = rollback_errors.join("; ");
+            self.last_error = truncate_middle(
+                &format!("reload rejected: {error}; {rollback}"),
+                MAX_LAST_ERROR_BYTES,
+            );
+            self.renderer_failed = true;
+            return Err(format!("reload rejected: {error}; {rollback}"));
+        }
+
+        if residency_changed {
+            self.last_cycle = Instant::now();
         }
         Ok("reloaded".into())
     }
@@ -1060,6 +1205,7 @@ fn entry_kind(kind: crate::config::EntryKind) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
 struct XorShift64(u64);
 impl XorShift64 {
     fn seeded() -> Self {

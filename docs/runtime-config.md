@@ -29,12 +29,27 @@ service's file-watcher fingerprint, so the same atomic rename is not applied a
 second time. The one-second watcher remains the fallback for an app that wrote
 the file but could not reach the socket.
 
+Every Python publisher shares a private advisory compiler lock beside the
+runtime document. The headless `--write-config` path acquires it before reading
+settings, authoring stores, or the library and holds it through the atomic
+rename; the GUI takes the same lock around rendering and installation. An older
+systemd preflight can therefore land only before a newer GUI edit, never after
+it. Lock acquisition is bounded and fail-closed: an unsafe lock path or timeout
+leaves the last-known-good runtime document untouched.
+
 Loading changed bytes is also not synonymous with restarting the current
 wallpaper. The service compares the fully resolved effective output/entry set,
 renderer settings, and dynamics setting across the reload. Editing an inactive
 playlist or changing only a timer keeps the existing renderer child; changing
 the active pairing, output, renderer options, or dynamics performs the normal
 break-before-make hand-over.
+
+That hand-over is transactional at the runtime boundary. If a decoded
+generation cannot be applied, the service restores the prior configuration,
+cursor and renderer settings, then reapplies the last-known-good entry. The
+failed generation is never exposed through `status`. A rollback failure is
+reported explicitly because the service can preserve the old configuration but
+cannot truthfully promise that an external renderer or desktop helper recovered.
 
 Schema 3 contains `schema_version`, `default_playlist`, `[settings]`,
 `[renderer]`, `[[playlists]]`, `[[schedules]]`, and `[[displays]]`. Executable
@@ -82,6 +97,12 @@ shuffle order, the manual playlist and cycle overrides, renderer PIDs, and
 current status are runtime state and never get written into it. The configured
 `cycle_enabled` is the session default. `cycle on|off` overrides it until the
 service exits or `cycle default` drops the override.
+
+The cycle interval is residency time for the wallpaper currently in force, not
+wall-clock debt carried by the one it replaced. A successful manual or scheduled
+playlist transition, next/previous/random action, or resume starts a fresh
+interval. In particular, a schedule change and a cycle advancement cannot both
+happen in the same tick.
 
 Display assignments are the baseline when no schedule rule matches. A matching
 schedule rule overrides assignments for its window, and a manual

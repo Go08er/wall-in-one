@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -38,6 +41,39 @@ def test_write_config_upgrades_old_schema_without_importing_the_gui(
     assert "upgrade_fixture" not in document
     assert document["playlists"][0]["entries"][0]["still"] == str(media / "wallpaper.png")
     assert "wall_in_one.ui.app" not in sys.modules
+
+
+def test_write_config_takes_the_compiler_lock_before_reading_authoring_state(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from wall_in_one import cli
+
+    entered = False
+
+    class ObservedLock:
+        def __enter__(self) -> None:
+            nonlocal entered
+            entered = True
+
+        def __exit__(
+            self,
+            _kind: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: object,
+        ) -> None:
+            nonlocal entered
+            entered = False
+
+    def load_under_lock() -> config.Settings:
+        assert entered
+        raise config.ConfigError("authoring fixture stops here")
+
+    monkeypatch.setattr(runtime_config, "compiler_lock", ObservedLock)
+    monkeypatch.setattr(config, "load_strict", load_under_lock)
+
+    assert cli.main(["--write-config"]) == 1
+    assert "authoring fixture stops here" in capsys.readouterr().err
+    assert not entered
 
 
 def test_write_config_refuses_a_malformed_settings_file(
@@ -341,6 +377,128 @@ def _session(
     )
     session.refresh()
     return settings, session
+
+
+_LOCK_HOLDER = """
+import sys
+import time
+from pathlib import Path
+
+from wall_in_one import runtime_config
+
+target, ready, release = (Path(value) for value in sys.argv[1:4])
+document = sys.argv[4]
+with runtime_config.compiler_lock(target, timeout=5):
+    ready.write_text("locked", encoding="utf-8")
+    deadline = time.monotonic() + 10
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not release.exists():
+        raise SystemExit("release barrier timed out")
+    if document != "-":
+        runtime_config._install(document, target)
+"""
+
+
+def _start_lock_holder(
+    target: Path,
+    ready: Path,
+    release: Path,
+    *,
+    document: str = "-",
+) -> subprocess.Popen[str]:
+    process = subprocess.Popen(
+        [sys.executable, "-c", _LOCK_HOLDER, str(target), str(ready), str(release), document],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        if process.poll() is not None:
+            output, error = process.communicate()
+            pytest.fail(f"lock holder exited early: {output}{error}")
+        time.sleep(0.01)
+    if not ready.exists():
+        process.kill()
+        output, error = process.communicate()
+        pytest.fail(f"lock holder did not reach its barrier: {output}{error}")
+    return process
+
+
+def _finish_lock_holder(process: subprocess.Popen[str], release: Path) -> None:
+    release.touch(exist_ok=True)
+    output, error = process.communicate(timeout=5)
+    assert process.returncode == 0, f"lock holder failed: {output}{error}"
+
+
+def test_newer_gui_compilation_lands_after_an_older_preflight_snapshot(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "runtime.toml"
+    target.write_text('schema_version = 3\ngeneration = "last-known-good"\n', encoding="utf-8")
+    ready = tmp_path / "older.ready"
+    release = tmp_path / "older.release"
+    older = 'schema_version = 3\ngeneration = "older-preflight"\n'
+    process = _start_lock_holder(target, ready, release, document=older)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            newer = pool.submit(runtime_config.update, settings, session, target)
+            time.sleep(0.1)
+            assert not newer.done(), "the newer publisher bypassed the preflight compiler lock"
+            release.touch()
+            assert newer.result(timeout=5)
+        _finish_lock_holder(process, release)
+    finally:
+        release.touch(exist_ok=True)
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+        session.shutdown()
+
+    document = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert document["default_playlist"] == "evening"
+    assert "generation" not in document
+
+
+def test_compiler_lock_timeout_preserves_the_last_known_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\ngeneration = "last-known-good"\n'
+    target.write_text(previous, encoding="utf-8")
+    ready = tmp_path / "held.ready"
+    release = tmp_path / "held.release"
+    process = _start_lock_holder(target, ready, release)
+    monkeypatch.setattr(runtime_config, "COMPILER_LOCK_TIMEOUT_SECONDS", 0.05)
+
+    try:
+        with pytest.raises(runtime_config.RuntimeConfigError, match="compiler lock"):
+            runtime_config.update(settings, session, target)
+        assert target.read_text(encoding="utf-8") == previous
+    finally:
+        _finish_lock_holder(process, release)
+        session.shutdown()
+
+
+def test_compiler_lock_refuses_a_symlink_without_touching_its_target(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\ngeneration = "last-known-good"\n'
+    target.write_text(previous, encoding="utf-8")
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("precious", encoding="utf-8")
+    runtime_config._compiler_lock_path(target).symlink_to(sentinel)
+
+    try:
+        with pytest.raises(runtime_config.RuntimeConfigError, match=r"safely open.*compiler lock"):
+            runtime_config.update(settings, session, target)
+    finally:
+        session.shutdown()
+
+    assert target.read_text(encoding="utf-8") == previous
+    assert sentinel.read_text(encoding="utf-8") == "precious"
 
 
 @pytest.mark.parametrize("collision", ("duplicate-name", "id-name"))

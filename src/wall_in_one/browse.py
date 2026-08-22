@@ -187,10 +187,17 @@ class Downloaded:
     result: DownloadResult
     #: Where the library must be rescanned from for the file to appear.
     root: Path
+    #: False when Settings changed folders while the transfer was running.
+    #: The file is still safely installed, but the current library scan will
+    #: not find it and the UI must say where it went.
+    root_current: bool = True
 
     def describe(self) -> str:
         megabytes = self.result.size / (1024 * 1024)
-        return f"downloaded {self.result.path.name} ({megabytes:.1f} MB)"
+        summary = f"downloaded {self.result.path.name} ({megabytes:.1f} MB)"
+        if not self.root_current:
+            summary += f" to the previous library folder {self.root} (folders changed mid-download)"
+        return summary
 
 
 class Browser:
@@ -348,9 +355,10 @@ class Browser:
         # into the replacement roots' index. If the index was not warm yet,
         # leave it lazy rather than building it under this completion path.
         with self._roots_lock:
-            if generation == self._roots_generation and self._owned is not None:
+            root_current = generation == self._roots_generation
+            if root_current and self._owned is not None:
                 self._owned.add(candidate, result.path)
-        return Downloaded(result=result, root=root)
+        return Downloaded(result=result, root=root, root_current=root_current)
 
     def thumbnail(self, candidate: WallpaperCandidate) -> bytes:
         """The provider's preview image, for a card in the browse dialog.

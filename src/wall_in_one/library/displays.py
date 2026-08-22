@@ -24,7 +24,6 @@ should not lose the arrangement.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Final
@@ -109,16 +108,11 @@ def save(assignments: Mapping[str, str], path: Path | None = None) -> Path:
         raise DisplayError(
             "local-io", f"could not prepare {target.parent}: {error.strerror or error}"
         ) from error
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with open(temporary, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        state_file.fsync_parent(target)
+        state_file.write_atomic_text(
+            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        )
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise DisplayError(
             "local-io", f"could not write {target}: {error.strerror or error}"
         ) from error

@@ -174,12 +174,12 @@ class Session:
 
     @property
     def cursor(self) -> MediaItem | None:
-        """The wallpaper the app is pointing at -- what the grid highlights.
+        """The wallpaper the Python compatibility driver is pointing at.
 
-        Not the same as :attr:`current`. At startup nothing has been applied
-        through us, but `sync_with_noctalia` has already moved the cursor onto
-        whatever is actually on screen, and that is the wallpaper the user
-        expects to see marked. `next` and friends move this too.
+        Not the same as :attr:`current`. The Media grid uses this only when no
+        valid Rust status snapshot exists; normally the runtime's per-display
+        entry ids are the playback truth. In compatibility mode,
+        `sync_with_noctalia` and the local navigation actions move it.
         """
         return self._playlist.current()
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -345,11 +346,9 @@ def read_bounded(stream: BinaryIO, maximum: int) -> bytes:
 class RateLimiter:
     """Keep at least ``interval`` seconds between calls.
 
-    Wallhaven publishes a 45-request-per-minute limit; the predecessor stored
-    the last-request timestamp in a lock-protected file because several helper
-    *processes* could race for it. One process needs none of that, so this is a
-    plain attribute -- and a monotonic clock cannot run backwards, which
-    removes the clock-skew clamp the file version needed.
+    Wallhaven publishes a 45-request-per-minute limit. One process removes the
+    old cross-process lock, but not synchronization itself: search, detail and
+    download workers share a provider and can call this concurrently.
     """
 
     def __init__(
@@ -363,12 +362,16 @@ class RateLimiter:
         self._clock = clock
         self._sleep = sleep
         self._last: float | None = None
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
-        now = self._clock()
-        if self._last is not None:
-            delay = self._interval - (now - self._last)
-            if delay > 0:
-                self._sleep(delay)
-                now = self._clock()
-        self._last = now
+        # Keep the reservation while sleeping. Releasing it first lets every
+        # waiter sleep toward one deadline and then issue a burst together.
+        with self._lock:
+            now = self._clock()
+            if self._last is not None:
+                delay = self._interval - (now - self._last)
+                if delay > 0:
+                    self._sleep(delay)
+                    now = self._clock()
+            self._last = now

@@ -227,7 +227,7 @@ Deleting the whole directory is safe -- it is rebuilt on demand.
 | `~/.local/state/wall-in-one/palette.json` | where Noctalia renders the live palette |
 | `~/.cache/wall-in-one/thumbnails` | the thumbnail cache |
 | `$XDG_RUNTIME_DIR/wall-in-one.sock` | the control socket, 0600 |
-| `$XDG_RUNTIME_DIR/wall-in-one-runtime.sock` | Rust runtime commands and status, 0600 |
+| `$XDG_RUNTIME_DIR/wall-in-one-runtime.sock` | Rust runtime commands and status, 0600; falls back to `$XDG_STATE_HOME/wall-in-one/wall-in-one-runtime.sock` when unset |
 | `$XDG_STATE_HOME/wall-in-one/runtime.toml` | atomically compiled, fully resolved service config |
 | `<first root>/Wall-in-One/Automatic Stills/` | generated stills |
 | `<first root>/Wall-in-One/Wallhaven/`, `.../MotionBGS/` | downloads |

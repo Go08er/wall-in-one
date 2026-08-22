@@ -24,7 +24,9 @@ from wall_in_one.wallpaper.scenes import SceneRenderer
 
 
 def command(**options: object) -> list[str]:
-    return SceneRenderer(**options).command("12345")  # type: ignore[arg-type]
+    return SceneRenderer(**options).command(  # type: ignore[arg-type]
+        "12345", available_outputs=("eDP-1",)
+    )
 
 
 # -- what gets run --------------------------------------------------------
@@ -38,11 +40,23 @@ def test_an_output_is_named_before_the_background() -> None:
     assert arguments[arguments.index("--bg") + 1] == "12345"
 
 
-def test_with_no_output_the_scene_is_positional() -> None:
-    """Which is how its own help spells "everywhere"."""
+def test_with_no_output_the_live_connector_is_a_background_target() -> None:
     arguments = command()
-    assert "--screen-root" not in arguments
-    assert arguments[-1] == "12345"
+    assert arguments[-4:] == ["--screen-root", "eDP-1", "--bg", "12345"]
+
+
+def test_all_output_application_repeats_the_background_pair() -> None:
+    arguments = SceneRenderer().command("12345", available_outputs=("DP-1", "eDP-1"))
+    targets = [
+        arguments[index + 1] for index, word in enumerate(arguments) if word == "--screen-root"
+    ]
+    assert targets == ["DP-1", "eDP-1"]
+    assert arguments.count("--bg") == 2
+
+
+def test_application_without_a_connector_refuses_window_preview_mode() -> None:
+    with pytest.raises(scenes.SceneError, match="refusing to open a scene preview window"):
+        SceneRenderer().command("12345", available_outputs=())
 
 
 def test_scaling_and_clamp_follow_the_screen_they_apply_to() -> None:
@@ -62,6 +76,11 @@ def test_a_volume_is_passed_when_it_is_not_silent() -> None:
     assert arguments[arguments.index("--volume") + 1] == "40"
 
 
+def test_the_configured_frame_rate_reaches_the_scene_engine() -> None:
+    arguments = command(fps=75)
+    assert arguments[arguments.index("--fps") + 1] == "75"
+
+
 def test_pausing_when_covered_is_the_default_and_is_expressed_by_omission() -> None:
     """The flag is `--no-fullscreen-pause`, so pausing is what you get by
     saying nothing."""
@@ -79,6 +98,7 @@ def test_a_screenshot_run_carries_a_delay() -> None:
 def test_a_screenshot_run_uses_linux_wallpaperengines_window_geometry() -> None:
     arguments = SceneRenderer().command("12345", screenshot=Path("/tmp/x.png"), window=(2560, 1600))
     assert arguments[arguments.index("--window") + 1] == "0x0x2560x1600"
+    assert "--screen-root" not in arguments
 
 
 def test_capture_size_prefers_the_physical_mode() -> None:

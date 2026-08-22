@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from wall_in_one import paths
+from wall_in_one.wallpaper import outputs
 
 #: mpvpaper's selector for every connected output.
 ALL_OUTPUTS: Final = "ALL"
@@ -40,6 +41,13 @@ DEFAULT_LAYER: Final = "background"
 #: only sensible when the auto options misbehave on a particular compositor.
 WHEN_HIDDEN_CHOICES: Final[tuple[str, ...]] = ("pause", "stop", "play")
 DEFAULT_WHEN_HIDDEN: Final = "pause"
+
+#: Temporal presentation modes forwarded to mpv.  ``oversample`` is the
+#: inexpensive, sharper choice recommended for low-frame-rate animation;
+#: ``linear`` blends more strongly and can therefore ghost more.  Neither is
+#: an FPS filter: mpv still decodes the source at its native rate.
+INTERPOLATION_CHOICES: Final[tuple[str, ...]] = ("off", "oversample", "linear")
+DEFAULT_INTERPOLATION: Final = "off"
 
 #: mpv's own scale, where 100 is the file's own level. It accepts more, but
 #: amplifying a wallpaper past its own volume is not something to reach by
@@ -80,6 +88,7 @@ class Renderer:
         layer: str = DEFAULT_LAYER,
         when_hidden: str = DEFAULT_WHEN_HIDDEN,
         hardware_decode: bool = True,
+        interpolation: str = DEFAULT_INTERPOLATION,
         muted: bool = True,
         volume: int = MAX_VOLUME,
     ) -> None:
@@ -87,6 +96,9 @@ class Renderer:
         self.layer = layer
         self.when_hidden = when_hidden
         self.hardware_decode = hardware_decode
+        self.interpolation = (
+            interpolation if interpolation in INTERPOLATION_CHOICES else DEFAULT_INTERPOLATION
+        )
         self.muted = muted
         self.volume = volume
         self._process: subprocess.Popen[bytes] | None = None
@@ -111,7 +123,7 @@ class Renderer:
 
     # -- lifecycle -------------------------------------------------------
 
-    def _mpv_options(self, ipc_socket: Path | None) -> str:
+    def _mpv_options(self, ipc_socket: Path | None, refresh_hz: float | None = None) -> str:
         options = [
             "loop-file=inf",
             # Fill the screen rather than letterboxing; a wallpaper with black
@@ -126,6 +138,18 @@ class Renderer:
             f"volume={max(0, min(MAX_VOLUME, self.volume))}",
             "hwdec=auto" if self.hardware_decode else "hwdec=no",
         ]
+        # All four options are one feature. Without a trustworthy refresh rate
+        # the setting would be partly configured and may remain inert inside
+        # mpvpaper, so mixed/unknown outputs retain the source cadence.
+        if self.interpolation != "off" and refresh_hz is not None and refresh_hz > 0:
+            options.extend(
+                (
+                    "video-sync=display-resample",
+                    "interpolation=yes",
+                    f"tscale={self.interpolation}",
+                )
+            )
+            options.append(f"display-fps-override={refresh_hz:.3f}")
         if ipc_socket is not None:
             options.append(f"input-ipc-server={ipc_socket}")
         return " ".join(options)
@@ -151,7 +175,12 @@ class Renderer:
             command.append("--auto-pause")
         elif self.when_hidden == "stop":
             command.append("--auto-stop")
-        command += ["-o", self._mpv_options(ipc_socket), self.output, str(video)]
+        refresh_hz = None
+        if self.interpolation != "off":
+            refresh_hz = outputs.unambiguous_refresh_hz(
+                outputs.discover(), "" if self.output == ALL_OUTPUTS else self.output
+            )
+        command += ["-o", self._mpv_options(ipc_socket, refresh_hz), self.output, str(video)]
 
         try:
             process = subprocess.Popen(
@@ -181,14 +210,14 @@ class Renderer:
         if process is not None and process.poll() is None:
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError):
+            except OSError, ProcessLookupError:
                 process.terminate()
             try:
                 process.wait(timeout=TERMINATE_TIMEOUT)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except (OSError, ProcessLookupError):
+                except OSError, ProcessLookupError:
                     process.kill()
                 # Reap it, or it lingers as a zombie for the app's lifetime.
                 with contextlib.suppress(subprocess.TimeoutExpired):

@@ -18,15 +18,12 @@ carries on rendering forever, so the capture waits for the file to appear
 *and settle* before stopping the process. Waiting only for it to appear
 catches a half-written PNG, which would become somebody's wallpaper.
 
-**This app does not take the renderer over by default**, and that is not
-timidity. `linux-wallpaperengine` is a single-instance-per-output program that
-other things also drive: the development machine has Noctalia's own
-`linux-wallpaperengine-controller` plugin enabled and an engine process that
-has been rendering the desktop for hours. Starting a second one on the same
-output is two programs fighting for one wallpaper, and the loser is whichever
-the user was actually looking at. So owning the renderer is a decision the user
-makes -- `config.Settings.own_scene_renderer` -- and even then a foreign
-instance on the same output is reported rather than shouldered aside.
+**The app takes the renderer over by default**, because a selected scene must
+actually animate without a hidden setting edit. `linux-wallpaperengine` is a
+single-instance-per-output program that other things may also drive, though,
+so a foreign instance on the target output is reported rather than shouldered
+aside. Ownership remains an explicit Settings switch for installations where
+another controller should remain authoritative.
 
 Capturing a still is exempt: it renders in window mode, touches no output, and
 is how a scene gets a representative without anything appearing on screen.
@@ -65,7 +62,10 @@ SETTLE_SECONDS: Final = 0.4
 #: How long to wait for a polite shutdown before insisting.
 TERMINATE_TIMEOUT: Final = 5.0
 
-#: Matches mpvpaper's default in `renderer`, for the same battery reason.
+#: Native linux-wallpaperengine render-rate bounds. Unlike an mpv post-decode
+#: filter, ``--fps`` limits the scene engine's own rendering work.
+MIN_FPS: Final = 1
+MAX_FPS: Final = 240
 DEFAULT_FPS: Final = 30
 
 #: `linux-wallpaperengine`'s own default is 15; scenes with audio are a
@@ -173,6 +173,7 @@ class SceneRenderer:
         screenshot: Path | None = None,
         *,
         window: tuple[int, int] | None = None,
+        available_outputs: tuple[str, ...] | None = None,
     ) -> list[str]:
         """The argument list, built once so the tests can read it.
 
@@ -197,23 +198,35 @@ class SceneRenderer:
             if window is not None:
                 width, height = window
                 arguments += ["--window", f"0x0x{width}x{height}"]
+            # The positional form is deliberately window preview mode here.
+            # Capture must never claim a compositor output.
+            if self.scaling:
+                arguments += ["--scaling", self.scaling]
+            if self.clamp:
+                arguments += ["--clamp", self.clamp]
+            arguments.append(scene)
+            return arguments
 
-        if self.output:
-            arguments += ["--screen-root", self.output]
+        targets = (
+            (self.output,)
+            if self.output
+            else (
+                available_outputs
+                if available_outputs is not None
+                else outputs.names(outputs.discover())
+            )
+        )
+        if not targets:
+            raise SceneError(
+                "niri reported no usable outputs; refusing to open a scene preview window"
+            )
+        for target in targets:
+            arguments += ["--screen-root", target]
             if self.scaling:
                 arguments += ["--scaling", self.scaling]
             if self.clamp:
                 arguments += ["--clamp", self.clamp]
             arguments += ["--bg", scene]
-            return arguments
-
-        # No output named: the scene is the positional argument, which is how
-        # its own help spells "everywhere" and also how it previews in a window.
-        if self.scaling:
-            arguments += ["--scaling", self.scaling]
-        if self.clamp:
-            arguments += ["--clamp", self.clamp]
-        arguments.append(scene)
         return arguments
 
     def start(self, scene: str) -> None:

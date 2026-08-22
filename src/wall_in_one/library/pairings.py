@@ -316,7 +316,7 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
 
     try:
         payload = json.loads(text)
-    except (ValueError, RecursionError):
+    except ValueError, RecursionError:
         return {}, f"{path.name} is not readable, so no customizations were loaded"
     if not isinstance(payload, dict):
         return {}, f"{path.name} is not a pairings file"

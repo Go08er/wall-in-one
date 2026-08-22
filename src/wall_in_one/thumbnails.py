@@ -491,7 +491,7 @@ def to_displayable(data: bytes) -> bytes:
             timeout=DECODE_TIMEOUT,
             check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired, OSError:
         return b""
     if completed.returncode != 0:
         return b""

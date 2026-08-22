@@ -252,7 +252,7 @@ def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
 
     try:
         payload = json.loads(text)
-    except (ValueError, RecursionError):
+    except ValueError, RecursionError:
         return (), f"{path.name} is not readable, so no schedule was loaded"
     if not isinstance(payload, dict):
         return (), f"{path.name} is not a schedule file"

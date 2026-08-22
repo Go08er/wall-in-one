@@ -32,6 +32,7 @@ own_scene_renderer = false
 layer = "background"
 video_when_hidden = "pause"
 video_hardware_decode = true
+video_interpolation = "off"
 video_muted = true
 video_volume = 50
 scene_fps = 30
@@ -70,7 +71,7 @@ playlist = "day"
 #[test]
 fn handwritten_config_loads_without_python_or_app_state() {
     let path = temp_file("standalone");
-    fs::write(&path, document(2)).unwrap();
+    fs::write(&path, document(3)).unwrap();
     let loaded = Config::load(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(loaded.playlists[0].entries[1].kind, EntryKind::Video);
@@ -81,20 +82,47 @@ fn handwritten_config_loads_without_python_or_app_state() {
 }
 
 #[test]
+fn renderer_frame_rate_is_bounded() {
+    let scene: Config =
+        toml::from_str(&document(3).replace("scene_fps = 30", "scene_fps = 241")).unwrap();
+    assert!(scene
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("scene_fps"));
+}
+
+#[test]
+fn unknown_video_interpolation_is_refused() {
+    let decoded = toml::from_str::<Config>(&document(3).replace(
+        "video_interpolation = \"off\"",
+        "video_interpolation = \"warp\"",
+    ));
+    assert!(decoded.is_err());
+}
+
+#[test]
+fn missing_video_interpolation_is_refused_by_schema_three() {
+    let decoded =
+        toml::from_str::<Config>(&document(3).replace("video_interpolation = \"off\"\n", ""));
+    assert!(decoded.is_err());
+}
+
+#[test]
 fn wrong_schema_is_refused() {
     let path = temp_file("schema");
     fs::write(&path, document(99)).unwrap();
     let error = Config::load(&path).unwrap_err();
     fs::remove_file(path).unwrap();
     assert!(matches!(error, ConfigError::Invalid(_)));
-    assert!(error.to_string().contains("expected 2"));
+    assert!(error.to_string().contains("expected 3"));
     assert!(error.to_string().contains("wall-in-one --write-config"));
 }
 
 #[test]
 fn relative_resolved_path_is_refused() {
     let path = temp_file("relative");
-    fs::write(&path, document(2).replace("/tmp/two.mp4", "two.mp4")).unwrap();
+    fs::write(&path, document(3).replace("/tmp/two.mp4", "two.mp4")).unwrap();
     let error = Config::load(&path).unwrap_err();
     fs::remove_file(path).unwrap();
     assert!(error.to_string().contains("absolute path"));

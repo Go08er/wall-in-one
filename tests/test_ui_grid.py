@@ -465,6 +465,65 @@ def test_one_thumbnail_request_delivers_to_every_visible_card(
 # -- the window and the store ---------------------------------------------
 
 
+def test_changing_roots_redraws_media_instead_of_only_moving_its_highlight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session rescans roots itself; Application must still show that result."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    from wall_in_one import config
+    from wall_in_one.ui.app import Application
+
+    class StubSession:
+        def __init__(self) -> None:
+            self.settings = config.Settings()
+            self.synced = 0
+
+        def update_settings(self, settings: config.Settings) -> None:
+            self.settings = settings
+
+        def sync_with_noctalia(self) -> None:
+            self.synced += 1
+
+    class StubWindow:
+        def __init__(self) -> None:
+            self.libraries = 0
+            self.highlights = 0
+            self.settings: config.Settings | None = None
+
+        def apply_settings(self, settings: config.Settings) -> None:
+            self.settings = settings
+
+        def show_library(self, _session: object) -> None:
+            self.libraries += 1
+
+        def show_current(self, _session: object) -> None:
+            self.highlights += 1
+
+    application = Application()
+    application._session.shutdown()
+    session = StubSession()
+    window = StubWindow()
+    application._session = session  # type: ignore[assignment]
+    application._window = window  # type: ignore[assignment]
+    monkeypatch.setattr(config, "save", lambda _settings: None)
+    monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)
+    monkeypatch.setattr(application, "sync_cycle_timer", lambda: None)
+    monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+
+    replacement = tmp_path / "new-library"
+    application.update_settings(roots=(replacement,))
+
+    assert session.settings.roots == (replacement,)
+    assert session.synced == 1
+    assert window.settings is session.settings
+    assert window.libraries == 1
+    assert window.highlights == 0
+    application._window = None
+
+
 def test_showing_the_library_repushes_the_favourites(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -560,7 +619,6 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
     from wall_in_one import config
-    from wall_in_one.control.protocol import Response
     from wall_in_one.library.model import Library
     from wall_in_one.session import Session
     from wall_in_one.theme import source
@@ -578,16 +636,11 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
                 scanner=lambda _roots: Library(roots=(), items=()),
             )
             self.session.refresh()
-            self.refreshes = 0
 
         def refresh_library(self) -> None: ...
 
-        def runtime_action(self, verb: str, argument: str | None = None) -> Response:
+        def runtime_action_async(self, verb: str, argument: str | None = None) -> bool:
             calls.append((verb, argument))
-            return Response.success()
-
-        def refresh_runtime_status(self) -> bool:
-            self.refreshes += 1
             return True
 
     application = FakeApp()
@@ -610,7 +663,6 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     window._runtime_cycle.set_active(False)
     window._runtime_stop.emit("clicked")
     assert calls == [("cycle", "off"), ("stop", None)]
-    assert application.refreshes == 2
 
     window.show_runtime_status(
         {

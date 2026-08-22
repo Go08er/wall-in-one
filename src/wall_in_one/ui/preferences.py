@@ -35,6 +35,12 @@ _WHEN_HIDDEN_LABELS: dict[str, str] = {
     "play": "Keep playing",
 }
 
+_INTERPOLATION_LABELS: dict[str, str] = {
+    "off": "Off (source cadence)",
+    "oversample": "Oversample (recommended)",
+    "linear": "Linear (stronger blending)",
+}
+
 
 def _connected_outputs() -> tuple[str, ...]:
     """Connector names of the monitors attached right now, in GTK's order."""
@@ -274,6 +280,40 @@ class PreferencesPage(Adw.PreferencesPage):
         self._volume.connect("notify::value", self._on_changed)
         group.add(self._volume)
 
+        self._hardware_decode = Adw.SwitchRow(
+            title="Hardware video decoding",
+            subtitle="Usually lowers CPU use; turn off to diagnose decoder or driver artifacts",
+        )
+        self._hardware_decode.connect("notify::active", self._on_changed)
+        group.add(self._hardware_decode)
+
+        self._interpolation = Adw.ComboRow(
+            title="Smooth low-frame-rate videos",
+            subtitle=(
+                "Uses an unambiguous active-monitor refresh; mixed-rate All outputs keeps "
+                "source cadence. Linear blending may ghost"
+            ),
+            model=Gtk.StringList.new(
+                [_INTERPOLATION_LABELS[choice] for choice in renderer.INTERPOLATION_CHOICES]
+            ),
+        )
+        self._interpolation.connect("notify::selected", self._on_changed)
+        group.add(self._interpolation)
+
+        self._scene_fps = Adw.SpinRow(
+            title="Wallpaper Engine frame rate",
+            subtitle="Native scene-rendering limit; videos keep their source frame rate",
+            adjustment=Gtk.Adjustment(
+                lower=scenes.MIN_FPS,
+                upper=scenes.MAX_FPS,
+                step_increment=1,
+                page_increment=10,
+                value=scenes.DEFAULT_FPS,
+            ),
+        )
+        self._scene_fps.connect("notify::value", self._on_changed)
+        group.add(self._scene_fps)
+
         self._when_hidden = Adw.ComboRow(
             title="When covered by a window",
             subtitle="Takes effect on the next video. Try 'Keep playing' if the others misbehave",
@@ -424,6 +464,12 @@ class PreferencesPage(Adw.PreferencesPage):
             self._output.set_selected(chosen)
             self._muted.set_active(settings.video_muted)
             self._volume.set_value(settings.video_volume)
+            self._hardware_decode.set_active(settings.video_hardware_decode)
+            if settings.video_interpolation in renderer.INTERPOLATION_CHOICES:
+                self._interpolation.set_selected(
+                    renderer.INTERPOLATION_CHOICES.index(settings.video_interpolation)
+                )
+            self._scene_fps.set_value(settings.scene_fps)
             if settings.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES:
                 self._when_hidden.set_selected(
                     renderer.WHEN_HIDDEN_CHOICES.index(settings.video_when_hidden)
@@ -439,6 +485,7 @@ class PreferencesPage(Adw.PreferencesPage):
             return
         scheme_index = self._scheme.get_selected()
         hidden_index = self._when_hidden.get_selected()
+        interpolation_index = self._interpolation.get_selected()
         self._app.update_settings(
             shuffle=self._shuffle.get_active(),
             cycle_enabled=self._cycle.get_active(),
@@ -449,6 +496,11 @@ class PreferencesPage(Adw.PreferencesPage):
             output=self._selected_output(),
             video_muted=self._muted.get_active(),
             video_volume=int(self._volume.get_value()),
+            video_hardware_decode=self._hardware_decode.get_active(),
+            video_interpolation=renderer.INTERPOLATION_CHOICES[interpolation_index]
+            if interpolation_index < len(renderer.INTERPOLATION_CHOICES)
+            else renderer.DEFAULT_INTERPOLATION,
+            scene_fps=int(self._scene_fps.get_value()),
             video_when_hidden=renderer.WHEN_HIDDEN_CHOICES[hidden_index]
             if hidden_index < len(renderer.WHEN_HIDDEN_CHOICES)
             else renderer.DEFAULT_WHEN_HIDDEN,

@@ -54,7 +54,7 @@ fn directory(label: &str) -> PathBuf {
 
 fn config(noctalia: &Path, mpvpaper: &Path, own_scene: bool) -> String {
     format!(
-        r#"schema_version = 2
+        r#"schema_version = 3
 default_playlist = "day"
 [settings]
 cycle_interval_seconds = 300
@@ -70,6 +70,7 @@ own_scene_renderer = {own_scene}
 layer = "background"
 video_when_hidden = "pause"
 video_hardware_decode = true
+video_interpolation = "off"
 video_muted = true
 video_volume = 50
 scene_fps = 30
@@ -323,6 +324,174 @@ fn renderer_applies_still_then_mode_then_palette_then_motion() {
 }
 
 #[test]
+fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("video-interpolation");
+    let launches = root.join("launches");
+    let queries = root.join("queries");
+    let noctalia = root.join("noctalia");
+    let niri = root.join("niri");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        &niri,
+        format!(
+            "#!/bin/sh\nprintf x >> {:?}\nprintf '%s\\n' '{{\"eDP-1\":{{\"current_mode\":0,\"modes\":[{{\"refresh_rate\":165004}}]}},\"DP-1\":{{\"current_mode\":0,\"modes\":[{{\"refresh_rate\":165004}}]}}}}'\n",
+            queries
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &mpvpaper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nsleep 30\n",
+            launches
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &niri, &mpvpaper] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, &mpvpaper, false)
+        .replace(
+            "niri_program = \"/bin/true\"",
+            &format!("niri_program = {niri:?}"),
+        )
+        .replace(
+            "video_interpolation = \"off\"",
+            "video_interpolation = \"oversample\"",
+        )
+        .replace(
+            "video_hardware_decode = true",
+            "video_hardware_decode = false",
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let video = parsed.playlists[0].entries[1].clone();
+    let mut driver = SystemDriver::new(parsed.renderer.clone());
+
+    driver.begin_apply();
+    without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
+    without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
+    driver.end_apply();
+    thread::sleep(Duration::from_millis(100));
+
+    assert_eq!(fs::read_to_string(&queries).unwrap(), "x");
+    let arguments = fs::read_to_string(&launches).unwrap();
+    assert_eq!(arguments.lines().count(), 2);
+    for expected in [
+        "video-sync=display-resample",
+        "interpolation=yes",
+        "display-fps-override=165.004",
+        "tscale=oversample",
+        "hwdec=no",
+    ] {
+        assert_eq!(arguments.matches(expected).count(), 2, "missing {expected}");
+    }
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn interpolation_off_never_queries_niri() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("video-interpolation-off");
+    let queried = root.join("queried");
+    let launches = root.join("launches");
+    let noctalia = root.join("noctalia");
+    let niri = root.join("niri");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&niri, format!("#!/bin/sh\ntouch {:?}\nexit 1\n", queried)).unwrap();
+    fs::write(
+        &mpvpaper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nsleep 30\n",
+            launches
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &niri, &mpvpaper] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, &mpvpaper, false).replace(
+        "niri_program = \"/bin/true\"",
+        &format!("niri_program = {niri:?}"),
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let video = parsed.playlists[0].entries[1].clone();
+    let mut driver = SystemDriver::new(parsed.renderer.clone());
+
+    without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    assert!(!queried.exists());
+    let arguments = fs::read_to_string(&launches).unwrap();
+    for absent in [
+        "video-sync=",
+        "interpolation=",
+        "display-fps-override=",
+        "tscale=",
+    ] {
+        assert!(!arguments.contains(absent), "unexpected {absent}");
+    }
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mixed_all_output_refresh_launches_unsmoothed() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("video-interpolation-mixed");
+    let launches = root.join("launches");
+    let noctalia = root.join("noctalia");
+    let niri = root.join("niri");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        &niri,
+        "#!/bin/sh\nprintf '%s\\n' '{\"eDP-1\":{\"current_mode\":0,\"modes\":[{\"refresh_rate\":165004}]},\"DP-1\":{\"current_mode\":0,\"modes\":[{\"refresh_rate\":60000}]}}'\n",
+    )
+    .unwrap();
+    fs::write(
+        &mpvpaper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nsleep 30\n",
+            launches
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &niri, &mpvpaper] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, &mpvpaper, false)
+        .replace(
+            "niri_program = \"/bin/true\"",
+            &format!("niri_program = {niri:?}"),
+        )
+        .replace(
+            "video_interpolation = \"off\"",
+            "video_interpolation = \"linear\"",
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let video = parsed.playlists[0].entries[1].clone();
+    let mut driver = SystemDriver::new(parsed.renderer.clone());
+
+    without_text_file_busy(|| driver.apply(&video, "", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let arguments = fs::read_to_string(&launches).unwrap();
+    assert!(arguments.contains(" ALL /tmp/two.mp4"));
+    for absent in [
+        "video-sync=",
+        "interpolation=",
+        "display-fps-override=",
+        "tscale=",
+    ] {
+        assert!(!arguments.contains(absent), "unexpected {absent}");
+    }
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn all_output_scene_uses_background_targets_for_every_live_connector() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("scene-all-outputs");
@@ -348,6 +517,7 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let document = config(&noctalia, Path::new("/bin/true"), true)
+        .replace("scene_fps = 30", "scene_fps = 75")
         .replace(
             "niri_program = \"/bin/true\"",
             &format!("niri_program = {niri:?}"),
@@ -366,6 +536,7 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
     let launched = fs::read_to_string(&events).unwrap();
     assert!(launched.contains("--screen-root DP-1 --bg 12345"));
     assert!(launched.contains("--screen-root eDP-1 --bg 12345"));
+    assert!(launched.contains("--fps 75"));
     assert_eq!(launched.matches("--screen-root").count(), 2);
     assert_eq!(launched.matches("--bg 12345").count(), 2);
     let words: Vec<_> = launched.split_whitespace().collect();
@@ -389,7 +560,9 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     let script = root.join("selective-failure");
     let mut executable = fs::File::create(&script).unwrap();
     executable
-        .write_all(b"#!/bin/sh\n[ \"$2\" != color-scheme-set ]\n")
+        .write_all(
+            b"#!/bin/sh\nif [ \"$2\" = color-scheme-set ]; then printf '%s\\n' 'palette was rejected' >&2; exit 1; fi\n",
+        )
         .unwrap();
     executable.sync_all().unwrap();
     drop(executable);
@@ -402,6 +575,10 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
 
     assert!(
         error.contains("noctalia exited"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("palette was rejected"),
         "unexpected error: {error}"
     );
     fs::remove_dir_all(root).unwrap();
@@ -424,7 +601,7 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
     fs::write(
         &engine,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nexit 42\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nprintf '%s\\n' 'unsupported scene shader' >&2\nexit 42\n",
             launches
         ),
     )
@@ -487,6 +664,10 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         .as_str()
         .unwrap()
         .contains("linux-wallpaperengine"));
+    assert!(status["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported scene shader"));
     assert_eq!(
         fs::read_to_string(&events)
             .unwrap()
@@ -526,7 +707,7 @@ fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
     fs::write(
         &mpvpaper,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nexit 23\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nprintf '%s\\n' 'video EGL startup failed' >&2\nexit 23\n",
             launches
         ),
     )
@@ -543,6 +724,7 @@ fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
         let failures = driver.poll_failures();
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("video entry \"video-two\""));
+        assert!(failures[0].contains("video EGL startup failed"));
         assert!(!driver.motion_active("eDP-1"));
     }
 
@@ -827,6 +1009,114 @@ fn stop_releases_motion_while_pause_keeps_it_resident_and_play_resumes() {
 }
 
 #[test]
+fn only_a_successful_apply_or_quit_supersedes_startup_readiness() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    let initial = runtime.authoritative_generation();
+    for (verb, argument) in [
+        ("status", None),
+        ("shuffle", Some("on")),
+        ("cycle", Some("off")),
+    ] {
+        assert!(
+            runtime
+                .handle(
+                    wall_in_one_service::protocol::Request {
+                        verb: verb.into(),
+                        argument: argument.map(str::to_string),
+                    },
+                    at,
+                )
+                .ok
+        );
+        assert_eq!(runtime.authoritative_generation(), initial);
+    }
+
+    runtime.apply_current().unwrap();
+    let applied = runtime.authoritative_generation();
+    assert_ne!(applied, initial);
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "pause".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    let paused = runtime.authoritative_generation();
+    assert_eq!(paused, applied);
+
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "play".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(runtime.authoritative_generation(), paused);
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "toggle".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    let toggle_paused = runtime.authoritative_generation();
+    assert_eq!(toggle_paused, paused);
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "stop".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(runtime.authoritative_generation(), toggle_paused);
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "quit".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_ne!(runtime.authoritative_generation(), toggle_paused);
+}
+
+#[test]
 fn failed_resume_stays_stopped_and_reports_the_renderer_error() {
     let parsed: Config = toml::from_str(&config(
         Path::new("/bin/true"),
@@ -989,5 +1279,591 @@ fn reload_of_inactive_authoring_state_does_not_reapply_the_wallpaper() {
 
     assert!(response.ok);
     assert!(events.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn losing_singleton_has_no_wallpaper_side_effects() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    let root = directory("singleton-before-apply");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let events = root.join("events");
+    let recorder = root.join("record");
+    fs::write(
+        &recorder,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\n", events),
+    )
+    .unwrap();
+    fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&config_path, config(&recorder, &recorder, false)).unwrap();
+
+    let mut owner = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+    let before = fs::read_to_string(&events).unwrap();
+
+    let contender = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .output()
+        .unwrap();
+
+    assert!(!contender.status.success());
+    assert!(String::from_utf8_lossy(&contender.stderr).contains("another service"));
+    assert_eq!(
+        fs::read_to_string(&events).unwrap(),
+        before,
+        "the process that loses singleton ownership must not invoke Noctalia or a renderer"
+    );
+    stop(&mut owner, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn initial_desktop_readiness_failure_is_visible_and_recovers_within_the_window() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("initial-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let ready = root.join("ready");
+    let events = root.join("events");
+    let noctalia = root.join("noctalia");
+    fs::write(
+        &noctalia,
+        format!(
+            "#!/bin/sh\nif [ ! -f {:?} ]; then printf '%s\\n' 'desktop bus is not ready yet' >&2; exit 75; fi\nprintf '%s\\n' \"$*\" >> {:?}\n",
+            ready, events
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        &config_path,
+        config(&noctalia, Path::new("/bin/true"), false),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+
+    let failed = request(&socket, "status", None);
+    let failed: serde_json::Value =
+        serde_json::from_str(failed["message"].as_str().unwrap()).unwrap();
+    assert!(failed["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("desktop bus is not ready yet"));
+    assert_eq!(request(&socket, "shuffle", Some("on"))["ok"], true);
+    assert_eq!(request(&socket, "cycle", Some("off"))["ok"], true);
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+
+    fs::write(&ready, "ready\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = request(&socket, "status", None);
+        let status: serde_json::Value =
+            serde_json::from_str(response["message"].as_str().unwrap()).unwrap();
+        if status["last_error"] == "" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "initial apply did not recover");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let applied = fs::read_to_string(&events).unwrap();
+    assert!(applied.contains("msg wallpaper-set /tmp/one.png"));
+
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pause_during_startup_readiness_applies_once_then_pauses_motion() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("pause-during-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let ready = root.join("ready");
+    let events = root.join("events");
+    let launches = root.join("video-launches");
+    let noctalia = root.join("noctalia");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(
+        &noctalia,
+        format!(
+            "#!/bin/sh\nif [ ! -f {:?} ]; then printf '%s\\n' 'desktop unavailable' >&2; exit 75; fi\nprintf '%s\\n' \"$*\" >> {:?}\n",
+            ready, events
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &mpvpaper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nsleep 30\n",
+            launches
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &mpvpaper] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, &mpvpaper, false).replace(
+        "id = \"still-one\"\nkind = \"still\"\nstill = \"/tmp/one.png\"",
+        "id = \"still-one\"\nkind = \"video\"\nstill = \"/tmp/one.png\"\nmotion = \"/tmp/one.mp4\"",
+    );
+    fs::write(&config_path, document).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+    assert_eq!(request(&socket, "pause", None)["message"], "paused");
+    fs::write(&ready, "ready\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = request(&socket, "status", None);
+        let status: serde_json::Value =
+            serde_json::from_str(response["message"].as_str().unwrap()).unwrap();
+        if status["last_error"] == ""
+            && status["playback_state"] == "paused"
+            && status["motion_active"] == true
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "paused startup apply did not recover"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let events_after_apply = fs::read_to_string(&events).unwrap();
+    let launch_deadline = Instant::now() + Duration::from_secs(3);
+    let launches_after_apply = loop {
+        if let Ok(contents) = fs::read_to_string(&launches) {
+            let count = contents.lines().count();
+            assert!(
+                count <= 1,
+                "startup recovery launched mpvpaper {count} times"
+            );
+            if count == 1 {
+                break contents;
+            }
+        }
+        assert!(
+            Instant::now() < launch_deadline,
+            "mpvpaper was tracked active but its launch record never appeared"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    thread::sleep(Duration::from_millis(700));
+    assert_eq!(fs::read_to_string(&events).unwrap(), events_after_apply);
+    assert_eq!(fs::read_to_string(&launches).unwrap(), launches_after_apply);
+
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stop_during_startup_readiness_applies_the_still_without_starting_motion() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("stop-during-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let ready = root.join("ready");
+    let events = root.join("events");
+    let launches = root.join("video-launches");
+    let noctalia = root.join("noctalia");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(
+        &noctalia,
+        format!(
+            "#!/bin/sh\nif [ ! -f {:?} ]; then printf '%s\\n' 'desktop unavailable' >&2; exit 75; fi\nprintf '%s\\n' \"$*\" >> {:?}\n",
+            ready, events
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &mpvpaper,
+        format!("#!/bin/sh\nprintf '%s\\n' launch >> {:?}\n", launches),
+    )
+    .unwrap();
+    for executable in [&noctalia, &mpvpaper] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, &mpvpaper, false).replace(
+        "id = \"still-one\"\nkind = \"still\"\nstill = \"/tmp/one.png\"",
+        "id = \"still-one\"\nkind = \"video\"\nstill = \"/tmp/one.png\"\nmotion = \"/tmp/one.mp4\"",
+    );
+    fs::write(&config_path, document).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+    assert_eq!(
+        request(&socket, "stop", None)["message"],
+        "stopped; paired still remains active"
+    );
+    fs::write(&ready, "ready\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = request(&socket, "status", None);
+        let status: serde_json::Value =
+            serde_json::from_str(response["message"].as_str().unwrap()).unwrap();
+        if status["last_error"] == "" && status["playback_state"] == "stopped" {
+            assert_eq!(status["motion_active"], false);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stopped startup apply did not recover"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(fs::read_to_string(&events)
+        .unwrap()
+        .contains("msg wallpaper-set /tmp/one.png"));
+    assert!(
+        !launches.exists(),
+        "stop must not start the video renderer while recovering the paired still"
+    );
+    let events_after_apply = fs::read_to_string(&events).unwrap();
+    thread::sleep(Duration::from_millis(700));
+    assert_eq!(fs::read_to_string(&events).unwrap(), events_after_apply);
+    assert!(!launches.exists());
+
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("initial-niri-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let ready = root.join("ready");
+    let launches = root.join("launches");
+    let noctalia = root.join("noctalia");
+    let niri = root.join("niri");
+    let engine = root.join("linux-wallpaperengine");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        &niri,
+        format!(
+            "#!/bin/sh\nif [ ! -f {:?} ]; then printf '%s\\n' 'niri IPC is not ready yet' >&2; exit 75; fi\nprintf '%s\\n' '{{\"eDP-1\":{{\"name\":\"eDP-1\"}}}}'\n",
+            ready
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nprintf '%s\\n' 'scene renderer crashed once' >&2\nexit 42\n",
+            launches
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &niri, &engine] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, &noctalia, true)
+        .replace("default_playlist = \"day\"", "default_playlist = \"night\"")
+        .replace(
+            "niri_program = \"/bin/true\"",
+            &format!("niri_program = {niri:?}"),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!("linux_wallpaperengine_program = {engine:?}"),
+        );
+    fs::write(&config_path, document).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+
+    let failed = request(&socket, "status", None);
+    let failed: serde_json::Value =
+        serde_json::from_str(failed["message"].as_str().unwrap()).unwrap();
+    assert!(failed["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("niri IPC is not ready yet"));
+
+    fs::write(&ready, "ready\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if launches.exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scene was not launched after niri recovered"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let failure_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = request(&socket, "status", None);
+        let status: serde_json::Value =
+            serde_json::from_str(status["message"].as_str().unwrap()).unwrap();
+        if status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("scene renderer crashed once")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < failure_deadline,
+            "renderer crash was not surfaced in status"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        fs::read_to_string(&launches).unwrap().lines().count(),
+        1,
+        "a renderer that launched and crashed must never enter the readiness retry loop"
+    );
+
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn successful_reload_apply_supersedes_the_pending_startup_retry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("reload-cancels-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let failed = root.join("not-ready");
+    let working = root.join("working");
+    let events = root.join("events");
+    fs::write(
+        &failed,
+        "#!/bin/sh\nprintf '%s\\n' 'desktop unavailable' >&2\nexit 75\n",
+    )
+    .unwrap();
+    fs::write(
+        &working,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\n", events),
+    )
+    .unwrap();
+    for executable in [&failed, &working] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(&config_path, config(&failed, &failed, false)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+
+    fs::write(&config_path, config(&working, &working, false)).unwrap();
+    assert_eq!(request(&socket, "reload", None)["ok"], true);
+    let after_reload = fs::read_to_string(&events).unwrap();
+    thread::sleep(Duration::from_millis(700));
+    assert_eq!(
+        fs::read_to_string(&events).unwrap(),
+        after_reload,
+        "the obsolete startup retry reapplied after an authoritative reload"
+    );
+
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reload_without_an_apply_keeps_the_startup_readiness_retry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("quiet-reload-keeps-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let ready = root.join("ready");
+    let events = root.join("events");
+    let helper = root.join("helper");
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nif [ ! -f {:?} ]; then printf '%s\\n' 'desktop unavailable' >&2; exit 75; fi\nprintf '%s\\n' \"$*\" >> {:?}\n",
+            ready, events
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    let original = config(&helper, &helper, false);
+    fs::write(&config_path, &original).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+
+    fs::write(
+        &config_path,
+        original.replace(
+            "cycle_interval_seconds = 300",
+            "cycle_interval_seconds = 301",
+        ),
+    )
+    .unwrap();
+    assert_eq!(request(&socket, "reload", None)["ok"], true);
+    fs::write(&ready, "ready\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !events.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "non-applying reload incorrectly canceled readiness recovery"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn quit_during_a_pending_readiness_attempt_never_applies_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("quit-cancels-readiness");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let attempts = root.join("attempts");
+    let helper = root.join("helper");
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' attempt >> {0:?}\ncount=$(wc -l < {0:?})\nif [ \"$count\" -ge 2 ]; then sleep 1; fi\nprintf '%s\\n' 'desktop unavailable' >&2\nexit 75\n",
+            attempts
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&config_path, config(&helper, &helper, false)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let count = fs::read_to_string(&attempts)
+            .map(|contents| contents.lines().count())
+            .unwrap_or(0);
+        if count >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "second readiness attempt did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_eq!(request(&socket, "quit", None)["ok"], true);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "service did not exit after quit");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(&attempts).unwrap().lines().count(),
+        2,
+        "service retried an apply after acknowledging quit"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exhausted_startup_readiness_is_fatal_for_systemd_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    let root = directory("readiness-deadline");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let helper = root.join("helper");
+    let stderr_path = root.join("stderr");
+    fs::write(
+        &helper,
+        "#!/bin/sh\nprintf '%s\\n' 'desktop stayed unavailable' >&2\nexit 75\n",
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&config_path, config(&helper, &helper, false)).unwrap();
+    let stderr = fs::File::create(&stderr_path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+
+    let deadline = Instant::now() + Duration::from_secs(11);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "service did not fail after its bounded readiness window"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(!status.success());
+    let stderr = fs::read_to_string(&stderr_path).unwrap();
+    assert!(stderr.contains("readiness deadline expired after 8 seconds"));
+    assert!(stderr.contains("desktop stayed unavailable"));
+    assert!(!socket.exists());
     fs::remove_dir_all(root).unwrap();
 }

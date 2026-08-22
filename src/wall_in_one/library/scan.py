@@ -51,7 +51,7 @@ def _read_marker(directory: Path) -> dict[str, object] | None:
             if marker.stat().st_size > pairing.MAX_SIDECAR_BYTES:
                 continue
             document = json.loads(marker.read_bytes())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         if isinstance(document, dict):
             return document
@@ -102,7 +102,7 @@ def wallpaper_directory_from_noctalia() -> Path | None:
     try:
         with paths.noctalia_settings_path().open("rb") as handle:
             document = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError, tomllib.TOMLDecodeError:
         return None
     section = document.get("wallpaper")
     if not isinstance(section, dict):

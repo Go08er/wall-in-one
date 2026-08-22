@@ -80,7 +80,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a v1 runtime config is regenerated headlessly during upgrade"):
         machine.succeed(
-            "grep -Fx 'schema_version = 2' ${home}/.local/state/wall-in-one/runtime.toml"
+            "grep -Fx 'schema_version = 3' ${home}/.local/state/wall-in-one/runtime.toml"
         )
         machine.fail("grep -F 'upgrade_fixture' ${home}/.local/state/wall-in-one/runtime.toml")
         assert "dev.goober.WallInOne" not in niri("windows")

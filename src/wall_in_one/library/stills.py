@@ -227,7 +227,7 @@ def _record_beside(video: Path, still: Path, root: Path) -> None:
     """
     try:
         inside = video.is_relative_to(root)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         inside = False
     if not inside:
         return

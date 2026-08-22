@@ -67,6 +67,8 @@ def test_the_real_reply_from_this_machine_parses() -> None:
     assert (found[0].width, found[0].height) == (1706, 1066)
     assert found[0].scale == 1.5
     assert (found[0].physical_width, found[0].physical_height) == (2560, 1600)
+    assert found[0].refresh_millihz == 165000
+    assert outputs.unambiguous_refresh_hz(found, "eDP-1") == 165.0
 
 
 def test_two_screens_come_back_in_a_fixed_order() -> None:
@@ -78,6 +80,33 @@ def test_two_screens_come_back_in_a_fixed_order() -> None:
     assert outputs.names(outputs.parse(TWO)) == ("DP-2", "eDP-1")
     reversed_document = dict(reversed(list(TWO.items())))
     assert outputs.names(outputs.parse(reversed_document)) == ("DP-2", "eDP-1")
+
+
+def test_all_outputs_requires_every_refresh_to_be_known_and_equal() -> None:
+    same = (
+        outputs.Output("DP-1", refresh_millihz=60000),
+        outputs.Output("DP-2", refresh_millihz=60000),
+    )
+    mixed = (same[0], outputs.Output("DP-2", refresh_millihz=165000))
+    missing = (same[0], outputs.Output("DP-2"))
+
+    assert outputs.unambiguous_refresh_hz(same) == 60.0
+    assert outputs.unambiguous_refresh_hz(mixed) is None
+    assert outputs.unambiguous_refresh_hz(missing) is None
+    assert outputs.unambiguous_refresh_hz(same, "DP-2") == 60.0
+    assert outputs.unambiguous_refresh_hz(same, "HDMI-A-1") is None
+
+
+def test_implausible_refresh_is_treated_as_unknown() -> None:
+    document = {
+        "DP-1": {
+            "current_mode": 0,
+            "modes": [{"width": 1, "height": 1, "refresh_rate": 2_000_000}],
+        }
+    }
+    found = outputs.parse(document)
+    assert found[0].refresh_millihz == 0
+    assert outputs.unambiguous_refresh_hz(found) is None
 
 
 def test_the_label_always_carries_the_connector() -> None:
@@ -147,11 +176,8 @@ def test_discover_reads_what_niri_prints(monkeypatch: pytest.MonkeyPatch) -> Non
     assert outputs.names(outputs.discover()) == ("eDP-1",)
 
 
-def test_no_niri_means_one_unnamed_screen(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty is what the app did before this module, and means "everywhere".
-
-    Which is exactly right on a compositor that is not niri.
-    """
+def test_no_niri_means_no_discovered_connectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty lets each renderer choose its own safe no-connector fallback."""
     monkeypatch.setattr(outputs, "is_available", lambda: False)
     assert outputs.discover() == ()
 

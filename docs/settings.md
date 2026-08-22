@@ -18,7 +18,13 @@ settings file should degrade to something usable, not stop the app starting.
 | `video_muted` | Mute video wallpapers. Takes effect immediately. | `true` |
 | `video_volume` | 0-100. Kept while muted, so unmuting lands where you left it. | `100` |
 | `video_when_hidden` | What a video does when a window covers it: `pause`, `stop` or `play`. Takes effect on the next video. | `"pause"` |
+| `video_hardware_decode` | Let mpv choose a hardware decoder. Turn off only to diagnose corruption, tearing or driver trouble. | `true` |
+| `video_interpolation` | Low-frame-rate smoothing: `off`, `oversample` or `linear`. Non-off modes use display-resample with the unambiguous active monitor refresh; mixed-rate All outputs stays unsmoothed. | `"off"` |
+| `scene_fps` | Native linux-wallpaperengine render-rate limit, 1-240 FPS. Video wallpapers keep their source rate because an mpv post-decode FPS filter does not reduce decoding work. | `30` |
 | `output` | Connector the wallpaper is applied to, e.g. `eDP-1`. Empty means every output. | `""` |
+| `own_scene_renderer` | Let Wall-in-One start linux-wallpaperengine for true Workshop scenes. Existing ownership of the target output is still respected. | `true` |
+| `scan_workshop` | Include Wallpaper Engine items found in Steam's Workshop libraries. | `true` |
+| `active_playlist` | Stable id of the default named playlist when no schedule rule matches. Empty uses the built-in all-media playlist. Runtime overrides do not rewrite it. | `""` |
 
 The Wallhaven key is not in here -- it lives in its own 0600 file. Neither are
 the favourites, which are app-maintained state rather than something you type;

@@ -9,6 +9,7 @@ discovering by hand.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -470,6 +471,59 @@ def test_a_new_search_replaces_the_grid_rather_than_growing_it(
     dialog.start_search(page=1)
 
     assert _settle(lambda: [c.candidate.identifier for c in dialog._cards] == ["zzz999"])
+
+
+def test_switching_provider_discards_an_in_flight_old_provider_result(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow Wallhaven answer must never appear under MotionBGS controls."""
+    started = threading.Event()
+    release = threading.Event()
+    asked: list[str] = []
+
+    def search(name: str, _query: object) -> SearchResult:
+        asked.append(name)
+        if name == "wallhaven":
+            started.set()
+            assert release.wait(2)
+            return _result("old-wallhaven", page=1)
+        return _result("new-motionbgs", page=1)
+
+    monkeypatch.setattr(dialog._browser, "search", search)
+    dialog.start_search(page=1)
+    assert started.wait(2)
+
+    dialog._providers.set_selected(1)
+    assert dialog.provider_name == "motionbgs"
+    assert dialog._stack.get_visible_child_name() == "empty"
+    assert dialog._cards == []
+
+    # A new-provider request may be queued while the old worker finishes. Its
+    # generation wins; the old completion is ignored when it reaches GTK.
+    dialog.start_search(page=1)
+    release.set()
+    assert _settle(
+        lambda: [card.candidate.identifier for card in dialog._cards] == ["new-motionbgs"]
+    )
+    assert asked == ["wallhaven", "motionbgs"]
+
+
+def test_changing_library_roots_retargets_browse_without_losing_the_query(
+    dialog: browse_dialog.BrowseDialog,
+    tmp_path: Path,
+) -> None:
+    dialog._entry.set_text("mountains")
+    dialog._show_result(_result("aaa111", page=1), page=1)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+
+    dialog.update_library_roots((replacement,))
+
+    assert dialog._browser.download_root() == replacement
+    assert dialog._entry.get_text() == "mountains"
+    assert dialog._cards == []
+    assert dialog._stack.get_visible_child_name() == "empty"
+    assert dialog._status.get_title() == "Library folders changed"
 
 
 def test_failing_to_load_more_keeps_what_is_already_shown(

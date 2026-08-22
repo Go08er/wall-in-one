@@ -33,12 +33,25 @@ playlist or changing only a timer keeps the existing renderer child; changing
 the active pairing, output, renderer options, or dynamics performs the normal
 break-before-make hand-over.
 
-Schema 2 contains `schema_version`, `default_playlist`, `[settings]`,
+Schema 3 contains `schema_version`, `default_playlist`, `[settings]`,
 `[renderer]`, `[[playlists]]`, `[[schedules]]`, and `[[displays]]`. Executable
 paths—including niri for live connector discovery—and media paths are
 absolute. Every playlist entry has a stable `id`, `kind`,
 absolute `still`, and inline `palette`. A video additionally has an absolute
 `motion`; a scene has a numeric `scene_id`.
+
+The renderer section carries `scene_fps`, which linux-wallpaperengine consumes
+through its native `--fps N` option. `video_hardware_decode` selects mpv's
+`hwdec=auto` or `hwdec=no`. `video_interpolation` is `off`, `oversample`, or
+`linear`. A non-off mode is applied only as the complete display-synchronised
+set (`video-sync=display-resample`, `interpolation=yes`, a live niri-derived
+`display-fps-override`, and the selected `tscale`). If the selected outputs do
+not all report one unambiguous refresh, playback stays unsmoothed rather than
+using a guessed or partial configuration.
+
+Video wallpapers still keep their source rate: mpv's `fps` filter runs after
+decoding, so it is not presented as a decoder-performance control without
+measurements proving an end-to-end benefit.
 
 ```toml
 palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "auto" }

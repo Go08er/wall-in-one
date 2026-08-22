@@ -25,7 +25,11 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-        python = pkgs.python3;
+        # InterpreterPoolExecutor is the measured isolation boundary between
+        # pure-Python provider parsing and GTK.  Pin the interpreter that owns
+        # that stdlib API instead of relying on nixpkgs' moving `python3`
+        # alias to happen to resolve to 3.14.
+        python = pkgs.python314;
 
         # The GApplication id, and so the Wayland app-id, the desktop entry's
         # filename and the icon's. It is `wall_in_one.paths.APPLICATION_ID`;

@@ -180,7 +180,7 @@ def _read(path: Path) -> tuple[Favourites, str | None]:
 
     try:
         payload = json.loads(text)
-    except (ValueError, RecursionError):
+    except ValueError, RecursionError:
         return Favourites(), f"{path.name} is not readable, so no favourites were loaded"
     if not isinstance(payload, dict):
         return Favourites(), f"{path.name} is not a favourites file"

@@ -34,9 +34,10 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import quote_plus, urljoin, urlsplit, urlunsplit
 
+from wall_in_one import backend
 from wall_in_one.library.model import Kind
+from wall_in_one.providers import backend_workers, http
 from wall_in_one.providers import download as download_module
-from wall_in_one.providers import http
 from wall_in_one.providers.base import (
     MAX_RESULTS,
     CandidateDetail,
@@ -851,14 +852,17 @@ class MotionBgs:
                     markup, effective = self._get_html(tag_url, "listing")
         else:
             markup, effective = self._get_html(source_url, "listing")
-        listing = parse_listing(
-            markup,
-            mode=parse_mode,
-            query=parse_query,
-            genre=parse_genre,
-            page=page,
-            source_url=effective,
-            limit=limit,
+        listing = backend_workers.value(
+            backend.run(
+                backend_workers.motionbgs_listing,
+                markup,
+                parse_mode,
+                parse_query,
+                parse_genre,
+                page,
+                effective,
+                limit,
+            )
         )
         self._listings.put(key, listing)
         return _to_result(listing, source_url, cached_flag=False)
@@ -888,7 +892,7 @@ class MotionBgs:
         markup, effective = self._get_html(source_url, "details")
         if site_path(effective) != site_path(source_url):
             raise ProviderError("redirects", "detail request redirected to another page")
-        detail = parse_detail(markup, slug)
+        detail = backend_workers.value(backend.run(backend_workers.motionbgs_detail, markup, slug))
         self._details.put(slug, detail)
         return detail
 

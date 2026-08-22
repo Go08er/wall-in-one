@@ -15,16 +15,14 @@ from __future__ import annotations
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import Final, Generic, TypeVar
+from typing import Final
 
 #: Search pages are large; details are small and re-read constantly.
 DEFAULT_MAX_ENTRIES: Final = 32
 DEFAULT_TTL_SECONDS: Final = 15 * 60
 
-Value = TypeVar("Value")
 
-
-class TtlCache(Generic[Value]):
+class TtlCache[Value]:
     """Least-recently-used, with a per-entry expiry."""
 
     def __init__(

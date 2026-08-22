@@ -148,7 +148,8 @@ def test_the_systemd_unit_runs_the_windowless_service() -> None:
     assert service["ExecStart"] == "wall-in-one-service --wait-for-config"
     assert service["Restart"] == "on-failure"
     assert service["RestartSec"] == "5"
-    assert parser["Unit"]["StartLimitIntervalSec"] == "0"
+    assert parser["Unit"]["StartLimitIntervalSec"] == "60"
+    assert parser["Unit"]["StartLimitBurst"] == "5"
     assert parser["Install"]["WantedBy"] == "graphical-session.target"
 
 

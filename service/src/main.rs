@@ -1,9 +1,9 @@
 use chrono::Local;
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::BufReader;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +15,27 @@ use wall_in_one_service::renderer::SystemDriver;
 use wall_in_one_service::runtime::Runtime;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
+const STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(8);
+const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+struct SocketOwner {
+    listener: UnixListener,
+    path: PathBuf,
+    _lock: File,
+}
+
+impl Drop for SocketOwner {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+struct StartupRetry {
+    deadline: Instant,
+    next_attempt: Instant,
+    first_error: String,
+    authoritative_generation: u64,
+}
 
 extern "C" fn terminate(_: libc::c_int) {
     TERMINATE.store(true, Ordering::Relaxed);
@@ -131,6 +152,174 @@ fn wait_for_config(path: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
+fn lock_path(socket: &Path) -> PathBuf {
+    let mut name = socket.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn claim_socket(path: &Path) -> Result<SocketOwner, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("socket {} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create socket directory: {error}"))?;
+    let lock_path = lock_path(path);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "cannot open singleton lock {}: {error}",
+                lock_path.display()
+            )
+        })?;
+    if !lock
+        .metadata()
+        .map_err(|error| format!("cannot inspect singleton lock: {error}"))?
+        .is_file()
+    {
+        return Err(format!(
+            "refusing non-regular singleton lock {}",
+            lock_path.display()
+        ));
+    }
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("cannot secure singleton lock: {error}"))?;
+    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if locked != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(format!("another service owns {}", path.display()));
+        }
+        return Err(format!(
+            "cannot lock singleton guard {}: {error}",
+            lock_path.display()
+        ));
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if UnixStream::connect(path).is_ok() {
+                return Err(format!(
+                    "another service is listening on {}",
+                    path.display()
+                ));
+            }
+            if !metadata.file_type().is_socket() {
+                return Err(format!(
+                    "refusing to replace non-socket path {}",
+                    path.display()
+                ));
+            }
+            fs::remove_file(path)
+                .map_err(|error| format!("cannot remove stale socket: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot inspect socket {}: {error}", path.display())),
+    }
+    let listener = UnixListener::bind(path)
+        .map_err(|error| format!("cannot bind {}: {error}", path.display()))?;
+    if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        let _ = fs::remove_file(path);
+        return Err(format!("cannot secure socket: {error}"));
+    }
+    if let Err(error) = listener.set_nonblocking(true) {
+        let _ = fs::remove_file(path);
+        return Err(error.to_string());
+    }
+    Ok(SocketOwner {
+        listener,
+        path: path.to_path_buf(),
+        _lock: lock,
+    })
+}
+
+fn startup_readiness_error(error: &str) -> bool {
+    [
+        "cannot run noctalia",
+        "noctalia exited",
+        "noctalia timed out",
+        "cannot run niri outputs",
+        "niri outputs exited",
+        "niri outputs timed out",
+        "niri outputs returned invalid JSON",
+        "niri reported no usable outputs",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
+}
+
+fn initial_apply(runtime: &mut Runtime<SystemDriver>, now: Instant) -> Option<StartupRetry> {
+    match runtime.apply_current() {
+        Ok(_) => None,
+        Err(error) if startup_readiness_error(&error) => {
+            eprintln!("wall-in-one-service: initial apply waiting for desktop readiness: {error}");
+            Some(StartupRetry {
+                deadline: now + STARTUP_RETRY_WINDOW,
+                next_attempt: now + STARTUP_RETRY_INTERVAL,
+                first_error: error,
+                authoritative_generation: runtime.authoritative_generation(),
+            })
+        }
+        Err(error) => {
+            eprintln!("wall-in-one-service: initial apply: {error}");
+            None
+        }
+    }
+}
+
+fn retry_initial_apply(
+    retry: &mut Option<StartupRetry>,
+    runtime: &mut Runtime<SystemDriver>,
+    now: Instant,
+) -> Result<(), String> {
+    let Some(pending) = retry.as_mut() else {
+        return Ok(());
+    };
+    if runtime.authoritative_generation() != pending.authoritative_generation {
+        *retry = None;
+        return Ok(());
+    }
+    if now < pending.next_attempt {
+        return Ok(());
+    }
+    if now >= pending.deadline {
+        return Err(format!(
+            "initial apply readiness deadline expired after {} seconds; first error: {}",
+            STARTUP_RETRY_WINDOW.as_secs(),
+            pending.first_error
+        ));
+    }
+    match runtime.apply_current() {
+        Ok(_) => {
+            eprintln!("wall-in-one-service: desktop became ready; initial wallpaper applied");
+            *retry = None;
+        }
+        Err(error) if startup_readiness_error(&error) && now < pending.deadline => {
+            pending.next_attempt = now + STARTUP_RETRY_INTERVAL;
+        }
+        Err(error) => {
+            if now >= pending.deadline {
+                return Err(format!(
+                    "initial apply readiness deadline expired after {} seconds; first error: {}; last error: {error}",
+                    STARTUP_RETRY_WINDOW.as_secs(),
+                    pending.first_error
+                ));
+            } else {
+                eprintln!("wall-in-one-service: initial apply stopped retrying: {error}");
+            }
+            *retry = None;
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let options = parse()?;
     install_signal_handlers();
@@ -145,31 +334,11 @@ fn run() -> Result<(), String> {
         driver,
         Local::now().naive_local(),
     )?;
-    if let Err(error) = runtime.apply_current() {
-        eprintln!("wall-in-one-service: initial apply: {error}");
-    }
-
-    if let Some(parent) = options.socket.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create socket directory: {error}"))?;
-    }
-    if options.socket.exists() {
-        if UnixStream::connect(&options.socket).is_ok() {
-            return Err(format!(
-                "another service is listening on {}",
-                options.socket.display()
-            ));
-        }
-        fs::remove_file(&options.socket)
-            .map_err(|error| format!("cannot remove stale socket: {error}"))?;
-    }
-    let listener = UnixListener::bind(&options.socket)
-        .map_err(|error| format!("cannot bind {}: {error}", options.socket.display()))?;
-    fs::set_permissions(&options.socket, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("cannot secure socket: {error}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| error.to_string())?;
+    // Own and secure the public endpoint before applying anything. A losing
+    // process must have exactly zero wallpaper or renderer side effects.
+    let socket = claim_socket(&options.socket)?;
+    let listener = &socket.listener;
+    let mut startup_retry = initial_apply(&mut runtime, Instant::now());
     let mut known = fingerprint(&options.config);
     let mut next_config_check = Instant::now() + Duration::from_secs(1);
     while !runtime.should_quit() && !TERMINATE.load(Ordering::Relaxed) {
@@ -188,6 +357,9 @@ fn run() -> Result<(), String> {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => eprintln!("wall-in-one-service: accept: {error}"),
             }
+        }
+        if runtime.should_quit() || TERMINATE.load(Ordering::Relaxed) {
+            break;
         }
         let now = Instant::now();
         if now >= next_config_check {
@@ -211,11 +383,11 @@ fn run() -> Result<(), String> {
             next_config_check = now + Duration::from_secs(1);
         }
         runtime.tick(Local::now().naive_local(), now);
+        retry_initial_apply(&mut startup_retry, &mut runtime, now)?;
         thread::sleep(Duration::from_millis(25));
     }
     runtime.shutdown();
-    drop(listener);
-    let _ = fs::remove_file(&options.socket);
+    drop(socket);
     Ok(())
 }
 

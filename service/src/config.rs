@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -62,6 +62,7 @@ pub struct RendererSettings {
     pub layer: String,
     pub video_when_hidden: VideoWhenHidden,
     pub video_hardware_decode: bool,
+    pub video_interpolation: VideoInterpolation,
     pub video_muted: bool,
     pub video_volume: u8,
     pub scene_fps: u16,
@@ -78,6 +79,25 @@ pub enum VideoWhenHidden {
     Pause,
     Stop,
     Play,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoInterpolation {
+    #[default]
+    Off,
+    Oversample,
+    Linear,
+}
+
+impl VideoInterpolation {
+    pub fn tscale(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Oversample => Some("oversample"),
+            Self::Linear => Some("linear"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

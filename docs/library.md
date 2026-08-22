@@ -138,13 +138,19 @@ It is ignored whenever that would leave nothing to rotate through: a manager
 that stops changing the wallpaper is a worse answer to "you have no favourites
 right now" than one that falls back to the whole library and keeps working.
 
-## Taking one away
+## Using or taking away an item
 
-Each tile has an actions button in its corner, and the same menu opens on a
-right-click anywhere on the tile:
+Each media tile has three deliberately different entry points:
 
-- **Set as wallpaper** -- the same thing activating the tile does.
-- **Remove**, or **Move to Trash**.
+- **Left-click** opens that item's full pairing editor: representative still,
+  moving source and palette policy.
+- **Right-click** plays it immediately through the visible one-entry **Quick
+  choice** playlist. It does not open a second copy of the actions menu.
+- The **actions button** in the tile's corner opens the keyboard-reachable menu
+  for Quick choice, favourites, representative still, colours, reset and
+  removal. Entries which do not apply to that item are omitted.
+
+The last menu entry is **Remove** or **Move to Trash**.
 
 Which of the two you get is named for what it does to *that* file, because one
 of them cannot be undone:

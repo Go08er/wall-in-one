@@ -8,7 +8,8 @@ was written, and the survey changed the design:
   drives. They are ordinary video wallpapers that happen to live under Steam.
 - **4 are `scene`**, and their `file` names a `scene.json` that *does not exist*
   -- the content is packed inside `scene.pkg`. Those genuinely require
-  `linux-wallpaperengine` to render, and are reported here but not yet playable.
+  `linux-wallpaperengine`; the app uses it for both desktop playback and a
+  full-resolution representative still without writing into Steam's tree.
 - `type` is spelled both `video` and `Video`, so it is compared case-folded.
   Trusting the casing would have silently hidden eight wallpapers.
 - The preview is a `.gif` for 46 of them. A gif is *not* a still -- this app
@@ -236,11 +237,12 @@ def videos(items: Iterable[WorkshopItem]) -> tuple[WorkshopItem, ...]:
 
 
 def unplayable(items: Iterable[WorkshopItem]) -> tuple[WorkshopItem, ...]:
-    """The ones that need a renderer this app does not have yet.
+    """The ones that are not directly playable media files.
 
-    Reported rather than hidden. A scene silently missing from the library
-    looks like the app failing to find it, which is a different bug from the
-    one that is actually there.
+    This is kept as the historical Workshop-classification helper: videos have
+    an ordinary media file while scenes require linux-wallpaperengine to read
+    ``scene.pkg``. Callers still need the latter items so they are reported,
+    never hidden from the library.
     """
     return tuple(item for item in items if not item.is_video)
 

@@ -3,7 +3,8 @@ Description=Wall-in-One wallpaper rotation service
 Documentation=https://github.com/Go08er/wall-in-one
 PartOf=graphical-session.target
 After=graphical-session.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

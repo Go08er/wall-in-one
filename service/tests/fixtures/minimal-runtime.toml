@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 default_playlist = "one"
 
 [settings]
@@ -16,6 +16,7 @@ own_scene_renderer = false
 layer = "background"
 video_when_hidden = "pause"
 video_hardware_decode = true
+video_interpolation = "off"
 video_muted = true
 video_volume = 0
 scene_fps = 30

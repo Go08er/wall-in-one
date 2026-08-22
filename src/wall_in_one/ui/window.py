@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, TypeVar
+from typing import TYPE_CHECKING, Any, Final
 
 import gi
 
@@ -68,10 +68,8 @@ _SHORTCUTS: Final = _sections()
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
 
-_Choice = TypeVar("_Choice")
 
-
-def _chosen(dropdown: Gtk.DropDown, choices: tuple[_Choice, ...]) -> _Choice:
+def _chosen[Choice](dropdown: Gtk.DropDown, choices: tuple[Choice, ...]) -> Choice:
     """What ``dropdown`` is pointing at.
 
     GTK answers `GTK_INVALID_LIST_POSITION` when nothing is selected, which is
@@ -124,6 +122,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_summary = ""
         self._runtime_error = ""
         self._runtime_controls_loading = False
+        self._runtime_available = False
+        self._runtime_busy = False
+        self._runtime_status_text = "Checking service…"
+        self._runtime_navigation_buttons: list[Gtk.Button] = []
         self._playback_state = "playing"
 
         self.set_content(self._build_content())
@@ -142,12 +144,13 @@ class MainWindow(Adw.ApplicationWindow):
         navigation.add_css_class("linked")
         for icon, tooltip, verb in (
             ("go-previous-symbolic", "Previous wallpaper", "previous"),
-            ("media-playlist-shuffle-symbolic", "Random wallpaper", "random"),
+            ("applications-games-symbolic", "Random wallpaper", "random"),
             ("go-next-symbolic", "Next wallpaper", "next"),
         ):
             button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
             navigate = self._make_navigator(verb)
             button.connect("clicked", lambda _button, run=navigate: run())
+            self._runtime_navigation_buttons.append(button)
             navigation.append(button)
         header.pack_start(navigation)
         header.pack_start(self._build_runtime_controls())
@@ -271,7 +274,7 @@ class MainWindow(Adw.ApplicationWindow):
         transport = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, homogeneous=True)
         for icon, tooltip, verb in (
             ("go-previous-symbolic", "Previous wallpaper", "previous"),
-            ("media-playlist-shuffle-symbolic", "Random wallpaper", "random"),
+            ("applications-games-symbolic", "Random wallpaper", "random"),
         ):
             button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
             button.connect("clicked", self._make_runtime_button(verb))
@@ -297,6 +300,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_cycle = self._runtime_switch_row(content, "Cycle", "cycle")
         self._runtime_shuffle = self._runtime_switch_row(content, "Shuffle", "shuffle")
         self._runtime_controls = content
+        self._runtime_controls.set_sensitive(False)
         popover = Gtk.Popover()
         popover.set_child(content)
         self._runtime_menu = Gtk.MenuButton(
@@ -331,10 +335,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._run_runtime_action(verb, "on" if switch.get_active() else "off")
 
     def _run_runtime_action(self, verb: str, argument: str | None = None) -> None:
-        response = self._app.runtime_action(verb, argument)
-        if not response.ok:
-            self.report(response.message)
-        self._app.refresh_runtime_status()
+        self._app.runtime_action_async(verb, argument)
 
     def _build_library_bar(self) -> Gtk.Widget:
         """Search, kind, and sort, on a row of their own under the header.
@@ -399,9 +400,7 @@ class MainWindow(Adw.ApplicationWindow):
         def navigate() -> None:
             # Runtime state belongs to the Rust service. The application keeps
             # a compatibility fallback until every installation has it.
-            response = self._app.runtime_action(verb)
-            if not response.ok:
-                self.report(response.message)
+            self._app.runtime_action_async(verb)
 
         return navigate
 
@@ -453,9 +452,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _quick_apply(self, item: MediaItem) -> None:
         """Right-click Media through the explicit one-entry Quick choice list."""
-        response = self._app.play_item(item)
-        if not response.ok:
-            self.report(response.message)
+        self._app.play_item_async(item)
 
     def open_preferences(self) -> None:
         self.show_page("settings")
@@ -488,7 +485,10 @@ class MainWindow(Adw.ApplicationWindow):
         return self._settings
 
     def apply_settings(self, settings: config.Settings) -> None:
+        previous = self._settings
         self._settings = settings
+        if settings.roots != previous.roots:
+            self._browse_page.update_library_roots(settings.roots)
 
     # -- display ---------------------------------------------------------
 
@@ -576,6 +576,16 @@ class MainWindow(Adw.ApplicationWindow):
             summary += f" · {self._runtime_summary}"
         self._subtitle.set_subtitle(summary)
 
+    def set_runtime_busy(self, busy: bool) -> None:
+        """Make one in-flight playback command visible and non-repeatable."""
+        self._runtime_busy = busy
+        for button in self._runtime_navigation_buttons:
+            button.set_sensitive(not busy)
+        self._runtime_controls.set_sensitive(self._runtime_available and not busy)
+        self._runtime_control_status.set_text(
+            "Sending playback command…" if busy else self._runtime_status_text
+        )
+
     def show_runtime_status(self, status: dict[str, object]) -> None:
         """Show service-owned truth rather than only the last authored choice."""
         playlist = status.get("playlist")
@@ -601,7 +611,8 @@ class MainWindow(Adw.ApplicationWindow):
                 self._runtime_shuffle.set_active(shuffle)
         finally:
             self._runtime_controls_loading = False
-        self._runtime_controls.set_sensitive(True)
+        self._runtime_available = True
+        self._runtime_controls.set_sensitive(not self._runtime_busy)
         if state == "playing":
             self._runtime_play.set_icon_name("media-playback-pause-symbolic")
             self._runtime_play.set_tooltip_text("Pause motion")
@@ -618,9 +629,11 @@ class MainWindow(Adw.ApplicationWindow):
             )
         cycle_text = "on" if cycle is True else "off"
         shuffle_text = "on" if shuffle is True else "off"
-        self._runtime_control_status.set_text(
+        self._runtime_status_text = (
             f"{state.capitalize()} · cycle {cycle_text} · shuffle {shuffle_text}"
         )
+        if not self._runtime_busy:
+            self._runtime_control_status.set_text(self._runtime_status_text)
         last_error = status.get("last_error")
         if isinstance(last_error, str) and last_error:
             self._runtime_summary = f"static fallback · {last_error}"
@@ -636,8 +649,11 @@ class MainWindow(Adw.ApplicationWindow):
         """Say plainly that authoring works but automation currently does not."""
         self._runtime_error = ""
         self._runtime_summary = "runtime unavailable"
+        self._runtime_available = False
         self._runtime_controls.set_sensitive(False)
-        self._runtime_control_status.set_text("Runtime unavailable")
+        self._runtime_status_text = "Runtime unavailable"
+        if not self._runtime_busy:
+            self._runtime_control_status.set_text(self._runtime_status_text)
         self._update_subtitle()
 
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:

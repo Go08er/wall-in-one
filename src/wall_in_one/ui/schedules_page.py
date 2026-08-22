@@ -342,14 +342,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if self._loading:
                 return
             index = row.get_selected()
-            response = (
-                self._app.activate_playlist(choices[index - 1].id)
+            started = (
+                self._app.activate_playlist_async(choices[index - 1].id)
                 if 0 < index <= len(choices)
-                else self._app.resume_schedule()
+                else self._app.resume_schedule_async()
             )
-            if not response.ok:
-                self._app.window_report(response.message)
-            self._fingerprint = self._state_fingerprint(self._app.session)
+            if started:
+                self._fingerprint = self._state_fingerprint(self._app.session)
 
         return changed
 

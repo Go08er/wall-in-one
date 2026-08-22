@@ -42,6 +42,8 @@ def _renderer_for(settings: config.Settings) -> renderer.Renderer:
     return renderer.Renderer(
         output=settings.output or renderer.ALL_OUTPUTS,
         when_hidden=settings.video_when_hidden,
+        hardware_decode=settings.video_hardware_decode,
+        interpolation=settings.video_interpolation,
         muted=settings.video_muted,
         volume=settings.video_volume,
     )
@@ -74,7 +76,7 @@ class Session:
             else Applier(
                 _renderer_for(settings),
                 settings.output,
-                scenes.SceneRenderer(output=settings.output),
+                scenes.SceneRenderer(output=settings.output, fps=settings.scene_fps),
                 own_scene_renderer=settings.own_scene_renderer,
             )
         )
@@ -200,6 +202,24 @@ class Session:
     def favourites(self) -> favourites.Store:
         """The starred wallpapers. The grid reads it; the rotation obeys it."""
         return self._favourites
+
+    def authoring_faults(self) -> tuple[tuple[str, str], ...]:
+        """Unreadable authoring stores, named for a useful headless error.
+
+        Store ``open`` methods deliberately recover to an empty in-memory
+        value so the interactive application can still open and help somebody
+        repair a damaged file. An unattended runtime-config compilation must
+        make a different choice: compiling those empty values would silently
+        replace the last known-good automation document.
+        """
+        stores = (
+            ("pairings", self._pairings),
+            ("playlists", self._playlists),
+            ("schedules", self._schedules),
+            ("display assignments", self._displays),
+            ("favourites", self._favourites),
+        )
+        return tuple((name, fault) for name, store in stores if (fault := store.fault))
 
     def _rebuild_playlist(self) -> None:
         self._in_force = self.active_playlist()
@@ -393,6 +413,25 @@ class Session:
             # starts under the new policy, and saying so beats restarting the
             # wallpaper underneath someone.
             self._applier.renderer.when_hidden = settings.video_when_hidden
+
+        if (
+            settings.video_hardware_decode,
+            settings.video_interpolation,
+        ) != (
+            previous.video_hardware_decode,
+            previous.video_interpolation,
+        ):
+            # Both are launch-time mpv options. The Rust runtime reloads and
+            # reapplies the current entry; the Python compatibility renderer
+            # records them for its next video without blinking this one.
+            self._applier.renderer.hardware_decode = settings.video_hardware_decode
+            self._applier.renderer.interpolation = settings.video_interpolation
+
+        if settings.scene_fps != previous.scene_fps:
+            # This is a launch-time linux-wallpaperengine setting. The Rust
+            # runtime reloads the compiled config and performs the active
+            # hand-over; this legacy fallback adopts it for the next scene.
+            self._applier.scenes.fps = settings.scene_fps
 
         if settings.dynamics_enabled != previous.dynamics_enabled:
             # Pausing a video with no still used to mean jumping to an unrelated

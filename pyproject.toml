@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "wall-in-one"
 version = "0.1.0"
 description = "A wallpaper manager for Wayland with Noctalia palette sync"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = ["PyGObject"]
 
 [project.scripts]
@@ -23,7 +23,7 @@ where = ["src"]
 "wall_in_one" = ["data/*.tmpl", "data/*.desktop", "data/*.svg", "data/systemd/*.service"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 strict = true
 warn_unreachable = true
 # PyGObject's generated bindings are only partly typed even with stubs, so the

@@ -15,6 +15,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import gi
@@ -492,6 +493,13 @@ class BrowseDialog(Adw.Dialog):
         #: Held across the pages of one random search so it does not re-roll
         #: between them, and cleared whenever a new search starts.
         self._seed = ""
+        #: Search completions carry this generation back to the main loop.
+        #: Changing provider or library roots invalidates the generation, so a
+        #: slow answer cannot appear under controls that now describe a
+        #: different request.
+        self._search_generation = 0
+        self._active_search_generation: int | None = None
+        self._view_provider = ""
         #: Open detail views by identifier, so a download started inside one
         #: can tell it what happened.
         self._detail_dialogs: dict[str, DetailDialog] = {}
@@ -512,6 +520,7 @@ class BrowseDialog(Adw.Dialog):
             if info.name == wallhaven.Wallhaven.name:
                 self._providers.set_selected(index)
                 break
+        self._view_provider = self.provider_name
         self._sync_provider_controls()
 
     # -- keyboard --------------------------------------------------------
@@ -891,7 +900,53 @@ class BrowseDialog(Adw.Dialog):
         return self._infos[index].name
 
     def _on_provider_changed(self, *_arguments: object) -> None:
+        selected = self.provider_name
+        if self._view_provider and selected != self._view_provider:
+            title = next(
+                (info.title for info in self._infos if info.name == selected),
+                selected,
+            )
+            self._invalidate_search(
+                title=f"Browse {title}",
+                description="Choose filters and press Search.",
+            )
+        self._view_provider = selected
         self._sync_provider_controls()
+
+    def update_library_roots(self, roots: tuple[Path, ...]) -> None:
+        """Retarget downloads and ownership checks after Settings changes.
+
+        The Browse page lives as long as the window, so constructing its
+        ``Browser`` once is not enough.  Keep its provider caches, but replace
+        both folder roles and discard results whose downloaded badges describe
+        the previous library.
+        """
+        self._browser.configure_roots(
+            root=roots[0] if roots else None,
+            library_roots=roots,
+        )
+        self._invalidate_search(
+            title="Library folders changed",
+            description="Search again to check the newly configured library.",
+        )
+
+    def _invalidate_search(self, *, title: str, description: str) -> None:
+        """Make every outstanding completion stale and reset the result view."""
+        self._search_generation += 1
+        self._active_search_generation = None
+        self._searching = False
+        self._result = None
+        self._page = 1
+        self._has_next = False
+        self._shown.clear()
+        self._capped = False
+        self._seed = ""
+        self._more.set_label("")
+        self._summary.set_label("")
+        self._clear()
+        self._status.set_title(title)
+        self._status.set_description(description)
+        self._stack.set_visible_child_name("empty")
 
     def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
         self._sync_motionbgs_mode()
@@ -971,12 +1026,15 @@ class BrowseDialog(Adw.Dialog):
             # the same ones, because the seed that keeps page two honest would
             # also pin page one.
             self._seed = ""
+            self._search_generation += 1
         try:
             query = self._query(page)
         except ProviderError as error:
             self.report(str(error))
             return
         name = self.provider_name
+        generation = self._search_generation
+        self._active_search_generation = generation
         self._searching = True
         if append:
             # The grid stays. Swapping to the full-page spinner would throw
@@ -989,9 +1047,18 @@ class BrowseDialog(Adw.Dialog):
             return self._browser.search(name, query)
 
         future = self._searches.submit(work)
-        future.add_done_callback(lambda done: self._deliver(done, page, append))
+        future.add_done_callback(
+            lambda done: self._deliver(done, page, append, generation=generation)
+        )
 
-    def _deliver(self, future: Future[SearchResult], page: int, append: bool = False) -> None:
+    def _deliver(
+        self,
+        future: Future[SearchResult],
+        page: int,
+        append: bool = False,
+        *,
+        generation: int,
+    ) -> None:
         try:
             result: SearchResult | None = future.result()
             message = ""
@@ -1002,8 +1069,13 @@ class BrowseDialog(Adw.Dialog):
             result, message = None, f"search failed: {error}"
 
         def deliver() -> bool:
-            if not self._closed:
+            current = (
+                generation == self._search_generation
+                and generation == self._active_search_generation
+            )
+            if not self._closed and current:
                 self._searching = False
+                self._active_search_generation = None
                 self._more.set_label("")
                 if result is None:
                     self._show_failure(message, append)
@@ -1292,6 +1364,9 @@ class BrowsePage(Gtk.Box):
 
     def focus_search(self) -> None:
         self._surface._focus_search()
+
+    def update_library_roots(self, roots: tuple[Path, ...]) -> None:
+        self._surface.update_library_roots(roots)
 
     def shutdown(self) -> None:
         if not self._surface._closed:

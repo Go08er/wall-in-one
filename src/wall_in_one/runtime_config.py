@@ -20,7 +20,7 @@ from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 FALLBACK_PLAYLIST_ID: Final = "all-media"
 FALLBACK_PLAYLIST_NAME: Final = "All media"
 
@@ -91,7 +91,15 @@ def _resolved_entry(
 
 
 def render(settings: config.Settings, session: Session) -> str:
-    """Return schema-2 TOML with every authoring decision resolved."""
+    """Return schema-3 TOML with every authoring decision resolved."""
+    faults = session.authoring_faults()
+    if faults:
+        details = "; ".join(f"{name}: {fault}" for name, fault in faults)
+        raise RuntimeConfigError(
+            "cannot compile runtime configuration because authoring state is "
+            f"unreadable ({details}). Repair or restore the named file; the "
+            "existing runtime configuration was left untouched."
+        )
     known = {item.path: item for item in session.library.items}
     playlists: list[tuple[str, str, tuple[tuple[str, ...], ...]]] = []
 
@@ -147,10 +155,11 @@ def render(settings: config.Settings, session: Session) -> str:
         f"own_scene_renderer = {str(settings.own_scene_renderer).lower()}",
         'layer = "background"',
         f"video_when_hidden = {_quote(settings.video_when_hidden)}",
-        "video_hardware_decode = true",
+        f"video_hardware_decode = {str(settings.video_hardware_decode).lower()}",
+        f"video_interpolation = {_quote(settings.video_interpolation)}",
         f"video_muted = {str(settings.video_muted).lower()}",
         f"video_volume = {settings.video_volume}",
-        "scene_fps = 30",
+        f"scene_fps = {settings.scene_fps}",
         f"scene_muted = {str(settings.video_muted).lower()}",
         f"scene_volume = {settings.video_volume}",
         "scene_pause_when_covered = true",

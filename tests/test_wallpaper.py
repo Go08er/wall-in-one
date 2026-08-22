@@ -222,6 +222,30 @@ def test_mpv_options_keep_audio_loaded_when_muted() -> None:
     assert "loop-file=inf" in options
 
 
+@pytest.mark.parametrize("mode", ("oversample", "linear"))
+def test_interpolation_is_an_atomic_effective_option_set(mode: str) -> None:
+    options = renderer.Renderer(interpolation=mode)._mpv_options(None, 165.004)
+    for expected in (
+        "video-sync=display-resample",
+        "interpolation=yes",
+        "display-fps-override=165.004",
+        f"tscale={mode}",
+    ):
+        assert expected in options
+
+
+def test_interpolation_without_a_known_refresh_changes_nothing() -> None:
+    options = renderer.Renderer(interpolation="oversample")._mpv_options(None, None)
+    assert "video-sync=" not in options
+    assert "interpolation=" not in options
+    assert "display-fps-override=" not in options
+    assert "tscale=" not in options
+
+
+def test_hardware_decoding_can_be_disabled_for_driver_diagnostics() -> None:
+    assert "hwdec=no" in renderer.Renderer(hardware_decode=False)._mpv_options(None)
+
+
 # -- video playback settings ----------------------------------------------
 #
 # The renderer always had the knobs -- mute, hardware decode, an auto-pause

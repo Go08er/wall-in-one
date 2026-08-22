@@ -116,7 +116,7 @@ def _entry(sidecar: Path) -> tuple[Origin | None, str, Path] | None:
         if sidecar.stat().st_size > MAX_SIDECAR_BYTES:
             return None
         raw = sidecar.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return None
     try:
         payload = json.loads(raw)

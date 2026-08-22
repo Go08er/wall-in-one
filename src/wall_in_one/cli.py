@@ -220,7 +220,11 @@ def _write_runtime_config() -> int:
     from wall_in_one import config, runtime_config
     from wall_in_one.session import Session
 
-    settings = config.load()
+    try:
+        settings = config.load_strict()
+    except config.ConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     session = Session(settings)
     try:
         session.refresh()

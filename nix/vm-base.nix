@@ -74,7 +74,7 @@ let
   );
 
   # Deliberately the previously shipped contract. ExecStartPre must replace
-  # these bytes from the authoring stores before schema-2 Rust is allowed to
+  # these bytes from the authoring stores before current-schema Rust is allowed to
   # start; otherwise this VM reproduces the real upgrade outage.
   runtimeConfig = pkgs.writeText "wall-in-one-vm-runtime-v1.toml" ''
     schema_version = 1

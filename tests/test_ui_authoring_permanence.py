@@ -8,9 +8,10 @@ restore-after-rebuild still flickers and still interrupts an edit in progress.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -23,7 +24,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gtk, Pango  # noqa: E402
 
 from wall_in_one import config  # noqa: E402
-from wall_in_one.library import playlists, schedules  # noqa: E402
+from wall_in_one.library import displays, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
 from wall_in_one.ui import playlists_page  # noqa: E402
@@ -83,9 +84,80 @@ def _session(tmp_path: Path) -> tuple[Session, playlists.Playlist, tuple[MediaIt
         config.Settings(active_playlist=chosen.id),
         scanner=lambda _roots: Library(roots=(Path("/test-media"),), items=items),
         playlist_store=store,
+        schedule_store=schedules.Store(path=tmp_path / "schedules.json"),
+        display_store=displays.Store(path=tmp_path / "displays.json"),
     )
     session.refresh()
     return session, store.find(chosen.id), items
+
+
+def test_playlist_deletion_confirmation_names_every_cascade(tmp_path: Path) -> None:
+    session, playlist, _items = _session(tmp_path)
+    session.schedules.add(playlist.id, weekdays=["sat"], rule_id="weekend")
+    session.displays.assign("DP-1", playlist.id)
+    session.use_playlist(playlist.id)
+
+    body = playlists_page._deletion_body(session, playlist)
+
+    assert "1 playlist entry" in body
+    assert "1 schedule rule" in body
+    assert "1 display assignment" in body
+    assert "saved default selection" in body
+    assert "current manual override" in body
+    assert "Wallpaper files stay in the library" in body
+
+
+def test_playlist_deletion_response_is_cancel_safe_and_keeps_the_stable_id() -> None:
+    called: list[str] = []
+    page = cast(
+        playlists_page.PlaylistsPage,
+        SimpleNamespace(_delete_confirmed=called.append),
+    )
+    dialog = cast(Adw.AlertDialog, None)
+
+    playlists_page.PlaylistsPage._on_delete_response(page, dialog, "cancel", "playlist-a")
+    assert called == []
+
+    playlists_page.PlaylistsPage._on_delete_response(page, dialog, "delete", "playlist-a")
+    assert called == ["playlist-a"]
+
+
+def test_confirmed_playlist_deletion_cascades_every_authored_reference(tmp_path: Path) -> None:
+    session, playlist, _items = _session(tmp_path)
+    session.schedules.add(playlist.id, weekdays=["sat"], rule_id="weekend")
+    session.displays.assign("DP-1", playlist.id)
+    session.use_playlist(playlist.id)
+
+    class DeleteApp:
+        def __init__(self) -> None:
+            self.published = 0
+
+        def update_settings(self, **changes: Any) -> None:
+            session.update_settings(replace(session.settings, **changes))
+
+        def resume_schedule_async(self) -> bool:
+            session.resume_schedule()
+            return True
+
+        def playlists_changed(self) -> None:
+            self.published += 1
+
+    application = DeleteApp()
+    page = cast(
+        playlists_page.PlaylistsPage,
+        SimpleNamespace(_session=session, _app=application, _selected=playlist.id),
+    )
+
+    playlists_page.PlaylistsPage._delete_confirmed(page, playlist.id)
+
+    assert session.playlists.get(playlist.id) is None
+    assert all(rule.playlist != playlist.id for rule in session.schedules.rules)
+    assert session.displays.playlist_for("DP-1") == ""
+    assert session.settings.active_playlist == ""
+    assert session.manual_playlist is None
+    assert page._selected == ""
+    assert application.published == 1
+    session.shutdown()
 
 
 class ScheduleApp:

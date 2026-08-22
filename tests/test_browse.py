@@ -82,6 +82,59 @@ def test_no_root_anywhere_is_an_error_not_a_guess(monkeypatch: pytest.MonkeyPatc
     assert caught.value.kind == "no-root"
 
 
+def test_reconfiguring_roots_retargets_downloads_and_owned_index(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    engine = browser(root=first, library_roots=(first,))
+
+    old_index = engine.owned
+    engine.configure_roots(root=second, library_roots=(second,))
+
+    assert engine.download_root() == second
+    assert engine.owned is not old_index
+
+
+def test_a_download_finishing_after_a_root_change_does_not_pollute_the_new_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    engine = browser(root=first, library_roots=(first,))
+    old_index = engine.owned
+    wanted = candidate()
+    installed = DownloadResult(
+        provider="wallhaven",
+        identifier=wanted.identifier,
+        path=first / "Wall-in-One" / "Wallhaven" / "wallhaven-ab1234.png",
+        sidecar=first / "s.json",
+        marker=first / "m.json",
+        kind=Kind.STILL,
+        size=3,
+        source_url=wanted.page_url,
+        download_url="https://w.wallhaven.cc/full/ab/wallhaven-ab1234.png",
+        sha256="0" * 64,
+        downloaded_at="2026-01-01T00:00:00Z",
+    )
+
+    class Stub:
+        def download(self, _candidate: object, root: Path, *, variant: str = "") -> DownloadResult:
+            assert root == first
+            engine.configure_roots(root=second, library_roots=(second,))
+            return installed
+
+    monkeypatch.setattr(engine, "provider", lambda _name: Stub())
+
+    done = engine.download(wanted)
+
+    assert done.root == first
+    assert not old_index.holds(wanted)
+    assert not engine.owned.holds(wanted)
+
+
 def test_a_download_reports_where_to_rescan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

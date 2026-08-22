@@ -478,6 +478,8 @@ class AudioRenderer(FakeRenderer):
         super().__init__()
         self.audio: list[tuple[bool, int]] = []
         self.when_hidden = "pause"
+        self.hardware_decode = True
+        self.interpolation = "off"
 
     def apply_audio(self, *, muted: bool, volume: int) -> None:
         self.audio.append((muted, volume))
@@ -523,16 +525,48 @@ def test_the_hidden_policy_is_recorded_for_the_next_video(applied_paths: list[Pa
     assert fake.when_hidden == "stop"
 
 
+def test_launch_time_video_options_are_recorded_for_the_next_video(
+    applied_paths: list[Path],
+) -> None:
+    session, fake = _audio_session()
+    session.update_settings(
+        replace(
+            session.settings,
+            video_hardware_decode=False,
+            video_interpolation="oversample",
+        )
+    )
+    assert fake.hardware_decode is False
+    assert fake.interpolation == "oversample"
+
+
+def test_the_scene_frame_rate_is_recorded_for_the_scene_backend(
+    applied_paths: list[Path],
+) -> None:
+    session, _fake = _audio_session()
+    session.update_settings(replace(session.settings, scene_fps=75))
+    assert session._applier.scenes.fps == 75
+
+
 def test_a_session_that_builds_its_own_renderer_carries_the_settings() -> None:
     """`when_hidden` becomes a command-line flag, so it has to be right before
     the first video starts, not pushed afterwards."""
     settings = replace(
-        config.Settings(), video_muted=False, video_volume=25, video_when_hidden="stop"
+        config.Settings(),
+        video_muted=False,
+        video_volume=25,
+        video_when_hidden="stop",
+        video_hardware_decode=False,
+        video_interpolation="linear",
+        scene_fps=75,
     ).validated()
     built = Session(settings, scanner=lambda _roots: Library(roots=(), items=()))
     assert built._applier.renderer.muted is False
     assert built._applier.renderer.volume == 25
     assert built._applier.renderer.when_hidden == "stop"
+    assert built._applier.renderer.hardware_decode is False
+    assert built._applier.renderer.interpolation == "linear"
+    assert built._applier.scenes.fps == 75
     built.shutdown()
 
 

@@ -10,6 +10,7 @@ without a network.
 from __future__ import annotations
 
 import secrets
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -207,6 +208,8 @@ class Browser:
         self._client = client if client is not None else http.UrllibClient()
         self._root = root
         self._library_roots = tuple(library_roots)
+        self._roots_generation = 0
+        self._roots_lock = threading.RLock()
         self._providers: dict[str, Provider] = {}
         self._owned: owned.Index | None = None
 
@@ -219,9 +222,22 @@ class Browser:
         Built on first use and then kept, because walking every root is
         filesystem work and the answer is wanted once per card.
         """
-        if self._owned is None:
-            self._owned = owned.read(self._library_roots or scan.default_roots())
-        return self._owned
+        while True:
+            with self._roots_lock:
+                if self._owned is not None:
+                    return self._owned
+                generation = self._roots_generation
+                roots = self._library_roots
+            # Walking a large library can take long enough for somebody to
+            # change the configured roots. Do that work outside the lock, then
+            # publish it only if it still describes the current settings.
+            built = owned.read(roots or scan.default_roots())
+            with self._roots_lock:
+                if generation != self._roots_generation:
+                    continue
+                if self._owned is None:
+                    self._owned = built
+                return self._owned
 
     def forget_owned(self) -> None:
         """Drop the index, so the next question re-reads the disk.
@@ -229,7 +245,24 @@ class Browser:
         For the cases this object cannot see: a wallpaper removed through the
         library window, or the roots being reconfigured underneath it.
         """
-        self._owned = None
+        with self._roots_lock:
+            self._owned = None
+
+    def configure_roots(self, *, root: Path | None, library_roots: Sequence[Path] = ()) -> None:
+        """Adopt changed library folders without rebuilding provider clients.
+
+        Search providers deliberately live for the whole browse session: they
+        own bounded response caches and HTTP connection reuse.  Download and
+        ownership roots are different state, however, and settings may change
+        while the Browse page is alive.  Updating those in place preserves the
+        useful provider caches while making the next search and download use
+        the folders the Settings page currently shows.
+        """
+        with self._roots_lock:
+            self._root = root
+            self._library_roots = tuple(library_roots)
+            self._roots_generation += 1
+            self._owned = None
 
     # -- providers -------------------------------------------------------
 
@@ -261,8 +294,10 @@ class Browser:
         path twice. The provider adds its own `Wall-in-One/<Provider>` beneath
         this; nothing is written directly here.
         """
-        if self._root is not None:
-            return self._root
+        with self._roots_lock:
+            configured = self._root
+        if configured is not None:
+            return configured
         roots = scan.default_roots()
         if roots:
             return roots[0]
@@ -302,12 +337,19 @@ class Browser:
         which the scanner works out from the marker and sidecar the provider
         wrote, not from anything we tell it.
         """
+        with self._roots_lock:
+            generation = self._roots_generation
         root = self.download_root()
         result = self.provider(candidate.provider).download(candidate, root, variant=variant)
         # Record it rather than invalidating the index: this process knows both
         # the candidate and where it landed, so re-walking every root to learn
-        # one fact it just created would be work for nothing.
-        self.owned.add(candidate, result.path)
+        # one fact it just created would be work for nothing. A download may
+        # outlive a Settings root change, though; never publish that old path
+        # into the replacement roots' index. If the index was not warm yet,
+        # leave it lazy rather than building it under this completion path.
+        with self._roots_lock:
+            if generation == self._roots_generation and self._owned is not None:
+                self._owned.add(candidate, result.path)
         return Downloaded(result=result, root=root)
 
     def thumbnail(self, candidate: WallpaperCandidate) -> bytes:

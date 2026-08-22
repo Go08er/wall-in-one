@@ -145,13 +145,32 @@ The unit first runs `wall-in-one --write-config`, then starts the runtime with
 `--wait-for-config`. An outdated document is therefore atomically replaced by
 the only component allowed to write it; malformed authoring data or an invalid
 generated document still fails loudly. The wait flag remains useful if the
-document disappears between those two steps. A deliberate `ctl quit` is a
-clean exit and is not restarted. The checked-in unit uses bare commands so it
-remains useful outside Nix; the Nix package rewrites both to wrapped store
-paths.
+document disappears between those two steps. The headless compiler reads a
+present settings file strictly: malformed TOML stops startup instead of
+silently compiling defaults over the user's intended library. It likewise
+refuses unreadable pairings, playlists, schedules, display assignments or
+favourites, leaving the previous runtime document untouched until the named
+authoring file is repaired or restored.
+
+The runtime claims its mode-0600 socket before applying anything, so a second
+instance loses without changing the wallpaper. At graphical-session startup it
+retries only desktop-readiness failures for a bounded eight seconds; Noctalia
+and niri helper calls themselves time out after three seconds and keep only a
+bounded stderr diagnostic. A deliberate `ctl quit` is a clean exit and is not
+restarted. Other failures use the unit's five-second retry, capped at five
+starts per minute rather than looping forever. The checked-in unit uses bare
+commands so it remains useful outside Nix; the Nix package rewrites both to
+wrapped store paths.
 If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 both `wall-in-one` and `wall-in-one-service` are on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.
+
+If a damaged settings or authoring file exhausts the unit's restart limit,
+repair or restore the file and explicitly recover the unit with
+`systemctl --user reset-failed wall-in-one.service` followed by
+`systemctl --user restart wall-in-one.service`. The limit is intentional: an
+invalid unattended configuration must not rewrite the last-known-good runtime
+document or spam the journal forever.
 
 ### Test it away from your desktop
 
@@ -237,6 +256,24 @@ animated wallpaper, so this is a performance control as much as a battery one
 surprise. The track stays loaded rather than being disabled, which is what lets
 mute and the volume setting take effect on the video already playing instead of
 only on the next one -- they go over mpv's IPC, so the wallpaper does not blink.
+
+**Wallpaper Engine frame rate** is a 1–240 FPS native scene-rendering limit (30
+by default). Video wallpapers keep their source rate: mpv's post-decode FPS
+filter would still decode every frame, so Wall-in-One does not claim it as a
+performance control without an end-to-end measurement showing a real benefit.
+
+**Smooth low-frame-rate videos** can use mpv's display-resample interpolation.
+Oversample is the sharper, cheaper default experiment; Linear blends more
+strongly and may ghost. Wall-in-One reads the active refresh from niri at each
+video hand-over and supplies the complete mpv option set together. A named
+output uses its rate; All outputs is smoothed only when every attached display
+reports the same rate. Unknown or mixed rates keep ordinary source cadence
+rather than using a hard-coded number or a partly effective setup. This does
+not alter or synthesize the source FPS.
+
+**Hardware video decoding** remains on by default. Turning it off forces
+software decoding and is intended as a diagnostic comparison for corruption,
+tearing, or driver-specific artifacts—not as a general performance tweak.
 
 **When covered by a window** chooses between pausing, stopping and carrying on.
 This one is an mpvpaper launch flag rather than an mpv property, so it cannot be
@@ -336,6 +373,11 @@ complete key, meaning and default table is in
 
 ## Development
 
+Development uses CPython 3.14. Provider HTML parsing runs in one lazily shared
+`InterpreterPoolExecutor`, so CPU-heavy scraper work has an independent GIL
+instead of interrupting GTK's frame loop. Network waits, subprocess work and
+all PyGObject code deliberately stay out of that pool.
+
 ```console
 $ nix develop
 $ python -m wall_in_one
@@ -344,9 +386,19 @@ $ mypy --strict src tests
 $ ruff check src tests && ruff format --check src tests
 ```
 
-The last three run as flake checks: `nix flake check`. A fourth check, `desktop`,
-validates the installed launcher entry and rasterises the icon, since neither
-can be seen from the Python suite.
+`nix flake check` is the complete local gate: it runs the packaged Python and
+Rust tests, ruff, strict mypy, the desktop/unit packaging check, and (on
+x86_64-linux) the niri + Noctalia desktop VM. The `desktop` check validates the
+installed launcher and systemd unit and rasterises the icon, since none can be
+seen from the Python suite.
+
+The [GitHub Actions workflow](.github/workflows/ci.yml) evaluates the complete
+flake and builds the Python, Rust, lint, type and packaging checks on every
+push to `main` and pull request. The hardware-heavier niri + Noctalia VM runs
+weekly and on manual dispatch: hosted runners do not promise KVM, so forcing a
+software-emulated desktop boot into every quick change would turn the red/green
+signal into a timeout lottery. The workflow is read-only and cancels obsolete
+runs for the same ref.
 
 Tests that need a display are marked `gui`; tests that need a live Noctalia are
 marked `noctalia`. The packaged build runs neither.

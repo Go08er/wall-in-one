@@ -3,8 +3,10 @@
 Every renderer this app drives already accepts a connector: Noctalia takes one
 on `wallpaper-set [connector]`, mpvpaper takes an output selector, and
 `linux-wallpaperengine` takes `--screen-root`. What was missing was any way to
-find out what the connectors *are*, so all three were only ever handed the
-empty string, which every one of them reads as "everywhere".
+find out what the connectors *are*. Noctalia and mpvpaper accept an all-output
+target, but linux-wallpaperengine's positional fallback is a preview window;
+its caller therefore expands an empty configured output into these connector
+names and refuses safely if none can be discovered.
 
 niri is the source, because niri is what this app targets and it publishes the
 answer as JSON on a command anybody can run. Asking the compositor rather than
@@ -36,6 +38,7 @@ QUERY_TIMEOUT: Final = 5.0
 #: A machine with more screens than this is not one this app was written for,
 #: and the ceiling stops a malformed reply becoming an unbounded loop.
 MAX_OUTPUTS: Final = 32
+MAX_REFRESH_MILLIHZ: Final = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,9 @@ class Output:
     #: that was then cropped and enlarged onto a landscape display.
     physical_width: int = 0
     physical_height: int = 0
+    #: Refresh rate of the active mode in millihertz, as niri reports it.
+    #: Kept integral so a value such as 165.004 Hz survives without rounding.
+    refresh_millihz: int = 0
 
     @property
     def label(self) -> str:
@@ -81,6 +87,11 @@ def _as_int(value: object) -> int:
 
 def _as_text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _as_refresh(value: object) -> int:
+    refresh = _as_int(value)
+    return refresh if 0 < refresh <= MAX_REFRESH_MILLIHZ else 0
 
 
 def parse(document: object) -> tuple[Output, ...]:
@@ -132,6 +143,7 @@ def parse(document: object) -> tuple[Output, ...]:
                 scale=float(scale) if isinstance(scale, (int, float)) and scale > 0 else 1.0,
                 physical_width=_as_int(mode.get("width")),
                 physical_height=_as_int(mode.get("height")),
+                refresh_millihz=_as_refresh(mode.get("refresh_rate")),
             )
         )
     return tuple(sorted(found, key=lambda output: output.name))
@@ -140,9 +152,10 @@ def parse(document: object) -> tuple[Output, ...]:
 def discover() -> tuple[Output, ...]:
     """Every screen niri knows about. Empty when it cannot be asked.
 
-    Empty is a meaningful answer rather than a failure: it is what the whole
-    app did before this module existed, and it means "one unnamed screen, aim
-    at everything", which is exactly right on a compositor that is not niri.
+    Empty is a meaningful answer rather than an exception. Each renderer then
+    chooses its safe degradation: Noctalia/mpvpaper can use an all-output
+    target, while linux-wallpaperengine must refuse rather than open a preview
+    window that only looks like an application.
     """
     if not is_available():
         return ()
@@ -153,16 +166,33 @@ def discover() -> tuple[Output, ...]:
             timeout=QUERY_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError, subprocess.TimeoutExpired:
         return ()
     if completed.returncode != 0:
         return ()
     try:
         document = json.loads(completed.stdout)
-    except (ValueError, UnicodeDecodeError):
+    except ValueError, UnicodeDecodeError:
         return ()
     return parse(document)
 
 
 def names(found: Iterable[Output]) -> tuple[str, ...]:
     return tuple(output.name for output in found)
+
+
+def unambiguous_refresh_hz(found: Iterable[Output], connector: str = "") -> float | None:
+    """The one refresh rate suitable for mpv's display override.
+
+    A named connector has one answer.  ``All outputs`` only has one when every
+    connected output reports the same active rate; feeding one monitor's rate
+    to an mpvpaper process spanning mixed-refresh outputs would fix one cadence
+    by making the other wrong.  Unknown or mixed rates therefore leave mpv to
+    detect what it can rather than inventing a number.
+    """
+    candidates = tuple(output for output in found if not connector or output.name == connector)
+    reported = tuple(output.refresh_millihz for output in candidates)
+    rates = set(reported)
+    if not candidates or any(rate <= 0 for rate in reported) or len(rates) != 1:
+        return None
+    return rates.pop() / 1000.0

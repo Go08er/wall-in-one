@@ -187,7 +187,7 @@ def _key_from_file(path: Path) -> tuple[str, str]:
         return "", ""
     try:
         first_line = raw.decode("utf-8").splitlines()[0]
-    except (UnicodeDecodeError, IndexError):
+    except UnicodeDecodeError, IndexError:
         return "", _malformed(path)
     try:
         return normalise_api_key(first_line), ""

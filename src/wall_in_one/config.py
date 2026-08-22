@@ -18,7 +18,7 @@ from typing import Any, Final, Self
 
 from wall_in_one import paths
 from wall_in_one.theme.noctalia import ALL_SCHEMES, DEFAULT_SCHEME
-from wall_in_one.wallpaper import renderer
+from wall_in_one.wallpaper import renderer, scenes
 
 #: Below this the window stops being legible against a busy wallpaper, and the
 #: compositor's blur cannot rescue it.
@@ -87,6 +87,18 @@ class Settings:
     #: "might not work as intended", so `play` stays reachable.
     video_when_hidden: str = renderer.DEFAULT_WHEN_HIDDEN
 
+    #: Use mpv's display-resample presentation and temporal interpolation for
+    #: low-frame-rate video. This changes presentation cadence, not decode FPS.
+    video_interpolation: str = renderer.DEFAULT_INTERPOLATION
+
+    #: ``auto`` lets mpv use a hardware decoder; false is a useful diagnostic
+    #: escape hatch for driver artifacts and forces software decoding.
+    video_hardware_decode: bool = True
+
+    #: Native linux-wallpaperengine rendering limit. Video FPS is deliberately
+    #: left alone: mpv's post-decode FPS filter does not reduce decode work.
+    scene_fps: int = scenes.DEFAULT_FPS
+
     #: Which output the wallpaper is applied to. Empty means every one of
     #: them, which is what Noctalia's `wallpaper-set` does with no connector
     #: and what mpvpaper's `ALL` does for videos.
@@ -136,6 +148,11 @@ class Settings:
             if self.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES
             else renderer.DEFAULT_WHEN_HIDDEN
         )
+        interpolation = (
+            self.video_interpolation
+            if self.video_interpolation in renderer.INTERPOLATION_CHOICES
+            else renderer.DEFAULT_INTERPOLATION
+        )
         return replace(
             self,
             opacity=opacity,
@@ -143,6 +160,8 @@ class Settings:
             cycle_interval=interval,
             video_volume=min(renderer.MAX_VOLUME, max(0, self.video_volume)),
             video_when_hidden=hidden,
+            video_interpolation=interpolation,
+            scene_fps=min(scenes.MAX_FPS, max(scenes.MIN_FPS, self.scene_fps)),
             roots=_tidy_roots(self.roots),
         )
 
@@ -183,6 +202,9 @@ class Settings:
             video_muted=boolean("video_muted", True),
             video_volume=int(number("video_volume", 100)),
             video_when_hidden=text("video_when_hidden", renderer.DEFAULT_WHEN_HIDDEN),
+            video_interpolation=text("video_interpolation", renderer.DEFAULT_INTERPOLATION),
+            video_hardware_decode=boolean("video_hardware_decode", True),
+            scene_fps=int(number("scene_fps", scenes.DEFAULT_FPS)),
             cycle_favourites_only=boolean("cycle_favourites_only", False),
             active_playlist=text("active_playlist", ""),
             scan_workshop=boolean("scan_workshop", True),
@@ -206,6 +228,9 @@ class Settings:
             f"video_muted = {str(self.video_muted).lower()}",
             f"video_volume = {self.video_volume}",
             f'video_when_hidden = "{self.video_when_hidden}"',
+            f'video_interpolation = "{self.video_interpolation}"',
+            f"video_hardware_decode = {str(self.video_hardware_decode).lower()}",
+            f"scene_fps = {self.scene_fps}",
             f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
             f'active_playlist = "{self.active_playlist}"',
             f"scan_workshop = {str(self.scan_workshop).lower()}",
@@ -238,10 +263,33 @@ def load(path: Path | None = None) -> Settings:
             raw = tomllib.load(handle)
     except FileNotFoundError:
         return Settings()
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError, tomllib.TOMLDecodeError:
         # A corrupt settings file should not be fatal; defaults are always
         # usable and the user can fix or delete the file.
         return Settings()
+    return Settings.from_mapping(raw)
+
+
+def load_strict(path: Path | None = None) -> Settings:
+    """Read settings for unattended compilation, rejecting unreadable bytes.
+
+    The interactive application deliberately recovers from a damaged file so
+    somebody can still reach Settings and repair it. The systemd
+    ``ExecStartPre`` path is different: silently compiling defaults from a
+    typo would replace the user's intended library and renderer configuration
+    just before starting automation. Missing remains a valid first-run state;
+    a present document must parse.
+    """
+    target = path if path is not None else paths.settings_path()
+    try:
+        with target.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except FileNotFoundError:
+        return Settings()
+    except OSError as error:
+        raise ConfigError(f"cannot read {target}: {error}") from error
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"cannot parse {target}: {error}") from error
     return Settings.from_mapping(raw)
 
 

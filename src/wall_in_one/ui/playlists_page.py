@@ -31,6 +31,36 @@ SETTLE_CURVE = (0.18, 0.82, 0.22, 1.0)
 CSS_EASE_CURVE = (0.25, 0.10, 0.25, 1.0)
 
 
+def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
+    """Describe every authored reference removed with ``playlist``.
+
+    This is deliberately independent of GTK so the destructive confirmation
+    cannot drift away from what ``_delete_confirmed`` actually cascades.
+    """
+    schedule_count = sum(rule.playlist == playlist.id for rule in session.schedules.rules)
+    assignment_count = sum(
+        assigned == playlist.id for _connector, assigned in session.displays.all()
+    )
+    consequences = [
+        f"{len(playlist.entries)} playlist entr{'y' if len(playlist.entries) == 1 else 'ies'}",
+    ]
+    if schedule_count:
+        consequences.append(f"{schedule_count} schedule rule{'s' if schedule_count != 1 else ''}")
+    if assignment_count:
+        consequences.append(
+            f"{assignment_count} display assignment{'s' if assignment_count != 1 else ''}"
+        )
+    if session.settings.active_playlist == playlist.id:
+        consequences.append("the saved default selection")
+    if session.manual_playlist == playlist.id:
+        consequences.append("the current manual override")
+    return (
+        "This removes "
+        + ", ".join(consequences)
+        + ". Wallpaper files stay in the library. This cannot be undone."
+    )
+
+
 class _ReorderList(Gtk.Widget):
     """A vertical container whose children move without changing membership."""
 
@@ -867,7 +897,7 @@ class PlaylistsPage(Gtk.Box):
         actions.append(self._default_button)
         delete = Gtk.Button(label="Delete playlist")
         delete.add_css_class("destructive-action")
-        delete.connect("clicked", lambda _button: self._delete())
+        delete.connect("clicked", lambda _button: self._request_delete())
         actions.append(delete)
         self._editor.append(actions)
 
@@ -1394,10 +1424,37 @@ class PlaylistsPage(Gtk.Box):
             return
         self._app.playlists_changed()
 
-    def _delete(self) -> None:
+    def _request_delete(self) -> None:
         session = self._session
         playlist = session.playlists.get(self._selected) if session is not None else None
         if session is None or playlist is None:
+            return
+        dialog = Adw.AlertDialog(
+            heading=f"Delete {playlist.name}?",
+            body=_deletion_body(session, playlist),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_delete_response, playlist.id)
+        dialog.present(self)
+
+    def _on_delete_response(
+        self, _dialog: Adw.AlertDialog, response: str, playlist_id: str
+    ) -> None:
+        if response != "delete":
+            return
+        self._delete_confirmed(playlist_id)
+
+    def _delete_confirmed(self, playlist_id: str) -> None:
+        session = self._session
+        playlist = session.playlists.get(playlist_id) if session is not None else None
+        if session is None or playlist is None:
+            # It may have been removed over the authoring socket while the
+            # confirmation was open.  Treat that as already handled instead
+            # of deleting whichever playlist is selected now.
             return
         session.playlists.delete(playlist.id)
         session.schedules.forget_playlist(playlist.id)
@@ -1405,7 +1462,7 @@ class PlaylistsPage(Gtk.Box):
         if session.settings.active_playlist == playlist.id:
             self._app.update_settings(active_playlist="")
         if session.manual_playlist == playlist.id:
-            self._app.resume_schedule()
+            self._app.resume_schedule_async()
         self._selected = ""
         self._app.playlists_changed()
 
@@ -1417,9 +1474,7 @@ class PlaylistsPage(Gtk.Box):
     def _play_now(self) -> None:
         if not self._selected:
             return
-        response = self._app.activate_playlist(self._selected)
-        if not response.ok:
-            self._app.window_report(response.message)
+        self._app.activate_playlist_async(self._selected)
 
     def _make_add(self, item: MediaItem) -> Any:
         def add(_button: Gtk.Button) -> None:

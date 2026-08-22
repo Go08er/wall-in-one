@@ -436,7 +436,7 @@ def _read(path: Path) -> tuple[dict[str, Playlist], str | None]:
 
     try:
         payload = json.loads(text)
-    except (ValueError, RecursionError):
+    except ValueError, RecursionError:
         return {}, f"{path.name} is not readable, so no playlists were loaded"
     if not isinstance(payload, dict):
         return {}, f"{path.name} is not a playlists file"

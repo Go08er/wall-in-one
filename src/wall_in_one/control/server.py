@@ -739,7 +739,7 @@ class SocketServer:
         probe.settimeout(0.5)
         try:
             probe.connect(str(self._path))
-        except (ConnectionRefusedError, FileNotFoundError):
+        except ConnectionRefusedError, FileNotFoundError:
             self._path.unlink(missing_ok=True)
             return
         except OSError:

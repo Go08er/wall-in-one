@@ -421,11 +421,32 @@ def test_roots_that_are_not_a_list_are_ignored_rather_than_fatal() -> None:
 
 
 def test_the_playback_settings_survive_a_toml_round_trip(tmp_path: Path) -> None:
-    settings = config.Settings(video_muted=False, video_volume=35, video_when_hidden="stop")
+    settings = config.Settings(
+        video_muted=False,
+        video_volume=35,
+        video_when_hidden="stop",
+        video_interpolation="linear",
+        video_hardware_decode=False,
+        scene_fps=72,
+    )
     written = tmp_path / "settings.toml"
     config.save(settings, written)
     read = config.load(written)
-    assert (read.video_muted, read.video_volume, read.video_when_hidden) == (False, 35, "stop")
+    assert (
+        read.video_muted,
+        read.video_volume,
+        read.video_when_hidden,
+        read.video_interpolation,
+        read.video_hardware_decode,
+        read.scene_fps,
+    ) == (
+        False,
+        35,
+        "stop",
+        "linear",
+        False,
+        72,
+    )
 
 
 @pytest.mark.parametrize(("given", "expected"), [(-5, 0), (0, 0), (100, 100), (900, 100)])
@@ -433,9 +454,18 @@ def test_the_volume_is_clamped_to_mpvs_scale(given: int, expected: int) -> None:
     assert config.Settings(video_volume=given).validated().video_volume == expected
 
 
+@pytest.mark.parametrize(("given", "expected"), [(-5, 1), (1, 1), (120, 120), (900, 240)])
+def test_the_scene_frame_rate_is_clamped(given: int, expected: int) -> None:
+    assert config.Settings(scene_fps=given).validated().scene_fps == expected
+
+
 def test_an_unknown_hidden_policy_falls_back_rather_than_failing() -> None:
     """A hand-edited settings file should degrade to something usable."""
     assert config.Settings(video_when_hidden="explode").validated().video_when_hidden == "pause"
+
+
+def test_an_unknown_interpolation_mode_is_safely_off() -> None:
+    assert config.Settings(video_interpolation="warp").validated().video_interpolation == "off"
 
 
 def test_every_hidden_policy_survives_validation() -> None:

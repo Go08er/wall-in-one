@@ -101,6 +101,7 @@ pub struct Runtime<D: WallpaperDriver> {
     rng: XorShift64,
     last_cycle: Instant,
     last_error: String,
+    authoritative_generation: u64,
     quit: bool,
 }
 
@@ -130,6 +131,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             rng: XorShift64::seeded(),
             last_cycle: Instant::now(),
             last_error: String::new(),
+            authoritative_generation: 0,
             quit: false,
         };
         runtime.rebuild_cursors(&HashMap::new())?;
@@ -138,6 +140,17 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// Changes when a successful apply or terminal command supersedes a
+    /// pending automatic startup apply. Pause and stop deliberately do not:
+    /// they shape that eventual apply into paused motion or a still-only one.
+    pub fn authoritative_generation(&self) -> u64 {
+        self.authoritative_generation
+    }
+
+    fn supersede_startup_apply(&mut self) {
+        self.authoritative_generation = self.authoritative_generation.wrapping_add(1);
     }
 
     pub fn shutdown(&mut self) {
@@ -166,6 +179,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             "reload" => self.reload(at),
             "quit" => {
+                self.supersede_startup_apply();
                 self.quit = true;
                 self.driver.stop();
                 Ok("quitting".into())
@@ -218,6 +232,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         if self.playback_state == PlaybackState::Stopped {
             settings.dynamics_enabled = false;
         }
+        self.driver.begin_apply();
         for (entry, output) in targets {
             if let Err(error) = self.driver.apply(&entry, &output, &settings) {
                 errors.push(if output.is_empty() {
@@ -227,10 +242,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 });
             }
         }
+        self.driver.end_apply();
         if self.playback_state == PlaybackState::Paused {
             self.driver.set_paused(true);
         }
         if errors.is_empty() {
+            self.supersede_startup_apply();
             self.last_error.clear();
             Ok(format!("playing {played}"))
         } else {

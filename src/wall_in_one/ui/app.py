@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import threading
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 import gi
 
@@ -60,6 +61,7 @@ PALETTE_RELOAD_DEBOUNCE_MS: Final = 75
 # this provider is refreshed after every palette render. Both carry the same
 # palette, so the copy we can guarantee is current must win inside this process.
 APPLICATION_STYLE_PRIORITY: Final = Gtk.STYLE_PROVIDER_PRIORITY_USER + 1
+_RuntimeResult = TypeVar("_RuntimeResult")
 
 
 class Application(Adw.Application):
@@ -88,6 +90,27 @@ class Application(Adw.Application):
         self._cycle_source: int = 0
         self._schedule_source: int = 0
         self._runtime_status_source: int = 0
+        # Every GUI-originated runtime request shares one worker.  Apart from
+        # keeping socket deadlines off GTK's main thread, one worker preserves
+        # command order: a configuration reload queued before ``playlist-use``
+        # cannot be overtaken by the playback command it enables.
+        self._runtime_jobs: ThreadPoolExecutor | None = None
+        self._runtime_status_pending = False
+        self._runtime_status_generation = -1
+        self._runtime_status_again = False
+        self._runtime_absent_callbacks: list[tuple[int, Callable[[], None]]] = []
+        self._runtime_action_pending = False
+        self._runtime_reload_pending = False
+        self._runtime_reload_again = False
+        self._runtime_config_lock = threading.Lock()
+        self._runtime_document_generation = 0
+        self._runtime_loaded_generation = 0
+        self._runtime_shutdown = False
+        # A GTK object can be destroyed while a worker is waiting on the
+        # socket, then replaced by a later activation.  The monotonically
+        # increasing generation keeps that old answer away from the new
+        # window even when Python happens to reuse an object address.
+        self._window_generation = 0
         self._palette_monitor: Gio.FileMonitor | None = None
         self._palette_reload_source: int = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
@@ -144,6 +167,9 @@ class Application(Adw.Application):
             window = MainWindow(self, self._settings)
             window.connect("close-request", self._on_close_request)
             self._window = window
+            self._window_generation += 1
+            if self._runtime_action_pending:
+                window.set_runtime_busy(True)
         self.reload_palette()
         self.refresh_library()
         assert self._window is not None
@@ -164,6 +190,14 @@ class Application(Adw.Application):
             GLib.source_remove(self._schedule_source)
             self._schedule_source = 0
         self._stop_runtime_status_timer()
+        self._runtime_shutdown = True
+        self._window_generation += 1
+        if self._runtime_jobs is not None:
+            # Socket calls have hard deadlines and are safe to let finish.  Do
+            # not hold application shutdown open for one, and invalidate its
+            # eventual delivery above so it cannot reach a destroyed window.
+            self._runtime_jobs.shutdown(wait=False, cancel_futures=True)
+            self._runtime_jobs = None
         self._stills.shutdown()
         self._session.shutdown()
         if self._browse_jobs is not None:
@@ -185,6 +219,7 @@ class Application(Adw.Application):
             # Drop our reference now so a later activation builds a fresh one
             # instead of trying to present a destroyed GTK object.
             self._window = None
+            self._window_generation += 1
             self._stop_runtime_status_timer()
         return False
 
@@ -299,7 +334,7 @@ class Application(Adw.Application):
     def _on_settings_changed(self, settings: config.Settings) -> None:
         self._settings = settings
         self._session.update_settings(settings)
-        self._publish_runtime()
+        self._publish_runtime_for_context()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
 
@@ -327,22 +362,40 @@ class Application(Adw.Application):
         """Rescan, then line the cursor up with the wallpaper already on screen."""
         self._session.refresh()
         self._session.sync_with_noctalia()
-        self._publish_runtime()
+        self._publish_runtime_for_context()
         if self._window is not None:
             self._window.show_library(self._session)
-            self._runtime_is_running()
+            self.refresh_runtime_status_async()
         self._make_missing_stills()
 
-    def _publish_runtime(self) -> bool:
-        """Publish changed authoring state and reload once; report validity.
+    def _update_runtime_document(self) -> tuple[bool, bool]:
+        """Write the resolved document and return ``(valid, changed)``.
 
-        ``True`` means the generated document is usable, including when no
-        runtime is currently listening.  It does not mean a service exists.
+        Keeping the filesystem half separate from the socket half lets GUI
+        callers finish their GTK callback after the atomic rename, then send
+        ``reload`` on the runtime worker.  Control-socket callers which need a
+        complete synchronous transaction retain :meth:`_publish_runtime`.
         """
         try:
             changed = runtime_config.update(self._settings, self._session)
         except runtime_config.RuntimeConfigError as error:
             self.window_report(str(error))
+            return False, False
+        if changed:
+            with self._runtime_config_lock:
+                self._runtime_document_generation += 1
+        return True, changed
+
+    def _publish_runtime(self) -> bool:
+        """Synchronously publish authoring state for non-GUI callers.
+
+        ``True`` means the generated document is usable, including when no
+        runtime is currently listening.  It does not mean a service exists.
+        GUI callbacks use :meth:`_publish_runtime_async` so a socket timeout
+        never stalls GTK.
+        """
+        valid, changed = self._update_runtime_document()
+        if not valid:
             return False
         if not changed:
             return True
@@ -358,7 +411,106 @@ class Application(Adw.Application):
         if not response.ok:
             self.window_report(f"Runtime rejected the new configuration: {response.message}")
             return False
+        with self._runtime_config_lock:
+            self._runtime_loaded_generation = self._runtime_document_generation
         return True
+
+    def _publish_runtime_async(self) -> bool:
+        """Atomically write now and coalesce runtime reloads on one worker."""
+        valid, changed = self._update_runtime_document()
+        if valid and changed:
+            self._queue_runtime_reload()
+        return valid
+
+    def _publish_runtime_for_context(self) -> bool:
+        """Use the non-blocking path whenever a real window owns this call."""
+        if self._window is not None:
+            return self._publish_runtime_async()
+        return self._publish_runtime()
+
+    def _runtime_pool(self) -> ThreadPoolExecutor:
+        """The ordered, single-flight lane for every GUI runtime request."""
+        if self._runtime_jobs is None:
+            self._runtime_jobs = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="runtime-socket",
+            )
+        return self._runtime_jobs
+
+    @staticmethod
+    def _post_runtime_completion(
+        future: Future[_RuntimeResult],
+        callback: Callable[[Future[_RuntimeResult]], bool],
+    ) -> None:
+        """Marshal one worker completion back onto GTK's main context."""
+        GLib.idle_add(callback, future)
+
+    def _queue_runtime_reload(self) -> None:
+        """Request one reload, folding a burst of authoring writes into two max.
+
+        A write that lands while the first request is already executing needs
+        one trailing reload: the service may have read the document just
+        before the newer atomic rename.  Further writes join that trailing
+        request instead of growing an unbounded queue.
+        """
+        if self._runtime_shutdown:
+            return
+        if self._runtime_reload_pending:
+            self._runtime_reload_again = True
+            return
+        self._runtime_reload_pending = True
+        future = self._runtime_pool().submit(self._reload_runtime_if_needed)
+        future.add_done_callback(
+            lambda done: self._post_runtime_completion(done, self._finish_runtime_reload)
+        )
+
+    def _finish_runtime_reload(self, future: Future[Response]) -> bool:
+        """Finish a coalesced authoring reload on GTK's thread."""
+        self._runtime_reload_pending = False
+        if not self._runtime_shutdown:
+            try:
+                response = future.result()
+            except client.NotRunningError:
+                if self._window is not None:
+                    self._window.show_runtime_unavailable()
+            except client.ControlError as error:
+                self.window_report(f"Runtime reload failed: {error}")
+            else:
+                if not response.ok:
+                    self.window_report(
+                        f"Runtime rejected the new configuration: {response.message}"
+                    )
+                elif self._window is not None:
+                    self.refresh_runtime_status_async()
+        again = self._runtime_reload_again
+        self._runtime_reload_again = False
+        if again and not self._runtime_shutdown:
+            self._queue_runtime_reload()
+        return GLib.SOURCE_REMOVE
+
+    def _reload_runtime_if_needed(self) -> Response:
+        """Bring Rust to the newest atomic document before later commands run.
+
+        A document can change while a previous reload is on the wire.  The
+        generation is sampled *before* each request; if it changes before the
+        reply, the loop reloads again.  Runtime actions call this in their own
+        worker job as a final ordering barrier, so an action already queued
+        behind reload A cannot overtake the trailing reload for document B.
+        """
+        while True:
+            with self._runtime_config_lock:
+                wanted = self._runtime_document_generation
+                loaded = self._runtime_loaded_generation
+            if loaded >= wanted:
+                return Response.success()
+            response = client.send_runtime("reload")
+            if not response.ok:
+                return response
+            with self._runtime_config_lock:
+                self._runtime_loaded_generation = max(
+                    self._runtime_loaded_generation,
+                    wanted,
+                )
 
     def _stop_runtime_status_timer(self) -> None:
         if self._runtime_status_source:
@@ -368,7 +520,7 @@ class Application(Adw.Application):
     def _start_runtime_status_timer(self) -> None:
         """Keep the GUI on service-owned truth without doing playback work."""
         self._stop_runtime_status_timer()
-        self._runtime_is_running()
+        self.refresh_runtime_status_async()
         self._runtime_status_source = GLib.timeout_add_seconds(
             RUNTIME_STATUS_TICK_SECONDS, self._on_runtime_status_tick
         )
@@ -377,8 +529,91 @@ class Application(Adw.Application):
         if self._window is None:
             self._runtime_status_source = 0
             return GLib.SOURCE_REMOVE
-        self._runtime_is_running()
+        self.refresh_runtime_status_async()
         return GLib.SOURCE_CONTINUE
+
+    def refresh_runtime_status_async(self, on_absent: Callable[[], None] | None = None) -> bool:
+        """Queue one status probe without ever waiting in a GTK callback.
+
+        Timer ticks coalesce while a probe is in flight.  A request from a
+        newly created window instead asks for one trailing probe, because the
+        old generation's result is deliberately ineligible to update it.
+        ``on_absent`` is used only by the compatibility fallback and runs only
+        for a definitive missing socket -- never for a timeout or malformed
+        response.
+        """
+        window = self._window
+        if window is None or self._runtime_shutdown:
+            return False
+        generation = self._window_generation
+        if on_absent is not None:
+            self._runtime_absent_callbacks.append((generation, on_absent))
+        if self._runtime_status_pending:
+            if self._runtime_status_generation != generation:
+                self._runtime_status_again = True
+            return False
+        self._runtime_status_pending = True
+        self._runtime_status_generation = generation
+        future = self._runtime_pool().submit(client.send_runtime, "status", timeout=0.25)
+
+        def completed(done: Future[Response]) -> None:
+            def deliver(landed: Future[Response]) -> bool:
+                return self._finish_runtime_status(landed, window, generation)
+
+            self._post_runtime_completion(done, deliver)
+
+        future.add_done_callback(completed)
+        return True
+
+    def _finish_runtime_status(
+        self,
+        future: Future[Response],
+        window: MainWindow,
+        generation: int,
+    ) -> bool:
+        """Render a status result only into the window that requested it."""
+        self._runtime_status_pending = False
+        callbacks = [
+            callback
+            for wanted_generation, callback in self._runtime_absent_callbacks
+            if wanted_generation == generation
+        ]
+        self._runtime_absent_callbacks = [
+            (wanted_generation, callback)
+            for wanted_generation, callback in self._runtime_absent_callbacks
+            if wanted_generation != generation
+        ]
+        if self._runtime_shutdown:
+            self._runtime_status_again = False
+            return GLib.SOURCE_REMOVE
+        current = self._window is window and self._window_generation == generation
+        try:
+            response = future.result()
+        except client.NotRunningError:
+            if current:
+                window.show_runtime_unavailable()
+                for callback in callbacks:
+                    callback()
+        except client.ControlError:
+            # A missed deadline is not proof that nobody owns the runtime.
+            # Showing the controls as unavailable is conservative; crucially,
+            # no compatibility callback is allowed to start a second driver.
+            if current:
+                window.show_runtime_unavailable()
+        else:
+            if response.ok and current:
+                try:
+                    status = json.loads(response.message)
+                except ValueError:
+                    pass
+                else:
+                    if isinstance(status, dict):
+                        window.show_runtime_status(status)
+        again = self._runtime_status_again
+        self._runtime_status_again = False
+        if again and self._window is not None and not self._runtime_shutdown:
+            self.refresh_runtime_status_async()
+        return GLib.SOURCE_REMOVE
 
     def _runtime_is_running(self) -> bool:
         try:
@@ -408,8 +643,143 @@ class Application(Adw.Application):
         return True
 
     def refresh_runtime_status(self) -> bool:
-        """Refresh service-owned state after an explicit GUI control."""
+        """Synchronously refresh state for non-GUI compatibility callers."""
         return self._runtime_is_running()
+
+    def _gui_runtime_call_pending(self) -> bool:
+        """Reject a duplicate gesture before it mutates local authoring state."""
+        if not self._runtime_action_pending:
+            return False
+        self.window_report("A playback command is already in progress")
+        return True
+
+    def _start_gui_runtime_call(
+        self,
+        work: Callable[[], Response],
+        *,
+        fallback: Callable[[], Response] | None = None,
+        on_success: Callable[[bool], None] | None = None,
+    ) -> bool:
+        """Run one GUI command on the ordered socket worker.
+
+        The only condition which authorises Python's compatibility renderer is
+        ``NotRunningError`` (a missing/refused socket).  A timeout, malformed
+        reply, or any other transport error is a failure, never permission for
+        a second wallpaper driver.
+        """
+        if self._gui_runtime_call_pending() or self._runtime_shutdown:
+            return False
+        window = self._window
+        generation = self._window_generation
+        self._runtime_action_pending = True
+        if window is not None:
+            window.set_runtime_busy(True)
+        future = self._runtime_pool().submit(self._execute_gui_runtime_call, work)
+
+        def completed(done: Future[tuple[Response, bool]]) -> None:
+            def deliver(landed: Future[tuple[Response, bool]]) -> bool:
+                return self._finish_gui_runtime_call(
+                    landed,
+                    window,
+                    generation,
+                    fallback,
+                    on_success,
+                )
+
+            self._post_runtime_completion(done, deliver)
+
+        future.add_done_callback(completed)
+        return True
+
+    def _execute_gui_runtime_call(
+        self,
+        work: Callable[[], Response],
+    ) -> tuple[Response, bool]:
+        """Do ordered runtime socket I/O off GTK's main thread."""
+        try:
+            reloaded = self._reload_runtime_if_needed()
+            if not reloaded.ok:
+                return reloaded, True
+            return work(), True
+        except client.NotRunningError:
+            # The fallback itself deliberately stays on the main thread.  It
+            # owns Session and Applier state which GTK authoring callbacks also
+            # mutate; running it here would trade a bounded compatibility pause
+            # for cross-thread renderer races.  Only the socket wait moves off
+            # GTK, which is the common Rust-runtime path this worker exists for.
+            return Response.failure("the wallpaper runtime is unavailable"), False
+        except client.ControlError as error:
+            return Response.failure(str(error)), True
+        except Exception as error:  # pragma: no cover - defensive worker boundary
+            return Response.failure(f"runtime command failed: {error}"), True
+
+    def _finish_gui_runtime_call(
+        self,
+        future: Future[tuple[Response, bool]],
+        window: MainWindow | None,
+        generation: int,
+        fallback: Callable[[], Response] | None,
+        on_success: Callable[[bool], None] | None,
+    ) -> bool:
+        """Complete a GUI runtime command on GTK's thread."""
+        try:
+            response, runtime_answered = future.result()
+        except Exception as error:  # pragma: no cover - defensive worker boundary
+            response = Response.failure(f"runtime command failed: {error}")
+            runtime_answered = True
+        if not runtime_answered and fallback is not None:
+            response = fallback()
+        if response.ok and on_success is not None:
+            on_success(runtime_answered)
+        self._runtime_action_pending = False
+        current = (
+            not self._runtime_shutdown
+            and window is not None
+            and self._window is window
+            and self._window_generation == generation
+        )
+        if current and window is not None:
+            window.set_runtime_busy(False)
+            if not response.ok:
+                window.report(response.message)
+            self.refresh_runtime_status_async()
+        elif not self._runtime_shutdown and self._window is not None:
+            # A command belongs to the application, not to one incarnation of
+            # its window.  Its result stays away from a reopened window, but
+            # the global single-flight busy flag still has to be released.
+            self._window.set_runtime_busy(False)
+            self.refresh_runtime_status_async()
+        return GLib.SOURCE_REMOVE
+
+    def runtime_action_async(self, verb: str, argument: str | None = None) -> bool:
+        """Drive a runtime control from GTK without blocking its main loop."""
+        actions: dict[str, Callable[[], Applied]] = {
+            "next": self._session.next,
+            "previous": self._session.previous,
+            "random": self._session.random,
+        }
+
+        def moved(runtime_answered: bool) -> None:
+            # The Python compatibility action already advanced its own cursor.
+            # Mirror the cursor only when Rust, rather than that fallback,
+            # handled the command.
+            if runtime_answered:
+                if verb == "next":
+                    self._session.playlist.next()
+                elif verb == "previous":
+                    self._session.playlist.previous()
+                elif verb == "random":
+                    self._session.playlist.random()
+            if self._window is not None:
+                self._window.show_current(self._session)
+
+        action = actions.get(verb)
+        fallback = (lambda: self.apply(action)) if action is not None else None
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime(verb, argument),
+            fallback=fallback,
+            on_success=moved,
+        )
 
     def runtime_action(self, verb: str, argument: str | None = None) -> Response:
         """Drive the Rust runtime, retaining Python application as fallback."""
@@ -462,6 +832,33 @@ class Application(Adw.Application):
             self._window.playlists_changed(self._session)
         return response
 
+    def play_item_async(self, item: MediaItem) -> bool:
+        """Compile and apply Media's Quick choice without blocking GTK."""
+        if self._gui_runtime_call_pending():
+            return False
+        try:
+            chosen = self._session.choose(item.path)
+        except ApplyError as error:
+            self.window_report(str(error))
+            return False
+        valid, _changed = self._update_runtime_document()
+        if not valid:
+            self.window_report("The Quick choice could not be published to the runtime")
+            return False
+
+        def work() -> Response:
+            return client.send_runtime("playlist-use", chosen.id)
+
+        def shown(_runtime_answered: bool) -> None:
+            if self._window is not None:
+                self._window.playlists_changed(self._session)
+
+        return self._start_gui_runtime_call(
+            work,
+            fallback=lambda: self.apply(self._session.apply_current),
+            on_success=shown,
+        )
+
     def _make_missing_stills(self) -> None:
         """Fill in the stills for videos that have none, in the background.
 
@@ -506,7 +903,7 @@ class Application(Adw.Application):
         This is the pair the window's own star button already does.
         """
         self._session.favourites_changed()
-        self._publish_runtime()
+        self._publish_runtime_for_context()
         if self._window is not None:
             self._window.show_library(self._session)
 
@@ -534,13 +931,13 @@ class Application(Adw.Application):
     def playlists_changed(self) -> None:
         """Publish one playlist edit without turning it into a library rescan."""
         self._session.playlists_changed()
-        self._publish_runtime()
+        self._publish_runtime_for_context()
         if self._window is not None:
             self._window.playlists_changed(self._session)
 
     def runtime_config_changed(self) -> None:
         """Publish a light authoring change that does not require a rescan."""
-        self._publish_runtime()
+        self._publish_runtime_for_context()
 
     def activate_playlist(self, reference: str) -> Response:
         """Switch immediately to a named playlist and apply its first entry."""
@@ -560,6 +957,26 @@ class Application(Adw.Application):
             return Response.success(f"playing {chosen.name}")
         return response
 
+    def activate_playlist_async(self, reference: str) -> bool:
+        """Switch playlists from GTK without waiting on the runtime socket."""
+        if self._gui_runtime_call_pending():
+            return False
+        try:
+            chosen = self._session.use_playlist(reference)
+        except playlists.PlaylistError as error:
+            self.window_report(str(error))
+            return False
+
+        def shown(_runtime_answered: bool) -> None:
+            if self._window is not None:
+                self._window.playlists_changed(self._session)
+
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime("playlist-use", chosen.id),
+            fallback=lambda: self.apply(self._session.apply_current),
+            on_success=shown,
+        )
+
     def resume_schedule(self) -> Response:
         """Release a manual playlist choice and apply the scheduled/default list."""
         self._session.resume_schedule()
@@ -573,11 +990,34 @@ class Application(Adw.Application):
             self._window.playlists_changed(self._session)
         return response
 
+    def resume_schedule_async(self) -> bool:
+        """Return to calendar control from GTK without blocking it."""
+        if self._gui_runtime_call_pending():
+            return False
+        self._session.resume_schedule()
+
+        def shown(_runtime_answered: bool) -> None:
+            if self._window is not None:
+                self._window.playlists_changed(self._session)
+
+        return self._start_gui_runtime_call(
+            lambda: client.send_runtime("schedule-follow"),
+            fallback=lambda: self.apply(self._session.apply_current),
+            on_success=shown,
+        )
+
     def schedule_edited(self) -> None:
         """Take a changed calendar into account now rather than at the next tick."""
-        self._publish_runtime()
+        self._publish_runtime_for_context()
+        if self._window is not None:
+            self.refresh_runtime_status_async(on_absent=self._apply_changed_schedule)
+            return
         if self._runtime_is_running():
             return
+        self._apply_changed_schedule()
+
+    def _apply_changed_schedule(self) -> None:
+        """Compatibility fallback after a definitive missing runtime socket."""
         if self._session.schedule_changed():
             self.apply(self._session.apply_current)
         if self._window is not None:
@@ -593,15 +1033,22 @@ class Application(Adw.Application):
         while the library is walked.
         """
         session = self._session
-        self._publish_runtime()
+        self._publish_runtime_for_context()
         cursor = session.cursor
-        if not self._runtime_is_running() and cursor is not None and cursor.path == item.path:
+        if self._window is not None:
+            if cursor is not None and cursor.path == item.path:
+                self.refresh_runtime_status_async(on_absent=self._queue_reapply_current)
+        elif not self._runtime_is_running() and cursor is not None and cursor.path == item.path:
             GLib.idle_add(self._reapply_current)
         GLib.idle_add(self.refresh_library)
 
     def _reapply_current(self) -> bool:
         self.apply(self._session.apply_current)
         return GLib.SOURCE_REMOVE
+
+    def _queue_reapply_current(self) -> None:
+        """Defer the compatibility apply without leaking GLib's source id."""
+        GLib.idle_add(self._reapply_current)
 
     def apply(self, action: Callable[[], Applied]) -> Response:
         """Run a navigation action and report it, without letting it kill the app."""
@@ -747,20 +1194,31 @@ class Application(Adw.Application):
     def update_settings(self, **changes: Any) -> config.Settings:
         previous = self._settings
         self._settings = replace(self._settings, **changes).validated()
+        roots_changed = self._settings.roots != previous.roots
         config.save(self._settings)
         self._session.update_settings(self._settings)
-        self._publish_runtime()
+        if roots_changed:
+            # Session.update_settings already rescanned. Synchronise the
+            # cursor and redraw that new library rather than only moving the
+            # highlight in the old grid below.
+            self._session.sync_with_noctalia()
+        self._publish_runtime_for_context()
         self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
         if self._window is not None:
             self._window.apply_settings(self._settings)
-            if self._settings.dynamics_enabled != previous.dynamics_enabled:
+            if roots_changed or self._settings.dynamics_enabled != previous.dynamics_enabled:
                 # Dynamics changes which wallpapers are playable at all, so the
                 # grid has different contents now, not just a different state.
+                # Roots are even more direct: Session has already replaced the
+                # library, and leaving the old grid visible would make the
+                # Settings page appear not to have worked.
                 self._window.show_library(self._session)
             else:
                 self._window.show_current(self._session)
+        if roots_changed:
+            self._make_missing_stills()
         if self._settings.preview_scheme != previous.preview_scheme:
             self.reload_palette()
         return self._settings

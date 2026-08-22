@@ -225,7 +225,7 @@ fn missing_video_interpolation_is_refused_by_schema_four() {
 }
 
 #[test]
-fn schema_four_display_contract_is_strict_but_independent_execution_is_staged() {
+fn schema_four_display_contract_executes_independent_mode_strictly() {
     let mirrored = parsed();
     assert_eq!(mirrored.settings.display_mode, DisplayMode::Mirrored);
     assert_eq!(mirrored.settings.theme_source_connector, "");
@@ -248,11 +248,7 @@ fn schema_four_display_contract_is_strict_but_independent_execution_is_staged() 
     assert_eq!(decoded.settings.display_mode, DisplayMode::Independent);
     assert_eq!(decoded.settings.theme_source_connector, "DP-1");
     assert_eq!(decoded.schedules[0].connector, "DP-1");
-    let error = decoded.validate().unwrap_err().to_string();
-    assert!(
-        error.contains("not supported by this runtime build yet"),
-        "{error}"
-    );
+    decoded.validate().unwrap();
 
     let missing_source: Config = toml::from_str(&document(4).replace(
         "display_mode = \"mirrored\"",
@@ -336,11 +332,14 @@ fn compiler_cardinality_bounds_are_enforced() {
     let base = parsed();
 
     let mut playlists = base.clone();
-    playlists.playlists = (0..514)
+    playlists.playlists = (0..579)
         .map(|index| playlist(&base.playlists[0], index))
         .collect();
+    playlists.default_playlist = "p0".into();
+    playlists.schedules.clear();
+    playlists.displays.clear();
     let error = playlists.validate().unwrap_err().to_string();
-    assert!(error.contains("no more than 513"), "{error}");
+    assert!(error.contains("no more than 578"), "{error}");
 
     let mut entries = base.clone();
     let template = entries.playlists[0].entries[0].clone();
@@ -380,7 +379,7 @@ fn compiler_cardinality_bounds_are_enforced() {
 fn generated_fallback_plus_authoring_maximum_is_accepted() {
     let base = parsed();
     let mut config = base.clone();
-    config.playlists = (0..513)
+    config.playlists = (0..578)
         .map(|index| playlist(&base.playlists[0], index))
         .collect();
     config.default_playlist = "p0".into();

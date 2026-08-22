@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const MAX_OUTPUTS: usize = 32;
+const MAX_OUTPUTS: usize = 64;
 pub const MAX_OUTPUT_NAME_BYTES: usize = 256;
 const MAX_OUTPUT_REPLY_BYTES: usize = 1024 * 1024;
 const MAX_REFRESH_MILLIHZ: u64 = 1_000_000;
@@ -212,6 +212,32 @@ pub trait WallpaperDriver: Send {
         output: &str,
         settings: &crate::config::Settings,
     ) -> Result<(), String>;
+    /// Stop only the renderer owned by one connector before a staged hand-over.
+    fn stop_output_renderer(&mut self, _output: &str) {}
+    /// Apply the paired still without launching motion or changing colours.
+    fn apply_still_only(
+        &mut self,
+        entry: &Entry,
+        output: &str,
+        settings: &crate::config::Settings,
+    ) -> Result<(), String> {
+        let mut still_only = settings.clone();
+        still_only.dynamics_enabled = false;
+        self.apply(entry, output, &still_only)
+    }
+    /// Apply the already-resolved global palette decision for one entry.
+    fn apply_palette_only(&mut self, _entry: &Entry) -> Result<(), String> {
+        Ok(())
+    }
+    /// Launch only the motion renderer after every output still is in place.
+    fn start_motion_only(
+        &mut self,
+        _entry: &Entry,
+        _output: &str,
+        _settings: &crate::config::Settings,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Stop renderers which no longer have an entry in the effective target set.
     ///
     /// Applying one output cannot discover that another output disappeared, so
@@ -220,6 +246,9 @@ pub trait WallpaperDriver: Send {
     /// override it.
     fn retain_outputs(&mut self, _outputs: &[String]) {}
     fn set_paused(&mut self, paused: bool) -> Result<(), String>;
+    fn set_output_paused(&mut self, _output: &str, paused: bool) -> Result<(), String> {
+        self.set_paused(paused)
+    }
     /// Retune video audio without restarting the renderer child.
     ///
     /// The default keeps lightweight/test drivers source-compatible. Process
@@ -341,8 +370,17 @@ impl Mpvpaper {
                 Ok(Some((status, diagnostics)))
             }
             Ok(None) => Ok(None),
-            Err(error) => Err(format!("cannot inspect mpvpaper: {error}")),
+            Err(error) => Err(self.inspection_failure(error)),
         }
+    }
+
+    fn inspection_failure(&mut self, error: std::io::Error) -> String {
+        let diagnostic = format!("cannot inspect mpvpaper: {error}");
+        // Child::drop does not terminate the process. An inspection failure
+        // therefore cannot be handled by merely removing the ActiveVideo:
+        // explicitly stop/reap the group before status falls back to still.
+        self.stop();
+        diagnostic
     }
 }
 
@@ -495,7 +533,6 @@ pub struct SystemDriver {
     settings: RendererSettings,
     videos: HashMap<String, ActiveVideo>,
     scenes: HashMap<String, ActiveScene>,
-    failed_scenes: HashSet<String>,
     applying_batch: bool,
     output_snapshot: Option<Result<Vec<LiveOutput>, String>>,
 }
@@ -552,8 +589,13 @@ fn query_outputs(settings: &RendererSettings) -> Result<Vec<LiveOutput>, String>
     let object = document
         .as_object()
         .ok_or("niri outputs did not return an object")?;
+    if object.len() > MAX_OUTPUTS {
+        return Err(format!(
+            "niri reported more than the supported {MAX_OUTPUTS} outputs"
+        ));
+    }
     let mut outputs = Vec::new();
-    for (key, value) in object.iter().take(MAX_OUTPUTS) {
+    for (key, value) in object {
         let entry = value.as_object();
         let candidate = entry
             .and_then(|entry| entry.get("name"))
@@ -597,6 +639,7 @@ fn query_outputs(settings: &RendererSettings) -> Result<Vec<LiveOutput>, String>
 fn usable_output_name(candidate: &str) -> bool {
     !candidate.is_empty()
         && candidate.len() <= MAX_OUTPUT_NAME_BYTES
+        && !candidate.chars().any(char::is_whitespace)
         && !candidate.chars().any(char::is_control)
 }
 
@@ -659,7 +702,6 @@ impl SystemDriver {
             settings,
             videos: HashMap::new(),
             scenes: HashMap::new(),
-            failed_scenes: HashSet::new(),
             applying_batch: false,
             output_snapshot: None,
         }
@@ -792,12 +834,6 @@ impl SystemDriver {
             .scene_id
             .as_ref()
             .ok_or("scene entry has no scene id")?;
-        if self.failed_scenes.contains(scene) {
-            return Err(format!(
-                "scene {scene} (entry {:?}) previously crashed linux-wallpaperengine this session; paired still remains applied",
-                entry.id
-            ));
-        }
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
         command
             .arg("--layer")
@@ -843,6 +879,35 @@ impl SystemDriver {
             },
         );
         Ok(())
+    }
+
+    fn start_motion(
+        &mut self,
+        entry: &Entry,
+        output: &str,
+        runtime: &crate::config::Settings,
+    ) -> Result<(), String> {
+        if !runtime.dynamics_enabled {
+            return Ok(());
+        }
+        match entry.kind {
+            EntryKind::Still => Ok(()),
+            EntryKind::Video => {
+                let mut video = Mpvpaper::new();
+                let refresh = self.interpolation_refresh(output);
+                video.start(entry, output, &self.settings, refresh)?;
+                self.videos.insert(
+                    Self::key(output),
+                    ActiveVideo {
+                        renderer: video,
+                        entry: entry.clone(),
+                        output: output.to_string(),
+                    },
+                );
+                Ok(())
+            }
+            EntryKind::Scene => self.start_scene(entry, output),
+        }
     }
 
     fn failure_message(
@@ -896,27 +961,33 @@ impl WallpaperDriver for SystemDriver {
         self.stop_output(output);
         self.still(entry, output)?;
         self.palette(&entry.palette)?;
-        if !runtime.dynamics_enabled {
-            return Ok(());
-        }
-        match entry.kind {
-            EntryKind::Still => Ok(()),
-            EntryKind::Video => {
-                let mut video = Mpvpaper::new();
-                let refresh = self.interpolation_refresh(output);
-                video.start(entry, output, &self.settings, refresh)?;
-                self.videos.insert(
-                    Self::key(output),
-                    ActiveVideo {
-                        renderer: video,
-                        entry: entry.clone(),
-                        output: output.to_string(),
-                    },
-                );
-                Ok(())
-            }
-            EntryKind::Scene => self.start_scene(entry, output),
-        }
+        self.start_motion(entry, output, runtime)
+    }
+
+    fn stop_output_renderer(&mut self, output: &str) {
+        self.stop_output(output);
+    }
+
+    fn apply_still_only(
+        &mut self,
+        entry: &Entry,
+        output: &str,
+        _settings: &crate::config::Settings,
+    ) -> Result<(), String> {
+        self.still(entry, output)
+    }
+
+    fn apply_palette_only(&mut self, entry: &Entry) -> Result<(), String> {
+        self.palette(&entry.palette)
+    }
+
+    fn start_motion_only(
+        &mut self,
+        entry: &Entry,
+        output: &str,
+        settings: &crate::config::Settings,
+    ) -> Result<(), String> {
+        self.start_motion(entry, output, settings)
     }
 
     fn retain_outputs(&mut self, outputs: &[String]) {
@@ -964,6 +1035,35 @@ impl WallpaperDriver for SystemDriver {
             Ok(())
         } else {
             Err(errors.join("; "))
+        }
+    }
+
+    fn set_output_paused(&mut self, output: &str, paused: bool) -> Result<(), String> {
+        let key = Self::key(output);
+        let mut errors = Vec::new();
+        if let Some(video) = self.videos.get_mut(&key) {
+            if let Err(error) = video.renderer.set_paused(paused) {
+                errors.push(error);
+            }
+        }
+        if let Some(scene) = self.scenes.get(&key) {
+            let result = unsafe {
+                libc::kill(
+                    -(scene.child.id() as i32),
+                    if paused { libc::SIGSTOP } else { libc::SIGCONT },
+                )
+            };
+            if result != 0 {
+                errors.push(format!(
+                    "cannot signal linux-wallpaperengine process group: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("{key}: {}", errors.join("; ")))
         }
     }
 
@@ -1036,18 +1136,22 @@ impl WallpaperDriver for SystemDriver {
         let mut exited_scenes = Vec::new();
         for (key, active) in &mut self.scenes {
             match active.child.try_wait() {
-                Ok(Some(status)) => exited_scenes.push((key.clone(), status.to_string())),
+                Ok(Some(status)) => exited_scenes.push((key.clone(), status.to_string(), false)),
                 Ok(None) => {}
                 Err(error) => exited_scenes.push((
                     key.clone(),
                     format!("cannot inspect linux-wallpaperengine: {error}"),
+                    true,
                 )),
             }
         }
-        for (key, status) in exited_scenes {
+        for (key, status, must_stop) in exited_scenes {
             if let Some(mut active) = self.scenes.remove(&key) {
-                if let Some(scene) = &active.entry.scene_id {
-                    self.failed_scenes.insert(scene.clone());
+                if must_stop {
+                    // Dropping Child would orphan a renderer that may still
+                    // own the output. Match every other hand-over path and
+                    // explicitly terminate/reap its process group.
+                    stop_group(&mut active.child);
                 }
                 let diagnostics = active
                     .diagnostics
@@ -1134,6 +1238,26 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
+    fn mpvpaper_inspection_failure_reaps_the_live_child_group() {
+        let child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let mut renderer = Mpvpaper::new();
+        renderer.child = Some(child);
+        let diagnostic = renderer.inspection_failure(std::io::Error::other("forced EIO"));
+        assert!(diagnostic.contains("forced EIO"));
+        assert!(renderer.child.is_none());
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was not reaped");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[test]
     fn interpolation_options_are_complete_or_absent() {
         assert!(interpolation_options(VideoInterpolation::Off, Some(165_004)).is_empty());
         assert!(interpolation_options(VideoInterpolation::Oversample, None).is_empty());
@@ -1191,6 +1315,7 @@ mod tests {
         assert!(usable_output_name("eDP-1"));
         assert!(usable_output_name(&"x".repeat(MAX_OUTPUT_NAME_BYTES)));
         assert!(!usable_output_name(&"x".repeat(MAX_OUTPUT_NAME_BYTES + 1)));
+        assert!(!usable_output_name("Display Port-1"));
         assert!(!usable_output_name("DP-1\n--bg"));
     }
 

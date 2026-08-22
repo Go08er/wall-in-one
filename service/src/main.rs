@@ -285,7 +285,13 @@ fn initial_apply(runtime: &mut Runtime<SystemDriver>, now: Instant) -> Option<St
             })
         }
         Err(error) => {
-            eprintln!("wall-in-one-service: initial apply: {error}");
+            if runtime.schedule_initial_apply_retry(now) {
+                eprintln!(
+                    "wall-in-one-service: initial apply failed; queued automatic quarantine retries: {error}"
+                );
+            } else {
+                eprintln!("wall-in-one-service: initial apply: {error}");
+            }
             None
         }
     }

@@ -11,8 +11,9 @@ pub const SCHEMA_VERSION: u32 = 4;
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 // These mirror the authoring-store ceilings.  The generated all-media
-// fallback is additional to the 512 playlists a person can create.
-const MAX_PLAYLISTS: usize = 513;
+// fallback, one global Quick choice, and up to 64 connector Quick choices are
+// additional to the 512 playlists a person can create.
+const MAX_PLAYLISTS: usize = 578;
 const MAX_ENTRIES_PER_PLAYLIST: usize = 10_000;
 const MAX_SCHEDULES: usize = 512;
 const MAX_DISPLAYS: usize = 64;
@@ -35,7 +36,7 @@ const MAX_TABOO_SOURCE_BYTES: usize = 64;
 const STATUS_STRUCTURAL_RESERVE: usize = 256 * 1024;
 const STATUS_DIAGNOSTIC_RESERVE: usize = 64 * 1024;
 const STATUS_JSON_ESCAPE_FACTOR: usize = 4;
-const MAX_LIVE_OUTPUTS: usize = 32;
+const MAX_LIVE_OUTPUTS: usize = 64;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -514,11 +515,6 @@ impl Config {
             )?;
             reference(&display.playlist, &ids, &names)?;
         }
-        if self.settings.display_mode == DisplayMode::Independent {
-            return invalid(
-                "independent display mode is recorded by schema 4 but is not supported by this runtime build yet",
-            );
-        }
         self.validate_status_budget()?;
         Ok(())
     }
@@ -550,9 +546,10 @@ impl Config {
                 .saturating_add(rule.end.as_ref().map_or(0, String::len));
         }
 
-        // niri discovery is independently capped at 32 live outputs.  A
-        // manual override may put the largest playlist and entry on every one,
-        // so count that rather than only the currently assigned values.
+        // niri discovery is independently capped at 64 live outputs and the
+        // atomic inventory also retains up to 64 configured-but-detached
+        // assignments. A manual override may put the largest playlist and
+        // entry on every row, so count the full 128-row union.
         let largest_connector = self
             .displays
             .iter()
@@ -564,7 +561,9 @@ impl Config {
             .saturating_add(largest_playlist_identity.saturating_mul(2))
             .saturating_add(largest_entry);
         configured_text = configured_text
-            .saturating_add(per_display.saturating_mul(MAX_LIVE_OUTPUTS))
+            .saturating_add(
+                per_display.saturating_mul(MAX_LIVE_OUTPUTS.saturating_add(MAX_DISPLAYS)),
+            )
             .saturating_add(largest_playlist_identity)
             .saturating_add(largest_entry);
 

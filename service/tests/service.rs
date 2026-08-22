@@ -118,6 +118,22 @@ end = "06:00"
     )
 }
 
+fn independent_config() -> String {
+    format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"day\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"day\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+            .replace(
+                "display_mode = \"mirrored\"",
+                "display_mode = \"independent\""
+            )
+            .replace(
+                "theme_source_connector = \"\"",
+                "theme_source_connector = \"DP-1\""
+            )
+    )
+}
+
 fn request(socket: &Path, verb: &str, argument: Option<&str>) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut stream = loop {
@@ -446,6 +462,38 @@ fn interpolation_off_never_queries_niri() {
 }
 
 #[test]
+fn compositor_output_inventory_over_the_route_ceiling_is_rejected_not_truncated() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("too-many-outputs");
+    let niri = root.join("niri");
+    let outputs = serde_json::Value::Object(
+        (0..65)
+            .map(|index| {
+                (
+                    format!("DP-{index}"),
+                    serde_json::json!({"name": format!("DP-{index}")}),
+                )
+            })
+            .collect(),
+    );
+    fs::write(&niri, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", outputs)).unwrap();
+    fs::set_permissions(&niri, fs::Permissions::from_mode(0o755)).unwrap();
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false).replace(
+        "niri_program = \"/bin/true\"",
+        &format!("niri_program = {niri:?}"),
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let mut driver = SystemDriver::new(parsed.renderer);
+    let error = driver.connected_outputs().unwrap_err();
+    assert!(
+        error.contains("more than the supported 64 outputs"),
+        "{error}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn mixed_all_output_refresh_launches_unsmoothed() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-interpolation-mixed");
@@ -636,8 +684,10 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         .unwrap()
         .and_hms_opt(12, 0, 0)
         .unwrap();
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, &document).unwrap();
     let mut runtime = Runtime::new(
-        root.join("runtime.toml"),
+        config_path.clone(),
         parsed,
         SystemDriver::new(toml::from_str::<Config>(&document).unwrap().renderer),
         at,
@@ -662,25 +712,25 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         },
         at,
     );
-    let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    let crash_status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
     assert_eq!(
-        status["config_generation"],
+        crash_status["config_generation"],
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
     assert_eq!(
-        status["config_path"],
+        crash_status["config_path"],
         root.join("runtime.toml").to_str().unwrap()
     );
-    assert_eq!(status["motion_active"], false);
-    assert!(status["last_error"]
+    assert_eq!(crash_status["motion_active"], false);
+    assert!(crash_status["last_error"]
         .as_str()
         .unwrap()
         .contains("scene 12345"));
-    assert!(status["last_error"]
+    assert!(crash_status["last_error"]
         .as_str()
         .unwrap()
         .contains("linux-wallpaperengine"));
-    assert!(status["last_error"]
+    assert!(crash_status["last_error"]
         .as_str()
         .unwrap()
         .contains("unsupported scene shader"));
@@ -694,16 +744,50 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         "the initial still is explicitly reaffirmed after the renderer exits"
     );
 
-    let refused = runtime.handle(
+    let suppressed = runtime.handle(
         wall_in_one_service::protocol::Request {
             verb: "playlist-use".into(),
             argument: Some("night".into()),
         },
         at,
     );
-    assert!(!refused.ok);
-    assert!(refused.message.contains("previously crashed"));
+    assert!(suppressed.ok);
     assert_eq!(fs::read_to_string(&launches).unwrap().lines().count(), 1);
+
+    let durable = document.replace(
+        "scene_id = \"12345\"",
+        "scene_id = \"12345\"\ntaboo = { reason = \"known scene crash\", source = \"renderer-crash\" }",
+    );
+    fs::write(&config_path, durable).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    assert_eq!(
+        status(&mut runtime, at)["taboo_entries"][0]["durable"],
+        true
+    );
+    assert_eq!(fs::read_to_string(&launches).unwrap().lines().count(), 1);
+
+    fs::write(&config_path, &document).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    assert!(status(&mut runtime, at)["taboo_entries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(&launches).unwrap().lines().count(),
+        1,
+        "clearing compiler-owned taboo metadata must wait for the explicit retry"
+    );
+    let retried = runtime_command(&mut runtime, at, "playlist-use", Some("night"));
+    assert!(retried.ok);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while fs::read_to_string(&launches).unwrap().lines().count() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "explicit scene retry did not launch"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read_to_string(&launches).unwrap().lines().count(), 2);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -804,6 +888,10 @@ struct RuntimeDriverState {
     fail_applies_remaining: usize,
     fail_entry_id: Option<String>,
     fail_entry_attempts_remaining: usize,
+    fail_stage_entry_id: Option<String>,
+    fail_stage_output: Option<String>,
+    fail_stage_attempts_remaining: usize,
+    fail_palette_attempts_remaining: usize,
     fail_pause: bool,
     failures: Vec<String>,
     renderer_failures: Vec<RendererFailure>,
@@ -811,6 +899,7 @@ struct RuntimeDriverState {
     output_probes: usize,
     video_audio: Vec<(bool, u8)>,
     reconfigures: usize,
+    stage_events: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -860,6 +949,69 @@ impl WallpaperDriver for RuntimeDriver {
         Ok(())
     }
 
+    fn stop_output_renderer(&mut self, output: &str) {
+        let mut state = self.0.lock().unwrap();
+        state.stage_events.push(format!("stop {output}"));
+        state.active_outputs.remove(output);
+        state.motion_active = !state.active_outputs.is_empty();
+    }
+
+    fn apply_still_only(
+        &mut self,
+        entry: &wall_in_one_service::config::Entry,
+        output: &str,
+        settings: &wall_in_one_service::config::Settings,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.0.lock().unwrap();
+            state
+                .stage_events
+                .push(format!("still {output} {}", entry.id));
+            if state.fail_stage_entry_id.as_deref() == Some(&entry.id)
+                && state.fail_stage_output.as_deref() == Some(output)
+                && state.fail_stage_attempts_remaining > 0
+            {
+                state.fail_stage_attempts_remaining -= 1;
+                return Err(format!("entry {} is borked on {output}", entry.id));
+            }
+        }
+        let mut still = settings.clone();
+        still.dynamics_enabled = false;
+        self.apply(entry, output, &still)
+    }
+
+    fn apply_palette_only(
+        &mut self,
+        entry: &wall_in_one_service::config::Entry,
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        state.stage_events.push(format!("palette {}", entry.id));
+        if state.fail_palette_attempts_remaining > 0 {
+            state.fail_palette_attempts_remaining -= 1;
+            Err("palette application failed".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn start_motion_only(
+        &mut self,
+        entry: &wall_in_one_service::config::Entry,
+        output: &str,
+        settings: &wall_in_one_service::config::Settings,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .unwrap()
+            .stage_events
+            .push(format!("motion {output} {}", entry.id));
+        if settings.dynamics_enabled && entry.kind != wall_in_one_service::config::EntryKind::Still
+        {
+            self.apply(entry, output, settings)?;
+        }
+        Ok(())
+    }
+
     fn retain_outputs(&mut self, outputs: &[String]) {
         let mut state = self.0.lock().unwrap();
         state.retained_outputs.push(outputs.to_vec());
@@ -878,6 +1030,15 @@ impl WallpaperDriver for RuntimeDriver {
         } else {
             Ok(())
         }
+    }
+
+    fn set_output_paused(&mut self, output: &str, paused: bool) -> Result<(), String> {
+        self.0
+            .lock()
+            .unwrap()
+            .stage_events
+            .push(format!("pause {output} {paused}"));
+        self.set_paused(paused)
     }
 
     fn set_video_audio(&mut self, muted: bool, volume: u8) -> Result<(), String> {
@@ -909,6 +1070,10 @@ impl WallpaperDriver for RuntimeDriver {
                 })
                 .collect::<Vec<_>>(),
         );
+        for failure in &structured {
+            state.active_outputs.remove(&failure.output);
+        }
+        state.motion_active = !state.active_outputs.is_empty();
         structured
     }
 
@@ -920,7 +1085,10 @@ impl WallpaperDriver for RuntimeDriver {
     }
 }
 
-fn status(runtime: &mut Runtime<RuntimeDriver>, at: chrono::NaiveDateTime) -> serde_json::Value {
+fn status<D: WallpaperDriver>(
+    runtime: &mut Runtime<D>,
+    at: chrono::NaiveDateTime,
+) -> serde_json::Value {
     let response = runtime.handle(
         wall_in_one_service::protocol::Request {
             verb: "status".into(),
@@ -932,29 +1100,1143 @@ fn status(runtime: &mut Runtime<RuntimeDriver>, at: chrono::NaiveDateTime) -> se
     serde_json::from_str(&response.message).unwrap()
 }
 
+fn display_status<D: WallpaperDriver>(
+    runtime: &mut Runtime<D>,
+    at: chrono::NaiveDateTime,
+    connector: &str,
+) -> serde_json::Value {
+    status(runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == connector)
+        .unwrap()
+        .clone()
+}
+
+fn runtime_command<D: WallpaperDriver>(
+    runtime: &mut Runtime<D>,
+    at: chrono::NaiveDateTime,
+    verb: &str,
+    argument: Option<&str>,
+) -> Response {
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: verb.into(),
+            argument: argument.map(str::to_owned),
+        },
+        at,
+    )
+}
+
 #[test]
-fn thirty_two_renderer_failures_keep_attribution_and_fit_the_status_wire() {
+fn independent_routes_keep_cursor_and_manual_state_per_connector() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    parsed.validate().unwrap();
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)
         .unwrap()
         .and_hms_opt(12, 0, 0)
         .unwrap();
     let state = Arc::new(Mutex::new(RuntimeDriverState {
-        failures: (0..32)
-            .map(|index| {
-                format!(
-                    "scene wallpaper-{index} crashed; stderr: {} TAIL-{index}\n",
-                    "diagnostic".repeat(1200)
-                )
-            })
-            .collect(),
+        connected_outputs: Some(vec!["HDMI-A-1".into(), "DP-1".into()]),
         ..RuntimeDriverState::default()
     }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 next")).ok);
+    let snapshot = status(&mut runtime, at);
+    let dp = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["entry_id"], "video-two");
+    assert_eq!(hdmi["entry_id"], "still-one");
+    assert_eq!(snapshot["source"], "schedule");
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use Night")).ok);
+    let snapshot = status(&mut runtime, at);
+    let dp = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["playlist_id"], "night");
+    assert_eq!(dp["route_source"], "manual");
+    assert_eq!(hdmi["playlist_id"], "day");
+    assert_eq!(snapshot["source"], "mixed");
+}
+
+#[test]
+fn independent_schedule_precedence_is_targeted_then_global_then_assignment() {
+    let document = format!(
+        "{}\n[[schedules]]\nid = \"global-now\"\nplaylist = \"night\"\n\
+         [[schedules]]\nid = \"dp-now\"\nplaylist = \"day\"\nconnector = \"DP-1\"\n",
+        independent_config()
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    parsed.validate().unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, at);
+    let dp = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["playlist_id"], "day");
+    assert_eq!(dp["schedule_rule_id"], "dp-now");
+    assert_eq!(hdmi["playlist_id"], "night");
+    assert_eq!(hdmi["schedule_rule_id"], "global-now");
+    assert!(snapshot["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["id"] == "global-now" && rule["connector"].is_null()));
+    assert!(snapshot["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["id"] == "dp-now" && rule["connector"] == "DP-1"));
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use night")).ok);
+    assert_eq!(
+        status(&mut runtime, at)["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connector"] == "DP-1")
+            .unwrap()["route_source"],
+        "manual"
+    );
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 schedule-follow")).ok);
+    let dp = status(&mut runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap()
+        .clone();
+    assert_eq!(dp["playlist_id"], "day");
+    assert_eq!(dp["route_source"], "schedule");
+}
+
+#[test]
+fn independent_apply_stages_stills_theme_palette_then_renderers() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let events = state.lock().unwrap().stage_events.clone();
+    let still_hdmi = events
+        .iter()
+        .position(|event| event.starts_with("still HDMI-A-1"))
+        .unwrap();
+    let still_dp = events
+        .iter()
+        .position(|event| event.starts_with("still DP-1"))
+        .unwrap();
+    let palette = events
+        .iter()
+        .position(|event| event.starts_with("palette "))
+        .unwrap();
+    let first_motion = events
+        .iter()
+        .position(|event| event.starts_with("motion "))
+        .unwrap();
+    assert!(
+        still_hdmi < still_dp,
+        "designated DP-1 still must land last: {events:?}"
+    );
+    assert!(still_dp < palette && palette < first_motion, "{events:?}");
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["status_version"], 2);
+    assert_eq!(snapshot["display_mode"], "independent");
+    assert_eq!(snapshot["theme_source"]["configured"], "DP-1");
+    assert_eq!(snapshot["theme_source"]["effective"], "DP-1");
+    assert_eq!(snapshot["theme_source"]["fallback"], false);
+}
+
+#[test]
+fn targeted_handover_never_restarts_or_recolours_an_unselected_display_and_rolls_back() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    state.lock().unwrap().stage_events.clear();
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 next")).ok);
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(events.iter().any(|event| event == "stop HDMI-A-1"));
+    assert!(events
+        .iter()
+        .any(|event| event == "still HDMI-A-1 video-two"));
+    assert!(events
+        .iter()
+        .any(|event| event == "motion HDMI-A-1 video-two"));
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.contains("DP-1") && !event.starts_with("palette ")),
+        "a targeted non-theme hand-over touched the designated display: {events:?}"
+    );
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 previous")).ok);
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.stage_events.clear();
+        recorded.fail_stage_entry_id = Some("video-two".into());
+        recorded.fail_stage_output = Some("HDMI-A-1".into());
+        recorded.fail_stage_attempts_remaining = 1;
+    }
+    let failed = runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 next"));
+    assert!(!failed.ok);
+    assert!(failed.message.contains("previous wallpaper restored"));
+    let snapshot = status(&mut runtime, at);
+    let hdmi = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    let dp = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    assert_eq!(hdmi["entry_id"], "still-one");
+    assert_eq!(hdmi["renderer_failed"], false);
+    assert!(hdmi["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("previous wallpaper restored"));
+    assert_eq!(dp["entry_id"], "still-one");
+    assert_eq!(dp["last_error"], "");
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.contains("DP-1") && !event.starts_with("palette ")),
+        "candidate or rollback touched the unselected route: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event == "motion HDMI-A-1 video-two"),
+        "motion leaked after its still failed: {events:?}"
+    );
+
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.stage_events.clear();
+        recorded.fail_palette_attempts_remaining = 1;
+    }
+    let failed = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+    assert!(!failed.ok);
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(events.iter().any(|event| event == "palette video-two"));
+    assert!(
+        !events.iter().any(|event| event == "motion DP-1 video-two"),
+        "motion leaked after its designated palette failed: {events:?}"
+    );
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(
+        snapshot["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connector"] == "DP-1")
+            .unwrap()["entry_id"],
+        "still-one"
+    );
+}
+
+#[test]
+fn independent_theme_source_falls_back_stably_without_forgetting_configuration() {
+    let parsed: Config = toml::from_str(&independent_config().replace(
+        "theme_source_connector = \"DP-1\"",
+        "theme_source_connector = \"eDP-1\"",
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["HDMI-A-1".into(), "DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["theme_source"]["configured"], "eDP-1");
+    assert_eq!(snapshot["theme_source"]["effective"], "DP-1");
+    assert_eq!(snapshot["theme_source"]["fallback"], true);
+}
+
+#[test]
+fn independent_automatic_failure_retries_and_marks_only_the_borked_route_candidate() {
+    let parsed: Config = toml::from_str(
+        &independent_config().replace("cycle_enabled = false", "cycle_enabled = true"),
+    )
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_stage_entry_id = Some("video-two".into());
+        recorded.fail_stage_output = Some("DP-1".into());
+        recorded.fail_stage_attempts_remaining = 3;
+    }
+
+    let base = Instant::now();
+    runtime.tick(at, base + Duration::from_secs(301));
+    let first = status(&mut runtime, at);
+    let dp = first["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = first["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["entry_id"], "still-one");
+    assert_eq!(dp["automatic_retry"]["attempt"], 1);
+    assert_eq!(dp["automatic_retry"]["maximum_attempts"], 3);
+    assert_eq!(hdmi["entry_id"], "video-two");
+    assert!(hdmi["automatic_retry"].is_null());
+    assert_eq!(hdmi["last_error"], "");
+
+    let rejected = runtime_command(&mut runtime, at, "on", Some("DP-1 cycle maybe"));
+    assert!(!rejected.ok);
+    assert_eq!(
+        status(&mut runtime, at)["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connector"] == "DP-1")
+            .unwrap()["automatic_retry"]["attempt"],
+        1,
+        "a rejected targeted command canceled the pending retry"
+    );
+
+    runtime.tick(at, base + Duration::from_secs(304));
+    assert_eq!(
+        status(&mut runtime, at)["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connector"] == "DP-1")
+            .unwrap()["automatic_retry"]["attempt"],
+        2
+    );
+    runtime.tick(at, base + Duration::from_secs(307));
+    let exhausted = status(&mut runtime, at);
+    let dp = exhausted["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = exhausted["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["entry_id"], "still-one");
+    assert!(dp["automatic_retry"].is_null());
+    assert!(dp["last_error"].as_str().unwrap().contains("marked taboo"));
+    assert_eq!(hdmi["entry_id"], "video-two");
+    assert_eq!(hdmi["last_error"], "");
+    assert_eq!(exhausted["taboo_entries"][0]["entry_id"], "video-two");
+    assert_eq!(exhausted["taboo_entries"][0]["durable"], false);
+}
+
+#[test]
+fn one_route_retry_never_rewinds_or_reapplies_another_routes_random_choice() {
+    let document = independent_config()
+        .replace("cycle_enabled = false", "cycle_enabled = true")
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"day\"",
+            "connector = \"HDMI-A-1\"\nplaylist = \"night\"",
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_stage_entry_id = Some("video-two".into());
+        recorded.fail_stage_output = Some("DP-1".into());
+        recorded.fail_stage_attempts_remaining = 3;
+    }
+    let base = Instant::now();
+    runtime.tick(at, base + Duration::from_secs(301));
+    assert_eq!(
+        display_status(&mut runtime, at, "DP-1")["automatic_retry"]["attempt"],
+        1
+    );
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 playlist-use day")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 random")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 cycle off")).ok);
+    let chosen = display_status(&mut runtime, at, "HDMI-A-1")["entry_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    state.lock().unwrap().stage_events.clear();
+    runtime.tick(at, base + Duration::from_secs(304));
+    assert_eq!(
+        display_status(&mut runtime, at, "HDMI-A-1")["entry_id"],
+        chosen
+    );
+    assert!(state
+        .lock()
+        .unwrap()
+        .stage_events
+        .iter()
+        .all(|event| !event.contains("HDMI-A-1")));
+}
+
+#[test]
+fn disconnected_pending_route_is_canceled_and_rejoins_current_schedule() {
+    let parsed: Config = toml::from_str(
+        &independent_config().replace("cycle_enabled = false", "cycle_enabled = true"),
+    )
+    .unwrap();
+    let summer = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        summer,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_stage_entry_id = Some("video-two".into());
+        recorded.fail_stage_output = Some("DP-1".into());
+        recorded.fail_stage_attempts_remaining = 3;
+    }
+    let base = Instant::now();
+    runtime.tick(summer, base + Duration::from_secs(301));
+    assert_eq!(
+        display_status(&mut runtime, summer, "DP-1")["automatic_retry"]["attempt"],
+        1
+    );
+
+    state.lock().unwrap().connected_outputs = Some(vec!["HDMI-A-1".into()]);
+    runtime.tick(winter, base + Duration::from_secs(307));
+    let detached = display_status(&mut runtime, winter, "DP-1");
+    assert_eq!(detached["connected"], false);
+    assert!(detached["automatic_retry"].is_null());
+
+    state.lock().unwrap().connected_outputs = Some(vec!["DP-1".into(), "HDMI-A-1".into()]);
+    runtime.tick(winter, base + Duration::from_secs(313));
+    let reconnected = display_status(&mut runtime, winter, "DP-1");
+    assert_eq!(reconnected["connected"], true);
+    assert_eq!(reconnected["playlist_id"], "night");
+    assert_eq!(reconnected["schedule_rule_id"], "night-rule");
+    assert!(reconnected["automatic_retry"].is_null());
+}
+
+#[test]
+fn display_mode_switch_clears_hidden_session_overrides_in_both_directions() {
+    let root = directory("display-mode-switch");
+    let config_path = root.join("runtime.toml");
+    let mirrored_document = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    let independent_document = independent_config();
+    fs::write(&config_path, &mirrored_document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        Config::load(&config_path).unwrap(),
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("night")).ok);
+    assert_eq!(status(&mut runtime, at)["source"], "manual");
+
+    fs::write(&config_path, &independent_document).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let independent = status(&mut runtime, at);
+    assert_ne!(independent["source"], "manual");
+    assert!(independent["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["manual_override"] == false));
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use night")).ok);
+    assert_eq!(
+        display_status(&mut runtime, at, "DP-1")["route_source"],
+        "manual"
+    );
+
+    fs::write(&config_path, &mirrored_document).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let mirrored = status(&mut runtime, at);
+    assert_eq!(mirrored["source"], "schedule");
+    assert_eq!(mirrored["playlist_id"], "day");
+
+    fs::write(&config_path, &independent_document).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let independent_again = status(&mut runtime, at);
+    assert!(independent_again["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["connected"] == true)
+        .all(|row| row["manual_override"] == false));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn independent_renderer_crash_is_attributed_without_poisoning_a_healthy_route() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.stage_events.clear();
+        recorded.renderer_failures.push(RendererFailure {
+            entry_id: "video-two".into(),
+            kind: wall_in_one_service::config::EntryKind::Video,
+            scene_id: None,
+            output: "HDMI-A-1".into(),
+            message: "mpvpaper crashed on HDMI-A-1; paired still restored".into(),
+            permanent_for_session: false,
+        });
+    }
+    runtime.tick(at, Instant::now());
+    let snapshot = status(&mut runtime, at);
+    let dp = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["playback_state"], "playing");
+    assert_eq!(dp["motion_active"], true);
+    assert_eq!(dp["renderer_failed"], false);
+    assert_eq!(dp["last_error"], "");
+    assert_eq!(hdmi["playback_state"], "stopped");
+    assert_eq!(hdmi["motion_active"], false);
+    assert_eq!(hdmi["renderer_failed"], true);
+    assert!(hdmi["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("mpvpaper crashed"));
+
+    state.lock().unwrap().stage_events.clear();
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
+    assert!(
+        state.lock().unwrap().stage_events.is_empty(),
+        "Play on the healthy route must not reapply either wallpaper"
+    );
+}
+
+#[test]
+fn renderer_crash_reasserts_only_the_shell_global_palette_owner() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+
+    let independent_state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut independent = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        toml::from_str::<Config>(&independent_config()).unwrap(),
+        RuntimeDriver(independent_state.clone()),
+        at,
+    )
+    .unwrap();
+    independent.apply_current().unwrap();
+    independent_state.lock().unwrap().stage_events.clear();
+    independent_state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "still-one".into(),
+            kind: wall_in_one_service::config::EntryKind::Still,
+            scene_id: None,
+            output: "HDMI-A-1".into(),
+            message: "non-theme renderer exited".into(),
+            permanent_for_session: false,
+        });
+    independent.tick(at, Instant::now());
+    assert!(independent_state
+        .lock()
+        .unwrap()
+        .stage_events
+        .iter()
+        .all(|event| !event.starts_with("palette ")));
+
+    independent_state.lock().unwrap().stage_events.clear();
+    independent_state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "still-one".into(),
+            kind: wall_in_one_service::config::EntryKind::Still,
+            scene_id: None,
+            output: "DP-1".into(),
+            message: "theme renderer exited".into(),
+            permanent_for_session: false,
+        });
+    independent.tick(at, Instant::now());
+    assert_eq!(
+        independent_state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .filter(|event| event.starts_with("palette "))
+            .count(),
+        1
+    );
+
+    let mirrored_state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut mirrored = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        toml::from_str::<Config>(&config(
+            Path::new("/bin/true"),
+            Path::new("/bin/true"),
+            false,
+        ))
+        .unwrap(),
+        RuntimeDriver(mirrored_state.clone()),
+        at,
+    )
+    .unwrap();
+    mirrored.apply_current().unwrap();
+    mirrored_state.lock().unwrap().stage_events.clear();
+    mirrored_state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "still-one".into(),
+            kind: wall_in_one_service::config::EntryKind::Still,
+            scene_id: None,
+            output: String::new(),
+            message: "mirrored renderer exited".into(),
+            permanent_for_session: false,
+        });
+    mirrored.tick(at, Instant::now());
+    assert_eq!(
+        mirrored_state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .filter(|event| event.starts_with("palette "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn targeted_command_applies_a_connector_first_seen_by_its_output_probe_once() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.connected_outputs = Some(vec!["DP-1".into(), "HDMI-A-1".into()]);
+        recorded.stage_events.clear();
+    }
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 next")).ok);
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event == "still HDMI-A-1 still-one"),
+        "the newly connected route was discovered but left unapplied: {events:?}"
+    );
+    assert!(events.iter().any(|event| event == "stop HDMI-A-1"));
+
+    state.lock().unwrap().stage_events.clear();
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 next")).ok);
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(
+        events.iter().all(|event| !event.contains("HDMI-A-1")),
+        "a connector already known from the prior probe was reapplied: {events:?}"
+    );
+}
+
+#[test]
+fn broken_hotplug_route_cannot_fail_or_rollback_an_explicit_target_command() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.connected_outputs = Some(vec!["DP-1".into(), "HDMI-A-1".into()]);
+        recorded.fail_stage_entry_id = Some("still-one".into());
+        recorded.fail_stage_output = Some("HDMI-A-1".into());
+        recorded.fail_stage_attempts_remaining = 3;
+        recorded.stage_events.clear();
+    }
+
+    let command = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+    assert!(command.ok, "{}", command.message);
+    let dp = display_status(&mut runtime, at, "DP-1");
+    let hdmi = display_status(&mut runtime, at, "HDMI-A-1");
+    assert_eq!(dp["entry_id"], "video-two");
+    assert_eq!(dp["last_error"], "");
+    assert_eq!(hdmi["entry_id"], "still-one");
+    assert_eq!(hdmi["automatic_retry"]["attempt"], 1);
+    assert!(hdmi["last_error"].as_str().unwrap().contains("borked"));
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .filter(|event| event.as_str() == "stop DP-1")
+            .count(),
+        1,
+        "the explicit route was rolled back or applied twice"
+    );
+}
+
+#[test]
+fn status_inventory_keeps_configured_assignments_when_the_connector_is_detached() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    for document in [
+        independent_config(),
+        format!(
+            "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"day\"\n\
+             [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"night\"\n",
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        ),
+    ] {
+        let parsed: Config = toml::from_str(&document).unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: Some(vec!["DP-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state),
+            at,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        let snapshot = status(&mut runtime, at);
+        let detached = snapshot["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connector"] == "HDMI-A-1")
+            .expect("configured detached assignment vanished from status");
+        assert_eq!(detached["connected"], false);
+        assert_eq!(detached["motion_active"], false);
+        assert_eq!(detached["assignment_source"], "explicit");
+        assert!(!detached["assigned_playlist_id"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
+fn global_independent_commands_apply_only_routes_that_change() {
+    let document = independent_config().replace(
+        "connector = \"HDMI-A-1\"\nplaylist = \"day\"",
+        "connector = \"HDMI-A-1\"\nplaylist = \"night\"",
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    state.lock().unwrap().stage_events.clear();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(events.iter().any(|event| event.contains("DP-1")));
+    assert!(
+        events.iter().all(|event| !event.contains("HDMI-A-1")),
+        "singleton route was restarted by a global Next: {events:?}"
+    );
+
+    state.lock().unwrap().stage_events.clear();
+    let following = runtime_command(&mut runtime, at, "schedule-follow", None);
+    assert!(following.ok);
+    assert!(following.message.contains("already following"));
+    assert!(state.lock().unwrap().stage_events.is_empty());
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 stop")).ok);
+    state.lock().unwrap().stage_events.clear();
+    assert!(runtime_command(&mut runtime, at, "stop", None).ok);
+    let events = state.lock().unwrap().stage_events.clone();
+    assert!(events.iter().any(|event| event.contains("DP-1")));
+    assert!(
+        events.iter().all(|event| !event.contains("HDMI-A-1")),
+        "already-stopped route was reapplied by global Stop: {events:?}"
+    );
+    state.lock().unwrap().stage_events.clear();
+    let stopped = runtime_command(&mut runtime, at, "stop", None);
+    assert!(stopped.ok);
+    assert!(stopped.message.contains("already stopped"));
+    assert!(state.lock().unwrap().stage_events.is_empty());
+}
+
+#[test]
+fn independent_target_grammar_is_strict_and_controls_are_per_display() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    for command in [
+        "missing next",
+        " DP-1 next",
+        "DP-1 next ",
+        "DP-1\tnext",
+        "DP-1 status",
+        "DP-1 reload",
+        "DP-1 quit",
+        "DP-1 on HDMI-A-1 next",
+        "DP-1 config",
+        "DP-1 next junk",
+        "DP-1 shuffle",
+    ] {
+        assert!(
+            !runtime_command(&mut runtime, at, "on", Some(command)).ok,
+            "accepted {command:?}"
+        );
+    }
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 pause")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 shuffle on")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 cycle off")).ok);
+    let snapshot = status(&mut runtime, at);
+    let dp = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "DP-1")
+        .unwrap();
+    let hdmi = snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "HDMI-A-1")
+        .unwrap();
+    assert_eq!(dp["playback_state"], "paused");
+    assert_eq!(dp["shuffle_source"], "manual");
+    assert_eq!(dp["cycle_source"], "manual");
+    assert_eq!(hdmi["playback_state"], "playing");
+    assert_eq!(hdmi["shuffle_source"], "config");
+    assert_eq!(hdmi["cycle_source"], "config");
+    assert_eq!(snapshot["playback_state"], "mixed");
+
+    assert!(runtime_command(&mut runtime, at, "toggle", None).ok);
+    assert!(status(&mut runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["playback_state"] == "paused"));
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 stop")).ok);
+    let mixed = status(&mut runtime, at);
+    assert!(mixed["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["playback_state"] == "stopped"));
+    assert!(mixed["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["playback_state"] == "paused"));
+    assert!(runtime_command(&mut runtime, at, "toggle", None).ok);
+    assert!(status(&mut runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["playback_state"] == "playing"));
+
+    assert!(runtime_command(&mut runtime, at, "stop", None).ok);
+    assert!(status(&mut runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["playback_state"] == "stopped"));
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["playback_state"], "mixed");
+}
+
+#[test]
+fn mirrored_mode_rejects_targeted_on_without_changing_legacy_commands() {
     let parsed: Config = toml::from_str(&config(
         Path::new("/bin/true"),
         Path::new("/bin/true"),
         false,
     ))
     .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    let rejected = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+    assert!(!rejected.ok);
+    assert!(rejected.message.contains("independent display mode"));
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+}
+
+#[test]
+fn sixty_four_display_failures_and_detached_inventory_fit_the_status_wire() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some((0..64).map(|index| format!("LIVE-{index:02}")).collect()),
+        renderer_failures: (0..64)
+            .map(|index| RendererFailure {
+                entry_id: "still-one".into(),
+                kind: wall_in_one_service::config::EntryKind::Still,
+                scene_id: None,
+                output: format!("LIVE-{index:02}"),
+                message: format!(
+                    "display LIVE-{index:02} failed; stderr: {} TAIL-{index:02}\n",
+                    "diagnostic".repeat(1200),
+                ),
+                permanent_for_session: false,
+            })
+            .collect(),
+        ..RuntimeDriverState::default()
+    }));
+    let mut parsed: Config = toml::from_str(&independent_config()).unwrap();
+    parsed.displays = (0..64)
+        .map(|index| wall_in_one_service::config::DisplayAssignment {
+            connector: format!("DETACHED-{index:02}"),
+            playlist: "day".into(),
+        })
+        .collect();
+    parsed.validate().unwrap();
     let mut runtime = Runtime::new(
         PathBuf::from("/tmp/runtime.toml"),
         parsed,
@@ -963,6 +2245,7 @@ fn thirty_two_renderer_failures_keep_attribution_and_fit_the_status_wire() {
     )
     .unwrap();
 
+    runtime.apply_current().unwrap();
     runtime.tick(at, Instant::now());
     let response = runtime.handle(
         wall_in_one_service::protocol::Request {
@@ -976,14 +2259,23 @@ fn thirty_two_renderer_failures_keep_attribution_and_fit_the_status_wire() {
     let error = snapshot["last_error"].as_str().unwrap();
     assert!(error.len() <= 12 * 1024, "{} bytes", error.len());
     assert!(!error.contains('\n'));
-    for index in [0, 31] {
-        assert!(
-            error.contains(&format!("scene wallpaper-{index}")),
-            "{error}"
-        );
-        assert!(error.contains(&format!("TAIL-{index}")), "{error}");
-    }
+    assert!(error.contains("LIVE-00"), "{error}");
+    assert!(error.contains("LIVE-63"), "{error}");
     assert!(error.contains("[truncated]"), "{error}");
+    assert_eq!(snapshot["displays"].as_array().unwrap().len(), 128);
+    assert_eq!(
+        snapshot["schedules"][0]["connector"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        snapshot["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["connected"] == false)
+            .count(),
+        64
+    );
     let mut encoded = Vec::new();
     write_response(&mut encoded, &response).unwrap();
     assert!(encoded.len() <= MAX_RESPONSE_BYTES);
@@ -1222,6 +2514,22 @@ fn automatic_cycle_retries_three_times_then_marks_and_skips_the_borked_entry() {
         1
     );
 
+    for (verb, argument) in [
+        ("quit", Some("junk")),
+        ("next", Some("junk")),
+        ("shuffle", Some("maybe")),
+        ("cycle", Some("maybe")),
+        ("not-a-verb", None),
+    ] {
+        let rejected = runtime_command(&mut runtime, at, verb, argument);
+        assert!(!rejected.ok, "{verb} {argument:?} unexpectedly succeeded");
+        assert_eq!(
+            status(&mut runtime, at)["automatic_retry"]["attempt"],
+            1,
+            "rejected {verb} {argument:?} canceled the pending retry"
+        );
+    }
+
     runtime.tick(at, due + Duration::from_secs(1));
     assert_eq!(
         state
@@ -1265,6 +2573,164 @@ fn automatic_cycle_retries_three_times_then_marks_and_skips_the_borked_entry() {
         3,
         "the taboo entry must never be selected automatically again"
     );
+}
+
+#[test]
+fn mirrored_startup_failure_retries_three_times_then_quarantines_and_advances() {
+    let mut parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    parsed.schedules.clear();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        fail_entry_id: Some("still-one".into()),
+        fail_entry_attempts_remaining: 3,
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    let started = Instant::now();
+    assert!(runtime.apply_current().is_err());
+    assert!(runtime.schedule_initial_apply_retry(started));
+    runtime.tick(at, started + Duration::from_secs(2));
+    runtime.tick(at, started + Duration::from_secs(4));
+    let retrying = status(&mut runtime, at);
+    assert_eq!(retrying["taboo_entries"][0]["entry_id"], "still-one");
+    assert_eq!(retrying["automatic_retry"]["attempt"], 0);
+    runtime.tick(at, started + Duration::from_secs(6));
+    let recovered = status(&mut runtime, at);
+    assert_eq!(recovered["entry_id"], "video-two");
+    assert_eq!(recovered["motion_active"], true);
+    assert_eq!(state.lock().unwrap().fail_entry_attempts_remaining, 0);
+}
+
+#[test]
+fn independent_startup_failure_quarantines_only_the_failed_route_and_advances() {
+    let parsed: Config = toml::from_str(&independent_config()).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        fail_stage_entry_id: Some("still-one".into()),
+        fail_stage_output: Some("DP-1".into()),
+        fail_stage_attempts_remaining: 3,
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    let started = Instant::now();
+    assert!(runtime.apply_current().is_err());
+    state.lock().unwrap().stage_events.clear();
+    assert!(runtime.schedule_initial_apply_retry(started));
+    assert!(display_status(&mut runtime, at, "HDMI-A-1")["automatic_retry"].is_null());
+    runtime.tick(at, started + Duration::from_secs(2));
+    runtime.tick(at, started + Duration::from_secs(4));
+    let quarantined = status(&mut runtime, at);
+    assert_eq!(quarantined["taboo_entries"][0]["entry_id"], "still-one");
+    assert_eq!(quarantined["displays"][0]["automatic_retry"]["attempt"], 0);
+    runtime.tick(at, started + Duration::from_secs(6));
+    let recovered = status(&mut runtime, at);
+    assert_eq!(recovered["displays"][0]["entry_id"], "video-two");
+    assert_eq!(recovered["displays"][0]["motion_active"], true);
+    assert!(state
+        .lock()
+        .unwrap()
+        .stage_events
+        .iter()
+        .all(|event| !event.contains("HDMI-A-1")));
+}
+
+#[test]
+fn failed_reload_preserves_mirrored_and_independent_automatic_retries() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+
+    let mirrored_root = directory("mirrored-reload-retry");
+    let mirrored_path = mirrored_root.join("runtime.toml");
+    let mirrored_document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    fs::write(&mirrored_path, &mirrored_document).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut mirrored = Runtime::new(
+        mirrored_path.clone(),
+        Config::load(&mirrored_path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    mirrored.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_entry_id = Some("video-two".into());
+        recorded.fail_entry_attempts_remaining = 3;
+    }
+    let mirrored_due = Instant::now() + Duration::from_secs(600);
+    mirrored.tick(at, mirrored_due);
+    assert_eq!(status(&mut mirrored, at)["automatic_retry"]["attempt"], 1);
+    fs::write(&mirrored_path, "not valid toml = [").unwrap();
+    assert!(!runtime_command(&mut mirrored, at, "reload", None).ok);
+    assert_eq!(status(&mut mirrored, at)["automatic_retry"]["attempt"], 1);
+    fs::remove_dir_all(mirrored_root).unwrap();
+
+    let independent_root = directory("independent-reload-retry");
+    let independent_path = independent_root.join("runtime.toml");
+    fs::write(
+        &independent_path,
+        independent_config().replace("cycle_enabled = false", "cycle_enabled = true"),
+    )
+    .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut independent = Runtime::new(
+        independent_path.clone(),
+        Config::load(&independent_path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    independent.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_stage_entry_id = Some("video-two".into());
+        recorded.fail_stage_output = Some("DP-1".into());
+        recorded.fail_stage_attempts_remaining = 3;
+    }
+    let independent_due = Instant::now() + Duration::from_secs(600);
+    independent.tick(at, independent_due);
+    assert_eq!(
+        display_status(&mut independent, at, "DP-1")["automatic_retry"]["attempt"],
+        1
+    );
+    fs::write(&independent_path, "not valid toml = [").unwrap();
+    assert!(!runtime_command(&mut independent, at, "reload", None).ok);
+    assert_eq!(
+        display_status(&mut independent, at, "DP-1")["automatic_retry"]["attempt"],
+        1
+    );
+    fs::remove_dir_all(independent_root).unwrap();
 }
 
 #[test]
@@ -1394,10 +2860,15 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
             permanent_for_session: true,
         });
     runtime.tick(at, Instant::now());
-    assert_eq!(
-        status(&mut runtime, at)["taboo_entries"][0]["entry_id"],
-        "video-two"
-    );
+    let first = status(&mut runtime, at);
+    assert_eq!(first["config_epoch"], 1);
+    assert_eq!(first["taboo_entries"][0]["entry_id"], "video-two");
+    assert_eq!(first["taboo_entries"][0]["observed_config_epoch"], 1);
+    let instance = first["runtime_instance"].as_str().unwrap();
+    assert_eq!(instance.len(), 32);
+    assert!(instance
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
 
     // An unrelated compiler reload before the app has consumed status must
     // not mistake absence for an author-owned clear.
@@ -1412,9 +2883,32 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
             )
             .ok
     );
+    let after_reload = status(&mut runtime, at);
+    assert_eq!(after_reload["runtime_instance"], instance);
+    assert_eq!(after_reload["config_epoch"], 2);
+    assert_eq!(after_reload["taboo_entries"][0]["entry_id"], "video-two");
     assert_eq!(
-        status(&mut runtime, at)["taboo_entries"][0]["entry_id"],
-        "video-two"
+        after_reload["taboo_entries"][0]["observed_config_epoch"], 1,
+        "a retained session finding must not be relabelled as the reloaded config"
+    );
+
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "video-two".into(),
+            kind: wall_in_one_service::config::EntryKind::Video,
+            scene_id: None,
+            output: String::new(),
+            message: "video-two crashed again under the new config epoch".into(),
+            permanent_for_session: true,
+        });
+    runtime.tick(at, Instant::now());
+    assert_eq!(
+        status(&mut runtime, at)["taboo_entries"][0]["observed_config_epoch"],
+        2,
+        "a new failure must be attributable to the current config epoch"
     );
 
     let persisted = original.replace(
@@ -1443,12 +2937,14 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
         true
     );
     assert_eq!(
-        state.lock().unwrap().applies.last().unwrap(),
-        &("video-two".into(), false)
+        status(&mut runtime, at)["taboo_entries"][0]["observed_config_epoch"],
+        3
     );
+    let applies_before_clear = state.lock().unwrap().applies.len();
+    assert_eq!(status(&mut runtime, at)["motion_active"], false);
 
-    // The app is the sole writer. Removing metadata is its explicit Retry:
-    // Rust drops the durable key before applying the changed entry.
+    // The app is the sole writer. Removing metadata makes one explicit retry
+    // possible, but the metadata-only reload itself does not restart motion.
     fs::write(&config_path, &original).unwrap();
     assert!(
         runtime
@@ -1463,11 +2959,159 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
     );
     let cleared = status(&mut runtime, at);
     assert!(cleared["taboo_entries"].as_array().unwrap().is_empty());
+    assert_eq!(state.lock().unwrap().applies.len(), applies_before_clear);
+    assert!(runtime_command(&mut runtime, at, "play", None).ok);
     assert_eq!(
         state.lock().unwrap().applies.last().unwrap(),
         &("video-two".into(), true)
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn taboo_propagates_across_equivalent_resolved_scene_and_video_occurrences() {
+    let mut parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    parsed.schedules.clear();
+    let mut scene_copy = parsed.playlists[1].clone();
+    scene_copy.id = "scene-copy-list".into();
+    scene_copy.name = "Scene copy".into();
+    scene_copy.entries[0].id = "scene-copy".into();
+    let mut video_copy = parsed.playlists[0].clone();
+    video_copy.id = "video-copy-list".into();
+    video_copy.name = "Video copy".into();
+    video_copy.entries = vec![video_copy.entries[1].clone()];
+    video_copy.entries[0].id = "video-copy".into();
+    parsed.playlists.push(scene_copy);
+    parsed.playlists.push(video_copy);
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("night")).ok);
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "scene-three".into(),
+            kind: wall_in_one_service::config::EntryKind::Scene,
+            scene_id: Some("12345".into()),
+            output: String::new(),
+            message: "scene 12345 crashed linux-wallpaperengine".into(),
+            permanent_for_session: true,
+        });
+    runtime.tick(at, Instant::now());
+
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("day")).ok);
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "video-two".into(),
+            kind: wall_in_one_service::config::EntryKind::Video,
+            scene_id: None,
+            output: String::new(),
+            message: "video decoder rejected /tmp/two.mp4".into(),
+            permanent_for_session: true,
+        });
+    runtime.tick(at, Instant::now());
+
+    let taboo = status(&mut runtime, at)["taboo_entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["playlist_id"].as_str().unwrap().to_string(),
+                row["entry_id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    for expected in [
+        ("night".to_string(), "scene-three".to_string()),
+        ("scene-copy-list".to_string(), "scene-copy".to_string()),
+        ("day".to_string(), "video-two".to_string()),
+        ("video-copy-list".to_string(), "video-copy".to_string()),
+    ] {
+        assert!(
+            taboo.contains(&expected),
+            "missing equivalent taboo {expected:?}"
+        );
+    }
+
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("scene-copy-list")).ok);
+    assert!(!state.lock().unwrap().applies.last().unwrap().1);
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("video-copy-list")).ok);
+    assert!(!state.lock().unwrap().applies.last().unwrap().1);
+}
+
+#[test]
+fn active_taboo_entry_reports_attributable_static_fallback_in_both_display_modes() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    for independent in [false, true] {
+        let document = (if independent {
+            independent_config()
+        } else {
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        })
+        .replace(
+            "motion = \"/tmp/two.mp4\"",
+            "motion = \"/tmp/two.mp4\"\n\
+             taboo = { reason = \"known decoder failure\", source = \"authoring\" }",
+        );
+        let parsed: Config = toml::from_str(&document).unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: independent.then(|| vec!["DP-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state),
+            at,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        let response = if independent {
+            runtime_command(&mut runtime, at, "on", Some("DP-1 next"))
+        } else {
+            runtime_command(&mut runtime, at, "next", None)
+        };
+        assert!(response.ok, "{}", response.message);
+        let row = if independent {
+            display_status(&mut runtime, at, "DP-1")
+        } else {
+            status(&mut runtime, at)["displays"][0].clone()
+        };
+        assert_eq!(row["entry_id"], "video-two");
+        assert_eq!(row["playback_state"], "playing");
+        assert_eq!(row["motion_active"], false);
+        assert_eq!(row["renderer_failed"], true);
+        let diagnostic = row["last_error"].as_str().unwrap();
+        assert!(diagnostic.contains("video-two"), "{diagnostic}");
+        assert!(diagnostic.contains("known decoder failure"), "{diagnostic}");
+        assert!(diagnostic.contains("paired still"), "{diagnostic}");
+    }
 }
 
 #[test]
@@ -2494,9 +4138,12 @@ fn output_hotplug_reconciles_targets_without_a_second_probe() {
         );
     }
     let snapshot = status(&mut runtime, at);
-    assert_eq!(snapshot["displays"][0]["connector"], "DP-2");
-    assert_eq!(snapshot["displays"][1]["connector"], "DP-3");
-    assert_eq!(snapshot["displays"][1]["assignment_source"], "default");
+    assert_eq!(snapshot["displays"][0]["connector"], "DP-1");
+    assert_eq!(snapshot["displays"][0]["connected"], false);
+    assert_eq!(snapshot["displays"][0]["assignment_source"], "explicit");
+    assert_eq!(snapshot["displays"][1]["connector"], "DP-2");
+    assert_eq!(snapshot["displays"][2]["connector"], "DP-3");
+    assert_eq!(snapshot["displays"][2]["assignment_source"], "default");
 }
 
 #[test]
@@ -2539,6 +4186,70 @@ fn schedule_transition_replaces_and_then_restores_per_display_baselines() {
     let baseline = status(&mut runtime, summer);
     assert_eq!(baseline["displays"][0]["playlist_id"], "night");
     assert_eq!(baseline["displays"][1]["playlist_id"], "day");
+}
+
+#[test]
+fn schedule_provenance_change_with_identical_target_never_restarts_motion() {
+    let summer = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+
+    for independent in [false, true] {
+        let mut document = if independent {
+            independent_config()
+        } else {
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        };
+        document.push_str(
+            if independent {
+                "\n[[schedules]]\nid = \"same-dp\"\nplaylist = \"day\"\nconnector = \"DP-1\"\nmonths = [12]\n"
+            } else {
+                "\n[[schedules]]\nid = \"same-global\"\nplaylist = \"day\"\nmonths = [12]\n"
+            },
+        );
+        let parsed: Config = toml::from_str(&document).unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: independent.then(|| vec!["DP-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state.clone()),
+            summer,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        state.lock().unwrap().stage_events.clear();
+        state.lock().unwrap().applies.clear();
+        runtime.tick(winter, Instant::now());
+        assert!(state.lock().unwrap().stage_events.is_empty());
+        assert!(state.lock().unwrap().applies.is_empty());
+        let snapshot = status(&mut runtime, winter);
+        if independent {
+            let dp = snapshot["displays"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["connector"] == "DP-1")
+                .unwrap();
+            assert_eq!(dp["route_source"], "schedule");
+            assert_eq!(dp["schedule_rule_id"], "same-dp");
+        } else {
+            assert_eq!(snapshot["schedule"]["rule_id"], "same-global");
+            assert_eq!(snapshot["schedule"]["in_force"], serde_json::Value::Null);
+            assert!(snapshot["schedules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|rule| rule["id"] == "same-global" && rule["in_force"] == true));
+        }
+    }
 }
 
 #[test]
@@ -2687,6 +4398,61 @@ fn reload_of_inactive_authoring_state_does_not_reapply_the_wallpaper() {
 
     assert!(response.ok);
     assert!(events.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn independent_same_playlist_override_after_reload_is_idempotent() {
+    let root = directory("independent-idempotent-override");
+    let config_path = root.join("runtime.toml");
+    let original = independent_config();
+    fs::write(&config_path, &original).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use day")).ok);
+
+    let updated = original
+        .replace("/tmp/one.png", "/tmp/one-updated.png")
+        .replace(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        );
+    fs::write(&config_path, updated).unwrap();
+    state.lock().unwrap().stage_events.clear();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let after_reload = state.lock().unwrap().stage_events.clone();
+    assert_eq!(
+        after_reload
+            .iter()
+            .filter(|event| event.as_str() == "stop DP-1")
+            .count(),
+        1,
+        "reload itself must perform one DP-1 hand-over: {after_reload:?}"
+    );
+
+    let repeated = runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use day"));
+    assert!(repeated.ok);
+    assert!(repeated.message.contains("already active"));
+    assert_eq!(
+        state.lock().unwrap().stage_events,
+        after_reload,
+        "the same-id override reapplied a route already updated by reload"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -18,6 +18,11 @@ $ wall-in-one ctl cycle on|off|default
 $ wall-in-one ctl shuffle on|off|default
 $ wall-in-one ctl playlist-use Evening
 $ wall-in-one ctl schedule-follow
+$ wall-in-one ctl on DP-1 playlist-use Evening photos
+$ wall-in-one ctl on DP-1 schedule-follow
+$ wall-in-one ctl on DP-1 play|pause|stop|toggle
+$ wall-in-one ctl on DP-1 previous|next|random
+$ wall-in-one ctl on DP-1 cycle|shuffle on|off|default
 $ wall-in-one ctl reload
 $ wall-in-one ctl status
 $ wall-in-one ctl providers
@@ -56,7 +61,8 @@ still rotate through static pairings when cycle remains on. `cycle on|off` is a
 session override and `cycle default` returns to the authored setting.
 
 `status` is JSON describing the active playlist and entry, whether the source
-is `manual` or `schedule`, the explicit `playing` / `paused` / `stopped` state,
+is `manual`, `schedule`, or (for divergent independent routes) `mixed`, the
+explicit `playing` / `paused` / `stopped` / `mixed` state,
 effective cycle value and its `config` or `manual` source, shuffle state, the
 playlist inventory, each display's effective entry, and the last renderer
 error. The same snapshot includes every schedule rule, the rule currently
@@ -70,11 +76,29 @@ accepted as a substitute for runtime status: exit code 3 still means automation
 is not running.
 
 Each display row identifies `assignment_source` as `explicit` or `default`.
+Status version 2 makes each connected display row authoritative for its route:
+manual/schedule source and effective rule, three-state playback, mode defaults
+and overrides, and route-attributed renderer/retry diagnostics. Top-level mode
+values can say `mixed`; clients must not render their compatibility boolean as
+“off” in that case. `theme_source` distinguishes the saved colour connector
+from the effective live fallback.
+Configured assignments remain in the same atomic inventory while unplugged,
+with `connected = false`; each schedule row carries its optional connector, so
+a runtime-only bar can distinguish global and targeted rules without querying
+the authoring socket.
 `output_discovery_error` is empty during normal operation and explains when
 the service is temporarily using its last known connectors because niri could
 not provide a fresh snapshot. Runtime verbs shown above without an operand are
 strictly zero-argument; ignored trailing text is rejected, including for
 `quit`.
+
+`on <connector> ...` is the connector-scoped runtime envelope. The connector
+is one whitespace-free token; `playlist-use` takes the remaining text as one
+possibly multiword id/name, transport verbs take no argument, and Cycle or
+Shuffle take exactly `on`, `off`, or `default`. The Python client validates
+that grammar before contacting Rust and never falls back to the legacy global
+Python renderer. Assignment and schedule edits are still configuration and are
+not accepted through `on`.
 
 If mpvpaper or linux-wallpaperengine exits, the runtime immediately falls back
 to that entry's paired still and reports the exact entry in `last_error`; it

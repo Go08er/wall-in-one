@@ -30,9 +30,34 @@ pub fn resolve_rule(
     rules: &[ScheduleRule],
     at: NaiveDateTime,
 ) -> Result<Option<&ScheduleRule>, ConfigError> {
+    resolve_rule_for(rules, None, at)
+}
+
+pub fn resolve_override_for<'a>(
+    rules: &'a [ScheduleRule],
+    connector: &str,
+    at: NaiveDateTime,
+) -> Result<Option<&'a str>, ConfigError> {
+    Ok(resolve_rule_for(rules, Some(connector), at)?.map(|rule| rule.playlist.as_str()))
+}
+
+/// Resolve the last matching rule visible to one routing scope.
+///
+/// The mirrored/global scope sees only rules without a connector. An
+/// independent connector sees both global and connector-specific rules in
+/// authored order, so a later rule of either kind wins exactly once.
+pub fn resolve_rule_for<'a>(
+    rules: &'a [ScheduleRule],
+    connector: Option<&str>,
+    at: NaiveDateTime,
+) -> Result<Option<&'a ScheduleRule>, ConfigError> {
     let mut chosen = None;
     for rule in rules {
-        if matches(rule, at)? {
+        let visible = match connector {
+            Some(connector) => rule.connector.is_empty() || rule.connector == connector,
+            None => rule.connector.is_empty(),
+        };
+        if visible && matches(rule, at)? {
             chosen = Some(rule);
         }
     }
@@ -125,5 +150,44 @@ mod tests {
         }
         let c = Fixed(at(2030, 12, 25, 3, 15));
         assert_eq!(c.now(), at(2030, 12, 25, 3, 15));
+    }
+
+    #[test]
+    fn connector_scope_combines_global_and_targeted_rules_in_authored_order() {
+        let global_first = rule("global-first", None, None);
+        let mut dp = rule("dp", None, None);
+        dp.connector = "DP-1".into();
+        let global_last = rule("global-last", None, None);
+        let rules = [global_first, dp, global_last];
+
+        assert_eq!(
+            resolve_rule_for(&rules, Some("DP-1"), at(2026, 8, 3, 10, 0))
+                .unwrap()
+                .unwrap()
+                .playlist,
+            "global-last"
+        );
+        assert_eq!(
+            resolve_rule_for(&rules[..2], Some("DP-1"), at(2026, 8, 3, 10, 0))
+                .unwrap()
+                .unwrap()
+                .playlist,
+            "dp"
+        );
+        assert_eq!(
+            resolve_rule_for(&rules[..2], Some("HDMI-A-1"), at(2026, 8, 3, 10, 0))
+                .unwrap()
+                .unwrap()
+                .playlist,
+            "global-first"
+        );
+        assert_eq!(
+            resolve_rule(&rules[..2], at(2026, 8, 3, 10, 0))
+                .unwrap()
+                .unwrap()
+                .playlist,
+            "global-first",
+            "mirrored resolution must ignore targeted rules"
+        );
     }
 }

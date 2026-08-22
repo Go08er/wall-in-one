@@ -71,12 +71,13 @@ token; it still needs no Python installation to run.
 
 `[settings]` now carries `display_mode = "mirrored" | "independent"` and
 `theme_source_connector`. A schedule may carry a connector target, and display
-assignments remain app-authored configuration. This contract commit executes
-only the mirrored subset: the compiler omits dormant connector rules and
-assignments, and both compiler and service reject independent mode explicitly
-until the connector-specific cursor and renderer hand-over land together.
-Independent mode requires a non-empty designated colour-source connector;
-mirrored mode may preserve that selection dormant.
+assignments remain app-authored configuration. Mirrored mode deliberately
+omits connector-targeted rules and assignments from the resolved document, but
+keeps them in the authoring stores so a dock setup survives a temporary mode
+change. Independent mode compiles them and gives every live connector its own
+route, cursor, shuffle bag, renderer and calendar winner. It requires a
+non-empty designated colour-source connector; mirrored mode may preserve that
+selection dormant.
 
 The renderer section carries `scene_fps`, which linux-wallpaperengine consumes
 through its native `--fps N` option. `video_hardware_decode` selects mpv's
@@ -132,11 +133,16 @@ permutation. `next` after `previous` follows the actual forward branch first.
 Both history directions are capped at 128 indexes per playlist, so a long-lived
 daemon does not accumulate an unbounded session log.
 
-An automatic schedule or cycle hand-over which cannot apply gets three attempts
-total, two seconds apart. Between attempts the service restores the prior
-selection and reapplies its last-known-good wallpaper. After the third failure
-the attributable playlist/entry is taboo for later automatic selection for the
-rest of that service session. This is distinct from a child renderer exit: a
+An automatic startup, schedule or cycle hand-over which cannot apply gets three
+attempts total, two seconds apart. Schedule and cycle transitions restore the
+prior selection and last-known-good wallpaper between attempts. Startup has no
+prior selection, so its paired still remains visible; after the third failure
+the route advances to another usable entry. In both cases the attributable
+playlist/entry becomes taboo for later automatic selection for the rest of the
+service session. Rejected socket input and failed reloads preserve a promised
+retry; an accepted explicit command or successful reload supersedes it. A
+disconnected route cancels its pending candidate and evaluates the current
+clock when it reconnects. This is distinct from a child renderer exit: a
 renderer which started and later died is never automatically restarted, and a
 linux-wallpaperengine scene crash becomes taboo immediately.
 
@@ -145,8 +151,11 @@ schedule rule overrides assignments for its window, and a manual
 `playlist-use` overrides both until `schedule-follow`. Each connector owns its
 own mpvpaper or linux-wallpaperengine child; switching one does not stop a
 renderer owned for another connector. Noctalia's colour palette is global, so
-when displays show different entries the last applied connector's palette is
-the shell-wide palette.
+one user-selected connector is the colour source. If it is detached, the
+lexically first live connector is the temporary source while the saved choice
+is preserved. A non-source targeted change never recolours the shell. Crash
+fallback reasserts the palette only when the failed renderer was the effective
+colour source.
 
 Assignments need not enumerate every monitor. At apply time the service takes
 one live niri output snapshot; a connected connector with no explicit
@@ -157,12 +166,15 @@ after a real hot-plug change. A transient discovery failure retains the last
 successful snapshot, falling back to the explicit assignment list before the
 first success. `status.output_discovery_error` reports that degraded state.
 
-`status` retains a top-level playlist for compact bar clients and also returns
-a `displays` array with the effective playlist and entry for every connector
-(`ALL` when the config has no explicit assignments). A single assigned
-playlist becomes that top-level summary; several different assignments report
-`Multiple displays` with no singular entry instead of naming a wallpaper that
-is not actually the common state.
+`status_version = 2` retains top-level compatibility fields for compact bar
+clients and also returns a `displays` array with the effective playlist and
+entry for the union of live connectors and configured assignments (`ALL` in
+mirrored mode). A configured but detached row has `connected = false` and does
+not claim active motion. When independent
+routes disagree, top-level `source`, `playback_state`, `cycle_source`, or
+`shuffle_source` can be `mixed`; their per-display fields are authoritative.
+Several different playlists report `Multiple displays` with no singular entry
+instead of naming a wallpaper that is not actually the common state.
 It also returns a `playlists` inventory so a runtime-only client can switch
 lists without opening the Python authoring socket. Each assigned playlist owns
 an independent cursor and shuffle order; a baseline playlist with more entries
@@ -173,6 +185,11 @@ followed, the playlist it currently selects, and the last matching rule), the
 complete read-only `schedules` array, and each display's configured assignment
 alongside its currently effective playlist. `assignment_source` distinguishes
 an `explicit` assignment from a connector following the `default` playlist.
+Each display row also carries its route source, manual/schedule-rule identity,
+three-state playback, Cycle and Shuffle values/defaults/sources, and
+route-attributed retry or renderer failure. `theme_source` names both the
+configured palette connector and the effective live fallback, since Noctalia
+still has only one shell-wide palette.
 There are deliberately no separate
 runtime listing verbs: combining independent replies could mix two config
 generations, while display assignment itself belongs only in this generated
@@ -180,11 +197,14 @@ file. Runtime status replies are bounded at 1 MiB; runtime requests and the
 Python authoring protocol remain bounded at 64 KiB.
 
 Every display and the top-level summary also report `motion_active`. If an
-owned renderer exits, the service reapplies that entry's still and records an
-attributed `last_error`; it never restarts the child automatically. A scene
-that crashed linux-wallpaperengine is suppressed for the rest of the service
-session, while a video may be attempted again only if rotation later revisits
-it.
+owned renderer exits, the service explicitly reaps its process group, reapplies
+that entry's still and records an attributed `last_error`; it never restarts
+the child automatically. Selecting an entry already marked taboo is an honest
+static fallback, not healthy motion: its row keeps `renderer_failed = true`,
+`motion_active = false`, and the attributable reason until the app clears the
+marker. A scene that crashed linux-wallpaperengine is suppressed for the rest
+of the service session, while a video may be attempted again only if rotation
+later revisits it.
 
 The same snapshot reports `automatic_retry` while a candidate is waiting,
 along with `taboo_entries` containing stable playlist/entry identities, kind,

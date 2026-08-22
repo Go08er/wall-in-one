@@ -82,6 +82,7 @@ mod tests {
         ScheduleRule {
             id: p.into(),
             playlist: p.into(),
+            connector: String::new(),
             months: vec![],
             weekdays: vec![],
             start: s.map(str::to_owned),

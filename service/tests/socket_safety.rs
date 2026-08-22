@@ -37,13 +37,16 @@ fn fixture(root: &Path) -> PathBuf {
     fs::write(
         &config,
         format!(
-            r#"schema_version = 3
+            r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 default_playlist = "only"
 [settings]
 cycle_interval_seconds = 300
 cycle_enabled = false
 shuffle = false
 dynamics_enabled = false
+display_mode = "mirrored"
+theme_source_connector = ""
 [renderer]
 noctalia_program = {noctalia:?}
 niri_program = {niri:?}

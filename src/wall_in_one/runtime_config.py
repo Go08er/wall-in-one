@@ -17,6 +17,7 @@ import stat
 import tempfile
 import threading
 import time
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 FALLBACK_PLAYLIST_ID: Final = "all-media"
 FALLBACK_PLAYLIST_NAME: Final = "All media"
 
@@ -46,6 +47,7 @@ MAX_REFERENCE_BYTES: Final = MAX_PLAYLIST_NAME_CHARS * 4
 MAX_CONNECTOR_BYTES: Final = 256
 MAX_OPTION_BYTES: Final = 256
 MAX_PATH_BYTES: Final = 4096
+CONFIG_GENERATION_HEX_CHARS: Final = 64
 COMPILER_LOCK_TIMEOUT_SECONDS: Final = 5.0
 COMPILER_LOCK_POLL_SECONDS: Final = 0.025
 
@@ -223,6 +225,17 @@ def _bounded_text(
         raise RuntimeConfigError(f"{label} cannot contain control characters")
 
 
+def _bounded_connector(value: str, *, label: str, optional: bool = False) -> None:
+    _bounded_text(
+        value,
+        label=label,
+        maximum_bytes=MAX_CONNECTOR_BYTES,
+        optional=optional,
+    )
+    if value and any(character.isspace() for character in value):
+        raise RuntimeConfigError(f"{label} cannot contain whitespace")
+
+
 def _bounded_name(value: str, *, label: str) -> None:
     if not value.strip():
         raise RuntimeConfigError(f"{label} cannot be empty")
@@ -242,6 +255,46 @@ def _absolute_path(value: Path, *, label: str) -> None:
 def _quote(value: str | Path) -> str:
     # TOML basic strings and JSON strings share the escaping needed here.
     return json.dumps(str(value), ensure_ascii=False)
+
+
+def _semantic_generation(document_without_generation: str) -> str:
+    """Hash the canonical compiled body before its identity field is inserted."""
+    return hashlib.sha256(document_without_generation.encode("utf-8")).hexdigest()
+
+
+def document_generation(document: str) -> str:
+    """Return a strictly validated generation token from compiled TOML bytes."""
+    try:
+        decoded = tomllib.loads(document)
+    except tomllib.TOMLDecodeError as error:
+        raise RuntimeConfigError(f"cannot parse runtime configuration: {error}") from error
+    generation = decoded.get("config_generation")
+    if (
+        not isinstance(generation, str)
+        or len(generation) != CONFIG_GENERATION_HEX_CHARS
+        or any(character not in "0123456789abcdef" for character in generation)
+    ):
+        raise RuntimeConfigError("runtime configuration has no valid config_generation")
+    return generation
+
+
+def read_config_generation(path: Path | None = None) -> str:
+    """Read and validate one app-managed runtime document's generation token.
+
+    Callers which use this as a concurrency guard must hold :func:`compiler_lock`
+    across this read and the authoring transaction it protects.
+    """
+    target = path if path is not None else paths.runtime_config_path()
+    try:
+        text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+    except (OSError, UnicodeDecodeError) as error:
+        raise RuntimeConfigError(f"cannot read {target}: {error}") from error
+    if text is None:
+        raise RuntimeConfigError(f"runtime configuration does not exist: {target}")
+    try:
+        return document_generation(text)
+    except RuntimeConfigError as error:
+        raise RuntimeConfigError(f"runtime configuration {target}: {error}") from error
 
 
 def _program(name: str) -> Path:
@@ -357,7 +410,7 @@ def _validate_playlist_identity(
 
 
 def _validate_settings_wire(settings: config.Settings) -> None:
-    """Validate every Settings value that can reach schema-3 TOML."""
+    """Validate every Settings value that can reach schema-4 TOML."""
     if not 5 <= settings.cycle_interval <= 24 * 60 * 60:
         raise RuntimeConfigError("cycle interval must be between 5 and 86400 seconds")
     if not 0 <= settings.video_volume <= 100:
@@ -368,29 +421,42 @@ def _validate_settings_wire(settings: config.Settings) -> None:
         raise RuntimeConfigError("video hidden policy is not supported by the runtime")
     if settings.video_interpolation not in ("off", "oversample", "linear"):
         raise RuntimeConfigError("video interpolation mode is not supported by the runtime")
+    if settings.display_mode not in config.DISPLAY_MODES:
+        raise RuntimeConfigError("display mode is not supported by the runtime")
     _bounded_text(
         settings.active_playlist,
         label="active playlist setting",
         maximum_bytes=MAX_REFERENCE_BYTES,
         optional=True,
     )
-    _bounded_text(
+    _bounded_connector(
         settings.output,
         label="output connector setting",
-        maximum_bytes=MAX_CONNECTOR_BYTES,
         optional=True,
     )
+    _bounded_connector(
+        settings.theme_source_connector,
+        label="theme source connector setting",
+        optional=True,
+    )
+    if (
+        settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+        and not settings.theme_source_connector
+    ):
+        raise RuntimeConfigError(
+            "independent display mode needs a designated theme source connector"
+        )
     for index, root in enumerate(settings.roots):
         _absolute_path(root, label=f"library root {index + 1}")
 
 
 def render(settings: config.Settings, session: Session) -> str:
-    """Return schema-3 TOML with every authoring decision resolved."""
+    """Return schema-4 TOML with every currently executable decision resolved."""
     _validate_settings_wire(settings)
     if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
         raise RuntimeConfigError(
-            "independent display authoring is saved but cannot be compiled for runtime "
-            "schema 3; the existing mirrored runtime configuration was left untouched"
+            "schema 4 records independent display authoring, but this service build does not "
+            "execute it yet; the existing mirrored runtime configuration was left untouched"
         )
     faults = session.authoring_faults()
     if faults:
@@ -482,6 +548,8 @@ def render(settings: config.Settings, session: Session) -> str:
         f"cycle_enabled = {str(settings.cycle_enabled).lower()}",
         f"shuffle = {str(settings.shuffle).lower()}",
         f"dynamics_enabled = {str(settings.dynamics_enabled).lower()}",
+        f"display_mode = {_quote(settings.display_mode)}",
+        f"theme_source_connector = {_quote(settings.theme_source_connector)}",
         "",
         "[renderer]",
         f"noctalia_program = {_quote(_program('noctalia'))}",
@@ -513,10 +581,9 @@ def render(settings: config.Settings, session: Session) -> str:
         for compiled_entry in entries:
             lines.extend(("", *compiled_entry))
 
-    # Connector-targeted rules are dormant in mirrored mode. Emitting one into
-    # schema 3 without its target would silently turn it into a global rule,
-    # which is worse than leaving the valid last-known-good runtime document in
-    # charge until schema 4 understands the target.
+    # Connector-targeted rules remain dormant until the runtime executes the
+    # schema-4 per-display semantics. Emitting one to today's global resolver
+    # would silently broaden it to every display.
     emitted_schedules = [
         (rule, runtime_playlist(rule.playlist, owner=f"schedule {rule.id!r}"))
         for rule in session.schedules.rules
@@ -538,6 +605,12 @@ def render(settings: config.Settings, session: Session) -> str:
         lines.extend(
             ("", "[[schedules]]", f"id = {_quote(rule.id)}", f"playlist = {_quote(playlist_id)}")
         )
+        if rule.connector:
+            _bounded_connector(
+                rule.connector,
+                label=f"schedule {rule.id!r} connector",
+            )
+            lines.append(f"connector = {_quote(rule.connector)}")
         if rule.months:
             lines.append(
                 "months = [" + ", ".join(str(value) for value in sorted(rule.months)) + "]"
@@ -552,8 +625,8 @@ def render(settings: config.Settings, session: Session) -> str:
         lines.append(f"enabled = {str(rule.enabled).lower()}")
 
     # Mirrored is deliberately one route. The display store and legacy Output
-    # value stay app-owned and preserved, but cannot alter the schema-3 target
-    # set unless independent mode is eventually compiled as schema 4.
+    # value stay app-owned and preserved, but cannot alter the executable
+    # target set until the next commit implements schema-4 per-display state.
     assignments: tuple[tuple[str, str], ...] = ()
     emitted_assignments = [
         (
@@ -569,10 +642,9 @@ def render(settings: config.Settings, session: Session) -> str:
         raise RuntimeConfigError(f"no more than {MAX_DISPLAYS} display assignments are supported")
     seen_connectors: set[str] = set()
     for connector, assigned_playlist in emitted_assignments:
-        _bounded_text(
+        _bounded_connector(
             connector,
             label="display connector",
-            maximum_bytes=MAX_CONNECTOR_BYTES,
         )
         if connector in seen_connectors:
             raise RuntimeConfigError(f"duplicate display connector {connector!r}")
@@ -590,6 +662,12 @@ def render(settings: config.Settings, session: Session) -> str:
                 f"playlist = {_quote(assigned_playlist)}",
             )
         )
+    semantic_document = "\n".join(lines) + "\n"
+    generation = _semantic_generation(semantic_document)
+    # Keep this top-level field before the first TOML table. It deliberately
+    # does not hash itself: the token identifies the compiled semantic body,
+    # not an unstable recursive document.
+    lines.insert(2, f"config_generation = {_quote(generation)}")
     document = "\n".join(lines) + "\n"
     if _encoded_length(document, label="runtime configuration") > MAX_RUNTIME_CONFIG_BYTES:
         raise RuntimeConfigError(

@@ -17,13 +17,16 @@ from wall_in_one import paths
 
 
 def _config() -> str:
-    document = """schema_version = 3
+    document = """schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 default_playlist = "only"
 [settings]
 cycle_interval_seconds = 300
 cycle_enabled = false
 shuffle = false
 dynamics_enabled = false
+display_mode = "mirrored"
+theme_source_connector = ""
 [renderer]
 noctalia_program = "/bin/true"
 niri_program = "/bin/false"

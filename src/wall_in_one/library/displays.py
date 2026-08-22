@@ -58,13 +58,27 @@ def state_path() -> Path:
 
 
 def _clean(value: object) -> str:
-    """A connector or playlist name, or ``""`` for anything unusable."""
+    """A playlist name, or ``""`` for anything unusable."""
     if not isinstance(value, str):
         return ""
     flattened = " ".join(value.split())
     if not flattened or len(flattened.encode("utf-8")) > MAX_NAME_BYTES:
         return ""
     return flattened
+
+
+def _clean_connector(value: object) -> str:
+    """One protocol-addressable connector token, with no whitespace."""
+    if not isinstance(value, str):
+        return ""
+    if (
+        not value
+        or any(character.isspace() for character in value)
+        or len(value.encode("utf-8")) > MAX_NAME_BYTES
+        or any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in value)
+    ):
+        return ""
+    return value
 
 
 def _read(path: Path) -> tuple[dict[str, str], str | None]:
@@ -88,7 +102,7 @@ def _read(path: Path) -> tuple[dict[str, str], str | None]:
     for key, value in entries.items():
         if len(found) >= MAX_ENTRIES:
             break
-        connector, playlist = _clean(key), _clean(value)
+        connector, playlist = _clean_connector(key), _clean(value)
         if connector and playlist:
             found[connector] = playlist
         else:
@@ -154,11 +168,11 @@ class Store:
         Empty is the ordinary answer, not a failure: it means this screen has
         no opinion and follows whatever the app is doing generally.
         """
-        return self._assignments.get(_clean(connector), "")
+        return self._assignments.get(_clean_connector(connector), "")
 
     def assign(self, connector: str, playlist: str) -> None:
         """Point one screen at one playlist."""
-        name, wanted = _clean(connector), _clean(playlist)
+        name, wanted = _clean_connector(connector), _clean(playlist)
         if not name:
             raise DisplayError("validation", "that is not a connector name")
         if not wanted:
@@ -172,7 +186,7 @@ class Store:
 
     def unassign(self, connector: str) -> bool:
         """Let a screen follow the default again. ``False`` if it already did."""
-        name = _clean(connector)
+        name = _clean_connector(connector)
         if name not in self._assignments:
             return False
         updated = dict(self._assignments)

@@ -569,12 +569,20 @@ def test_interactive_display_settings_recover_without_inventing_a_target() -> No
     assert settings.display_mode == config.DISPLAY_MODE_MIRRORED
     assert settings.theme_source_connector == ""
 
+    incomplete = config.Settings(display_mode=config.DISPLAY_MODE_INDEPENDENT).validated()
+    assert incomplete.display_mode == config.DISPLAY_MODE_MIRRORED
+
 
 @pytest.mark.parametrize(
     ("line", "message"),
     [
         ('display_mode = "sideways"\n', "display_mode must be one of"),
-        ('theme_source_connector = " DP-1"\n', "cannot have leading or trailing whitespace"),
+        (
+            'display_mode = "independent"\ntheme_source_connector = ""\n',
+            "theme_source_connector must name a display",
+        ),
+        ('theme_source_connector = " DP-1"\n', "cannot contain whitespace"),
+        ('theme_source_connector = "DP 1"\n', "cannot contain whitespace"),
         (
             "theme_source_connector = "
             f"{json.dumps('x' * (config.MAX_RUNTIME_CONNECTOR_BYTES + 1))}\n",

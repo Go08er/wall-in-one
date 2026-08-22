@@ -55,13 +55,16 @@ fn directory(label: &str) -> PathBuf {
 
 fn config(noctalia: &Path, mpvpaper: &Path, own_scene: bool) -> String {
     format!(
-        r#"schema_version = 3
+        r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 default_playlist = "day"
 [settings]
 cycle_interval_seconds = 300
 cycle_enabled = false
 shuffle = false
 dynamics_enabled = true
+display_mode = "mirrored"
+theme_source_connector = ""
 [renderer]
 noctalia_program = {noctalia:?}
 niri_program = "/bin/true"
@@ -660,6 +663,14 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         at,
     );
     let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    assert_eq!(
+        status["config_generation"],
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(
+        status["config_path"],
+        root.join("runtime.toml").to_str().unwrap()
+    );
     assert_eq!(status["motion_active"], false);
     assert!(status["last_error"]
         .as_str()
@@ -1234,6 +1245,7 @@ fn automatic_cycle_retries_three_times_then_marks_and_skips_the_borked_entry() {
     assert_eq!(taboo["taboo_entries"][0]["playlist_id"], "day");
     assert_eq!(taboo["taboo_entries"][0]["entry_id"], "video-two");
     assert_eq!(taboo["taboo_entries"][0]["source"], "automatic-apply");
+    assert_eq!(taboo["taboo_entries"][0]["durable"], false);
     assert!(taboo["taboo_entries"][0]["reason"]
         .as_str()
         .unwrap()
@@ -1425,6 +1437,10 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
     assert_eq!(
         status(&mut runtime, at)["taboo_entries"][0]["source"],
         "renderer-crash"
+    );
+    assert_eq!(
+        status(&mut runtime, at)["taboo_entries"][0]["durable"],
+        true
     );
     assert_eq!(
         state.lock().unwrap().applies.last().unwrap(),

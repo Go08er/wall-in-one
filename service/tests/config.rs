@@ -5,8 +5,8 @@ use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{
-    Config, ConfigError, DisplayAssignment, EntryKind, Palette, Playlist, ScheduleRule,
-    MAX_CONFIG_BYTES,
+    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, Palette, Playlist,
+    ScheduleRule, MAX_CONFIG_BYTES,
 };
 
 fn temp_file(name: &str) -> PathBuf {
@@ -23,12 +23,15 @@ fn temp_file(name: &str) -> PathBuf {
 fn document(schema: u32) -> String {
     format!(
         r#"schema_version = {schema}
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 default_playlist = "day"
 [settings]
 cycle_interval_seconds = 300
 cycle_enabled = true
 shuffle = false
 dynamics_enabled = true
+display_mode = "mirrored"
+theme_source_connector = ""
 [renderer]
 noctalia_program = "/bin/true"
 niri_program = "/bin/true"
@@ -75,7 +78,7 @@ playlist = "day"
 }
 
 fn parsed() -> Config {
-    toml::from_str(&document(3)).unwrap()
+    toml::from_str(&document(4)).unwrap()
 }
 
 fn playlist(template: &Playlist, index: usize) -> Playlist {
@@ -88,7 +91,7 @@ fn playlist(template: &Playlist, index: usize) -> Playlist {
 #[test]
 fn handwritten_config_loads_without_python_or_app_state() {
     let path = temp_file("standalone");
-    fs::write(&path, document(3)).unwrap();
+    fs::write(&path, document(4)).unwrap();
     let loaded = Config::load(&path).unwrap();
     fs::remove_file(path).unwrap();
     assert_eq!(loaded.playlists[0].entries[1].kind, EntryKind::Video);
@@ -99,8 +102,32 @@ fn handwritten_config_loads_without_python_or_app_state() {
 }
 
 #[test]
+fn config_generation_is_required_canonical_sha256_text() {
+    for invalid_generation in [
+        "",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    ] {
+        let decoded: Config = toml::from_str(&document(4).replace(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            invalid_generation,
+        ))
+        .unwrap();
+        let error = decoded.validate().unwrap_err().to_string();
+        assert!(error.contains("config_generation"), "{error}");
+    }
+
+    let missing = document(4).replace(
+        "config_generation = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+        "",
+    );
+    assert!(toml::from_str::<Config>(&missing).is_err());
+}
+
+#[test]
 fn entry_taboo_metadata_is_optional_bounded_and_backwards_compatible() {
-    let original = document(3);
+    let original = document(4);
     let with_taboo = original.replace(
         "motion = \"/tmp/two.mp4\"",
         "motion = \"/tmp/two.mp4\"\n\
@@ -125,7 +152,7 @@ fn entry_taboo_metadata_is_optional_bounded_and_backwards_compatible() {
 fn config_loader_refuses_a_final_symlink() {
     let target = temp_file("symlink-target");
     let link = temp_file("symlink");
-    fs::write(&target, document(3)).unwrap();
+    fs::write(&target, document(4)).unwrap();
     symlink(&target, &link).unwrap();
 
     let error = Config::load(&link).unwrap_err();
@@ -173,7 +200,7 @@ fn config_loader_rejects_oversized_regular_files_before_decoding() {
 #[test]
 fn renderer_frame_rate_is_bounded() {
     let scene: Config =
-        toml::from_str(&document(3).replace("scene_fps = 30", "scene_fps = 241")).unwrap();
+        toml::from_str(&document(4).replace("scene_fps = 30", "scene_fps = 241")).unwrap();
     assert!(scene
         .validate()
         .unwrap_err()
@@ -183,7 +210,7 @@ fn renderer_frame_rate_is_bounded() {
 
 #[test]
 fn unknown_video_interpolation_is_refused() {
-    let decoded = toml::from_str::<Config>(&document(3).replace(
+    let decoded = toml::from_str::<Config>(&document(4).replace(
         "video_interpolation = \"off\"",
         "video_interpolation = \"warp\"",
     ));
@@ -191,10 +218,89 @@ fn unknown_video_interpolation_is_refused() {
 }
 
 #[test]
-fn missing_video_interpolation_is_refused_by_schema_three() {
+fn missing_video_interpolation_is_refused_by_schema_four() {
     let decoded =
-        toml::from_str::<Config>(&document(3).replace("video_interpolation = \"off\"\n", ""));
+        toml::from_str::<Config>(&document(4).replace("video_interpolation = \"off\"\n", ""));
     assert!(decoded.is_err());
+}
+
+#[test]
+fn schema_four_display_contract_is_strict_but_independent_execution_is_staged() {
+    let mirrored = parsed();
+    assert_eq!(mirrored.settings.display_mode, DisplayMode::Mirrored);
+    assert_eq!(mirrored.settings.theme_source_connector, "");
+    assert_eq!(mirrored.schedules[0].connector, "");
+
+    let independent = document(4)
+        .replace(
+            "display_mode = \"mirrored\"",
+            "display_mode = \"independent\"",
+        )
+        .replace(
+            "theme_source_connector = \"\"",
+            "theme_source_connector = \"DP-1\"",
+        )
+        .replace(
+            "id = \"night\"\nplaylist = \"day\"\nweekdays",
+            "id = \"night\"\nplaylist = \"day\"\nconnector = \"DP-1\"\nweekdays",
+        );
+    let decoded: Config = toml::from_str(&independent).unwrap();
+    assert_eq!(decoded.settings.display_mode, DisplayMode::Independent);
+    assert_eq!(decoded.settings.theme_source_connector, "DP-1");
+    assert_eq!(decoded.schedules[0].connector, "DP-1");
+    let error = decoded.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("not supported by this runtime build yet"),
+        "{error}"
+    );
+
+    let missing_source: Config = toml::from_str(&document(4).replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    ))
+    .unwrap();
+    let error = missing_source.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("non-empty theme_source_connector"),
+        "{error}"
+    );
+
+    assert!(toml::from_str::<Config>(
+        &document(4).replace("display_mode = \"mirrored\"", "display_mode = \"span\"")
+    )
+    .is_err());
+}
+
+#[test]
+fn connector_fields_are_single_protocol_tokens() {
+    let theme: Config = toml::from_str(&document(4).replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP 1\"",
+    ))
+    .unwrap();
+    assert!(theme
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("whitespace"));
+
+    let schedule: Config = toml::from_str(&document(4).replace(
+        "id = \"night\"\nplaylist = \"day\"\nweekdays",
+        "id = \"night\"\nplaylist = \"day\"\nconnector = \"DP 1\"\nweekdays",
+    ))
+    .unwrap();
+    assert!(schedule
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("whitespace"));
+
+    let display: Config = toml::from_str(&document(4).replace("eDP-1", "DP 1")).unwrap();
+    assert!(display
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("whitespace"));
 }
 
 #[test]
@@ -204,14 +310,14 @@ fn wrong_schema_is_refused() {
     let error = Config::load(&path).unwrap_err();
     fs::remove_file(path).unwrap();
     assert!(matches!(error, ConfigError::Invalid(_)));
-    assert!(error.to_string().contains("expected 3"));
+    assert!(error.to_string().contains("expected 4"));
     assert!(error.to_string().contains("wall-in-one --write-config"));
 }
 
 #[test]
 fn relative_resolved_path_is_refused() {
     let path = temp_file("relative");
-    fs::write(&path, document(3).replace("/tmp/two.mp4", "two.mp4")).unwrap();
+    fs::write(&path, document(4).replace("/tmp/two.mp4", "two.mp4")).unwrap();
     let error = Config::load(&path).unwrap_err();
     fs::remove_file(path).unwrap();
     assert!(error.to_string().contains("absolute path"));

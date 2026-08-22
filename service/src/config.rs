@@ -7,7 +7,7 @@ use std::io::{Error, ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 // These mirror the authoring-store ceilings.  The generated all-media
@@ -21,7 +21,8 @@ const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_REFERENCE_BYTES: usize = MAX_PLAYLIST_NAME_CHARS * 4;
 const MAX_CONNECTOR_BYTES: usize = 256;
 const MAX_OPTION_BYTES: usize = 256;
-const MAX_PATH_BYTES: usize = 4096;
+pub const MAX_PATH_BYTES: usize = 4096;
+const CONFIG_GENERATION_HEX_BYTES: usize = 64;
 const MAX_TABOO_REASON_BYTES: usize = 512;
 const MAX_TABOO_SOURCE_BYTES: usize = 64;
 
@@ -61,6 +62,7 @@ impl std::error::Error for ConfigError {}
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
+    pub config_generation: String,
     pub default_playlist: String,
     pub settings: Settings,
     pub renderer: RendererSettings,
@@ -78,6 +80,15 @@ pub struct Settings {
     pub cycle_enabled: bool,
     pub shuffle: bool,
     pub dynamics_enabled: bool,
+    pub display_mode: DisplayMode,
+    pub theme_source_connector: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    Mirrored,
+    Independent,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -219,6 +230,8 @@ pub struct ScheduleRule {
     pub id: String,
     pub playlist: String,
     #[serde(default)]
+    pub connector: String,
+    #[serde(default)]
     pub months: Vec<u8>,
     #[serde(default)]
     pub weekdays: Vec<u8>,
@@ -285,8 +298,28 @@ impl Config {
                 self.schema_version
             ));
         }
+        if self.config_generation.len() != CONFIG_GENERATION_HEX_BYTES
+            || !self
+                .config_generation
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return invalid(
+                "config_generation must be exactly 64 lowercase hexadecimal characters",
+            );
+        }
         if self.settings.cycle_interval_seconds < 5 {
             return invalid("cycle_interval_seconds must be at least 5");
+        }
+        bounded_connector(
+            "theme source connector",
+            &self.settings.theme_source_connector,
+            false,
+        )?;
+        if self.settings.display_mode == DisplayMode::Independent
+            && self.settings.theme_source_connector.is_empty()
+        {
+            return invalid("independent display mode needs a non-empty theme_source_connector");
         }
         if self.renderer.video_volume > 100 || self.renderer.scene_volume > 100 {
             return invalid("renderer volume must be between 0 and 100");
@@ -437,6 +470,7 @@ impl Config {
                 &rule.playlist,
                 MAX_REFERENCE_BYTES,
             )?;
+            bounded_connector("schedule connector", &rule.connector, false)?;
             reference(&rule.playlist, &ids, &names)?;
             if rule.months.len() > 12
                 || rule.months.iter().any(|m| !(1..=12).contains(m))
@@ -466,7 +500,7 @@ impl Config {
         }
         let mut connectors = HashSet::new();
         for display in &self.displays {
-            bounded_nonempty("display connector", &display.connector, MAX_CONNECTOR_BYTES)?;
+            bounded_connector("display connector", &display.connector, true)?;
             if !connectors.insert(display.connector.as_str()) {
                 return invalid(format!(
                     "duplicate display connector {:?}",
@@ -479,6 +513,11 @@ impl Config {
                 MAX_REFERENCE_BYTES,
             )?;
             reference(&display.playlist, &ids, &names)?;
+        }
+        if self.settings.display_mode == DisplayMode::Independent {
+            return invalid(
+                "independent display mode is recorded by schema 4 but is not supported by this runtime build yet",
+            );
         }
         self.validate_status_budget()?;
         Ok(())
@@ -504,6 +543,7 @@ impl Config {
                 .expect("playlist references were validated before the status budget");
             configured_text = configured_text
                 .saturating_add(rule.id.len())
+                .saturating_add(rule.connector.len())
                 .saturating_add(playlist.id.len())
                 .saturating_add(playlist.name.len())
                 .saturating_add(rule.start.as_ref().map_or(0, String::len))
@@ -601,6 +641,19 @@ fn bounded_optional(label: &str, value: &str, maximum_bytes: usize) -> Result<()
     } else {
         invalid(format!(
             "{label} is longer than {maximum_bytes} bytes or contains control characters"
+        ))
+    }
+}
+fn bounded_connector(label: &str, value: &str, required: bool) -> Result<(), ConfigError> {
+    if (!required || !value.is_empty())
+        && !value.chars().any(char::is_whitespace)
+        && value.len() <= MAX_CONNECTOR_BYTES
+        && !value.chars().any(char::is_control)
+    {
+        Ok(())
+    } else {
+        invalid(format!(
+            "{label} is empty when required, contains whitespace, is longer than {MAX_CONNECTOR_BYTES} bytes, or contains control characters"
         ))
     }
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -19,7 +20,7 @@ from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
 
 
-@pytest.mark.parametrize("old_schema", (1, 2))
+@pytest.mark.parametrize("old_schema", (1, 2, 3))
 def test_write_config_upgrades_old_schema_without_importing_the_gui(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_schema: int
 ) -> None:
@@ -37,7 +38,7 @@ def test_write_config_upgrades_old_schema_without_importing_the_gui(
     assert cli.main(["--write-config"]) == 0
 
     document = tomllib.loads(target.read_text())
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == 4
     assert "upgrade_fixture" not in document
     assert document["playlists"][0]["entries"][0]["still"] == str(media / "wallpaper.png")
     assert "wall_in_one.ui.app" not in sys.modules
@@ -121,7 +122,7 @@ def test_write_config_refuses_semantically_invalid_settings_without_replacing_ru
     settings.write_text(settings_text, encoding="utf-8")
     target = paths.runtime_config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
     assert cli.main(["--write-config"]) == 1
@@ -166,7 +167,7 @@ def test_headless_settings_obey_rust_wire_bounds_without_replacing_runtime(
     settings.write_text(settings_text, encoding="utf-8")
     target = paths.runtime_config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
     assert cli.main(["--write-config"]) == 1
@@ -435,10 +436,10 @@ def _finish_lock_holder(process: subprocess.Popen[str], release: Path) -> None:
 def test_newer_gui_compilation_lands_after_an_older_preflight_snapshot(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     target = tmp_path / "runtime.toml"
-    target.write_text('schema_version = 3\ngeneration = "last-known-good"\n', encoding="utf-8")
+    target.write_text('schema_version = 4\ngeneration = "last-known-good"\n', encoding="utf-8")
     ready = tmp_path / "older.ready"
     release = tmp_path / "older.release"
-    older = 'schema_version = 3\ngeneration = "older-preflight"\n'
+    older = 'schema_version = 4\ngeneration = "older-preflight"\n'
     process = _start_lock_holder(target, ready, release, document=older)
 
     try:
@@ -466,7 +467,7 @@ def test_compiler_lock_timeout_preserves_the_last_known_good(
 ) -> None:
     settings, session = _session(tmp_path)
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\ngeneration = "last-known-good"\n'
+    previous = 'schema_version = 4\ngeneration = "last-known-good"\n'
     target.write_text(previous, encoding="utf-8")
     ready = tmp_path / "held.ready"
     release = tmp_path / "held.release"
@@ -485,7 +486,7 @@ def test_compiler_lock_timeout_preserves_the_last_known_good(
 def test_compiler_lock_refuses_a_symlink_without_touching_its_target(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\ngeneration = "last-known-good"\n'
+    previous = 'schema_version = 4\ngeneration = "last-known-good"\n'
     target.write_text(previous, encoding="utf-8")
     sentinel = tmp_path / "sentinel"
     sentinel.write_text("precious", encoding="utf-8")
@@ -530,7 +531,7 @@ def test_compiler_refuses_ambiguous_playlist_identity_before_replacing_runtime(
         )
     settings, session = _session(tmp_path, extra_playlists=(first, second))
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 2\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
     try:
         with pytest.raises(runtime_config.RuntimeConfigError, match="playlist"):
@@ -559,7 +560,7 @@ def test_shared_compiler_rechecks_wire_bound_settings_and_preserves_runtime(
 ) -> None:
     settings, session = _session(tmp_path)
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
     if case == "output-control":
         changed = replace(settings, output="DP-1\x01")
@@ -584,7 +585,10 @@ def test_shared_compiler_rechecks_wire_bound_settings_and_preserves_runtime(
 def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     document = tomllib.loads(runtime_config.render(settings, session))
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == 4
+    assert len(document["config_generation"]) == 64
+    assert document["settings"]["display_mode"] == "mirrored"
+    assert document["settings"]["theme_source_connector"] == ""
     assert Path(document["renderer"]["niri_program"]).is_absolute()
     assert document["renderer"]["scene_fps"] == 75
     assert document["renderer"]["video_hardware_decode"] is False
@@ -611,6 +615,38 @@ def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     assert "pairings.json" not in text
     assert document["schedules"][0]["weekdays"] == [4, 5]
     assert document.get("displays", []) == []
+
+
+def test_compiler_generation_is_stable_non_recursive_and_semantic(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    rendered = runtime_config.render(settings, session)
+    generation = runtime_config.document_generation(rendered)
+    identity_line = f'config_generation = "{generation}"\n'
+    semantic_body = rendered.replace(identity_line, "", 1)
+
+    assert generation == hashlib.sha256(semantic_body.encode("utf-8")).hexdigest()
+    assert (
+        runtime_config.document_generation(runtime_config.render(settings, session)) == generation
+    )
+    assert (
+        runtime_config.document_generation(
+            runtime_config.render(replace(settings, cycle_interval=301), session)
+        )
+        != generation
+    )
+
+    target = tmp_path / "runtime.toml"
+    target.write_text(rendered, encoding="utf-8")
+    assert runtime_config.read_config_generation(target) == generation
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("", "a" * 63, "a" * 65, "A" * 64, "z" * 64),
+)
+def test_document_generation_rejects_noncanonical_tokens(value: str) -> None:
+    with pytest.raises(runtime_config.RuntimeConfigError, match="config_generation"):
+        runtime_config.document_generation(f'schema_version = 4\nconfig_generation = "{value}"\n')
 
 
 def test_compiler_uses_a_pairing_specific_adaptive_generator(tmp_path: Path) -> None:
@@ -659,7 +695,7 @@ def test_compiler_write_is_atomic_and_leaves_no_temporary(tmp_path: Path) -> Non
     settings, session = _session(tmp_path)
     target = tmp_path / "state" / "runtime.toml"
     assert runtime_config.write(settings, session, target) == target
-    assert tomllib.loads(target.read_text())["schema_version"] == 3
+    assert tomllib.loads(target.read_text())["schema_version"] == 4
     assert list(target.parent.glob(".*.tmp")) == []
 
 
@@ -708,7 +744,7 @@ def test_playlist_with_no_resolved_entries_preserves_last_known_good(tmp_path: P
     session.playlists.add(empty.id, tmp_path / "not-in-library.mp4")
     settings = config.Settings(roots=settings.roots, active_playlist=empty.id)
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
     with pytest.raises(runtime_config.RuntimeConfigError, match=r"playlist 'Empty'.*all 1"):
@@ -731,7 +767,7 @@ def test_a_schedule_cannot_silently_lose_its_empty_playlist(tmp_path: Path) -> N
     draft = session.playlists.create("Draft")
     session.schedules.add(draft.id, rule_id="draft-rule")
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
     with pytest.raises(
@@ -766,7 +802,7 @@ def test_compiler_rejects_authored_strings_outside_the_rust_wire_contract(
     )
     settings, session = _session(tmp_path, extra_playlists=(invalid,))
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
     try:
         with pytest.raises(runtime_config.RuntimeConfigError, match=message):
@@ -788,14 +824,14 @@ def test_compiler_rejects_schedule_strings_outside_wire_bounds(
         rule_id="x" * (runtime_config.MAX_IDENTIFIER_BYTES + 1),
     )
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
     with pytest.raises(runtime_config.RuntimeConfigError, match="schedule id must be at most"):
         runtime_config.update(settings, session, target)
     assert target.read_text(encoding="utf-8") == previous
 
-    # Dormant independent assignments are authoring state, not schema-3 wire
+    # Dormant independent assignments are authoring state, not executable wire
     # data, so they cannot poison the last working mirrored document.
     session.schedules.remove(session.schedules.rules[-1].id)
     assert runtime_config.update(settings, session, target) is True
@@ -813,19 +849,31 @@ def test_legacy_single_output_is_dormant_under_the_new_mirrored_default(tmp_path
     assert document.get("displays", []) == []
 
 
-def test_independent_authoring_does_not_replace_schema_three_last_known_good(
+def test_independent_authoring_does_not_replace_schema_four_last_known_good(
     tmp_path: Path,
 ) -> None:
     settings, session = _session(tmp_path)
-    settings = replace(settings, display_mode=config.DISPLAY_MODE_INDEPENDENT)
+    settings = replace(
+        settings,
+        display_mode=config.DISPLAY_MODE_INDEPENDENT,
+        theme_source_connector="DP-1",
+    )
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
-    with pytest.raises(runtime_config.RuntimeConfigError, match="schema 3"):
+    with pytest.raises(runtime_config.RuntimeConfigError, match="does not execute it yet"):
         runtime_config.update(settings, session, target)
 
     assert target.read_text(encoding="utf-8") == previous
+
+
+def test_independent_authoring_requires_a_designated_theme_connector(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    settings = replace(settings, display_mode=config.DISPLAY_MODE_INDEPENDENT)
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="designated theme source"):
+        runtime_config.render(settings, session)
 
 
 def test_connector_schedule_is_not_silently_emitted_as_global_in_mirrored_mode(

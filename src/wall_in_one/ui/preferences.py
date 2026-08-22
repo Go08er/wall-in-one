@@ -305,8 +305,8 @@ class PreferencesPage(Adw.PreferencesPage):
         self._independent_runtime_note = Adw.ActionRow(
             title="Independent runtime routing is not active yet",
             subtitle=(
-                "This authoring choice is preserved, while the schema-3 service keeps its "
-                "last working mirrored configuration."
+                "Schema 4 preserves this authoring choice, while this service build keeps "
+                "its last working mirrored configuration."
             ),
         )
         self._independent_runtime_note.add_prefix(
@@ -639,6 +639,36 @@ class PreferencesPage(Adw.PreferencesPage):
         hidden_index = self._when_hidden.get_selected()
         interpolation_index = self._interpolation.get_selected()
         independent = self._display_mode.get_selected() == 1
+        if independent and not self._selected_theme_connector():
+            connected = _connected_outputs()
+            if not connected:
+                self._loading = True
+                try:
+                    self._display_mode.set_selected(0)
+                finally:
+                    self._loading = False
+                self._theme_source.set_visible(False)
+                self._independent_runtime_note.set_visible(False)
+                self._report(
+                    "Independent display control needs an attached display for Colours "
+                    "follow. Connect a display and try again."
+                )
+                return
+            connector = connected[0]
+            # Live connectors are always part of this model. Refresh once in
+            # case a monitor appeared between the signal and this callback.
+            if connector not in self._theme_connectors:
+                self._loading = True
+                try:
+                    self._refresh_display_controls(self._app.settings)
+                finally:
+                    self._loading = False
+            if connector in self._theme_connectors:
+                self._loading = True
+                try:
+                    self._theme_source.set_selected(self._theme_connectors.index(connector) + 1)
+                finally:
+                    self._loading = False
         self._theme_source.set_visible(independent)
         self._independent_runtime_note.set_visible(independent and not INDEPENDENT_RUNTIME_READY)
         changes: dict[str, object] = {

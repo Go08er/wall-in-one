@@ -90,14 +90,14 @@ def test_an_attached_screen_is_not_marked(store: Store) -> None:
     assert "not attached" not in store.describe(attached=("eDP-1",))[0]
 
 
-def test_names_are_tidied_rather_than_trusted(store: Store) -> None:
-    store.assign("  eDP-1  ", "  Quiet  Nights ")
+def test_playlist_names_are_tidied_but_connectors_remain_tokens(store: Store) -> None:
+    store.assign("eDP-1", "  Quiet  Nights ")
 
     assert store.all() == (("eDP-1", "Quiet Nights"),)
     assert store.playlist_for("eDP-1") == "Quiet Nights"
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "\n"])
+@pytest.mark.parametrize("bad", ["", "   ", "\n", " DP-1", "DP 1", "DP-1\t"])
 def test_an_empty_connector_is_refused(store: Store, bad: str) -> None:
     with pytest.raises(DisplayError, match="connector"):
         store.assign(bad, "Quiet")

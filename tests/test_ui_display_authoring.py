@@ -43,12 +43,14 @@ class _PreferencesApp:
             schedules=SimpleNamespace(rules=()),
         )
         self.resolved_palette = None
+        self.reports: list[str] = []
 
     def update_settings(self, **changes: Any) -> config.Settings:
         self.settings = replace(self.settings, **changes).validated()
         return self.settings
 
-    def window_report(self, _message: str) -> None: ...
+    def window_report(self, message: str) -> None:
+        self.reports.append(message)
 
     def open_palette_browser(self) -> None: ...
 
@@ -82,6 +84,53 @@ def test_theme_source_preserves_a_detached_choice_across_hotplug(
     assert "DP-9" in _model_strings(page._theme_source)
     assert "not attached" not in page._theme_source.get_subtitle()
     assert application.settings.theme_source_connector == "DP-9"
+
+
+def test_enabling_independent_mode_selects_the_first_live_colour_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preferences, "_connected_outputs", lambda: ("eDP-1", "DP-2"))
+    root = tmp_path / "library"
+    root.mkdir()
+    application = _PreferencesApp(root)
+    application.settings = replace(
+        application.settings,
+        display_mode=config.DISPLAY_MODE_MIRRORED,
+        theme_source_connector="",
+    )
+    application.session.displays = SimpleNamespace(all=lambda: ())
+    page = preferences.PreferencesPage(application)  # type: ignore[arg-type]
+
+    page._display_mode.set_selected(1)
+
+    assert application.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
+    assert application.settings.theme_source_connector == "eDP-1"
+    assert page._selected_theme_connector() == "eDP-1"
+
+
+def test_enabling_independent_mode_without_a_live_display_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preferences, "_connected_outputs", lambda: ())
+    root = tmp_path / "library"
+    root.mkdir()
+    application = _PreferencesApp(root)
+    application.settings = replace(
+        application.settings,
+        display_mode=config.DISPLAY_MODE_MIRRORED,
+        theme_source_connector="",
+    )
+    application.session.displays = SimpleNamespace(all=lambda: ())
+    page = preferences.PreferencesPage(application)  # type: ignore[arg-type]
+
+    page._display_mode.set_selected(1)
+
+    assert application.settings.display_mode == config.DISPLAY_MODE_MIRRORED
+    assert page._display_mode.get_selected() == 0
+    assert application.reports == [
+        "Independent display control needs an attached display for Colours follow. "
+        "Connect a display and try again."
+    ]
 
 
 class _Displays:

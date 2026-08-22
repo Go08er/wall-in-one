@@ -79,8 +79,10 @@ def _tidy_connector(value: str) -> str:
         encoded = connector.encode("utf-8")
     except UnicodeEncodeError:
         return ""
-    if len(encoded) > MAX_RUNTIME_CONNECTOR_BYTES or any(
-        ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector
+    if (
+        len(encoded) > MAX_RUNTIME_CONNECTOR_BYTES
+        or any(character.isspace() for character in value)
+        or any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector)
     ):
         return ""
     return connector
@@ -146,10 +148,10 @@ class Settings:
     display_mode: str = DISPLAY_MODE_MIRRORED
 
     #: Which display's wallpaper feeds Noctalia's one shell-wide palette while
-    #: independent displays show different media. Empty means an automatic,
-    #: deterministic live display. A detached named connector is preserved so
-    #: docking again restores the user's choice rather than silently rewriting
-    #: it to whichever display happened to be present.
+    #: independent displays show different media. Independent mode requires a
+    #: named connector; the UI starts with the first live one. A detached named
+    #: connector is preserved so docking again restores the user's choice
+    #: rather than silently rewriting it to whichever display is present.
     theme_source_connector: str = ""
 
     #: Which output the wallpaper is applied to. Empty means every one of
@@ -209,6 +211,12 @@ class Settings:
             self.display_mode if self.display_mode in DISPLAY_MODES else DISPLAY_MODE_MIRRORED
         )
         theme_source_connector = _tidy_connector(self.theme_source_connector)
+        if display_mode == DISPLAY_MODE_INDEPENDENT and not theme_source_connector:
+            # Interactive recovery must always produce a usable configuration.
+            # Only the UI can discover a live connector and make an informed
+            # choice, so a hand-edited incomplete independent setup becomes the
+            # safe mirrored default instead of inventing a display identity.
+            display_mode = DISPLAY_MODE_MIRRORED
         return replace(
             self,
             opacity=opacity,
@@ -448,10 +456,22 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         value = raw[key]
         assert isinstance(value, str)
         _validate_runtime_text(value, maximum, key=key, target=target, optional=True)
+        if key in ("output", "theme_source_connector") and any(
+            character.isspace() for character in value
+        ):
+            raise ConfigError(f"cannot use {target}: {key} cannot contain whitespace")
         if value and value != value.strip():
             raise ConfigError(
                 f"cannot use {target}: {key} cannot have leading or trailing whitespace"
             )
+
+    if raw.get("display_mode", DISPLAY_MODE_MIRRORED) == DISPLAY_MODE_INDEPENDENT and not raw.get(
+        "theme_source_connector", ""
+    ):
+        raise ConfigError(
+            f"cannot use {target}: theme_source_connector must name a display when "
+            "display_mode is independent"
+        )
 
     if "roots" in raw:
         roots = raw["roots"]

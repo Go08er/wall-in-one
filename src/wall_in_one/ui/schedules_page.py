@@ -37,9 +37,9 @@ MONTH_LABELS = (
 )
 WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
-# Stage-one authoring support deliberately cannot emit a schema-3 runtime
-# document for independent routing. Keep controls which would claim realtime
-# per-display behavior unavailable until schema 4 and the Rust routes land.
+# The schema-4 contract records independent authoring, but this staged service
+# build deliberately refuses to execute it. Keep controls which would claim
+# realtime per-display behavior unavailable until the Rust routes land.
 INDEPENDENT_RUNTIME_READY = False
 
 

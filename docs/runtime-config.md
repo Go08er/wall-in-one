@@ -1,7 +1,7 @@
 # Runtime configuration contract
 
 `wall-in-one-service` reads one input: a fully resolved TOML document written
-by the Python application. Schema version `3` is intentionally strict. An
+by the Python application. Schema version `4` is intentionally strict. An
 unknown version, unknown field, relative path, dangling playlist reference, or
 kind-specific entry missing its motion source makes the service refuse to
 start. It never falls back to the application's database or library files.
@@ -51,7 +51,7 @@ failed generation is never exposed through `status`. A rollback failure is
 reported explicitly because the service can preserve the old configuration but
 cannot truthfully promise that an external renderer or desktop helper recovered.
 
-Schema 3 contains `schema_version`, `default_playlist`, `[settings]`,
+Schema 4 contains `schema_version`, `config_generation`, `default_playlist`, `[settings]`,
 `[renderer]`, `[[playlists]]`, `[[schedules]]`, and `[[displays]]`. Executable
 paths—including niri for live connector discovery—and media paths are
 absolute. Every playlist entry has a stable `id`, `kind`,
@@ -59,6 +59,24 @@ absolute `still`, and inline `palette`. A video additionally has an absolute
 `motion`; a scene has a numeric `scene_id`. An entry may also carry app-owned
 `taboo = { reason, source }` metadata. That is a durable compatibility decision,
 not runtime state: Rust never creates or edits it.
+
+`config_generation` is a 64-character lowercase SHA-256 token. The Python
+compiler hashes its canonical semantic body before inserting this field, so
+the identity is deterministic and non-recursive. Rust validates and echoes the
+token but does not derive it or write it. Together with the normalized absolute
+`config_path` in `status`, this lets an app client prove that an atomic runtime
+snapshot came from the exact app-managed document it is about to map back to
+authoring state. A hand-written standalone config may supply any canonical
+token; it still needs no Python installation to run.
+
+`[settings]` now carries `display_mode = "mirrored" | "independent"` and
+`theme_source_connector`. A schedule may carry a connector target, and display
+assignments remain app-authored configuration. This contract commit executes
+only the mirrored subset: the compiler omits dormant connector rules and
+assignments, and both compiler and service reject independent mode explicitly
+until the connector-specific cursor and renderer hand-over land together.
+Independent mode requires a non-empty designated colour-source connector;
+mirrored mode may preserve that selection dormant.
 
 The renderer section carries `scene_fps`, which linux-wallpaperengine consumes
 through its native `--fps N` option. `video_hardware_decode` selects mpv's
@@ -170,7 +188,9 @@ it.
 
 The same snapshot reports `automatic_retry` while a candidate is waiting,
 along with `taboo_entries` containing stable playlist/entry identities, kind,
-scene id where applicable, attributable reason, and source. The most recent 64
+scene id where applicable, attributable reason, source, and `durable` state.
+`durable = true` means that exact finding was loaded from the app-owned config;
+`false` is still session-only and needs acknowledgement. The most recent 64
 records fit in the bounded atomic reply; `taboo_entries_omitted` counts older
 records while the complete loaded set remains skipped. An omitted record is
 intentionally not a recovery signal.
@@ -183,6 +203,15 @@ service restart seeds its skip set from those optional fields. Removing the
 marker in the app compiles their absence; reload then clears only a previously
 durable record before retrying. An unrelated reload cannot clear a newly found,
 session-only failure which the app has not consumed yet.
+
+The GUI performs that hand-off while open. For daemon-and-bar-only sessions,
+`wall-in-one --sync-runtime-health` performs the same operation once without
+importing GTK: one status read, one app-owned authoring update, one atomic
+compile, and a reload only when bytes changed. Runtime absence or malformed
+status fails before an authoring read; a compiler failure preserves the prior
+runtime document. A bounded snapshot with an omitted count is never interpreted
+as permission to clear an existing marker. Rust neither spawns this command nor
+writes its result.
 
 The top-level snapshot reports `playback_state` as `playing`, `paused`, or
 `stopped`; the older `paused` boolean remains for compatibility and `stopped`

@@ -78,7 +78,7 @@ def clean_connector(raw: str) -> str:
     preserve their punctuation and internal spaces exactly, trimming only the
     accidental whitespace around a hand-edited value.
     """
-    connector = raw.strip()
+    connector = raw
     try:
         encoded = connector.encode("utf-8")
     except UnicodeEncodeError as error:
@@ -88,6 +88,8 @@ def clean_connector(raw: str) -> str:
             "invalid-connector",
             f"connector must be at most {MAX_CONNECTOR_BYTES} UTF-8 bytes",
         )
+    if any(character.isspace() for character in connector):
+        raise ScheduleError("invalid-connector", "connector cannot contain whitespace")
     if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector):
         raise ScheduleError("invalid-connector", "connector cannot contain control characters")
     return connector

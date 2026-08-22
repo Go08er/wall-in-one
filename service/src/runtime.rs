@@ -1,11 +1,11 @@
-use crate::config::{Config, Entry, Playlist, ScheduleRule};
+use crate::config::{Config, Entry, Playlist, ScheduleRule, MAX_PATH_BYTES};
 use crate::protocol::{Request, Response};
 use crate::renderer::{WallpaperDriver, MAX_OUTPUT_NAME_BYTES};
 use crate::schedule;
 use chrono::NaiveDateTime;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OUTPUT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
@@ -75,6 +75,8 @@ fn bounded_failure_summary(failures: &[String]) -> String {
 
 #[derive(Debug, Serialize)]
 pub struct Status<'a> {
+    pub config_generation: &'a str,
+    pub config_path: &'a str,
     pub playlist_id: &'a str,
     pub playlist: &'a str,
     pub source: &'a str,
@@ -118,6 +120,7 @@ pub struct TabooStatus<'a> {
     pub scene_id: Option<&'a str>,
     pub reason: &'a str,
     pub source: &'a str,
+    pub durable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -316,6 +319,23 @@ impl<D: WallpaperDriver> Runtime<D> {
         driver: D,
         at: NaiveDateTime,
     ) -> Result<Self, String> {
+        let rendered_config_path = config_path
+            .to_str()
+            .ok_or("runtime config path must be valid UTF-8")?;
+        if !config_path.is_absolute()
+            || config_path
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
+            return Err("runtime config path must be a normalized absolute path".into());
+        }
+        if rendered_config_path.len() > MAX_PATH_BYTES
+            || rendered_config_path.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "runtime config path must be at most {MAX_PATH_BYTES} UTF-8 bytes without control characters"
+            ));
+        }
         let scheduled =
             schedule::resolve_override(&config.schedules, at).map_err(|error| error.to_string())?;
         let schedule_overrode_default = scheduled.is_some();
@@ -1660,6 +1680,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     scene_id: entry.scene_id.as_deref(),
                     reason: &record.reason,
                     source: record.source.as_str(),
+                    durable: record.durable,
                 })
             })
             .take(MAX_TABOO_STATUS_ENTRIES)
@@ -1757,6 +1778,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
         serde_json::to_string(&Status {
+            config_generation: &self.config.config_generation,
+            config_path: self
+                .config_path
+                .to_str()
+                .expect("Runtime::new validated the config path as UTF-8"),
             playlist_id: summary_playlist.map_or("", |playlist| playlist.id.as_str()),
             playlist: summary_playlist
                 .map_or("Multiple displays", |playlist| playlist.name.as_str()),

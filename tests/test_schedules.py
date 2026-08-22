@@ -250,7 +250,7 @@ def test_a_connector_target_survives_add_edit_and_reload(tmp_path: Path) -> None
     assert json.loads(target.read_text(encoding="utf-8"))["version"] == 2
 
 
-@pytest.mark.parametrize("connector", ["DP-1\x01", "x" * 257])
+@pytest.mark.parametrize("connector", ["DP-1\x01", "DP 1", " DP-1", "x" * 257])
 def test_invalid_connector_target_is_refused(store: Store, connector: str) -> None:
     with pytest.raises(ScheduleError) as caught:
         store.add("Evening", connector=connector)

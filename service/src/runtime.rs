@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OUTPUT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const AUTOMATIC_APPLY_ATTEMPTS: u8 = 3;
+const AUTOMATIC_RETRY_DELAY: Duration = Duration::from_secs(2);
+const PLAYBACK_HISTORY_LIMIT: usize = 128;
+const MAX_TABOO_STATUS_ENTRIES: usize = 64;
 const MAX_LAST_ERROR_BYTES: usize = 12 * 1024;
 const MAX_OUTPUT_DISCOVERY_ERROR_BYTES: usize = 4 * 1024;
 const TRUNCATION_MARKER: &str = " ... [truncated] ... ";
@@ -89,10 +93,31 @@ pub struct Status<'a> {
     pub cycle_source: &'a str,
     pub last_error: &'a str,
     pub output_discovery_error: &'a str,
+    pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
+    pub taboo_entries: Vec<TabooStatus<'a>>,
+    pub taboo_entries_omitted: usize,
     pub playlists: Vec<PlaylistStatus<'a>>,
     pub schedule: ScheduleStatus<'a>,
     pub schedules: Vec<ScheduleRuleStatus<'a>>,
     pub displays: Vec<DisplayStatus<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AutomaticRetryStatus<'a> {
+    pub attempt: u8,
+    pub maximum_attempts: u8,
+    pub reason: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TabooStatus<'a> {
+    pub playlist_id: &'a str,
+    pub playlist: &'a str,
+    pub entry_id: &'a str,
+    pub kind: &'a str,
+    pub scene_id: Option<&'a str>,
+    pub reason: &'a str,
+    pub source: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,10 +164,57 @@ pub struct DisplayStatus<'a> {
     pub motion_active: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct PlaylistCursor {
     order: Vec<usize>,
     position: usize,
+    /// Previously played entry indexes, oldest first. This is deliberately
+    /// bounded: Previous is a convenience, not an unbounded session log.
+    history: Vec<usize>,
+    /// Entries unwound by Previous, newest continuation at the end.
+    forward: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct EntryKey {
+    playlist_id: String,
+    entry_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct TabooEntry {
+    reason: String,
+    source: &'static str,
+}
+
+#[derive(Clone)]
+struct SelectionState {
+    active_playlist: String,
+    schedule_overrode_default: bool,
+    cursors: HashMap<String, PlaylistCursor>,
+    rng: XorShift64,
+}
+
+struct PendingAutomatic {
+    baseline: SelectionState,
+    candidate: SelectionState,
+    attempts: u8,
+    next_attempt: Instant,
+    reason: &'static str,
+    failures: Vec<ApplyFailure>,
+}
+
+#[derive(Clone, Debug)]
+struct ApplyFailure {
+    key: EntryKey,
+    reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Target {
+    playlist_id: String,
+    entry: Entry,
+    output: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +240,8 @@ struct ReloadSnapshot {
     last_error: String,
     renderer_failed: bool,
     authoritative_generation: u64,
+    taboo: HashMap<EntryKey, TabooEntry>,
+    taboo_order: Vec<EntryKey>,
 }
 
 pub struct Runtime<D: WallpaperDriver> {
@@ -194,6 +268,10 @@ pub struct Runtime<D: WallpaperDriver> {
     rng: XorShift64,
     last_cycle: Instant,
     last_error: String,
+    last_apply_failures: Vec<ApplyFailure>,
+    pending_automatic: Option<PendingAutomatic>,
+    taboo: HashMap<EntryKey, TabooEntry>,
+    taboo_order: Vec<EntryKey>,
     authoritative_generation: u64,
     quit: bool,
 }
@@ -237,6 +315,10 @@ impl<D: WallpaperDriver> Runtime<D> {
             rng: XorShift64::seeded(),
             last_cycle: Instant::now(),
             last_error: String::new(),
+            last_apply_failures: Vec::new(),
+            pending_automatic: None,
+            taboo: HashMap::new(),
+            taboo_order: Vec::new(),
             authoritative_generation: 0,
             quit: false,
         };
@@ -275,9 +357,32 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.last_error = snapshot.last_error;
         self.renderer_failed = snapshot.renderer_failed;
         self.authoritative_generation = snapshot.authoritative_generation;
+        self.taboo = snapshot.taboo;
+        self.taboo_order = snapshot.taboo_order;
+    }
+
+    fn selection_state(&self) -> SelectionState {
+        SelectionState {
+            active_playlist: self.active_playlist.clone(),
+            schedule_overrode_default: self.schedule_overrode_default,
+            cursors: self.cursors.clone(),
+            rng: self.rng,
+        }
+    }
+
+    fn restore_selection(&mut self, state: &SelectionState) {
+        self.active_playlist.clone_from(&state.active_playlist);
+        self.schedule_overrode_default = state.schedule_overrode_default;
+        self.cursors.clone_from(&state.cursors);
+        self.rng = state.rng;
+    }
+
+    fn cancel_automatic_retry(&mut self) {
+        self.pending_automatic = None;
     }
 
     pub fn shutdown(&mut self) {
+        self.cancel_automatic_retry();
         self.driver.stop();
         self.quit = true;
     }
@@ -290,6 +395,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 Ok(())
             }
         };
+        if !matches!(request.verb.as_str(), "status") {
+            // An explicit client command supersedes an automatic candidate
+            // waiting between attempts. It must never reappear two seconds
+            // later and overwrite the person's choice.
+            self.cancel_automatic_retry();
+        }
         let result = match request.verb.as_str() {
             "playlist-use" => self.use_playlist(request.argument.as_deref()),
             "schedule-follow" => {
@@ -331,7 +442,18 @@ impl<D: WallpaperDriver> Runtime<D> {
     pub fn tick(&mut self, at: NaiveDateTime, now: Instant) {
         let failures = self.driver.poll_failures();
         if !failures.is_empty() {
-            self.last_error = bounded_failure_summary(&failures);
+            let messages: Vec<String> = failures
+                .iter()
+                .map(|failure| failure.message.clone())
+                .collect();
+            self.last_error = bounded_failure_summary(&messages);
+            for failure in &failures {
+                if failure.permanent_for_session {
+                    if let Some(key) = self.failure_key(&failure.entry_id, &failure.output) {
+                        self.mark_taboo(key, &failure.message, "renderer-crash");
+                    }
+                }
+            }
             // Videos remain retryable: unlike scenes, SystemDriver does not
             // suppress a video after it exits.  Remember that Play has real
             // work to do instead of treating the still fallback as healthy
@@ -339,8 +461,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             // suppression and fail with the attributable scene diagnostic.
             self.renderer_failed = true;
         }
+        let had_pending = self.pending_automatic.is_some();
+        if let Some(pending) = self.pending_automatic.take() {
+            if now >= pending.next_attempt {
+                self.attempt_automatic(pending, now);
+            } else {
+                self.pending_automatic = Some(pending);
+            }
+        }
         let mut schedule_transition_attempted = false;
-        if self.manual_playlist.is_none() {
+        if !had_pending && self.pending_automatic.is_none() && self.manual_playlist.is_none() {
             if let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at) {
                 let overrode = scheduled.is_some();
                 let wanted = scheduled
@@ -348,29 +478,38 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .to_string();
                 let playlist_changed = wanted != self.active_playlist;
                 let routing_changed = overrode != self.schedule_overrode_default;
-                self.schedule_overrode_default = overrode;
-                if playlist_changed {
-                    self.active_playlist = wanted;
-                    self.reset_cursor(&self.active_playlist.clone());
-                }
                 if playlist_changed || routing_changed {
                     schedule_transition_attempted = true;
-                    if self.apply_current().is_ok() {
-                        // A scheduled route owns a complete residency interval.
-                        // Do not immediately advance it using time accrued by the
-                        // wallpaper that was just replaced.
-                        self.last_cycle = now;
+                    let baseline = self.selection_state();
+                    self.schedule_overrode_default = overrode;
+                    let mut candidate_available = true;
+                    if playlist_changed {
+                        self.active_playlist = wanted.clone();
+                        candidate_available =
+                            self.reset_cursor_automatic(&self.active_playlist.clone());
+                    }
+                    if candidate_available {
+                        let candidate = self.selection_state();
+                        self.restore_selection(&baseline);
+                        self.start_automatic(baseline, candidate, "schedule", now);
+                    } else {
+                        self.restore_selection(&baseline);
+                        self.last_error = format!(
+                            "scheduled playlist {wanted:?} has no usable entries; every entry is taboo this session"
+                        );
                     }
                 }
             }
         }
         if !schedule_transition_attempted
+            && !had_pending
+            && self.pending_automatic.is_none()
             && self.playback_state != PlaybackState::Paused
             && self.cycle_enabled()
             && now.duration_since(self.last_cycle)
                 >= Duration::from_secs(self.config.settings.cycle_interval_seconds)
         {
-            let _ = self.move_by_at(1, now);
+            self.start_automatic_move(now);
         }
         if now.saturating_duration_since(self.last_output_probe) >= OUTPUT_PROBE_INTERVAL {
             self.last_output_probe = now;
@@ -392,6 +531,159 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             self.driver.end_apply();
         }
+    }
+
+    fn start_automatic_move(&mut self, now: Instant) {
+        let baseline = self.selection_state();
+        let mut moved = false;
+        for playlist in self.effective_playlist_ids() {
+            moved |= self.move_cursor_forward(&playlist, true);
+        }
+        if !moved {
+            self.restore_selection(&baseline);
+            self.last_cycle = now;
+            self.last_error = "every entry in the active playlist is taboo this session".into();
+            return;
+        }
+        let candidate = self.selection_state();
+        self.restore_selection(&baseline);
+        self.start_automatic(baseline, candidate, "cycle", now);
+    }
+
+    fn start_automatic(
+        &mut self,
+        baseline: SelectionState,
+        candidate: SelectionState,
+        reason: &'static str,
+        now: Instant,
+    ) {
+        self.attempt_automatic(
+            PendingAutomatic {
+                baseline,
+                candidate,
+                attempts: 0,
+                next_attempt: now,
+                reason,
+                failures: Vec::new(),
+            },
+            now,
+        );
+    }
+
+    fn attempt_automatic(&mut self, mut pending: PendingAutomatic, now: Instant) {
+        self.restore_selection(&pending.candidate);
+        let attempted: Vec<EntryKey> = self
+            .current_targets(&self.target_outputs)
+            .into_iter()
+            .map(|target| EntryKey {
+                playlist_id: target.playlist_id,
+                entry_id: target.entry.id,
+            })
+            .collect();
+        pending.attempts += 1;
+        match self.apply_current() {
+            Ok(_) => {
+                // A successful automatic hand-over owns a complete residency
+                // interval. The candidate selection is already installed.
+                self.last_cycle = now;
+                self.pending_automatic = None;
+            }
+            Err(error) => {
+                let mut failures = self.last_apply_failures.clone();
+                if failures.is_empty() {
+                    failures = attempted
+                        .into_iter()
+                        .map(|key| ApplyFailure {
+                            key,
+                            reason: error.clone(),
+                        })
+                        .collect();
+                }
+                pending.failures = failures;
+                self.restore_selection(&pending.baseline);
+
+                // Driver apply is necessarily break-before-make. Restore the
+                // last known-good selection immediately after a rejected
+                // candidate so status and the desktop agree between retries.
+                let rollback = self.apply_current().err();
+                let diagnostic = match rollback {
+                    Some(rollback) => format!(
+                        "automatic {} attempt {}/{} failed: {error}; could not restore the previous wallpaper: {rollback}",
+                        pending.reason, pending.attempts, AUTOMATIC_APPLY_ATTEMPTS
+                    ),
+                    None => format!(
+                        "automatic {} attempt {}/{} failed: {error}; previous wallpaper restored",
+                        pending.reason, pending.attempts, AUTOMATIC_APPLY_ATTEMPTS
+                    ),
+                };
+                self.last_error = truncate_middle(&diagnostic, MAX_LAST_ERROR_BYTES);
+                self.renderer_failed = false;
+
+                if pending.attempts >= AUTOMATIC_APPLY_ATTEMPTS {
+                    for failure in &pending.failures {
+                        self.mark_taboo(failure.key.clone(), &failure.reason, "automatic-apply");
+                    }
+                    self.last_error = truncate_middle(
+                        &format!(
+                            "{diagnostic}; entry marked taboo for this session after {} failed attempts",
+                            AUTOMATIC_APPLY_ATTEMPTS
+                        ),
+                        MAX_LAST_ERROR_BYTES,
+                    );
+                    self.pending_automatic = None;
+                } else {
+                    pending.next_attempt = now + AUTOMATIC_RETRY_DELAY;
+                    self.pending_automatic = Some(pending);
+                }
+            }
+        }
+    }
+
+    fn failure_key(&self, entry_id: &str, output: &str) -> Option<EntryKey> {
+        self.current_targets(&self.target_outputs)
+            .into_iter()
+            .find(|target| target.output == output && target.entry.id == entry_id)
+            .map(|target| EntryKey {
+                playlist_id: target.playlist_id,
+                entry_id: target.entry.id,
+            })
+            .or_else(|| {
+                let mut matches =
+                    self.config.playlists.iter().filter(|playlist| {
+                        playlist.entries.iter().any(|entry| entry.id == entry_id)
+                    });
+                let playlist = matches.next()?;
+                if matches.next().is_some() {
+                    None
+                } else {
+                    Some(EntryKey {
+                        playlist_id: playlist.id.clone(),
+                        entry_id: entry_id.to_string(),
+                    })
+                }
+            })
+    }
+
+    fn mark_taboo(&mut self, key: EntryKey, reason: &str, source: &'static str) {
+        if self.taboo.contains_key(&key) {
+            return;
+        }
+        let record = TabooEntry {
+            reason: truncate_middle(reason, 512),
+            source,
+        };
+        if self.taboo_order.len() == MAX_TABOO_STATUS_ENTRIES {
+            self.taboo_order.remove(0);
+        }
+        self.taboo_order.push(key.clone());
+        self.taboo.insert(key, record);
+    }
+
+    fn is_taboo(&self, playlist_id: &str, entry_id: &str) -> bool {
+        self.taboo.contains_key(&EntryKey {
+            playlist_id: playlist_id.to_string(),
+            entry_id: entry_id.to_string(),
+        })
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
@@ -453,23 +745,31 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         };
         let targets = self.current_targets(&self.target_outputs);
-        let outputs: Vec<String> = targets.iter().map(|(_, output)| output.clone()).collect();
+        let outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
         self.driver.retain_outputs(&outputs);
+        self.last_apply_failures.clear();
         if targets.is_empty() {
             return self.fail("active display playlists are empty");
         }
-        let played = targets[0].0.id.clone();
+        let played = targets[0].entry.id.clone();
         let mut errors = Vec::new();
         let mut settings = self.config.settings.clone();
         if self.playback_state == PlaybackState::Stopped {
             settings.dynamics_enabled = false;
         }
-        for (entry, output) in targets {
-            if let Err(error) = self.driver.apply(&entry, &output, &settings) {
-                errors.push(if output.is_empty() {
+        for target in targets {
+            if let Err(error) = self.driver.apply(&target.entry, &target.output, &settings) {
+                self.last_apply_failures.push(ApplyFailure {
+                    key: EntryKey {
+                        playlist_id: target.playlist_id,
+                        entry_id: target.entry.id,
+                    },
+                    reason: error.clone(),
+                });
+                errors.push(if target.output.is_empty() {
                     error
                 } else {
-                    format!("{output}: {error}")
+                    format!("{}: {error}", target.output)
                 });
             }
         }
@@ -505,11 +805,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
     }
 
-    fn current_targets(&self, outputs: &[String]) -> Vec<(Entry, String)> {
+    fn current_targets(&self, outputs: &[String]) -> Vec<Target> {
         let mut targets = Vec::new();
         if self.config.displays.is_empty() {
-            if let Some(entry) = self.current_entry_for(&self.active_playlist).cloned() {
-                targets.push((entry, String::new()));
+            if let Some(playlist) = self.config.playlist(&self.active_playlist) {
+                if let Some(entry) = self.current_entry_for(&playlist.id).cloned() {
+                    targets.push(Target {
+                        playlist_id: playlist.id.clone(),
+                        entry,
+                        output: String::new(),
+                    });
+                }
             }
         } else {
             for output in outputs {
@@ -525,8 +831,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                             display.playlist.as_str()
                         })
                 };
-                if let Some(entry) = self.current_entry_for(reference).cloned() {
-                    targets.push((entry, output.clone()));
+                if let Some(playlist) = self.config.playlist(reference) {
+                    if let Some(entry) = self.current_entry_for(&playlist.id).cloned() {
+                        targets.push(Target {
+                            playlist_id: playlist.id.clone(),
+                            entry,
+                            output: output.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -721,16 +1033,18 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn move_by_at(&mut self, delta: isize, now: Instant) -> Result<String, String> {
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
-            if let Some(cursor) = self.cursors.get_mut(&playlist) {
-                if !cursor.order.is_empty() {
-                    let len = cursor.order.len() as isize;
-                    cursor.position = ((cursor.position as isize + delta).rem_euclid(len)) as usize;
-                    moved = true;
-                }
-            }
+            moved |= if delta < 0 {
+                self.move_cursor_backward(&playlist)
+            } else {
+                self.move_cursor_forward(&playlist, false)
+            };
         }
         if !moved {
-            return self.fail("active display playlists are empty");
+            return self.fail(if delta < 0 {
+                "no previous playback history"
+            } else {
+                "active display playlists are empty or taboo"
+            });
         }
         let result = self.apply_current();
         if result.is_ok() {
@@ -742,18 +1056,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn random_entry(&mut self) -> Result<String, String> {
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
-            if let Some(cursor) = self.cursors.get_mut(&playlist) {
-                if cursor.order.is_empty() {
-                    continue;
-                }
-                if cursor.order.len() > 1 {
-                    let old = cursor.position;
-                    while cursor.position == old {
-                        cursor.position = self.rng.index(cursor.order.len());
-                    }
-                }
-                moved = true;
-            }
+            moved |= self.move_cursor_random(&playlist);
         }
         if !moved {
             return self.fail("active display playlists are empty");
@@ -827,6 +1130,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             last_error: self.last_error.clone(),
             renderer_failed: self.renderer_failed,
             authoritative_generation: self.authoritative_generation,
+            taboo: self.taboo.clone(),
+            taboo_order: self.taboo_order.clone(),
         };
         if let Err(error) = self.rebuild_cursors(&old_entries) {
             self.restore_reload_snapshot(snapshot);
@@ -901,6 +1206,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         if residency_changed {
             self.last_cycle = Instant::now();
         }
+        self.taboo.retain(|key, _| {
+            self.config
+                .playlist(&key.playlist_id)
+                .is_some_and(|playlist| {
+                    playlist
+                        .entries
+                        .iter()
+                        .any(|entry| entry.id == key.entry_id)
+                })
+        });
+        self.taboo_order.retain(|key| self.taboo.contains_key(key));
         Ok("reloaded".into())
     }
 
@@ -949,15 +1265,29 @@ impl<D: WallpaperDriver> Runtime<D> {
             .collect();
         let mut cursors = HashMap::new();
         for (id, entries, entry_ids) in specifications {
-            let mut order: Vec<usize> = (0..entries).collect();
-            if self.shuffle_enabled() {
-                self.rng.shuffle(&mut order);
-            }
-            let position = keep_entries
+            let current = keep_entries
                 .get(&id)
-                .and_then(|wanted| order.iter().position(|index| entry_ids[*index] == *wanted))
+                .and_then(|wanted| entry_ids.iter().position(|entry| entry == wanted))
                 .unwrap_or(0);
-            cursors.insert(id, PlaylistCursor { order, position });
+            let (order, position) = if self.shuffle_enabled() && entries > 0 {
+                let mut rest: Vec<usize> = (0..entries).filter(|index| *index != current).collect();
+                self.rng.shuffle(&mut rest);
+                let mut order = Vec::with_capacity(entries);
+                order.push(current);
+                order.extend(rest);
+                (order, 0)
+            } else {
+                ((0..entries).collect(), current)
+            };
+            cursors.insert(
+                id,
+                PlaylistCursor {
+                    order,
+                    position,
+                    history: Vec::new(),
+                    forward: Vec::new(),
+                },
+            );
         }
         self.cursors = cursors;
         self.playlist()?;
@@ -968,8 +1298,215 @@ impl<D: WallpaperDriver> Runtime<D> {
         if let Some(playlist) = self.config.playlist(reference) {
             if let Some(cursor) = self.cursors.get_mut(&playlist.id) {
                 cursor.position = 0;
+                cursor.history.clear();
+                cursor.forward.clear();
             }
         }
+    }
+
+    fn reset_cursor_automatic(&mut self, reference: &str) -> bool {
+        let Some(playlist) = self.config.playlist(reference) else {
+            return false;
+        };
+        let playlist_id = playlist.id.clone();
+        let eligible: HashSet<usize> = playlist
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
+            .collect();
+        let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
+            return false;
+        };
+        let Some(position) = cursor
+            .order
+            .iter()
+            .position(|index| eligible.contains(index))
+        else {
+            return false;
+        };
+        cursor.position = position;
+        cursor.history.clear();
+        cursor.forward.clear();
+        true
+    }
+
+    fn move_cursor_forward(&mut self, reference: &str, automatic: bool) -> bool {
+        let Some(playlist) = self.config.playlist(reference) else {
+            return false;
+        };
+        let playlist_id = playlist.id.clone();
+        let entry_ids: Vec<String> = playlist
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let taboo = &self.taboo;
+        let shuffle_enabled = self
+            .shuffle_override
+            .unwrap_or(self.config.settings.shuffle);
+        let eligible = |index: usize| {
+            !automatic
+                || !taboo.contains_key(&EntryKey {
+                    playlist_id: playlist_id.clone(),
+                    entry_id: entry_ids[index].clone(),
+                })
+        };
+        let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
+            return false;
+        };
+        let Some(&current) = cursor.order.get(cursor.position) else {
+            return false;
+        };
+
+        while let Some(index) = cursor.forward.pop() {
+            if eligible(index) {
+                push_bounded(&mut cursor.history, current);
+                if let Some(position) = cursor
+                    .order
+                    .iter()
+                    .position(|candidate| *candidate == index)
+                {
+                    cursor.position = position;
+                }
+                return index != current;
+            }
+        }
+
+        if shuffle_enabled {
+            if let Some(position) = ((cursor.position + 1)..cursor.order.len())
+                .find(|position| eligible(cursor.order[*position]))
+            {
+                push_bounded(&mut cursor.history, current);
+                cursor.position = position;
+                cursor.forward.clear();
+                return cursor.order[position] != current;
+            }
+
+            let mut next: Vec<usize> = (0..entry_ids.len())
+                .filter(|index| eligible(*index))
+                .collect();
+            if next.is_empty() {
+                return false;
+            }
+            self.rng.shuffle(&mut next);
+            if next.len() > 1 && next[0] == current {
+                next.swap(0, 1);
+            }
+            let selected = next[0];
+            if selected == current {
+                return false;
+            }
+            push_bounded(&mut cursor.history, current);
+            cursor.order = next;
+            cursor.position = 0;
+            cursor.forward.clear();
+            true
+        } else {
+            for offset in 1..=cursor.order.len() {
+                let position = (cursor.position + offset) % cursor.order.len();
+                let index = cursor.order[position];
+                if eligible(index) && index != current {
+                    push_bounded(&mut cursor.history, current);
+                    cursor.position = position;
+                    cursor.forward.clear();
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    fn move_cursor_backward(&mut self, reference: &str) -> bool {
+        let Some(playlist) = self.config.playlist(reference) else {
+            return false;
+        };
+        let Some(cursor) = self.cursors.get_mut(&playlist.id) else {
+            return false;
+        };
+        let Some(previous) = cursor.history.pop() else {
+            return false;
+        };
+        let Some(&current) = cursor.order.get(cursor.position) else {
+            return false;
+        };
+        push_bounded(&mut cursor.forward, current);
+        cursor.position = if let Some(position) = cursor
+            .order
+            .iter()
+            .position(|candidate| *candidate == previous)
+        {
+            position
+        } else {
+            cursor.order.push(previous);
+            cursor.order.len() - 1
+        };
+        true
+    }
+
+    fn move_cursor_random(&mut self, reference: &str) -> bool {
+        let Some(playlist) = self.config.playlist(reference) else {
+            return false;
+        };
+        let playlist_id = playlist.id.clone();
+        let eligible: Vec<usize> = playlist
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
+            .collect();
+        let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
+            return false;
+        };
+        let Some(&current) = cursor.order.get(cursor.position) else {
+            return false;
+        };
+        if self
+            .shuffle_override
+            .unwrap_or(self.config.settings.shuffle)
+        {
+            let remaining_positions: Vec<usize> = ((cursor.position + 1)..cursor.order.len())
+                .filter(|position| eligible.contains(&cursor.order[*position]))
+                .collect();
+            if remaining_positions.is_empty() {
+                let mut next: Vec<usize> = eligible;
+                if next.len() <= 1 {
+                    return false;
+                }
+                self.rng.shuffle(&mut next);
+                if next[0] == current {
+                    next.swap(0, 1);
+                }
+                push_bounded(&mut cursor.history, current);
+                cursor.forward.clear();
+                cursor.order = next;
+                cursor.position = 0;
+                return true;
+            }
+            let chosen = remaining_positions[self.rng.index(remaining_positions.len())];
+            let next = cursor.position + 1;
+            cursor.order.swap(next, chosen);
+            push_bounded(&mut cursor.history, current);
+            cursor.forward.clear();
+            cursor.position = next;
+        } else {
+            let candidates: Vec<usize> = eligible
+                .into_iter()
+                .filter(|index| *index != current)
+                .collect();
+            if candidates.is_empty() {
+                return false;
+            }
+            let selected = candidates[self.rng.index(candidates.len())];
+            push_bounded(&mut cursor.history, current);
+            cursor.forward.clear();
+            cursor.position = cursor
+                .order
+                .iter()
+                .position(|index| *index == selected)
+                .unwrap_or(cursor.position);
+        }
+        true
     }
 
     fn effective_playlist_ids(&self) -> Vec<String> {
@@ -1023,6 +1560,30 @@ impl<D: WallpaperDriver> Runtime<D> {
         let entry = summary_playlist.and_then(|playlist| self.current_entry_for(&playlist.id));
         let kind = entry.map(|entry| entry_kind(entry.kind));
         let active_ids: HashSet<_> = effective_ids.into_iter().collect();
+        let taboo_total = self.taboo.len();
+        let taboo_entries: Vec<TabooStatus<'_>> = self
+            .taboo_order
+            .iter()
+            .rev()
+            .filter_map(|key| {
+                let record = self.taboo.get(key)?;
+                let playlist = self.config.playlist(&key.playlist_id)?;
+                let entry = playlist
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == key.entry_id)?;
+                Some(TabooStatus {
+                    playlist_id: &playlist.id,
+                    playlist: &playlist.name,
+                    entry_id: &entry.id,
+                    kind: entry_kind(entry.kind),
+                    scene_id: entry.scene_id.as_deref(),
+                    reason: &record.reason,
+                    source: record.source,
+                })
+            })
+            .take(MAX_TABOO_STATUS_ENTRIES)
+            .collect();
         let playlists = self
             .config
             .playlists
@@ -1159,6 +1720,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             last_error: &self.last_error,
             output_discovery_error: &self.output_discovery_error,
+            automatic_retry: self
+                .pending_automatic
+                .as_ref()
+                .map(|pending| AutomaticRetryStatus {
+                    attempt: pending.attempts,
+                    maximum_attempts: AUTOMATIC_APPLY_ATTEMPTS,
+                    reason: pending.reason,
+                }),
+            taboo_entries_omitted: taboo_total.saturating_sub(taboo_entries.len()),
+            taboo_entries,
             playlists,
             schedule: ScheduleStatus {
                 following: self.manual_playlist.is_none(),
@@ -1205,6 +1776,13 @@ fn entry_kind(kind: crate::config::EntryKind) -> &'static str {
     }
 }
 
+fn push_bounded(values: &mut Vec<usize>, value: usize) {
+    if values.len() == PLAYBACK_HISTORY_LIMIT {
+        values.remove(0);
+    }
+    values.push(value);
+}
+
 #[derive(Clone, Copy)]
 struct XorShift64(u64);
 impl XorShift64 {
@@ -1237,4 +1815,20 @@ impl XorShift64 {
 #[allow(dead_code)]
 fn _is_absolute(path: &Path) -> bool {
     path.is_absolute()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{push_bounded, PLAYBACK_HISTORY_LIMIT};
+
+    #[test]
+    fn playback_history_has_a_hard_memory_bound() {
+        let mut history = Vec::new();
+        for value in 0..(PLAYBACK_HISTORY_LIMIT * 3) {
+            push_bounded(&mut history, value);
+        }
+        assert_eq!(history.len(), PLAYBACK_HISTORY_LIMIT);
+        assert_eq!(history[0], PLAYBACK_HISTORY_LIMIT * 2);
+        assert_eq!(history.last(), Some(&(PLAYBACK_HISTORY_LIMIT * 3 - 1)));
+    }
 }

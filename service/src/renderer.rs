@@ -229,13 +229,26 @@ pub trait WallpaperDriver: Send {
     }
     fn end_apply(&mut self) {}
     fn reconfigure(&mut self, settings: RendererSettings);
-    fn poll_failures(&mut self) -> Vec<String> {
+    fn poll_failures(&mut self) -> Vec<RendererFailure> {
         Vec::new()
     }
     fn motion_active(&self, _output: &str) -> bool {
         false
     }
     fn stop(&mut self);
+}
+
+/// An owned renderer-exit report. Runtime policy needs the entry identity,
+/// not a diagnostic string it would have to parse, because a scene crash is a
+/// session-scoped incompatibility while a video exit remains retryable.
+#[derive(Clone, Debug)]
+pub struct RendererFailure {
+    pub entry_id: String,
+    pub kind: EntryKind,
+    pub scene_id: Option<String>,
+    pub output: String,
+    pub message: String,
+    pub permanent_for_session: bool,
 }
 
 pub struct Mpvpaper {
@@ -986,7 +999,7 @@ impl WallpaperDriver for SystemDriver {
         self.settings = settings;
     }
 
-    fn poll_failures(&mut self) -> Vec<String> {
+    fn poll_failures(&mut self) -> Vec<RendererFailure> {
         let mut failures = Vec::new();
         let mut exited_videos = Vec::new();
         for (key, active) in &mut self.videos {
@@ -1001,14 +1014,22 @@ impl WallpaperDriver for SystemDriver {
         for (key, status, diagnostics) in exited_videos {
             if let Some(active) = self.videos.remove(&key) {
                 let fallback = self.still(&active.entry, &active.output);
-                failures.push(Self::failure_message(
+                let message = Self::failure_message(
                     "mpvpaper",
                     &active.entry,
                     &active.output,
                     &status,
                     &diagnostics,
                     fallback,
-                ));
+                );
+                failures.push(RendererFailure {
+                    entry_id: active.entry.id.clone(),
+                    kind: active.entry.kind,
+                    scene_id: active.entry.scene_id.clone(),
+                    output: active.output.clone(),
+                    message,
+                    permanent_for_session: false,
+                });
             }
         }
 
@@ -1034,14 +1055,22 @@ impl WallpaperDriver for SystemDriver {
                     .map(|capture| diagnostic(&capture.finish()))
                     .unwrap_or_default();
                 let fallback = self.still(&active.entry, &active.output);
-                failures.push(Self::failure_message(
+                let message = Self::failure_message(
                     "linux-wallpaperengine",
                     &active.entry,
                     &active.output,
                     &status,
                     &diagnostics,
                     fallback,
-                ));
+                );
+                failures.push(RendererFailure {
+                    entry_id: active.entry.id.clone(),
+                    kind: active.entry.kind,
+                    scene_id: active.entry.scene_id.clone(),
+                    output: active.output.clone(),
+                    message,
+                    permanent_for_session: true,
+                });
             }
         }
         failures

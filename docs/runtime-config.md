@@ -104,6 +104,21 @@ playlist transition, next/previous/random action, or resume starts a fresh
 interval. In particular, a schedule change and a cycle advancement cannot both
 happen in the same tick.
 
+Shuffle uses a fresh bag per playlist round. Every eligible entry appears once,
+the next bag is reshuffled without repeating the seam entry, and `previous`
+retraces actual playback rather than walking backwards through an unrelated
+permutation. `next` after `previous` follows the actual forward branch first.
+Both history directions are capped at 128 indexes per playlist, so a long-lived
+daemon does not accumulate an unbounded session log.
+
+An automatic schedule or cycle hand-over which cannot apply gets three attempts
+total, two seconds apart. Between attempts the service restores the prior
+selection and reapplies its last-known-good wallpaper. After the third failure
+the attributable playlist/entry is taboo for later automatic selection for the
+rest of that service session. This is distinct from a child renderer exit: a
+renderer which started and later died is never automatically restarted, and a
+linux-wallpaperengine scene crash becomes taboo immediately.
+
 Display assignments are the baseline when no schedule rule matches. A matching
 schedule rule overrides assignments for its window, and a manual
 `playlist-use` overrides both until `schedule-follow`. Each connector owns its
@@ -149,6 +164,18 @@ attributed `last_error`; it never restarts the child automatically. A scene
 that crashed linux-wallpaperengine is suppressed for the rest of the service
 session, while a video may be attempted again only if rotation later revisits
 it.
+
+The same snapshot reports `automatic_retry` while a candidate is waiting,
+along with `taboo_entries` containing stable playlist/entry identities, kind,
+scene id where applicable, attributable reason, and source. The most recent 64
+records fit in the bounded atomic reply; `taboo_entries_omitted` counts older
+session records while all current-config taboo entries remain skipped.
+
+This inventory is also the only persistence hand-off. The service is read-only:
+it never edits this config or an auxiliary blacklist. When the app reconnects,
+it may persist a borked-paper judgement in its authoring data and compile an
+omitted/disabled entry into a later config generation. Until the app does that,
+the finding is deliberately session-scoped and a service restart forgets it.
 
 The top-level snapshot reports `playback_state` as `playing`, `paused`, or
 `stopped`; the older `paused` boolean remains for compatibility and `stopped`

@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::Config;
 use wall_in_one_service::protocol::{write_response, Response, MAX_RESPONSE_BYTES};
-use wall_in_one_service::renderer::{SystemDriver, WallpaperDriver};
+use wall_in_one_service::renderer::{RendererFailure, SystemDriver, WallpaperDriver};
 use wall_in_one_service::runtime::Runtime;
 
 /// Run `attempt` until the kernel stops calling the freshly written program busy.
@@ -728,8 +728,8 @@ fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
         thread::sleep(Duration::from_millis(100));
         let failures = driver.poll_failures();
         assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("video entry \"video-two\""));
-        assert!(failures[0].contains("video EGL startup failed"));
+        assert!(failures[0].message.contains("video entry \"video-two\""));
+        assert!(failures[0].message.contains("video EGL startup failed"));
         assert!(!driver.motion_active("eDP-1"));
     }
 
@@ -791,8 +791,11 @@ struct RuntimeDriverState {
     active_outputs: HashSet<String>,
     fail_apply: bool,
     fail_applies_remaining: usize,
+    fail_entry_id: Option<String>,
+    fail_entry_attempts_remaining: usize,
     fail_pause: bool,
     failures: Vec<String>,
+    renderer_failures: Vec<RendererFailure>,
     connected_outputs: Option<Vec<String>>,
     output_probes: usize,
     video_audio: Vec<(bool, u8)>,
@@ -825,6 +828,12 @@ impl WallpaperDriver for RuntimeDriver {
         state.applied_outputs.push(output.to_string());
         if state.fail_apply {
             return Err("renderer refused resume".into());
+        }
+        if state.fail_entry_id.as_deref() == Some(&entry.id)
+            && state.fail_entry_attempts_remaining > 0
+        {
+            state.fail_entry_attempts_remaining -= 1;
+            return Err(format!("entry {} is borked", entry.id));
         }
         if state.fail_applies_remaining > 0 {
             state.fail_applies_remaining -= 1;
@@ -873,8 +882,23 @@ impl WallpaperDriver for RuntimeDriver {
         self.0.lock().unwrap().active_outputs.contains(output)
     }
 
-    fn poll_failures(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.0.lock().unwrap().failures)
+    fn poll_failures(&mut self) -> Vec<RendererFailure> {
+        let mut state = self.0.lock().unwrap();
+        let mut structured = std::mem::take(&mut state.renderer_failures);
+        structured.extend(
+            std::mem::take(&mut state.failures)
+                .into_iter()
+                .map(|message| RendererFailure {
+                    entry_id: String::new(),
+                    kind: wall_in_one_service::config::EntryKind::Video,
+                    scene_id: None,
+                    output: String::new(),
+                    message,
+                    permanent_for_session: false,
+                })
+                .collect::<Vec<_>>(),
+        );
+        structured
     }
 
     fn stop(&mut self) {
@@ -1137,6 +1161,268 @@ fn scheduled_playlist_gets_a_full_residency_interval_before_cycling() {
     assert_eq!(status(&mut runtime, winter)["entry_id"], "scene-three");
     runtime.tick(winter, transition + Duration::from_secs(5));
     assert_eq!(status(&mut runtime, winter)["entry_id"], "scene-four");
+}
+
+#[test]
+fn automatic_cycle_retries_three_times_then_marks_and_skips_the_borked_entry() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let mut parsed: Config = toml::from_str(&document).unwrap();
+    parsed.schedules.clear();
+    let mut third = parsed.playlists[0].entries[0].clone();
+    third.id = "still-four".into();
+    third.still = "/tmp/four.png".into();
+    parsed.playlists[0].entries.push(third);
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_entry_id = Some("video-two".into());
+        recorded.fail_entry_attempts_remaining = 3;
+    }
+
+    let due = Instant::now() + Duration::from_secs(600);
+    runtime.tick(at, due);
+    let after_first = status(&mut runtime, at);
+    assert_eq!(after_first["entry_id"], "still-one");
+    assert_eq!(after_first["automatic_retry"]["attempt"], 1);
+    assert_eq!(after_first["automatic_retry"]["maximum_attempts"], 3);
+    assert_eq!(after_first["automatic_retry"]["reason"], "cycle");
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .filter(|apply| apply.0 == "video-two")
+            .count(),
+        1
+    );
+
+    runtime.tick(at, due + Duration::from_secs(1));
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .filter(|apply| apply.0 == "video-two")
+            .count(),
+        1,
+        "a retry must not happen before its delay"
+    );
+    runtime.tick(at, due + Duration::from_secs(2));
+    assert_eq!(status(&mut runtime, at)["automatic_retry"]["attempt"], 2);
+    runtime.tick(at, due + Duration::from_secs(4));
+
+    let taboo = status(&mut runtime, at);
+    assert_eq!(taboo["entry_id"], "still-one");
+    assert!(taboo["automatic_retry"].is_null());
+    assert_eq!(taboo["taboo_entries"].as_array().unwrap().len(), 1);
+    assert_eq!(taboo["taboo_entries"][0]["playlist_id"], "day");
+    assert_eq!(taboo["taboo_entries"][0]["entry_id"], "video-two");
+    assert_eq!(taboo["taboo_entries"][0]["source"], "automatic-apply");
+    assert!(taboo["taboo_entries"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("borked"));
+    assert_eq!(taboo["taboo_entries_omitted"], 0);
+
+    runtime.tick(at, due + Duration::from_secs(5));
+    assert_eq!(status(&mut runtime, at)["entry_id"], "still-four");
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .filter(|apply| apply.0 == "video-two")
+            .count(),
+        3,
+        "the taboo entry must never be selected automatically again"
+    );
+}
+
+#[test]
+fn renderer_crash_is_attributed_and_never_enters_the_apply_retry_machine() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        true,
+    ))
+    .unwrap();
+    let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        winter,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let applies_before = state.lock().unwrap().applies.len();
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+        entry_id: "scene-three".into(),
+        kind: wall_in_one_service::config::EntryKind::Scene,
+        scene_id: Some("12345".into()),
+        output: String::new(),
+        message:
+            "scene 12345 (entry scene-three) crashed linux-wallpaperengine; paired still is active"
+                .into(),
+        permanent_for_session: true,
+    });
+
+    runtime.tick(winter, Instant::now());
+    runtime.tick(winter, Instant::now() + Duration::from_secs(1));
+    let snapshot = status(&mut runtime, winter);
+    assert_eq!(state.lock().unwrap().applies.len(), applies_before);
+    assert!(snapshot["automatic_retry"].is_null());
+    assert_eq!(snapshot["taboo_entries"][0]["entry_id"], "scene-three");
+    assert_eq!(snapshot["taboo_entries"][0]["scene_id"], "12345");
+    assert_eq!(snapshot["taboo_entries"][0]["source"], "renderer-crash");
+    assert!(snapshot["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("linux-wallpaperengine"));
+}
+
+#[test]
+fn shuffle_bag_covers_each_entry_then_reshuffles_without_a_seam_repeat() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("shuffle = false", "shuffle = true");
+    let mut parsed: Config = toml::from_str(&document).unwrap();
+    parsed.schedules.clear();
+    for (id, path) in [
+        ("still-four", "/tmp/four.png"),
+        ("still-five", "/tmp/five.png"),
+    ] {
+        let mut entry = parsed.playlists[0].entries[0].clone();
+        entry.id = id.into();
+        entry.still = path.into();
+        parsed.playlists[0].entries.push(entry);
+    }
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    let mut first_round = vec![status(&mut runtime, at)["entry_id"]
+        .as_str()
+        .unwrap()
+        .to_string()];
+    for _ in 1..4 {
+        assert!(
+            runtime
+                .handle(
+                    wall_in_one_service::protocol::Request {
+                        verb: "next".into(),
+                        argument: None,
+                    },
+                    at,
+                )
+                .ok
+        );
+        first_round.push(
+            status(&mut runtime, at)["entry_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    assert_eq!(first_round.iter().collect::<HashSet<_>>().len(), 4);
+    let seam_previous = first_round.last().unwrap().clone();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "next".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    let seam_current = status(&mut runtime, at)["entry_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(seam_current, seam_previous);
+
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "previous".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(status(&mut runtime, at)["entry_id"], seam_previous);
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "next".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(status(&mut runtime, at)["entry_id"], seam_current);
+
+    let mut second_round = vec![seam_current];
+    for _ in 1..4 {
+        assert!(
+            runtime
+                .handle(
+                    wall_in_one_service::protocol::Request {
+                        verb: "next".into(),
+                        argument: None,
+                    },
+                    at,
+                )
+                .ok
+        );
+        second_round.push(
+            status(&mut runtime, at)["entry_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    assert_eq!(second_round.iter().collect::<HashSet<_>>().len(), 4);
 }
 
 #[test]

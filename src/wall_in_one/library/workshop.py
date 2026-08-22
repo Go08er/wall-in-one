@@ -31,19 +31,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from wall_in_one import file_io
+
 #: Wallpaper Engine's Steam application id.
 APP_ID: Final = "431960"
 
 #: Where Steam keeps the file that lists every library folder.
 _LIBRARY_INDEX: Final = Path("steamapps") / "libraryfolders.vdf"
 
-#: The usual roots. Flatpak's is included because a Flatpak Steam puts the
-#: same tree somewhere else entirely and a user is unlikely to know that.
-DEFAULT_STEAM_ROOTS: Final[tuple[Path, ...]] = (
-    Path.home() / ".local" / "share" / "Steam",
-    Path.home() / ".steam" / "steam",
-    Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
-)
+
+def default_steam_roots() -> tuple[Path, ...]:
+    """The usual roots, resolved against the caller's current home.
+
+    This must stay lazy. Test and VM launchers deliberately replace ``HOME``
+    after importing modules; capturing :func:`Path.home` at import time made a
+    later sandboxed scan inspect the developer's real Steam installation.
+    Flatpak's location is included because it lives in a separate tree.
+    """
+    home = Path.home()
+    return (
+        home / ".local" / "share" / "Steam",
+        home / ".steam" / "steam",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+    )
+
 
 #: Ceilings. A workshop directory is user-writable and can hold anything.
 MAX_ITEMS: Final = 4096
@@ -106,7 +117,7 @@ def steam_roots(extra: Sequence[Path] = (), *, include_defaults: bool = True) ->
     and fails on every other.
     """
     seen: dict[Path, None] = {}
-    candidates = (*extra, *DEFAULT_STEAM_ROOTS) if include_defaults else tuple(extra)
+    candidates = (*extra, *default_steam_roots()) if include_defaults else tuple(extra)
     for candidate in candidates:
         expanded = Path(candidate).expanduser()
         if expanded.is_dir():
@@ -124,10 +135,11 @@ def library_folders(root: Path) -> tuple[Path, ...]:
     found: dict[Path, None] = {root: None}
     index = root / _LIBRARY_INDEX
     try:
-        if index.is_file() and index.stat().st_size <= MAX_INDEX_BYTES:
-            for match in _PATH_LINE.finditer(index.read_text(encoding="utf-8", errors="replace")):
+        raw = file_io.read_regular_text(index, MAX_INDEX_BYTES, encoding="utf-8", errors="replace")
+        if raw is not None:
+            for match in _PATH_LINE.finditer(raw):
                 candidate = Path(match.group(1))
-                if candidate.is_dir():
+                if not candidate.is_symlink() and candidate.is_dir():
                     found.setdefault(candidate, None)
     except OSError:
         # An unreadable index is not a reason to find nothing: the root itself
@@ -157,12 +169,12 @@ def _read_project(directory: Path) -> WorkshopItem | None:
     """
     project = directory / "project.json"
     try:
-        if project.is_symlink() or not project.is_file():
-            return None
-        if project.stat().st_size > MAX_PROJECT_BYTES:
-            return None
-        raw = project.read_text(encoding="utf-8", errors="replace")
+        raw = file_io.read_regular_text(
+            project, MAX_PROJECT_BYTES, encoding="utf-8", errors="replace"
+        )
     except OSError:
+        return None
+    if raw is None:
         return None
     try:
         document = json.loads(raw)
@@ -199,7 +211,7 @@ def _beside(directory: Path, name: object) -> Path | None:
     if "/" in name or "\\" in name or name.strip() in (".", ".."):
         return None
     candidate = directory / name.strip()
-    return candidate if candidate.is_file() else None
+    return candidate if not candidate.is_symlink() and candidate.is_file() else None
 
 
 def scan(

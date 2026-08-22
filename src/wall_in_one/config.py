@@ -9,20 +9,32 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
+import tempfile
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Self
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
+from wall_in_one.library import state_file
 from wall_in_one.theme.noctalia import ALL_SCHEMES, DEFAULT_SCHEME
 from wall_in_one.wallpaper import renderer, scenes
 
 #: Below this the window stops being legible against a busy wallpaper, and the
 #: compositor's blur cannot rescue it.
 MIN_OPACITY: Final = 0.30
+MAX_SETTINGS_BYTES: Final = 1024 * 1024
+
+# These are part of the versioned Python -> Rust configuration wire contract,
+# not arbitrary UI limits. Keep them aligned with ``service/src/config.rs`` so
+# systemd's headless compiler refuses a value *before* replacing the last-known
+# good runtime document with one the service cannot load.
+MAX_RUNTIME_PATH_BYTES: Final = 4096
+MAX_RUNTIME_REFERENCE_BYTES: Final = 120 * 4
+MAX_RUNTIME_CONNECTOR_BYTES: Final = 256
 
 
 class ConfigError(Exception):
@@ -259,11 +271,11 @@ def load(path: Path | None = None) -> Settings:
     """Read settings, falling back to defaults when absent or unreadable."""
     target = path if path is not None else paths.settings_path()
     try:
-        with target.open("rb") as handle:
-            raw = tomllib.load(handle)
-    except FileNotFoundError:
-        return Settings()
-    except OSError, tomllib.TOMLDecodeError:
+        document = file_io.read_regular_bytes(target, MAX_SETTINGS_BYTES)
+        if document is None:
+            return Settings()
+        raw = tomllib.loads(document.decode("utf-8"))
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
         # A corrupt settings file should not be fatal; defaults are always
         # usable and the user can fix or delete the file.
         return Settings()
@@ -282,27 +294,162 @@ def load_strict(path: Path | None = None) -> Settings:
     """
     target = path if path is not None else paths.settings_path()
     try:
-        with target.open("rb") as handle:
-            raw = tomllib.load(handle)
-    except FileNotFoundError:
-        return Settings()
+        document = file_io.read_regular_bytes(target, MAX_SETTINGS_BYTES)
+        if document is None:
+            return Settings()
+        raw = tomllib.loads(document.decode("utf-8"))
     except OSError as error:
         raise ConfigError(f"cannot read {target}: {error}") from error
-    except tomllib.TOMLDecodeError as error:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"cannot parse {target}: {error}") from error
+    _validate_strict_mapping(raw, target)
     return Settings.from_mapping(raw)
+
+
+def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
+    """Reject values the interactive loader would otherwise repair silently.
+
+    ``load`` is intentionally forgiving because it has a Settings screen a
+    person can use to recover.  The headless compiler has no such interaction:
+    substituting defaults there can atomically publish a valid but unintended
+    runtime document.  Keep the two policies separate and make every known
+    unattended value unambiguous before calling the shared mapper.
+    """
+
+    known = frozenset(Settings.__dataclass_fields__)
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        joined = ", ".join(unknown)
+        raise ConfigError(f"cannot use {target}: unknown setting(s): {joined}")
+
+    booleans = (
+        "follow_noctalia_palette",
+        "cycle_enabled",
+        "shuffle",
+        "dynamics_enabled",
+        "video_muted",
+        "video_hardware_decode",
+        "cycle_favourites_only",
+        "scan_workshop",
+        "own_scene_renderer",
+    )
+    for key in booleans:
+        if key in raw and not isinstance(raw[key], bool):
+            raise ConfigError(f"cannot use {target}: {key} must be a boolean")
+
+    integer_ranges = {
+        "cycle_interval": (5, 24 * 60 * 60),
+        "video_volume": (0, renderer.MAX_VOLUME),
+        "scene_fps": (scenes.MIN_FPS, scenes.MAX_FPS),
+    }
+    for key, (minimum, maximum) in integer_ranges.items():
+        if key not in raw:
+            continue
+        value = raw[key]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ConfigError(f"cannot use {target}: {key} must be an integer")
+        if not minimum <= value <= maximum:
+            raise ConfigError(f"cannot use {target}: {key} must be between {minimum} and {maximum}")
+
+    if "opacity" in raw:
+        opacity = raw["opacity"]
+        if (
+            not isinstance(opacity, (int, float))
+            or isinstance(opacity, bool)
+            or not math.isfinite(opacity)
+        ):
+            raise ConfigError(f"cannot use {target}: opacity must be a finite number")
+        if not MIN_OPACITY <= opacity <= 1.0:
+            raise ConfigError(
+                f"cannot use {target}: opacity must be between {MIN_OPACITY:.2f} and 1.0"
+            )
+
+    strings = (
+        "preview_scheme",
+        "video_when_hidden",
+        "video_interpolation",
+        "active_playlist",
+        "output",
+    )
+    for key in strings:
+        if key in raw and not isinstance(raw[key], str):
+            raise ConfigError(f"cannot use {target}: {key} must be a string")
+
+    choices = {
+        "preview_scheme": ALL_SCHEMES,
+        "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES,
+        "video_interpolation": renderer.INTERPOLATION_CHOICES,
+    }
+    for key, allowed in choices.items():
+        if key in raw and raw[key] not in allowed:
+            choices_text = ", ".join(allowed)
+            raise ConfigError(f"cannot use {target}: {key} must be one of {choices_text}")
+
+    for key, maximum in (
+        ("active_playlist", MAX_RUNTIME_REFERENCE_BYTES),
+        ("output", MAX_RUNTIME_CONNECTOR_BYTES),
+    ):
+        if key not in raw:
+            continue
+        value = raw[key]
+        assert isinstance(value, str)
+        _validate_runtime_text(value, maximum, key=key, target=target, optional=True)
+        if value and value != value.strip():
+            raise ConfigError(
+                f"cannot use {target}: {key} cannot have leading or trailing whitespace"
+            )
+
+    if "roots" in raw:
+        roots = raw["roots"]
+        if not isinstance(roots, list) or any(
+            not isinstance(entry, str) or not entry.strip() for entry in roots
+        ):
+            raise ConfigError(f"cannot use {target}: roots must be an array of non-empty strings")
+        assert isinstance(roots, list)
+        for index, root in enumerate(roots):
+            assert isinstance(root, str)
+            expanded = str(Path(root).expanduser().absolute())
+            _validate_runtime_text(
+                expanded,
+                MAX_RUNTIME_PATH_BYTES,
+                key=f"roots[{index}]",
+                target=target,
+            )
+
+
+def _validate_runtime_text(
+    value: str,
+    maximum_bytes: int,
+    *,
+    key: str,
+    target: Path,
+    optional: bool = False,
+) -> None:
+    """Apply Rust's UTF-8 byte and control-character bounds to one value."""
+    if not value and optional:
+        return
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ConfigError(f"cannot use {target}: {key} must be valid UTF-8 text") from error
+    if len(encoded) > maximum_bytes:
+        raise ConfigError(f"cannot use {target}: {key} must be at most {maximum_bytes} UTF-8 bytes")
+    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in value):
+        raise ConfigError(f"cannot use {target}: {key} cannot contain control characters")
 
 
 def save(settings: Settings, path: Path | None = None) -> Path:
     target = path if path is not None else paths.settings_path()
     paths.ensure_directory(target.parent)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temporary = Path(name)
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(settings.validated().to_toml())
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        state_file.fsync_parent(target)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise ConfigError(f"cannot write {target}: {error}") from error

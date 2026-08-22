@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -8,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::Config;
-use wall_in_one_service::protocol::Response;
+use wall_in_one_service::protocol::{write_response, Response, MAX_RESPONSE_BYTES};
 use wall_in_one_service::renderer::{SystemDriver, WallpaperDriver};
 use wall_in_one_service::runtime::Runtime;
 
@@ -193,7 +194,7 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
     assert_eq!(request(&socket, "pause", None)["message"], "paused");
     assert_eq!(
         request(&socket, "shuffle", Some("on"))["message"],
-        "shuffle on"
+        "shuffle on (manual)"
     );
     assert_eq!(request(&socket, "schedule-follow", None)["ok"], true);
     fs::write(&config_path, "schema_version = 99\n").unwrap();
@@ -370,6 +371,10 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     let mut driver = SystemDriver::new(parsed.renderer.clone());
 
     driver.begin_apply();
+    assert_eq!(
+        driver.connected_outputs().unwrap(),
+        vec!["DP-1".to_string(), "eDP-1".to_string()]
+    );
     without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
     without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
     driver.end_apply();
@@ -768,7 +773,9 @@ impl WallpaperDriver for RecordingDriver {
             .push((output.into(), entry.id.clone()));
         Ok(())
     }
-    fn set_paused(&mut self, _paused: bool) {}
+    fn set_paused(&mut self, _paused: bool) -> Result<(), String> {
+        Ok(())
+    }
     fn reconfigure(&mut self, _settings: wall_in_one_service::config::RendererSettings) {}
     fn stop(&mut self) {}
 }
@@ -776,48 +783,100 @@ impl WallpaperDriver for RecordingDriver {
 #[derive(Default)]
 struct RuntimeDriverState {
     applies: Vec<(String, bool)>,
+    applied_outputs: Vec<String>,
+    retained_outputs: Vec<Vec<String>>,
     pauses: Vec<bool>,
     stops: usize,
     motion_active: bool,
+    active_outputs: HashSet<String>,
     fail_apply: bool,
+    fail_pause: bool,
+    failures: Vec<String>,
+    connected_outputs: Option<Vec<String>>,
+    output_probes: usize,
+    video_audio: Vec<(bool, u8)>,
+    reconfigures: usize,
 }
 
 #[derive(Clone)]
 struct RuntimeDriver(Arc<Mutex<RuntimeDriverState>>);
 
 impl WallpaperDriver for RuntimeDriver {
+    fn connected_outputs(&mut self) -> Result<Vec<String>, String> {
+        let mut state = self.0.lock().unwrap();
+        state.output_probes += 1;
+        state
+            .connected_outputs
+            .clone()
+            .ok_or_else(|| "test compositor output discovery unavailable".into())
+    }
+
     fn apply(
         &mut self,
         entry: &wall_in_one_service::config::Entry,
-        _output: &str,
+        output: &str,
         settings: &wall_in_one_service::config::Settings,
     ) -> Result<(), String> {
         let mut state = self.0.lock().unwrap();
         state
             .applies
             .push((entry.id.clone(), settings.dynamics_enabled));
+        state.applied_outputs.push(output.to_string());
         if state.fail_apply {
             return Err("renderer refused resume".into());
         }
         state.motion_active = settings.dynamics_enabled
             && entry.kind != wall_in_one_service::config::EntryKind::Still;
+        if state.motion_active {
+            state.active_outputs.insert(output.to_string());
+        } else {
+            state.active_outputs.remove(output);
+        }
         Ok(())
     }
 
-    fn set_paused(&mut self, paused: bool) {
-        self.0.lock().unwrap().pauses.push(paused);
+    fn retain_outputs(&mut self, outputs: &[String]) {
+        let mut state = self.0.lock().unwrap();
+        state.retained_outputs.push(outputs.to_vec());
+        let wanted: HashSet<&str> = outputs.iter().map(String::as_str).collect();
+        state
+            .active_outputs
+            .retain(|output| wanted.contains(output.as_str()));
+        state.motion_active = !state.active_outputs.is_empty();
     }
 
-    fn reconfigure(&mut self, _settings: wall_in_one_service::config::RendererSettings) {}
+    fn set_paused(&mut self, paused: bool) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        state.pauses.push(paused);
+        if state.fail_pause {
+            Err("pause transport failed".into())
+        } else {
+            Ok(())
+        }
+    }
 
-    fn motion_active(&self, _output: &str) -> bool {
-        self.0.lock().unwrap().motion_active
+    fn set_video_audio(&mut self, muted: bool, volume: u8) -> Result<(), String> {
+        self.0.lock().unwrap().video_audio.push((muted, volume));
+        Ok(())
+    }
+
+    fn reconfigure(&mut self, _settings: wall_in_one_service::config::RendererSettings) {
+        self.0.lock().unwrap().reconfigures += 1;
+    }
+
+    fn motion_active(&self, output: &str) -> bool {
+        self.0.lock().unwrap().active_outputs.contains(output)
+    }
+
+    fn poll_failures(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.0.lock().unwrap().failures)
     }
 
     fn stop(&mut self) {
         let mut state = self.0.lock().unwrap();
         state.stops += 1;
         state.motion_active = false;
+        state.active_outputs.clear();
     }
 }
 
@@ -831,6 +890,148 @@ fn status(runtime: &mut Runtime<RuntimeDriver>, at: chrono::NaiveDateTime) -> se
     );
     assert!(response.ok, "{}", response.message);
     serde_json::from_str(&response.message).unwrap()
+}
+
+#[test]
+fn thirty_two_renderer_failures_keep_attribution_and_fit_the_status_wire() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        failures: (0..32)
+            .map(|index| {
+                format!(
+                    "scene wallpaper-{index} crashed; stderr: {} TAIL-{index}\n",
+                    "diagnostic".repeat(1200)
+                )
+            })
+            .collect(),
+        ..RuntimeDriverState::default()
+    }));
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+
+    runtime.tick(at, Instant::now());
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(response.ok, "{}", response.message);
+    let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    let error = snapshot["last_error"].as_str().unwrap();
+    assert!(error.len() <= 12 * 1024, "{} bytes", error.len());
+    assert!(!error.contains('\n'));
+    for index in [0, 31] {
+        assert!(
+            error.contains(&format!("scene wallpaper-{index}")),
+            "{error}"
+        );
+        assert!(error.contains(&format!("TAIL-{index}")), "{error}");
+    }
+    assert!(error.contains("[truncated]"), "{error}");
+    let mut encoded = Vec::new();
+    write_response(&mut encoded, &response).unwrap();
+    assert!(encoded.len() <= MAX_RESPONSE_BYTES);
+}
+
+#[test]
+fn oversized_discovered_connector_is_never_a_renderer_target_or_status_field() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let document = format!(
+        "{}\n[[displays]]\nconnector = \"eDP-1\"\nplaylist = \"day\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let oversized = "x".repeat(257);
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec![oversized.clone(), "eDP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+
+    runtime.apply_current().unwrap();
+    assert_eq!(state.lock().unwrap().applied_outputs, ["eDP-1"]);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["displays"][0]["connector"], "eDP-1");
+    assert!(!snapshot.to_string().contains(&oversized));
+}
+
+#[test]
+fn no_argument_runtime_verbs_reject_junk_without_side_effects() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+
+    for verb in [
+        "status",
+        "next",
+        "previous",
+        "random",
+        "schedule-follow",
+        "play",
+        "pause",
+        "stop",
+        "toggle",
+        "reload",
+        "quit",
+    ] {
+        let response = runtime.handle(
+            wall_in_one_service::protocol::Request {
+                verb: verb.into(),
+                argument: Some("junk".into()),
+            },
+            at,
+        );
+        assert!(!response.ok, "{verb} accepted an ignored argument");
+        assert_eq!(response.message, format!("usage: {verb}"));
+    }
+    assert!(
+        !runtime.should_quit(),
+        "rejected quit must not stop the service"
+    );
+    let recorded = state.lock().unwrap();
+    assert!(recorded.applies.is_empty());
+    assert!(recorded.pauses.is_empty());
+    assert_eq!(recorded.stops, 0);
 }
 
 #[test]
@@ -897,6 +1098,277 @@ fn cycle_runtime_override_stops_advancement_without_stopping_motion() {
 }
 
 #[test]
+fn shuffle_runtime_override_survives_reload_and_can_follow_config_again() {
+    let root = directory("shuffle-reload");
+    let config_path = root.join("runtime.toml");
+    let original = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    fs::write(&config_path, &original).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(config_path.clone(), parsed, RuntimeDriver(state), at).unwrap();
+
+    let enabled = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "shuffle".into(),
+            argument: Some("on".into()),
+        },
+        at,
+    );
+    assert_eq!(enabled.message, "shuffle on (manual)");
+    fs::write(
+        &config_path,
+        original.replace(
+            "cycle_interval_seconds = 300",
+            "cycle_interval_seconds = 301",
+        ),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "reload".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    let reloaded = status(&mut runtime, at);
+    assert_eq!(reloaded["shuffle"], true);
+    assert_eq!(reloaded["shuffle_default"], false);
+    assert_eq!(reloaded["shuffle_source"], "manual");
+
+    let following = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "shuffle".into(),
+            argument: Some("default".into()),
+        },
+        at,
+    );
+    assert_eq!(following.message, "shuffle off (config)");
+    let following = status(&mut runtime, at);
+    assert_eq!(following["shuffle"], false);
+    assert_eq!(following["shuffle_source"], "config");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn target_reconciliation_removes_disconnected_all_and_empty_renderers() {
+    let root = directory("target-reconciliation");
+    let config_path = root.join("runtime.toml");
+    let base = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    let two_displays = format!(
+        "{base}\n[[displays]]\nconnector = \"eDP-1\"\nplaylist = \"day\"\n\
+         [[displays]]\nconnector = \"DP-2\"\nplaylist = \"day\"\n"
+    );
+    fs::write(&config_path, &two_displays).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "next".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["eDP-1".into(), "DP-2".into()])
+    );
+
+    let one_display = format!("{base}\n[[displays]]\nconnector = \"eDP-1\"\nplaylist = \"day\"\n");
+    fs::write(&config_path, one_display).unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "reload".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["eDP-1".into()])
+    );
+
+    fs::write(&config_path, &base).unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "reload".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from([String::new()])
+    );
+
+    let entries_start = base.find("[[playlists.entries]]").unwrap();
+    let night_start = base.find("[[playlists]]\nid = \"night\"").unwrap();
+    assert!(entries_start < night_start);
+    let empty_day = format!(
+        "{}entries = []\n{}",
+        &base[..entries_start],
+        &base[night_start..]
+    );
+    fs::write(&config_path, empty_day).unwrap();
+    let emptied = Config::load(&config_path).unwrap();
+    assert!(emptied.playlist("day").unwrap().entries.is_empty());
+    let reply = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "reload".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(!reply.ok);
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    assert_eq!(
+        state.lock().unwrap().retained_outputs.last(),
+        Some(&Vec::<String>::new())
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pause_and_resume_failures_do_not_lie_about_playback_state() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    state.lock().unwrap().fail_pause = true;
+    let refused = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "pause".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(!refused.ok);
+    assert!(refused.message.contains("pause transport failed"));
+    assert_eq!(status(&mut runtime, at)["playback_state"], "playing");
+
+    state.lock().unwrap().fail_pause = false;
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "pause".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    state.lock().unwrap().fail_pause = true;
+    let refused = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "play".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(!refused.ok);
+    assert!(refused.message.contains("pause transport failed"));
+    assert_eq!(status(&mut runtime, at)["playback_state"], "paused");
+}
+
+#[test]
+fn play_retries_a_crashed_video_renderer() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "next".into(),
+            argument: None,
+        },
+        at,
+    );
+    let applies_before = state.lock().unwrap().applies.len();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.active_outputs.clear();
+        recorded.motion_active = false;
+        recorded.failures.push(
+            "video entry \"video-two\" stopped because mpvpaper exited; paired still is active"
+                .into(),
+        );
+    }
+    runtime.tick(at, Instant::now());
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "play".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(response.ok, "{}", response.message);
+    assert!(state.lock().unwrap().applies.len() > applies_before);
+    assert_eq!(status(&mut runtime, at)["motion_active"], true);
+}
+
+#[test]
 fn stop_releases_motion_while_pause_keeps_it_resident_and_play_resumes() {
     let parsed: Config = toml::from_str(&config(
         Path::new("/bin/true"),
@@ -944,6 +1416,23 @@ fn stop_releases_motion_while_pause_keeps_it_resident_and_play_resumes() {
     assert_eq!(paused["stopped"], false);
     assert!(state.lock().unwrap().motion_active);
 
+    let moved = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "previous".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert_eq!(moved.message, "paused still-one");
+    let moved = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "next".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert_eq!(moved.message, "paused video-two");
+
     assert_eq!(
         runtime
             .handle(
@@ -963,27 +1452,29 @@ fn stop_releases_motion_while_pause_keeps_it_resident_and_play_resumes() {
     assert_eq!(stopped["motion_active"], false);
     {
         let recorded = state.lock().unwrap();
-        assert_eq!(recorded.pauses, vec![true, false]);
+        assert_eq!(recorded.pauses, vec![true, true, true, false]);
         assert_eq!(recorded.stops, 1);
     }
 
     // Moving while stopped changes the still but never launches its motion.
-    runtime.handle(
+    let moved = runtime.handle(
         wall_in_one_service::protocol::Request {
             verb: "previous".into(),
             argument: None,
         },
         at,
     );
+    assert_eq!(moved.message, "showing still-one; motion stopped");
     let last = state.lock().unwrap().applies.last().cloned().unwrap();
     assert_eq!(last, ("still-one".into(), false));
-    runtime.handle(
+    let moved = runtime.handle(
         wall_in_one_service::protocol::Request {
             verb: "next".into(),
             argument: None,
         },
         at,
     );
+    assert_eq!(moved.message, "showing video-two; motion stopped");
     let last = state.lock().unwrap().applies.last().cloned().unwrap();
     assert_eq!(last, ("video-two".into(), false));
 
@@ -1240,6 +1731,294 @@ fn display_assignment_is_the_baseline_and_manual_override_wins() {
 }
 
 #[test]
+fn unassigned_live_output_follows_default_and_global_overrides_remain_global() {
+    let mut parsed: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    parsed.schedules[0].months.clear();
+    parsed.schedules[0].start = None;
+    parsed.schedules[0].end = None;
+    parsed.validate().unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    // Keep the schedule out of force for the baseline apply, then inject a
+    // matching time when returning from a manual override below.
+    parsed.schedules[0].months = vec![12];
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-2".into(), "DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+
+    runtime.apply_current().unwrap();
+    {
+        let recorded = state.lock().unwrap();
+        assert_eq!(recorded.output_probes, 1);
+        assert_eq!(recorded.applied_outputs, vec!["DP-1", "DP-2"]);
+        assert_eq!(recorded.applies[0].0, "scene-three");
+        assert_eq!(recorded.applies[1].0, "still-one");
+    }
+    let baseline = status(&mut runtime, at);
+    assert_eq!(baseline["playlist"], "Multiple displays");
+    assert_eq!(baseline["displays"][0]["connector"], "DP-1");
+    assert_eq!(baseline["displays"][0]["assignment_source"], "explicit");
+    assert_eq!(baseline["displays"][0]["playlist_id"], "night");
+    assert_eq!(baseline["displays"][1]["connector"], "DP-2");
+    assert_eq!(baseline["displays"][1]["assignment_source"], "default");
+    assert_eq!(baseline["displays"][1]["assigned_playlist_id"], "day");
+    assert_eq!(baseline["displays"][1]["playlist_id"], "day");
+
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "playlist-use".into(),
+                    argument: Some("day".into()),
+                },
+                at,
+            )
+            .ok
+    );
+    let manual = status(&mut runtime, at);
+    assert_eq!(manual["source"], "manual");
+    assert!(manual["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|display| display["playlist_id"] == "day"));
+
+    let scheduled_at = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "schedule-follow".into(),
+                    argument: None,
+                },
+                scheduled_at,
+            )
+            .ok
+    );
+    let scheduled = status(&mut runtime, scheduled_at);
+    assert_eq!(scheduled["source"], "schedule");
+    assert!(scheduled["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|display| display["playlist_id"] == "night"));
+}
+
+#[test]
+fn output_hotplug_reconciles_targets_without_a_second_probe() {
+    let mut parsed: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    parsed.schedules.clear();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "DP-2".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    let before = Instant::now();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.connected_outputs = Some(vec!["DP-3".into(), "DP-2".into()]);
+        recorded.applies.clear();
+        recorded.applied_outputs.clear();
+    }
+
+    runtime.tick(at, before + Duration::from_secs(6));
+    {
+        let recorded = state.lock().unwrap();
+        assert_eq!(recorded.output_probes, 2, "one probe per apply batch");
+        assert_eq!(recorded.applied_outputs, vec!["DP-2", "DP-3"]);
+        assert!(recorded.applies.iter().all(|apply| apply.0 == "still-one"));
+        assert_eq!(
+            recorded.retained_outputs.last(),
+            Some(&vec!["DP-2".into(), "DP-3".into()])
+        );
+    }
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["displays"][0]["connector"], "DP-2");
+    assert_eq!(snapshot["displays"][1]["connector"], "DP-3");
+    assert_eq!(snapshot["displays"][1]["assignment_source"], "default");
+}
+
+#[test]
+fn schedule_transition_replaces_and_then_restores_per_display_baselines() {
+    let parsed: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    let summer = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "DP-2".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        summer,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+
+    runtime.tick(winter, Instant::now());
+    let scheduled = status(&mut runtime, winter);
+    assert!(scheduled["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|display| display["playlist_id"] == "night"));
+
+    runtime.tick(summer, Instant::now());
+    let baseline = status(&mut runtime, summer);
+    assert_eq!(baseline["displays"][0]["playlist_id"], "night");
+    assert_eq!(baseline["displays"][1]["playlist_id"], "day");
+}
+
+#[test]
+fn missing_output_snapshot_degrades_to_known_targets_without_window_mode() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let partial: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    let partial_state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(Vec::new()),
+        ..RuntimeDriverState::default()
+    }));
+    let mut partial_runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        partial,
+        RuntimeDriver(partial_state.clone()),
+        at,
+    )
+    .unwrap();
+    partial_runtime.apply_current().unwrap();
+    assert_eq!(partial_state.lock().unwrap().applied_outputs, vec!["DP-1"]);
+    let partial_status = status(&mut partial_runtime, at);
+    assert_eq!(partial_status["displays"][0]["connector"], "DP-1");
+    assert!(partial_status["output_discovery_error"]
+        .as_str()
+        .unwrap()
+        .contains("no usable connectors"));
+
+    let all: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let all_state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(Vec::new()),
+        ..RuntimeDriverState::default()
+    }));
+    let mut all_runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        all,
+        RuntimeDriver(all_state.clone()),
+        at,
+    )
+    .unwrap();
+    all_runtime.apply_current().unwrap();
+    assert_eq!(all_state.lock().unwrap().applied_outputs, vec![""]);
+    assert_eq!(
+        status(&mut all_runtime, at)["displays"][0]["connector"],
+        "ALL"
+    );
+}
+
+#[test]
+fn transient_output_discovery_failure_keeps_the_last_live_targets() {
+    let mut parsed: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    parsed.schedules.clear();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "DP-2".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.connected_outputs = Some(Vec::new());
+        recorded.applied_outputs.clear();
+    }
+
+    assert!(
+        runtime
+            .handle(
+                wall_in_one_service::protocol::Request {
+                    verb: "next".into(),
+                    argument: None,
+                },
+                at,
+            )
+            .ok
+    );
+    assert_eq!(state.lock().unwrap().applied_outputs, vec!["DP-1", "DP-2"]);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["displays"][1]["connector"], "DP-2");
+    assert!(snapshot["output_discovery_error"]
+        .as_str()
+        .unwrap()
+        .contains("no usable connectors"));
+}
+
+#[test]
 fn reload_of_inactive_authoring_state_does_not_reapply_the_wallpaper() {
     let root = directory("quiet-reload");
     let config_path = root.join("runtime.toml");
@@ -1279,6 +2058,49 @@ fn reload_of_inactive_authoring_state_does_not_reapply_the_wallpaper() {
 
     assert!(response.ok);
     assert!(events.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reload_applies_video_audio_live_without_restarting_the_renderer() {
+    let root = directory("live-audio-reload");
+    let config_path = root.join("runtime.toml");
+    let original = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    fs::write(&config_path, &original).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    fs::write(
+        &config_path,
+        original
+            .replace("video_muted = true", "video_muted = false")
+            .replace("video_volume = 50", "video_volume = 27"),
+    )
+    .unwrap();
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "reload".into(),
+            argument: None,
+        },
+        at,
+    );
+
+    assert!(response.ok, "{}", response.message);
+    let recorded = state.lock().unwrap();
+    assert_eq!(recorded.video_audio, vec![(false, 27)]);
+    assert_eq!(recorded.reconfigures, 0);
+    assert!(recorded.applies.is_empty());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1457,6 +2279,10 @@ fn pause_during_startup_readiness_applies_once_then_pauses_motion() {
         thread::sleep(Duration::from_millis(25));
     }
     let events_after_apply = fs::read_to_string(&events).unwrap();
+    // A real pause may SIGSTOP the just-spawned process before its shell has
+    // written the launch record. Resume it long enough to prove exactly one
+    // child was started, then pause it again for the stability assertion.
+    assert_eq!(request(&socket, "play", None)["message"], "playing");
     let launch_deadline = Instant::now() + Duration::from_secs(3);
     let launches_after_apply = loop {
         if let Ok(contents) = fs::read_to_string(&launches) {
@@ -1475,6 +2301,7 @@ fn pause_during_startup_readiness_applies_once_then_pauses_motion() {
         );
         thread::sleep(Duration::from_millis(25));
     };
+    assert_eq!(request(&socket, "pause", None)["message"], "paused");
     thread::sleep(Duration::from_millis(700));
     assert_eq!(fs::read_to_string(&events).unwrap(), events_after_apply);
     assert_eq!(fs::read_to_string(&launches).unwrap(), launches_after_apply);

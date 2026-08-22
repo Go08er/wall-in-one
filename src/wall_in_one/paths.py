@@ -125,3 +125,17 @@ def noctalia_community_palettes_dir() -> Path:
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def fsync_directory(path: Path) -> None:
+    """Persist directory-entry changes made beneath ``path``.
+
+    Syncing a file's bytes is not enough to make a following link, rename or
+    unlink survive power loss. Wall-in-One runs on Linux, where opening a
+    directory and syncing its descriptor is the narrow durability primitive.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

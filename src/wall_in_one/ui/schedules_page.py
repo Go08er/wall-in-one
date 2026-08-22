@@ -13,6 +13,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gtk
 
 from wall_in_one.library import displays, schedules
+from wall_in_one.ui import runtime_truth
 
 if TYPE_CHECKING:
     from wall_in_one.session import Session
@@ -63,6 +64,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._built = False
         self._fingerprint: object = None
         self._rule_rows: list[Gtk.Widget] = []
+        self._playback_row: Adw.ComboRow | None = None
+        self._playback_choices: tuple[Any, ...] = ()
         self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self._content.set_margin_top(18)
         self._content.set_margin_bottom(24)
@@ -104,11 +107,25 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._loading = False
         self.get_vadjustment().set_value(scroll)
 
-    @staticmethod
-    def _state_fingerprint(session: Session) -> object:
+    def runtime_status_changed(self, session: Session) -> None:
+        """Update the live selector without rebuilding schedule authoring."""
+        row = self._playback_row
+        if not self._built or row is None:
+            return
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        self._loading = True
+        try:
+            row.set_subtitle(self._playback_description(session, truth))
+            row.set_selected(self._playback_selected(session, self._playback_choices, truth))
+        finally:
+            self._loading = False
+        self._fingerprint = self._state_fingerprint(session)
+
+    def _state_fingerprint(self, session: Session) -> object:
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         return (
             session.settings.active_playlist,
-            session.manual_playlist,
+            truth if truth is not None else session.manual_playlist,
             session.playlists.all(),
             session.displays.all(),
             session.schedules.rules,
@@ -125,20 +142,56 @@ class SchedulesPage(Gtk.ScrolledWindow):
             ),
         )
         choices = session.playlists.all()
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         row = Adw.ComboRow(
             title="Active playlist",
+            subtitle=self._playback_description(session, truth),
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
         )
-        selected = 0
-        if session.manual_playlist is not None:
-            for index, playlist in enumerate(choices, start=1):
-                if playlist.id == session.manual_playlist:
-                    selected = index
-                    break
-        row.set_selected(selected)
+        row.set_selected(self._playback_selected(session, choices, truth))
+        self._playback_row = row
+        self._playback_choices = choices
         row.connect("notify::selected", self._make_playback_changed(choices))
         group.add(row)
         return group
+
+    @staticmethod
+    def _playback_description(session: Session, truth: runtime_truth.RuntimeTruth | None) -> str:
+        if truth is None:
+            return (
+                "Manual override is active. Choose Follow schedule to return calendar control."
+                if session.manual_playlist is not None
+                else "Following the authored schedule."
+            )
+        if truth.is_manual:
+            return f"Manual override · {truth.playlist} is playing."
+        if truth.is_multi_display:
+            return "Following schedule · screens use their assigned or default playlists."
+        if truth.schedule_rule_id is not None:
+            return (
+                f"Following schedule · rule {truth.schedule_rule_id} selects "
+                f"{truth.scheduled_playlist or truth.playlist}."
+            )
+        return f"Following schedule · default selects {truth.scheduled_playlist or truth.playlist}."
+
+    @staticmethod
+    def _playback_selected(
+        session: Session,
+        choices: tuple[Any, ...],
+        truth: runtime_truth.RuntimeTruth | None,
+    ) -> int:
+        manual_id = (
+            truth.playlist_id
+            if truth is not None and truth.is_manual
+            else session.manual_playlist
+            if truth is None
+            else None
+        )
+        if manual_id is not None:
+            for index, playlist in enumerate(choices, start=1):
+                if playlist.id == manual_id:
+                    return index
+        return 0
 
     def _build_defaults(self, session: Session) -> Gtk.Widget:
         group = Adw.PreferencesGroup(
@@ -347,8 +400,20 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 if 0 < index <= len(choices)
                 else self._app.resume_schedule_async()
             )
+            # A ComboRow changes before its callback runs. Put it immediately
+            # back on the last service-owned snapshot; the subsequent status
+            # response is what makes a successful command visible. A failure
+            # therefore cannot leave an optimistic manual/schedule claim.
+            self._loading = True
+            try:
+                truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+                row.set_selected(self._playback_selected(self._app.session, choices, truth))
+            finally:
+                self._loading = False
             if started:
-                self._fingerprint = self._state_fingerprint(self._app.session)
+                # Force the next accepted status to reconcile this row even
+                # when the runtime rejected the requested transition.
+                self._fingerprint = None
 
         return changed
 

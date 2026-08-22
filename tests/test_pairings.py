@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one.library import pairing, pairings
+from wall_in_one.library import pairing, pairings, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.pairings import (
     Identity,
@@ -169,7 +169,7 @@ def test_a_better_default_reaches_an_item_nobody_chose_for(tmp_path: Path) -> No
     store = Store(path=tmp_path / "pairings.json")
     assert store.resolve(item(clip, Kind.VIDEO), roots=[tmp_path]).still is None
 
-    generated = png(pairing.still_directory(tmp_path) / "clip.png")
+    generated = png(pairing.still_directory(tmp_path) / f"{pairing.automatic_still_stem(clip)}.png")
     assert store.resolve(item(clip, Kind.VIDEO), roots=[tmp_path]).still == generated
 
 
@@ -179,7 +179,7 @@ def test_a_better_default_does_not_overrule_a_choice(tmp_path: Path) -> None:
     store = Store(path=tmp_path / "pairings.json")
     store.choose_still(item(clip, Kind.VIDEO), chosen)
 
-    png(pairing.still_directory(tmp_path) / "clip.png")
+    png(pairing.still_directory(tmp_path) / f"{pairing.automatic_still_stem(clip)}.png")
 
     assert store.resolve(item(clip, Kind.VIDEO), roots=[tmp_path]).still == chosen
 
@@ -334,15 +334,19 @@ def test_one_bad_record_costs_only_that_record(tmp_path: Path) -> None:
     assert set(records) == {"still:/w/a.png", "still:/w/b.png"}
     # The relative path was dropped, but the record it was in survives.
     assert records["still:/w/b.png"].still is None
+    assert Store.open(target).fault is not None
 
 
-def test_an_unrecognised_version_is_still_read(tmp_path: Path) -> None:
+def test_an_unrecognised_version_is_recovered_but_faulted(tmp_path: Path) -> None:
     target = tmp_path / "pairings.json"
     target.write_text(
         json.dumps({"version": 99, "pairings": [{"identity": "still:/w/a.png"}]}),
         encoding="utf-8",
     )
-    assert set(pairings.load(target)) == {"still:/w/a.png"}
+    opened = Store.open(target)
+    assert set(opened.records) == {"still:/w/a.png"}
+    assert opened.fault is not None
+    assert "unsupported version" in opened.fault
 
 
 def test_the_write_is_a_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,6 +381,28 @@ def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.Mon
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_store_write_failure_does_not_change_its_in_memory_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "pairings.json"
+    picture = png(tmp_path / "a.png")
+    medium = item(picture)
+    store = Store(path=target)
+    store.choose_palette(medium, PalettePolicy("builtin", "First"))
+
+    def fail(_records: object, _path: object) -> None:
+        raise PairingError("local-io", "injected write failure")
+
+    monkeypatch.setattr(pairings, "save", fail)
+    with pytest.raises(PairingError):
+        store.choose_palette(medium, PalettePolicy("builtin", "Second"))
+
+    in_memory = store.get(Identity.of(medium))
+    on_disk = Store.open(target).get(Identity.of(medium))
+    assert in_memory is not None and in_memory.palette.name == "First"
+    assert on_disk is not None and on_disk.palette.name == "First"
+
+
 def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) -> None:
     target = tmp_path / "pairings.json"
     target.write_text("not json but somebody's choices", encoding="utf-8")
@@ -385,6 +411,26 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     store.choose_palette(item(png(tmp_path / "a.png")), PalettePolicy(kind=pairings.KEEP))
     kept = target.with_name(target.name + pairings.BROKEN_SUFFIX)
     assert kept.read_text(encoding="utf-8") == "not json but somebody's choices"
+
+
+def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "pairings.json"
+    original = "not json but somebody's choices"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+
+    def fail(_path: Path) -> Path:
+        raise OSError("injected relocation failure")
+
+    monkeypatch.setattr(state_file, "preserve_faulted", fail)
+    with pytest.raises(PairingError):
+        store.choose_palette(item(png(tmp_path / "a.png")), PalettePolicy(kind=pairings.KEEP))
+
+    assert store.fault is not None
+    assert target.read_text(encoding="utf-8") == original
+    assert len(store) == 0
 
 
 def test_the_default_file_lives_beside_the_favourites(state_home: Path) -> None:

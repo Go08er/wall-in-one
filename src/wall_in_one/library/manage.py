@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import errno
 import os
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -104,7 +105,7 @@ def _is_managed_on_disk(path: Path) -> bool:
     the user dropped into a managed directory be deleted as though it were
     ours.
     """
-    return scan.is_managed_directory(path.parent) and scan.has_file_sidecar(path)
+    return scan.is_managed_directory(path.parent) and scan.has_download_sidecar(path)
 
 
 def _companions(item: MediaItem, roots: tuple[Path, ...]) -> list[Path]:
@@ -116,17 +117,32 @@ def _companions(item: MediaItem, roots: tuple[Path, ...]) -> list[Path]:
     theirs and stays, even though it is about to have nothing to pair with.
     """
     found: list[Path] = []
-    for suffix in scan.FILE_SIDECAR_SUFFIXES:
-        candidate = item.path.with_name(item.path.name + suffix)
+    provenance = scan.download_provenance(item.path)
+    provider_suffix = (
+        {
+            "MotionBGS": ".motionbgs.json",
+            "Wallhaven": ".wallhaven.json",
+        }.get(provenance)
+        if provenance is not None
+        else None
+    )
+    if provider_suffix is not None:
+        candidate = item.path.with_name(item.path.name + provider_suffix)
         if candidate.is_file() and not candidate.is_symlink():
             found.append(candidate)
+
+    pairing_sidecar = item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
+    if pairing_sidecar.is_file() and not pairing_sidecar.is_symlink():
+        found.append(pairing_sidecar)
 
     if item.kind is not Kind.VIDEO:
         return found
     still = item.paired_still
     if still is None or still.is_symlink() or not still.is_file():
         return found
-    generated = any(still.parent == pairing.still_directory(root) for root in roots)
+    generated = still.stem == pairing.automatic_still_stem(item.path) and any(
+        still.parent == pairing.still_directory(root) for root in roots
+    )
     if generated:
         found.append(still)
         sidecar = still.with_name(still.name + pairing.SIDECAR_SUFFIX)
@@ -144,7 +160,9 @@ def remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> Removal:
     is this check.
     """
     path = item.path
-    if roots and not _within(path, roots):
+    if item.provider == scan.WORKSHOP_PROVIDER or item.kind is Kind.SCENE:
+        raise ManageError("not-ours", f"{path.name} belongs to Steam, not this app")
+    if not roots or not _within(path, roots):
         raise ManageError("outside-root", f"{path} is not inside the library")
     if path.is_symlink():
         raise ManageError("symlink", f"{path} is a symbolic link, so it is not ours to delete")
@@ -190,33 +208,62 @@ def trash_directory() -> Path:
     return paths.data_home() / TRASH_DIRECTORY
 
 
-def _trash_name(directory: Path, original: Path) -> str:
-    """A name free in ``directory``, keeping the extension recognisable.
+def _trash_names(original: Path) -> Sequence[str]:
+    """Candidate names, keeping the extension recognisable.
 
     The suffix goes before the extension so that a restored `foo (1).mp4` is
-    still obviously a video, which `foo.mp4 (1)` would not be.
+    still obviously a video, which `foo.mp4 (1)` would not be. Availability is
+    deliberately not checked here: only a no-replace link may claim a name
+    without racing another trash operation.
     """
-    if not (directory / original.name).exists():
-        return original.name
-    for attempt in range(1, MAX_TRASH_ATTEMPTS):
-        candidate = f"{original.stem} ({attempt}){original.suffix}"
-        if not (directory / candidate).exists():
-            return candidate
-    raise ManageError("local-io", f"the trash already holds {MAX_TRASH_ATTEMPTS} files so named")
+    return tuple(
+        original.name if attempt == 0 else f"{original.stem} ({attempt}){original.suffix}"
+        for attempt in range(MAX_TRASH_ATTEMPTS)
+    )
 
 
-def is_removable(path: Path, roots: Sequence[Path] = ()) -> bool:
-    """Whether this app may move ``path`` at all.
+def _identity(path: Path) -> tuple[int, int]:
+    status = path.lstat()
+    return status.st_dev, status.st_ino
+
+
+def _unlink_if_same(path: Path, identity: tuple[int, int]) -> None:
+    """Remove only the directory entry this operation installed."""
+    try:
+        current = _identity(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if current != identity:
+        return
+    try:
+        path.unlink()
+        paths.fsync_directory(path.parent)
+    except OSError:
+        # Rollback is best effort. Leaving an extra hard link or inert record
+        # is safer than masking the original failure or unlinking a replacement.
+        return
+
+
+def is_removable(item: MediaItem, roots: Sequence[Path] = ()) -> bool:
+    """Whether this app may remove or move ``item`` at all.
 
     Inside a configured root, or nowhere. Being in the library is not enough:
     Steam's Workshop content is scanned into the library and is emphatically
     not the app's to move.
     """
-    return not roots or _within(path, tuple(roots))
+    return (
+        bool(roots)
+        and (item.deletable or item.provider == "local")
+        and item.provider != scan.WORKSHOP_PROVIDER
+        and item.kind is not Kind.SCENE
+        and _within(item.path, tuple(roots))
+    )
 
 
-def trash(path: Path, roots: Sequence[Path] = ()) -> Path:
-    """Move ``path`` into the trash and return where it landed.
+def trash(item: MediaItem, roots: Sequence[Path] = ()) -> Path:
+    """Move ``item`` into the trash and return where it landed.
 
     The reversible verb, and therefore the right one for a file the user made.
     Only the home trash is implemented: a wallpaper on another filesystem
@@ -225,12 +272,13 @@ def trash(path: Path, roots: Sequence[Path] = ()) -> Path:
     better than silently unlinking something the user expected to be able to
     get back.
     """
-    if not is_removable(path, roots):
+    path = item.path
+    if item.provider != "local" or not is_removable(item, roots):
         raise ManageError(
             "not-ours",
             f"{path.name} lives outside your wallpaper folders, so it is not this app's to move",
         )
-    if path.is_symlink() or not path.exists():
+    if path.is_symlink() or not path.is_file():
         raise ManageError("missing", f"{path} is no longer there")
 
     files = trash_directory() / "files"
@@ -244,31 +292,94 @@ def trash(path: Path, roots: Sequence[Path] = ()) -> Path:
         ) from error
 
     original = path.absolute()
-    name = _trash_name(files, original)
-    # The record is written first. A record with no file is a stale entry that
-    # a file manager ignores; a file with no record is a file the user cannot
-    # restore, which is the failure that matters.
-    record = info / f"{name}.trashinfo"
+    original_identity = _identity(original)
     stamp = datetime.now().replace(microsecond=0).isoformat()
     payload = f"[Trash Info]\nPath={quote(str(original), safe='/')}\nDeletionDate={stamp}\n"
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".wall-in-one-trashinfo-", dir=info)
+    temporary = Path(temporary_name)
     try:
-        record.write_text(payload, encoding="utf-8")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
+            sink.write(payload)
+            sink.flush()
+            os.fsync(sink.fileno())
     except OSError as error:
+        temporary.unlink(missing_ok=True)
         raise ManageError(
             "local-io", f"could not write the trash record: {error.strerror or error}"
         ) from error
 
-    destination = files / name
+    temporary_identity = _identity(temporary)
     try:
-        os.rename(original, destination)
-    except OSError as error:
-        record.unlink(missing_ok=True)
-        if error.errno == errno.EXDEV:
-            raise ManageError(
-                "cross-device",
-                f"{original.name} is on another filesystem, so it cannot be moved to the trash",
-            ) from error
+        for name in _trash_names(original):
+            record = info / f"{name}.trashinfo"
+            try:
+                os.link(temporary, record, follow_symlinks=False)
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise ManageError(
+                    "local-io",
+                    f"could not reserve a trash record: {error.strerror or error}",
+                ) from error
+            record_identity = temporary_identity
+            try:
+                paths.fsync_directory(info)
+            except OSError as error:
+                _unlink_if_same(record, record_identity)
+                raise ManageError(
+                    "local-io",
+                    f"could not persist the trash record: {error.strerror or error}",
+                ) from error
+
+            destination = files / name
+            try:
+                os.link(original, destination, follow_symlinks=False)
+            except FileExistsError:
+                _unlink_if_same(record, record_identity)
+                continue
+            except OSError as error:
+                _unlink_if_same(record, record_identity)
+                if error.errno == errno.EXDEV:
+                    raise ManageError(
+                        "cross-device",
+                        f"{original.name} is on another filesystem, "
+                        "so it cannot be moved to the trash",
+                    ) from error
+                if error.errno == errno.ENOENT:
+                    raise ManageError("missing", f"{original} is no longer there") from error
+                raise ManageError(
+                    "local-io", f"could not move {original}: {error.strerror or error}"
+                ) from error
+
+            destination_identity = _identity(destination)
+            if destination_identity != original_identity:
+                _unlink_if_same(destination, destination_identity)
+                _unlink_if_same(record, record_identity)
+                raise ManageError("local-io", f"{original} changed while it was being moved")
+            try:
+                paths.fsync_directory(files)
+                if _identity(original) != original_identity:
+                    raise ManageError("local-io", f"{original} changed while it was being moved")
+                original.unlink()
+            except (OSError, ManageError) as error:
+                _unlink_if_same(destination, destination_identity)
+                _unlink_if_same(record, record_identity)
+                if isinstance(error, ManageError):
+                    raise
+                kind = "missing" if error.errno == errno.ENOENT else "local-io"
+                raise ManageError(kind, f"could not finish moving {original}: {error}") from error
+            try:
+                paths.fsync_directory(original.parent)
+            except OSError as error:
+                # The source is already gone, so rolling back the durable trash
+                # copy here would be data loss. Keep it and report uncertainty.
+                raise ManageError(
+                    "local-io",
+                    f"moved {original}, but could not persist its removal: {error}",
+                ) from error
+            return destination
         raise ManageError(
-            "local-io", f"could not move {original} to the trash: {error.strerror or error}"
-        ) from error
-    return destination
+            "local-io", f"the trash already holds {MAX_TRASH_ATTEMPTS} files so named"
+        )
+    finally:
+        _unlink_if_same(temporary, temporary_identity)

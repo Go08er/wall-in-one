@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from wall_in_one import paths  # noqa: E402
+from wall_in_one.theme import source  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
     APPLICATION_STYLE_PRIORITY,
     PALETTE_RELOAD_DEBOUNCE_MS,
@@ -70,6 +72,22 @@ def _spin_for(seconds: float) -> None:
 
 def test_application_palette_wins_over_the_startup_user_stylesheet() -> None:
     assert APPLICATION_STYLE_PRIORITY == Gtk.STYLE_PROVIDER_PRIORITY_USER + 1
+
+
+def test_disabling_noctalia_palette_following_uses_a_fixed_app_palette(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application._settings = replace(application.settings, follow_noctalia_palette=False)
+    monkeypatch.setattr(
+        source,
+        "resolve",
+        lambda **_arguments: pytest.fail("disabled following must not inspect Noctalia"),
+    )
+
+    resolved = application.reload_palette()
+
+    assert resolved.origin is source.Origin.FALLBACK
+    assert "following is off" in resolved.detail
 
 
 def test_atomic_palette_replacement_triggers_reload_without_the_socket(

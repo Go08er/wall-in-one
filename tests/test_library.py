@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
 
@@ -104,9 +105,29 @@ def test_sidecar_naming_a_missing_file_is_ignored(tmp_path: Path) -> None:
     assert pairing.find_still(video) == convention
 
 
+@pytest.mark.parametrize("kind", ("symlink", "fifo"))
+def test_pairing_sidecar_special_files_are_ignored_without_blocking(
+    tmp_path: Path, kind: str
+) -> None:
+    video = _touch(tmp_path / "clip.mp4")
+    convention = _touch(tmp_path / "clip-still.png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"still_path": "/not/chosen.png"}), encoding="utf-8")
+    if kind == "symlink":
+        sidecar.symlink_to(outside)
+    else:
+        os.mkfifo(sidecar)
+
+    assert pairing.find_still(video) == convention
+    assert outside.is_file()
+
+
 def test_automatic_stills_directory_is_searched(tmp_path: Path) -> None:
     video = _touch(tmp_path / "videos" / "clip.mp4")
-    generated = _touch(tmp_path / "Wall-in-One" / pairing.AUTOMATIC_STILLS_DIRECTORY / "clip.png")
+    generated = _touch(
+        pairing.still_directory(tmp_path) / f"{pairing.automatic_still_stem(video)}.png"
+    )
     assert pairing.find_still(video, roots=[tmp_path]) == generated
 
 
@@ -120,6 +141,18 @@ def test_apply_drops_stills_that_only_represent_a_video(tmp_path: Path) -> None:
 
     assert [item.path for item in result] == [video.path, standalone.path]
     assert result[0].paired_still == paired.path
+
+
+def test_scan_keeps_spent_stills_in_the_authoring_inventory(tmp_path: Path) -> None:
+    """Rotation de-duplication must not remove a still from pairing choices."""
+    _touch(tmp_path / "clip.mp4")
+    paired = _touch(tmp_path / "clip.png")
+    standalone = _touch(tmp_path / "landscape.png")
+
+    library = scan.scan([tmp_path])
+
+    assert paired not in {item.path for item in library.stills}
+    assert {item.path for item in library.reusable_stills} == {paired, standalone}
 
 
 def test_apply_leaves_an_unpaired_video_alone(tmp_path: Path) -> None:
@@ -157,14 +190,53 @@ def test_scan_reports_a_missing_root_instead_of_failing(tmp_path: Path) -> None:
     assert any("not a directory" in note for note in library.skipped)
 
 
+def test_scan_uses_the_explicit_workshop_root_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[tuple[Path, ...], bool]] = []
+
+    def installed(
+        roots: tuple[Path, ...] = (), *, include_defaults: bool = True
+    ) -> tuple[object, ...]:
+        asked.append((tuple(roots), include_defaults))
+        return ()
+
+    steam = tmp_path / "steam-at-submit"
+    monkeypatch.setattr("wall_in_one.library.scan.workshop.scan", installed)
+
+    scan.scan(
+        [tmp_path],
+        include_workshop=True,
+        workshop_roots=(steam,),
+    )
+
+    assert asked == [((steam,), False)]
+
+
 def test_managed_needs_both_a_directory_marker_and_a_file_sidecar(tmp_path: Path) -> None:
     managed = tmp_path / "Wall-in-One" / "MotionBGS"
     _touch(
         managed / ".wall-in-one-motionbgs-managed.json",
-        json.dumps({"provider": "MotionBGS"}).encode(),
+        json.dumps(
+            {
+                "schema": 1,
+                "owner": "goober/wall-in-one",
+                "provider": "MotionBGS",
+            }
+        ).encode(),
     )
-    _touch(managed / "downloaded.mp4")
-    _touch(managed / "downloaded.mp4.motionbgs.json", b"{}")
+    downloaded = _touch(managed / "downloaded.mp4")
+    _touch(
+        managed / "downloaded.mp4.motionbgs.json",
+        json.dumps(
+            {
+                "schema": 1,
+                "plugin": "goober/wall-in-one",
+                "provider": "MotionBGS",
+                "path": str(downloaded),
+            }
+        ).encode(),
+    )
     # Dropped in by hand: the directory is ours, this file is not.
     _touch(managed / "mine.mp4")
 
@@ -175,6 +247,96 @@ def test_managed_needs_both_a_directory_marker_and_a_file_sidecar(tmp_path: Path
     assert by_name["downloaded.mp4"].provider == "MotionBGS"
     assert by_name["mine.mp4"].ownership is Ownership.USER
     assert not by_name["mine.mp4"].deletable
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {},
+        {
+            "schema": 1,
+            "plugin": "somebody-else",
+            "provider": "MotionBGS",
+        },
+        {
+            "schema": 1,
+            "plugin": "goober/wall-in-one",
+            "provider": "Wallhaven",
+        },
+    ),
+)
+def test_a_sidecar_name_without_exact_provenance_never_grants_ownership(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    managed = tmp_path / "Wall-in-One" / "MotionBGS"
+    _touch(
+        managed / ".wall-in-one-motionbgs-managed.json",
+        json.dumps(
+            {
+                "schema": 1,
+                "owner": "goober/wall-in-one",
+                "provider": "MotionBGS",
+            }
+        ).encode(),
+    )
+    media = _touch(managed / "mine.mp4")
+    document = dict(payload)
+    document.setdefault("path", str(media))
+    _touch(media.with_name(media.name + ".motionbgs.json"), json.dumps(document).encode())
+
+    (found,) = scan.scan([tmp_path]).items
+
+    assert found.path == media
+    assert found.ownership is Ownership.USER
+    assert found.provider == "local"
+
+
+def test_a_sidecar_copied_from_another_file_never_grants_ownership(tmp_path: Path) -> None:
+    managed = tmp_path / "Wall-in-One" / "MotionBGS"
+    _touch(
+        managed / ".wall-in-one-motionbgs-managed.json",
+        json.dumps(
+            {
+                "schema": 1,
+                "owner": "goober/wall-in-one",
+                "provider": "MotionBGS",
+            }
+        ).encode(),
+    )
+    media = _touch(managed / "mine.mp4")
+    _touch(
+        media.with_name(media.name + ".motionbgs.json"),
+        json.dumps(
+            {
+                "schema": 1,
+                "plugin": "goober/wall-in-one",
+                "provider": "MotionBGS",
+                "path": str(managed / "different.mp4"),
+            }
+        ).encode(),
+    )
+
+    (found,) = scan.scan([tmp_path]).items
+
+    assert found.ownership is Ownership.USER
+
+
+def test_scan_does_not_follow_media_or_sidecar_symlinks(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    precious = _touch(outside / "precious.png", b"precious")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "linked.png").symlink_to(precious)
+    fifo = root / "movie.mp4.motionbgs.json"
+    os.mkfifo(fifo)
+    _touch(root / "movie.mp4")
+
+    library = scan.scan([root])
+
+    assert [item.path.name for item in library.items] == ["movie.mp4"]
+    assert library.items[0].ownership is Ownership.USER
+    assert precious.read_bytes() == b"precious"
 
 
 def test_scan_pairs_what_it_finds(tmp_path: Path) -> None:
@@ -232,6 +394,24 @@ def test_missing_noctalia_settings_is_not_fatal(
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert scan.wallpaper_directory_from_noctalia() is None
+
+
+@pytest.mark.parametrize("kind", ("symlink", "fifo"))
+def test_noctalia_settings_special_files_cannot_block_or_redirect_a_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    settings = tmp_path / "state" / "noctalia" / "settings.toml"
+    settings.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.toml"
+    outside.write_text('[wallpaper]\ndirectory = "/should/not/be/read"\n', encoding="utf-8")
+    if kind == "symlink":
+        settings.symlink_to(outside)
+    else:
+        os.mkfifo(settings)
+
+    assert scan.wallpaper_directory_from_noctalia() is None
+    assert outside.read_text(encoding="utf-8").endswith('"\n')
 
 
 # -- playlist ------------------------------------------------------------
@@ -369,6 +549,22 @@ def test_roots_survive_a_toml_round_trip(tmp_path: Path) -> None:
     written = tmp_path / "settings.toml"
     config.save(settings, written)
     assert config.load(written).roots == (tmp_path / "one", tmp_path / "two")
+
+
+@pytest.mark.parametrize("kind", ("symlink", "fifo"))
+def test_settings_special_files_are_never_followed_or_waited_on(tmp_path: Path, kind: str) -> None:
+    settings = tmp_path / "settings.toml"
+    outside = tmp_path / "outside.toml"
+    outside.write_text('roots = ["/precious"]\n', encoding="utf-8")
+    if kind == "symlink":
+        settings.symlink_to(outside)
+    else:
+        os.mkfifo(settings)
+
+    assert config.load(settings) == config.Settings()
+    with pytest.raises(config.ConfigError, match="cannot read"):
+        config.load_strict(settings)
+    assert outside.read_text(encoding="utf-8") == 'roots = ["/precious"]\n'
 
 
 def test_an_empty_root_list_survives_the_round_trip(tmp_path: Path) -> None:

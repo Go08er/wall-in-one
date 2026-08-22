@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one.library import playlists
+from wall_in_one.library import playlists, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Playlist, PlaylistError, Store
 
@@ -68,6 +68,66 @@ def test_a_playlist_can_be_found_by_name_however_it_is_typed(store: Store) -> No
     assert store.find(made.id).id == made.id
 
 
+@pytest.mark.parametrize("second", ("Evening", "EVENING", "evening"))
+def test_playlist_names_are_unique_without_case(store: Store, second: str) -> None:
+    store.create("Evening", entry_id="first")
+
+    with pytest.raises(PlaylistError) as caught:
+        store.create(second, entry_id="second")
+
+    assert caught.value.kind == "identity-conflict"
+    assert "choose a different name" in str(caught.value)
+
+
+def test_a_playlist_name_cannot_be_another_playlists_id(store: Store) -> None:
+    store.create("Morning", entry_id="opaque-id")
+
+    with pytest.raises(PlaylistError) as caught:
+        store.create("OPAQUE-ID", entry_id="second")
+
+    assert caught.value.kind == "identity-conflict"
+    assert "conflicts with id" in str(caught.value)
+
+
+def test_a_playlist_id_cannot_be_another_playlists_name(store: Store) -> None:
+    store.create("Morning", entry_id="first")
+
+    with pytest.raises(PlaylistError) as caught:
+        store.create("Evening", entry_id="MORNING")
+
+    assert caught.value.kind == "identity-conflict"
+    assert "conflicts with name" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("name", "identifier"),
+    (
+        ("All media", "ordinary"),
+        ("ALL-MEDIA", "ordinary"),
+        ("Quick choice", "ordinary"),
+        ("QUICK-CHOICE", "ordinary"),
+        ("Ordinary", "all-media"),
+        ("Ordinary", "quick-choice"),
+    ),
+)
+def test_generated_playlist_identities_are_reserved(
+    store: Store, name: str, identifier: str
+) -> None:
+    with pytest.raises(PlaylistError) as caught:
+        store.create(name, entry_id=identifier)
+
+    assert caught.value.kind == "identity-conflict"
+    assert "reserved for a generated playlist" in str(caught.value)
+
+
+@pytest.mark.parametrize("identifier", ("", "   ", " padded", "padded ", "bad\x01id"))
+def test_explicit_playlist_ids_must_be_safe_wire_text(store: Store, identifier: str) -> None:
+    with pytest.raises(PlaylistError) as caught:
+        store.create("Ordinary", entry_id=identifier)
+
+    assert caught.value.kind == "identity-conflict"
+
+
 def test_asking_for_a_playlist_that_is_not_there_says_which(store: Store) -> None:
     with pytest.raises(PlaylistError) as caught:
         store.find("nope")
@@ -79,6 +139,24 @@ def test_renaming_keeps_the_identity_and_the_entries(store: Store) -> None:
     store.add(made.id, Path("/w/a.png"))
     renamed = store.rename(made.id, "Night")
     assert (renamed.id, renamed.name, len(renamed)) == (made.id, "Night", 1)
+
+
+def test_rename_cannot_create_a_casefold_or_cross_identity_collision(store: Store) -> None:
+    store.create("Morning", entry_id="first-id")
+    second = store.create("Evening", entry_id="second-id")
+
+    for conflicting in ("MORNING", "FIRST-ID"):
+        with pytest.raises(PlaylistError) as caught:
+            store.rename(second.id, conflicting)
+        assert caught.value.kind == "identity-conflict"
+        assert store.find(second.id).name == "Evening"
+
+
+def test_the_generated_quick_choice_cannot_be_renamed(store: Store) -> None:
+    quick = store.set_singleton("quick-choice", "Quick choice", Path("/w/a.png"))
+
+    with pytest.raises(PlaylistError, match="generated automatically"):
+        store.rename(quick.id, "Something else")
 
 
 def test_deleting_reports_whether_there_was_one(store: Store) -> None:
@@ -304,6 +382,7 @@ def test_one_bad_playlist_costs_only_itself(tmp_path: Path) -> None:
     found = playlists.load(target)
     assert set(found) == {"one", "two"}
     assert len(found["two"]) == 0
+    assert Store.open(target).fault is not None
 
 
 def test_a_relative_entry_is_dropped_and_the_list_survives(tmp_path: Path) -> None:
@@ -326,6 +405,7 @@ def test_a_relative_entry_is_dropped_and_the_list_survives(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert [entry.id for entry in playlists.load(target)["one"].entries] == ["b"]
+    assert Store.open(target).fault is not None
 
 
 def test_the_write_is_a_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,6 +436,24 @@ def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.Mon
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_store_write_failure_does_not_change_the_in_memory_playlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "playlists.json"
+    store = Store(path=target)
+    made = store.create("First", entry_id="playlist")
+
+    def fail(_playlists: object, _path: object) -> None:
+        raise PlaylistError("local-io", "injected write failure")
+
+    monkeypatch.setattr(playlists, "save", fail)
+    with pytest.raises(PlaylistError):
+        store.rename(made.id, "Second")
+
+    assert store.find(made.id).name == "First"
+    assert Store.open(target).find(made.id).name == "First"
+
+
 def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) -> None:
     target = tmp_path / "playlists.json"
     target.write_text("not json but somebody's lists", encoding="utf-8")
@@ -364,6 +462,26 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     store.create("Evening")
     kept = target.with_name(target.name + playlists.BROKEN_SUFFIX)
     assert kept.read_text(encoding="utf-8") == "not json but somebody's lists"
+
+
+def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "playlists.json"
+    original = "not json but somebody's lists"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+
+    def fail(_path: Path) -> Path:
+        raise OSError("injected relocation failure")
+
+    monkeypatch.setattr(state_file, "preserve_faulted", fail)
+    with pytest.raises(PlaylistError):
+        store.create("Evening")
+
+    assert store.fault is not None
+    assert target.read_text(encoding="utf-8") == original
+    assert len(store) == 0
 
 
 def test_playlists_are_listed_by_name(store: Store) -> None:

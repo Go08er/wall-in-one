@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one.library import favourites
+from wall_in_one.library import favourites, state_file
 from wall_in_one.library.favourites import Favourites, FavouritesError, Store
 
 ONE = Path("/w/one.png")
@@ -157,6 +157,7 @@ def test_entries_that_are_not_absolute_paths_are_dropped(tmp_path: Path) -> None
         json.dumps({"paths": [str(ONE), "relative/one.png", "", 7, str(TWO)]}), encoding="utf-8"
     )
     assert list(favourites.load(target)) == [ONE, TWO]
+    assert Store.open(target).fault is not None
 
 
 def test_a_duplicate_in_the_file_is_read_once(tmp_path: Path) -> None:
@@ -172,15 +173,16 @@ def test_an_absurdly_long_list_is_capped(tmp_path: Path) -> None:
     assert len(favourites.load(target)) == favourites.MAX_FAVOURITES
 
 
-def test_an_unrecognised_version_is_still_read(tmp_path: Path) -> None:
-    """It is a list of paths whatever the number says; refusing it would throw
-    away favourites over a version field."""
+def test_an_unrecognised_version_is_recovered_but_faulted(tmp_path: Path) -> None:
     target = tmp_path / "favourites.json"
     target.write_text(
         json.dumps({"version": 99, "paths": [str(ONE)]}),
         encoding="utf-8",
     )
-    assert list(favourites.load(target)) == [ONE]
+    opened = Store.open(target)
+    assert list(opened.favourites) == [ONE]
+    assert opened.fault is not None
+    assert "unsupported version" in opened.fault
 
 
 # -- the store ------------------------------------------------------------
@@ -210,6 +212,24 @@ def test_adding_twice_reports_the_second_as_a_no_op(tmp_path: Path) -> None:
     assert store.add(ONE) is False
 
 
+def test_a_store_write_failure_does_not_change_the_in_memory_favourites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "favourites.json"
+    store = Store(path=target)
+    store.add(ONE)
+
+    def fail(_favourites: object, _path: object) -> None:
+        raise FavouritesError("local-io", "injected write failure")
+
+    monkeypatch.setattr(favourites, "save", fail)
+    with pytest.raises(FavouritesError):
+        store.add(TWO)
+
+    assert store.paths == frozenset({ONE})
+    assert Store.open(target).paths == frozenset({ONE})
+
+
 def test_the_store_opens_from_a_file(tmp_path: Path) -> None:
     target = tmp_path / "favourites.json"
     favourites.save(Favourites().with_added(ONE), target)
@@ -234,6 +254,26 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     kept = target.with_name(target.name + favourites.BROKEN_SUFFIX)
     assert kept.read_text(encoding="utf-8") == "not json but precious"
     assert list(favourites.load(target)) == [ONE]
+
+
+def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "favourites.json"
+    original = "not json but precious"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+
+    def fail(_path: Path) -> Path:
+        raise OSError("injected relocation failure")
+
+    monkeypatch.setattr(state_file, "preserve_faulted", fail)
+    with pytest.raises(FavouritesError):
+        store.add(ONE)
+
+    assert store.fault is not None
+    assert target.read_text(encoding="utf-8") == original
+    assert len(store) == 0
 
 
 def test_the_file_is_only_moved_aside_once(tmp_path: Path) -> None:

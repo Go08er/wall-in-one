@@ -425,7 +425,7 @@ def test_an_explicit_root_still_wins_over_the_configured_ones(
         scanner=scanner,
     )
     session.refresh([Path("/elsewhere")])
-    assert asked == [[Path("/elsewhere")]]
+    assert asked == [(Path("/elsewhere"),)]
 
 
 def test_changing_the_roots_rescans_immediately(applied_paths: list[Path]) -> None:
@@ -446,6 +446,58 @@ def test_changing_the_roots_rescans_immediately(applied_paths: list[Path]) -> No
     assert scans == 1
     session.update_settings(replace(session.settings, roots=(Path("/new"),)))
     assert scans == 2
+
+
+def test_changing_workshop_inclusion_rescans_immediately(applied_paths: list[Path]) -> None:
+    """Workshop is a library source just like a configured filesystem root."""
+    scans = 0
+
+    def scanner(_roots: Sequence[Path] | None) -> Library:
+        nonlocal scans
+        scans += 1
+        return Library(roots=(), items=())
+
+    session = Session(
+        replace(config.Settings(), scan_workshop=False).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    session.refresh()
+    assert scans == 1
+    session.update_settings(replace(session.settings, scan_workshop=True))
+    assert scans == 2
+
+
+def test_scan_request_snapshots_sources_before_worker_runs(
+    applied_paths: list[Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending GUI scan cannot observe roots changed after submission."""
+    asked: list[Sequence[Path] | None] = []
+
+    def scanner(roots: Sequence[Path] | None) -> Library:
+        asked.append(roots)
+        return Library(roots=tuple(roots or ()), items=())
+
+    session = Session(
+        replace(config.Settings(), roots=(Path("/first"),), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=scanner,
+    )
+    monkeypatch.setattr(
+        "wall_in_one.session.workshop.steam_roots",
+        lambda: (Path("/steam-at-submit"),),
+    )
+    request = session.prepare_scan()
+    session.update_settings(
+        replace(session.settings, roots=(Path("/second"),), scan_workshop=False),
+        rescan_library=False,
+    )
+
+    scanned = request.run()
+
+    assert asked == [(Path("/first"),)]
+    assert scanned.roots == (Path("/first"),)
+    assert request.workshop_roots == (Path("/steam-at-submit"),)
 
 
 def test_settings_that_do_not_touch_the_roots_do_not_rescan(

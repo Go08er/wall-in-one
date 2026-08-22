@@ -26,7 +26,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from wall_in_one.library.filter import Query  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
@@ -331,6 +331,36 @@ def test_closing_the_window_keeps_only_the_service_reference(
     assert application._window is None
 
 
+@pytest.mark.parametrize(
+    "document",
+    (
+        "roots = [\n",
+        '# written by a future release\nroots = []\nfuture_renderer = "shiny"\n',
+    ),
+    ids=("malformed", "future-key"),
+)
+def test_closing_without_an_edit_preserves_settings_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: str
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from wall_in_one import paths
+    from wall_in_one.ui.app import Application
+
+    target = paths.settings_path()
+    target.parent.mkdir(parents=True)
+    target.write_text(document, encoding="utf-8")
+    application = Application()
+    window = object()
+    application._window = window  # type: ignore[assignment]
+
+    try:
+        assert application._on_close_request(window) is False  # type: ignore[arg-type]
+        assert target.read_text(encoding="utf-8") == document
+    finally:
+        application.session.shutdown()
+
+
 # -- decoding off the main thread -----------------------------------------
 #
 # `ThumbnailLoader` hands back a decoded `Gdk.Texture` rather than a path, and
@@ -465,10 +495,10 @@ def test_one_thumbnail_request_delivers_to_every_visible_card(
 # -- the window and the store ---------------------------------------------
 
 
-def test_changing_roots_redraws_media_instead_of_only_moving_its_highlight(
+def test_changing_roots_requests_a_scan_and_redraw_instead_of_only_a_highlight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Session rescans roots itself; Application must still show that result."""
+    """Graphical root changes queue a scan whose completed result is redrawn."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -481,7 +511,10 @@ def test_changing_roots_redraws_media_instead_of_only_moving_its_highlight(
             self.settings = config.Settings()
             self.synced = 0
 
-        def update_settings(self, settings: config.Settings) -> None:
+        def update_settings(
+            self, settings: config.Settings, *, rescan_library: bool = True
+        ) -> None:
+            del rescan_library
             self.settings = settings
 
         def sync_with_noctalia(self) -> None:
@@ -512,6 +545,12 @@ def test_changing_roots_redraws_media_instead_of_only_moving_its_highlight(
     monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)
     monkeypatch.setattr(application, "sync_cycle_timer", lambda: None)
     monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+
+    def finish_scan() -> None:
+        session.sync_with_noctalia()
+        window.show_library(session)
+
+    monkeypatch.setattr(application, "refresh_library", finish_scan)
 
     replacement = tmp_path / "new-library"
     application.update_settings(roots=(replacement,))
@@ -571,6 +610,77 @@ def test_showing_the_library_repushes_the_favourites(
     application.session.shutdown()
 
 
+def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The context menu must honour the stores' persist-before-adopt contract."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    from wall_in_one import config
+    from wall_in_one.library import favourites, pairings, scan
+    from wall_in_one.session import Session
+    from wall_in_one.ui.window import MainWindow
+
+    root = tmp_path / "library"
+    root.mkdir()
+    wallpaper = root / "one.png"
+    _png(wallpaper)
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.TransactionalMenuTest")
+            self.settings = config.Settings(roots=(root,))
+            self.resolved_palette = None
+            self.session = Session(self.settings, scanner=lambda _roots: scan.scan((root,)))
+            self.session.refresh()
+            self.pairing_updates = 0
+            self.favourite_updates = 0
+
+        def refresh_library(self) -> None: ...
+
+        def pairing_changed(self, _item: MediaItem) -> None:
+            self.pairing_updates += 1
+
+        def favourites_changed(self) -> None:
+            self.favourite_updates += 1
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    item = application.session.library.items[0]
+    reports: list[str] = []
+    monkeypatch.setattr(window, "report", reports.append)
+
+    def favourite_failure(_path: Path) -> None:
+        raise favourites.FavouritesError("local-io", "disk full")
+
+    monkeypatch.setattr(application.session.favourites, "add", favourite_failure)
+    window._on_favourite(item, True)
+    assert application.favourite_updates == 0
+    assert item.path not in application.session.favourites.paths
+
+    def pairing_failure(*_args: object) -> None:
+        raise pairings.PairingError("local-io", "disk full")
+
+    failure = pairing_failure
+    monkeypatch.setattr(application.session.pairings, "choose_still", failure)
+    window._store_still(item, root / "other.png")
+    monkeypatch.setattr(application.session.pairings, "reset", failure)
+    window._on_reset_pairing(None, GLib.Variant.new_string(str(item.path)))  # type: ignore[arg-type]
+    monkeypatch.setattr(application.session.pairings, "choose_palette", failure)
+    window._on_palette_path(
+        None,  # type: ignore[arg-type]
+        GLib.Variant("(ss)", (str(item.path), pairings.PalettePolicy().encode())),
+    )
+
+    assert application.pairing_updates == 0
+    assert len(reports) == 4
+    assert all("nothing changed" in message for message in reports)
+    window.destroy()
+    application.session.shutdown()
+
+
 def test_main_window_keeps_pairings_inside_the_media_workflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -604,6 +714,17 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
 
     for page in ("browse", "media", "playlists", "schedules", "settings"):
         assert window._stack.get_child_by_name(page) is not None
+        window.show_page(page)
+        assert (
+            window.get_title()
+            == {
+                "browse": "Wall-in-One - Browse",
+                "media": "Wall-in-One - Media/Pairings",
+                "playlists": "Wall-in-One - Playlists",
+                "schedules": "Wall-in-One - Schedules",
+                "settings": "Wall-in-One - Settings",
+            }[page]
+        )
     assert window._stack.get_child_by_name("pairings") is None
     assert window._content_stack.get_child_by_name("pairing-editor") is window._pairings_page
 
@@ -660,6 +781,34 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     assert window._runtime_cycle.get_active()
     assert not window._runtime_shuffle.get_active()
     assert calls == [], "status refreshes must not echo commands back to the service"
+    window.show_runtime_delayed()
+    assert window._runtime_controls.get_sensitive()
+    assert "status delayed" in window._runtime_control_status.get_text()
+    assert "status delayed" in window._subtitle.get_subtitle()
+    window.show_runtime_status(
+        {
+            "playlist": "Evening",
+            "source": "manual",
+            "playback_state": "playing",
+            "paused": False,
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": "",
+        }
+    )
+    assert "status delayed" not in window._runtime_control_status.get_text()
+    window.show_runtime_status(
+        {
+            "playlist": "Evening",
+            "source": "manual",
+            "playback_state": "playing",
+            "cycle_enabled": True,
+            "shuffle": False,
+            "last_error": "",
+            "output_discovery_error": "niri IPC is not ready",
+        }
+    )
+    assert "display discovery degraded" in window._subtitle.get_subtitle()
     window._runtime_cycle.set_active(False)
     window._runtime_stop.emit("clicked")
     assert calls == [("cycle", "off"), ("stop", None)]

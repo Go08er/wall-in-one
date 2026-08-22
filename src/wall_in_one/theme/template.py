@@ -21,13 +21,14 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.theme import noctalia
 
 TEMPLATE_ID: Final = "wall-in-one"
@@ -37,6 +38,8 @@ TEMPLATE_FILENAME: Final = "palette.json.tmpl"
 #: exact region it owns instead of guessing.
 _BEGIN_MARKER: Final = "# >>> wall-in-one palette template (managed) >>>"
 _END_MARKER: Final = "# <<< wall-in-one palette template (managed) <<<"
+MAX_NOCTALIA_SETTINGS_BYTES: Final = 8 * 1024 * 1024
+MAX_TEMPLATE_BYTES: Final = 1024 * 1024
 
 
 class TemplateInstallError(Exception):
@@ -80,16 +83,23 @@ def installed_template_path() -> Path:
     return paths.app_state_dir() / TEMPLATE_FILENAME
 
 
-def _read_settings(path: Path) -> dict[str, Any]:
+def _read_settings_text(path: Path) -> str:
     try:
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except FileNotFoundError as error:
+        document = file_io.read_regular_text(path, MAX_NOCTALIA_SETTINGS_BYTES)
+    except OSError as error:
+        raise TemplateInstallError(f"cannot safely read {path}: {error}") from error
+    except UnicodeDecodeError as error:
+        raise TemplateInstallError(f"{path} is not UTF-8 text") from error
+    if document is None:
         raise TemplateInstallError(
             f"Noctalia settings not found at {path}; is Noctalia installed and has it run once?"
-        ) from error
-    except OSError as error:
-        raise TemplateInstallError(f"cannot read {path}: {error}") from error
+        )
+    return document
+
+
+def _read_settings(path: Path) -> dict[str, Any]:
+    try:
+        return tomllib.loads(_read_settings_text(path))
     except tomllib.TOMLDecodeError as error:
         raise TemplateInstallError(f"{path} is not valid TOML: {error}") from error
 
@@ -137,10 +147,25 @@ def _write_atomically(path: Path, text: str) -> None:
     Noctalia watches this file, so a partial write is not merely a data risk --
     it can be observed and parsed mid-update.
     """
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise TemplateInstallError(f"cannot write {path}: {error}") from error
+
+
+def _write_bytes_atomically(path: Path, document: bytes) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(document)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -170,9 +195,16 @@ def install(*, reload_config: bool = True) -> InstallResult:
     paths.ensure_directory(destination.parent)
     output_path = paths.palette_path()
 
-    template_changed = not destination.is_file() or destination.read_bytes() != source.read_bytes()
+    try:
+        source_document = file_io.read_regular_bytes(source, MAX_TEMPLATE_BYTES)
+        destination_document = file_io.read_regular_bytes(destination, MAX_TEMPLATE_BYTES)
+    except OSError as error:
+        raise TemplateInstallError(f"cannot safely read palette template: {error}") from error
+    if source_document is None:
+        raise TemplateInstallError(f"palette template disappeared: {source}")
+    template_changed = destination_document != source_document
     if template_changed:
-        shutil.copyfile(source, destination)
+        _write_bytes_atomically(destination, source_document)
 
     block = _render_block(destination, output_path, _post_hook_command())
     existing = _existing_entry(settings)
@@ -194,13 +226,13 @@ def install(*, reload_config: bool = True) -> InstallResult:
             )
         # Rewriting an entry we do not provably own risks clobbering a hand-
         # edited one, so leave it and say what to fix.
-        if _BEGIN_MARKER not in settings_path.read_text(encoding="utf-8"):
+        if _BEGIN_MARKER not in _read_settings_text(settings_path):
             raise TemplateInstallError(
                 f"[theme.templates.user.{TEMPLATE_ID}] already exists in {settings_path} "
                 "but was not written by us; remove it by hand and re-run"
             )
 
-    original = settings_path.read_text(encoding="utf-8")
+    original = _read_settings_text(settings_path)
     if _BEGIN_MARKER in original:
         updated = _replace_managed_block(original, block)
     else:
@@ -243,10 +275,7 @@ def _replace_managed_block(text: str, block: str) -> str:
 def uninstall(*, reload_config: bool = True) -> InstallResult:
     """Remove the block we added, leaving anything else untouched."""
     settings_path = paths.noctalia_settings_path()
-    try:
-        original = settings_path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise TemplateInstallError(f"cannot read {settings_path}: {error}") from error
+    original = _read_settings_text(settings_path)
 
     if _BEGIN_MARKER not in original:
         return InstallResult(

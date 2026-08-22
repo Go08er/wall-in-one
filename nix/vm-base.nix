@@ -27,6 +27,9 @@ let
     video_muted = true
     video_volume = 0
     video_when_hidden = "pause"
+    video_hardware_decode = false
+    video_interpolation = "oversample"
+    scene_fps = 30
     cycle_favourites_only = false
     active_playlist = "day"
     scan_workshop = false
@@ -59,6 +62,16 @@ let
             {
               id = "night-grid";
               source = "${mediaDir}/night-grid.png";
+            }
+          ];
+        }
+        {
+          id = "video";
+          name = "Video samples";
+          entries = [
+            {
+              id = "video-grid";
+              source = "${mediaDir}/moving-grid.mp4";
             }
           ];
         }
@@ -247,7 +260,9 @@ in
     # instead of silently degrading to wallpaper-only application.
     path = [ (if noctaliaProbe == null then pkgs.noctalia else noctaliaProbe) ];
     serviceConfig = {
-      ExecStartPre = "${wallInOnePackage}/bin/wall-in-one --write-config";
+      # A failed compiler preserves the previous document. The runtime remains
+      # the authority on whether that last-known-good config is usable.
+      ExecStartPre = "-${wallInOnePackage}/bin/wall-in-one --write-config";
       ExecStart = "${wallInOnePackage}/bin/wall-in-one-service --wait-for-config";
       Restart = "on-failure";
       RestartSec = 5;
@@ -277,6 +292,9 @@ in
       install -m 0644 ${noctaliaSettings} "${home}/.local/state/noctalia/settings.toml"
       touch "${home}/.local/state/noctalia/.setup-complete"
       cp --no-preserve=mode,ownership ${sampleMedia}/* "${mediaDir}/"
+      # A deterministic representative still lets the headless compiler fully
+      # resolve the video pairing without running ffmpeg during login.
+      cp "${mediaDir}/colour-grid.png" "${mediaDir}/moving-grid.png"
 
       chown -R ${user}:users \
         "${home}/.config" \

@@ -76,8 +76,23 @@ def root(tmp_path: Path) -> Path:
 def test_a_still_is_taken_into_the_managed_directory(root: Path, tmp_path: Path) -> None:
     video = make_video(tmp_path / "clip.mp4")
     still = stills.generate(video, root)
-    assert still == root / "Wall-in-One" / "Automatic Stills" / "clip.png"
+    assert still == stills.destination(video, root)
+    assert still.name.startswith("video-")
     assert still.stat().st_size > 0
+
+
+def test_same_stem_videos_get_distinct_generated_stills(root: Path, tmp_path: Path) -> None:
+    first = make_video(tmp_path / "one" / "intro.mp4", colour="red")
+    second = make_video(tmp_path / "two" / "intro.mp4", colour="blue")
+
+    first_still = stills.generate(first, root)
+    second_still = stills.generate(second, root)
+
+    assert first_still != second_still
+    assert first_still.is_file()
+    assert second_still.is_file()
+    assert pairing.find_still(first, (root,)) == first_still
+    assert pairing.find_still(second, (root,)) == second_still
 
 
 def test_the_still_is_a_png_whatever_the_video_was(root: Path, tmp_path: Path) -> None:

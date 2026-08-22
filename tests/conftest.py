@@ -20,6 +20,7 @@ here.
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,16 @@ MUTATORS: tuple[str, ...] = (
     "set_mode",
     "reload_config",
     "apply_templates",
+)
+
+MUTATING_MESSAGES: frozenset[str] = frozenset(
+    {
+        "wallpaper-set",
+        "color-scheme-set",
+        "theme-mode-set",
+        "config-reload",
+        "templates-apply",
+    }
 )
 
 
@@ -60,6 +71,27 @@ def no_live_noctalia(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
 
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def refuse_internet(connection: socket.socket, address: object) -> None:
+        if connection.family in (socket.AF_INET, socket.AF_INET6):
+            raise AssertionError(f"a test attempted a live network connection to {address!r}")
+        real_connect(connection, address)  # type: ignore[arg-type]
+
+    def refuse_internet_ex(connection: socket.socket, address: object) -> int:
+        if connection.family in (socket.AF_INET, socket.AF_INET6):
+            raise AssertionError(f"a test attempted a live network connection to {address!r}")
+        return real_connect_ex(connection, address)  # type: ignore[arg-type]
+
+    def refuse_create_connection(*arguments: object, **_keywords: object) -> None:
+        target = arguments[0] if arguments else "an internet address"
+        raise AssertionError(f"a test attempted a live network connection to {target!r}")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse_internet)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse_internet_ex)
+    monkeypatch.setattr(socket, "create_connection", refuse_create_connection)
+
     def refuse(name: str) -> Any:
         def called(*_arguments: object, **_keywords: object) -> None:
             raise AssertionError(
@@ -71,4 +103,16 @@ def no_live_noctalia(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
 
     for name in MUTATORS:
         monkeypatch.setattr(noctalia, name, refuse(name))
+
+    real_message = noctalia.message
+
+    def guarded_message(command: str, *arguments: str) -> str:
+        if command in MUTATING_MESSAGES:
+            raise AssertionError(
+                f"a test called noctalia.message({command!r}), which changes the live desktop. "
+                "Patch it in the test if that is what you meant to exercise."
+            )
+        return real_message(command, *arguments)
+
+    monkeypatch.setattr(noctalia, "message", guarded_message)
     yield

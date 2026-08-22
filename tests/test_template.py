@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
@@ -135,6 +136,25 @@ def test_install_reports_malformed_settings(fake_home: Path) -> None:
     _write_noctalia_settings("this = is = not = toml")
     with pytest.raises(template.TemplateInstallError, match="not valid TOML"):
         template.install()
+
+
+@pytest.mark.parametrize("kind", ("symlink", "fifo"))
+def test_installer_refuses_unsafe_noctalia_settings_without_outside_writes(
+    fake_home: Path, kind: str
+) -> None:
+    settings = paths.noctalia_settings_path()
+    settings.parent.mkdir(parents=True)
+    outside = fake_home / "precious.toml"
+    outside.write_text(SAMPLE_SETTINGS, encoding="utf-8")
+    if kind == "symlink":
+        settings.symlink_to(outside)
+    else:
+        os.mkfifo(settings)
+
+    with pytest.raises(template.TemplateInstallError, match="safely read"):
+        template.install()
+
+    assert outside.read_text(encoding="utf-8") == SAMPLE_SETTINGS
 
 
 def test_status_tracks_installation(fake_home: Path) -> None:

@@ -143,14 +143,15 @@ $ systemctl --user enable --now wall-in-one.service
 
 The unit first runs `wall-in-one --write-config`, then starts the runtime with
 `--wait-for-config`. An outdated document is therefore atomically replaced by
-the only component allowed to write it; malformed authoring data or an invalid
-generated document still fails loudly. The wait flag remains useful if the
-document disappears between those two steps. The headless compiler reads a
-present settings file strictly: malformed TOML stops startup instead of
-silently compiling defaults over the user's intended library. It likewise
-refuses unreadable pairings, playlists, schedules, display assignments or
-favourites, leaving the previous runtime document untouched until the named
-authoring file is repaired or restored.
+the only component allowed to write it. The compiler is fail-closed: malformed
+settings or authoring data is reported and leaves the previous resolved
+document byte-for-byte intact. The unit deliberately continues to Rust after
+that preflight failure so a valid last-known-good document keeps unattended
+rotation alive; Rust still refuses a missing, invalid, or obsolete document.
+The wait flag remains useful if the document disappears between those two
+steps. The headless compiler validates both TOML syntax and every known setting
+type/range, and likewise refuses unreadable pairings, playlists, schedules,
+display assignments, or favourites until the named file is repaired.
 
 The runtime claims its mode-0600 socket before applying anything, so a second
 instance loses without changing the wallpaper. At graphical-session startup it
@@ -165,12 +166,12 @@ If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
 both `wall-in-one` and `wall-in-one-service` are on the user manager's `PATH`, then run
 `systemctl --user daemon-reload` before enabling it.
 
-If a damaged settings or authoring file exhausts the unit's restart limit,
-repair or restore the file and explicitly recover the unit with
+If the resolved runtime document itself is missing or invalid and exhausts the
+unit's restart limit, repair the authoring source and explicitly recover with
 `systemctl --user reset-failed wall-in-one.service` followed by
 `systemctl --user restart wall-in-one.service`. The limit is intentional: an
-invalid unattended configuration must not rewrite the last-known-good runtime
-document or spam the journal forever.
+invalid runtime document must not spam the journal forever. A damaged authoring
+file alone does not stop an otherwise-valid last-known-good runtime.
 
 ### Test it away from your desktop
 
@@ -256,6 +257,9 @@ animated wallpaper, so this is a performance control as much as a battery one
 surprise. The track stays loaded rather than being disabled, which is what lets
 mute and the volume setting take effect on the video already playing instead of
 only on the next one -- they go over mpv's IPC, so the wallpaper does not blink.
+Wallpaper Engine scenes remain silent. Their engine accepts audio only at
+launch, so coupling it to this live video slider would restart a scene on every
+step while claiming otherwise; separate scene-audio controls are deferred.
 
 **Wallpaper Engine frame rate** is a 1–240 FPS native scene-rendering limit (30
 by default). Video wallpapers keep their source rate: mpv's post-decode FPS
@@ -387,10 +391,11 @@ $ ruff check src tests && ruff format --check src tests
 ```
 
 `nix flake check` is the complete local gate: it runs the packaged Python and
-Rust tests, ruff, strict mypy, the desktop/unit packaging check, and (on
-x86_64-linux) the niri + Noctalia desktop VM. The `desktop` check validates the
-installed launcher and systemd unit and rasterises the icon, since none can be
-seen from the Python suite.
+Rust tests, all display-backed GTK tests under an isolated Xvfb server, ruff,
+strict mypy, the desktop/unit packaging check, and (on x86_64-linux) the niri +
+Noctalia desktop VM. The `desktop` check validates the installed launcher and
+systemd unit and rasterises the icon, since none can be seen from the Python
+suite.
 
 The [GitHub Actions workflow](.github/workflows/ci.yml) evaluates the complete
 flake and builds the Python, Rust, lint, type and packaging checks on every
@@ -401,7 +406,10 @@ signal into a timeout lottery. The workflow is read-only and cancels obsolete
 runs for the same ref.
 
 Tests that need a display are marked `gui`; tests that need a live Noctalia are
-marked `noctalia`. The packaged build runs neither.
+marked `noctalia`. The packaged build remains display-independent and excludes
+both. The separate `gui-tests` flake check supplies Xvfb, fails if a GUI test is
+skipped, and is part of the fast GitHub Actions job; it does not contact a live
+desktop or Noctalia session.
 
 Anything touching Noctalia's settings file is tested against a sandboxed set of
 XDG directories -- never the real one.

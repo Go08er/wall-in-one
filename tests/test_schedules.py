@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one.library import schedules
+from wall_in_one.library import schedules, state_file
 from wall_in_one.library.schedules import Rule, ScheduleError, Store
 
 
@@ -316,6 +316,7 @@ def test_one_bad_rule_costs_only_itself(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert [rule.id for rule in schedules.load(target)] == ["good", "also-good"]
+    assert Store.open(target).fault is not None
 
 
 def test_half_a_stored_window_is_read_as_no_window(tmp_path: Path) -> None:
@@ -325,6 +326,7 @@ def test_half_a_stored_window_is_read_as_no_window(tmp_path: Path) -> None:
     )
     rule = schedules.load(target)[0]
     assert (rule.start, rule.end) == (None, None)
+    assert Store.open(target).fault is not None
 
 
 def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -338,6 +340,24 @@ def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.Mon
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_store_write_failure_does_not_change_the_in_memory_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "schedules.json"
+    store = Store(path=target)
+    made = store.add("Evening", rule_id="rule")
+
+    def fail(_rules: object, _path: object) -> None:
+        raise ScheduleError("local-io", "injected write failure")
+
+    monkeypatch.setattr(schedules, "save", fail)
+    with pytest.raises(ScheduleError):
+        store.set_enabled(made.id, False)
+
+    assert store.rules[0].enabled is True
+    assert Store.open(target).rules[0].enabled is True
+
+
 def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     target.write_text("not json but somebody's schedule", encoding="utf-8")
@@ -346,6 +366,26 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     store.add("Evening")
     kept = target.with_name(target.name + schedules.BROKEN_SUFFIX)
     assert kept.read_text(encoding="utf-8") == "not json but somebody's schedule"
+
+
+def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "schedules.json"
+    original = "not json but somebody's schedule"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+
+    def fail(_path: Path) -> Path:
+        raise OSError("injected relocation failure")
+
+    monkeypatch.setattr(state_file, "preserve_faulted", fail)
+    with pytest.raises(ScheduleError):
+        store.add("Evening")
+
+    assert store.fault is not None
+    assert target.read_text(encoding="utf-8") == original
+    assert len(store) == 0
 
 
 # -- describing it --------------------------------------------------------

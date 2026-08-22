@@ -103,6 +103,13 @@ class PreferencesPage(Adw.PreferencesPage):
         # which one moved would be more code than making them again.
         self._roots_group = group
         self._root_rows: list[Gtk.Widget] = []
+
+        self._workshop = Adw.SwitchRow(
+            title="Scan Wallpaper Engine library",
+            subtitle=("Show installed Steam Workshop wallpapers; Wall-in-One never modifies them"),
+        )
+        self._workshop.connect("notify::active", self._on_changed)
+        group.add(self._workshop)
         return group
 
     def _refresh_roots(self) -> None:
@@ -372,8 +379,15 @@ class PreferencesPage(Adw.PreferencesPage):
     def _build_colour_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
             title="Colour",
-            description="Colours follow Noctalia's active palette.",
+            description="Use Noctalia's active palette or a fixed app palette.",
         )
+
+        self._follow_palette = Adw.SwitchRow(
+            title="Follow Noctalia colours",
+            subtitle="Update this app's chrome when Noctalia's active palette changes",
+        )
+        self._follow_palette.connect("notify::active", self._on_changed)
+        group.add(self._follow_palette)
 
         self._palette_source = Adw.ActionRow(title="Palette source")
         group.add(self._palette_source)
@@ -452,6 +466,7 @@ class PreferencesPage(Adw.PreferencesPage):
             self._interval.set_value(settings.cycle_interval)
             self._dynamics.set_active(settings.dynamics_enabled)
             self._own_scenes.set_active(settings.own_scene_renderer)
+            self._workshop.set_active(settings.scan_workshop)
             self._favourites_only.set_active(settings.cycle_favourites_only)
             # A monitor that has since been unplugged is offered anyway rather
             # than silently reset to "All outputs": the setting is still what
@@ -475,6 +490,7 @@ class PreferencesPage(Adw.PreferencesPage):
                     renderer.WHEN_HIDDEN_CHOICES.index(settings.video_when_hidden)
                 )
             self._opacity.set_value(settings.opacity)
+            self._follow_palette.set_active(settings.follow_noctalia_palette)
             if settings.preview_scheme in ALL_SCHEMES:
                 self._scheme.set_selected(ALL_SCHEMES.index(settings.preview_scheme))
         finally:
@@ -492,6 +508,7 @@ class PreferencesPage(Adw.PreferencesPage):
             cycle_interval=int(self._interval.get_value()),
             dynamics_enabled=self._dynamics.get_active(),
             own_scene_renderer=self._own_scenes.get_active(),
+            scan_workshop=self._workshop.get_active(),
             cycle_favourites_only=self._favourites_only.get_active(),
             output=self._selected_output(),
             video_muted=self._muted.get_active(),
@@ -505,6 +522,7 @@ class PreferencesPage(Adw.PreferencesPage):
             if hidden_index < len(renderer.WHEN_HIDDEN_CHOICES)
             else renderer.DEFAULT_WHEN_HIDDEN,
             opacity=round(self._opacity.get_value(), 2),
+            follow_noctalia_palette=self._follow_palette.get_active(),
             preview_scheme=ALL_SCHEMES[scheme_index]
             if scheme_index < len(ALL_SCHEMES)
             else config.Settings().preview_scheme,

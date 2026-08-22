@@ -23,7 +23,6 @@ dropped.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import os
@@ -34,12 +33,14 @@ from pathlib import Path
 from typing import Any, Final
 
 from wall_in_one import paths
+from wall_in_one.library import state_file
 from wall_in_one.library.model import MediaItem
 
 #: The file, under `paths.app_state_dir()`, beside the favourites and pairings.
 STATE_FILENAME: Final = "playlists.json"
 
-#: Bumped only if the shape changes. Read leniently.
+#: Bumped only if the shape changes. Newer documents are recovered for the UI
+#: but faulted so this build cannot silently compile or rewrite them.
 FORMAT_VERSION: Final = 1
 
 #: Ceilings, so a file that grew a zero cannot be read forever.
@@ -50,6 +51,19 @@ MAX_STATE_BYTES: Final = 8 * 1024 * 1024
 #: A name has to fit in a menu and a dropdown.
 MAX_NAME_LENGTH: Final = 120
 
+#: Rust's runtime wire contract. Opaque ids normally come from ``new_id``, but
+#: tests, migrations and the authoring socket can supply one explicitly.
+MAX_IDENTIFIER_BYTES: Final = 256
+
+#: These are generated playback sources, not names available to authoring.
+#: Reserve both halves because the runtime resolves references by id *or* name.
+#: ``Quick choice`` is materialised through ``set_singleton``; ``All media`` is
+#: generated only by the runtime-config compiler.
+RESERVED_IDENTITIES: Final = (
+    ("all-media", "All media"),
+    ("quick-choice", "Quick choice"),
+)
+
 #: Where a file we could not parse is moved before it would be overwritten.
 BROKEN_SUFFIX: Final = ".broken"
 
@@ -58,7 +72,7 @@ class PlaylistError(Exception):
     """A playlist could not be changed, with a machine-readable reason.
 
     Kinds in use: ``local-io``, ``no-such-playlist``, ``no-such-entry``,
-    ``invalid-name``, ``full``.
+    ``invalid-name``, ``identity-conflict``, ``full``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -305,6 +319,35 @@ def tidy_name(raw: str) -> str:
     return name
 
 
+def _fold_identity(value: str) -> str:
+    """The comparison used by the human-facing id-or-name lookup surface."""
+    return value.casefold()
+
+
+def _identifier(raw: str) -> str:
+    """Validate an explicitly supplied opaque playlist id without rewriting it."""
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise PlaylistError(
+            "identity-conflict", "a playlist id must be valid UTF-8 text; choose another id"
+        ) from error
+    if not raw.strip():
+        raise PlaylistError("identity-conflict", "a playlist id cannot be empty")
+    if raw != raw.strip():
+        raise PlaylistError(
+            "identity-conflict", "a playlist id cannot have leading or trailing whitespace"
+        )
+    if len(encoded) > MAX_IDENTIFIER_BYTES:
+        raise PlaylistError(
+            "identity-conflict",
+            f"a playlist id must be at most {MAX_IDENTIFIER_BYTES} UTF-8 bytes",
+        )
+    if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in raw):
+        raise PlaylistError("identity-conflict", "a playlist id cannot contain control characters")
+    return raw
+
+
 @dataclass(frozen=True, slots=True)
 class Entry:
     """One position in a playlist.
@@ -425,31 +468,53 @@ def state_path() -> Path:
 
 def _read(path: Path) -> tuple[dict[str, Playlist], str | None]:
     """Every stored playlist by id, plus why the file was passed over."""
-    try:
-        if path.is_symlink() or not path.is_file():
-            return {}, None
-        if path.stat().st_size > MAX_STATE_BYTES:
-            return {}, f"{path.name} is too large to be a list of playlists"
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return {}, f"could not read {path.name}: {error.strerror or error}"
-
-    try:
-        payload = json.loads(text)
-    except ValueError, RecursionError:
-        return {}, f"{path.name} is not readable, so no playlists were loaded"
-    if not isinstance(payload, dict):
-        return {}, f"{path.name} is not a playlists file"
+    payload, fault = state_file.read_object(
+        path, maximum_bytes=MAX_STATE_BYTES, description="playlists"
+    )
+    if payload is None:
+        return {}, fault
+    faults = [
+        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
+    ]
     stored = payload.get("playlists")
     if not isinstance(stored, list):
         return {}, f"{path.name} has no playlists in it"
 
+    if len(stored) > MAX_PLAYLISTS:
+        faults.append(f"{path.name} has more than {MAX_PLAYLISTS} playlists")
+
     found: dict[str, Playlist] = {}
+    malformed = 0
+    duplicate_playlists = 0
+    duplicate_entries = 0
     for raw in stored[:MAX_PLAYLISTS]:
         playlist = _playlist(raw)
-        if playlist is not None:
-            found[playlist.id] = playlist
-    return found, None
+        if playlist is None:
+            malformed += 1
+            continue
+        assert isinstance(raw, dict)
+        raw_entries = raw.get("entries")
+        if not isinstance(raw_entries, list):
+            malformed += 1
+        else:
+            if len(raw_entries) > MAX_ENTRIES:
+                faults.append(
+                    f"{path.name} playlist {playlist.id!r} has more than {MAX_ENTRIES} entries"
+                )
+            parsed_entries = [_entry(item) for item in raw_entries[:MAX_ENTRIES]]
+            malformed += sum(entry is None for entry in parsed_entries)
+            ids = [entry.id for entry in parsed_entries if entry is not None]
+            duplicate_entries += len(ids) - len(set(ids))
+        if playlist.id in found:
+            duplicate_playlists += 1
+        found[playlist.id] = playlist
+    if malformed:
+        faults.append(f"{path.name} has {malformed} malformed playlist records")
+    if duplicate_playlists:
+        faults.append(f"{path.name} has {duplicate_playlists} duplicate playlist ids")
+    if duplicate_entries:
+        faults.append(f"{path.name} has {duplicate_entries} duplicate playlist entry ids")
+    return found, state_file.joined_faults(faults)
 
 
 def load(path: Path | None = None) -> dict[str, Playlist]:
@@ -479,6 +544,7 @@ def save(playlists: Mapping[str, Playlist], path: Path | None = None) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        state_file.fsync_parent(target)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise PlaylistError(
@@ -546,18 +612,80 @@ class Store:
             raise PlaylistError("no-such-playlist", f"no playlist called {reference!r}")
         return found
 
+    def _validate_identity(
+        self,
+        identifier: str,
+        name: str,
+        *,
+        replacing: str | None = None,
+        generated: bool = False,
+    ) -> None:
+        """Keep every id-or-name reference unambiguous before it reaches Rust.
+
+        Rust accepts both an opaque id and a display name as a playlist
+        reference. Consequently, duplicate names and *cross* collisions (one
+        playlist's name equals another playlist's id) are not merely cosmetic:
+        they make a schedule resolve according to iteration order. Compare
+        without case here because this is the human-facing authoring boundary.
+        """
+        candidate_id = _fold_identity(identifier)
+        candidate_name = _fold_identity(name)
+        reserved = {_fold_identity(token) for pair in RESERVED_IDENTITIES for token in pair}
+        canonical_generated = (identifier, name) in RESERVED_IDENTITIES
+        if not (generated and canonical_generated):
+            for label, token in (("id", candidate_id), ("name", candidate_name)):
+                if token in reserved:
+                    raise PlaylistError(
+                        "identity-conflict",
+                        f"playlist {label} {identifier if label == 'id' else name!r} is "
+                        "reserved for a generated playlist; choose a different name",
+                    )
+
+        for playlist in self._playlists.values():
+            if playlist.id == replacing:
+                continue
+            occupied = {
+                _fold_identity(playlist.id): ("id", playlist.id),
+                _fold_identity(playlist.name): ("name", playlist.name),
+            }
+            for label, value, token in (
+                ("id", identifier, candidate_id),
+                ("name", name, candidate_name),
+            ):
+                collision = occupied.get(token)
+                if collision is None:
+                    continue
+                other_label, other_value = collision
+                raise PlaylistError(
+                    "identity-conflict",
+                    f"playlist {label} {value!r} conflicts with {other_label} "
+                    f"{other_value!r} on {playlist.name!r}; choose a different name",
+                )
+
     def create(self, name: str, entry_id: str | None = None) -> Playlist:
-        """A new, empty playlist. Duplicate names are allowed but discouraged
-        by `by_name` answering the first: they are the user's to sort out, and
-        refusing one would be the app arguing about their filing."""
+        """A new, empty playlist with an unambiguous id and display name."""
         if len(self._playlists) >= MAX_PLAYLISTS:
             raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
-        playlist = Playlist(id=entry_id or new_id(), name=tidy_name(name))
+        identifier = new_id() if entry_id is None else _identifier(entry_id)
+        tidy = tidy_name(name)
+        self._validate_identity(identifier, tidy)
+        playlist = Playlist(id=identifier, name=tidy)
         return self._commit(playlist)
 
     def rename(self, identifier: str, name: str) -> Playlist:
         playlist = self.find(identifier)
-        return self._commit(replace(playlist, name=tidy_name(name)))
+        tidy = tidy_name(name)
+        if tidy == playlist.name:
+            return playlist
+        if _fold_identity(playlist.id) in {
+            _fold_identity(generated_id) for generated_id, _name in RESERVED_IDENTITIES
+        }:
+            raise PlaylistError(
+                "identity-conflict",
+                f"{playlist.name} is generated automatically and cannot be renamed",
+            )
+        self._validate_identity(playlist.id, tidy, replacing=playlist.id)
+        return self._commit(replace(playlist, name=tidy))
 
     def delete(self, identifier: str) -> bool:
         playlist = self.get(identifier)
@@ -565,8 +693,10 @@ class Store:
             playlist = self.by_name(identifier)
         if playlist is None:
             return False
-        del self._playlists[playlist.id]
-        self._write()
+        updated = dict(self._playlists)
+        del updated[playlist.id]
+        self._write(updated)
+        self._playlists = updated
         return True
 
     def add(self, identifier: str, source: Path, entry_id: str | None = None) -> Playlist:
@@ -590,8 +720,11 @@ class Store:
         existing = self.get(identifier)
         if existing is None and len(self._playlists) >= MAX_PLAYLISTS:
             raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+        identifier = _identifier(identifier)
+        tidy = tidy_name(name)
+        self._validate_identity(identifier, tidy, replacing=identifier, generated=True)
         entry = Entry(id=entry_id or new_id(), source=str(source))
-        playlist = Playlist(id=identifier, name=tidy_name(name), entries=(entry,))
+        playlist = Playlist(id=identifier, name=tidy, entries=(entry,))
         return self._commit(playlist)
 
     def remove_entry(self, identifier: str, entry: str) -> Playlist:
@@ -607,29 +740,37 @@ class Store:
         file on purpose; not one we unlinked.
         """
         source = str(path)
+        updated = dict(self._playlists)
         changed = False
-        for identifier, playlist in list(self._playlists.items()):
+        for identifier, playlist in self._playlists.items():
             kept = tuple(entry for entry in playlist.entries if entry.source != source)
             if len(kept) != len(playlist.entries):
-                self._playlists[identifier] = replace(playlist, entries=kept)
+                updated[identifier] = replace(playlist, entries=kept)
                 changed = True
         if changed:
-            self._write()
+            self._write(updated)
+            self._playlists = updated
         return changed
 
     def _commit(self, playlist: Playlist) -> Playlist:
-        self._playlists[playlist.id] = playlist
-        self._write()
+        updated = dict(self._playlists)
+        updated[playlist.id] = playlist
+        self._write(updated)
+        self._playlists = updated
         return playlist
 
-    def _write(self) -> None:
+    def _write(self, authored: Mapping[str, Playlist]) -> None:
         target = self._path if self._path is not None else state_path()
         if self._fault is not None:
-            broken = target.with_name(target.name + BROKEN_SUFFIX)
-            with contextlib.suppress(OSError):
-                os.replace(target, broken)
+            try:
+                state_file.preserve_faulted(target)
+            except OSError as error:
+                raise PlaylistError(
+                    "local-io",
+                    f"could not preserve unreadable {target}: {error.strerror or error}",
+                ) from error
             self._fault = None
-        save(self._playlists, target)
+        save(authored, target)
 
 
 def rotation(

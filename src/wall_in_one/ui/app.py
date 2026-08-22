@@ -26,7 +26,7 @@ from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import favourites, pairings, playlists, schedules
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library.model import MediaItem
+from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchQuery, WallpaperCandidate
 from wall_in_one.session import Session
@@ -98,6 +98,10 @@ class Application(Adw.Application):
         self._runtime_status_pending = False
         self._runtime_status_generation = -1
         self._runtime_status_again = False
+        # The Rust snapshot is the sole playback truth for every GUI surface.
+        # Keep the last valid answer through a transient deadline so the
+        # header and authoring pages cannot briefly contradict one another.
+        self._runtime_status: dict[str, object] | None = None
         self._runtime_absent_callbacks: list[tuple[int, Callable[[], None]]] = []
         self._runtime_action_pending = False
         self._runtime_reload_pending = False
@@ -114,6 +118,14 @@ class Application(Adw.Application):
         self._palette_monitor: Gio.FileMonitor | None = None
         self._palette_reload_source: int = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
+        # Library walking is filesystem I/O, not the measured pure-Python
+        # parsing handled by the shared subinterpreter pool. One thread keeps
+        # GTK responsive without paying another interpreter's memory cost or
+        # making injected/headless scanners cross a pickling boundary.
+        self._library_scan_jobs: ThreadPoolExecutor | None = None
+        self._library_scan_future: Future[Library] | None = None
+        self._library_scan_generation = 0
+        self._library_scan_shutdown = False
         self._stills = StillMaker()
 
     # -- lifecycle -------------------------------------------------------
@@ -170,6 +182,8 @@ class Application(Adw.Application):
             self._window_generation += 1
             if self._runtime_action_pending:
                 window.set_runtime_busy(True)
+            if self._runtime_status is not None:
+                window.show_runtime_status(self._runtime_status)
         self.reload_palette()
         self.refresh_library()
         assert self._window is not None
@@ -192,6 +206,12 @@ class Application(Adw.Application):
         self._stop_runtime_status_timer()
         self._runtime_shutdown = True
         self._window_generation += 1
+        self._library_scan_shutdown = True
+        self._library_scan_generation += 1
+        if self._library_scan_jobs is not None:
+            self._library_scan_jobs.shutdown(wait=False, cancel_futures=True)
+            self._library_scan_jobs = None
+        self._library_scan_future = None
         if self._runtime_jobs is not None:
             # Socket calls have hard deadlines and are safe to let finish.  Do
             # not hold application shutdown open for one, and invalidate its
@@ -213,7 +233,10 @@ class Application(Adw.Application):
         Adw.Application.do_shutdown(self)
 
     def _on_close_request(self, window: Gtk.Window) -> bool:
-        config.save(self._settings)
+        # Every settings edit is persisted by ``update_settings``.  Saving the
+        # in-memory recovery defaults here used to overwrite a malformed file,
+        # and even a valid future document lost unknown keys merely because an
+        # older app was opened and closed without an edit.
         if self._window is window:
             # The default handler destroys the window after this callback.
             # Drop our reference now so a later activation builds a fresh one
@@ -234,6 +257,11 @@ class Application(Adw.Application):
     def legacy_service(self) -> bool:
         """Whether this Python process intentionally owns compatibility timers."""
         return self._service_start
+
+    @property
+    def runtime_status(self) -> dict[str, object] | None:
+        """Last valid atomic Rust status, retained across transient timeouts."""
+        return self._runtime_status
 
     def present_page(self, page: str) -> None:
         """Present the singleton window with one primary workflow page visible."""
@@ -309,7 +337,11 @@ class Application(Adw.Application):
             # than applying the same rendered palette twice.
             GLib.source_remove(self._palette_reload_source)
             self._palette_reload_source = 0
-        resolved = source.resolve(scheme=self._settings.preview_scheme)
+        resolved = (
+            source.resolve(scheme=self._settings.preview_scheme)
+            if self._settings.follow_noctalia_palette
+            else source.fixed()
+        )
         self._resolved = resolved
         self._apply_stylesheet(resolved)
         if self._window is not None:
@@ -332,9 +364,17 @@ class Application(Adw.Application):
         )
 
     def _on_settings_changed(self, settings: config.Settings) -> None:
+        library_sources_changed = (settings.roots, settings.scan_workshop) != (
+            self._settings.roots,
+            self._settings.scan_workshop,
+        )
         self._settings = settings
-        self._session.update_settings(settings)
-        self._publish_runtime_for_context()
+        async_scan = library_sources_changed and self._window is not None
+        self._session.update_settings(settings, rescan_library=not async_scan)
+        if async_scan:
+            self.refresh_library()
+        else:
+            self._publish_runtime_for_context()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
 
@@ -359,11 +399,65 @@ class Application(Adw.Application):
         return self._session
 
     def refresh_library(self) -> None:
-        """Rescan, then line the cursor up with the wallpaper already on screen."""
-        self._session.refresh()
+        """Rescan without ever walking a GUI library on GTK's main thread.
+
+        Headless callers keep the synchronous :class:`Session` contract. With
+        a window present, a generation-tagged worker snapshots and walks the
+        filesystem while the existing grid, search, scroll and focus remain in
+        place. A newer request cancels an older queued one and makes any
+        already-running result ineligible to land.
+        """
+        if self._window is None:
+            self._session.refresh()
+            self._finish_library_refresh()
+            return
+
+        self._library_scan_generation += 1
+        generation = self._library_scan_generation
+        request = self._session.prepare_scan()
+        previous = self._library_scan_future
+        if previous is not None:
+            previous.cancel()
+        self._window.show_library_scanning(True)
+        future = self._library_scan_pool().submit(request.run)
+        self._library_scan_future = future
+        future.add_done_callback(lambda done: self._post_library_scan(generation, done))
+
+    def _library_scan_pool(self) -> ThreadPoolExecutor:
+        """The single I/O lane used by graphical library scans."""
+        if self._library_scan_jobs is None:
+            self._library_scan_jobs = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="library-scan",
+            )
+        return self._library_scan_jobs
+
+    def _post_library_scan(self, generation: int, future: Future[Library]) -> None:
+        """Marshal one completed filesystem walk back onto GTK's context."""
+
+        def deliver() -> bool:
+            if self._library_scan_shutdown or generation != self._library_scan_generation:
+                return GLib.SOURCE_REMOVE
+            self._library_scan_future = None
+            try:
+                library = future.result()
+            except Exception as error:  # defensive boundary around injected scanners too
+                if self._window is not None:
+                    self._window.show_library_scanning(False)
+                    self._window.report(f"Library scan failed: {error}")
+                return GLib.SOURCE_REMOVE
+            self._session.adopt_library(library)
+            self._finish_library_refresh()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(deliver)
+
+    def _finish_library_refresh(self) -> None:
+        """Reconcile and render one installed scan, always on the main thread."""
         self._session.sync_with_noctalia()
         self._publish_runtime_for_context()
         if self._window is not None:
+            self._window.show_library_scanning(False)
             self._window.show_library(self._session)
             self.refresh_runtime_status_async()
         self._make_missing_stills()
@@ -591,15 +685,17 @@ class Application(Adw.Application):
             response = future.result()
         except client.NotRunningError:
             if current:
+                self._runtime_status = None
                 window.show_runtime_unavailable()
                 for callback in callbacks:
                     callback()
         except client.ControlError:
             # A missed deadline is not proof that nobody owns the runtime.
-            # Showing the controls as unavailable is conservative; crucially,
+            # Retain the last atomic answer rather than making the header and
+            # authoring pages jump to Python's stale Session state. Crucially,
             # no compatibility callback is allowed to start a second driver.
             if current:
-                window.show_runtime_unavailable()
+                window.show_runtime_delayed()
         else:
             if response.ok and current:
                 try:
@@ -608,6 +704,7 @@ class Application(Adw.Application):
                     pass
                 else:
                     if isinstance(status, dict):
+                        self._runtime_status = status
                         window.show_runtime_status(status)
         again = self._runtime_status_again
         self._runtime_status_again = False
@@ -619,6 +716,7 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime("status", timeout=0.25)
         except client.NotRunningError:
+            self._runtime_status = None
             if self._window is not None:
                 self._window.show_runtime_unavailable()
             return False
@@ -628,7 +726,7 @@ class Application(Adw.Application):
             # start applying wallpapers merely because a busy Rust runtime
             # missed one status deadline.
             if self._window is not None:
-                self._window.show_runtime_unavailable()
+                self._window.show_runtime_delayed()
             return True
         if response.ok and self._window is not None:
             try:
@@ -637,6 +735,7 @@ class Application(Adw.Application):
                 pass
             else:
                 if isinstance(status, dict):
+                    self._runtime_status = status
                     self._window.show_runtime_status(status)
         # Even a rejected status request proves that this socket has an owner;
         # do not turn a protocol failure into permission for a second driver.
@@ -910,12 +1009,10 @@ class Application(Adw.Application):
     def forget(self, path: Path) -> None:
         """Drop a wallpaper this app has just destroyed, and rescan.
 
-        The star and the pairing are the two pieces of state that outlive the
-        file, and an entry for something we deleted ourselves is pointless:
-        both survive a missing file because the file might come back, which is
-        not true of one we have just unlinked. The store's own write failing changes nothing
-        here -- the file is gone either way, and the socket has already been
-        told what happened to it.
+        Stars, pairing choices and playlist entries normally outlive a missing
+        file because it might come back. That is not true of one we have just
+        unlinked. A store write failing changes nothing here -- the file is
+        gone either way, and the socket has already been told what happened.
 
         The rescan is deferred for the reason a finished download's is: it is
         the window's work, not the client's, and `ctl remove` should not be
@@ -926,6 +1023,8 @@ class Application(Adw.Application):
             self._session.favourites.discard(path)
         with contextlib.suppress(pairings.PairingError):
             self._session.pairings.forget_path(path)
+        with contextlib.suppress(playlists.PlaylistError):
+            self._session.playlists.forget_path(path)
         GLib.idle_add(self.refresh_library)
 
     def playlists_changed(self) -> None:
@@ -942,12 +1041,13 @@ class Application(Adw.Application):
     def activate_playlist(self, reference: str) -> Response:
         """Switch immediately to a named playlist and apply its first entry."""
         try:
-            chosen = self._session.use_playlist(reference)
+            chosen = self._session.playlists.find(reference)
         except playlists.PlaylistError as error:
             return Response.failure(str(error))
         try:
             response = client.send_runtime("playlist-use", chosen.id)
         except client.NotRunningError:
+            self._session.use_playlist(chosen.id)
             response = self.apply(self._session.apply_current)
         except client.ControlError as error:
             response = Response.failure(str(error))
@@ -962,10 +1062,14 @@ class Application(Adw.Application):
         if self._gui_runtime_call_pending():
             return False
         try:
-            chosen = self._session.use_playlist(reference)
+            chosen = self._session.playlists.find(reference)
         except playlists.PlaylistError as error:
             self.window_report(str(error))
             return False
+
+        def apply_locally() -> Response:
+            self._session.use_playlist(chosen.id)
+            return self.apply(self._session.apply_current)
 
         def shown(_runtime_answered: bool) -> None:
             if self._window is not None:
@@ -973,16 +1077,16 @@ class Application(Adw.Application):
 
         return self._start_gui_runtime_call(
             lambda: client.send_runtime("playlist-use", chosen.id),
-            fallback=lambda: self.apply(self._session.apply_current),
+            fallback=apply_locally,
             on_success=shown,
         )
 
     def resume_schedule(self) -> Response:
         """Release a manual playlist choice and apply the scheduled/default list."""
-        self._session.resume_schedule()
         try:
             response = client.send_runtime("schedule-follow")
         except client.NotRunningError:
+            self._session.resume_schedule()
             response = self.apply(self._session.apply_current)
         except client.ControlError as error:
             response = Response.failure(str(error))
@@ -994,7 +1098,10 @@ class Application(Adw.Application):
         """Return to calendar control from GTK without blocking it."""
         if self._gui_runtime_call_pending():
             return False
-        self._session.resume_schedule()
+
+        def apply_locally() -> Response:
+            self._session.resume_schedule()
+            return self.apply(self._session.apply_current)
 
         def shown(_runtime_answered: bool) -> None:
             if self._window is not None:
@@ -1002,7 +1109,7 @@ class Application(Adw.Application):
 
         return self._start_gui_runtime_call(
             lambda: client.send_runtime("schedule-follow"),
-            fallback=lambda: self.apply(self._session.apply_current),
+            fallback=apply_locally,
             on_success=shown,
         )
 
@@ -1194,32 +1301,38 @@ class Application(Adw.Application):
     def update_settings(self, **changes: Any) -> config.Settings:
         previous = self._settings
         self._settings = replace(self._settings, **changes).validated()
-        roots_changed = self._settings.roots != previous.roots
+        library_sources_changed = (self._settings.roots, self._settings.scan_workshop) != (
+            previous.roots,
+            previous.scan_workshop,
+        )
+        async_scan = library_sources_changed and self._window is not None
         config.save(self._settings)
-        self._session.update_settings(self._settings)
-        if roots_changed:
-            # Session.update_settings already rescanned. Synchronise the
-            # cursor and redraw that new library rather than only moving the
-            # highlight in the old grid below.
+        self._session.update_settings(self._settings, rescan_library=not async_scan)
+        if library_sources_changed and not async_scan:
             self._session.sync_with_noctalia()
-        self._publish_runtime_for_context()
+        # Do not publish a temporary document which combines new roots with an
+        # old library. The completed async scan publishes the coherent pair.
+        if not async_scan:
+            self._publish_runtime_for_context()
         self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)
         if self._window is not None:
             self._window.apply_settings(self._settings)
-            if roots_changed or self._settings.dynamics_enabled != previous.dynamics_enabled:
+            if self._settings.dynamics_enabled != previous.dynamics_enabled:
                 # Dynamics changes which wallpapers are playable at all, so the
                 # grid has different contents now, not just a different state.
-                # Roots are even more direct: Session has already replaced the
-                # library, and leaving the old grid visible would make the
-                # Settings page appear not to have worked.
                 self._window.show_library(self._session)
-            else:
+            elif not async_scan:
                 self._window.show_current(self._session)
-        if roots_changed:
+        if async_scan:
+            self.refresh_library()
+        elif library_sources_changed:
             self._make_missing_stills()
-        if self._settings.preview_scheme != previous.preview_scheme:
+        if (
+            self._settings.preview_scheme != previous.preview_scheme
+            or self._settings.follow_noctalia_palette != previous.follow_noctalia_palette
+        ):
             self.reload_palette()
         return self._settings
 
@@ -1439,11 +1552,13 @@ class _Commands:
             # taking its assignment -- say so rather than print a bare hash.
             return names.get(identifier) or f"{identifier} (missing)"
 
-        lines = ["# fields: connector, playlist"]
+        lines = ["# fields: connector, playlist, description"]
         assigned = dict(session.displays.all())
         for screen in attached:
             wanted = assigned.get(screen.name)
-            lines.append(f"{screen.label}\t{shown(wanted) if wanted else '(default)'}")
+            lines.append(
+                f"{screen.name}\t{shown(wanted) if wanted else '(default)'}\t{screen.label}"
+            )
         # Assignments for screens that are not plugged in are shown rather than
         # hidden: keeping them is the point, so they have to be visible.
         for connector, playlist in session.displays.all():
@@ -1582,11 +1697,8 @@ class _Commands:
         try:
             moved = store.add(path) if wanted else store.discard(path)
         except favourites.FavouritesError as error:
-            # The store takes the change in memory whatever the disk did, so
-            # the window still has to be told; the failure is only about
-            # whether the star outlives the session, and it travels with the
-            # `local-io` kind that says so.
-            self._app.favourites_changed()
+            # Store mutations are transactional: a failed write also leaves
+            # memory unchanged, so there is nothing for the window to redraw.
             return server.failed(error)
         self._app.favourites_changed()
         if wanted:

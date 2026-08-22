@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.library import pairing, pairings, workshop
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 
@@ -27,6 +27,7 @@ WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
 MAX_ITEMS: Final = 4096
 MAX_ENTRIES_EXAMINED: Final = 65536
 MAX_DEPTH: Final = 8
+MAX_NOCTALIA_SETTINGS_BYTES: Final = 8 * 1024 * 1024
 
 #: A directory carrying one of these was created by us, so files inside it may
 #: be deletable -- but only with a per-file sidecar to prove which download
@@ -36,51 +37,107 @@ _DIRECTORY_MARKERS: Final[tuple[str, ...]] = (
     ".wall-in-one-motionbgs-managed.json",
 )
 
-#: Per-file sidecars that grant deletion authority.
-_FILE_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = (
+#: Provider provenance sidecars that grant deletion authority when paired with
+#: a managed-directory marker. Pairing metadata is intentionally absent: a
+#: user can customise a file without turning it into one of our downloads.
+_DOWNLOAD_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = (
     ".motionbgs.json",
     ".wallhaven.json",
+)
+
+#: Every per-media sidecar recognised by the scanner. This broader set is for
+#: filtering metadata out of the library and companion cleanup only; it must
+#: never be used as an ownership predicate.
+_MEDIA_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = (
+    *_DOWNLOAD_SIDECAR_SUFFIXES,
     pairing.SIDECAR_SUFFIX,
 )
 
 
-def _read_marker(directory: Path) -> dict[str, object] | None:
+def _read_marker(directory: Path) -> tuple[str, dict[str, object]] | None:
     for name in _DIRECTORY_MARKERS:
         marker = directory / name
         try:
-            if marker.stat().st_size > pairing.MAX_SIDECAR_BYTES:
+            raw = file_io.read_regular_bytes(marker, pairing.MAX_SIDECAR_BYTES)
+            if raw is None:
                 continue
-            document = json.loads(marker.read_bytes())
-        except OSError, ValueError:
+            document = json.loads(raw)
+        except OSError, ValueError, RecursionError:
             continue
-        if isinstance(document, dict):
-            return document
+        if (
+            not isinstance(document, dict)
+            or type(document.get("schema")) is not int
+            or document.get("schema") != 1
+        ):
+            continue
+        if name == ".wall-in-one-motionbgs-managed.json":
+            # The first MotionBGS marker used ``owner`` rather than ``plugin``;
+            # accepting that exact identity is the only legacy allowance.
+            owner = document.get("plugin", document.get("owner"))
+            provider = document.get("provider", "MotionBGS")
+            if owner == "goober/wall-in-one" and provider == "MotionBGS":
+                return "MotionBGS", document
+        elif (
+            document.get("kind") == "wallhaven"
+            and document.get("ownership") == "managed"
+            and document.get("plugin", "goober/wall-in-one") == "goober/wall-in-one"
+            and document.get("provider", "Wallhaven") == "Wallhaven"
+        ):
+            # The predecessor's Wallhaven marker had schema/kind/ownership but
+            # no plugin/provider fields.  Those three exact legacy fields are
+            # still a defensible app-created identity; arbitrary JSON is not.
+            return "Wallhaven", document
     return None
 
 
-def _provider_of(marker: dict[str, object]) -> str:
-    for key in ("provider", "kind"):
-        value = marker.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return "Wall-in-One"
+def download_provenance(path: Path) -> str | None:
+    """Provider proven by an exact, adjacent provenance sidecar.
+
+    A suffix is a naming convention, not deletion authority.  Both providers
+    have always emitted the four identity fields checked here; accepting a
+    bare ``{}`` (or a sidecar copied from another file) would let arbitrary
+    user files be classified and later unlinked as app-owned downloads.
+    """
+    expected = {
+        ".motionbgs.json": "MotionBGS",
+        ".wallhaven.json": "Wallhaven",
+    }
+    for suffix, provider in expected.items():
+        sidecar = path.with_name(path.name + suffix)
+        try:
+            raw = file_io.read_regular_bytes(sidecar, pairing.MAX_SIDECAR_BYTES)
+            if raw is None:
+                continue
+            document: object = json.loads(raw)
+        except OSError, ValueError, RecursionError:
+            continue
+        if (
+            isinstance(document, dict)
+            and type(document.get("schema")) is int
+            and document.get("schema") == 1
+            and document.get("plugin") == "goober/wall-in-one"
+            and document.get("provider") == provider
+            and document.get("path") == str(path)
+        ):
+            return provider
+    return None
 
 
-def _has_file_sidecar(path: Path) -> bool:
-    return any(path.with_name(path.name + suffix).is_file() for suffix in _FILE_SIDECAR_SUFFIXES)
+def _has_download_sidecar(path: Path) -> bool:
+    return download_provenance(path) is not None
 
 
 def _is_sidecar(path: Path) -> bool:
     name = path.name
     return name in _DIRECTORY_MARKERS or any(
-        name.endswith(suffix) for suffix in _FILE_SIDECAR_SUFFIXES
+        name.endswith(suffix) for suffix in _MEDIA_SIDECAR_SUFFIXES
     )
 
 
 #: The two halves of ownership, published for `library.manage`. Deletion has to
 #: ask the same question a scan asks, and asking it with a second copy of the
 #: rule is how the two come to disagree -- with an unlink on the losing side.
-FILE_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = _FILE_SIDECAR_SUFFIXES
+MEDIA_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = _MEDIA_SIDECAR_SUFFIXES
 
 
 def is_managed_directory(directory: Path) -> bool:
@@ -88,9 +145,9 @@ def is_managed_directory(directory: Path) -> bool:
     return _read_marker(directory) is not None
 
 
-def has_file_sidecar(path: Path) -> bool:
-    """Whether ``path`` has a sidecar proving this app downloaded it."""
-    return _has_file_sidecar(path)
+def has_download_sidecar(path: Path) -> bool:
+    """Whether ``path`` has provider provenance proving it was downloaded."""
+    return _has_download_sidecar(path)
 
 
 def wallpaper_directory_from_noctalia() -> Path | None:
@@ -100,9 +157,13 @@ def wallpaper_directory_from_noctalia() -> Path | None:
     the library is without the user configuring it twice.
     """
     try:
-        with paths.noctalia_settings_path().open("rb") as handle:
-            document = tomllib.load(handle)
-    except OSError, tomllib.TOMLDecodeError:
+        raw = file_io.read_regular_bytes(
+            paths.noctalia_settings_path(), MAX_NOCTALIA_SETTINGS_BYTES
+        )
+        if raw is None:
+            return None
+        document = tomllib.loads(raw.decode("utf-8"))
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
         return None
     section = document.get("wallpaper")
     if not isinstance(section, dict):
@@ -148,13 +209,13 @@ def _walk(root: Path, budget: list[int], skipped: list[str]) -> Iterable[Path]:
                         skipped.append(f"{entry.path}: deeper than {MAX_DEPTH} levels")
                         continue
                     stack.append((Path(entry.path), depth + 1))
-                elif entry.is_file(follow_symlinks=False) or entry.is_file():
+                elif entry.is_file(follow_symlinks=False):
                     yield Path(entry.path)
             except OSError as error:
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
-def workshop_items() -> tuple[MediaItem, ...]:
+def workshop_items(steam_roots: Sequence[Path] | None = None) -> tuple[MediaItem, ...]:
     """Installed Wallpaper Engine wallpapers, videos and scenes alike.
 
     `Ownership.USER` without exception: these are Steam's files, in Steam's
@@ -162,7 +223,12 @@ def workshop_items() -> tuple[MediaItem, ...]:
     the surrounding tree looks.
     """
     found: list[MediaItem] = []
-    for item in workshop.scan():
+    installed = (
+        workshop.scan()
+        if steam_roots is None
+        else workshop.scan(steam_roots, include_defaults=False)
+    )
+    for item in installed:
         entry = item.entry
         if item.is_video and entry is not None:
             try:
@@ -211,6 +277,7 @@ def scan(
     records: Mapping[str, pairings.Pairing] | None = None,
     *,
     include_workshop: bool = False,
+    workshop_roots: Sequence[Path] | None = None,
 ) -> Library:
     """Build a `Library` from ``roots`` (or the default roots).
 
@@ -226,10 +293,10 @@ def scan(
     skipped: list[str] = []
     items: list[MediaItem] = []
     seen: set[Path] = set()
-    marker_cache: dict[Path, dict[str, object] | None] = {}
+    marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
 
     for root in resolved_roots:
-        if not root.is_dir():
+        if root.is_symlink() or not root.is_dir():
             skipped.append(f"{root}: not a directory")
             continue
         for path in _walk(root, budget, skipped):
@@ -258,9 +325,10 @@ def scan(
             # sidecar says we created *this file* and know where it came from.
             # Deletion needs both, so anything the user dropped into a managed
             # directory by hand stays theirs.
-            if marker is not None and _has_file_sidecar(path):
+            provenance = download_provenance(path)
+            if marker is not None and provenance == marker[0]:
                 ownership = Ownership.MANAGED
-                provider = _provider_of(marker)
+                provider = provenance
 
             items.append(
                 MediaItem(
@@ -276,11 +344,17 @@ def scan(
     if include_workshop:
         # After the roots, so a wallpaper somebody has copied into their own
         # library wins over the Steam copy of it -- `seen` keeps the first.
-        for item in workshop_items():
+        for item in workshop_items(workshop_roots):
             if item.path not in seen:
                 seen.add(item.path)
                 items.append(item)
 
     items.sort(key=lambda item: (item.path.parent.as_posix(), item.name.lower()))
+    still_inventory = tuple(item for item in items if item.kind is Kind.STILL)
     paired = pairings.apply(items, resolved_roots, records)
-    return Library(roots=resolved_roots, items=paired, skipped=tuple(skipped))
+    return Library(
+        roots=resolved_roots,
+        items=paired,
+        skipped=tuple(skipped),
+        still_inventory=still_inventory,
+    )

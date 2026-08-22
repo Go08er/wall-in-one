@@ -64,15 +64,21 @@ The result contains PNG screenshots named `wall-in-one-browse.png`,
 verifies that:
 
 - niri exposes a visible output and Noctalia loads the companion plugin;
-- `wall-in-one-service` starts from a handwritten resolved config and owns a
-  responsive runtime socket without importing Python;
+- the packaged headless Python compiler upgrades seeded authoring state and an
+  obsolete schema-1 runtime document before `wall-in-one-service` starts; the
+  Rust service then owns a responsive runtime socket;
 - Browse, Media/Pairings, Playlists, Schedules, and Settings open in the
-  running app;
+  running app; each capture first verifies the page-specific compositor title,
+  and its comparison image excludes Noctalia's clock-bearing panel so a stuck
+  app cannot pass merely because the clock changed;
 - closing the GUI leaves the same service process alive and rotation advances;
 - an isolated Noctalia probe observes exactly one `wallpaper-set` for that
   advance and records the Rust service as its parent, proving the GUI did not
   start a second Python wallpaper driver;
 - a control-socket playlist switch changes the active media;
+- a generated video launches one instrumented mpvpaper child with the compiled
+  hardware-decode and interpolation options; Pause freezes it, Stop releases
+  it, and Play creates exactly one new child before handing back to a still;
 - a schedule timer observes an injected local-time boundary and applies its
   playlist.
 
@@ -86,7 +92,9 @@ library, Steam directory, or home directory.
 This fixture has one virtual output and software rendering. Steam is not
 installed, no Workshop content is copied into it, and no Wallpaper Engine scene
 is available to render. The app therefore reports an empty scene library and
-degrades normally. The VM proves the application/service lifecycle, ordinary
-still and video library wiring, Noctalia/plugin integration, schedule control,
-and the five GTK tabs. It does **not** prove GPU rendering, Wallpaper Engine
-scene playback, Steam integration, or multi-monitor behavior.
+degrades normally. The VM proves the application/service lifecycle, still
+rotation, video discovery in the library, Noctalia/plugin integration,
+schedule control, the five GTK tabs, and mpvpaper's process/argument lifecycle
+through an instrumented renderer substitute. It does **not** prove actual video
+decoding or GPU rendering, Wallpaper Engine scene playback, Steam integration,
+or multi-monitor behavior.

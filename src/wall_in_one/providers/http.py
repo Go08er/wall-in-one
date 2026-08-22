@@ -39,6 +39,7 @@ from typing import IO, BinaryIO, Final, Protocol, cast
 from urllib.parse import urlsplit
 
 from wall_in_one.providers.base import ProviderError
+from wall_in_one.providers.download import MEDIA_STAGING_PREFIX
 
 #: Sent on every request. Identifying the client honestly is the price of using
 #: someone else's public API.
@@ -56,7 +57,7 @@ REDIRECT_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
 
 #: Staged downloads are dot-files so a library scan already ignores them if one
 #: is ever left behind by a hard kill.
-STAGING_PREFIX: Final = ".wall-in-one-staged-"
+STAGING_PREFIX: Final = MEDIA_STAGING_PREFIX
 
 
 @dataclass(frozen=True, slots=True)

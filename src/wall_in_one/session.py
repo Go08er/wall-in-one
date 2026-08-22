@@ -11,11 +11,21 @@ from __future__ import annotations
 import contextlib
 import random
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from wall_in_one import config
-from wall_in_one.library import displays, favourites, pairings, playlists, scan, schedules, stills
+from wall_in_one.library import (
+    displays,
+    favourites,
+    pairings,
+    playlists,
+    scan,
+    schedules,
+    stills,
+    workshop,
+)
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.library.playlists import Playlist as NamedPlaylist
@@ -24,6 +34,38 @@ from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
 
 Scanner = Callable[[Sequence[Path] | None], Library]
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryScan:
+    """One immutable library-scan request, safe to execute off the UI thread.
+
+    Pairing records and Workshop roots are captured before the worker starts.
+    That matters when a setting or pairing changes while a slow filesystem is
+    still being walked: the application can tag this request as stale and run
+    a newer snapshot, rather than letting one scan mix old and new state.
+
+    An injected scanner is retained for headless callers and tests.  The real
+    scanner receives every input explicitly, including Steam roots, so a
+    worker never reaches out to mutable ``Session`` state or re-resolves HOME.
+    """
+
+    roots: tuple[Path, ...] | None
+    records: dict[str, pairings.Pairing]
+    include_workshop: bool
+    workshop_roots: tuple[Path, ...]
+    scanner: Scanner | None = None
+
+    def run(self) -> Library:
+        if self.scanner is not None:
+            return self.scanner(self.roots)
+        return scan.scan(
+            self.roots,
+            self.records,
+            include_workshop=self.include_workshop,
+            workshop_roots=self.workshop_roots,
+        )
+
 
 #: The one-entry playlist created when Media is activated.  A fixed id means
 #: repeated choices replace one visible playlist instead of filling the store
@@ -84,7 +126,7 @@ class Session:
         # happens once, inside the scan. An injected scanner is left alone: a
         # test that hands over a ready-made library means it, and re-resolving
         # would recompute every pairing from a disk the test never wrote to.
-        self._scan: Scanner = scanner if scanner is not None else self._scan_with_pairings
+        self._scanner = scanner
         self._library = Library(roots=(), items=())
         #: What the schedule last asked for, so a tick can tell whether the
         #: calendar has moved without rebuilding to find out.
@@ -152,18 +194,36 @@ class Session:
         rescan -- startup, the refresh button, a finished download -- honour
         the setting without having to remember to.
         """
+        return self.adopt_library(self.prepare_scan(roots).run())
+
+    def prepare_scan(self, roots: Sequence[Path] | None = None) -> LibraryScan:
+        """Snapshot all inputs for a scan without walking the library.
+
+        GUI code calls this on GTK's thread and runs :meth:`LibraryScan.run`
+        elsewhere.  Keeping the snapshot here means the synchronous and async
+        paths cannot quietly disagree about configured roots or pairings.
+        """
         if roots is None and self._settings.roots:
             roots = self._settings.roots
-        self._library = self._scan(roots)
+        resolved_roots = tuple(roots) if roots is not None else None
+        include_workshop = self._settings.scan_workshop
+        return LibraryScan(
+            roots=resolved_roots,
+            records=dict(self._pairings.records),
+            include_workshop=include_workshop,
+            workshop_roots=workshop.steam_roots() if include_workshop else (),
+            scanner=self._scanner,
+        )
+
+    def adopt_library(self, library: Library) -> Library:
+        """Install one completed scan and reconcile the active play order.
+
+        This is deliberately separate from the filesystem work so GUI callers
+        can guarantee mutation happens only on GTK's main thread.
+        """
+        self._library = library
         self._rebuild_playlist()
         return self._library
-
-    def _scan_with_pairings(self, roots: Sequence[Path] | None) -> Library:
-        return scan.scan(
-            roots,
-            self._pairings.records,
-            include_workshop=self._settings.scan_workshop,
-        )
 
     @property
     def pairings(self) -> pairings.Store:
@@ -366,7 +426,7 @@ class Session:
 
     # -- settings --------------------------------------------------------
 
-    def update_settings(self, settings: config.Settings) -> None:
+    def update_settings(self, settings: config.Settings, *, rescan_library: bool = True) -> None:
         """Adopt new settings, reacting to the ones that change behaviour."""
         previous = self._settings
         self._settings = settings
@@ -390,10 +450,14 @@ class Session:
         ):
             self._rebuild_playlist()
 
-        if settings.roots != previous.roots:
+        if (settings.roots, settings.scan_workshop) != (
+            previous.roots,
+            previous.scan_workshop,
+        ) and rescan_library:
             # Nothing else notices: the library is only re-read when something
-            # asks, and a root the user just added would stay invisible until
-            # the next launch.
+            # asks, and a root or Workshop source the user just changed would
+            # stay stale until the next launch. GUI callers opt out here and
+            # submit the exact same scan through their background lane.
             self.refresh()
 
         if (settings.video_muted, settings.video_volume) != (

@@ -1,0 +1,232 @@
+"""The pairing editor previews what it authors without hiding reusable stills."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+pytestmark = pytest.mark.gui
+
+gi = pytest.importorskip("gi")
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Adw, Gtk  # noqa: E402
+
+from wall_in_one import config  # noqa: E402
+from wall_in_one.library import pairings  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
+from wall_in_one.session import Session  # noqa: E402
+from wall_in_one.theme import palettes  # noqa: E402
+from wall_in_one.theme.palette import Palette, PalettePair  # noqa: E402
+from wall_in_one.ui import pairings_page  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def toolkit() -> None:
+    try:
+        Gtk.init()
+    except Exception:  # pragma: no cover - only on a headless machine
+        pytest.skip("no display")
+    Adw.init()
+
+
+class QuietThumbnailLoader:
+    def __init__(self, **_arguments: object) -> None: ...
+
+    def request(self, _item: MediaItem, _callback: Any) -> None: ...
+
+    def shutdown(self) -> None: ...
+
+
+class QuietPreviewLoader:
+    def __init__(self, **_arguments: object) -> None: ...
+
+    def request(self, _image: Path, _scheme: str, _callback: Any) -> None: ...
+
+    def shutdown(self) -> None: ...
+
+
+class PairingApp:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.settings = session.settings
+        self.resolved_palette = None
+        self.changes = 0
+        self.messages: list[str] = []
+
+    def pairing_changed(self, _item: MediaItem) -> None:
+        self.changes += 1
+
+    def window_report(self, message: str) -> None:
+        self.messages.append(message)
+
+
+def _item(path: Path, kind: Kind = Kind.STILL) -> MediaItem:
+    return MediaItem(path=path, kind=kind, size=1, mtime=1)
+
+
+def _session(
+    tmp_path: Path,
+    *,
+    item: MediaItem,
+    stills: tuple[MediaItem, ...],
+) -> Session:
+    library = Library(
+        roots=(tmp_path,),
+        items=(item, *stills),
+        still_inventory=stills,
+    )
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: library,
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    return session
+
+
+def _put_scroll_at(scroller: Gtk.ScrolledWindow, value: float) -> None:
+    scroller.get_vadjustment().configure(value, 0.0, 200.0, 1.0, 10.0, 20.0)
+
+
+def test_still_picker_is_searchable_bounded_and_survives_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video_path = tmp_path / "motion" / "clip.mp4"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    video = _item(video_path, Kind.VIDEO)
+    stills: list[MediaItem] = []
+    for index in range(60):
+        group = "group-b" if index == 57 else "group-a"
+        path = tmp_path / group / f"cover-{index:02d}.png"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"image")
+        stills.append(_item(path))
+
+    session = _session(tmp_path, item=video, stills=tuple(stills))
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page.edit(session, video)
+    root = Gtk.Window()
+    root.set_child(page)
+
+    assert len(page._still_cards_by_path) == pairings_page.STILL_PICKER_PAGE_SIZE
+    assert page._still_more.get_visible()
+    search = page._still_search
+    editor = page._editor.get_first_child()
+    search.set_text("group-b")
+    search.emit("search-changed")
+    search.set_position(4)
+    _put_scroll_at(page._still_scroll, 23.0)
+    chosen = stills[57]
+    card = page._still_cards_by_path[chosen.path]
+    card.set_active(True)
+
+    saved = session.pairings.get(pairings.Identity.of(video))
+    assert saved is not None and saved.still == chosen.path
+    assert application.changes == 1
+    assert page._editor.get_first_child() is editor
+    assert page._still_search is search
+    assert search.get_text() == "group-b"
+    assert search.get_position() == 4
+    assert page._still_scroll.get_vadjustment().get_value() == 23.0
+
+    # Model the asynchronous rescan that follows a pairing edit. The same
+    # widgets are reconciled in place rather than rebuilding the editor.
+    focused = search.grab_focus()
+    focused_widget = root.get_focus()
+    session.adopt_library(
+        Library(
+            roots=(tmp_path,),
+            items=(video.with_still(chosen.path), *stills),
+            still_inventory=tuple(stills),
+        )
+    )
+    page.refresh(session)
+    assert page._editor.get_first_child() is editor
+    assert page._still_search is search
+    assert page._still_cards_by_path[chosen.path] is card
+    assert search.get_text() == "group-b"
+    assert search.get_position() == 4
+    assert page._still_scroll.get_vadjustment().get_value() == 23.0
+    if focused:
+        assert root.get_focus() is focused_widget
+
+    page.shutdown()
+    root.destroy()
+    session.shutdown()
+
+
+def test_palette_swatches_follow_the_pairing_mode_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    picture = tmp_path / "wall.png"
+    picture.write_bytes(b"image")
+    media = _item(picture)
+    session = _session(tmp_path, item=media, stills=(media,))
+    application = PairingApp(session)
+    pair = PalettePair(
+        dark=Palette.from_mapping("dark", {"primary": "#000000"}),
+        light=Palette.from_mapping("light", {"primary": "#ffffff"}),
+    )
+    entry = palettes.PaletteEntry(
+        name="Test palette",
+        origin=palettes.Origin.CUSTOM,
+        path=None,
+        colours=pair,
+    )
+    monkeypatch.setattr(palettes, "discover", lambda: palettes.Discovery(entries=(entry,)))
+    monkeypatch.setattr(
+        pairings_page,
+        "swatch_strip",
+        lambda palette, **_arguments: Gtk.Label(label=palette.mode),
+    )
+
+    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page.edit(session, media)
+    box = page._adaptive_boxes["custom:Test palette"]
+    first = cast(Gtk.Label, box.get_first_child())
+    assert first.get_label() == "dark"
+
+    page._mode_row.set_selected(2)  # Light
+
+    assert page._adaptive_boxes["custom:Test palette"] is box
+    second = cast(Gtk.Label, box.get_first_child())
+    assert second.get_label() == "light"
+    assert second is not first
+    saved = session.pairings.get(pairings.Identity.of(media))
+    assert saved is not None and saved.palette.mode is pairings.Mode.LIGHT
+
+    page.shutdown()
+    session.shutdown()
+
+
+def test_manual_still_remains_an_explicit_escape_hatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video = _item(tmp_path / "clip.mp4", Kind.VIDEO)
+    manual = tmp_path / "outside" / "chosen.png"
+    manual.parent.mkdir()
+    manual.write_bytes(b"image")
+    session = _session(tmp_path, item=video, stills=())
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page.edit(session, video)
+
+    page._choose_picker_still(video, manual)
+
+    assert page._manual_still.get_subtitle() == str(manual)
+    saved = session.pairings.get(pairings.Identity.of(video))
+    assert saved is not None and saved.still == manual
+    page.shutdown()
+    session.shutdown()

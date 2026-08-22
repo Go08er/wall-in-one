@@ -8,7 +8,9 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStartPre=wall-in-one --write-config
+# Compilation is fail-closed and preserves the previous resolved document.
+# Let Rust decide whether that last-known-good document is still usable.
+ExecStartPre=-wall-in-one --write-config
 ExecStart=wall-in-one-service --wait-for-config
 Restart=on-failure
 RestartSec=5

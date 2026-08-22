@@ -93,6 +93,15 @@ def fallback_palette(mode: Mode = "dark") -> Palette:
     return Palette(mode=mode, colours=colours)
 
 
+def fixed() -> ResolvedPalette:
+    """The app-owned palette used when live Noctalia colours are disabled."""
+    return ResolvedPalette(
+        palette=fallback_palette(),
+        origin=Origin.FALLBACK,
+        detail="fixed Wall-in-One palette (Noctalia following is off)",
+    )
+
+
 def from_template(path: Path | None = None) -> ResolvedPalette | None:
     """Load the palette Noctalia last rendered for us, if it exists."""
     target = path if path is not None else paths.palette_path()

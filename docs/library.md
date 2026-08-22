@@ -58,7 +58,8 @@ video looks like rather than whatever was up before it.
 A video finds its still three ways, in this order:
 
 1. a `<video>.wall-in-one.json` sidecar naming one;
-2. a file of the same stem under `<first root>/Wall-in-One/Automatic Stills/`;
+2. its deterministic path-keyed file under
+   `<first root>/Wall-in-One/Automatic Stills/`;
 3. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
 
 A still that exists only to represent a video is not listed as a wallpaper of
@@ -75,6 +76,10 @@ Now every video without a still gets one. The frame is taken three seconds in
 -- videos routinely open on black or on a fade, and a black still looks like a
 bug and generates a grey palette -- at full resolution, as PNG, and a sidecar
 is written alongside recording the pairing.
+
+Generated filenames include a digest of the video's absolute path. Two files
+named `intro.mp4` in different folders therefore get different stills rather
+than silently overwriting each other.
 
 - It happens after each rescan, on a single background worker. One, not four:
   each job is ffmpeg decoding a large video, so the disk is the limit rather
@@ -158,7 +163,8 @@ of them cannot be undone:
 - **Remove** appears for a file we downloaded. It unlinks it along with
   everything we wrote beside it -- the sidecar proving we owned it, a still we
   generated for it, and that still's sidecar. It asks for confirmation.
-- **Move to Trash** appears for your own files. It moves them to the
+- **Move to Trash** appears for your own files inside a configured library
+  root. It moves them to the
   freedesktop home trash under `~/.local/share/Trash`, where a file manager can
   restore them. It does not ask, because confirming everything trains people to
   confirm everything and this one is recoverable.
@@ -168,14 +174,29 @@ renamed into it and is refused with a reason, rather than being silently
 unlinked when you expected to get it back.
 
 A file is only ours when two things agree: a marker file says we made the
-directory, and a per-file sidecar says we fetched that particular file. Both
-are required, so anything you drop into a downloads folder by hand stays yours.
+directory, and a provider provenance sidecar says we fetched that particular
+file. Both are required, so anything you drop into a downloads folder by hand
+stays yours. A `.wall-in-one.json` pairing sidecar only records the chosen
+representative still; it never grants deletion authority.
 Ownership is re-checked on disk at the moment of deletion, not trusted from a
 scan that may be minutes old.
 
-Removing a wallpaper also drops it from the favourites. The reason favourites
-outlive a missing file is that the file might come back, which is not true of
-one the app just destroyed.
+Provider installs publish and sync that provenance sidecar before making the
+media filename visible. A killed process can therefore leave only an ignored
+sidecar, never a visible download whose ownership became ambiguous. Hidden
+staging files and sidecars with no media are removed after 24 hours; recent
+ones, symlinks and unknown files are left alone in case another process is
+still working.
+
+Trash names are claimed with no-replace hard links rather than a check followed
+by an overwriting rename. Concurrent files with the same basename therefore
+receive distinct names, and both their bytes and `.trashinfo` records are
+synced before the original directory entry is removed.
+
+Removing a wallpaper also drops it from favourites, pairings and every
+playlist entry that refers to it. Those records normally outlive a missing
+file because the file might come back; that is not true of one the app just
+destroyed.
 
 ## Thumbnails
 

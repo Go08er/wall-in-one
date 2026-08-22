@@ -27,6 +27,14 @@ from wall_in_one.control.protocol import (
 #: callback.
 TIMEOUT: Final = 5.0
 
+# Applying an entry is deliberately synchronous on the Rust wire: the reply
+# means the still, palette and renderer hand-over actually happened. Each
+# external desktop helper has its own three-second bound, and a multi-display
+# apply can legitimately outlive the authoring socket's five-second budget.
+# Keep this below the plugin's 55-second command ceiling while avoiding the
+# worse outcome where ctl reports failure and the wallpaper changes afterward.
+RUNTIME_ACTION_TIMEOUT: Final = 45.0
+
 #: A search is answered on a worker, so the wait here is the website's rather
 #: than the window's -- the app stays responsive throughout. Generous enough to
 #: cover a rate limiter's own spacing between requests.
@@ -63,11 +71,49 @@ RUNTIME_VERBS: Final[frozenset[str]] = frozenset(
     }
 )
 
+RUNTIME_APPLY_VERBS: Final[frozenset[str]] = frozenset(
+    {
+        "playlist-use",
+        "schedule-follow",
+        "play",
+        "pause",
+        "stop",
+        "toggle",
+        "next",
+        "previous",
+        "prev",
+        "random",
+        "reload",
+        "quit",
+    }
+)
+
 # Verbs the retained Python --service mode already understands. They are a
 # compatibility bridge while installations move to the Rust runtime.
 PYTHON_RUNTIME_FALLBACKS: Final[frozenset[str]] = frozenset(
-    {"playlist-use", "shuffle", "cycle", "next", "prev", "random", "status", "quit"}
+    {
+        "playlist-use",
+        "schedule-follow",
+        "shuffle",
+        "cycle",
+        "next",
+        "previous",
+        "prev",
+        "random",
+        "status",
+        "quit",
+    }
 )
+
+OPEN_PAGE_ALIASES: Final[Mapping[str, str]] = {
+    "browse": "browse",
+    "media": "media",
+    "pairings": "media",
+    "playlists": "playlists",
+    "schedules": "schedules",
+    "displays": "schedules",
+    "settings": "settings",
+}
 
 #: Exit code for "the app is not running". Distinct from a failed command so a
 #: caller can react by launching it.
@@ -87,7 +133,12 @@ def send(request: Request, *, path: Path | None = None, timeout: float | None = 
     max_reply = (
         MAX_RUNTIME_MESSAGE_BYTES if target == paths.runtime_socket_path() else MAX_MESSAGE_BYTES
     )
-    wait = timeout if timeout is not None else TIMEOUTS.get(request.verb, TIMEOUT)
+    if timeout is not None:
+        wait = timeout
+    elif target == paths.runtime_socket_path() and request.verb in RUNTIME_APPLY_VERBS:
+        wait = RUNTIME_ACTION_TIMEOUT
+    else:
+        wait = TIMEOUTS.get(request.verb, TIMEOUT)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(wait)
     try:
@@ -149,14 +200,25 @@ def dispatch(verb: str, argument: str | None) -> int:
             except NotRunningError:
                 if verb not in PYTHON_RUNTIME_FALLBACKS:
                     raise
-                response = send(Request(verb=verb, argument=argument))
+                legacy_verb = "prev" if verb == "previous" else verb
+                legacy_argument = argument
+                if verb == "schedule-follow":
+                    legacy_verb = "playlist-use"
+                    legacy_argument = "none"
+                response = send(Request(verb=legacy_verb, argument=legacy_argument))
         else:
             response = send(Request(verb=verb, argument=argument))
     except NotRunningError as error:
         if verb == "open" and argument:
+            requested = argument.strip().casefold()
+            page = OPEN_PAGE_ALIASES.get(requested)
+            if page is None:
+                choices = "|".join(OPEN_PAGE_ALIASES)
+                print(f"error: usage: open <{choices}>", file=sys.stderr)
+                return 1
             try:
                 subprocess.Popen(
-                    [sys.argv[0], "--open-page", argument],
+                    [sys.argv[0], "--open-page", page],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -165,7 +227,7 @@ def dispatch(verb: str, argument: str | None) -> int:
             except OSError as launch_error:
                 print(f"error: cannot open Wall-in-One: {launch_error}", file=sys.stderr)
                 return 1
-            print(f"opened {argument}")
+            print(f"launch requested for {page}")
             return 0
         print(f"{error}", file=sys.stderr)
         return EXIT_NOT_RUNNING

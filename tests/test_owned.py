@@ -36,7 +36,11 @@ def _install(
     target = directory / name
     if media:
         target.write_bytes(b"not really an image")
-    (directory / f"{name}{suffix}").write_text(json.dumps(payload), encoding="utf-8")
+    document = dict(payload)
+    document.setdefault("schema", 1)
+    document.setdefault("plugin", "goober/wall-in-one")
+    document.setdefault("path", str(target))
+    (directory / f"{name}{suffix}").write_text(json.dumps(document), encoding="utf-8")
     return target
 
 
@@ -116,6 +120,19 @@ def test_a_malformed_sidecar_does_not_lose_the_others(tmp_path: Path) -> None:
 
     assert index.holds(_candidate())
     assert len(index) == 1
+
+
+def test_a_sidecar_filename_alone_is_not_provider_provenance(tmp_path: Path) -> None:
+    directory = tmp_path / "Wallhaven"
+    target = _install(
+        directory,
+        "mine.jpg",
+        ".wallhaven.json",
+        {"provider": "Wallhaven", "id": "abc123"},
+    )
+    target.with_name(target.name + ".wallhaven.json").write_text("{}", encoding="utf-8")
+
+    assert not owned.read([tmp_path]).holds(_candidate())
 
 
 def test_an_unrelated_result_is_not_held(tmp_path: Path) -> None:

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from wall_in_one.library import workshop
 
 # -- linking out ----------------------------------------------------------
@@ -73,6 +75,17 @@ def test_a_rejected_id_produces_no_links() -> None:
 
 
 # -- reading the tree -----------------------------------------------------
+
+
+def test_default_roots_follow_the_current_home_instead_of_import_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "isolated-home"
+    steam = home / ".local" / "share" / "Steam"
+    steam.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    assert workshop.steam_roots() == (steam,)
 
 
 def _install(content: Path, workshop_id: str, project: dict[str, object], file: str = "") -> Path:

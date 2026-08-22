@@ -1,12 +1,73 @@
 use crate::config::{Config, Entry, Playlist, ScheduleRule};
 use crate::protocol::{Request, Response};
-use crate::renderer::WallpaperDriver;
+use crate::renderer::{WallpaperDriver, MAX_OUTPUT_NAME_BYTES};
 use crate::schedule;
 use chrono::NaiveDateTime;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const OUTPUT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_LAST_ERROR_BYTES: usize = 12 * 1024;
+const MAX_OUTPUT_DISCOVERY_ERROR_BYTES: usize = 4 * 1024;
+const TRUNCATION_MARKER: &str = " ... [truncated] ... ";
+
+fn clean_error(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn truncate_middle(value: &str, maximum_bytes: usize) -> String {
+    let clean = clean_error(value);
+    if clean.len() <= maximum_bytes {
+        return clean;
+    }
+    if maximum_bytes <= TRUNCATION_MARKER.len() {
+        return "[truncated]".chars().take(maximum_bytes).collect();
+    }
+    let content_bytes = maximum_bytes - TRUNCATION_MARKER.len();
+    let prefix_bytes = content_bytes * 3 / 5;
+    let suffix_bytes = content_bytes - prefix_bytes;
+    let mut prefix_end = prefix_bytes;
+    while !clean.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let mut suffix_start = clean.len() - suffix_bytes;
+    while !clean.is_char_boundary(suffix_start) {
+        suffix_start += 1;
+    }
+    format!(
+        "{}{}{}",
+        &clean[..prefix_end],
+        TRUNCATION_MARKER,
+        &clean[suffix_start..]
+    )
+}
+
+fn bounded_failure_summary(failures: &[String]) -> String {
+    if failures.is_empty() {
+        return String::new();
+    }
+    let separators = failures.len().saturating_sub(1).saturating_mul(2);
+    let each = MAX_LAST_ERROR_BYTES
+        .saturating_sub(separators)
+        .checked_div(failures.len())
+        .unwrap_or(0);
+    failures
+        .iter()
+        .map(|failure| truncate_middle(failure, each))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 
 #[derive(Debug, Serialize)]
 pub struct Status<'a> {
@@ -21,10 +82,13 @@ pub struct Status<'a> {
     pub paused: bool,
     pub stopped: bool,
     pub shuffle: bool,
+    pub shuffle_default: bool,
+    pub shuffle_source: &'a str,
     pub cycle_enabled: bool,
     pub cycle_default: bool,
     pub cycle_source: &'a str,
     pub last_error: &'a str,
+    pub output_discovery_error: &'a str,
     pub playlists: Vec<PlaylistStatus<'a>>,
     pub schedule: ScheduleStatus<'a>,
     pub schedules: Vec<ScheduleRuleStatus<'a>>,
@@ -64,6 +128,7 @@ pub struct ScheduleRuleStatus<'a> {
 #[derive(Debug, Serialize)]
 pub struct DisplayStatus<'a> {
     pub connector: &'a str,
+    pub assignment_source: &'a str,
     pub assigned_playlist_id: &'a str,
     pub assigned_playlist: &'a str,
     pub playlist_id: &'a str,
@@ -96,8 +161,18 @@ pub struct Runtime<D: WallpaperDriver> {
     schedule_overrode_default: bool,
     cursors: HashMap<String, PlaylistCursor>,
     playback_state: PlaybackState,
-    shuffle: bool,
+    shuffle_override: Option<bool>,
     cycle_override: Option<bool>,
+    renderer_failed: bool,
+    /// Connectors used by the most recent apply. A blank connector is the
+    /// renderer's efficient all-output target when there are no explicit
+    /// assignments.
+    target_outputs: Vec<String>,
+    /// Last successful live compositor snapshot. This remains available as a
+    /// bounded fallback across a transient niri failure.
+    live_outputs: Option<Vec<String>>,
+    output_discovery_error: String,
+    last_output_probe: Instant,
     rng: XorShift64,
     last_cycle: Instant,
     last_error: String,
@@ -116,7 +191,15 @@ impl<D: WallpaperDriver> Runtime<D> {
             schedule::resolve_override(&config.schedules, at).map_err(|error| error.to_string())?;
         let schedule_overrode_default = scheduled.is_some();
         let active = scheduled.unwrap_or(&config.default_playlist).to_string();
-        let shuffle = config.settings.shuffle;
+        let target_outputs = if config.displays.is_empty() {
+            vec![String::new()]
+        } else {
+            config
+                .displays
+                .iter()
+                .map(|display| display.connector.clone())
+                .collect()
+        };
         let mut runtime = Self {
             config_path,
             config,
@@ -126,8 +209,13 @@ impl<D: WallpaperDriver> Runtime<D> {
             schedule_overrode_default,
             cursors: HashMap::new(),
             playback_state: PlaybackState::Playing,
-            shuffle,
+            shuffle_override: None,
             cycle_override: None,
+            renderer_failed: false,
+            target_outputs,
+            live_outputs: None,
+            output_discovery_error: String::new(),
+            last_output_probe: Instant::now(),
             rng: XorShift64::seeded(),
             last_cycle: Instant::now(),
             last_error: String::new(),
@@ -159,31 +247,43 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn handle(&mut self, request: Request, at: NaiveDateTime) -> Response {
+        let no_argument = |usage: &str| {
+            if request.argument.is_some() {
+                Err(format!("usage: {usage}"))
+            } else {
+                Ok(())
+            }
+        };
         let result = match request.verb.as_str() {
             "playlist-use" => self.use_playlist(request.argument.as_deref()),
-            "schedule-follow" => self.follow_schedule(at),
-            "play" => self.play(),
-            "pause" => self.pause(),
-            "toggle" => self.toggle(),
-            "stop" => self.stop_motion(),
+            "schedule-follow" => {
+                no_argument("schedule-follow").and_then(|()| self.follow_schedule(at))
+            }
+            "play" => no_argument("play").and_then(|()| self.play()),
+            "pause" => no_argument("pause").and_then(|()| self.pause()),
+            "toggle" => no_argument("toggle").and_then(|()| self.toggle()),
+            "stop" => no_argument("stop").and_then(|()| self.stop_motion()),
             "shuffle" => self.set_shuffle(request.argument.as_deref()),
             "cycle" => self.set_cycle(request.argument.as_deref()),
-            "next" => self.move_by(1),
-            "previous" => self.move_by(-1),
-            "random" => self.random_entry(),
+            "next" => no_argument("next").and_then(|()| self.move_by(1)),
+            "previous" => no_argument("previous").and_then(|()| self.move_by(-1)),
+            "random" => no_argument("random").and_then(|()| self.random_entry()),
             "status" => {
+                if let Err(error) = no_argument("status") {
+                    return Response::failure(error);
+                }
                 return match self.status_json(at) {
                     Ok(status) => Response::success(status),
                     Err(error) => Response::failure(error),
-                }
+                };
             }
-            "reload" => self.reload(at),
-            "quit" => {
+            "reload" => no_argument("reload").and_then(|()| self.reload(at)),
+            "quit" => no_argument("quit").map(|()| {
                 self.supersede_startup_apply();
                 self.quit = true;
                 self.driver.stop();
-                Ok("quitting".into())
-            }
+                "quitting".into()
+            }),
             _ => Err(format!("unknown runtime verb {:?}", request.verb)),
         };
         match result {
@@ -195,7 +295,13 @@ impl<D: WallpaperDriver> Runtime<D> {
     pub fn tick(&mut self, at: NaiveDateTime, now: Instant) {
         let failures = self.driver.poll_failures();
         if !failures.is_empty() {
-            self.last_error = failures.join("; ");
+            self.last_error = bounded_failure_summary(&failures);
+            // Videos remain retryable: unlike scenes, SystemDriver does not
+            // suppress a video after it exits.  Remember that Play has real
+            // work to do instead of treating the still fallback as healthy
+            // playback.  Scene retries still reach SystemDriver's session
+            // suppression and fail with the attributable scene diagnostic.
+            self.renderer_failed = true;
         }
         if self.manual_playlist.is_none() {
             if let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at) {
@@ -203,12 +309,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let wanted = scheduled
                     .unwrap_or(&self.config.default_playlist)
                     .to_string();
-                if wanted != self.active_playlist {
+                let playlist_changed = wanted != self.active_playlist;
+                let routing_changed = overrode != self.schedule_overrode_default;
+                self.schedule_overrode_default = overrode;
+                if playlist_changed {
                     self.active_playlist = wanted;
                     self.reset_cursor(&self.active_playlist.clone());
+                }
+                if playlist_changed || routing_changed {
                     let _ = self.apply_current();
                 }
-                self.schedule_overrode_default = overrode;
             }
         }
         if self.playback_state != PlaybackState::Paused
@@ -219,10 +329,89 @@ impl<D: WallpaperDriver> Runtime<D> {
             let _ = self.move_by(1);
             self.last_cycle = now;
         }
+        if now.saturating_duration_since(self.last_output_probe) >= OUTPUT_PROBE_INTERVAL {
+            self.last_output_probe = now;
+            self.driver.begin_apply();
+            match self.probe_outputs() {
+                Ok(outputs) if self.live_outputs.as_ref() != Some(&outputs) => {
+                    // The discovery call populated the driver's batch snapshot;
+                    // reuse it for this hand-over instead of asking niri twice.
+                    let _ = self.apply_current_in_batch(Ok(outputs));
+                }
+                Ok(outputs) => {
+                    self.live_outputs = Some(outputs);
+                    self.output_discovery_error.clear();
+                }
+                Err(error) => {
+                    self.output_discovery_error =
+                        truncate_middle(&error, MAX_OUTPUT_DISCOVERY_ERROR_BYTES)
+                }
+            }
+            self.driver.end_apply();
+        }
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
-        let targets = self.current_targets();
+        self.last_output_probe = Instant::now();
+        self.driver.begin_apply();
+        let discovered = self.probe_outputs();
+        let result = self.apply_current_in_batch(discovered);
+        self.driver.end_apply();
+        result
+    }
+
+    fn probe_outputs(&mut self) -> Result<Vec<String>, String> {
+        let mut outputs = self.driver.connected_outputs()?;
+        outputs.retain(|output| {
+            !output.is_empty()
+                && output.len() <= MAX_OUTPUT_NAME_BYTES
+                && !output.chars().any(char::is_control)
+        });
+        outputs.sort();
+        outputs.dedup();
+        if outputs.is_empty() {
+            Err("live output discovery returned no usable connectors".into())
+        } else {
+            Ok(outputs)
+        }
+    }
+
+    fn apply_current_in_batch(
+        &mut self,
+        discovered: Result<Vec<String>, String>,
+    ) -> Result<String, String> {
+        self.target_outputs = match discovered {
+            Ok(outputs) => {
+                self.live_outputs = Some(outputs.clone());
+                self.output_discovery_error.clear();
+                if self.config.displays.is_empty() {
+                    vec![String::new()]
+                } else {
+                    outputs
+                }
+            }
+            Err(error) => {
+                self.output_discovery_error =
+                    truncate_middle(&error, MAX_OUTPUT_DISCOVERY_ERROR_BYTES);
+                if self.config.displays.is_empty() {
+                    vec![String::new()]
+                } else if let Some(outputs) = &self.live_outputs {
+                    outputs.clone()
+                } else {
+                    // niri may not be ready during login. Preserve the former
+                    // explicit-assignment behaviour until a live snapshot is
+                    // available; unassigned outputs join on the first probe.
+                    self.config
+                        .displays
+                        .iter()
+                        .map(|display| display.connector.clone())
+                        .collect()
+                }
+            }
+        };
+        let targets = self.current_targets(&self.target_outputs);
+        let outputs: Vec<String> = targets.iter().map(|(_, output)| output.clone()).collect();
+        self.driver.retain_outputs(&outputs);
         if targets.is_empty() {
             return self.fail("active display playlists are empty");
         }
@@ -232,7 +421,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         if self.playback_state == PlaybackState::Stopped {
             settings.dynamics_enabled = false;
         }
-        self.driver.begin_apply();
         for (entry, output) in targets {
             if let Err(error) = self.driver.apply(&entry, &output, &settings) {
                 errors.push(if output.is_empty() {
@@ -242,37 +430,60 @@ impl<D: WallpaperDriver> Runtime<D> {
                 });
             }
         }
-        self.driver.end_apply();
         if self.playback_state == PlaybackState::Paused {
-            self.driver.set_paused(true);
+            if let Err(error) = self.driver.set_paused(true) {
+                // The newly started renderer is not paused. Do not leave status
+                // claiming otherwise. Undo any partial multi-output pause on a
+                // best-effort basis before reporting the renderer as playing.
+                self.playback_state = PlaybackState::Playing;
+                let rollback = self
+                    .driver
+                    .set_paused(false)
+                    .err()
+                    .map(|detail| format!("; resume rollback also failed: {detail}"))
+                    .unwrap_or_default();
+                errors.push(format!("could not pause renderer: {error}{rollback}"));
+            }
         }
         if errors.is_empty() {
             self.supersede_startup_apply();
             self.last_error.clear();
-            Ok(format!("playing {played}"))
+            self.renderer_failed = false;
+            Ok(match self.playback_state {
+                PlaybackState::Playing => format!("playing {played}"),
+                PlaybackState::Paused => format!("paused {played}"),
+                PlaybackState::Stopped => format!("showing {played}; motion stopped"),
+            })
         } else {
             let error = errors.join("; ");
-            self.last_error = error.clone();
+            self.last_error = bounded_failure_summary(&errors);
+            self.renderer_failed = true;
             Err(error)
         }
     }
 
-    fn current_targets(&self) -> Vec<(Entry, String)> {
+    fn current_targets(&self, outputs: &[String]) -> Vec<(Entry, String)> {
         let mut targets = Vec::new();
         if self.config.displays.is_empty() {
             if let Some(entry) = self.current_entry_for(&self.active_playlist).cloned() {
                 targets.push((entry, String::new()));
             }
         } else {
-            for display in &self.config.displays {
+            for output in outputs {
                 let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
                 {
                     &self.active_playlist
                 } else {
-                    &display.playlist
+                    self.config
+                        .displays
+                        .iter()
+                        .find(|display| display.connector == *output)
+                        .map_or(self.config.default_playlist.as_str(), |display| {
+                            display.playlist.as_str()
+                        })
                 };
                 if let Some(entry) = self.current_entry_for(reference).cloned() {
-                    targets.push((entry, display.connector.clone()));
+                    targets.push((entry, output.clone()));
                 }
             }
         }
@@ -309,22 +520,37 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn set_shuffle(&mut self, value: Option<&str>) -> Result<String, String> {
-        self.shuffle = match value
-            .ok_or("usage: shuffle on|off")?
+        let before = self.shuffle_enabled();
+        self.shuffle_override = match value
+            .ok_or("usage: shuffle on|off|default")?
             .trim()
             .to_ascii_lowercase()
             .as_str()
         {
-            "on" | "true" | "1" => true,
-            "off" | "false" | "0" => false,
-            _ => return Err("usage: shuffle on|off".into()),
+            "on" | "true" | "1" => Some(true),
+            "off" | "false" | "0" => Some(false),
+            "default" | "config" | "follow" => None,
+            _ => return Err("usage: shuffle on|off|default".into()),
         };
-        let current = self.current_entry_ids();
-        self.rebuild_cursors(&current)?;
+        let enabled = self.shuffle_enabled();
+        if enabled != before {
+            let current = self.current_entry_ids();
+            self.rebuild_cursors(&current)?;
+        }
         Ok(format!(
-            "shuffle {}",
-            if self.shuffle { "on" } else { "off" }
+            "shuffle {} ({})",
+            if enabled { "on" } else { "off" },
+            if self.shuffle_override.is_some() {
+                "manual"
+            } else {
+                "config"
+            }
         ))
+    }
+
+    fn shuffle_enabled(&self) -> bool {
+        self.shuffle_override
+            .unwrap_or(self.config.settings.shuffle)
     }
 
     fn cycle_enabled(&self) -> bool {
@@ -364,9 +590,24 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn play(&mut self) -> Result<String, String> {
         match self.playback_state {
-            PlaybackState::Playing => {}
+            PlaybackState::Playing => {
+                if self.renderer_failed {
+                    self.apply_current()?;
+                }
+            }
             PlaybackState::Paused => {
-                self.driver.set_paused(false);
+                if let Err(error) = self.driver.set_paused(false) {
+                    // A multi-output driver can fail after resuming an earlier
+                    // child. Restore the prior state as far as possible so the
+                    // unchanged Paused status remains truthful.
+                    let rollback = self
+                        .driver
+                        .set_paused(true)
+                        .err()
+                        .map(|detail| format!("; pause rollback also failed: {detail}"))
+                        .unwrap_or_default();
+                    return Err(format!("could not resume renderer: {error}{rollback}"));
+                }
                 self.playback_state = PlaybackState::Playing;
             }
             PlaybackState::Stopped => {
@@ -386,8 +627,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         if self.playback_state == PlaybackState::Stopped {
             return Ok("stopped; use play to resume motion".into());
         }
+        if let Err(error) = self.driver.set_paused(true) {
+            // Restore any children already paused before one target failed.
+            let rollback = self
+                .driver
+                .set_paused(false)
+                .err()
+                .map(|detail| format!("; resume rollback also failed: {detail}"))
+                .unwrap_or_default();
+            return Err(format!("could not pause renderer: {error}{rollback}"));
+        }
         self.playback_state = PlaybackState::Paused;
-        self.driver.set_paused(true);
         Ok("paused".into())
     }
 
@@ -403,7 +653,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         if self.playback_state == PlaybackState::Paused {
             // linux-wallpaperengine is process-frozen for pause. Let it receive
             // SIGTERM rather than waiting for the supervisor's SIGKILL timeout.
-            self.driver.set_paused(false);
+            let _ = self.driver.set_paused(false);
         }
         self.driver.stop();
         self.playback_state = PlaybackState::Stopped;
@@ -451,16 +701,34 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn reload(&mut self, at: NaiveDateTime) -> Result<String, String> {
         let next = Config::load(&self.config_path).map_err(|error| error.to_string())?;
-        let old_targets = self.current_targets();
+        let old_targets = self.current_targets(&self.target_outputs);
         let old_entries = self.current_entry_ids();
-        let renderer_changed = next.renderer != self.config.renderer;
+        let video_audio_changed = (next.renderer.video_muted, next.renderer.video_volume)
+            != (
+                self.config.renderer.video_muted,
+                self.config.renderer.video_volume,
+            );
+        // Mute and volume are live mpv properties. Treating them like launch
+        // settings made every slider step stop and recreate the wallpaper.
+        let mut comparable_renderer = next.renderer.clone();
+        comparable_renderer.video_muted = self.config.renderer.video_muted;
+        comparable_renderer.video_volume = self.config.renderer.video_volume;
+        let renderer_changed = comparable_renderer != self.config.renderer;
         let dynamics_changed =
             next.settings.dynamics_enabled != self.config.settings.dynamics_enabled;
-        if renderer_changed {
+        let displays_changed = next.displays != self.config.displays;
+        let video_audio_result = if renderer_changed {
             self.driver.reconfigure(next.renderer.clone());
-        }
+            None
+        } else if video_audio_changed {
+            Some(
+                self.driver
+                    .set_video_audio(next.renderer.video_muted, next.renderer.video_volume),
+            )
+        } else {
+            None
+        };
         self.config = next;
-        self.shuffle = self.config.settings.shuffle;
         if let Some(manual) = &self.manual_playlist {
             if self.config.playlist(manual).is_none() {
                 self.manual_playlist = None;
@@ -478,8 +746,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .to_string()
         };
         self.rebuild_cursors(&old_entries)?;
-        if renderer_changed || dynamics_changed || old_targets != self.current_targets() {
+        if renderer_changed
+            || dynamics_changed
+            || displays_changed
+            || old_targets != self.current_targets(&self.target_outputs)
+        {
             self.apply_current()?;
+        }
+        if let Some(result) = video_audio_result {
+            result?;
         }
         Ok("reloaded".into())
     }
@@ -530,7 +805,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let mut cursors = HashMap::new();
         for (id, entries, entry_ids) in specifications {
             let mut order: Vec<usize> = (0..entries).collect();
-            if self.shuffle {
+            if self.shuffle_enabled() {
                 self.rng.shuffle(&mut order);
             }
             let position = keep_entries
@@ -560,11 +835,18 @@ impl<D: WallpaperDriver> Runtime<D> {
             return vec![self.active_playlist.clone()];
         }
         let mut seen = HashSet::new();
-        self.config
-            .displays
+        self.target_outputs
             .iter()
-            .filter_map(|display| {
-                let playlist = self.config.playlist(&display.playlist)?;
+            .filter_map(|output| {
+                let reference = self
+                    .config
+                    .displays
+                    .iter()
+                    .find(|display| display.connector == *output)
+                    .map_or(self.config.default_playlist.as_str(), |display| {
+                        display.playlist.as_str()
+                    });
+                let playlist = self.config.playlist(reference)?;
                 if seen.insert(playlist.id.clone()) {
                     Some(playlist.id.clone())
                 } else {
@@ -576,7 +858,7 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn fail<T>(&mut self, error: impl Into<String>) -> Result<T, String> {
         let error = error.into();
-        self.last_error = error.clone();
+        self.last_error = truncate_middle(&error, MAX_LAST_ERROR_BYTES);
         Err(error)
     }
 
@@ -626,10 +908,15 @@ impl<D: WallpaperDriver> Runtime<D> {
         let mut displays = Vec::new();
         if self.config.displays.is_empty() {
             if let Some(entry) = entry {
+                let assigned = self
+                    .config
+                    .playlist(&self.config.default_playlist)
+                    .ok_or("default playlist is missing")?;
                 displays.push(DisplayStatus {
                     connector: "ALL",
-                    assigned_playlist_id: &active_playlist.id,
-                    assigned_playlist: &active_playlist.name,
+                    assignment_source: "default",
+                    assigned_playlist_id: &assigned.id,
+                    assigned_playlist: &assigned.name,
                     playlist_id: &active_playlist.id,
                     playlist: &active_playlist.name,
                     entry_id: &entry.id,
@@ -639,22 +926,38 @@ impl<D: WallpaperDriver> Runtime<D> {
                 });
             }
         } else {
-            for display in &self.config.displays {
-                let assigned = self.config.playlist(&display.playlist).ok_or_else(|| {
-                    format!("display {} names a missing playlist", display.connector)
-                })?;
+            for output in &self.target_outputs {
+                let explicit = self
+                    .config
+                    .displays
+                    .iter()
+                    .find(|display| display.connector == *output);
+                let assigned_reference = explicit
+                    .map_or(self.config.default_playlist.as_str(), |display| {
+                        display.playlist.as_str()
+                    });
+                let assigned = self
+                    .config
+                    .playlist(assigned_reference)
+                    .ok_or_else(|| format!("display {output} names a missing playlist"))?;
                 let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
                 {
                     &self.active_playlist
                 } else {
-                    &display.playlist
+                    assigned_reference
                 };
-                let effective = self.config.playlist(reference).ok_or_else(|| {
-                    format!("display {} names a missing playlist", display.connector)
-                })?;
+                let effective = self
+                    .config
+                    .playlist(reference)
+                    .ok_or_else(|| format!("display {output} names a missing playlist"))?;
                 if let Some(entry) = self.current_entry_for(&effective.id) {
                     displays.push(DisplayStatus {
-                        connector: &display.connector,
+                        connector: output,
+                        assignment_source: if explicit.is_some() {
+                            "explicit"
+                        } else {
+                            "default"
+                        },
                         assigned_playlist_id: &assigned.id,
                         assigned_playlist: &assigned.name,
                         playlist_id: &effective.id,
@@ -662,7 +965,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         entry_id: &entry.id,
                         kind: entry_kind(entry.kind),
                         still: entry.still.display().to_string(),
-                        motion_active: self.driver.motion_active(&display.connector),
+                        motion_active: self.driver.motion_active(output),
                     });
                 }
             }
@@ -683,10 +986,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                 if self.config.displays.is_empty() {
                     self.driver.motion_active("")
                 } else {
-                    self.config
-                        .displays
+                    self.target_outputs
                         .iter()
-                        .any(|display| self.driver.motion_active(&display.connector))
+                        .any(|output| self.driver.motion_active(output))
                 }
             }),
             playback_state: match self.playback_state {
@@ -696,7 +998,13 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             paused: self.playback_state == PlaybackState::Paused,
             stopped: self.playback_state == PlaybackState::Stopped,
-            shuffle: self.shuffle,
+            shuffle: self.shuffle_enabled(),
+            shuffle_default: self.config.settings.shuffle,
+            shuffle_source: if self.shuffle_override.is_some() {
+                "manual"
+            } else {
+                "config"
+            },
             cycle_enabled: self.cycle_enabled(),
             cycle_default: self.config.settings.cycle_enabled,
             cycle_source: if self.cycle_override.is_some() {
@@ -705,6 +1013,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "config"
             },
             last_error: &self.last_error,
+            output_discovery_error: &self.output_discovery_error,
             playlists,
             schedule: ScheduleStatus {
                 following: self.manual_playlist.is_none(),

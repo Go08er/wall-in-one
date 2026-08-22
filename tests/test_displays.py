@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one.library import displays, state_file
 from wall_in_one.library.displays import DisplayError, Store
 
 
@@ -153,6 +154,44 @@ def test_a_broken_file_is_set_aside_on_the_next_write(tmp_path: Path) -> None:
     assert Store.open(target).playlist_for("eDP-1") == "Quiet"
 
 
+def test_a_store_write_failure_does_not_change_the_in_memory_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "displays.json"
+    store = Store(path=target)
+    store.assign("eDP-1", "Quiet")
+
+    def fail(_assignments: object, _path: object) -> None:
+        raise DisplayError("local-io", "injected write failure")
+
+    monkeypatch.setattr(displays, "save", fail)
+    with pytest.raises(DisplayError):
+        store.assign("eDP-1", "Loud")
+
+    assert store.playlist_for("eDP-1") == "Quiet"
+    assert Store.open(target).playlist_for("eDP-1") == "Quiet"
+
+
+def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "displays.json"
+    original = "{not json"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+
+    def fail(_path: Path) -> Path:
+        raise OSError("injected relocation failure")
+
+    monkeypatch.setattr(state_file, "preserve_faulted", fail)
+    with pytest.raises(DisplayError):
+        store.assign("eDP-1", "Quiet")
+
+    assert store.fault is not None
+    assert target.read_text(encoding="utf-8") == original
+    assert len(store) == 0
+
+
 def test_entries_that_are_not_strings_are_dropped(tmp_path: Path) -> None:
     target = tmp_path / "displays.json"
     target.write_text(
@@ -160,7 +199,9 @@ def test_entries_that_are_not_strings_are_dropped(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert Store.open(target).all() == (("DP-2", "Quiet"),)
+    opened = Store.open(target)
+    assert opened.all() == (("DP-2", "Quiet"),)
+    assert opened.fault is not None
 
 
 def test_a_symlink_where_the_state_should_be_is_not_read(tmp_path: Path) -> None:
@@ -169,4 +210,6 @@ def test_a_symlink_where_the_state_should_be_is_not_read(tmp_path: Path) -> None
     target = tmp_path / "displays.json"
     target.symlink_to(elsewhere)
 
-    assert len(Store.open(target)) == 0
+    opened = Store.open(target)
+    assert len(opened) == 0
+    assert opened.fault is not None

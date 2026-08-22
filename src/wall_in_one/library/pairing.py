@@ -9,8 +9,8 @@ video wants a still standing behind it. There are three ways one gets there,
 tried in this order:
 
 1. a sidecar we wrote, `<video>.wall-in-one.json`, naming the still outright;
-2. a file of the same name in the managed `Automatic Stills` directory, which
-   is where generated stills land;
+2. a path-keyed file in the managed `Automatic Stills` directory, which is
+   where generated stills land without same-stem videos colliding;
 3. a sibling named by convention -- `foo.mp4` pairs with `foo-still.png` or
    plain `foo.png`.
 
@@ -20,11 +20,14 @@ so it is not a fallback so much as the common case.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
+from wall_in_one import file_io
 from wall_in_one.library.model import IMAGE_EXTENSIONS
 
 #: Written by us next to a video to record which still represents it.
@@ -77,10 +80,10 @@ def read_sidecar(video: Path) -> Path | None:
     """Read `<video>.wall-in-one.json` and return the still it names."""
     sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
-        if sidecar.stat().st_size > MAX_SIDECAR_BYTES:
-            return None
-        raw = sidecar.read_bytes()
+        raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
     except OSError:
+        return None
+    if raw is None:
         return None
     try:
         document = json.loads(raw)
@@ -103,12 +106,23 @@ def still_directory(root: Path) -> Path:
     return root / MANAGED_PARENT / AUTOMATIC_STILLS_DIRECTORY
 
 
+def automatic_still_stem(video: Path) -> str:
+    """Stable, collision-resistant basename for a video's generated still.
+
+    The absolute byte path is the media identity already used by the stores.
+    Keeping the readable ``video-`` prefix while hashing that identity avoids
+    two different ``intro.mp4`` files overwriting each other's still.
+    """
+    identity = os.fsencode(video.absolute())
+    return f"video-{hashlib.sha256(identity).hexdigest()[:24]}"
+
+
 def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
     """Look for a generated still under a managed `Automatic Stills` directory."""
     for root in roots:
         directory = still_directory(root)
         for extension in _still_extensions():
-            candidate = directory / (video.stem + extension)
+            candidate = directory / (automatic_still_stem(video) + extension)
             if candidate.is_file():
                 return candidate
     return None

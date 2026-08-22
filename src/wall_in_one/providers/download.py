@@ -6,28 +6,32 @@ sidecar** saying we downloaded that particular file. A marker alone is not
 enough, which is what keeps a file the user dropped into a managed directory
 by hand out of reach of the delete button.
 
-The names here are therefore not free -- they have to be the ones
-`library.scan._DIRECTORY_MARKERS` and `_FILE_SIDECAR_SUFFIXES` already look
-for, and they are the same names the predecessor wrote, so an existing library
-keeps its ownership across the rewrite.
+The names here are therefore not free -- they have to be the provider
+provenance names `library.scan` already looks for, and they are the same names
+the predecessor wrote, so an existing library keeps its ownership across the
+rewrite. Pairing metadata is separate and never grants deletion authority.
 
-Installation is `os.link` from a staged temporary in the same directory, not
-`os.replace`. Both are atomic; `link` additionally *fails* when the destination
-exists, and never overwriting a file we did not create is the whole point of
-the ownership rules above. The predecessor's suite has a regression test for
-exactly that (`test_preexisting_media_is_not_replaced`), and it is ported.
+Installation is `os.link` from staged temporaries in the same directory, not
+`os.replace`. Links fail rather than overwrite. Provenance is linked and synced
+first; media is the commit point, so process death leaves either a complete
+pair or an ignored sidecar that age-bounded recovery can remove. That ordering
+is as important as the ordinary exception rollback: `finally` never runs after
+`SIGKILL` or power loss.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from wall_in_one import file_io, paths
 from wall_in_one.providers.base import ProviderError
 
 #: Everything this app downloads lives under one directory in the user's
@@ -40,6 +44,20 @@ MAX_SIDECAR_BYTES: Final = 64 * 1024
 #: Enough distinct names that a collision means something is wrong, few enough
 #: that the loop terminates promptly.
 MAX_NAME_ATTEMPTS: Final = 10_000
+
+#: Typed hidden names make recovery conservative: only files this subsystem
+#: could have created are ever swept after a hard kill.
+MEDIA_STAGING_PREFIX: Final = ".wall-in-one-media-stage-"
+SIDECAR_STAGING_PREFIX: Final = ".wall-in-one-sidecar-stage-"
+MARKER_STAGING_PREFIX: Final = ".wall-in-one-marker-stage-"
+LEGACY_STAGING_PREFIXES: Final[tuple[str, ...]] = (
+    ".wall-in-one-staged-",
+    ".wall-in-one-tmp-",
+)
+
+#: A live transfer may legitimately take minutes. Recovery waits a day so it
+#: cannot race another process that is still validating a large download.
+STAGING_MAX_AGE_SECONDS: Final = 24 * 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,40 +154,207 @@ def managed_directory(root: Path, location: ManagedLocation) -> tuple[Path, Path
     """
     if not root.is_absolute():
         raise ProviderError("invalid-path", "download root must be an absolute path")
-    directory = root / MANAGED_PARENT / location.directory_name
+    if (
+        not location.directory_name
+        or "/" in location.directory_name
+        or "\\" in location.directory_name
+    ):
+        raise ProviderError("invalid-path", "managed provider directory name is unsafe")
+    _require_real_directory(root, create=False)
+    parent = root / MANAGED_PARENT
+    _require_real_directory(parent, create=True)
+    directory = parent / location.directory_name
+    _require_real_directory(directory, create=True)
     try:
-        directory.mkdir(parents=True, exist_ok=True)
+        resolved_root = root.resolve(strict=True)
+        resolved_parent = parent.resolve(strict=True)
+        resolved_directory = directory.resolve(strict=True)
     except OSError as error:
         raise ProviderError(
-            "local-io", f"could not create {directory}: {error.strerror or error}"
+            "invalid-path", f"managed directory cannot be resolved: {error}"
         ) from error
-    return directory, _write_marker(directory, location)
+    if (
+        resolved_parent.parent != resolved_root
+        or resolved_directory.parent != resolved_parent
+        or not resolved_directory.is_relative_to(resolved_root)
+    ):
+        raise ProviderError("invalid-path", f"managed directory escapes {root}")
+    # Validate the ownership marker before recovery is allowed to unlink even
+    # an app-shaped staging name.  A foreign marker must make this directory
+    # inert, not let cleanup run first and complain afterwards.
+    marker = _write_marker(directory, location)
+    recover_abandoned(directory, location)
+    return directory, marker
+
+
+def _require_real_directory(directory: Path, *, create: bool) -> None:
+    """Require one path component to be a real directory, never a link.
+
+    Provider destinations are write authority.  Following a symlink here
+    would let ``<root>/Wall-in-One`` redirect downloads, markers and recovery
+    unlinks outside the configured library root.
+    """
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise ProviderError(
+                "invalid-path", f"download root does not exist: {directory}"
+            ) from None
+        try:
+            directory.mkdir()
+            info = directory.lstat()
+        except OSError as error:
+            raise ProviderError(
+                "local-io", f"could not create {directory}: {error.strerror or error}"
+            ) from error
+    except OSError as error:
+        raise ProviderError(
+            "local-io", f"could not inspect {directory}: {error.strerror or error}"
+        ) from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ProviderError("invalid-path", f"managed path is not a real directory: {directory}")
+
+
+def recover_abandoned(
+    directory: Path,
+    location: ManagedLocation,
+    *,
+    now: float | None = None,
+) -> tuple[Path, ...]:
+    """Remove old, unmistakably app-owned remnants of interrupted installs.
+
+    Recent files are left alone because another process may still be
+    downloading. A final provider sidecar with no adjacent media is the only
+    visible half-install possible under the sidecar-first commit protocol; it
+    is inert to the scanner and safe to remove once old. Arbitrary dotfiles,
+    symlinks and non-regular files are never touched.
+    """
+    marker = directory / location.marker_name
+    try:
+        raw_marker = file_io.read_regular_bytes(marker, MAX_SIDECAR_BYTES)
+        marker_document: object = json.loads(raw_marker) if raw_marker is not None else None
+    except OSError, ValueError, RecursionError:
+        marker_document = None
+    if not isinstance(marker_document, dict) or not _marker_matches_location(
+        marker_document, location
+    ):
+        raise ProviderError(
+            "invalid-path", f"refusing provider cleanup without a valid marker: {marker}"
+        )
+
+    cutoff = (time.time() if now is None else now) - STAGING_MAX_AGE_SECONDS
+    prefixes = (
+        MEDIA_STAGING_PREFIX,
+        SIDECAR_STAGING_PREFIX,
+        MARKER_STAGING_PREFIX,
+        *LEGACY_STAGING_PREFIXES,
+    )
+    removed: list[Path] = []
+    try:
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                path = Path(entry.path)
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
+                    continue
+                staging = entry.name.startswith(prefixes)
+                orphan_sidecar = _is_owned_orphan_sidecar(path, location, info.st_size)
+                if not staging and not orphan_sidecar:
+                    continue
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                removed.append(path)
+    except OSError as error:
+        raise ProviderError(
+            "local-io", f"could not inspect provider staging: {error.strerror or error}"
+        ) from error
+    if removed:
+        try:
+            paths.fsync_directory(directory)
+        except OSError as error:
+            raise ProviderError(
+                "local-io",
+                f"cleaned abandoned provider staging but could not persist it: {error}",
+            ) from error
+    return tuple(removed)
+
+
+def _is_owned_orphan_sidecar(path: Path, location: ManagedLocation, size: int) -> bool:
+    """Prove an orphan is our provider provenance before unlinking it.
+
+    A suffix is only a naming convention, not deletion authority. Recovery
+    therefore requires the same identity fields emitted by both providers and
+    an exact path binding to the missing adjacent media. This keeps an old
+    user-authored ``*.motionbgs.json`` file out of the cleanup sweep.
+    """
+    if not path.name.endswith(location.sidecar_suffix) or size > MAX_SIDECAR_BYTES:
+        return False
+    media = Path(str(path)[: -len(location.sidecar_suffix)])
+    if os.path.lexists(media):
+        return False
+    try:
+        raw = file_io.read_regular_bytes(path, MAX_SIDECAR_BYTES)
+        if raw is None:
+            return False
+        document: object = json.loads(raw)
+    except OSError, ValueError, RecursionError:
+        return False
+    return (
+        isinstance(document, dict)
+        and type(document.get("schema")) is int
+        and document.get("schema") == 1
+        and document.get("plugin") == "goober/wall-in-one"
+        and document.get("provider") == location.provider
+        and document.get("path") == str(media)
+    )
 
 
 def _write_marker(directory: Path, location: ManagedLocation) -> Path:
     marker = directory / location.marker_name
-    if marker.is_symlink():
-        # Nothing legitimate makes this a symlink, and following one would let
-        # a download's ownership claim be redirected at an arbitrary file.
-        raise ProviderError("invalid-path", f"ownership marker is a symlink: {marker}")
     payload = encode_sidecar(location.marker_payload)
-    if marker.is_file():
+    try:
+        existing = file_io.read_regular_bytes(marker, MAX_SIDECAR_BYTES)
+    except OSError as error:
+        raise ProviderError("invalid-path", f"ownership marker is unsafe: {error}") from error
+    if existing is not None:
         try:
-            existing = marker.read_bytes()
-        except OSError:
-            existing = b""
-        if existing == payload:
-            return marker
-        try:
+            if existing == payload:
+                return marker
             document: object = json.loads(existing)
         except ValueError:
             document = None
-        if isinstance(document, dict) and document.get("schema") == 1:
-            # Someone else's version of our marker, or an older one. It still
-            # says the directory is managed, which is all that is claimed.
+        if isinstance(document, dict) and _marker_matches_location(document, location):
             return marker
-    _atomic_write(marker, payload)
+        raise ProviderError(
+            "conflict", f"ownership marker is not one this provider recognises: {marker}"
+        )
+    _atomic_write(marker, payload, prefix=MARKER_STAGING_PREFIX)
     return marker
+
+
+def _marker_matches_location(document: Mapping[str, object], location: ManagedLocation) -> bool:
+    """Current marker, plus the one exact predecessor shape we shipped."""
+    if type(document.get("schema")) is not int or document.get("schema") != 1:
+        return False
+    if location.provider == "MotionBGS" and location.sidecar_suffix == ".motionbgs.json":
+        return (
+            document.get("plugin", document.get("owner")) == "goober/wall-in-one"
+            and document.get("provider", "MotionBGS") == "MotionBGS"
+        )
+    if location.provider == "Wallhaven" and location.sidecar_suffix == ".wallhaven.json":
+        return (
+            document.get("kind") == "wallhaven"
+            and document.get("ownership") == "managed"
+            and document.get("plugin", "goober/wall-in-one") == "goober/wall-in-one"
+            and document.get("provider", "Wallhaven") == "Wallhaven"
+        )
+    return False
 
 
 def unique_destination(directory: Path, stem: str, extension: str, sidecar_suffix: str) -> Path:
@@ -192,8 +377,10 @@ def install(
 ) -> tuple[Path, Path]:
     """Move ``staged`` into place next to a freshly written sidecar.
 
-    Both links are no-replace, and either one failing rolls the other back, so
-    the library never sees a media file without its provenance or the reverse.
+    Both links are no-replace, and either one failing rolls the other back. The
+    sidecar is published and synced first; the media link is the commit point.
+    A hard kill can therefore leave an ignored orphan sidecar, never a visible
+    media file that has lost the provenance needed to manage it safely.
     ``staged`` must already be in ``destination``'s directory -- it is, because
     the transport streams downloads into the directory they are destined for,
     which is also what makes `os.link` cheap and same-filesystem by
@@ -204,7 +391,7 @@ def install(
         raise ProviderError("invalid-path", "staged download is not in its destination directory")
     sidecar_destination = Path(str(destination) + sidecar_suffix)
 
-    descriptor, name = tempfile.mkstemp(prefix=".wall-in-one-tmp-", dir=directory)
+    descriptor, name = tempfile.mkstemp(prefix=SIDECAR_STAGING_PREFIX, dir=directory)
     sidecar_temporary = Path(name)
     installed_media = False
     installed_sidecar = False
@@ -213,37 +400,56 @@ def install(
             sink.write(sidecar_payload)
             sink.flush()
             os.fsync(sink.fileno())
-        os.link(staged, destination, follow_symlinks=False)
-        installed_media = True
         os.link(sidecar_temporary, sidecar_destination, follow_symlinks=False)
         installed_sidecar = True
+        paths.fsync_directory(directory)
+        os.link(staged, destination, follow_symlinks=False)
+        installed_media = True
+        paths.fsync_directory(directory)
     except FileExistsError as error:
         _roll_back(installed_media, installed_sidecar, destination, sidecar_destination)
-        sidecar_temporary.unlink(missing_ok=True)
+        _discard_owned(sidecar_temporary)
         raise ProviderError(
             "conflict", f"{error.filename} appeared before it could be installed"
         ) from error
     except OSError as error:
         _roll_back(installed_media, installed_sidecar, destination, sidecar_destination)
-        sidecar_temporary.unlink(missing_ok=True)
+        _discard_owned(sidecar_temporary)
         raise ProviderError(
             "local-io", f"could not install download: {error.strerror or error}"
         ) from error
-    staged.unlink(missing_ok=True)
-    sidecar_temporary.unlink(missing_ok=True)
+    for temporary in (staged, sidecar_temporary):
+        _discard_owned(temporary)
     return destination, sidecar_destination
 
 
 def _roll_back(installed_media: bool, installed_sidecar: bool, media: Path, sidecar: Path) -> None:
-    if installed_sidecar:
-        sidecar.unlink(missing_ok=True)
+    # Media is the commit point. Remove and sync it before removing provenance,
+    # so a second hard kill during rollback can leave only the inert sidecar --
+    # never visible media with no ownership record.
     if installed_media:
-        media.unlink(missing_ok=True)
+        try:
+            media.unlink(missing_ok=True)
+            paths.fsync_directory(media.parent)
+        except OSError:
+            return
+    if installed_sidecar:
+        _discard_owned(sidecar)
 
 
-def _atomic_write(destination: Path, payload: bytes) -> None:
+def _discard_owned(path: Path) -> None:
+    """Best-effort removal of an unmistakably app-owned staging/sidecar path."""
+    try:
+        path.unlink(missing_ok=True)
+        paths.fsync_directory(path.parent)
+    except OSError:
+        # Recovery recognises the typed staging name or orphan sidecar later.
+        return
+
+
+def _atomic_write(destination: Path, payload: bytes, *, prefix: str) -> None:
     """Write ``payload`` to ``destination`` via a temporary in the same directory."""
-    descriptor, name = tempfile.mkstemp(prefix=".wall-in-one-tmp-", dir=destination.parent)
+    descriptor, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "wb") as sink:
@@ -251,6 +457,7 @@ def _atomic_write(destination: Path, payload: bytes) -> None:
             sink.flush()
             os.fsync(sink.fileno())
         os.replace(temporary, destination)
+        paths.fsync_directory(destination.parent)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise ProviderError(

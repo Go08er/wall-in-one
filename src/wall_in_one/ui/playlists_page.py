@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from functools import cmp_to_key
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import gi
 
@@ -18,6 +18,7 @@ from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk, Pango
 
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 
 SOURCE_PREFIX = "media:"
+SOURCE_PAGE_SIZE: Final = 48
 FLIP_CURVE = (0.20, 0.75, 0.18, 1.0)
 SETTLE_CURVE = (0.18, 0.82, 0.22, 1.0)
 CSS_EASE_CURVE = (0.25, 0.10, 0.25, 1.0)
@@ -682,6 +684,8 @@ class PlaylistsPage(Gtk.Box):
         self._source_cards: dict[_MediaCard, MediaItem] = {}
         self._source_cards_by_path: dict[Path, _MediaCard] = {}
         self._source_positions: dict[Path, int] = {}
+        self._source_inventory: tuple[MediaItem, ...] = ()
+        self._source_limit = SOURCE_PAGE_SIZE
         self._entry_rows: dict[str, _PlaylistEntryRow] = {}
         # Kept as an alias because permanence is about stable identity, not the
         # name callers used when the editor happened to be a card grid.
@@ -805,6 +809,16 @@ class PlaylistsPage(Gtk.Box):
         else:
             self._show_empty()
 
+    def runtime_status_changed(self, session: Session) -> None:
+        """Refresh only service-owned badges, never the media/card inventory."""
+        for identifier, (_row, _name, detail) in self._playlist_rows_by_id.items():
+            playlist = session.playlists.get(identifier)
+            if playlist is not None:
+                detail.set_label(self._playlist_detail(session, playlist))
+        playlist = session.playlists.get(self._editor_id)
+        if playlist is not None:
+            self._sync_play_button(session, playlist)
+
     @staticmethod
     def _new_playlist_row() -> tuple[Gtk.ListBoxRow, Gtk.Label, Gtk.Label]:
         row = Gtk.ListBoxRow()
@@ -823,11 +837,28 @@ class PlaylistsPage(Gtk.Box):
         row.set_child(content)
         return row, name, detail
 
-    @staticmethod
-    def _playlist_detail(session: Session, playlist: playlists.Playlist) -> str:
+    def _playlist_detail(self, session: Session, playlist: playlists.Playlist) -> str:
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        active = (
+            truth.playlist_is_active(playlist.id)
+            if truth is not None
+            else playlist.id == session.active_playlist()
+        )
+        if active:
+            playing = (
+                " · playing manually"
+                if truth is not None and truth.is_manual
+                else " · active on a display"
+                if truth is not None and truth.is_multi_display
+                else " · playing from schedule"
+                if truth is not None
+                else " · playing"
+            )
+        else:
+            playing = ""
         return (
             f"{len(playlist)} item{'s' if len(playlist) != 1 else ''}"
-            + (" · playing" if playlist.id == session.active_playlist() else "")
+            + playing
             + (" · default" if playlist.id == session.settings.active_playlist else "")
         )
 
@@ -854,6 +885,7 @@ class PlaylistsPage(Gtk.Box):
         self._source_cards.clear()
         self._source_cards_by_path.clear()
         self._source_positions.clear()
+        self._source_inventory = ()
         self._entry_rows.clear()
         self._entry_items.clear()
         self._entry_positions.clear()
@@ -926,14 +958,21 @@ class PlaylistsPage(Gtk.Box):
             lambda child: self._source_visible(child, self._source_search.get_text())
         )
         self._source_flow.set_sort_func(self._compare_source_cards)
-        self._source_search.connect(
-            "search-changed", lambda _entry: self._source_flow.invalidate_filter()
-        )
+        # `search-changed` is deliberately delayed by Gtk.SearchEntry. A late
+        # callback can otherwise append cards for a query the person has
+        # already replaced. Reconciliation is cheap (only widgets are bounded;
+        # matching strings is pure), so follow the immediate text signal.
+        self._source_search.connect("changed", self._source_search_changed)
         self._source_scroll = Gtk.ScrolledWindow(
             vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
         )
         self._source_scroll.set_child(self._source_flow)
         pane.append(self._source_scroll)
+        self._source_more = Gtk.Button()
+        self._source_more.set_halign(Gtk.Align.CENTER)
+        self._source_more.connect("clicked", self._show_more_sources)
+        pane.append(self._source_more)
+        self._source_limit = SOURCE_PAGE_SIZE
         return pane
 
     def _build_playlist_pane(self) -> Gtk.Widget:
@@ -1001,12 +1040,7 @@ class PlaylistsPage(Gtk.Box):
             return
         if not self._name_entry.has_focus() and self._name_entry.get_text() != playlist.name:
             self._name_entry.set_text(playlist.name)
-        self._play_button.set_label(
-            "Playing now" if playlist.id == session.manual_playlist else "Play this playlist now"
-        )
-        self._play_button.set_sensitive(
-            bool(playlist.entries) and playlist.id != session.manual_playlist
-        )
+        self._sync_play_button(session, playlist)
         self._default_button.set_label(
             "Schedule default"
             if playlist.id == session.settings.active_playlist
@@ -1016,18 +1050,67 @@ class PlaylistsPage(Gtk.Box):
         self._sync_source_cards(session)
         self._sync_entry_cards(session, playlist)
 
+    def _sync_play_button(self, session: Session, playlist: playlists.Playlist) -> None:
+        """Render one runtime choice without touching either thumbnail pane."""
+        truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        manual = (
+            playlist.id == truth.playlist_id and truth.is_manual
+            if truth is not None
+            else playlist.id == session.manual_playlist
+        )
+        scheduled = (
+            truth is not None and playlist.id == truth.playlist_id and truth.follows_schedule
+        )
+        self._play_button.set_label(
+            "Playing now · manual override"
+            if manual
+            else "Use as manual override"
+            if scheduled
+            else "Play this playlist now"
+        )
+        self._play_button.set_sensitive(bool(playlist.entries) and not manual)
+
     def _sync_source_cards(self, session: Session) -> None:
-        incoming = {item.path: item for item in session.library.items}
+        self._source_inventory = session.library.items
+        self._reconcile_source_cards()
+
+    def _matching_source_items(self) -> tuple[MediaItem, ...]:
+        """Search the complete inventory without constructing every card."""
+        query = self._source_search.get_text().strip().casefold()
+        if not query:
+            return self._source_inventory
+        return tuple(item for item in self._source_inventory if self._source_matches(item, query))
+
+    @staticmethod
+    def _source_matches(item: MediaItem, query: str) -> bool:
+        return (
+            not query
+            or query in item.name.casefold()
+            or query in str(item.path).casefold()
+            or query in item.provider.casefold()
+        )
+
+    def _reconcile_source_cards(self) -> None:
+        """Diff one bounded page of source cards and thumbnail requests."""
+        matches = self._matching_source_items()
+        query = self._source_search.get_text().strip()
+        wanted_paths = {item.path for item in matches[: self._source_limit]}
+        # Keep the initial page's stable card objects while filtering. They are
+        # hidden by FlowBox, not destroyed, so a playlist edit during a search
+        # cannot replace the widget under the pointer/focus. Query-specific
+        # cards are replaced on the next query, keeping membership bounded.
+        if query:
+            wanted_paths.update(item.path for item in self._source_inventory[:SOURCE_PAGE_SIZE])
+        visible = tuple(item for item in self._source_inventory if item.path in wanted_paths)
+        incoming = {item.path: item for item in visible}
         for path, card in list(self._source_cards_by_path.items()):
             replacement = incoming.get(path)
             if replacement is None or replacement != card.item:
                 self._source_flow.remove(card)
                 self._source_cards.pop(card, None)
                 del self._source_cards_by_path[path]
-        self._source_positions = {
-            item.path: index for index, item in enumerate(session.library.items)
-        }
-        for item in session.library.items:
+        self._source_positions = {item.path: index for index, item in enumerate(visible)}
+        for item in visible:
             if item.path in self._source_cards_by_path:
                 continue
             card = _MediaCard(
@@ -1043,6 +1126,24 @@ class PlaylistsPage(Gtk.Box):
             self._loader.request(item, card.show_thumbnail)
         self._source_flow.invalidate_sort()
         self._source_flow.invalidate_filter()
+
+        remaining = max(0, len(matches) - self._source_limit)
+        self._source_more.set_visible(remaining > 0)
+        self._source_more.set_label(f"Show {min(SOURCE_PAGE_SIZE, remaining)} more")
+
+    def _source_search_changed(self, _entry: Gtk.SearchEntry) -> None:
+        self._source_limit = SOURCE_PAGE_SIZE
+        self._reconcile_source_cards()
+
+    def _show_more_sources(self, _button: Gtk.Button) -> None:
+        self._source_limit += SOURCE_PAGE_SIZE
+        self._reconcile_source_cards()
+
+    def _source_visible(self, child: Gtk.FlowBoxChild, raw: str) -> bool:
+        card = child.get_child()
+        item = self._source_cards.get(card) if isinstance(card, _MediaCard) else None
+        query = raw.strip().casefold()
+        return item is None or self._source_matches(item, query)
 
     def _sync_entry_cards(self, session: Session, playlist: playlists.Playlist) -> None:
         wanted = {entry.id: session.library.find(Path(entry.source)) for entry in playlist.entries}
@@ -1110,12 +1211,6 @@ class PlaylistsPage(Gtk.Box):
         flow.set_margin_top(6)
         flow.set_margin_bottom(6)
         return flow
-
-    def _source_visible(self, child: Gtk.FlowBoxChild, raw: str) -> bool:
-        card = child.get_child()
-        item = self._source_cards.get(card) if isinstance(card, _MediaCard) else None
-        query = raw.strip().casefold()
-        return item is None or not query or query in item.name.casefold()
 
     def _append_order_row(self, row: _PlaylistEntryRow) -> None:
         self._assert_not_dragging()

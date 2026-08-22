@@ -43,16 +43,16 @@ from pathlib import Path
 from typing import Any, Final
 
 from wall_in_one import paths
-from wall_in_one.library import pairing
+from wall_in_one.library import pairing, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
 
 #: The file, under `paths.app_state_dir()`, beside the favourites.
 STATE_FILENAME: Final = "pairings.json"
 
-#: Bumped only if the shape below changes. Read leniently: an unrecognised
-#: version is still a list of records, and refusing it would throw away
-#: somebody's choices over a number.
+#: Bumped only if the shape below changes. A newer marker is recovered for the
+#: interactive UI but reported as a fault, so an older build cannot compile or
+#: rewrite a document whose extra meaning it does not understand.
 FORMAT_VERSION: Final = 1
 
 #: A ceiling, so a file that grew a zero cannot be read forever.
@@ -305,31 +305,51 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
     Never raises. A wallpaper manager that will not start over its own
     customization file is worse than one that starts with the defaults.
     """
-    try:
-        if path.is_symlink() or not path.is_file():
-            return {}, None
-        if path.stat().st_size > MAX_STATE_BYTES:
-            return {}, f"{path.name} is too large to be a list of pairings"
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return {}, f"could not read {path.name}: {error.strerror or error}"
-
-    try:
-        payload = json.loads(text)
-    except ValueError, RecursionError:
-        return {}, f"{path.name} is not readable, so no customizations were loaded"
-    if not isinstance(payload, dict):
-        return {}, f"{path.name} is not a pairings file"
+    payload, fault = state_file.read_object(
+        path, maximum_bytes=MAX_STATE_BYTES, description="pairings"
+    )
+    if payload is None:
+        return {}, fault
+    faults = [
+        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
+    ]
     stored = payload.get("pairings")
     if not isinstance(stored, list):
         return {}, f"{path.name} has no pairings in it"
 
+    if len(stored) > MAX_PAIRINGS:
+        faults.append(f"{path.name} has more than {MAX_PAIRINGS} pairing records")
+
     found: dict[str, Pairing] = {}
+    malformed = 0
+    duplicate = 0
     for raw in stored[:MAX_PAIRINGS]:
         record = _record(raw)
-        if record is not None:
-            found[record.identity.key] = record
-    return found, None
+        if record is None:
+            malformed += 1
+            continue
+        assert isinstance(raw, dict)
+        still = raw.get("still")
+        mode = raw.get("mode")
+        palette = raw.get("palette")
+        if "still" in raw and (
+            not isinstance(still, str) or not still.strip() or not Path(still).is_absolute()
+        ):
+            malformed += 1
+        if "mode" in raw and (
+            not isinstance(mode, str) or mode not in {item.value for item in Mode}
+        ):
+            malformed += 1
+        if "palette" in raw and (not isinstance(palette, str) or not palette.strip()):
+            malformed += 1
+        if record.identity.key in found:
+            duplicate += 1
+        found[record.identity.key] = record
+    if malformed:
+        faults.append(f"{path.name} has {malformed} malformed pairing record fields")
+    if duplicate:
+        faults.append(f"{path.name} has {duplicate} duplicate pairing identities")
+    return found, state_file.joined_faults(faults)
 
 
 def load(path: Path | None = None) -> dict[str, Pairing]:
@@ -365,6 +385,7 @@ def save(records: Mapping[str, Pairing], path: Path | None = None) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        state_file.fsync_parent(target)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise PairingError(
@@ -535,8 +556,10 @@ class Store:
         identity = Identity.of(item)
         if identity.key not in self._records:
             return False
-        del self._records[identity.key]
-        self._write()
+        updated = dict(self._records)
+        del updated[identity.key]
+        self._write(updated)
+        self._records = updated
         return True
 
     def forget_identity(self, identity: Identity) -> bool:
@@ -547,8 +570,10 @@ class Store:
         """
         if identity.key not in self._records:
             return False
-        del self._records[identity.key]
-        self._write()
+        updated = dict(self._records)
+        del updated[identity.key]
+        self._write(updated)
+        self._records = updated
         return True
 
     def forget_path(self, path: Path) -> bool:
@@ -562,23 +587,31 @@ class Store:
         present = [key for key in keys if key in self._records]
         if not present:
             return False
+        updated = dict(self._records)
         for key in present:
-            del self._records[key]
-        self._write()
+            del updated[key]
+        self._write(updated)
+        self._records = updated
         return True
 
     def _commit(self, record: Pairing) -> Pairing:
-        self._records[record.identity.key] = record
-        self._write()
+        updated = dict(self._records)
+        updated[record.identity.key] = record
+        self._write(updated)
+        self._records = updated
         return record
 
-    def _write(self) -> None:
+    def _write(self, records: Mapping[str, Pairing]) -> None:
         target = self._path if self._path is not None else state_path()
         if self._fault is not None:
             # Do not overwrite bytes we could not understand: they are
             # somebody's choices, in some form, and a copy costs nothing.
-            broken = target.with_name(target.name + BROKEN_SUFFIX)
-            with contextlib.suppress(OSError):
-                os.replace(target, broken)
+            try:
+                state_file.preserve_faulted(target)
+            except OSError as error:
+                raise PairingError(
+                    "local-io",
+                    f"could not preserve unreadable {target}: {error.strerror or error}",
+                ) from error
             self._fault = None
-        save(self._records, target)
+        save(records, target)

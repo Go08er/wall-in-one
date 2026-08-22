@@ -15,7 +15,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config
-from wall_in_one.library import favourites, manage, pairings
+from wall_in_one.library import favourites, manage, pairings, playlists
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
 from wall_in_one.session import Session
@@ -96,6 +96,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._query = library_filter.Query()
         self._playable = 0
         self._summary = "No library loaded"
+        self._library_scanning = False
         self._management_session: Session | None = None
 
         self.set_title("Wall-in-One")
@@ -125,6 +126,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_available = False
         self._runtime_busy = False
         self._runtime_status_text = "Checking service…"
+        self._runtime_status_delayed = False
         self._runtime_navigation_buttons: list[Gtk.Button] = []
         self._playback_state = "playing"
 
@@ -158,6 +160,7 @@ class MainWindow(Adw.ApplicationWindow):
         refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Rescan the library")
         refresh.connect("clicked", lambda _button: self._app.refresh_library())
         refresh.set_tooltip_text("Rescan the library (F5)")
+        self._refresh_button = refresh
         header.pack_start(refresh)
 
         browse = Gtk.Button(
@@ -520,6 +523,23 @@ class MainWindow(Adw.ApplicationWindow):
         self._management_session = session
         self._refresh_visible_page()
 
+    def show_library_scanning(self, scanning: bool) -> None:
+        """Show scan progress without replacing any interactive widget.
+
+        The old grid deliberately stays mounted: its search text, focus,
+        scroll adjustment, decoded thumbnails and tile identities are all
+        still useful while the filesystem worker prepares the next snapshot.
+        """
+        self._library_scanning = scanning
+        self._refresh_button.set_sensitive(not scanning)
+        self._refresh_button.set_icon_name(
+            "content-loading-symbolic" if scanning else "view-refresh-symbolic"
+        )
+        self._refresh_button.set_tooltip_text(
+            "Scanning the library…" if scanning else "Rescan the library (F5)"
+        )
+        self._update_subtitle()
+
     def playlists_changed(self, session: Session) -> None:
         """Refresh only playlist authoring after a playlist-store mutation.
 
@@ -538,13 +558,33 @@ class MainWindow(Adw.ApplicationWindow):
         self._content_stack.set_visible_child_name("primary")
         self._switcher.set_reveal(True)
         self._stack.set_visible_child_name(page)
+        self._update_page_title()
         # GTK normally emits notify synchronously. Calling this explicitly is
         # cheap and keeps a remotely opened page populated even if a backend
         # defers that notification until the next frame.
         self._refresh_visible_page()
 
     def _on_page_changed(self, _stack: Adw.ViewStack, _property: object) -> None:
+        self._update_page_title()
         self._refresh_visible_page()
+
+    def _update_page_title(self) -> None:
+        """Expose the selected workflow to the compositor and accessibility.
+
+        The header deliberately stays compact, but a page-specific toplevel
+        title makes task switchers useful and gives the VM an observable marker
+        that cannot be forged by a changing desktop clock outside the window.
+        """
+        page = self._stack.get_visible_child_name()
+        titles = {
+            "browse": "Browse",
+            "media": "Media/Pairings",
+            "playlists": "Playlists",
+            "schedules": "Schedules",
+            "settings": "Settings",
+        }
+        title = titles.get(page) if page is not None else None
+        self.set_title(f"Wall-in-One - {title}" if title is not None else "Wall-in-One")
 
     def _refresh_visible_page(self) -> None:
         """Build only the page being viewed; palette previews stay truly lazy."""
@@ -559,6 +599,17 @@ class MainWindow(Adw.ApplicationWindow):
         elif shown == "schedules":
             self._schedules_page.refresh(session)
 
+    def _refresh_visible_runtime_state(self) -> None:
+        """Update playback labels without reconciling large authoring trees."""
+        session = self._management_session
+        if session is None:
+            return
+        shown = self._stack.get_visible_child_name()
+        if shown == "playlists":
+            self._playlists_page.runtime_status_changed(session)
+        elif shown == "schedules":
+            self._schedules_page.runtime_status_changed(session)
+
     def _update_subtitle(self) -> None:
         """Report what is on screen without misreporting the library.
 
@@ -572,9 +623,25 @@ class MainWindow(Adw.ApplicationWindow):
         summary = self._summary
         if self._query.narrows:
             summary = f"Showing {self._grid.visible_count} of {self._playable} - {summary}"
-        if self._runtime_summary:
-            summary += f" · {self._runtime_summary}"
+        if self._library_scanning:
+            summary += " · scanning library…"
+        runtime_summary = self._runtime_summary
+        if self._runtime_status_delayed:
+            runtime_summary = (
+                f"{runtime_summary} · status delayed"
+                if runtime_summary
+                else "runtime status delayed"
+            )
+        if runtime_summary:
+            summary += f" · {runtime_summary}"
         self._subtitle.set_subtitle(summary)
+
+    def _runtime_status_display_text(self) -> str:
+        return (
+            f"{self._runtime_status_text} · status delayed"
+            if self._runtime_status_delayed
+            else self._runtime_status_text
+        )
 
     def set_runtime_busy(self, busy: bool) -> None:
         """Make one in-flight playback command visible and non-repeatable."""
@@ -583,7 +650,7 @@ class MainWindow(Adw.ApplicationWindow):
             button.set_sensitive(not busy)
         self._runtime_controls.set_sensitive(self._runtime_available and not busy)
         self._runtime_control_status.set_text(
-            "Sending playback command…" if busy else self._runtime_status_text
+            "Sending playback command…" if busy else self._runtime_status_display_text()
         )
 
     def show_runtime_status(self, status: dict[str, object]) -> None:
@@ -612,6 +679,7 @@ class MainWindow(Adw.ApplicationWindow):
         finally:
             self._runtime_controls_loading = False
         self._runtime_available = True
+        self._runtime_status_delayed = False
         self._runtime_controls.set_sensitive(not self._runtime_busy)
         if state == "playing":
             self._runtime_play.set_icon_name("media-playback-pause-symbolic")
@@ -635,14 +703,28 @@ class MainWindow(Adw.ApplicationWindow):
         if not self._runtime_busy:
             self._runtime_control_status.set_text(self._runtime_status_text)
         last_error = status.get("last_error")
+        output_error = status.get("output_discovery_error")
         if isinstance(last_error, str) and last_error:
             self._runtime_summary = f"static fallback · {last_error}"
             if last_error != self._runtime_error:
                 self.report(last_error)
             self._runtime_error = last_error
+        elif isinstance(output_error, str) and output_error:
+            self._runtime_summary = f"{state} {playlist} ({source}) · display discovery degraded"
+            if output_error != self._runtime_error:
+                self.report(f"Display discovery is degraded: {output_error}")
+            self._runtime_error = output_error
         else:
             self._runtime_error = ""
             self._runtime_summary = f"{state} {playlist} ({source})"
+        self._update_subtitle()
+        self._refresh_visible_runtime_state()
+
+    def show_runtime_delayed(self) -> None:
+        """Keep last-known truth visible while one status deadline is missed."""
+        self._runtime_status_delayed = True
+        if not self._runtime_busy:
+            self._runtime_control_status.set_text(self._runtime_status_display_text())
         self._update_subtitle()
 
     def show_runtime_unavailable(self) -> None:
@@ -650,11 +732,13 @@ class MainWindow(Adw.ApplicationWindow):
         self._runtime_error = ""
         self._runtime_summary = "runtime unavailable"
         self._runtime_available = False
+        self._runtime_status_delayed = False
         self._runtime_controls.set_sensitive(False)
         self._runtime_status_text = "Runtime unavailable"
         if not self._runtime_busy:
             self._runtime_control_status.set_text(self._runtime_status_text)
         self._update_subtitle()
+        self._refresh_visible_runtime_state()
 
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:
         """Star or unstar one wallpaper, and tell the user if it did not stick."""
@@ -664,10 +748,11 @@ class MainWindow(Adw.ApplicationWindow):
             else:
                 self._favourites.discard(item.path)
         except favourites.FavouritesError:
-            # The store keeps the change in memory whatever the disk did, so
-            # the star stays where the user put it; this only says that it
-            # will not outlive the session.
-            self.report(f"{item.name} is a favourite for now, but could not be saved")
+            # Store mutations are transactional: a failed write did not adopt
+            # the candidate state, so leave every view on the last durable
+            # value instead of claiming an in-memory-only success.
+            self.report(f"{item.name} could not be saved as a favourite; nothing changed")
+            return
         self._grid.set_favourites(self._favourites.paths)
         self._app.favourites_changed()
         self._update_subtitle()
@@ -712,9 +797,10 @@ class MainWindow(Adw.ApplicationWindow):
 
         menu.append_submenu("Colours", self._palette_menu(item))
 
-        remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
-        remove_item.set_action_and_target_value("win.remove-wallpaper", target)
-        menu.append_item(remove_item)
+        if manage.is_removable(item, self._app.session.library.roots):
+            remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
+            remove_item.set_action_and_target_value("win.remove-wallpaper", target)
+            menu.append_item(remove_item)
         return menu
 
     def _palette_menu(self, item: MediaItem) -> Gio.MenuModel:
@@ -801,7 +887,8 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             self._app.session.pairings.choose_still(item, still)
         except pairings.PairingError:
-            self.report(f"{item.name} uses it for now, but the choice could not be saved")
+            self.report(f"The still for {item.name} could not be saved; nothing changed")
+            return
         self._app.pairing_changed(item)
 
     def _on_reset_pairing(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
@@ -813,7 +900,8 @@ class MainWindow(Adw.ApplicationWindow):
             if not self._app.session.pairings.reset(item):
                 return
         except pairings.PairingError:
-            self.report(f"{item.name} is back to its defaults for now, but that was not saved")
+            self.report(f"{item.name} could not be reset; nothing changed")
+            return
         self.report(f"{item.name} is back to its defaults")
         self._app.pairing_changed(item)
 
@@ -833,7 +921,8 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             self._app.session.pairings.choose_palette(item, policy)
         except pairings.PairingError:
-            self.report(f"{item.name} keeps those colours for now, but they could not be saved")
+            self.report(f"The colours for {item.name} could not be saved; nothing changed")
+            return
 
         self._app.pairing_changed(item)
 
@@ -895,7 +984,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _trash(self, item: MediaItem) -> None:
         try:
-            manage.trash(item.path, self._app.session.library.roots)
+            manage.trash(item, self._app.session.library.roots)
         except manage.ManageError as error:
             self.report(str(error))
             return
@@ -903,17 +992,18 @@ class MainWindow(Adw.ApplicationWindow):
         self.report(f"{item.name} moved to the trash")
 
     def _forget(self, item: MediaItem) -> None:
-        """Drop a removed wallpaper from the favourites, then rescan.
+        """Drop a removed wallpaper from authoring stores, then rescan.
 
-        The star and the pairing are what survive the file, and keeping either
-        for something the app itself destroyed would be pointless: the reason
-        they outlive a missing file is that the file might come back, which is
-        not true of one we just deleted.
+        Stars, pairing choices and playlist entries normally survive a missing
+        file because it might come back. That is not true of one we explicitly
+        deleted, so none may keep pointing at it.
         """
         with contextlib.suppress(favourites.FavouritesError):
             self._favourites.discard(item.path)
         with contextlib.suppress(pairings.PairingError):
             self._app.session.pairings.forget_path(item.path)
+        with contextlib.suppress(playlists.PlaylistError):
+            self._app.session.playlists.forget_path(item.path)
         self._grid.set_favourites(self._favourites.paths)
         self._app.refresh_library()
 

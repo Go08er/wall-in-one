@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 import tomllib
 from collections.abc import Callable
@@ -58,6 +60,85 @@ def test_write_config_refuses_a_malformed_settings_file(
 
 
 @pytest.mark.parametrize(
+    ("settings_text", "message"),
+    (
+        ('cycle_enabled = "yes"\n', "cycle_enabled must be a boolean"),
+        ("cycle_interval = 2.5\n", "cycle_interval must be an integer"),
+        ("cycle_interval = 2\n", "cycle_interval must be between"),
+        ("opacity = nan\n", "opacity must be a finite number"),
+        ('video_interpolation = "magic"\n', "video_interpolation must be one of"),
+        ('roots = ["/valid", 7]\n', "roots must be an array"),
+        ("future_setting = true\n", "unknown setting"),
+    ),
+)
+def test_write_config_refuses_semantically_invalid_settings_without_replacing_runtime(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    settings_text: str,
+    message: str,
+) -> None:
+    """Parseable TOML must not be allowed to compile repaired defaults."""
+    from wall_in_one import cli, paths
+
+    settings = paths.settings_path()
+    settings.parent.mkdir(parents=True)
+    settings.write_text(settings_text, encoding="utf-8")
+    target = paths.runtime_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    assert cli.main(["--write-config"]) == 1
+    assert message in capsys.readouterr().err
+    assert target.read_text(encoding="utf-8") == previous
+
+
+@pytest.mark.parametrize(
+    ("settings_text", "message"),
+    (
+        (
+            f"active_playlist = {json.dumps('x' * (config.MAX_RUNTIME_REFERENCE_BYTES + 1))}\n",
+            "active_playlist must be at most 480 UTF-8 bytes",
+        ),
+        (
+            f"output = {json.dumps('DP-1' + chr(1))}\n",
+            "output cannot contain control characters",
+        ),
+        (
+            f"output = {json.dumps('x' * (config.MAX_RUNTIME_CONNECTOR_BYTES + 1))}\n",
+            "output must be at most 256 UTF-8 bytes",
+        ),
+        (
+            f"roots = [{json.dumps('/' + 'x' * config.MAX_RUNTIME_PATH_BYTES)}]\n",
+            "roots[0] must be at most 4096 UTF-8 bytes",
+        ),
+        (
+            f"roots = [{json.dumps('/wallpapers/' + chr(1))}]\n",
+            "roots[0] cannot contain control characters",
+        ),
+    ),
+)
+def test_headless_settings_obey_rust_wire_bounds_without_replacing_runtime(
+    settings_text: str,
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one import cli, paths
+
+    settings = paths.settings_path()
+    settings.parent.mkdir(parents=True)
+    settings.write_text(settings_text, encoding="utf-8")
+    target = paths.runtime_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    assert cli.main(["--write-config"]) == 1
+    assert message in capsys.readouterr().err
+    assert target.read_text(encoding="utf-8") == previous
+
+
+@pytest.mark.parametrize(
     ("state_path", "store_name"),
     (
         (pairings.state_path, "pairings"),
@@ -99,6 +180,87 @@ def test_write_config_refuses_unreadable_authoring_state_without_replacing_runti
     assert target.read_text(encoding="utf-8") == previous
 
 
+@pytest.mark.parametrize(
+    ("state_path", "store_name", "valid", "malformed"),
+    (
+        (
+            pairings.state_path,
+            "pairings",
+            {"version": 1, "pairings": []},
+            {"version": 1, "pairings": [{"identity": "not-an-identity"}]},
+        ),
+        (
+            playlists.state_path,
+            "playlists",
+            {"version": 1, "playlists": []},
+            {"version": 1, "playlists": [{"name": "missing id"}]},
+        ),
+        (
+            schedules.state_path,
+            "schedules",
+            {"version": 1, "rules": []},
+            {"version": 1, "rules": [{"playlist": "missing id"}]},
+        ),
+        (
+            displays.state_path,
+            "display assignments",
+            {"version": 1, "displays": {}},
+            {"version": 1, "displays": {"eDP-1": 7}},
+        ),
+        (
+            favourites.state_path,
+            "favourites",
+            {"version": 1, "paths": []},
+            {"version": 1, "paths": ["relative/wallpaper.png"]},
+        ),
+    ),
+)
+@pytest.mark.parametrize("damage", ("symlink", "directory", "malformed-record", "future"))
+def test_write_config_preserves_last_good_for_every_authoring_store_fault(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_path: Callable[[], Path],
+    store_name: str,
+    valid: dict[str, object],
+    malformed: dict[str, object],
+    damage: str,
+) -> None:
+    """Recovery for the GUI must remain fail-closed for unattended automation."""
+    from wall_in_one import cli, paths
+
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "wallpaper.png").write_bytes(b"fixture")
+    config.save(config.Settings(roots=(media,), scan_workshop=False))
+    authoring = state_path()
+    authoring.parent.mkdir(parents=True, exist_ok=True)
+    if damage == "symlink":
+        elsewhere = authoring.with_name(f"{authoring.stem}-elsewhere.json")
+        elsewhere.write_text(json.dumps(valid), encoding="utf-8")
+        authoring.symlink_to(elsewhere)
+    elif damage == "directory":
+        authoring.mkdir()
+    elif damage == "malformed-record":
+        authoring.write_text(json.dumps(malformed), encoding="utf-8")
+    else:
+        future = dict(valid)
+        future["version"] = 99
+        authoring.write_text(json.dumps(future), encoding="utf-8")
+
+    target = paths.runtime_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    previous = 'schema_version = 1\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    assert cli.main(["--write-config"]) == 1
+
+    error = capsys.readouterr().err
+    assert store_name in error
+    assert authoring.name in error
+    assert "left untouched" in error
+    assert target.read_text(encoding="utf-8") == previous
+
+
 def test_shared_runtime_compiler_refuses_a_recovered_empty_authoring_store(
     tmp_path: Path,
 ) -> None:
@@ -119,7 +281,10 @@ def test_shared_runtime_compiler_refuses_a_recovered_empty_authoring_store(
 
 
 def _session(
-    tmp_path: Path, *, display_assignments: dict[str, str] | None = None
+    tmp_path: Path,
+    *,
+    display_assignments: dict[str, str] | None = None,
+    extra_playlists: tuple[playlists.Playlist, ...] = (),
 ) -> tuple[config.Settings, Session]:
     still = tmp_path / "still.png"
     video = tmp_path / "video.mp4"
@@ -152,11 +317,13 @@ def _session(
         video_interpolation="oversample",
         scene_fps=75,
     )
+    authored_playlists = {named.id: named}
+    authored_playlists.update((playlist.id, playlist) for playlist in extra_playlists)
     session = Session(
         settings,
         scanner=lambda _roots: Library(roots=(tmp_path,), items=items),
         pairing_store=pairings.Store({palette.identity.key: palette}),
-        playlist_store=playlists.Store({named.id: named}),
+        playlist_store=playlists.Store(authored_playlists),
         schedule_store=schedules.Store(
             (
                 schedules.Rule(
@@ -176,6 +343,86 @@ def _session(
     return settings, session
 
 
+@pytest.mark.parametrize("collision", ("duplicate-name", "id-name"))
+def test_compiler_refuses_ambiguous_playlist_identity_before_replacing_runtime(
+    tmp_path: Path, collision: str
+) -> None:
+    source = tmp_path / "still.png"
+    if collision == "duplicate-name":
+        first = playlists.Playlist(
+            id="first",
+            name="Same name",
+            entries=(playlists.Entry(id="entry-first", source=str(source)),),
+        )
+        second = playlists.Playlist(
+            id="second",
+            name="same NAME",
+            entries=(playlists.Entry(id="entry-second", source=str(source)),),
+        )
+    else:
+        first = playlists.Playlist(
+            id="opaque-id",
+            name="First",
+            entries=(playlists.Entry(id="entry-first", source=str(source)),),
+        )
+        second = playlists.Playlist(
+            id="second",
+            name="opaque-id",
+            entries=(playlists.Entry(id="entry-second", source=str(source)),),
+        )
+    settings, session = _session(tmp_path, extra_playlists=(first, second))
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 2\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+    try:
+        with pytest.raises(runtime_config.RuntimeConfigError, match="playlist"):
+            runtime_config.update(settings, session, target)
+    finally:
+        session.shutdown()
+    assert target.read_text(encoding="utf-8") == previous
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("output-control", "output connector setting cannot contain control"),
+        (
+            "active-playlist-long",
+            "active playlist setting must be at most",
+        ),
+        (
+            "root-long",
+            "library root 1 must be at most",
+        ),
+    ),
+)
+def test_shared_compiler_rechecks_wire_bound_settings_and_preserves_runtime(
+    tmp_path: Path, case: str, message: str
+) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+    if case == "output-control":
+        changed = replace(settings, output="DP-1\x01")
+    elif case == "active-playlist-long":
+        changed = replace(
+            settings,
+            active_playlist="x" * (runtime_config.MAX_REFERENCE_BYTES + 1),
+        )
+    else:
+        changed = replace(
+            settings,
+            roots=(Path("/") / ("x" * runtime_config.MAX_PATH_BYTES),),
+        )
+    try:
+        with pytest.raises(runtime_config.RuntimeConfigError, match=message):
+            runtime_config.update(changed, session, target)
+    finally:
+        session.shutdown()
+    assert target.read_text(encoding="utf-8") == previous
+
+
 def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     document = tomllib.loads(runtime_config.render(settings, session))
@@ -184,6 +431,8 @@ def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     assert document["renderer"]["scene_fps"] == 75
     assert document["renderer"]["video_hardware_decode"] is False
     assert document["renderer"]["video_interpolation"] == "oversample"
+    assert document["renderer"]["scene_muted"] is True
+    assert document["renderer"]["scene_volume"] == 0
     assert document["default_playlist"] == "evening"
     assert [one["id"] for one in document["playlists"]] == ["all-media", "evening"]
     entry = document["playlists"][1]["entries"][0]
@@ -235,6 +484,26 @@ def test_unchanged_compilation_does_not_replace_the_runtime_document(tmp_path: P
     assert target.stat().st_ino == inode
 
 
+@pytest.mark.parametrize("kind", ("symlink", "fifo"))
+def test_compiler_never_follows_or_waits_on_an_unsafe_runtime_target(
+    tmp_path: Path, kind: str
+) -> None:
+    settings, session = _session(tmp_path)
+    target = tmp_path / "state" / "runtime.toml"
+    target.parent.mkdir()
+    outside = tmp_path / "outside.toml"
+    outside.write_text('precious = "yes"\n', encoding="utf-8")
+    if kind == "symlink":
+        target.symlink_to(outside)
+    else:
+        os.mkfifo(target)
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="cannot read"):
+        runtime_config.update(settings, session, target)
+
+    assert outside.read_text(encoding="utf-8") == 'precious = "yes"\n'
+
+
 def test_unresolved_playlist_entries_are_omitted_not_looked_up(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     session.playlists.add("evening", tmp_path / "not-in-library.mp4", entry_id="missing")
@@ -243,17 +512,106 @@ def test_unresolved_playlist_entries_are_omitted_not_looked_up(tmp_path: Path) -
     assert [entry["id"] for entry in entries] == ["entry-video"]
 
 
-def test_playlist_with_no_resolved_entries_is_not_exported(tmp_path: Path) -> None:
+def test_playlist_with_no_resolved_entries_preserves_last_known_good(tmp_path: Path) -> None:
     settings, session = _session(tmp_path)
     empty = session.playlists.create("Empty")
     session.playlists.add(empty.id, tmp_path / "not-in-library.mp4")
     settings = config.Settings(roots=settings.roots, active_playlist=empty.id)
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match=r"playlist 'Empty'.*all 1"):
+        runtime_config.update(settings, session, target)
+
+    assert target.read_text(encoding="utf-8") == previous
+
+
+def test_an_unreferenced_empty_playlist_remains_a_safe_authoring_draft(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    draft = session.playlists.create("Draft")
+
     document = tomllib.loads(runtime_config.render(settings, session))
-    assert [playlist["id"] for playlist in document["playlists"]] == [
-        "all-media",
+
+    assert draft.id not in {playlist["id"] for playlist in document["playlists"]}
+
+
+def test_a_schedule_cannot_silently_lose_its_empty_playlist(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    draft = session.playlists.create("Draft")
+    session.schedules.add(draft.id, rule_id="draft-rule")
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    with pytest.raises(
+        runtime_config.RuntimeConfigError,
+        match=r"schedule 'draft-rule'.*playlist 'Draft'.*no playable entries",
+    ):
+        runtime_config.update(settings, session, target)
+
+    assert target.read_text(encoding="utf-8") == previous
+
+
+@pytest.mark.parametrize(
+    ("identifier", "name", "entry_id", "message"),
+    (
+        ("x" * (runtime_config.MAX_IDENTIFIER_BYTES + 1), "Valid", "entry", "playlist id"),
+        ("valid", "x" * (runtime_config.MAX_PLAYLIST_NAME_CHARS + 1), "entry", "name"),
+        ("valid", "Valid", "entry\x01", "playlist entry id"),
+    ),
+)
+def test_compiler_rejects_authored_strings_outside_the_rust_wire_contract(
+    tmp_path: Path,
+    identifier: str,
+    name: str,
+    entry_id: str,
+    message: str,
+) -> None:
+    source = tmp_path / "still.png"
+    invalid = playlists.Playlist(
+        id=identifier,
+        name=name,
+        entries=(playlists.Entry(id=entry_id, source=str(source)),),
+    )
+    settings, session = _session(tmp_path, extra_playlists=(invalid,))
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+    try:
+        with pytest.raises(runtime_config.RuntimeConfigError, match=message):
+            runtime_config.update(settings, session, target)
+    finally:
+        session.shutdown()
+    assert target.read_text(encoding="utf-8") == previous
+
+
+def test_compiler_rejects_schedule_and_display_strings_outside_wire_bounds(
+    tmp_path: Path,
+) -> None:
+    settings, session = _session(
+        tmp_path,
+        display_assignments={"x" * (runtime_config.MAX_CONNECTOR_BYTES + 1): "evening"},
+    )
+    session.schedules.add(
         "evening",
-    ]
-    assert document["default_playlist"] == "all-media"
+        rule_id="x" * (runtime_config.MAX_IDENTIFIER_BYTES + 1),
+    )
+    target = tmp_path / "runtime.toml"
+    previous = 'schema_version = 3\nlast_known_good = "preserve me"\n'
+    target.write_text(previous, encoding="utf-8")
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="schedule id must be at most"):
+        runtime_config.update(settings, session, target)
+    assert target.read_text(encoding="utf-8") == previous
+
+    # Remove the oversized rule so the next emitted field is examined.
+    session.schedules.remove(session.schedules.rules[-1].id)
+    with pytest.raises(
+        runtime_config.RuntimeConfigError, match="display connector must be at most"
+    ):
+        runtime_config.update(settings, session, target)
+    assert target.read_text(encoding="utf-8") == previous
 
 
 def test_legacy_single_output_becomes_a_resolved_display_assignment(tmp_path: Path) -> None:

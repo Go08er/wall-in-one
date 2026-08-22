@@ -5,7 +5,7 @@ use crate::config::{
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_OUTPUTS: usize = 32;
+pub const MAX_OUTPUT_NAME_BYTES: usize = 256;
 const MAX_OUTPUT_REPLY_BYTES: usize = 1024 * 1024;
 const MAX_REFRESH_MILLIHZ: u64 = 1_000_000;
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
@@ -191,19 +192,41 @@ pub trait VideoRenderer: Send {
         refresh_millihz: Option<u64>,
     ) -> Result<(), String>;
     fn stop(&mut self);
-    fn set_paused(&mut self, paused: bool) -> bool;
+    fn set_paused(&mut self, paused: bool) -> Result<(), String>;
     fn set_volume(&mut self, muted: bool, volume: u8) -> bool;
 }
 
 pub trait WallpaperDriver: Send {
     fn begin_apply(&mut self) {}
+    /// Return the compositor's currently connected output names.
+    ///
+    /// A batch-aware driver must reuse this same snapshot for any renderer
+    /// decisions made before `end_apply`, so one wallpaper hand-over performs
+    /// at most one compositor query.
+    fn connected_outputs(&mut self) -> Result<Vec<String>, String> {
+        Err("live output discovery is unavailable".into())
+    }
     fn apply(
         &mut self,
         entry: &Entry,
         output: &str,
         settings: &crate::config::Settings,
     ) -> Result<(), String>;
-    fn set_paused(&mut self, paused: bool);
+    /// Stop renderers which no longer have an entry in the effective target set.
+    ///
+    /// Applying one output cannot discover that another output disappeared, so
+    /// the runtime supplies the complete set once per batch.  The default keeps
+    /// lightweight test drivers source-compatible while real process owners
+    /// override it.
+    fn retain_outputs(&mut self, _outputs: &[String]) {}
+    fn set_paused(&mut self, paused: bool) -> Result<(), String>;
+    /// Retune video audio without restarting the renderer child.
+    ///
+    /// The default keeps lightweight/test drivers source-compatible. Process
+    /// owners override it and update both active children and launch defaults.
+    fn set_video_audio(&mut self, _muted: bool, _volume: u8) -> Result<(), String> {
+        Ok(())
+    }
     fn end_apply(&mut self) {}
     fn reconfigure(&mut self, settings: RendererSettings);
     fn poll_failures(&mut self) -> Vec<String> {
@@ -219,6 +242,15 @@ pub struct Mpvpaper {
     child: Option<Child>,
     socket: Option<PathBuf>,
     diagnostics: Option<BoundedCapture>,
+    pause_transport: PauseTransport,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PauseTransport {
+    #[default]
+    None,
+    Ipc,
+    Signal,
 }
 
 impl Mpvpaper {
@@ -227,26 +259,54 @@ impl Mpvpaper {
             child: None,
             socket: None,
             diagnostics: None,
+            pause_transport: PauseTransport::None,
         }
     }
 
-    fn ipc(&self, command: serde_json::Value) -> bool {
+    fn ipc(&self, command: serde_json::Value) -> Result<(), String> {
         let Some(path) = &self.socket else {
-            return false;
+            return Err("mpvpaper IPC socket is not configured".into());
         };
-        let Ok(mut stream) = UnixStream::connect(path) else {
-            return false;
-        };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-        let Ok(mut encoded) = serde_json::to_vec(&json!({"command": command})) else {
-            return false;
-        };
+        let mut stream = UnixStream::connect(path).map_err(|error| {
+            format!("cannot connect to mpvpaper IPC {}: {error}", path.display())
+        })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("cannot configure mpvpaper IPC timeout: {error}"))?;
+        let mut encoded = serde_json::to_vec(&json!({"command": command}))
+            .map_err(|error| format!("cannot encode mpvpaper IPC request: {error}"))?;
         encoded.push(b'\n');
-        if stream.write_all(&encoded).is_err() {
-            return false;
+        stream
+            .write_all(&encoded)
+            .map_err(|error| format!("cannot write mpvpaper IPC request: {error}"))?;
+        let mut reply = String::new();
+        BufReader::new(stream)
+            .take(4097)
+            .read_line(&mut reply)
+            .map_err(|error| format!("cannot read mpvpaper IPC response: {error}"))?;
+        if reply.len() > 4096 {
+            return Err("mpvpaper IPC response exceeded 4 KiB".into());
         }
-        let mut reply = [0_u8; 4096];
-        matches!(stream.read(&mut reply), Ok(count) if count > 0)
+        let document: serde_json::Value = serde_json::from_str(reply.trim())
+            .map_err(|error| format!("mpvpaper IPC returned invalid JSON: {error}"))?;
+        match document.get("error").and_then(serde_json::Value::as_str) {
+            Some("success") => Ok(()),
+            Some(error) => Err(format!("mpvpaper IPC refused the command: {error}")),
+            None => Err("mpvpaper IPC response has no error field".into()),
+        }
+    }
+
+    fn signal(&mut self, signal: i32) -> Result<(), String> {
+        let child = self.child.as_ref().ok_or("mpvpaper has no running child")?;
+        let result = unsafe { libc::kill(-(child.id() as i32), signal) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "cannot signal mpvpaper process group: {}",
+                std::io::Error::last_os_error()
+            ))
+        }
     }
 
     fn take_exit(&mut self) -> Result<Option<(ExitStatus, String)>, String> {
@@ -256,6 +316,7 @@ impl Mpvpaper {
         match child.try_wait() {
             Ok(Some(status)) => {
                 self.child.take();
+                self.pause_transport = PauseTransport::None;
                 if let Some(socket) = self.socket.take() {
                     let _ = fs::remove_file(socket);
                 }
@@ -291,10 +352,7 @@ impl VideoRenderer for Mpvpaper {
             .as_ref()
             .ok_or("video entry has no motion path")?;
         self.stop();
-        let safe_output: String = output
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
+        let safe_output = output_socket_token(output);
         let socket = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
@@ -350,14 +408,21 @@ impl VideoRenderer for Mpvpaper {
             .map(|stderr| BoundedCapture::start(stderr, MAX_DIAGNOSTIC_BYTES));
         self.child = Some(child);
         self.socket = Some(socket);
+        self.pause_transport = PauseTransport::None;
         options.clear();
         Ok(())
     }
 
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            if self.pause_transport == PauseTransport::Signal {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGCONT);
+                }
+            }
             stop_group(&mut child);
         }
+        self.pause_transport = PauseTransport::None;
         if let Some(diagnostics) = self.diagnostics.take() {
             let _ = diagnostics.finish();
         }
@@ -366,12 +431,49 @@ impl VideoRenderer for Mpvpaper {
         }
     }
 
-    fn set_paused(&mut self, paused: bool) -> bool {
-        self.ipc(json!(["set_property", "pause", paused]))
+    fn set_paused(&mut self, paused: bool) -> Result<(), String> {
+        if paused {
+            if self.pause_transport != PauseTransport::None {
+                return Ok(());
+            }
+            match self.ipc(json!(["set_property", "pause", true])) {
+                Ok(()) => {
+                    self.pause_transport = PauseTransport::Ipc;
+                    Ok(())
+                }
+                Err(ipc_error) => {
+                    // mpvpaper creates its IPC socket asynchronously.  A process
+                    // signal is an honest pause/resume fallback during that window,
+                    // and retains the documented resident-process semantics.
+                    self.signal(libc::SIGSTOP).map_err(|signal_error| {
+                        format!("{ipc_error}; signal fallback failed: {signal_error}")
+                    })?;
+                    self.pause_transport = PauseTransport::Signal;
+                    Ok(())
+                }
+            }
+        } else {
+            match self.pause_transport {
+                PauseTransport::None => Ok(()),
+                PauseTransport::Signal => {
+                    self.signal(libc::SIGCONT)?;
+                    self.pause_transport = PauseTransport::None;
+                    Ok(())
+                }
+                PauseTransport::Ipc => {
+                    // SIGCONT cannot undo mpv's own `pause` property. If IPC
+                    // disappears after an IPC pause, fail instead of claiming
+                    // playback resumed while frames remain frozen.
+                    self.ipc(json!(["set_property", "pause", false]))?;
+                    self.pause_transport = PauseTransport::None;
+                    Ok(())
+                }
+            }
+        }
     }
     fn set_volume(&mut self, muted: bool, volume: u8) -> bool {
-        let volume_ok = self.ipc(json!(["set_property", "volume", volume]));
-        let mute_ok = self.ipc(json!(["set_property", "mute", muted]));
+        let volume_ok = self.ipc(json!(["set_property", "volume", volume])).is_ok();
+        let mute_ok = self.ipc(json!(["set_property", "mute", muted])).is_ok();
         volume_ok && mute_ok
     }
 }
@@ -445,8 +547,7 @@ fn query_outputs(settings: &RendererSettings) -> Result<Vec<LiveOutput>, String>
             .and_then(serde_json::Value::as_str)
             .unwrap_or(key)
             .trim();
-        if candidate.is_empty()
-            || candidate.chars().any(char::is_control)
+        if !usable_output_name(candidate)
             || outputs
                 .iter()
                 .any(|known: &LiveOutput| known.name == candidate)
@@ -478,6 +579,40 @@ fn query_outputs(settings: &RendererSettings) -> Result<Vec<LiveOutput>, String>
     } else {
         Ok(outputs)
     }
+}
+
+fn usable_output_name(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate.len() <= MAX_OUTPUT_NAME_BYTES
+        && !candidate.chars().any(char::is_control)
+}
+
+fn output_socket_token(output: &str) -> String {
+    // Connector punctuation is not unique after sanitising (`DP-1` and
+    // `DP_1` both become `DP_1`). Keep a readable bounded prefix, then add a
+    // deterministic hash so two live outputs can never share mpv's IPC path.
+    let label: String = if output.is_empty() {
+        "ALL".into()
+    } else {
+        output
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .take(32)
+            .collect()
+    };
+    let hash = output
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("{label}-{hash:016x}")
 }
 
 fn unambiguous_refresh_millihz(outputs: &[LiveOutput], output: &str) -> Option<u64> {
@@ -734,6 +869,10 @@ impl WallpaperDriver for SystemDriver {
         self.output_snapshot = None;
     }
 
+    fn connected_outputs(&mut self) -> Result<Vec<String>, String> {
+        self.current_outputs()
+    }
+
     fn apply(
         &mut self,
         entry: &Entry,
@@ -767,17 +906,73 @@ impl WallpaperDriver for SystemDriver {
         }
     }
 
-    fn set_paused(&mut self, paused: bool) {
-        for video in self.videos.values_mut() {
-            let _ = video.renderer.set_paused(paused);
+    fn retain_outputs(&mut self, outputs: &[String]) {
+        let wanted: HashSet<String> = outputs.iter().map(|output| Self::key(output)).collect();
+        let stale: HashSet<String> = self
+            .videos
+            .keys()
+            .chain(self.scenes.keys())
+            .filter(|key| !wanted.contains(*key))
+            .cloned()
+            .collect();
+        for key in stale {
+            let output = self
+                .videos
+                .get(&key)
+                .map(|active| active.output.clone())
+                .or_else(|| self.scenes.get(&key).map(|active| active.output.clone()))
+                .unwrap_or(key);
+            self.stop_output(&output);
         }
-        for scene in self.scenes.values() {
-            unsafe {
+    }
+
+    fn set_paused(&mut self, paused: bool) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (key, video) in &mut self.videos {
+            if let Err(error) = video.renderer.set_paused(paused) {
+                errors.push(format!("{key}: {error}"));
+            }
+        }
+        for (key, scene) in &self.scenes {
+            let result = unsafe {
                 libc::kill(
                     -(scene.child.id() as i32),
                     if paused { libc::SIGSTOP } else { libc::SIGCONT },
-                );
+                )
+            };
+            if result != 0 {
+                errors.push(format!(
+                    "{key}: cannot signal linux-wallpaperengine process group: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn set_video_audio(&mut self, muted: bool, volume: u8) -> Result<(), String> {
+        // Adopt the launch defaults even if one current child refuses IPC: a
+        // later wallpaper must not resurrect the old setting.
+        self.settings.video_muted = muted;
+        self.settings.video_volume = volume;
+        let failed: Vec<_> = self
+            .videos
+            .iter_mut()
+            .filter_map(|(output, video)| {
+                (!video.renderer.set_volume(muted, volume)).then(|| output.clone())
+            })
+            .collect();
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "could not update video audio on {}",
+                failed.join(", ")
+            ))
         }
     }
 
@@ -882,6 +1077,8 @@ fn stop_group(child: &mut Child) {
 
 fn stop_group_with_grace(child: &mut Child, grace: Duration) {
     unsafe {
+        // A paused renderer cannot process SIGTERM until it is continued.
+        libc::kill(-(child.id() as i32), libc::SIGCONT);
         libc::kill(-(child.id() as i32), libc::SIGTERM);
     }
     let deadline = Instant::now() + grace;
@@ -905,6 +1102,7 @@ fn _absolute(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
 
     #[test]
     fn interpolation_options_are_complete_or_absent() {
@@ -960,6 +1158,21 @@ mod tests {
     }
 
     #[test]
+    fn compositor_output_names_are_bounded_before_becoming_process_arguments() {
+        assert!(usable_output_name("eDP-1"));
+        assert!(usable_output_name(&"x".repeat(MAX_OUTPUT_NAME_BYTES)));
+        assert!(!usable_output_name(&"x".repeat(MAX_OUTPUT_NAME_BYTES + 1)));
+        assert!(!usable_output_name("DP-1\n--bg"));
+    }
+
+    #[test]
+    fn connector_punctuation_cannot_collide_in_mpv_socket_names() {
+        assert_ne!(output_socket_token("DP-1"), output_socket_token("DP_1"));
+        assert_ne!(output_socket_token(""), output_socket_token("ALL"));
+        assert!(output_socket_token(&"x".repeat(MAX_OUTPUT_NAME_BYTES)).len() <= 49);
+    }
+
+    #[test]
     fn bounded_helper_times_out_kills_its_group_and_keeps_diagnostics() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -998,5 +1211,50 @@ mod tests {
         let rendered = diagnostic(&output.stderr);
         assert!(rendered.len() <= MAX_DIAGNOSTIC_BYTES + 32);
         assert!(rendered.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn ipc_paused_video_does_not_claim_sigcont_resumed_mpv() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wall-in-one-mpv-ipc-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("mpv.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let responder = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("set_property"));
+            stream.write_all(b"{\"error\":\"success\"}\n").unwrap();
+        });
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut renderer = Mpvpaper::new();
+        renderer.child = Some(command.spawn().unwrap());
+        renderer.socket = Some(socket.clone());
+
+        renderer.set_paused(true).unwrap();
+        responder.join().unwrap();
+        fs::remove_file(&socket).unwrap();
+        let error = renderer.set_paused(false).unwrap_err();
+        assert!(error.contains("cannot connect to mpvpaper IPC"), "{error}");
+        assert_eq!(renderer.pause_transport, PauseTransport::Ipc);
+
+        renderer.stop();
+        fs::remove_dir_all(root).unwrap();
     }
 }

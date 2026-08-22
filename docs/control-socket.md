@@ -11,7 +11,7 @@ $ wall-in-one ctl previous
 $ wall-in-one ctl random
 $ wall-in-one ctl play|pause|stop|toggle
 $ wall-in-one ctl cycle on|off|default
-$ wall-in-one ctl shuffle on|off
+$ wall-in-one ctl shuffle on|off|default
 $ wall-in-one ctl playlist-use Evening
 $ wall-in-one ctl schedule-follow
 $ wall-in-one ctl reload
@@ -26,9 +26,9 @@ $ wall-in-one ctl favourite /path/to/wallpaper.png
 $ wall-in-one ctl unfavourite /path/to/wallpaper.png
 $ wall-in-one ctl remove /path/to/wallpaper.png
 $ wall-in-one ctl pairing /path/to/wallpaper.png
-$ wall-in-one ctl still /path/to/wallpaper.mp4 /path/to/picture.png
+$ wall-in-one ctl still /path/to/wallpaper.mp4 :: /path/to/picture.png
 $ wall-in-one ctl still /path/to/wallpaper.mp4 default
-$ wall-in-one ctl palette /path/to/wallpaper.png builtin:Nord
+$ wall-in-one ctl palette /path/to/wallpaper.png :: builtin:Nord
 $ wall-in-one ctl reset-pairing /path/to/wallpaper.png
 $ wall-in-one ctl playlists [name]
 $ wall-in-one ctl playlist-new Evening
@@ -62,6 +62,13 @@ rule edits still belong in the app-generated configuration. An open GUI is not
 accepted as a substitute for runtime status: exit code 3 still means automation
 is not running.
 
+Each display row identifies `assignment_source` as `explicit` or `default`.
+`output_discovery_error` is empty during normal operation and explains when
+the service is temporarily using its last known connectors because niri could
+not provide a fresh snapshot. Runtime verbs shown above without an operand are
+strictly zero-argument; ignored trailing text is rejected, including for
+`quit`.
+
 If mpvpaper or linux-wallpaperengine exits, the runtime immediately falls back
 to that entry's paired still and reports the exact entry in `last_error`; it
 does not enter an automatic restart loop. A Workshop scene that crashes the
@@ -69,10 +76,12 @@ engine stays static for the rest of that service session, so later rotations
 do not repeatedly launch a known-incompatible scene. The app shows the same
 failure as a one-time toast and a persistent static-fallback subtitle.
 
-`open` presents the requested workflow in an existing app process, or launches
-the app when only the Rust service is running. The `displays` spelling is an
-alias for the Display schedules page, so a shell or panel integration does not
-have to know that both concepts share one screen.
+`open` validates the page name, presents the requested workflow in an existing
+app process, or requests a GUI launch when only the Rust service is running.
+The detached launch reply deliberately says **launch requested** rather than
+claiming a window was observed. The `displays` spelling is an alias for the
+Display schedules page, so a shell or panel integration does not have to know
+that both concepts share one screen.
 
 `providers`, `search` and `download` reach the same provider code the Browse
 tab uses, so a wallpaper can be found and pulled into the library without
@@ -96,7 +105,8 @@ moving source, and the colours it asks Noctalia for. Nothing has to be created
 reaches everything you have not spoken for. `pairing` shows one; `still` and
 `palette` choose; `reset-pairing` forgets. A palette policy is `adaptive`,
 `keep`, or `builtin:`/`community:`/`custom:` and a name. The path is split from
-the right, so a wallpaper directory with a space in its name needs no quoting.
+the right for the legacy one-word form; use the explicit ` :: ` separator when
+both the path and the chosen value contain spaces.
 
 A **playlist** is a named, ordered list, and `playlist-use` plays one now as a
 temporary override. `schedule-follow` returns control to the calendar. A manual
@@ -108,6 +118,11 @@ wallpapers that are not here keeps them -- an unmounted drive is not a deletion
 -- and if none of them are here the rotation quietly falls back to the whole
 library rather than stopping. A playlist whose name has a space in it is
 referred to by the id `playlists` prints beside it.
+
+Pairing commands use ` :: ` between their two operands. That delimiter is
+required when both sides may contain spaces—for example a video path and a
+representative-still path, or a wallpaper path and `community:Tokyo Night`.
+The older single-space form remains accepted when the right side is one word.
 
 **Wallpaper Engine** content installed through Steam is picked up automatically
 -- 49 wallpapers on the machine this was built on. Most Workshop items turn out

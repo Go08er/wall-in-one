@@ -1,11 +1,36 @@
+use crate::protocol::MAX_RESPONSE_BYTES;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 3;
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+
+// These mirror the authoring-store ceilings.  The generated all-media
+// fallback is additional to the 512 playlists a person can create.
+const MAX_PLAYLISTS: usize = 513;
+const MAX_ENTRIES_PER_PLAYLIST: usize = 10_000;
+const MAX_SCHEDULES: usize = 512;
+const MAX_DISPLAYS: usize = 64;
+const MAX_PLAYLIST_NAME_CHARS: usize = 120;
+const MAX_IDENTIFIER_BYTES: usize = 256;
+const MAX_REFERENCE_BYTES: usize = MAX_PLAYLIST_NAME_CHARS * 4;
+const MAX_CONNECTOR_BYTES: usize = 256;
+const MAX_OPTION_BYTES: usize = 256;
+const MAX_PATH_BYTES: usize = 4096;
+
+// Status is a single atomic snapshot containing every playlist and schedule.
+// Reserve room for JSON structure and ordinary bounded runtime diagnostics,
+// then count every configured string at four times its UTF-8 size.  Status is
+// JSON stored inside the line protocol's JSON `message`, so quotes and
+// backslashes can be escaped twice.  This prevents a successful status
+// snapshot from crossing protocol::MAX_RESPONSE_BYTES only when queried.
+const STATUS_STRUCTURAL_RESERVE: usize = 256 * 1024;
+const STATUS_DIAGNOSTIC_RESERVE: usize = 64 * 1024;
+const STATUS_JSON_ESCAPE_FACTOR: usize = 4;
+const MAX_LIVE_OUTPUTS: usize = 32;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -234,7 +259,17 @@ impl Config {
         if self.renderer.scene_fps == 0 || self.renderer.scene_fps > 240 {
             return invalid("scene_fps must be between 1 and 240");
         }
-        nonempty("renderer layer", &self.renderer.layer)?;
+        bounded_nonempty("renderer layer", &self.renderer.layer, MAX_OPTION_BYTES)?;
+        bounded_optional(
+            "renderer scene_scaling",
+            &self.renderer.scene_scaling,
+            MAX_OPTION_BYTES,
+        )?;
+        bounded_optional(
+            "renderer scene_clamp",
+            &self.renderer.scene_clamp,
+            MAX_OPTION_BYTES,
+        )?;
         for (label, path) in [
             ("noctalia_program", &self.renderer.noctalia_program),
             ("niri_program", &self.renderer.niri_program),
@@ -247,20 +282,56 @@ impl Config {
             absolute(label, path)?;
         }
 
-        let mut ids = HashSet::new();
-        let mut names = HashSet::new();
-        for playlist in &self.playlists {
-            nonempty("playlist id", &playlist.id)?;
-            nonempty("playlist name", &playlist.name)?;
-            if !ids.insert(playlist.id.as_str()) {
+        if self.playlists.len() > MAX_PLAYLISTS {
+            return invalid(format!(
+                "there are {} playlists; no more than {MAX_PLAYLISTS} are supported",
+                self.playlists.len()
+            ));
+        }
+        if self.schedules.len() > MAX_SCHEDULES {
+            return invalid(format!(
+                "there are {} schedule rules; no more than {MAX_SCHEDULES} are supported",
+                self.schedules.len()
+            ));
+        }
+        if self.displays.len() > MAX_DISPLAYS {
+            return invalid(format!(
+                "there are {} display assignments; no more than {MAX_DISPLAYS} are supported",
+                self.displays.len()
+            ));
+        }
+
+        let mut ids = HashMap::new();
+        let mut names = HashMap::new();
+        let mut folded_names = HashSet::new();
+        for (playlist_index, playlist) in self.playlists.iter().enumerate() {
+            bounded_nonempty("playlist id", &playlist.id, MAX_IDENTIFIER_BYTES)?;
+            bounded_nonempty_chars("playlist name", &playlist.name, MAX_PLAYLIST_NAME_CHARS)?;
+            if ids.insert(playlist.id.as_str(), playlist_index).is_some() {
                 return invalid(format!("duplicate playlist id {:?}", playlist.id));
             }
-            if !names.insert(playlist.name.as_str()) {
+            if names
+                .insert(playlist.name.as_str(), playlist_index)
+                .is_some()
+            {
                 return invalid(format!("duplicate playlist name {:?}", playlist.name));
+            }
+            if !folded_names.insert(fold_name(&playlist.name)) {
+                return invalid(format!(
+                    "duplicate playlist name {:?} when compared without case",
+                    playlist.name
+                ));
+            }
+            if playlist.entries.len() > MAX_ENTRIES_PER_PLAYLIST {
+                return invalid(format!(
+                    "playlist {:?} has {} entries; no more than {MAX_ENTRIES_PER_PLAYLIST} are supported",
+                    playlist.name,
+                    playlist.entries.len()
+                ));
             }
             let mut entry_ids = HashSet::new();
             for entry in &playlist.entries {
-                nonempty("entry id", &entry.id)?;
+                bounded_nonempty("entry id", &entry.id, MAX_IDENTIFIER_BYTES)?;
                 if !entry_ids.insert(entry.id.as_str()) {
                     return invalid(format!(
                         "duplicate entry id {:?} in playlist {:?}",
@@ -275,7 +346,10 @@ impl Config {
                         None => return invalid("video entry needs motion"),
                     },
                     EntryKind::Scene if entry.motion.is_none() => match &entry.scene_id {
-                        Some(id) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => {}
+                        Some(id)
+                            if !id.is_empty()
+                                && id.len() <= MAX_IDENTIFIER_BYTES
+                                && id.bytes().all(|b| b.is_ascii_digit()) => {}
                         _ => return invalid("scene entry needs a numeric scene_id"),
                     },
                     EntryKind::Still => {
@@ -286,22 +360,55 @@ impl Config {
                 }
                 match &entry.palette {
                     Palette::Keep { .. } => {}
-                    Palette::Adaptive { scheme, .. } => nonempty("adaptive scheme", scheme)?,
-                    Palette::Named { name, .. } => nonempty("palette name", name)?,
+                    Palette::Adaptive { scheme, .. } => {
+                        bounded_nonempty("adaptive scheme", scheme, MAX_OPTION_BYTES)?
+                    }
+                    Palette::Named { name, .. } => {
+                        bounded_nonempty("palette name", name, MAX_OPTION_BYTES)?
+                    }
                 }
             }
         }
         if self.playlists.is_empty() {
             return invalid("at least one playlist is required");
         }
+        for (id, id_index) in &ids {
+            if let Some(name_index) = names.get(id) {
+                if id_index != name_index {
+                    return invalid(format!(
+                        "playlist id {id:?} is also another playlist's name"
+                    ));
+                }
+            }
+        }
+        bounded_nonempty(
+            "default playlist reference",
+            &self.default_playlist,
+            MAX_REFERENCE_BYTES,
+        )?;
         reference(&self.default_playlist, &ids, &names)?;
+        let mut schedule_ids = HashSet::new();
         for rule in &self.schedules {
-            nonempty("schedule id", &rule.id)?;
+            bounded_nonempty("schedule id", &rule.id, MAX_IDENTIFIER_BYTES)?;
+            if !schedule_ids.insert(rule.id.as_str()) {
+                return invalid(format!("duplicate schedule id {:?}", rule.id));
+            }
+            bounded_nonempty(
+                "schedule playlist reference",
+                &rule.playlist,
+                MAX_REFERENCE_BYTES,
+            )?;
             reference(&rule.playlist, &ids, &names)?;
-            if rule.months.iter().any(|m| !(1..=12).contains(m)) {
+            if rule.months.len() > 12
+                || rule.months.iter().any(|m| !(1..=12).contains(m))
+                || rule.months.iter().collect::<HashSet<_>>().len() != rule.months.len()
+            {
                 return invalid(format!("schedule {:?} has an invalid month", rule.id));
             }
-            if rule.weekdays.iter().any(|d| *d > 6) {
+            if rule.weekdays.len() > 7
+                || rule.weekdays.iter().any(|d| *d > 6)
+                || rule.weekdays.iter().collect::<HashSet<_>>().len() != rule.weekdays.len()
+            {
                 return invalid(format!("schedule {:?} has an invalid weekday", rule.id));
             }
             match (&rule.start, &rule.end) {
@@ -320,14 +427,76 @@ impl Config {
         }
         let mut connectors = HashSet::new();
         for display in &self.displays {
-            nonempty("display connector", &display.connector)?;
+            bounded_nonempty("display connector", &display.connector, MAX_CONNECTOR_BYTES)?;
             if !connectors.insert(display.connector.as_str()) {
                 return invalid(format!(
                     "duplicate display connector {:?}",
                     display.connector
                 ));
             }
+            bounded_nonempty(
+                "display playlist reference",
+                &display.playlist,
+                MAX_REFERENCE_BYTES,
+            )?;
             reference(&display.playlist, &ids, &names)?;
+        }
+        self.validate_status_budget()?;
+        Ok(())
+    }
+
+    fn validate_status_budget(&self) -> Result<(), ConfigError> {
+        let mut configured_text = 0_usize;
+        let mut largest_playlist_identity = 0_usize;
+        let mut largest_entry = 0_usize;
+
+        for playlist in &self.playlists {
+            let identity = playlist.id.len().saturating_add(playlist.name.len());
+            configured_text = configured_text.saturating_add(identity);
+            largest_playlist_identity = largest_playlist_identity.max(identity);
+            for entry in &playlist.entries {
+                largest_entry =
+                    largest_entry.max(entry.id.len().saturating_add(path_bytes(&entry.still)));
+            }
+        }
+        for rule in &self.schedules {
+            let playlist = self
+                .playlist(&rule.playlist)
+                .expect("playlist references were validated before the status budget");
+            configured_text = configured_text
+                .saturating_add(rule.id.len())
+                .saturating_add(playlist.id.len())
+                .saturating_add(playlist.name.len())
+                .saturating_add(rule.start.as_ref().map_or(0, String::len))
+                .saturating_add(rule.end.as_ref().map_or(0, String::len));
+        }
+
+        // niri discovery is independently capped at 32 live outputs.  A
+        // manual override may put the largest playlist and entry on every one,
+        // so count that rather than only the currently assigned values.
+        let largest_connector = self
+            .displays
+            .iter()
+            .map(|display| display.connector.len())
+            .max()
+            .unwrap_or(MAX_CONNECTOR_BYTES)
+            .max(MAX_CONNECTOR_BYTES);
+        let per_display = largest_connector
+            .saturating_add(largest_playlist_identity.saturating_mul(2))
+            .saturating_add(largest_entry);
+        configured_text = configured_text
+            .saturating_add(per_display.saturating_mul(MAX_LIVE_OUTPUTS))
+            .saturating_add(largest_playlist_identity)
+            .saturating_add(largest_entry);
+
+        let encoded_bound = configured_text
+            .saturating_mul(STATUS_JSON_ESCAPE_FACTOR)
+            .saturating_add(STATUS_STRUCTURAL_RESERVE)
+            .saturating_add(STATUS_DIAGNOSTIC_RESERVE);
+        if encoded_bound > MAX_RESPONSE_BYTES {
+            return invalid(format!(
+                "runtime status could exceed the {MAX_RESPONSE_BYTES}-byte protocol response limit"
+            ));
         }
         Ok(())
     }
@@ -340,24 +509,71 @@ impl Config {
 }
 
 fn absolute(label: &str, path: &Path) -> Result<(), ConfigError> {
-    if path.is_absolute() {
-        Ok(())
-    } else {
+    if !path.is_absolute() {
         invalid(format!(
             "{label} must be an absolute path: {}",
             path.display()
         ))
+    } else {
+        let rendered = path.to_string_lossy();
+        if rendered.len() > MAX_PATH_BYTES || rendered.chars().any(char::is_control) {
+            invalid(format!(
+                "{label} is longer than {MAX_PATH_BYTES} bytes or contains control characters"
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
-fn nonempty(label: &str, value: &str) -> Result<(), ConfigError> {
-    if !value.trim().is_empty() && !value.chars().any(char::is_control) {
+fn path_bytes(path: &Path) -> usize {
+    path.to_string_lossy().len()
+}
+fn bounded_nonempty(label: &str, value: &str, maximum_bytes: usize) -> Result<(), ConfigError> {
+    if !value.trim().is_empty()
+        && value.len() <= maximum_bytes
+        && !value.chars().any(char::is_control)
+    {
         Ok(())
     } else {
-        invalid(format!("{label} is empty or contains control characters"))
+        invalid(format!(
+            "{label} is empty, longer than {maximum_bytes} bytes, or contains control characters"
+        ))
     }
 }
-fn reference(value: &str, ids: &HashSet<&str>, names: &HashSet<&str>) -> Result<(), ConfigError> {
-    if ids.contains(value) || names.contains(value) {
+fn bounded_nonempty_chars(
+    label: &str,
+    value: &str,
+    maximum_chars: usize,
+) -> Result<(), ConfigError> {
+    if !value.trim().is_empty()
+        && value.chars().count() <= maximum_chars
+        && !value.chars().any(char::is_control)
+    {
+        Ok(())
+    } else {
+        invalid(format!(
+            "{label} is empty, longer than {maximum_chars} characters, or contains control characters"
+        ))
+    }
+}
+fn bounded_optional(label: &str, value: &str, maximum_bytes: usize) -> Result<(), ConfigError> {
+    if value.len() <= maximum_bytes && !value.chars().any(char::is_control) {
+        Ok(())
+    } else {
+        invalid(format!(
+            "{label} is longer than {maximum_bytes} bytes or contains control characters"
+        ))
+    }
+}
+fn fold_name(value: &str) -> String {
+    value.chars().flat_map(char::to_lowercase).collect()
+}
+fn reference(
+    value: &str,
+    ids: &HashMap<&str, usize>,
+    names: &HashMap<&str, usize>,
+) -> Result<(), ConfigError> {
+    if ids.contains_key(value) || names.contains_key(value) {
         Ok(())
     } else {
         invalid(format!("unknown playlist {value:?}"))

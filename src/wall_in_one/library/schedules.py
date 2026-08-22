@@ -21,7 +21,6 @@ the alternative is making them write two rules.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import secrets
@@ -32,6 +31,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from wall_in_one import paths
+from wall_in_one.library import state_file
 
 #: The file, under `paths.app_state_dir()`.
 STATE_FILENAME: Final = "schedules.json"
@@ -241,31 +241,47 @@ def state_path() -> Path:
 
 
 def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
-    try:
-        if path.is_symlink() or not path.is_file():
-            return (), None
-        if path.stat().st_size > MAX_STATE_BYTES:
-            return (), f"{path.name} is too large to be a schedule"
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return (), f"could not read {path.name}: {error.strerror or error}"
-
-    try:
-        payload = json.loads(text)
-    except ValueError, RecursionError:
-        return (), f"{path.name} is not readable, so no schedule was loaded"
-    if not isinstance(payload, dict):
-        return (), f"{path.name} is not a schedule file"
+    payload, fault = state_file.read_object(
+        path, maximum_bytes=MAX_STATE_BYTES, description="schedule"
+    )
+    if payload is None:
+        return (), fault
+    faults = [
+        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
+    ]
     stored = payload.get("rules")
     if not isinstance(stored, list):
         return (), f"{path.name} has no rules in it"
 
+    if len(stored) > MAX_RULES:
+        faults.append(f"{path.name} has more than {MAX_RULES} schedule rules")
+
     found: list[Rule] = []
+    malformed = 0
+    duplicate = 0
+    identifiers: set[str] = set()
     for raw in stored[:MAX_RULES]:
         rule = _rule(raw)
-        if rule is not None:
-            found.append(rule)
-    return tuple(found), None
+        if rule is None:
+            malformed += 1
+            continue
+        assert isinstance(raw, dict)
+        for key, expected in (("months", list), ("weekdays", list), ("start", str), ("end", str)):
+            if key in raw and not isinstance(raw[key], expected):
+                malformed += 1
+        if "enabled" in raw and not isinstance(raw["enabled"], bool):
+            malformed += 1
+        if ("start" in raw) != ("end" in raw):
+            malformed += 1
+        if rule.id in identifiers:
+            duplicate += 1
+        identifiers.add(rule.id)
+        found.append(rule)
+    if malformed:
+        faults.append(f"{path.name} has {malformed} malformed schedule record fields")
+    if duplicate:
+        faults.append(f"{path.name} has {duplicate} duplicate schedule rule ids")
+    return tuple(found), state_file.joined_faults(faults)
 
 
 def load(path: Path | None = None) -> tuple[Rule, ...]:
@@ -291,6 +307,7 @@ def save(rules: Sequence[Rule], path: Path | None = None) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        state_file.fsync_parent(target)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise ScheduleError(
@@ -354,24 +371,27 @@ class Store:
         )
         if not rule.playlist:
             raise ScheduleError("no-such-rule", "a rule needs a playlist")
-        self._rules.append(rule)
-        self._write()
+        updated = [*self._rules, rule]
+        self._write(updated)
+        self._rules = updated
         return rule
 
     def remove(self, rule_id: str) -> bool:
         kept = [rule for rule in self._rules if rule.id != rule_id]
         if len(kept) == len(self._rules):
             return False
+        self._write(kept)
         self._rules = kept
-        self._write()
         return True
 
     def set_enabled(self, rule_id: str, enabled: bool) -> Rule:
         for index, rule in enumerate(self._rules):
             if rule.id == rule_id:
                 updated = replace(rule, enabled=enabled)
-                self._rules[index] = updated
-                self._write()
+                rules = list(self._rules)
+                rules[index] = updated
+                self._write(rules)
+                self._rules = rules
                 return updated
         raise ScheduleError("no-such-rule", f"no rule {rule_id}")
 
@@ -402,8 +422,10 @@ class Store:
                 end=parse_time(end) if end else None,
                 enabled=rule.enabled,
             )
-            self._rules[index] = updated
-            self._write()
+            rules = list(self._rules)
+            rules[index] = updated
+            self._write(rules)
+            self._rules = rules
             return updated
         raise ScheduleError("no-such-rule", f"no rule {rule_id}")
 
@@ -411,10 +433,12 @@ class Store:
         """Move one stable rule to ``position``; later rows keep priority."""
         for index, rule in enumerate(self._rules):
             if rule.id == rule_id:
-                moving = self._rules.pop(index)
-                target = max(0, min(len(self._rules), position))
-                self._rules.insert(target, moving)
-                self._write()
+                rules = list(self._rules)
+                moving = rules.pop(index)
+                target = max(0, min(len(rules), position))
+                rules.insert(target, moving)
+                self._write(rules)
+                self._rules = rules
                 return moving
         raise ScheduleError("no-such-rule", f"no rule {rule_id}")
 
@@ -429,18 +453,22 @@ class Store:
         kept = [rule for rule in self._rules if rule.playlist != playlist]
         if len(kept) == len(self._rules):
             return False
+        self._write(kept)
         self._rules = kept
-        self._write()
         return True
 
-    def _write(self) -> None:
+    def _write(self, rules: Sequence[Rule]) -> None:
         target = self._path if self._path is not None else state_path()
         if self._fault is not None:
-            broken = target.with_name(target.name + BROKEN_SUFFIX)
-            with contextlib.suppress(OSError):
-                os.replace(target, broken)
+            try:
+                state_file.preserve_faulted(target)
+            except OSError as error:
+                raise ScheduleError(
+                    "local-io",
+                    f"could not preserve unreadable {target}: {error.strerror or error}",
+                ) from error
             self._fault = None
-        save(self._rules, target)
+        save(rules, target)
 
 
 def describe(

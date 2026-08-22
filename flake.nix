@@ -153,8 +153,8 @@
             substituteInPlace $out/share/applications/${applicationId}.desktop \
               --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
             substituteInPlace $out/share/systemd/user/wall-in-one.service \
-              --replace-fail "ExecStartPre=wall-in-one" \
-              "ExecStartPre=$out/bin/wall-in-one" \
+              --replace-fail "ExecStartPre=-wall-in-one" \
+              "ExecStartPre=-$out/bin/wall-in-one" \
               --replace-fail "ExecStart=wall-in-one-service" \
               "ExecStart=$out/bin/wall-in-one-service"
           '';
@@ -182,16 +182,100 @@
         };
 
         apps =
-          { default = flake-utils.lib.mkApp { drv = wall-in-one; }; }
-          // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
-            vm = flake-utils.lib.mkApp {
-              drv = self.nixosConfigurations.wall-in-one-vm.config.system.build.vm;
-              exePath = "/bin/run-wall-in-one-vm";
+          {
+            default = flake-utils.lib.mkApp { drv = wall-in-one; } // {
+              meta.description = "Open Wall-in-One";
             };
+          }
+          // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            vm =
+              flake-utils.lib.mkApp {
+                drv = self.nixosConfigurations.wall-in-one-vm.config.system.build.vm;
+                exePath = "/bin/run-wall-in-one-vm";
+              }
+              // {
+                meta.description = "Launch the isolated Wall-in-One development VM";
+              };
           };
 
         checks = {
           inherit wall-in-one wall-in-one-service;
+
+          # Widget identity, focus, scroll-position and asynchronous GTK
+          # delivery regressions need a real display.  Keep those tests out of
+          # the package's ordinary checkPhase (which must remain usable in a
+          # display-less build sandbox), but do not let that turn `gui` into a
+          # marker CI silently never runs.  Xvfb supplies only an isolated X11
+          # framebuffer; the tests retain their autouse XDG/network/desktop
+          # guards and never see the developer's session.
+          gui-tests =
+            pkgs.runCommand "wall-in-one-gui-tests"
+              {
+                nativeBuildInputs = [
+                  (python.withPackages (ps: [
+                    ps.pygobject3
+                    ps.pytest
+                  ]))
+                  pkgs.adwaita-icon-theme
+                  pkgs.glib
+                  pkgs.gsettings-desktop-schemas
+                  pkgs.gtk4
+                  pkgs.libadwaita
+                  pkgs.ffmpeg
+                  pkgs.xauth
+                  pkgs.xvfb-run
+                ];
+              }
+              ''
+                export HOME="$TMPDIR/home"
+                export XDG_CONFIG_HOME="$TMPDIR/config"
+                export XDG_STATE_HOME="$TMPDIR/state"
+                export XDG_CACHE_HOME="$TMPDIR/cache"
+                export XDG_DATA_HOME="$TMPDIR/data"
+                mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
+                  "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+
+                export GDK_BACKEND=x11
+                export GSETTINGS_BACKEND=memory
+                export GI_TYPELIB_PATH="${
+                  pkgs.lib.makeSearchPath "lib/girepository-1.0" [
+                    pkgs.gtk4
+                    pkgs.libadwaita
+                    pkgs.glib.out
+                    pkgs.gobject-introspection
+                    pkgs.pango.out
+                    pkgs.harfbuzz
+                    pkgs.gdk-pixbuf
+                    pkgs.graphene
+                    pkgs.at-spi2-core
+                  ]
+                }"
+                export XDG_DATA_DIRS="${
+                  pkgs.lib.concatMapStringsSep ":" (drv: "${drv}/share/gsettings-schemas/${drv.name}") [
+                    pkgs.gsettings-desktop-schemas
+                    pkgs.gtk4
+                  ]
+                }:${pkgs.adwaita-icon-theme}/share"
+
+                cd ${./.}
+                export PYTHONPATH="$PWD/src"
+                xvfb-run --auto-servernum \
+                  --server-args='-screen 0 1280x1024x24 -nolisten tcp' \
+                  pytest tests -q -m gui -ra -p no:cacheprovider \
+                    --junitxml="$TMPDIR/gui-results.xml"
+
+                # importorskip/"no display" are useful for an ad-hoc headless
+                # developer run but would make this dedicated display-backed
+                # gate a false green.  The report also proves collection did
+                # not quietly fall to zero.
+                grep -Eq 'tests="[1-9][0-9]*"' "$TMPDIR/gui-results.xml"
+                if grep -Eq 'skipped="[1-9][0-9]*"' "$TMPDIR/gui-results.xml"; then
+                  echo "the display-backed GUI suite skipped tests" >&2
+                  cat "$TMPDIR/gui-results.xml" >&2
+                  exit 1
+                fi
+                touch $out
+              '';
 
           mypy =
             pkgs.runCommand "wall-in-one-mypy"
@@ -238,7 +322,7 @@
                     -o "rendered-$size.png"
                 done
                 unit=${wall-in-one}/share/systemd/user/wall-in-one.service
-                grep -F 'ExecStartPre=${wall-in-one}/bin/wall-in-one --write-config' "$unit"
+                grep -F 'ExecStartPre=-${wall-in-one}/bin/wall-in-one --write-config' "$unit"
                 grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service --wait-for-config' "$unit"
                 test -x ${wall-in-one}/bin/wall-in-one-service
                 touch $out

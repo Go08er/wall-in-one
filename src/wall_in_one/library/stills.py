@@ -102,10 +102,10 @@ def scene_capture_required(
 def destination(video: Path, root: Path) -> Path:
     """Where the generated still for ``video`` belongs under ``root``.
 
-    The name matches the video's, because that is what `pairing` looks for
-    when it searches the managed directory.
+    The name is keyed by the video's absolute path, because basenames are not
+    identities: two library folders may both contain an ``intro.mp4``.
     """
-    return pairing.still_directory(root) / f"{video.stem}{STILL_SUFFIX}"
+    return pairing.still_directory(root) / f"{pairing.automatic_still_stem(video)}{STILL_SUFFIX}"
 
 
 def write_sidecar(video: Path, still: Path) -> Path:

@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import stat
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -287,16 +288,21 @@ def resolve(library: Library, value: str | None, *, verb: str) -> MediaItem:
 def parse_pair(value: str | None, *, verb: str) -> tuple[str, str]:
     """Split ``<path> <rest>`` the way the shell handed it over.
 
-    From the right, because the left side is a path and paths contain spaces --
-    this machine's own library lives under one. The right side is a palette
-    policy or the word `default`, neither of which ever does.
+    `` :: `` is the unambiguous form when both operands contain spaces. The
+    historical right split remains for simple palette policies and ``default``
+    so existing scripts continue to work.
     """
     text = (value or "").strip()
     if not text:
         raise ValueError(f"{verb} needs a path and a value")
-    path, separator, rest = text.rpartition(" ")
+    if " :: " in text:
+        path, separator, rest = text.partition(" :: ")
+        if " :: " in rest:
+            raise ValueError(f"{verb} accepts one :: separator")
+    else:
+        path, separator, rest = text.rpartition(" ")
     if not separator or not path.strip() or not rest.strip():
-        raise ValueError(f"{verb} needs a path and a value, as: {verb} <path> <value>")
+        raise ValueError(f"{verb} needs a path and a value, as: {verb} <path> :: <value>")
     return path.strip(), rest.strip()
 
 
@@ -353,10 +359,10 @@ def describe_pairing(item: MediaItem, bundle: pairings.Pairing) -> str:
 
 def describe_playlists(store: playlists.Store, active: str) -> str:
     """Every playlist as rows, marking whichever is in force."""
-    lines = ["# fields: name, entries, active"]
+    lines = ["# fields: id, name, entries, active"]
     for playlist in store.all():
         in_force = "yes" if active in (playlist.id, playlist.name) else "no"
-        lines.append(f"{_field(playlist.name)}\t{len(playlist)}\t{in_force}")
+        lines.append(f"{playlist.id}\t{_field(playlist.name)}\t{len(playlist)}\t{in_force}")
     return f"# playlists: {len(store)}\n" + "\n".join(lines)
 
 
@@ -395,7 +401,7 @@ def remove_wallpaper(item: MediaItem, roots: tuple[Path, ...]) -> str:
     if item.deletable:
         result = manage.remove(item, roots)
         return f"{result.describe()} - deleted, which cannot be undone"
-    landed = manage.trash(item.path, roots)
+    landed = manage.trash(item, roots)
     return f"{item.path.name} moved to the trash - {landed}"
 
 
@@ -722,6 +728,7 @@ class SocketServer:
         self._verbs = build_verb_table(commands)
         self._path = path if path is not None else paths.socket_path()
         self._service: object | None = None
+        self._socket_identity: tuple[int, int] | None = None
 
     @property
     def path(self) -> Path:
@@ -733,18 +740,50 @@ class SocketServer:
         Only when nothing answers on it -- a live socket means another instance
         is running and we must not steal its address.
         """
-        if not self._path.exists():
+        try:
+            existing = self._path.lstat()
+        except FileNotFoundError:
             return
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot inspect existing control path {self._path}: {error.strerror or error}"
+            ) from error
+        if not stat.S_ISSOCK(existing.st_mode):
+            raise RuntimeError(f"refusing to replace non-socket control path {self._path}")
+
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         probe.settimeout(0.5)
         try:
             probe.connect(str(self._path))
-        except ConnectionRefusedError, FileNotFoundError:
-            self._path.unlink(missing_ok=True)
+        except FileNotFoundError:
             return
-        except OSError:
-            self._path.unlink(missing_ok=True)
+        except ConnectionRefusedError:
+            # The path may have been replaced while connect was in flight.
+            # Remove only the exact dead socket inspected above.
+            try:
+                current = self._path.lstat()
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                raise RuntimeError(
+                    f"cannot recheck stale control socket {self._path}: {error.strerror or error}"
+                ) from error
+            identity = (existing.st_dev, existing.st_ino)
+            if not stat.S_ISSOCK(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+                raise RuntimeError(
+                    f"control path {self._path} changed while it was being checked"
+                ) from None
+            try:
+                self._path.unlink()
+            except OSError as error:
+                raise RuntimeError(
+                    f"cannot remove stale control socket {self._path}: {error.strerror or error}"
+                ) from error
             return
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot probe existing control socket {self._path}: {error.strerror or error}"
+            ) from error
         else:
             raise RuntimeError(f"another instance is already listening on {self._path}")
         finally:
@@ -793,6 +832,10 @@ class SocketServer:
         service.start()
         self._service = service
         try:
+            bound = self._path.lstat()
+            if not stat.S_ISSOCK(bound.st_mode):
+                raise OSError(f"{self._path} is not the socket that was just bound")
+            self._socket_identity = (bound.st_dev, bound.st_ino)
             # The socket carries control of the wallpaper; no reason for anyone
             # else on the system to reach it.
             os.chmod(self._path, 0o600)
@@ -809,7 +852,19 @@ class SocketServer:
         if service is not None:
             service.stop()  # type: ignore[attr-defined]
             self._service = None
-        self._path.unlink(missing_ok=True)
+        identity = self._socket_identity
+        self._socket_identity = None
+        if identity is None:
+            return
+        try:
+            current = self._path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            # Failure to inspect is not permission to delete an unknown path.
+            return
+        if stat.S_ISSOCK(current.st_mode) and (current.st_dev, current.st_ino) == identity:
+            self._path.unlink(missing_ok=True)
 
     def _on_incoming(self, _service: object, connection: object, _source: object) -> bool:
         from gi.repository import Gio

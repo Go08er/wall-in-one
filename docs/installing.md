@@ -53,8 +53,9 @@ That rewrite is the difference between a menu entry that works and one that
 reports "command not found" in a session whose `PATH` never picked up the
 profile -- a common enough state when the display manager starts before the
 profile is on `PATH`. It also guarantees the *wrapped* binary runs, the one
-carrying `GI_TYPELIB_PATH`, the GSettings schemas, and mpvpaper and ffmpeg on
-`PATH`. `TryExec` holds the same string and is rewritten with it.
+carrying `GI_TYPELIB_PATH`, the GSettings schemas, mpvpaper and ffmpeg on
+`PATH`, together with niri for output discovery and linux-wallpaperengine for
+scene playback. `TryExec` holds the same string and is rewritten with it.
 
 ## What the entry deliberately does not say
 

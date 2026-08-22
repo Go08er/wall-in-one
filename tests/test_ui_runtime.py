@@ -45,6 +45,7 @@ class FakeWindow:
     def __init__(self) -> None:
         self.statuses: list[dict[str, object]] = []
         self.unavailable = 0
+        self.delayed = 0
         self.busy: list[bool] = []
         self.reports: list[str] = []
         self.currents = 0
@@ -54,6 +55,9 @@ class FakeWindow:
 
     def show_runtime_unavailable(self) -> None:
         self.unavailable += 1
+
+    def show_runtime_delayed(self) -> None:
+        self.delayed += 1
 
     def set_runtime_busy(self, busy: bool) -> None:
         self.busy.append(busy)
@@ -99,18 +103,43 @@ def _close(application: Application) -> None:
 
 
 def _status(name: str) -> Response:
+    identifier = name.casefold().replace(" ", "-")
     return Response.success(
         json.dumps(
             {
+                "playlist_id": identifier,
                 "playlist": name,
                 "source": "schedule",
                 "paused": False,
                 "cycle_enabled": True,
                 "shuffle": False,
                 "last_error": "",
+                "schedule": {
+                    "following": True,
+                    "playlist_id": identifier,
+                    "playlist": name,
+                    "rule_id": None,
+                },
             }
         )
     )
+
+
+def test_forgetting_destroyed_media_removes_every_playlist_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    deleted = tmp_path / "wallpapers" / "gone.png"
+    try:
+        playlist = application.session.playlists.create("Keep clean")
+        application.session.playlists.add(playlist.id, deleted)
+        application.session.playlists.add(playlist.id, deleted)
+
+        application.forget(deleted)
+
+        assert application.session.playlists.find(playlist.id).entries == ()
+    finally:
+        _close(application)
 
 
 def test_delayed_status_keeps_the_glib_heartbeat_responsive(
@@ -240,14 +269,63 @@ def test_timeout_never_authorises_the_python_fallback(
     _attach(application, window)
     fallback: list[bool] = []
 
-    def timed_out(*_arguments: object, **_keywords: object) -> Response:
+    calls = 0
+
+    def status_then_timeout(*_arguments: object, **_keywords: object) -> Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _status("Last known")
         raise client.ControlError("timed out after 0.25s")
 
-    monkeypatch.setattr(client, "send_runtime", timed_out)
+    monkeypatch.setattr(client, "send_runtime", status_then_timeout)
     try:
+        assert application.refresh_runtime_status_async()
+        _spin_until(lambda: len(window.statuses) == 1)
+        remembered = application.runtime_status
+        assert remembered is window.statuses[-1]
+
         assert application.refresh_runtime_status_async(on_absent=lambda: fallback.append(True))
-        _spin_until(lambda: window.unavailable == 1)
+        _spin_until(lambda: window.delayed == 1)
+        assert application.runtime_status is remembered
+        assert len(window.statuses) == 1
+        assert window.unavailable == 0
         assert fallback == []
+    finally:
+        _close(application)
+
+
+@pytest.mark.parametrize("verb", ["playlist-use", "schedule-follow"])
+def test_failed_playlist_mode_change_does_not_mutate_python_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    playlist = application.session.playlists.create("Evening", entry_id="evening")
+    if verb == "schedule-follow":
+        application.session.use_playlist(playlist.id)
+    before = application.session.manual_playlist
+
+    def rejected(request: str, _argument: str | None = None, **_kwargs: object) -> Response:
+        if request == "status":
+            return _status("Scheduled")
+        assert request == verb
+        return Response.failure(f"{verb} rejected")
+
+    monkeypatch.setattr(client, "send_runtime", rejected)
+    try:
+        started = (
+            application.activate_playlist_async(playlist.id)
+            if verb == "playlist-use"
+            else application.resume_schedule_async()
+        )
+        assert started
+        _spin_until(lambda: window.busy == [True, False])
+        assert application.session.manual_playlist == before
+        assert window.reports == [f"{verb} rejected"]
     finally:
         _close(application)
 

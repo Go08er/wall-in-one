@@ -3,6 +3,12 @@
 `~/.config/wall-in-one/settings.toml` is written by the Settings tab and safe
 to edit by hand. Anything out of range is clamped rather than rejected: a bad
 settings file should degrade to something usable, not stop the app starting.
+That recovery policy belongs to the interactive app. The unattended
+`wall-in-one --write-config` compiler is deliberately strict: a present known
+key with the wrong type, a non-finite or out-of-range number, an unknown key,
+or an invalid enumerated value is reported and leaves the last resolved runtime
+document untouched. This prevents a typo from silently publishing defaults at
+login while still letting the Settings screen open for repair.
 
 | key | meaning | default |
 |---|---|---|
@@ -15,8 +21,8 @@ settings file should degrade to something usable, not stop the app starting.
 | `cycle_favourites_only` | Narrow the rotation to starred wallpapers. Ignored while that would leave nothing to rotate through. | `false` |
 | `shuffle` | Visit every wallpaper once before repeating. | `false` |
 | `dynamics_enabled` | Play video wallpapers. Off shows their paired stills instead. | `true` |
-| `video_muted` | Mute video wallpapers. Takes effect immediately. | `true` |
-| `video_volume` | 0-100. Kept while muted, so unmuting lands where you left it. | `100` |
+| `video_muted` | Mute video wallpapers. Takes effect immediately over mpv IPC; Wallpaper Engine scenes remain silent. | `true` |
+| `video_volume` | Video volume, 0-100. Kept while muted, so unmuting lands where you left it without restarting mpvpaper. | `100` |
 | `video_when_hidden` | What a video does when a window covers it: `pause`, `stop` or `play`. Takes effect on the next video. | `"pause"` |
 | `video_hardware_decode` | Let mpv choose a hardware decoder. Turn off only to diagnose corruption, tearing or driver trouble. | `true` |
 | `video_interpolation` | Low-frame-rate smoothing: `off`, `oversample` or `linear`. Non-off modes use display-resample with the unambiguous active monitor refresh; mixed-rate All outputs stays unsmoothed. | `"off"` |

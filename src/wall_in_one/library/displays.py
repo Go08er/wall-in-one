@@ -23,7 +23,6 @@ should not lose the arrangement.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 from collections.abc import Iterable, Mapping
@@ -31,9 +30,11 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import paths
+from wall_in_one.library import state_file
 
 STATE_FILENAME: Final = "displays.json"
 BROKEN_SUFFIX: Final = ".broken"
+FORMAT_VERSION: Final = 1
 
 #: A connector name is short. This is a ceiling on damage from a file somebody
 #: has been editing, not a limit anybody will meet.
@@ -69,38 +70,39 @@ def _clean(value: object) -> str:
 
 def _read(path: Path) -> tuple[dict[str, str], str | None]:
     """Stored assignments, plus why the file was passed over."""
-    try:
-        if path.is_symlink() or not path.is_file():
-            return {}, None
-        if path.stat().st_size > MAX_STATE_BYTES:
-            return {}, f"{path.name} is too large to be a list of displays"
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return {}, f"could not read {path.name}: {error.strerror or error}"
-    try:
-        document = json.loads(text)
-    except ValueError:
-        return {}, f"{path.name} is not readable JSON"
-    if not isinstance(document, dict):
-        return {}, f"{path.name} does not hold a list of displays"
+    document, fault = state_file.read_object(
+        path, maximum_bytes=MAX_STATE_BYTES, description="display assignments"
+    )
+    if document is None:
+        return {}, fault
+    faults = [
+        found for found in (state_file.version_fault(path, document, FORMAT_VERSION),) if found
+    ]
 
     found: dict[str, str] = {}
     entries = document.get("displays")
     if not isinstance(entries, dict):
-        return {}, None
+        return {}, f"{path.name} has no display assignments in it"
+    if len(entries) > MAX_ENTRIES:
+        faults.append(f"{path.name} has more than {MAX_ENTRIES} display assignments")
+    malformed = 0
     for key, value in entries.items():
         if len(found) >= MAX_ENTRIES:
             break
         connector, playlist = _clean(key), _clean(value)
         if connector and playlist:
             found[connector] = playlist
-    return found, None
+        else:
+            malformed += 1
+    if malformed:
+        faults.append(f"{path.name} has {malformed} malformed display assignments")
+    return found, state_file.joined_faults(faults)
 
 
 def save(assignments: Mapping[str, str], path: Path | None = None) -> Path:
     """Write the assignments, atomically."""
     target = path if path is not None else state_path()
-    payload = {"version": 1, "displays": dict(assignments)}
+    payload = {"version": FORMAT_VERSION, "displays": dict(assignments)}
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
@@ -114,6 +116,7 @@ def save(assignments: Mapping[str, str], path: Path | None = None) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        state_file.fsync_parent(target)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise DisplayError(
@@ -168,14 +171,20 @@ class Store:
             raise DisplayError("validation", "that is not a playlist name")
         if len(self._assignments) >= MAX_ENTRIES and name not in self._assignments:
             raise DisplayError("validation", f"no more than {MAX_ENTRIES} screens can be assigned")
-        self._assignments[name] = wanted
-        self._write()
+        updated = dict(self._assignments)
+        updated[name] = wanted
+        self._write(updated)
+        self._assignments = updated
 
     def unassign(self, connector: str) -> bool:
         """Let a screen follow the default again. ``False`` if it already did."""
-        if self._assignments.pop(_clean(connector), None) is None:
+        name = _clean(connector)
+        if name not in self._assignments:
             return False
-        self._write()
+        updated = dict(self._assignments)
+        del updated[name]
+        self._write(updated)
+        self._assignments = updated
         return True
 
     def forget_playlist(self, playlist: str) -> int:
@@ -187,10 +196,12 @@ class Store:
         """
         wanted = _clean(playlist)
         stale = [key for key, value in self._assignments.items() if value == wanted]
+        updated = dict(self._assignments)
         for key in stale:
-            del self._assignments[key]
+            del updated[key]
         if stale:
-            self._write()
+            self._write(updated)
+            self._assignments = updated
         return len(stale)
 
     def describe(self, attached: Iterable[str] = ()) -> tuple[str, ...]:
@@ -207,11 +218,15 @@ class Store:
             lines.append(f"{connector}\t{playlist}{missing}")
         return tuple(lines)
 
-    def _write(self) -> None:
+    def _write(self, assignments: Mapping[str, str]) -> None:
         target = self._path if self._path is not None else state_path()
         if self._fault is not None:
-            broken = target.with_name(target.name + BROKEN_SUFFIX)
-            with contextlib.suppress(OSError):
-                os.replace(target, broken)
+            try:
+                state_file.preserve_faulted(target)
+            except OSError as error:
+                raise DisplayError(
+                    "local-io",
+                    f"could not preserve unreadable {target}: {error.strerror or error}",
+                ) from error
             self._fault = None
-        save(self._assignments, target)
+        save(assignments, target)

@@ -144,6 +144,11 @@ class Library:
     items: tuple[MediaItem, ...]
     #: Directories that were skipped: unreadable, or past the scan ceiling.
     skipped: tuple[str, ...] = ()
+    #: Every still the scanner found before pairing hides representatives from
+    #: playback.  A picture already used behind one video remains a perfectly
+    #: valid representative for another; authoring must not inherit the
+    #: rotation-only de-duplication performed by ``pairings.apply``.
+    still_inventory: tuple[MediaItem, ...] = ()
 
     def __len__(self) -> int:
         return len(self.items)
@@ -171,3 +176,13 @@ class Library:
     @property
     def stills(self) -> tuple[MediaItem, ...]:
         return tuple(item for item in self.items if item.kind is Kind.STILL)
+
+    @property
+    def reusable_stills(self) -> tuple[MediaItem, ...]:
+        """All still images available to an authoring picker.
+
+        Hand-built ``Library`` values in callers and tests predate the
+        inventory field, so falling back to the playback-visible stills keeps
+        those useful without weakening scanner-backed libraries.
+        """
+        return self.still_inventory or self.stills

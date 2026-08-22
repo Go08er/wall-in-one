@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
 import sys
 import types
@@ -50,6 +52,7 @@ from wall_in_one.providers.base import ProviderError, SearchResult, WallpaperCan
 from wall_in_one.providers.registry import ProviderInfo
 from wall_in_one.session import Session
 from wall_in_one.wallpaper.applier import Applied, Applier
+from wall_in_one.wallpaper.outputs import Output
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application, _Commands
@@ -294,9 +297,59 @@ def test_open_launches_the_gui_when_only_the_runtime_exists(
     monkeypatch.setattr(sys, "argv", ["/nix/store/example/bin/wall-in-one"])
 
     assert client.dispatch("open", "playlists") == 0
-    assert capsys.readouterr().out == "opened playlists\n"
+    assert capsys.readouterr().out == "launch requested for playlists\n"
     assert launched[0][0] == ["/nix/store/example/bin/wall-in-one", "--open-page", "playlists"]
     assert launched[0][1]["start_new_session"] is True
+
+
+def test_open_refuses_an_unknown_page_before_launching(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one.control import client
+
+    def absent(*_args: object, **_kwargs: object) -> Response:
+        raise client.NotRunningError("authoring app is closed")
+
+    monkeypatch.setattr(client, "send", absent)
+    launched: list[object] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: launched.append(object()))
+
+    assert client.dispatch("open", "not-a-page") == 1
+    assert "usage: open" in capsys.readouterr().err
+    assert launched == []
+
+
+@pytest.mark.parametrize(
+    ("verb", "legacy_request"),
+    [
+        ("previous", Request("prev")),
+        ("schedule-follow", Request("playlist-use", "none")),
+    ],
+)
+def test_runtime_aliases_reach_the_legacy_service_when_rust_is_absent(
+    verb: str,
+    legacy_request: Request,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one import paths
+    from wall_in_one.control import client
+
+    seen: list[tuple[Request, Path | None]] = []
+
+    def answer(request: Request, *, path: Path | None = None, **_kwargs: object) -> Response:
+        seen.append((request, path))
+        if path == paths.runtime_socket_path():
+            raise client.NotRunningError("runtime is closed")
+        return Response.success("ok")
+
+    monkeypatch.setattr(client, "send", answer)
+
+    assert client.dispatch(verb, None) == 0
+    assert seen == [
+        (Request(verb), paths.runtime_socket_path()),
+        (legacy_request, None),
+    ]
 
 
 def test_status_does_not_accept_a_plain_gui_as_the_runtime(
@@ -615,6 +668,16 @@ def test_the_slow_verbs_are_given_longer_than_the_others() -> None:
     assert set(client.TIMEOUTS) <= set(build_verb_table(_StubCommands()))
 
 
+def test_runtime_actions_allow_a_bounded_multi_display_apply_to_finish() -> None:
+    from wall_in_one.control import client
+
+    assert client.RUNTIME_ACTION_TIMEOUT > client.TIMEOUT
+    assert client.RUNTIME_ACTION_TIMEOUT < 55
+    assert "next" in client.RUNTIME_APPLY_VERBS
+    assert "status" not in client.RUNTIME_APPLY_VERBS
+    assert "shuffle" not in client.RUNTIME_APPLY_VERBS
+
+
 def test_the_cli_joins_its_words_back_into_one_argument() -> None:
     from wall_in_one.cli import _build_parser
 
@@ -857,11 +920,32 @@ def _downloaded(root: Path, name: str = "aurora.jpg", *, sidecar: bool = True) -
     """A file with both halves of ownership: the directory marker and the sidecar."""
     directory = root / "Wall-in-One" / "Wallhaven"
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / MANAGED_MARKER).write_text("{}", encoding="utf-8")
+    (directory / MANAGED_MARKER).write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "plugin": "goober/wall-in-one",
+                "provider": "Wallhaven",
+                "kind": "wallhaven",
+                "ownership": "managed",
+            }
+        ),
+        encoding="utf-8",
+    )
     path = directory / name
     path.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
     if sidecar:
-        path.with_name(path.name + ".wallhaven.json").write_text("{}", encoding="utf-8")
+        path.with_name(path.name + ".wallhaven.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "plugin": "goober/wall-in-one",
+                    "provider": "Wallhaven",
+                    "path": str(path),
+                }
+            ),
+            encoding="utf-8",
+        )
     return path
 
 
@@ -1163,11 +1247,10 @@ def test_unstarring_something_that_was_never_starred_says_so(sandbox: Path) -> N
     assert commands.remove_favourite("/w/aurora.png").message == "aurora.png was not starred"
 
 
-def test_a_star_that_could_not_be_saved_is_reported_and_still_shown(
+def test_a_star_that_could_not_be_saved_is_reported_and_rolled_back(
     sandbox: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The store keeps the change in memory whatever the disk did, so the window
-    has to be told either way; the failure is only about the next launch."""
+    """Disk and memory remain one state when persistence fails."""
     item = _wallpaper("aurora")
     commands, app = _commands(sandbox, [item])
 
@@ -1178,8 +1261,8 @@ def test_a_star_that_could_not_be_saved_is_reported_and_still_shown(
     response = commands.add_favourite(str(item.path))
 
     assert (response.ok, response.kind) == (False, "local-io")
-    assert app.session.favourites.is_favourite(item.path)
-    assert app.restarred == 1
+    assert not app.session.favourites.is_favourite(item.path)
+    assert app.restarred == 0
 
 
 def test_the_starred_list_comes_back_from_the_socket(sandbox: Path) -> None:
@@ -1281,6 +1364,75 @@ def test_a_socket_path_too_long_to_bind_is_refused_before_anything_is_created(
     assert not long_enough.parent.exists()
 
 
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_start_never_deletes_a_non_socket_control_path(tmp_path: Path, kind: str) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("keep me", encoding="utf-8")
+    if kind == "file":
+        path.write_text("also keep me", encoding="utf-8")
+    else:
+        path.symlink_to(sentinel)
+
+    server = SocketServer(_StubCommands(), path)
+    with pytest.raises(RuntimeError, match="refusing to replace non-socket"):
+        server.start()
+
+    if kind == "file":
+        assert path.read_text(encoding="utf-8") == "also keep me"
+    else:
+        assert path.is_symlink()
+        assert path.readlink() == sentinel
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+
+
+def test_a_dead_unix_socket_is_the_only_path_start_removes(tmp_path: Path) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+
+    server = SocketServer(_StubCommands(), path)
+    server._clear_stale_socket()
+
+    assert not path.exists()
+
+
+def test_a_live_unix_socket_is_never_stolen(tmp_path: Path) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    live = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    live.bind(str(path))
+    live.listen(1)
+    try:
+        server = SocketServer(_StubCommands(), path)
+        with pytest.raises(RuntimeError, match="another instance"):
+            server._clear_stale_socket()
+        assert path.is_socket()
+    finally:
+        live.close()
+        path.unlink(missing_ok=True)
+
+
+def test_stop_preserves_a_path_that_replaced_the_owned_socket(tmp_path: Path) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    server = SocketServer(_StubCommands(), path)
+    server.start()
+    path.unlink()
+    path.write_text("replacement", encoding="utf-8")
+
+    server.stop()
+
+    assert path.read_text(encoding="utf-8") == "replacement"
+
+
 def test_a_socket_that_cannot_be_secured_leaves_nothing_listening(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1310,6 +1462,30 @@ def test_a_path_with_spaces_and_a_value_split_correctly() -> None:
     library lives under a directory with a space in its name."""
     path, value = parse_pair("/home/me/customization stuff/a.png builtin:Nord", verb="p")
     assert (path, value) == ("/home/me/customization stuff/a.png", "builtin:Nord")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "/home/me/video walls/clip.mp4 :: /home/me/still walls/night sky.png",
+            ("/home/me/video walls/clip.mp4", "/home/me/still walls/night sky.png"),
+        ),
+        (
+            "/home/me/walls/night.png :: community:Tokyo Night",
+            ("/home/me/walls/night.png", "community:Tokyo Night"),
+        ),
+    ],
+)
+def test_the_explicit_separator_supports_spaces_in_both_values(
+    raw: str, expected: tuple[str, str]
+) -> None:
+    assert parse_pair(raw, verb="pairing") == expected
+
+
+def test_more_than_one_explicit_separator_is_refused() -> None:
+    with pytest.raises(ValueError, match="one :: separator"):
+        parse_pair("/one :: /two :: /three", verb="still")
 
 
 @pytest.mark.parametrize("raw", ["", "   ", "/only/a/path", "value-only "])
@@ -1431,9 +1607,11 @@ def test_playlists_list_as_rows_marking_the_active_one(sandbox: Path, applied: l
 
     message = commands.list_playlists(None).message
 
-    assert "# fields: name, entries, active" in message
-    assert "Evening\t0\tyes" in message
-    assert "Morning\t0\tno" in message
+    assert "# fields: id, name, entries, active" in message
+    evening = app.session.playlists.find("Evening")
+    morning = app.session.playlists.find("Morning")
+    assert f"{evening.id}\tEvening\t0\tyes" in message
+    assert f"{morning.id}\tMorning\t0\tno" in message
 
 
 def test_a_named_playlist_lists_its_entries_with_their_ids(
@@ -1494,6 +1672,23 @@ def test_using_a_playlist_that_is_not_there_says_which(sandbox: Path, applied: l
     with pytest.raises(PlaylistError) as caught:
         commands.use_playlist("nope")
     assert caught.value.kind == "no-such-playlist"
+
+
+def test_display_listing_leads_with_the_reusable_connector(
+    sandbox: Path,
+    applied: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    monkeypatch.setattr(
+        "wall_in_one.ui.app.outputs.discover",
+        lambda: (Output("DP-2", make="Acme", model="Wide", width=2560, height=1440),),
+    )
+
+    message = commands.list_displays().message
+
+    assert "# fields: connector, playlist, description" in message
+    assert "DP-2\t(default)\tDP-2 (Acme Wide, 2560x1440)" in message
 
 
 def test_editing_a_playlist_tells_the_window(sandbox: Path, applied: list[Path]) -> None:

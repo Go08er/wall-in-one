@@ -49,11 +49,22 @@ class QuietLoader:
     def shutdown(self) -> None: ...
 
 
+class CountingLoader(QuietLoader):
+    """Record work so a large-library test can pin the initial bound."""
+
+    def __init__(self) -> None:
+        self.requests: list[Path] = []
+
+    def request(self, item: MediaItem, _callback: Any) -> None:
+        self.requests.append(item.path)
+
+
 class PlaylistApp:
     """Refresh the visible page the same synchronous way the real window does."""
 
     def __init__(self, session: Session) -> None:
         self.session = session
+        self.runtime_status: dict[str, object] | None = None
         self.page: playlists_page.PlaylistsPage | None = None
         self.published = 0
 
@@ -89,6 +100,30 @@ def _session(tmp_path: Path) -> tuple[Session, playlists.Playlist, tuple[MediaIt
     )
     session.refresh()
     return session, store.find(chosen.id), items
+
+
+def _large_session(tmp_path: Path, count: int) -> tuple[Session, playlists.Playlist]:
+    items = tuple(
+        MediaItem(
+            path=Path("/test-media") / f"media-{index:04d}.png",
+            kind=Kind.STILL,
+            size=1,
+            mtime=1,
+        )
+        for index in range(count)
+    )
+    store = playlists.Store(path=tmp_path / "large-playlists.json")
+    chosen = store.create("Large library", entry_id="large")
+    store.add(chosen.id, items[0].path, entry_id="first")
+    session = Session(
+        config.Settings(active_playlist=chosen.id),
+        scanner=lambda _roots: Library(roots=(Path("/test-media"),), items=items),
+        playlist_store=store,
+        schedule_store=schedules.Store(path=tmp_path / "large-schedules.json"),
+        display_store=displays.Store(path=tmp_path / "large-displays.json"),
+    )
+    session.refresh()
+    return session, store.find(chosen.id)
 
 
 def test_playlist_deletion_confirmation_names_every_cascade(tmp_path: Path) -> None:
@@ -259,6 +294,135 @@ def test_playlist_refresh_does_not_replace_focused_search(
         assert root.get_focus() is focused_widget
     root.set_child(None)
     root.destroy()
+    session.shutdown()
+
+
+@pytest.mark.parametrize("count", (600, 4096))
+def test_playlist_source_initial_work_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    loader = CountingLoader()
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", lambda: loader)
+    session, _playlist = _large_session(tmp_path, count)
+
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+
+    assert len(page._source_cards_by_path) == playlists_page.SOURCE_PAGE_SIZE
+    # One extra request represents the first item in the authored order pane;
+    # all remaining work is the bounded source page, never the full inventory.
+    assert len(loader.requests) == playlists_page.SOURCE_PAGE_SIZE + 1
+    assert page._source_more.get_visible()
+
+    page._show_more_sources(Gtk.Button())
+    assert len(page._source_cards_by_path) == playlists_page.SOURCE_PAGE_SIZE * 2
+    assert len(loader.requests) == playlists_page.SOURCE_PAGE_SIZE * 2 + 1
+    page.shutdown()
+    session.shutdown()
+
+
+def test_playlist_source_search_and_rescan_never_mix_stale_cards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loader = CountingLoader()
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", lambda: loader)
+    session, _playlist = _large_session(tmp_path, 600)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+
+    page._source_search.set_text("media-01")
+    base_paths = {Path("/test-media") / f"media-{index:04d}.png" for index in range(48)}
+    assert len(page._source_cards_by_path) <= playlists_page.SOURCE_PAGE_SIZE * 2
+    assert all(path in base_paths or "media-01" in path.name for path in page._source_cards_by_path)
+    page._show_more_sources(Gtk.Button())
+    assert len(page._source_cards_by_path) <= playlists_page.SOURCE_PAGE_SIZE * 3
+
+    # A new query resets the page and synchronously reconciles membership, so
+    # no pending batch from the previous query can append an obsolete card.
+    page._source_search.set_text("media-02")
+    assert len(page._source_cards_by_path) <= playlists_page.SOURCE_PAGE_SIZE * 2
+    assert all(path in base_paths or "media-02" in path.name for path in page._source_cards_by_path)
+
+    replacement = tuple(
+        MediaItem(
+            path=Path("/replacement") / f"media-02-{index:03d}.png",
+            kind=Kind.STILL,
+            size=1,
+            mtime=2,
+        )
+        for index in range(80)
+    )
+    session.adopt_library(Library(roots=(Path("/replacement"),), items=replacement))
+    page.refresh(session)
+
+    assert len(page._source_cards_by_path) == playlists_page.SOURCE_PAGE_SIZE
+    assert all(path.parent == Path("/replacement") for path in page._source_cards_by_path)
+    assert all(card.item.path == path for path, card in page._source_cards_by_path.items())
+    page.shutdown()
+    session.shutdown()
+
+
+def test_playlist_and_schedule_pages_follow_one_runtime_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bar override wins over Python's stale compatibility Session."""
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, evening, items = _session(tmp_path)
+    night = session.playlists.create("Night", entry_id="night")
+    session.playlists.add(night.id, items[1].path, entry_id="night-first")
+    # Deliberately disagree with Rust: this is the state an old Python client
+    # would retain after the bar chose another playlist directly.
+    session.use_playlist(evening.id)
+    application = PlaylistApp(session)
+    application.runtime_status = {
+        "playlist_id": night.id,
+        "playlist": night.name,
+        "source": "manual",
+        "schedule": {
+            "following": False,
+            "playlist_id": evening.id,
+            "playlist": evening.name,
+            "rule_id": "work-hours",
+        },
+    }
+
+    playlist_page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    playlist_page.refresh(session)
+    night_record = playlist_page._playlist_rows_by_id[night.id]
+    evening_record = playlist_page._playlist_rows_by_id[evening.id]
+    assert "playing manually" in night_record[2].get_label()
+    assert "playing" not in evening_record[2].get_label()
+    playlist_page._list.select_row(night_record[0])
+    assert playlist_page._play_button.get_label() == "Playing now · manual override"
+    assert not playlist_page._play_button.get_sensitive()
+
+    schedule_page = SchedulesPage(application)  # type: ignore[arg-type]
+    schedule_page.refresh(session)
+    playback_row = schedule_page._playback_row
+    assert playback_row is not None
+    assert playback_row.get_selected() == 2
+    assert playback_row.get_subtitle() == "Manual override · Night is playing."
+
+    application.runtime_status = {
+        "playlist_id": evening.id,
+        "playlist": evening.name,
+        "source": "schedule",
+        "schedule": {
+            "following": True,
+            "playlist_id": evening.id,
+            "playlist": evening.name,
+            "rule_id": "work-hours",
+        },
+    }
+    playlist_page.runtime_status_changed(session)
+    schedule_page.runtime_status_changed(session)
+    assert "playing from schedule" in evening_record[2].get_label()
+    assert "playing" not in night_record[2].get_label()
+    assert schedule_page._playback_row is playback_row
+    assert playback_row.get_selected() == 0
+    assert playback_row.get_subtitle() == ("Following schedule · rule work-hours selects Evening.")
+
+    playlist_page.shutdown()
     session.shutdown()
 
 
@@ -646,13 +810,13 @@ def test_unchanged_pairing_refresh_keeps_editor_widgets(tmp_path: Path) -> None:
     page = PairingsPage(application, lambda: None)  # type: ignore[arg-type]
     page.edit(session, items[0])
     editor = page._editor.get_first_child()
-    still_picker = page._still_row
+    still_picker = page._still_search
     _put_scroll_at(page._editor_scroll, 29.0)
 
     page.refresh(session)
 
     assert page._editor.get_first_child() is editor
-    assert page._still_row is still_picker
+    assert page._still_search is still_picker
     assert page._editor_scroll.get_vadjustment().get_value() == 29.0
     page.shutdown()
     session.shutdown()

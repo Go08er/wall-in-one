@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from wall_in_one import file_io
 from wall_in_one.providers.base import WallpaperCandidate
 
 #: The sidecar suffixes that record a download. `library.scan` knows a third,
@@ -110,19 +111,29 @@ def _entry(sidecar: Path) -> tuple[Origin | None, str, Path] | None:
     media = sidecar.with_name(sidecar.name[: -len(_suffix_of(sidecar))])
     # The file having gone is the interesting case: a sidecar left behind by a
     # deletion must not make the browser claim we still hold the wallpaper.
-    if not media.is_file():
+    if media.is_symlink() or not media.is_file():
         return None
     try:
-        if sidecar.stat().st_size > MAX_SIDECAR_BYTES:
-            return None
-        raw = sidecar.read_text(encoding="utf-8")
-    except OSError, UnicodeDecodeError:
+        raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
+    except OSError:
+        return None
+    if raw is None:
         return None
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
+        return None
+
+    expected_provider = "Wallhaven" if sidecar.name.endswith(".wallhaven.json") else "MotionBGS"
+    if not (
+        type(payload.get("schema")) is int
+        and payload.get("schema") == 1
+        and payload.get("plugin") == "goober/wall-in-one"
+        and payload.get("provider") == expected_provider
+        and payload.get("path") == str(media)
+    ):
         return None
 
     provider = payload.get("provider")
@@ -151,7 +162,7 @@ def _sidecars(roots: Iterable[Path]) -> Iterable[Path]:
     """
     seen: set[Path] = set()
     for root in roots:
-        if not root.is_dir():
+        if root.is_symlink() or not root.is_dir():
             continue
         for suffix in SIDECAR_SUFFIXES:
             for found in root.rglob(f"*{suffix}"):

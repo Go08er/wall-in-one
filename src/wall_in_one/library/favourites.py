@@ -40,7 +40,6 @@ whatever was in there is still recoverable by hand.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 from collections.abc import Iterable, Iterator
@@ -49,13 +48,14 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import paths
+from wall_in_one.library import state_file
 
 #: The file, under `paths.app_state_dir()`.
 STATE_FILENAME: Final = "favourites.json"
 
-#: Bumped only if the shape below ever changes. Read leniently -- an
-#: unrecognised version is still a list of paths, and refusing it would throw
-#: away favourites over a number.
+#: Bumped only if the shape below ever changes. Newer documents remain
+#: recoverable in the interactive UI, but fault so an older build never
+#: rewrites fields it cannot understand.
 FORMAT_VERSION: Final = 1
 
 #: A ceiling, so a file that grew a zero on the end cannot be read forever.
@@ -169,25 +169,35 @@ def _read(path: Path) -> tuple[Favourites, str | None]:
     Never raises. The fault is a message for a toast, not a control flow: the
     caller gets working, empty favourites either way.
     """
-    try:
-        if path.is_symlink() or not path.is_file():
-            return Favourites(), None
-        if path.stat().st_size > MAX_STATE_BYTES:
-            return Favourites(), f"{path.name} is too large to be a list of favourites"
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return Favourites(), f"could not read {path.name}: {error.strerror or error}"
-
-    try:
-        payload = json.loads(text)
-    except ValueError, RecursionError:
-        return Favourites(), f"{path.name} is not readable, so no favourites were loaded"
-    if not isinstance(payload, dict):
-        return Favourites(), f"{path.name} is not a favourites file"
+    payload, fault = state_file.read_object(
+        path, maximum_bytes=MAX_STATE_BYTES, description="favourites"
+    )
+    if payload is None:
+        return Favourites(), fault
+    faults = [
+        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
+    ]
     stored = payload.get("paths")
     if not isinstance(stored, list):
         return Favourites(), f"{path.name} has no list of favourites in it"
-    return Favourites(entries=_readable(stored)), None
+    if len(stored) > MAX_FAVOURITES:
+        faults.append(f"{path.name} has more than {MAX_FAVOURITES} favourites")
+    malformed = sum(
+        not isinstance(candidate, str) or not candidate.strip() or not Path(candidate).is_absolute()
+        for candidate in stored[:MAX_FAVOURITES]
+    )
+    if malformed:
+        faults.append(f"{path.name} has {malformed} malformed favourite records")
+    valid_paths = [
+        Path(candidate)
+        for candidate in stored[:MAX_FAVOURITES]
+        if isinstance(candidate, str) and candidate.strip() and Path(candidate).is_absolute()
+    ]
+    readable = _readable(stored)
+    duplicate = len(valid_paths) - len(set(valid_paths))
+    if duplicate:
+        faults.append(f"{path.name} has {duplicate} duplicate favourite paths")
+    return Favourites(entries=readable), state_file.joined_faults(faults)
 
 
 def load(path: Path | None = None) -> Favourites:
@@ -220,6 +230,7 @@ def save(favourites: Favourites, path: Path | None = None) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        state_file.fsync_parent(target)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise FavouritesError(
@@ -286,27 +297,29 @@ class Store:
     def _commit(self, updated: Favourites) -> None:
         """Adopt ``updated`` and persist it.
 
-        In memory first, then the file, and the file's failure does not roll
-        the memory back: the user asked for this and gets it for as long as
-        the app is running, while the raised error is what tells them it will
-        not outlive the session. Silently refusing the star would be worse.
+        The file first, then memory. A failed write is reported to the caller
+        and leaves both views on the last state known to be durable; otherwise
+        a retry could claim a favourite was already added while disk never saw
+        it.
         """
+        self._write(updated)
         self._favourites = updated
         self._paths = updated.paths
-        self._write()
 
-    def _write(self) -> None:
+    def _write(self, updated: Favourites) -> None:
         target = self._path if self._path is not None else state_path()
         if self._fault is not None:
             # Do not overwrite bytes we could not understand. They are the
             # user's list, in some form, and a copy costs nothing.
-            broken = target.with_name(target.name + BROKEN_SUFFIX)
-            # Nothing to move, or nowhere to move it: either way the save below
-            # is still the right thing to do.
-            with contextlib.suppress(OSError):
-                os.replace(target, broken)
+            try:
+                state_file.preserve_faulted(target)
+            except OSError as error:
+                raise FavouritesError(
+                    "local-io",
+                    f"could not preserve unreadable {target}: {error.strerror or error}",
+                ) from error
             self._fault = None
-        save(self._favourites, target)
+        save(updated, target)
 
     def add(self, path: Path) -> bool:
         """Mark ``path``. False if it was already marked."""

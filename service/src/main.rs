@@ -21,12 +21,22 @@ const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 struct SocketOwner {
     listener: UnixListener,
     path: PathBuf,
+    identity: (u64, u64),
     _lock: File,
 }
 
 impl Drop for SocketOwner {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        remove_owned_socket(&self.path, self.identity);
+    }
+}
+
+fn remove_owned_socket(path: &Path, identity: (u64, u64)) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_socket() && (metadata.dev(), metadata.ino()) == identity {
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -106,6 +116,7 @@ fn parse() -> Result<Options, String> {
 
 fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
     let mut reader = BufReader::new(&stream);
     let (response, was_reload) = match read_request(&mut reader) {
         Ok(request) => {
@@ -118,7 +129,9 @@ fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) -> bool {
         Err(error) => (Response::failure(error), false),
     };
     let mut writer = stream;
-    let _ = write_response(&mut writer, &response);
+    if let Err(error) = write_response(&mut writer, &response) {
+        eprintln!("wall-in-one-service: response write failed: {error}");
+    }
     was_reload
 }
 
@@ -225,17 +238,21 @@ fn claim_socket(path: &Path) -> Result<SocketOwner, String> {
     }
     let listener = UnixListener::bind(path)
         .map_err(|error| format!("cannot bind {}: {error}", path.display()))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect newly bound socket: {error}"))?;
+    let identity = (metadata.dev(), metadata.ino());
     if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        let _ = fs::remove_file(path);
+        remove_owned_socket(path, identity);
         return Err(format!("cannot secure socket: {error}"));
     }
     if let Err(error) = listener.set_nonblocking(true) {
-        let _ = fs::remove_file(path);
+        remove_owned_socket(path, identity);
         return Err(error.to_string());
     }
     Ok(SocketOwner {
         listener,
         path: path.to_path_buf(),
+        identity,
         _lock: lock,
     })
 }

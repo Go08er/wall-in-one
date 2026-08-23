@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one.library import pairing, pairings, state_file
+from wall_in_one.library import pairing, pairings, state_file, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.pairings import (
     Identity,
@@ -259,10 +259,98 @@ def test_a_deleted_wallpaper_loses_its_record(tmp_path: Path) -> None:
     assert len(store) == 0
 
 
+def test_deleting_motion_forgets_all_its_metadata_but_preserves_manual_still(
+    tmp_path: Path,
+) -> None:
+    clip = video(tmp_path / "clip.mp4")
+    chosen = png(tmp_path / "chosen.png")
+    motion = item(clip, Kind.VIDEO)
+    picture = item(chosen)
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_still(motion, chosen)
+    store.choose_palette(motion, PalettePolicy("builtin", "Nord"))
+    store.mark_borked(motion, "renderer crashed", "automatic-apply")
+    store.choose_palette(picture, PalettePolicy("custom", "My still"))
+
+    assert store.forget_item(motion)
+
+    assert store.get(Identity.of(motion)) is None
+    still_record = store.get(Identity.of(picture))
+    assert still_record is not None
+    assert still_record.palette == PalettePolicy("custom", "My still")
+    assert chosen.is_file(), "a manually selected still is an independent library item"
+
+
+def test_deleting_a_manual_still_resets_links_but_preserves_palette_and_health(
+    tmp_path: Path,
+) -> None:
+    clip = item(video(tmp_path / "clip.mp4"), Kind.VIDEO)
+    chosen_path = png(tmp_path / "chosen.png")
+    chosen = item(chosen_path)
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_still(clip, chosen_path)
+    store.choose_palette(clip, PalettePolicy("builtin", "Nord"))
+    store.mark_borked(clip, "renderer crashed", "automatic-apply")
+    store.choose_palette(chosen, PalettePolicy("custom", "Still colours"))
+
+    assert store.forget_item(chosen)
+
+    assert store.get(Identity.of(chosen)) is None
+    motion = store.get(Identity.of(clip))
+    assert motion is not None
+    assert motion.still is None
+    assert motion.palette == PalettePolicy("builtin", "Nord")
+    assert motion.health.is_borked
+
+
+def test_deleting_generated_stills_scrubs_other_links_in_the_same_transaction(
+    tmp_path: Path,
+) -> None:
+    first = item(video(tmp_path / "first.mp4"), Kind.VIDEO)
+    second = item(video(tmp_path / "second.mp4"), Kind.VIDEO)
+    generated = png(tmp_path / "Wall-in-One" / "Automatic Stills" / "generated.png")
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_palette(second, PalettePolicy("builtin", "Nord"))
+    store.choose_still(second, generated)
+
+    assert store.forget_item(first, removed_stills=(generated,))
+
+    survivor = store.get(Identity.of(second))
+    assert survivor is not None
+    assert survivor.still is None
+    assert survivor.palette == PalettePolicy("builtin", "Nord")
+
+
+def test_deletion_rebases_before_scrubbing_dependent_still_choices(tmp_path: Path) -> None:
+    target = tmp_path / "pairings.json"
+    clip = item(video(tmp_path / "clip.mp4"), Kind.VIDEO)
+    chosen_path = png(tmp_path / "chosen.png")
+    chosen = item(chosen_path)
+    other = item(png(tmp_path / "other.png"))
+    live = Store(path=target)
+    live.choose_still(clip, chosen_path)
+    live.choose_palette(clip, PalettePolicy("builtin", "Nord"))
+    live.mark_borked(clip, "renderer crashed", "automatic-apply")
+    stale = Store.open(target)
+    live.choose_palette(other, PalettePolicy("custom", "Concurrent choice"))
+
+    assert stale.forget_item(chosen)
+
+    reopened = Store.open(target)
+    survivor = reopened.get(Identity.of(clip))
+    concurrent = reopened.get(Identity.of(other))
+    assert survivor is not None
+    assert survivor.still is None
+    assert survivor.palette == PalettePolicy("builtin", "Nord")
+    assert survivor.health.is_borked
+    assert concurrent is not None
+    assert concurrent.palette == PalettePolicy("custom", "Concurrent choice")
+
+
 # -- applying over a library ---------------------------------------------
 
 
-def test_a_still_spent_representing_a_video_leaves_the_rotation(tmp_path: Path) -> None:
+def test_a_manual_sibling_representing_a_video_remains_first_class(tmp_path: Path) -> None:
     clip = video(tmp_path / "clip.mp4")
     sibling = png(tmp_path / "clip-still.png")
     standalone = png(tmp_path / "holiday.png")
@@ -271,13 +359,12 @@ def test_a_still_spent_representing_a_video_leaves_the_rotation(tmp_path: Path) 
         [item(clip, Kind.VIDEO), item(sibling), item(standalone)], roots=[tmp_path]
     )
 
-    assert [entry.path for entry in kept] == [clip, standalone]
+    assert [entry.path for entry in kept] == [clip, sibling, standalone]
     assert kept[0].paired_still == sibling
 
 
-def test_choosing_a_different_still_frees_the_old_one(tmp_path: Path) -> None:
-    """The reason this cannot be an overlay on an already-paired library: the
-    still the convention had spent has to come back into the rotation."""
+def test_choosing_a_different_still_keeps_both_manual_items(tmp_path: Path) -> None:
+    """Both user-provided images remain independent library items."""
     clip = video(tmp_path / "clip.mp4")
     sibling = png(tmp_path / "clip-still.png")
     chosen = png(tmp_path / "chosen.png")
@@ -287,7 +374,7 @@ def test_choosing_a_different_still_frees_the_old_one(tmp_path: Path) -> None:
     kept = store.apply([item(clip, Kind.VIDEO), item(sibling), item(chosen)], roots=[tmp_path])
 
     by_path = {entry.path: entry for entry in kept}
-    assert chosen not in by_path
+    assert chosen in by_path
     assert sibling in by_path
     assert by_path[clip].paired_still == chosen
 
@@ -304,8 +391,22 @@ def test_two_videos_may_share_one_still(tmp_path: Path) -> None:
         [item(first, Kind.VIDEO), item(second, Kind.VIDEO), item(shared)], roots=[tmp_path]
     )
 
-    assert [entry.path for entry in kept] == [first, second]
-    assert all(entry.paired_still == shared for entry in kept)
+    assert [entry.path for entry in kept] == [first, second, shared]
+    assert all(entry.paired_still == shared for entry in kept[:2])
+    assert kept[2].paired_still is None
+
+
+def test_an_exact_app_generated_still_is_absorbed_by_its_video(tmp_path: Path) -> None:
+    clip = video(tmp_path / "clip.mp4")
+    generated = png(stills.destination(clip, tmp_path))
+    standalone = png(tmp_path / "holiday.png")
+
+    kept = pairings.apply(
+        [item(clip, Kind.VIDEO), item(generated), item(standalone)], roots=[tmp_path]
+    )
+
+    assert [entry.path for entry in kept] == [clip, standalone]
+    assert kept[0].paired_still == generated
 
 
 def test_applying_nothing_is_not_an_error(tmp_path: Path) -> None:

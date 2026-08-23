@@ -238,7 +238,13 @@ def _write_runtime_config() -> int:
             settings = config.load_strict()
             session = Session(settings)
             try:
-                session.refresh()
+                # Runtime publication is a read-only authoring snapshot. The
+                # GUI owns pending-removal reconciliation; letting this
+                # short-lived process rewrite Favourites/Playlists from stale
+                # snapshots could race an interactive edit. A malformed
+                # journal is still present in ``authoring_faults`` below and
+                # therefore fails publication closed.
+                session.refresh(mutate_removals=False)
                 changed = runtime_config.update(settings, session)
             finally:
                 session.shutdown()
@@ -306,7 +312,9 @@ def _sync_runtime_health() -> int:
 
             settings = config.load_strict()
             session = Session(settings)
-            session.refresh()
+            # Health sync may update Pairings under its mutation lock, but it
+            # must not opportunistically rewrite the other authoring stores.
+            session.refresh(mutate_removals=False)
             faults = session.authoring_faults()
             if faults:
                 details = "; ".join(f"{name}: {fault}" for name, fault in faults)

@@ -405,7 +405,12 @@ class SchedulesPage(Gtk.ScrolledWindow):
         choices: tuple[Any, ...],
         truth: runtime_truth.RuntimeTruth,
     ) -> None:
-        description = self._display_playback_description(display, truth)
+        taboo = display.entry_taboo or runtime_truth.entry_is_taboo(
+            getattr(self._app, "runtime_status", None),
+            display.playlist_id,
+            display.entry_id,
+        )
+        description = self._display_playback_description(display, truth, taboo=taboo)
         controls.row.set_subtitle(description)
         diagnostic = (
             display.automatic_retry.reason
@@ -422,15 +427,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
             controls.playlist,
             self._display_playback_selected(display, choices),
         )
-        taboo = display.renderer_failed and runtime_truth.entry_is_taboo(
-            getattr(self._app, "runtime_status", None),
-            display.playlist_id,
-            display.entry_id,
-        )
         # A renderer failure leaves the resolved still on screen and may keep
         # the route's logical playback state as ``playing``. A transient
-        # failure can be retried with Play. A session-taboo entry cannot: its
-        # recovery action lives on the Media/Pairings health surface.
+        # failure can be retried with Play. A session-taboo entry cannot: the
+        # Media/Pairings health surface explains how to remove it safely.
         playing = display.playback_state == "playing" and not display.renderer_failed
         controls.play.set_icon_name(
             "dialog-warning-symbolic"
@@ -441,7 +441,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         if taboo:
             controls.play.set_tooltip_text(
-                "Borked wallpaper: open it in Media/Pairings to clear taboo and retry"
+                "Borked wallpaper: playback is disabled; open it in Media/Pairings"
             )
         elif display.renderer_failed:
             controls.play.set_tooltip_text("Retry motion on this display")
@@ -449,6 +449,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             controls.play.set_tooltip_text(
                 "Pause this display" if playing else "Resume this display"
             )
+        controls.play.set_sensitive(not taboo)
         controls.stop.set_sensitive(display.playback_state != "stopped")
         controls.modes.set_subtitle(self._display_modes_description(display))
         controls.shuffle.set_active(display.shuffle)
@@ -479,6 +480,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
     def _display_playback_description(
         display: runtime_truth.DisplayRuntimeTruth,
         truth: runtime_truth.RuntimeTruth,
+        *,
+        taboo: bool,
     ) -> str:
         if display.automatic_retry is not None:
             retry = display.automatic_retry
@@ -486,11 +489,18 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 f"Retry {retry.attempt}/{retry.maximum_attempts} · {display.playlist} · "
                 f"{SchedulesPage._bounded_diagnostic(retry.reason)}"
             )
+        if taboo:
+            detail = SchedulesPage._bounded_diagnostic(
+                display.last_error or "this wallpaper is marked as a known renderer crasher"
+            )
+            return (
+                f"Borked · playback disabled; paired still retained · {display.playlist} · {detail}"
+            )
         if display.renderer_failed:
             detail = SchedulesPage._bounded_diagnostic(
                 display.last_error or "the motion renderer exited"
             )
-            return f"Static fallback · {display.playlist} · {detail}"
+            return f"Renderer stopped · Retry available · {display.playlist} · {detail}"
         if display.route_source == "manual":
             route = "Manual override"
         elif display.route_source == "schedule":
@@ -1030,7 +1040,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             display = truth.display(connector) if truth is not None else None
             if display is None:
                 return
-            if display.renderer_failed and runtime_truth.entry_is_taboo(
+            if display.entry_taboo or runtime_truth.entry_is_taboo(
                 getattr(self._app, "runtime_status", None),
                 display.playlist_id,
                 display.entry_id,

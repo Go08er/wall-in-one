@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import favourites, playlists, schedules
+from wall_in_one.library import (
+    favourites,
+    pairing,
+    pairings,
+    playlists,
+    removals,
+    scan,
+    schedules,
+)
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
@@ -85,6 +93,83 @@ def test_navigation_applies_wallpapers(applied_paths: list[Path]) -> None:
     assert session.next().path == Path("/w/b.png")
     assert session.previous().path == Path("/w/a.png")
     assert applied_paths == [Path("/w/b.png"), Path("/w/a.png")]
+
+
+def test_navigation_and_direct_choice_never_apply_a_borked_wallpaper(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_still("a"), _video("b"), _still("c")]
+    health = pairings.Store(path=tmp_path / "pairings.json")
+    lists = playlists.Store(path=tmp_path / "playlists.json")
+    health.mark_borked(items[1], "decoder crashed", "renderer-crash")
+    session = Session(
+        config.Settings(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: Library(roots=(Path("/w"),), items=tuple(items)),
+        pairing_store=health,
+        playlist_store=lists,
+        rng=random.Random(4),
+    )
+    session.refresh()
+
+    assert session.next().item == items[2]
+    assert session.previous().item == items[0]
+    for _ in range(12):
+        assert session.random().item != items[1]
+    with pytest.raises(ApplyError, match="marked Borked and cannot play"):
+        session.choose(items[1].path)
+
+    assert lists.get("quick-choice") is None
+    assert items[1].path not in applied_paths
+
+
+def test_new_health_marker_blocks_play_and_next_skips_the_current_crasher(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    items = [_video("crasher"), _still("safe")]
+    health = pairings.Store(path=tmp_path / "pairings.json")
+    session = Session(
+        config.Settings(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: Library(roots=(Path("/w"),), items=tuple(items)),
+        pairing_store=health,
+    )
+    session.refresh()
+    health.mark_borked(items[0], "renderer exited", "renderer-crash")
+
+    with pytest.raises(ApplyError, match="marked Borked and cannot play"):
+        session.apply_current()
+    assert session.next().item == items[1]
+    assert applied_paths == [items[1].path]
+
+
+def test_all_borked_playlist_is_refused_without_replacing_the_manual_choice(
+    applied_paths: list[Path], tmp_path: Path
+) -> None:
+    safe, borked = _still("safe"), _video("crasher")
+    health = pairings.Store(path=tmp_path / "pairings.json")
+    lists = playlists.Store(path=tmp_path / "playlists.json")
+    safe_list = lists.create("Safe")
+    broken_list = lists.create("Broken")
+    lists.add(safe_list.id, safe.path)
+    lists.add(broken_list.id, borked.path)
+    health.mark_borked(borked, "renderer exited", "renderer-crash")
+    session = Session(
+        config.Settings(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda _roots: Library(roots=(Path("/w"),), items=(safe, borked)),
+        pairing_store=health,
+        playlist_store=lists,
+    )
+    session.refresh()
+    session.use_playlist(safe_list.id)
+
+    with pytest.raises(ApplyError, match="every item is marked Borked"):
+        session.use_playlist(broken_list.id)
+
+    assert session.manual_playlist == safe_list.id
+    assert session.cursor == safe
+    assert applied_paths == []
 
 
 def test_selecting_media_plays_through_a_visible_quick_choice_playlist(
@@ -633,6 +718,524 @@ def test_an_applier_handed_in_is_left_as_its_owner_configured_it() -> None:
     settings = replace(config.Settings(), video_when_hidden="stop").validated()
     Session(settings, applier=Applier(fake), scanner=lambda _roots: Library(roots=(), items=()))  # type: ignore[arg-type]
     assert fake.when_hidden == "play"
+
+
+def test_confirmed_workshop_uninstall_forgets_authoring_and_generated_still(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    content = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    scene_path = content / "42"
+    scene_path.mkdir(parents=True)
+    scene = MediaItem(
+        path=scene_path,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        provider=scan.WORKSHOP_PROVIDER,
+        scene="42",
+    )
+    pairing_store = pairings.Store(path=tmp_path / "pairings.json")
+    favourite_store = favourites.Store(path=tmp_path / "favourites.json")
+    playlist_store = playlists.Store(path=tmp_path / "playlists.json")
+    session = Session(
+        replace(config.Settings(), roots=(root,), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairing_store,
+        favourite_store=favourite_store,
+        playlist_store=playlist_store,
+    )
+    session.adopt_library(Library(roots=(root,), items=(scene,)))
+    custom = tmp_path / "my-scene-still.png"
+    custom.write_bytes(b"custom")
+    pairing_store.choose_still(scene, custom)
+    pairing_store.mark_borked(scene, "engine crashed", "renderer-crash")
+    favourite_store.add(scene.path)
+    playlist = playlist_store.create("Scenes")
+    playlist_store.add(playlist.id, scene.path)
+    generated = pairing.still_directory(root) / "42.png"
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(b"automatic")
+
+    scene_path.rmdir()
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    assert session.removed_workshop == (scene,)
+    assert pairing_store.get(pairings.Identity.of(scene)) is None
+    assert scene.path not in favourite_store.paths
+    assert playlist_store.get(playlist.id) is not None
+    assert playlist_store.get(playlist.id).entries == ()  # type: ignore[union-attr]
+    assert not generated.exists()
+    assert custom.is_file(), "a chosen representative is the user's file"
+
+    # The stable Workshop id is no longer poisoned after reinstall.
+    scene_path.mkdir()
+    session.adopt_library(Library(roots=(root,), items=(scene,)))
+    assert not pairing_store.resolve(scene, (root,)).health.is_borked
+    session.shutdown()
+
+
+@pytest.mark.parametrize("source_present", [True, False])
+def test_workshop_omission_is_not_an_uninstall_without_both_safety_signals(
+    tmp_path: Path,
+    source_present: bool,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    content = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    scene_path = content / "42"
+    scene_path.mkdir(parents=True)
+    scene = MediaItem(
+        path=scene_path,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        provider=scan.WORKSHOP_PROVIDER,
+        scene="42",
+    )
+    store = pairings.Store(path=tmp_path / "pairings.json")
+    session = Session(
+        replace(config.Settings(), roots=(root,), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=store,
+    )
+    session.adopt_library(Library(roots=(root,), items=(scene,)))
+    custom = tmp_path / "chosen.png"
+    custom.write_bytes(b"custom")
+    store.choose_still(scene, custom)
+    store.choose_palette(scene, pairings.PalettePolicy("builtin", "Nord"))
+    store.mark_borked(scene, "engine crashed", "renderer-crash")
+    generated = pairing.still_directory(root) / "42.png"
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(b"automatic")
+    if not source_present:
+        scene_path.rmdir()
+        content.rmdir()
+
+    # With the source present this models a transient malformed project.json;
+    # with both source and content root absent it models an unavailable drive.
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    assert len(session.removed_workshop) == 0
+    record = store.get(pairings.Identity.of(scene))
+    assert record is not None
+    assert record.still == custom
+    assert record.palette == pairings.PalettePolicy("builtin", "Nord")
+    assert record.health.is_borked
+    assert generated.is_file()
+    session.shutdown()
+
+
+def test_missing_workshop_video_entry_is_not_an_uninstall_while_item_directory_exists(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    content = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    item_directory = content / "42"
+    item_directory.mkdir(parents=True)
+    entry = item_directory / "wallpaper.mp4"
+    entry.write_bytes(b"video")
+    video = MediaItem(
+        path=entry,
+        kind=Kind.VIDEO,
+        size=5,
+        mtime=1,
+        provider=scan.WORKSHOP_PROVIDER,
+    )
+    store = pairings.Store(path=tmp_path / "pairings.json")
+    session = Session(
+        replace(config.Settings(), roots=(root,), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=store,
+    )
+    session.adopt_library(Library(roots=(root,), items=(video,)))
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"custom")
+    store.choose_still(video, chosen)
+    store.mark_borked(video, "renderer crashed", "renderer-crash")
+
+    # Steam may replace or rename the media while updating project.json. The
+    # Workshop-id directory is the install lifecycle boundary, not this file.
+    entry.unlink()
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    record = store.get(pairings.Identity.of(video))
+    assert record is not None
+    assert record.still == chosen
+    assert record.health.is_borked
+
+    # The transient omission must not erase the last-known installation. A
+    # later scan can still recognize the directory's actual removal.
+    item_directory.rmdir()
+    session.adopt_library(Library(roots=(root,), items=()))
+    assert session.removed_workshop == (video,)
+    assert store.get(pairings.Identity.of(video)) is None
+    assert chosen.is_file()
+    session.shutdown()
+
+
+def test_confirmed_workshop_video_uninstall_uses_the_item_directory_boundary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    content = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    item_directory = content / "42"
+    item_directory.mkdir(parents=True)
+    entry = item_directory / "wallpaper.mp4"
+    entry.write_bytes(b"video")
+    video = MediaItem(
+        path=entry,
+        kind=Kind.VIDEO,
+        size=5,
+        mtime=1,
+        provider=scan.WORKSHOP_PROVIDER,
+    )
+    store = pairings.Store(path=tmp_path / "pairings.json")
+    session = Session(
+        replace(config.Settings(), roots=(root,), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=store,
+    )
+    session.adopt_library(Library(roots=(root,), items=(video,)))
+    store.mark_borked(video, "renderer crashed", "renderer-crash")
+
+    entry.unlink()
+    item_directory.rmdir()
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    assert session.removed_workshop == (video,)
+    assert store.get(pairings.Identity.of(video)) is None
+    session.shutdown()
+
+
+def test_workshop_metadata_failure_stays_visible_and_retries_on_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    content = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    scene_path = content / "42"
+    scene_path.mkdir(parents=True)
+    scene = MediaItem(
+        path=scene_path,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        provider=scan.WORKSHOP_PROVIDER,
+        scene="42",
+    )
+    store = pairings.Store(path=tmp_path / "pairings.json")
+    session = Session(
+        replace(config.Settings(), roots=(root,), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=store,
+    )
+    session.adopt_library(Library(roots=(root,), items=(scene,)))
+    store.mark_borked(scene, "renderer crashed", "renderer-crash")
+    original = store.forget_item
+    attempts = 0
+
+    def fail_once(
+        removed: MediaItem,
+        *,
+        removed_stills: tuple[Path, ...] = (),
+    ) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise pairings.PairingError("local-io", "pairings.json is read-only")
+        return original(removed, removed_stills=removed_stills)
+
+    monkeypatch.setattr(store, "forget_item", fail_once)
+    scene_path.rmdir()
+
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    assert session.removed_workshop == (scene,)
+    assert "pairings.json is read-only" in " ".join(session.workshop_cleanup_failures)
+    assert store.get(pairings.Identity.of(scene)) is not None
+
+    # The next refresh retries the remembered lifecycle cleanup even though
+    # the removed item is no longer present in the previous Library snapshot.
+    session.adopt_library(Library(roots=(root,), items=()))
+    assert session.workshop_cleanup_failures == ()
+    assert store.get(pairings.Identity.of(scene)) is None
+    session.shutdown()
+
+
+def test_workshop_journal_failure_stays_visible_until_durable_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    content = tmp_path / "steamapps" / "workshop" / "content" / "431960"
+    scene_path = content / "42"
+    scene_path.mkdir(parents=True)
+    scene = MediaItem(
+        path=scene_path,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        provider=scan.WORKSHOP_PROVIDER,
+        scene="42",
+    )
+    pairing_store = pairings.Store(path=tmp_path / "pairings.json")
+    journal = removals.Store.open(tmp_path / "pending-removals.json")
+    session = Session(
+        replace(config.Settings(), roots=(root,), scan_workshop=True).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairing_store,
+        removal_store=journal,
+    )
+    session.adopt_library(Library(roots=(root,), items=(scene,)))
+    pairing_store.mark_borked(scene, "renderer crashed", "renderer-crash")
+    original = journal.record_external
+
+    def refuse_record(_item: MediaItem, _roots: Sequence[Path]) -> removals.Intent:
+        raise removals.RemovalJournalError("local-io", "state directory is read-only")
+
+    monkeypatch.setattr(journal, "record_external", refuse_record)
+    scene_path.rmdir()
+
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    assert "state directory is read-only" in " ".join(session.workshop_cleanup_failures)
+    assert "recorded durably" in " ".join(session.workshop_cleanup_failures)
+    assert pairing_store.get(pairings.Identity.of(scene)) is None
+
+    monkeypatch.setattr(journal, "record_external", original)
+    session.adopt_library(Library(roots=(root,), items=()))
+
+    assert session.workshop_cleanup_failures == ()
+    assert removals.Store.open(tmp_path / "pending-removals.json").records == ()
+    session.shutdown()
+
+
+def test_crash_after_local_delete_replays_durable_metadata_cleanup(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "clip.mp4"
+    source.write_bytes(b"video")
+    motion = MediaItem(source, Kind.VIDEO, 5, 1)
+    generated = pairing.still_directory(root) / f"{pairing.automatic_still_stem(source)}.png"
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(b"automatic")
+    dependent_path = root / "other.mp4"
+    dependent_path.write_bytes(b"other")
+    dependent = MediaItem(dependent_path, Kind.VIDEO, 5, 1)
+    favourite_path = tmp_path / "favourites.json"
+    pairing_path = tmp_path / "pairings.json"
+    playlist_path = tmp_path / "playlists.json"
+    journal_path = tmp_path / "pending-removals.json"
+    favourite_store = favourites.Store(path=favourite_path)
+    pairing_store = pairings.Store(path=pairing_path)
+    playlist_store = playlists.Store(path=playlist_path)
+    journal = removals.Store.open(journal_path)
+    favourite_store.add(source)
+    pairing_store.mark_borked(motion, "renderer crashed", "renderer-crash")
+    pairing_store.choose_still(dependent, generated)
+    playlist = playlist_store.create("Saved")
+    playlist_store.add(playlist.id, source)
+    first = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=favourite_store,
+        pairing_store=pairing_store,
+        playlist_store=playlist_store,
+        removal_store=journal,
+    )
+
+    first.prepare_removal(motion, (root,))
+    source.unlink()
+    # Simulate process death here: no commit marker and no store cleanup.
+    first.shutdown()
+
+    reopened_pairings = pairings.Store.open(pairing_path)
+    reopened_favourites = favourites.Store.open(favourite_path)
+    reopened_playlists = playlists.Store.open(playlist_path)
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=reopened_favourites,
+        pairing_store=reopened_pairings,
+        playlist_store=reopened_playlists,
+        removal_store=removals.Store.open(journal_path),
+    )
+
+    assert restarted.retry_removals() == ()
+    assert reopened_favourites.is_favourite(source) is False
+    assert reopened_pairings.get(pairings.Identity.of(motion)) is None
+    survivor = reopened_pairings.get(pairings.Identity.of(dependent))
+    assert survivor is not None and survivor.still is None
+    assert reopened_playlists.get(playlist.id) is not None
+    assert reopened_playlists.get(playlist.id).entries == ()  # type: ignore[union-attr]
+    assert not generated.exists()
+    assert removals.Store.open(journal_path).records == ()
+
+    # Reinstalling the same path cannot inherit the deleted item's Borked bit.
+    source.write_bytes(b"reinstalled")
+    assert not reopened_pairings.resolve(motion, (root,)).health.is_borked
+    restarted.shutdown()
+
+
+def test_restart_cancels_prepared_intent_when_original_was_never_removed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    pairing_path = tmp_path / "pairings.json"
+    journal_path = tmp_path / "pending-removals.json"
+    pairing_store = pairings.Store(path=pairing_path)
+    pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
+    prepared_store = removals.Store.open(journal_path)
+    prepared_store.prepare(picture, (root,))
+    prepared_store.close()
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairings.Store.open(pairing_path),
+        removal_store=removals.Store.open(journal_path),
+    )
+
+    assert restarted.retry_removals() == ()
+    assert source.is_file()
+    assert restarted.pairings.health(pairings.Identity.of(picture)).is_borked
+    assert removals.Store.open(journal_path).records == ()
+    restarted.shutdown()
+
+
+def test_live_prepared_removal_cannot_be_cancelled_by_another_session(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    journal_path = tmp_path / "pending-removals.json"
+    owner = removals.Store.open(journal_path)
+    intent = owner.prepare(picture, (root,))
+    observer = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    try:
+        failures = observer.retry_removals()
+
+        assert "still active in another process" in " ".join(failures)
+        assert removals.Store.open(journal_path).records == (intent,)
+    finally:
+        owner.discard(intent)
+        observer.shutdown()
+
+
+def test_uncommitted_missing_source_waits_for_the_same_library_filesystem(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    pairing_path = tmp_path / "pairings.json"
+    journal_path = tmp_path / "pending-removals.json"
+    pairing_store = pairings.Store(path=pairing_path)
+    pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
+    owner = removals.Store.open(journal_path)
+    owner.prepare(picture, (root,))
+    owner.close()
+    mounted_elsewhere = tmp_path / "disconnected-drive"
+    root.rename(mounted_elsewhere)
+    root.mkdir()
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairings.Store.open(pairing_path),
+        removal_store=removals.Store.open(journal_path),
+    )
+    try:
+        failures = restarted.retry_removals()
+
+        assert "filesystem is unavailable or changed" in " ".join(failures)
+        assert restarted.pairings.health(pairings.Identity.of(picture)).is_borked
+        assert restarted.removal_journal.records
+    finally:
+        restarted.shutdown()
+
+
+def test_explicit_committed_removal_replays_after_the_source_root_changes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    pairing_path = tmp_path / "pairings.json"
+    journal_path = tmp_path / "pending-removals.json"
+    pairing_store = pairings.Store(path=pairing_path)
+    pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
+    owner = removals.Store.open(journal_path)
+    intent = owner.prepare(picture, (root,))
+    source.unlink()
+    committed = owner.mark_committed(intent)
+    owner.finish_operation(committed)
+    root.rename(tmp_path / "disconnected-drive")
+    root.mkdir()
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairings.Store.open(pairing_path),
+        removal_store=removals.Store.open(journal_path),
+    )
+    try:
+        assert restarted.retry_removals() == ()
+        assert not restarted.pairings.health(pairings.Identity.of(picture)).is_borked
+        assert restarted.removal_journal.records == ()
+    finally:
+        restarted.shutdown()
+
+
+def test_stale_commit_token_cannot_clean_a_newer_removal_lifecycle(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    pairing_store = pairings.Store(path=tmp_path / "pairings.json")
+    pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
+    journal = removals.Store.open(tmp_path / "pending-removals.json")
+    stale = journal.prepare(picture, (root,))
+    journal.discard(stale)
+    current = journal.prepare(picture, (root,))
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairing_store,
+        removal_store=journal,
+    )
+    try:
+        failures = session.commit_removal(stale)
+
+        assert "different pending removal" in " ".join(failures)
+        assert pairing_store.health(pairings.Identity.of(picture)).is_borked
+        assert journal.records == (current,)
+    finally:
+        journal.discard(current)
+        session.shutdown()
 
 
 # -- the rotation and the favourites --------------------------------------

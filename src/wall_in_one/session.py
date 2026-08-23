@@ -9,6 +9,7 @@ surface the Noctalia plugin drives -- be tested directly.
 from __future__ import annotations
 
 import contextlib
+import os
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -19,8 +20,10 @@ from wall_in_one import config
 from wall_in_one.library import (
     displays,
     favourites,
+    manage,
     pairings,
     playlists,
+    removals,
     scan,
     schedules,
     stills,
@@ -67,6 +70,14 @@ class LibraryScan:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkshopCleanup:
+    """A confirmed uninstall whose durable authoring cleanup must finish."""
+
+    item: MediaItem
+    roots: tuple[Path, ...]
+
+
 #: The one-entry playlist created when Media is activated.  A fixed id means
 #: repeated choices replace one visible playlist instead of filling the store
 #: with disposable records.
@@ -106,6 +117,7 @@ class Session:
         playlist_store: playlists.Store | None = None,
         schedule_store: schedules.Store | None = None,
         display_store: displays.Store | None = None,
+        removal_store: removals.Store | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._settings = settings
@@ -128,6 +140,14 @@ class Session:
         # would recompute every pairing from a disk the test never wrote to.
         self._scanner = scanner
         self._library = Library(roots=(), items=())
+        # Keep successfully observed Workshop installations across malformed
+        # or missing-entry scans. The ordinary Library snapshot intentionally
+        # drops unplayable items, but that must not erase the evidence needed
+        # to recognize a later, confirmed uninstall in this process.
+        self._known_workshop: dict[str, MediaItem] = {}
+        self._removed_workshop: tuple[MediaItem, ...] = ()
+        self._pending_workshop_cleanup: dict[str, _WorkshopCleanup] = {}
+        self._workshop_cleanup_failures: tuple[str, ...] = ()
         #: What the schedule last asked for, so a tick can tell whether the
         #: calendar has moved without rebuilding to find out.
         self._in_force = ""
@@ -135,7 +155,8 @@ class Session:
         #: calendar.  It is intentionally runtime-only: after a service
         #: restart the saved schedule is authoritative again.
         self._manual_playlist: str | None = None
-        self._playlist = Playlist(shuffle=settings.shuffle, rng=rng)
+        self._rng = rng if rng is not None else random.Random()
+        self._playlist = Playlist(shuffle=settings.shuffle, rng=self._rng)
         # Owned here rather than by the window, because the rotation is built
         # from them and the window is not allowed to be the only thing that
         # knows. `open` never raises: an unreadable list degrades to none.
@@ -147,6 +168,7 @@ class Session:
         # the only thing that knows.
         self._pairings = pairing_store if pairing_store is not None else pairings.Store.open()
         self._playlists = playlist_store if playlist_store is not None else playlists.Store.open()
+        self._removals = removal_store if removal_store is not None else removals.Store.open()
         self._schedules = schedule_store if schedule_store is not None else schedules.Store.open()
         self._displays = display_store if display_store is not None else displays.Store.open()
         # Injected so a schedule can be tested at three in the morning in
@@ -185,7 +207,12 @@ class Session:
 
     # -- library ---------------------------------------------------------
 
-    def refresh(self, roots: Sequence[Path] | None = None) -> Library:
+    def refresh(
+        self,
+        roots: Sequence[Path] | None = None,
+        *,
+        mutate_removals: bool = True,
+    ) -> Library:
         """Rescan and rebuild the play order, keeping our place if we can.
 
         With no roots given, the configured ones are used. An empty configured
@@ -194,7 +221,12 @@ class Session:
         wallpaper directory. Resolving it here rather than at each call site
         makes startup, refresh and completed-download scans agree.
         """
-        return self.adopt_library(self.prepare_scan(roots).run())
+        if mutate_removals:
+            self.retry_removals()
+        return self.adopt_library(
+            self.prepare_scan(roots).run(),
+            reconcile_workshop=mutate_removals,
+        )
 
     def prepare_scan(self, roots: Sequence[Path] | None = None) -> LibraryScan:
         """Snapshot all inputs for a scan without walking the library.
@@ -218,15 +250,248 @@ class Session:
             scanner=self._scanner,
         )
 
-    def adopt_library(self, library: Library) -> Library:
+    def adopt_library(
+        self,
+        library: Library,
+        *,
+        reconcile_workshop: bool = True,
+    ) -> Library:
         """Install one completed scan and reconcile the active play order.
 
         This is deliberately separate from the filesystem work so GUI callers
         can guarantee mutation happens only on GTK's main thread.
         """
+        self._removed_workshop = (
+            self._forget_confirmed_workshop_removals(library) if reconcile_workshop else ()
+        )
         self._library = library
         self._rebuild_playlist()
         return self._library
+
+    @property
+    def removed_workshop(self) -> tuple[MediaItem, ...]:
+        """Workshop installs conclusively removed by the most recent scan."""
+        return self._removed_workshop
+
+    @property
+    def workshop_cleanup_failures(self) -> tuple[str, ...]:
+        """Actionable store/artifact failures still pending after reconciliation."""
+        return self._workshop_cleanup_failures
+
+    @property
+    def removal_journal(self) -> removals.Store:
+        """Explicit removal intents, retained until cleanup is complete."""
+        return self._removals
+
+    def prepare_removal(
+        self,
+        item: MediaItem,
+        roots: Sequence[Path],
+    ) -> removals.Intent:
+        """Durably authorize a local removal before media can be touched."""
+        return self._removals.prepare(item, roots)
+
+    def cancel_removal(self, intent: removals.Intent) -> None:
+        """Cancel an intent whose physical operation did not commit."""
+        self._removals.discard(intent)
+
+    def commit_removal(self, intent: removals.Intent) -> tuple[str, ...]:
+        """Finish a committed removal and clear its journal only when clean."""
+        journal_failure: str | None = None
+        try:
+            try:
+                intent = self._removals.mark_committed(intent)
+            except removals.RemovalJournalError as error:
+                # Only a post-delete I/O failure with the exact token-owned
+                # prepared record still durable may continue. Invalid state or
+                # a stale token could name a replacement lifecycle, whose
+                # metadata this caller has no authority to mutate.
+                if error.kind != "local-io" or not self._removals.owns(intent):
+                    return (f"removal journal: {error}",)
+                journal_failure = f"removal journal: {error}"
+            failures = list(self._cleanup_removed_item(intent.item, intent.roots))
+            if failures:
+                if journal_failure is not None:
+                    failures.insert(0, journal_failure)
+                return tuple(failures)
+            try:
+                self._removals.discard(intent)
+            except removals.RemovalJournalError as error:
+                return (f"removal journal: {error}",)
+            return ()
+        finally:
+            self._removals.finish_operation(intent)
+
+    def retry_removals(self, *, external_only: bool = False) -> tuple[str, ...]:
+        """Replay crash-surviving intents without inferring from missing media."""
+        intents = self._removals.reload()
+        if self._removals.fault is not None:
+            return (f"removal journal: {self._removals.fault}",)
+        failures: list[str] = []
+        operation_active: bool | None = None
+        for intent in intents:
+            if external_only and not intent.external:
+                continue
+            # A committed marker is authoritative even if settings changed or
+            # the source filesystem went away afterwards. Availability is
+            # only evidence for resolving the prepared-but-unmarked crash
+            # window; it must never undo an explicit commit.
+            if not intent.committed and any(
+                root not in self._settings.roots for root in intent.roots
+            ):
+                failures.append(
+                    f"{intent.item.name}: pending removal names a library root which is no "
+                    "longer configured; restore that root and refresh to finish safely"
+                )
+                continue
+            if not intent.committed:
+                if operation_active is None:
+                    try:
+                        operation_active = self._removals.operation_is_active()
+                    except removals.RemovalJournalError as error:
+                        failures.append(f"{intent.item.name}: removal journal: {error}")
+                        continue
+                if operation_active:
+                    failures.append(
+                        f"{intent.item.name}: removal is still active in another process"
+                    )
+                    continue
+                if not intent.source_context_is_present():
+                    failures.append(
+                        f"{intent.item.name}: the prepared library filesystem is unavailable "
+                        "or changed; reconnect the same root and refresh before cleanup"
+                    )
+                    continue
+            if not intent.committed and intent.original_is_present():
+                # A crash before the physical operation left only a prepared
+                # intent. The exact original inode is still present, so this
+                # is safe to cancel and must not become missing-drive pruning.
+                try:
+                    self._removals.discard(intent)
+                except removals.RemovalJournalError as error:
+                    failures.append(f"{intent.item.name}: removal journal: {error}")
+                continue
+            current = self.commit_removal(intent)
+            failures.extend(f"{intent.item.name}: {failure}" for failure in current)
+        return tuple(failures)
+
+    def _cleanup_removed_item(
+        self,
+        item: MediaItem,
+        roots: Sequence[Path],
+    ) -> tuple[str, ...]:
+        """Attempt every durable association and deterministic child artifact."""
+        failures: list[str] = []
+        try:
+            self._favourites.discard(item.path)
+        except favourites.FavouritesError as error:
+            failures.append(f"favourites: {error}")
+        artifacts = manage.pairing_artifact_paths(item, roots)
+        try:
+            self._pairings.forget_item(item, removed_stills=artifacts)
+        except pairings.PairingError as error:
+            failures.append(f"pairing: {error}")
+        try:
+            self._playlists.forget_path(item.path)
+        except playlists.PlaylistError as error:
+            failures.append(f"playlists: {error}")
+        _discarded, retained = manage.discard_pairing_artifacts(item, roots)
+        if retained:
+            names = ", ".join(path.name for path in retained[:3])
+            failures.append(f"pairing files could not be removed: {names}")
+        return tuple(failures)
+
+    def _forget_confirmed_workshop_removals(self, incoming: Library) -> tuple[MediaItem, ...]:
+        """Forget an uninstall, but never confuse an unavailable drive with one.
+
+        Workshop content is external and cannot be deleted here.  There is
+        nevertheless one safe observation: an item which was present in the
+        previous scan is gone while its Workshop *content directory* is still
+        readable.  Steam removed that item rather than its whole library
+        becoming unavailable.  That explicit lifecycle boundary clears the
+        durable crash judgement and every authored reference, so reinstalling
+        the same Workshop id starts clean.
+
+        Turning Workshop scanning off is not an uninstall, nor is first run,
+        so neither case enters this path.
+        """
+        removed: list[MediaItem] = []
+        if self._settings.scan_workshop and self._settings.roots:
+            incoming_identities = {
+                pairings.Identity.of(item).key
+                for item in incoming.items
+                if item.provider == scan.WORKSHOP_PROVIDER
+            }
+            confirmed: set[str] = set()
+            for identity, item in tuple(self._known_workshop.items()):
+                identity = pairings.Identity.of(item).key
+                if identity in incoming_identities:
+                    continue
+                # A video identity names its entry file, but Steam uninstalls
+                # the containing Workshop-id directory. A missing/renamed
+                # media file inside a still-installed item is not an
+                # uninstall. Scenes already name that directory directly.
+                installation = item.path if item.kind is Kind.SCENE else item.path.parent
+                if os.path.lexists(installation):
+                    continue
+                content = installation.parent
+                try:
+                    # Opening the directory distinguishes a mounted, readable
+                    # content root from one whose scan merely failed. Confirm
+                    # the concrete id is absent in the same observation.
+                    with os.scandir(content) as entries:
+                        installation_absent = all(
+                            entry.name != installation.name for entry in entries
+                        )
+                except OSError:
+                    installation_absent = False
+                if not installation_absent:
+                    continue
+                try:
+                    self._removals.record_external(item, incoming.roots)
+                except removals.RemovalJournalError:
+                    # Steam already committed this uninstall. If the state
+                    # directory itself is unavailable there is nowhere else
+                    # to persist a trustworthy tombstone, so retain the
+                    # in-process retry and surface any cleanup failure below.
+                    self._pending_workshop_cleanup.setdefault(
+                        identity,
+                        _WorkshopCleanup(item, incoming.roots),
+                    )
+                removed.append(item)
+                confirmed.add(identity)
+
+            for identity in confirmed:
+                self._known_workshop.pop(identity, None)
+            for item in incoming.items:
+                if item.provider == scan.WORKSHOP_PROVIDER:
+                    identity = pairings.Identity.of(item).key
+                    self._known_workshop[identity] = item
+
+        failures = list(self.retry_removals(external_only=True))
+        for identity, pending in tuple(self._pending_workshop_cleanup.items()):
+            try:
+                intent = self._removals.record_external(pending.item, pending.roots)
+            except removals.RemovalJournalError as error:
+                # Cleanup is still worth attempting: Steam has already
+                # removed the install. Keep the in-process record even if all
+                # stores succeed, though, and say why. Otherwise an unwritable
+                # journal would be silently presented as a durable reset.
+                item_failures = self._cleanup_removed_item(pending.item, pending.roots)
+                failures.append(
+                    f"{pending.item.name}: removal journal: {error}; repair the state "
+                    "directory and refresh so this confirmed uninstall can be recorded durably"
+                )
+                failures.extend(f"{pending.item.name}: {failure}" for failure in item_failures)
+                continue
+            item_failures = self.commit_removal(intent)
+            failures.extend(f"{pending.item.name}: {failure}" for failure in item_failures)
+            # Once the journal accepted the lifecycle boundary, it owns any
+            # remaining retry across process exit. The in-memory fallback is
+            # no longer needed whether cleanup finished now or remains there.
+            del self._pending_workshop_cleanup[identity]
+        self._workshop_cleanup_failures = tuple(failures)
+        return tuple(removed)
 
     @property
     def pairings(self) -> pairings.Store:
@@ -281,14 +546,16 @@ class Session:
             ("schedules", self._schedules),
             ("display assignments", self._displays),
             ("favourites", self._favourites),
+            ("pending removals", self._removals),
         )
         return tuple((name, fault) for name, store in stores if (fault := store.fault))
 
     def _rebuild_playlist(self) -> None:
         self._in_force = self.active_playlist()
-        self._playlist.set_items(self._rotation())
+        self._playlist.set_items(self._rotation(self._in_force))
+        self._select_first_usable()
 
-    def _rotation(self) -> tuple[MediaItem, ...]:
+    def _rotation(self, active: str | None = None) -> tuple[MediaItem, ...]:
         """What `next` walks through.
 
         Narrowing to favourites is skipped when it would empty the rotation --
@@ -303,7 +570,11 @@ class Session:
         # A named playlist is the stronger statement, so it goes first:
         # somebody who built a list and then left "favourites only" on from
         # last week meant the list.
-        listed = playlists.rotation(self._playlists, self.active_playlist(), playable)
+        listed = playlists.rotation(
+            self._playlists,
+            self.active_playlist() if active is None else active,
+            playable,
+        )
         if listed is not None:
             return listed
 
@@ -312,6 +583,28 @@ class Session:
         starred = self._favourites.paths
         chosen = tuple(item for item in playable if item.path in starred)
         return chosen if chosen else playable
+
+    def _is_usable(self, item: MediaItem) -> bool:
+        return not self._pairings.health(pairings.Identity.of(item)).is_borked
+
+    def _select_first_usable(self) -> bool:
+        """Keep a Borked entry visible in authoring, but never cue it to play."""
+        if not any(self._is_usable(item) for item in self._playlist.items):
+            return False
+        for _ in range(len(self._playlist)):
+            current = self._playlist.current()
+            if current is not None and self._is_usable(current):
+                return True
+            self._playlist.next()
+        return False
+
+    def _require_usable_rotation(self, reference: str, *, label: str) -> tuple[MediaItem, ...]:
+        rotation = self._rotation(reference)
+        if any(self._is_usable(item) for item in rotation):
+            return rotation
+        if rotation:
+            raise ApplyError(f"{label} has no usable wallpapers; every item is marked Borked")
+        raise ApplyError(f"{label} has no playable wallpapers in the current library")
 
     def schedule_changed(self) -> bool:
         """Rebuild if the calendar now asks for a different playlist.
@@ -322,8 +615,16 @@ class Session:
         wanted = self.active_playlist()
         if wanted == self._in_force:
             return False
+        try:
+            rotation = self._require_usable_rotation(wanted, label="the scheduled playlist")
+        except ApplyError:
+            # Keep the last usable compatibility selection. The timer retries
+            # after a later library/health edit instead of launching a known
+            # crasher merely because the clock changed.
+            return False
         self._in_force = wanted
-        self._rebuild_playlist()
+        self._playlist.set_items(rotation)
+        self._select_first_usable()
         return True
 
     def playlists_changed(self) -> None:
@@ -339,14 +640,23 @@ class Session:
     def use_playlist(self, reference: str) -> NamedPlaylist:
         """Play one named list now, temporarily overriding schedule rules."""
         chosen = self._playlists.find(reference)
+        rotation = self._require_usable_rotation(chosen.id, label=f"playlist {chosen.name!r}")
         self._manual_playlist = chosen.id
-        self._rebuild_playlist()
+        self._in_force = chosen.id
+        self._playlist.set_items(rotation)
+        self._select_first_usable()
         return chosen
 
     def resume_schedule(self) -> None:
         """Release an on-demand choice and return control to the calendar."""
+        wanted = schedules.effective(
+            self._schedules.rules, self._settings.active_playlist, self._now()
+        )
+        rotation = self._require_usable_rotation(wanted, label="the scheduled playlist")
         self._manual_playlist = None
-        self._rebuild_playlist()
+        self._in_force = wanted
+        self._playlist.set_items(rotation)
+        self._select_first_usable()
 
     def favourites_changed(self) -> None:
         """Re-narrow the rotation after a star moved.
@@ -370,11 +680,12 @@ class Session:
             return False
         if active is None:
             return False
-        if self._playlist.select(active):
+        direct = self._library.find(active)
+        if direct is not None and self._is_usable(direct) and self._playlist.select(active):
             return True
         # It may be a video's paired still rather than a library item itself.
         for item in self._playlist.items:
-            if item.paired_still == active:
+            if item.paired_still == active and self._is_usable(item):
                 return self._playlist.select(item.path)
         return False
 
@@ -383,6 +694,11 @@ class Session:
     def _apply(self, item: MediaItem | None) -> Applied:
         if item is None:
             raise ApplyError("the library is empty")
+        if not self._is_usable(item):
+            raise ApplyError(
+                f"{item.name} is marked Borked and cannot play; "
+                "remove or uninstall it before trying again"
+            )
         # The pairing is resolved here rather than in the applier, because the
         # store is the session's and the applier has no business reading files.
         bundle = self._pairings.resolve(item, self._library.roots)
@@ -397,13 +713,39 @@ class Session:
         return self._apply(self._playlist.current())
 
     def next(self) -> Applied:
-        return self._apply(self._playlist.next())
+        if not self._playlist.items:
+            return self._apply(None)
+        for _ in range(len(self._playlist)):
+            item = self._playlist.next()
+            if item is not None and self._is_usable(item):
+                return self._apply(item)
+        raise ApplyError("the active playlist has no usable wallpapers; every item is Borked")
 
     def previous(self) -> Applied:
-        return self._apply(self._playlist.previous())
+        if not self._playlist.items:
+            return self._apply(None)
+        for _ in range(len(self._playlist)):
+            item = self._playlist.previous()
+            if item is not None and self._is_usable(item):
+                return self._apply(item)
+        raise ApplyError("the active playlist has no usable wallpapers; every item is Borked")
 
     def random(self) -> Applied:
-        return self._apply(self._playlist.random())
+        if not self._playlist.items:
+            return self._apply(None)
+        current = self._playlist.current()
+        usable = [
+            item
+            for item in self._playlist.items
+            if self._is_usable(item) and (current is None or item.path != current.path)
+        ]
+        if not usable:
+            if current is not None and self._is_usable(current):
+                return self._apply(current)
+            raise ApplyError("the active playlist has no usable wallpapers; every item is Borked")
+        chosen = self._rng.choice(usable)
+        self._playlist.select(chosen.path)
+        return self._apply(chosen)
 
     def choose(self, path: Path) -> NamedPlaylist:
         """Make ``path`` the visible one-entry playlist without applying it.
@@ -416,6 +758,11 @@ class Session:
         item = self._library.find(path)
         if item is None:
             raise ApplyError(f"not in the library: {path}")
+        if not self._is_usable(item):
+            raise ApplyError(
+                f"{item.name} is marked Borked and cannot play; "
+                "remove or uninstall it before trying again"
+            )
         try:
             chosen = self._playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, item.path)
         except playlists.PlaylistError as error:
@@ -548,6 +895,7 @@ class Session:
         return current.item.path
 
     def shutdown(self) -> None:
+        self._removals.close()
         self._applier.shutdown()
 
     # -- reporting -------------------------------------------------------

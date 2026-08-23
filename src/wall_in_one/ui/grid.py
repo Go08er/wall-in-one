@@ -40,16 +40,16 @@ class WallpaperTile(Gtk.Box):
         self._picture.set_content_fit(Gtk.ContentFit.COVER)
         self._picture.add_css_class("wio-tile-image")
 
-        frame = Gtk.Overlay()
-        frame.set_child(self._picture)
-        frame.set_tooltip_text("Left-click to edit · right-click to play as Quick choice")
+        self._frame = Gtk.Overlay()
+        self._frame.set_child(self._picture)
+        self._frame.set_tooltip_text("Left-click to edit · right-click to play as Quick choice")
 
         # Until the thumbnail arrives, show something with the right footprint
         # so tiles do not jump around as they load in.
         self._spinner = Adw.Spinner()
         self._spinner.set_halign(Gtk.Align.CENTER)
         self._spinner.set_valign(Gtk.Align.CENTER)
-        frame.add_overlay(self._spinner)
+        self._frame.add_overlay(self._spinner)
 
         # Top-right, opposite the badges, so that a long provider name can
         # never push it off the tile. A button rather than a decoration,
@@ -70,7 +70,7 @@ class WallpaperTile(Gtk.Box):
         #: and write the value straight back -- harmless once, and an endless
         #: exchange the first time anything else moves the state.
         self._reflecting = False
-        frame.add_overlay(self._star)
+        self._frame.add_overlay(self._star)
 
         # Bottom-right, below the star. A `MenuButton` rather than right-click
         # alone: a right-click-only action is unreachable for anyone driving
@@ -85,7 +85,7 @@ class WallpaperTile(Gtk.Box):
         self._menu.add_css_class("osd")
         self._menu.add_css_class("wio-tile-action")
         self._menu.set_tooltip_text(f"Actions for {item.name}")
-        frame.add_overlay(self._menu)
+        self._frame.add_overlay(self._menu)
 
         badges = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         badges.set_halign(Gtk.Align.START)
@@ -100,18 +100,19 @@ class WallpaperTile(Gtk.Box):
             badges.append(_badge(what if item.paired_still else f"{what} (no still)"))
         if item.ownership is Ownership.MANAGED:
             badges.append(_badge(item.provider))
-        self._health_badge = _badge("Borked · still only")
+        self._health_badge = _badge("Borked · won't play")
         self._health_badge.add_css_class("error")
         self._health_badge.set_visible(False)
+        self._borked_reason: str | None = None
         badges.append(self._health_badge)
-        frame.add_overlay(badges)
+        self._frame.add_overlay(badges)
 
         caption = Gtk.Label(label=item.name)
         caption.set_ellipsize(Pango.EllipsizeMode.END)
         caption.set_max_width_chars(24)
         caption.add_css_class("caption")
 
-        self.append(frame)
+        self.append(self._frame)
         self.append(caption)
 
     def show_thumbnail(self, texture: Gdk.Texture | None) -> None:
@@ -132,12 +133,22 @@ class WallpaperTile(Gtk.Box):
 
     def set_borked(self, reason: str | None) -> None:
         """Expose a durable runtime incompatibility on the media itself."""
+        if (self._borked_reason is None) != (reason is None):
+            # Menus are built lazily and then cached.  A healthy menu contains
+            # global/targeted Quick choice actions; a borked one deliberately
+            # does not, so crossing that boundary must invalidate the cache.
+            self._menu.set_menu_model(None)
+        self._borked_reason = reason
         self._health_badge.set_visible(reason is not None)
         self._health_badge.set_tooltip_text(reason)
         if reason is None:
             self.remove_css_class("wio-tile-borked")
+            self._frame.set_tooltip_text("Left-click to edit · right-click to play as Quick choice")
         else:
             self.add_css_class("wio-tile-borked")
+            self._frame.set_tooltip_text(
+                "Borked wallpaper · left-click for details and removal options · playback disabled"
+            )
 
     def set_favourite(self, favourite: bool) -> None:
         """Show whether this one is starred. Never reads as a click."""

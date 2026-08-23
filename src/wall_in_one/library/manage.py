@@ -44,7 +44,7 @@ from typing import Final
 from urllib.parse import quote
 
 from wall_in_one import paths
-from wall_in_one.library import pairing, scan
+from wall_in_one.library import pairing, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 
 #: Where the freedesktop home trash lives, relative to the data home.
@@ -52,6 +52,7 @@ TRASH_DIRECTORY: Final = "Trash"
 
 #: How many `name (n)` variants to try before giving up on a unique name.
 MAX_TRASH_ATTEMPTS: Final = 1000
+SourceIdentity = tuple[int, int]
 
 
 class ManageError(Exception):
@@ -61,9 +62,14 @@ class ManageError(Exception):
     ``cross-device``, ``local-io``.
     """
 
-    def __init__(self, kind: str, message: str) -> None:
+    def __init__(self, kind: str, message: str, *, committed: bool = False) -> None:
         super().__init__(message)
         self.kind = kind
+        #: True only when the source removal/trash move crossed its commit
+        #: point before a later durability check failed. Callers use this to
+        #: retain the prewritten removal journal without mistaking an
+        #: unavailable source drive for a completed operation.
+        self.committed = committed
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
@@ -84,6 +90,53 @@ class Removal:
         extra = len(self.removed) - 1
         beside = f" and {extra} file{'s' if extra != 1 else ''} beside it" if extra > 0 else ""
         return f"removed {self.item.path.name}{beside}"
+
+    def cleanup_note(self) -> str:
+        return _cleanup_note(self.kept)
+
+
+@dataclass(frozen=True, slots=True)
+class Trashed:
+    """A committed trash move and the fate of app-owned companions."""
+
+    item: MediaItem
+    destination: Path
+    removed_artifacts: tuple[Path, ...] = ()
+    kept_artifacts: tuple[Path, ...] = ()
+
+    def __str__(self) -> str:
+        return str(self.destination)
+
+    def cleanup_note(self) -> str:
+        return _cleanup_note(self.kept_artifacts)
+
+
+def _cleanup_note(kept: Sequence[Path]) -> str:
+    if not kept:
+        return ""
+    names = ", ".join(path.name for path in kept[:3])
+    omitted = len(kept) - 3
+    more = f" and {omitted} more" if omitted > 0 else ""
+    return f"; could not remove app-owned pairing files: {names}{more}"
+
+
+def metadata_cleanup_note(failures: Sequence[str]) -> str:
+    """Explain a metadata failure after the media operation already committed.
+
+    Delete and trash cannot be rolled back safely.  The useful contract is
+    therefore explicit partial failure plus a retry path, never an unqualified
+    success which suggests the pairing/health records went away too.
+    """
+    if not failures:
+        return ""
+    shown = "; ".join(failures[:3])
+    omitted = len(failures) - 3
+    more = f"; and {omitted} more" if omitted > 0 else ""
+    return (
+        f"; metadata cleanup is incomplete: {shown}{more}. "
+        "The wallpaper is already gone; fix the state-directory problem and "
+        "refresh the library to retry"
+    )
 
 
 def _within(path: Path, roots: tuple[Path, ...]) -> bool:
@@ -131,27 +184,89 @@ def _companions(item: MediaItem, roots: tuple[Path, ...]) -> list[Path]:
         if candidate.is_file() and not candidate.is_symlink():
             found.append(candidate)
 
+    for candidate in pairing_artifact_paths(item, roots):
+        if candidate.is_file() and not candidate.is_symlink():
+            found.append(candidate)
+    # A path can be both a provider and pairing sidecar only if a future
+    # provider accidentally adopts our reserved suffix.  Keep deletion
+    # idempotent anyway rather than reporting a harmless second unlink as a
+    # failure.
+    return list(dict.fromkeys(found))
+
+
+def pairing_artifact_paths(item: MediaItem, roots: Sequence[Path] = ()) -> tuple[Path, ...]:
+    """Exact app-owned pairing paths derived from one media identity.
+
+    Candidates are returned whether or not they currently exist.  Besides
+    driving filesystem cleanup, that lets the app scrub stored references to
+    an automatic still after the unlink has already committed.
+    """
+    bounded = tuple(roots)
+    found: list[Path] = []
     pairing_sidecar = item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
-    if pairing_sidecar.is_file() and not pairing_sidecar.is_symlink():
+    if _within(pairing_sidecar, bounded):
         found.append(pairing_sidecar)
 
-    if item.kind is not Kind.VIDEO:
-        return found
-    still = item.paired_still
-    if still is None or still.is_symlink() or not still.is_file():
-        return found
-    generated = still.stem == pairing.automatic_still_stem(item.path) and any(
-        still.parent == pairing.still_directory(root) for root in roots
-    )
-    if generated:
-        found.append(still)
-        sidecar = still.with_name(still.name + pairing.SIDECAR_SUFFIX)
-        if sidecar.is_file() and not sidecar.is_symlink():
-            found.append(sidecar)
-    return found
+    for root in bounded:
+        generated = stills.automatic_destination(item, root)
+        if generated is None:
+            break
+        found.append(generated)
+        found.append(generated.with_name(generated.name + pairing.SIDECAR_SUFFIX))
+    return tuple(dict.fromkeys(found))
 
 
-def remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> Removal:
+def discard_pairing_artifacts(
+    item: MediaItem, roots: Sequence[Path] = ()
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Best-effort removal of app-owned stills and pairing sidecars.
+
+    This deliberately does not touch ``item.path``.  It is shared by explicit
+    remove/trash and by the one trustworthy external-delete signal: a
+    Workshop item vanished while its content root remained mounted.  The
+    return is ``(removed, kept)`` so callers and tests can account for an
+    unlink which failed without ever widening deletion authority.
+    """
+    removed: list[Path] = []
+    kept: list[Path] = []
+    for companion in _companions(item, tuple(roots)):
+        try:
+            companion.unlink()
+            paths.fsync_directory(companion.parent)
+        except OSError:
+            kept.append(companion)
+        else:
+            removed.append(companion)
+    return tuple(removed), tuple(kept)
+
+
+def _require_source_identity(path: Path, expected: SourceIdentity | None) -> SourceIdentity:
+    """Refuse an unjournaled operation or a path replaced since prepare."""
+    if expected is None:
+        raise ManageError(
+            "unrecorded",
+            "the removal has no persisted source identity; nothing was changed",
+        )
+    try:
+        current = _identity(path)
+    except OSError as error:
+        raise ManageError(
+            "missing", f"{path} is no longer the wallpaper prepared for removal"
+        ) from error
+    if current != expected:
+        raise ManageError(
+            "changed",
+            f"{path} was replaced after removal was prepared; nothing was changed",
+        )
+    return current
+
+
+def remove(
+    item: MediaItem,
+    roots: tuple[Path, ...] = (),
+    *,
+    expected_source: SourceIdentity | None = None,
+) -> Removal:
     """Delete a wallpaper we downloaded, and everything we wrote beside it.
 
     Refuses anything else. The refusal is the point of the function: the app
@@ -168,6 +283,7 @@ def remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> Removal:
         raise ManageError("symlink", f"{path} is a symbolic link, so it is not ours to delete")
     if not path.is_file():
         raise ManageError("missing", f"{path} is no longer there")
+    _require_source_identity(path, expected_source)
     if not _is_managed_on_disk(path):
         # Deliberately phrased as ours-or-not rather than as a permission
         # problem: the user has every right to delete this file, just not
@@ -176,6 +292,9 @@ def remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> Removal:
             "not-ours",
             f"{path.name} is your own file, not one this app downloaded",
         )
+    # Provenance reads several files. Recheck the prepared inode immediately
+    # before granting the destructive operation filesystem authority.
+    _require_source_identity(path, expected_source)
 
     removed: list[Path] = []
     kept: list[Path] = []
@@ -188,15 +307,19 @@ def remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> Removal:
         raise ManageError("local-io", f"could not remove {path}: {error.strerror or error}") from (
             error
         )
+    try:
+        paths.fsync_directory(path.parent)
+    except OSError as error:
+        raise ManageError(
+            "local-io",
+            f"removed {path}, but could not persist its removal: {error}",
+            committed=True,
+        ) from error
     removed.append(path)
 
-    for companion in _companions(item, roots):
-        try:
-            companion.unlink()
-        except OSError:
-            kept.append(companion)
-        else:
-            removed.append(companion)
+    discarded, retained = discard_pairing_artifacts(item, roots)
+    removed.extend(discarded)
+    kept.extend(retained)
     return Removal(item=item, removed=tuple(removed), kept=tuple(kept))
 
 
@@ -262,8 +385,13 @@ def is_removable(item: MediaItem, roots: Sequence[Path] = ()) -> bool:
     )
 
 
-def trash(item: MediaItem, roots: Sequence[Path] = ()) -> Path:
-    """Move ``item`` into the trash and return where it landed.
+def trash(
+    item: MediaItem,
+    roots: Sequence[Path] = (),
+    *,
+    expected_source: SourceIdentity | None = None,
+) -> Trashed:
+    """Move ``item`` into trash and report its destination and artifact cleanup.
 
     The reversible verb, and therefore the right one for a file the user made.
     Only the home trash is implemented: a wallpaper on another filesystem
@@ -280,6 +408,7 @@ def trash(item: MediaItem, roots: Sequence[Path] = ()) -> Path:
         )
     if path.is_symlink() or not path.is_file():
         raise ManageError("missing", f"{path} is no longer there")
+    _require_source_identity(path, expected_source)
 
     files = trash_directory() / "files"
     info = trash_directory() / "info"
@@ -293,6 +422,11 @@ def trash(item: MediaItem, roots: Sequence[Path] = ()) -> Path:
 
     original = path.absolute()
     original_identity = _identity(original)
+    if original_identity != expected_source:
+        raise ManageError(
+            "changed",
+            f"{original} was replaced after removal was prepared; nothing was changed",
+        )
     stamp = datetime.now().replace(microsecond=0).isoformat()
     payload = f"[Trash Info]\nPath={quote(str(original), safe='/')}\nDeletionDate={stamp}\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".wall-in-one-trashinfo-", dir=info)
@@ -376,8 +510,13 @@ def trash(item: MediaItem, roots: Sequence[Path] = ()) -> Path:
                 raise ManageError(
                     "local-io",
                     f"moved {original}, but could not persist its removal: {error}",
+                    committed=True,
                 ) from error
-            return destination
+            # The source move is the commit point.  From here, discard only
+            # paths which are independently proven to have been generated for
+            # this item.  A custom representative still is never among them.
+            removed_artifacts, kept_artifacts = discard_pairing_artifacts(item, roots)
+            return Trashed(item, destination, removed_artifacts, kept_artifacts)
         raise ManageError(
             "local-io", f"the trash already holds {MAX_TRASH_ATTEMPTS} files so named"
         )

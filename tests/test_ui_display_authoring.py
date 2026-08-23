@@ -247,6 +247,7 @@ def _display_runtime_status() -> dict[str, object]:
                 "playlist_id": "evening",
                 "playlist": "Evening",
                 "entry_id": "entry-1",
+                "entry_taboo": False,
                 "kind": "still",
                 "still": "/library/evening.png",
                 "motion_active": False,
@@ -414,29 +415,32 @@ def test_route_failure_keeps_the_schedule_row_compact_but_preserves_diagnostics(
     row = controls.row
     subtitle = row.get_subtitle() or ""
     assert len(subtitle) < 280
-    assert subtitle.startswith("Static fallback · Evening · renderer start")
+    assert subtitle.startswith("Renderer stopped · Retry available · Evening · renderer start")
     assert subtitle.endswith("attributable tail")
     assert " … " in subtitle
     assert row.get_tooltip_text() == diagnostic
     assert controls.play.get_icon_name() == "media-playback-start-symbolic"
     assert controls.play.get_tooltip_text() == "Retry motion on this display"
+    assert controls.play.get_sensitive(), "a transient renderer failure keeps one-shot Retry"
 
     controls.play.emit("clicked")
 
     assert calls == [("DP-9", "play", None)]
 
-    status["taboo_entries"] = [
-        {
-            "playlist_id": "evening",
-            "entry_id": "entry-1",
-            "reason": diagnostic,
-        }
-    ]
+    # An equivalent occurrence may have crashed elsewhere, and an old record
+    # may be outside the bounded diagnostic inventory. Exact route truth must
+    # still remove Play even though this display itself never failed.
+    display["renderer_failed"] = False
+    display["entry_taboo"] = True
+    status["taboo_entries"] = []
+    status["taboo_entries_omitted"] = 7
     page.runtime_status_changed(application.session)
 
+    assert "Borked · playback disabled" in (controls.row.get_subtitle() or "")
     assert controls.play.get_icon_name() == "dialog-warning-symbolic"
     assert "Borked wallpaper" in (controls.play.get_tooltip_text() or "")
     assert "Media/Pairings" in (controls.play.get_tooltip_text() or "")
+    assert not controls.play.get_sensitive()
 
     controls.play.emit("clicked")
 

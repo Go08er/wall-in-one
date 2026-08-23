@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -15,9 +14,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config
-from wall_in_one.library import favourites, manage, pairings, playlists
+from wall_in_one.library import favourites, manage, pairings, removals
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
+from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem, RepresentativeStillError
 from wall_in_one.session import Session
 from wall_in_one.theme import palettes, source
 from wall_in_one.ui import runtime_truth
@@ -134,7 +133,11 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self._grid.set_favourites(self._favourites.paths)
         self._toast = Adw.ToastOverlay()
-        self._pairings_page = PairingsPage(application, self._close_pairing_editor)
+        self._pairings_page = PairingsPage(
+            application,
+            self._close_pairing_editor,
+            self._request_remove,
+        )
         self._browse_page = BrowsePage(application)
         self._playlists_page = PlaylistsPage(application)
         self._schedules_page = SchedulesPage(application)
@@ -362,7 +365,7 @@ class MainWindow(Adw.ApplicationWindow):
             # the user to the existing health action instead of sending a
             # command which can only leave the wallpaper static.
             self.show_page("media")
-            self.report("Open the Borked wallpaper to clear its taboo and retry motion")
+            self.report("Open the Borked wallpaper to see its safe removal options")
             return
         verb = (
             "play"
@@ -498,6 +501,10 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _quick_apply(self, item: MediaItem) -> None:
         """Right-click Media through the explicit one-entry Quick choice list."""
+        health = self._app.session.pairings.resolve(item, self._app.session.library.roots).health
+        if health.is_borked:
+            self.report(f"{item.name} is marked Borked and cannot play; open it to remove the item")
+            return
         self._app.play_item_async(item)
 
     def open_preferences(self) -> None:
@@ -607,7 +614,7 @@ class MainWindow(Adw.ApplicationWindow):
         if library.skipped:
             summary += f" - {len(library.skipped)} skipped"
         if self._borked_count:
-            summary += f" · {self._borked_count} borked (static fallback)"
+            summary += f" · {self._borked_count} Borked (won't play)"
         self._summary = summary
         self._update_subtitle()
 
@@ -799,7 +806,7 @@ class MainWindow(Adw.ApplicationWindow):
         if self._renderer_taboo:
             self._runtime_play.set_icon_name("dialog-warning-symbolic")
             self._runtime_play.set_tooltip_text(
-                "Borked wallpaper: open it in Media/Pairings to clear taboo and retry"
+                "Borked wallpaper: playback is disabled; open it in Media/Pairings"
             )
             self._runtime_menu.set_icon_name("dialog-warning-symbolic")
         elif self._renderer_failed:
@@ -833,9 +840,9 @@ class MainWindow(Adw.ApplicationWindow):
         cycle_text = "mixed" if cycle_mixed else "on" if cycle is True else "off"
         shuffle_text = "mixed" if shuffle_mixed else "on" if shuffle is True else "off"
         state_text = (
-            "Borked · static fallback"
+            "Borked · playback disabled"
             if self._renderer_taboo
-            else "Static fallback"
+            else "Renderer stopped · Retry available"
             if self._renderer_failed
             else state.capitalize()
         )
@@ -845,7 +852,12 @@ class MainWindow(Adw.ApplicationWindow):
         last_error = status.get("last_error")
         output_error = status.get("output_discovery_error")
         if isinstance(last_error, str) and last_error:
-            self._runtime_summary = f"static fallback · {_bounded_runtime_error(last_error)}"
+            failure_state = (
+                "playback disabled; paired still retained"
+                if self._renderer_taboo
+                else "renderer stopped; Retry available"
+            )
+            self._runtime_summary = f"{failure_state} · {_bounded_runtime_error(last_error)}"
             self._subtitle.set_tooltip_text(last_error)
             if last_error != self._runtime_error:
                 self.report(last_error)
@@ -944,24 +956,31 @@ class MainWindow(Adw.ApplicationWindow):
         """
         menu = Gio.Menu()
         target = GLib.Variant.new_string(str(item.path))
+        bundle = self._app.session.pairings.resolve(item, self._app.session.library.roots)
         independent = self._settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
-        apply_item = Gio.MenuItem.new(
-            "Play on all displays as Quick choice" if independent else "Play as Quick choice",
-            None,
-        )
-        apply_item.set_action_and_target_value("win.apply-wallpaper", target)
-        menu.append_item(apply_item)
-        connectors = self._quick_choice_connectors() if independent else ()
-        if connectors:
-            per_display = Gio.Menu()
-            for connector in connectors:
-                chosen = Gio.MenuItem.new(connector, None)
-                chosen.set_action_and_target_value(
-                    "win.apply-wallpaper-on",
-                    GLib.Variant("(ss)", (str(item.path), connector)),
-                )
-                per_display.append_item(chosen)
-            menu.append_submenu("Play on one display", per_display)
+        if bundle.health.is_borked:
+            # No action on purpose: this renders as an insensitive explanation
+            # rather than leaving a stale playback route beside the warning
+            # badge.  Editing and safe deletion remain available below.
+            menu.append("Borked · playback disabled", None)
+        else:
+            apply_item = Gio.MenuItem.new(
+                "Play on all displays as Quick choice" if independent else "Play as Quick choice",
+                None,
+            )
+            apply_item.set_action_and_target_value("win.apply-wallpaper", target)
+            menu.append_item(apply_item)
+            connectors = self._quick_choice_connectors() if independent else ()
+            if connectors:
+                per_display = Gio.Menu()
+                for connector in connectors:
+                    chosen = Gio.MenuItem.new(connector, None)
+                    chosen.set_action_and_target_value(
+                        "win.apply-wallpaper-on",
+                        GLib.Variant("(ss)", (str(item.path), connector)),
+                    )
+                    per_display.append_item(chosen)
+                menu.append_submenu("Play on one display", per_display)
 
         # Also in the menu, not only on the star. The star is hidden until the
         # tile is hovered or focused, which keeps the grid readable but leaves
@@ -973,7 +992,6 @@ class MainWindow(Adw.ApplicationWindow):
         )
         favourite_item.set_action_and_target_value("win.favourite-wallpaper", target)
         menu.append_item(favourite_item)
-        bundle = self._app.session.pairings.resolve(item, self._app.session.library.roots)
         still_item = Gio.MenuItem.new("Choose a still...", None)
         still_item.set_action_and_target_value("win.choose-still", target)
         menu.append_item(still_item)
@@ -1036,9 +1054,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_choose_still(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Pick the picture that stands in for this wallpaper.
 
-        Any image will do, including one outside the library: a representative
-        is a picture, not a library entry, and refusing an outside one would
-        mean the only way to use a photo is to import it first.
+        The file chooser is useful for a large library, but it is not an import
+        operation: the chosen picture must already be an indexed still item.
         """
         item = self._item_at(raw)
         if item is None:
@@ -1075,7 +1092,12 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _store_still(self, item: MediaItem, still: Path | None) -> None:
         try:
+            if still is not None:
+                still = self._app.session.library.require_representative_still(still).path
             self._app.session.pairings.choose_still(item, still)
+        except RepresentativeStillError as error:
+            self.report(str(error))
+            return
         except pairings.PairingError:
             self.report(f"The still for {item.name} could not be saved; nothing changed")
             return
@@ -1168,6 +1190,16 @@ class MainWindow(Adw.ApplicationWindow):
         item = self._item_at(raw)
         if item is None:
             return
+        self._request_remove(item)
+
+    def _request_remove(self, item: MediaItem) -> None:
+        """Start the ownership-appropriate removal flow for one live item."""
+        # Pairing-editor buttons are built from the same predicate, but the
+        # path may have changed before the click.  Recheck rather than letting
+        # a stale widget broaden deletion authority.
+        if not manage.is_removable(item, self._app.session.library.roots):
+            self.report(f"{item.name} belongs to an external source and cannot be deleted here")
+            return
         if not item.deletable:
             self._trash(item)
             return
@@ -1190,37 +1222,83 @@ class MainWindow(Adw.ApplicationWindow):
         if response != "remove":
             return
         try:
-            result = manage.remove(item, self._app.session.library.roots)
-        except manage.ManageError as error:
-            self.report(str(error))
+            intent = self._app.prepare_item_removal(item)
+        except removals.RemovalJournalError as error:
+            self.report(f"Nothing was deleted; removal could not be recorded safely: {error}")
             return
-        self._forget(item)
-        self.report(result.describe())
+        try:
+            result = manage.remove(
+                item,
+                self._app.session.library.roots,
+                expected_source=intent.source_identity,
+            )
+        except manage.ManageError as error:
+            if not error.committed:
+                cancellation = self._app.cancel_item_removal(intent)
+                detail = (
+                    "; the file is still present, but its prepared removal intent "
+                    f"could not be cleared: {'; '.join(cancellation)}"
+                    if cancellation
+                    else ""
+                )
+                self.report(str(error) + detail)
+                return
+            failures = self._forget(item, intent)
+            self.report(str(error) + manage.metadata_cleanup_note(failures))
+            return
+        failures = self._forget(item, intent)
+        self.report(
+            f"{result.describe()}{result.cleanup_note()}{manage.metadata_cleanup_note(failures)}"
+        )
 
     def _trash(self, item: MediaItem) -> None:
         try:
-            manage.trash(item, self._app.session.library.roots)
-        except manage.ManageError as error:
-            self.report(str(error))
+            intent = self._app.prepare_item_removal(item)
+        except removals.RemovalJournalError as error:
+            self.report(f"Nothing was moved; removal could not be recorded safely: {error}")
             return
-        self._forget(item)
-        self.report(f"{item.name} moved to the trash")
+        try:
+            result = manage.trash(
+                item,
+                self._app.session.library.roots,
+                expected_source=intent.source_identity,
+            )
+        except manage.ManageError as error:
+            if not error.committed:
+                cancellation = self._app.cancel_item_removal(intent)
+                detail = (
+                    "; the file is still present, but its prepared removal intent "
+                    f"could not be cleared: {'; '.join(cancellation)}"
+                    if cancellation
+                    else ""
+                )
+                self.report(str(error) + detail)
+                return
+            failures = self._forget(item, intent)
+            self.report(str(error) + manage.metadata_cleanup_note(failures))
+            return
+        failures = self._forget(item, intent)
+        self.report(
+            f"{item.name} moved to the trash{result.cleanup_note()}"
+            f"{manage.metadata_cleanup_note(failures)}"
+        )
 
-    def _forget(self, item: MediaItem) -> None:
+    def _forget(
+        self,
+        item: MediaItem,
+        intent: removals.Intent,
+    ) -> tuple[str, ...]:
         """Drop a removed wallpaper from authoring stores, then rescan.
 
         Stars, pairing choices and playlist entries normally survive a missing
         file because it might come back. That is not true of one we explicitly
         deleted, so none may keep pointing at it.
         """
-        with contextlib.suppress(favourites.FavouritesError):
-            self._favourites.discard(item.path)
-        with contextlib.suppress(pairings.PairingError):
-            self._app.session.pairings.forget_path(item.path)
-        with contextlib.suppress(playlists.PlaylistError):
-            self._app.session.playlists.forget_path(item.path)
+        failures = self._app.forget_item(item, intent=intent)
         self._grid.set_favourites(self._favourites.paths)
-        self._app.refresh_library()
+        if self._content_stack.get_visible_child_name() == "pairing-editor":
+            self._close_pairing_editor()
+        return failures
 
     def show_current(self, session: Session) -> None:
         """Refresh playback truth without rebuilding the Media grid."""

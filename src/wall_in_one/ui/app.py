@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import sys
 import threading
@@ -24,7 +23,7 @@ from wall_in_one import config, paths, runtime_config, runtime_health
 from wall_in_one.browse import Browser
 from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
-from wall_in_one.library import favourites, pairings, playlists, scan, schedules
+from wall_in_one.library import favourites, manage, pairings, playlists, removals, scan, schedules
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
@@ -502,6 +501,16 @@ class Application(Adw.Application):
         place. A newer request cancels an older queued one and makes any
         already-running result ineligible to land.
         """
+        # Replay the durable intent journal before pairing records are
+        # snapshotted. This is both the startup recovery path and the ordinary
+        # retry after a state-directory problem has been fixed.
+        replay_failures = self._session.retry_removals()
+        if replay_failures:
+            self.window_report(
+                "Pending removal cleanup could not finish: "
+                + "; ".join(replay_failures[:3])
+                + ". Fix the state-directory problem and refresh to retry."
+            )
         if self._window is None:
             self._session.refresh()
             self._finish_library_refresh()
@@ -549,6 +558,16 @@ class Application(Adw.Application):
 
     def _finish_library_refresh(self) -> None:
         """Reconcile and render one installed scan, always on the main thread."""
+        # A confirmed Workshop uninstall clears its generated still.  Let a
+        # reinstall at the same path enter the still-maker again instead of
+        # inheriting the process-local "already attempted" memo.
+        for item in self._session.removed_workshop:
+            self._stills.forget(item.path)
+        if self._session.workshop_cleanup_failures:
+            self.window_report(
+                "Workshop uninstall"
+                + manage.metadata_cleanup_note(self._session.workshop_cleanup_failures)
+            )
         self._session.sync_with_noctalia()
         self._publish_runtime_for_context()
         if self._window is not None:
@@ -1112,6 +1131,11 @@ class Application(Adw.Application):
 
     def play_item(self, item: MediaItem) -> Response:
         """Compile Media's Quick choice, then let the runtime apply it."""
+        health = self._session.pairings.resolve(item, self._session.library.roots).health
+        if health.is_borked:
+            return Response.failure(
+                f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+            )
         try:
             chosen = self._session.choose(item.path)
         except ApplyError as error:
@@ -1133,6 +1157,12 @@ class Application(Adw.Application):
     def play_item_async(self, item: MediaItem) -> bool:
         """Compile and apply Media's Quick choice without blocking GTK."""
         if self._gui_runtime_call_pending():
+            return False
+        health = self._session.pairings.resolve(item, self._session.library.roots).health
+        if health.is_borked:
+            self.window_report(
+                f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+            )
             return False
         try:
             chosen = self._session.choose(item.path)
@@ -1170,6 +1200,13 @@ class Application(Adw.Application):
             return False
         if self._session.library.find(item.path) is None:
             self.window_report(f"Not in the library: {item.path}")
+            return False
+        health = self._session.pairings.resolve(item, self._session.library.roots).health
+        if health.is_borked:
+            self.window_report(
+                f"{item.name} is marked Borked and cannot play on {connector}; "
+                "remove or uninstall it first"
+            )
             return False
         try:
             chosen = self._session.playlists.set_display_singleton(
@@ -1248,26 +1285,31 @@ class Application(Adw.Application):
         if self._window is not None:
             self._window.show_library(self._session)
 
-    def forget(self, path: Path) -> None:
-        """Drop a wallpaper this app has just destroyed, and rescan.
+    def prepare_item_removal(self, item: MediaItem) -> removals.Intent:
+        """Persist an intent before Delete/Trash receives filesystem authority."""
+        return self._session.prepare_removal(item, self._session.library.roots)
 
-        Stars, pairing choices and playlist entries normally outlive a missing
-        file because it might come back. That is not true of one we have just
-        unlinked. A store write failing changes nothing here -- the file is
-        gone either way, and the socket has already been told what happened.
+    def cancel_item_removal(self, intent: removals.Intent) -> tuple[str, ...]:
+        """Discard a prepared intent after a physical operation was refused."""
+        try:
+            self._session.cancel_removal(intent)
+        except removals.RemovalJournalError as error:
+            return (f"removal journal: {error}",)
+        return ()
 
-        The rescan is deferred for the reason a finished download's is: it is
-        the window's work, not the client's, and `ctl remove` should not be
-        held open while six hundred files are walked to confirm that one of
-        them is missing.
-        """
-        with contextlib.suppress(favourites.FavouritesError):
-            self._session.favourites.discard(path)
-        with contextlib.suppress(pairings.PairingError):
-            self._session.pairings.forget_path(path)
-        with contextlib.suppress(playlists.PlaylistError):
-            self._session.playlists.forget_path(path)
+    def forget_item(
+        self,
+        item: MediaItem,
+        *,
+        intent: removals.Intent,
+    ) -> tuple[str, ...]:
+        """Finish one committed deletion, retaining its journal until clean."""
+        if (item.path, item.kind, item.scene) != (intent.path, intent.kind, intent.scene):
+            raise ValueError("removal intent does not identify the removed library item")
+        failures = self._session.commit_removal(intent)
+        self._stills.forget(item.path)
         GLib.idle_add(self.refresh_library)
+        return failures
 
     def playlists_changed(self) -> None:
         """Publish one playlist edit without turning it into a library rescan."""
@@ -1289,8 +1331,12 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime("playlist-use", chosen.id)
         except client.NotRunningError:
-            self._session.use_playlist(chosen.id)
-            response = self.apply(self._session.apply_current)
+            try:
+                self._session.use_playlist(chosen.id)
+            except ApplyError as error:
+                response = Response.failure(str(error))
+            else:
+                response = self.apply(self._session.apply_current)
         except client.ControlError as error:
             response = Response.failure(str(error))
         if self._window is not None:
@@ -1310,7 +1356,10 @@ class Application(Adw.Application):
             return False
 
         def apply_locally() -> Response:
-            self._session.use_playlist(chosen.id)
+            try:
+                self._session.use_playlist(chosen.id)
+            except ApplyError as error:
+                return Response.failure(str(error))
             return self.apply(self._session.apply_current)
 
         def shown(_runtime_answered: bool) -> None:
@@ -1347,8 +1396,12 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime("schedule-follow")
         except client.NotRunningError:
-            self._session.resume_schedule()
-            response = self.apply(self._session.apply_current)
+            try:
+                self._session.resume_schedule()
+            except ApplyError as error:
+                response = Response.failure(str(error))
+            else:
+                response = self.apply(self._session.apply_current)
         except client.ControlError as error:
             response = Response.failure(str(error))
         if self._window is not None:
@@ -1361,7 +1414,10 @@ class Application(Adw.Application):
             return False
 
         def apply_locally() -> Response:
-            self._session.resume_schedule()
+            try:
+                self._session.resume_schedule()
+            except ApplyError as error:
+                return Response.failure(str(error))
             return self.apply(self._session.apply_current)
 
         def shown(_runtime_answered: bool) -> None:
@@ -1423,25 +1479,6 @@ class Application(Adw.Application):
         elif not self._runtime_is_running() and cursor is not None and cursor.path == item.path:
             GLib.idle_add(self._reapply_current)
         GLib.idle_add(self.refresh_library)
-
-    def retry_borked(self, item: MediaItem) -> bool:
-        """Clear one durable taboo judgement and try it as Quick choice now."""
-        if self._gui_runtime_call_pending():
-            return False
-        try:
-            # This is one authoring transaction: clear the durable judgement,
-            # compile Quick choice without it, then queue the runtime command.
-            # The nested runtime_config.update is re-entrant on this thread;
-            # a headless health sync cannot sample the old runtime status in
-            # between the clear and publication and put the marker back.
-            with runtime_config.compiler_lock():
-                self._session.pairings.clear_borked(item)
-                if self._window is not None:
-                    self._window.pairing_health_changed(self._session)
-                return self.play_item_async(item)
-        except (pairings.PairingError, runtime_config.RuntimeConfigError) as error:
-            self.window_report(f"Could not clear borked wallpaper state: {error}")
-            return False
 
     def _reapply_current(self) -> bool:
         self.apply(self._session.apply_current)
@@ -1744,7 +1781,13 @@ class _Commands:
         )
 
     def select_wallpaper(self, value: str | None) -> Response:
-        item = server.resolve(self._app.session.library, value, verb="select")
+        session = self._app.session
+        item = server.resolve(session.library, value, verb="select")
+        health = session.pairings.health(pairings.Identity.of(item))
+        if health.is_borked:
+            return Response.failure(
+                f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+            )
         return self._app.play_item(item)
 
     def list_favourites(self) -> Response:
@@ -1767,18 +1810,17 @@ class _Commands:
         """`still <wallpaper> <picture>`, or `default` to stop choosing.
 
         The wallpaper is resolved against the library, so a record can only
-        name something the scan produced. The picture is not: a representative
-        is a picture, not a library entry, and requiring it to be indexed would
-        mean a photo has to be imported before it can stand in for anything.
+        name something the scan produced. A manually chosen picture is resolved
+        the same way: it is a first-class still with its own metadata, not an
+        untracked attachment to the moving wallpaper.
         """
         source, chosen = server.parse_pair(value, verb="still")
         session = self._app.session
         item = server.resolve(session.library, source, verb="still")
         still: Path | None = None
         if chosen != "default":
-            still = server.parse_path(chosen, verb="still")
-            if not still.is_file():
-                raise ValueError(f"no such picture: {still}")
+            requested = server.parse_path(chosen, verb="still")
+            still = session.library.require_representative_still(requested).path
         session.pairings.choose_still(item, still)
         self._app.pairing_changed(item)
         return Response.success(
@@ -2021,8 +2063,42 @@ class _Commands:
         """
         session = self._app.session
         item = server.resolve(session.library, value, verb="remove")
-        message = server.remove_wallpaper(item, session.library.roots)
-        self._app.forget(item.path)
+        try:
+            intent = self._app.prepare_item_removal(item)
+        except removals.RemovalJournalError as error:
+            # The durable intent is the precondition for filesystem authority.
+            # Refuse before manage can unlink or trash anything.
+            return server.failed(error)
+        try:
+            message = server.remove_wallpaper(
+                item,
+                session.library.roots,
+                expected_source=intent.source_identity,
+            )
+        except manage.ManageError as error:
+            if not error.committed:
+                cancellation = self._app.cancel_item_removal(intent)
+                detail = (
+                    "; the file was not removed, but its prepared removal intent "
+                    f"could not be cleared: {'; '.join(cancellation)}"
+                    if cancellation
+                    else ""
+                )
+                return Response.failure(str(error) + detail, kind=error.kind)
+            # Trash can report a durability error after its source unlink has
+            # already committed. ManageError carries that explicit boundary;
+            # mere source absence could instead be an unavailable drive.
+            failures = self._app.forget_item(item, intent=intent)
+            return Response.failure(
+                str(error) + manage.metadata_cleanup_note(failures),
+                kind=error.kind,
+            )
+        failures = self._app.forget_item(item, intent=intent)
+        if failures:
+            return Response.failure(
+                message + manage.metadata_cleanup_note(failures),
+                kind="metadata-cleanup",
+            )
         return Response.success(message)
 
     # -- browsing ---------------------------------------------------------

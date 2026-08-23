@@ -157,6 +157,12 @@ Pairing commands use ` :: ` between their two operands. That delimiter is
 required when both sides may contain spaces—for example a video path and a
 representative-still path, or a wallpaper path and `community:Tokyo Night`.
 The older single-space form remains accepted when the right side is one word.
+The picture passed to `still` must be a still item in the current library scan;
+an existing but unindexed path and an indexed video are both refused. Copy or
+move an outside picture into a configured library folder, or add its folder in
+Settings, then refresh before choosing it. The command never imports or copies
+the file for you. `default` remains the way to return to the internal automatic
+choice.
 
 **Wallpaper Engine** content installed through Steam is picked up automatically
 -- 49 wallpapers on the machine this was built on. Most Workshop items turn out

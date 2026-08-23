@@ -139,16 +139,23 @@ def test_borked_health_updates_the_existing_tile_in_place(grid: WallpaperGrid) -
     media = item("a")
     grid.populate((media,))
     tile = grid._tiles[media.path]
+    healthy_menu = Gio.Menu()
+    healthy_menu.append("Play as Quick choice", "win.apply-wallpaper")
+    tile._menu.set_menu_model(healthy_menu)
 
     grid.set_borked({media.path: "renderer crashed on this wallpaper"})
     assert grid._tiles[media.path] is tile
     assert tile._health_badge.get_visible()
     assert tile._health_badge.get_tooltip_text() == "renderer crashed on this wallpaper"
     assert tile.has_css_class("wio-tile-borked")
+    assert tile._menu.get_menu_model() is None
+    assert "playback disabled" in (tile._frame.get_tooltip_text() or "")
 
+    tile._menu.set_menu_model(Gio.Menu())
     grid.set_borked({})
     assert grid._tiles[media.path] is tile
     assert not tile._health_badge.get_visible()
+    assert tile._menu.get_menu_model() is None
 
 
 def test_a_removed_wallpaper_loses_its_tile(grid: WallpaperGrid) -> None:
@@ -678,6 +685,12 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
     root.mkdir()
     wallpaper = root / "one.png"
     _png(wallpaper)
+    indexed_still = root / "other.png"
+    _png(indexed_still)
+    indexed_video = root / "motion.mp4"
+    indexed_video.write_bytes(b"video")
+    outside = tmp_path / "outside.png"
+    _png(outside)
 
     class FakeApp(Adw.Application):
         def __init__(self) -> None:
@@ -699,9 +712,23 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
 
     application = FakeApp()
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
-    item = application.session.library.items[0]
+    item = application.session.library.find(wallpaper)
+    assert item is not None
     reports: list[str] = []
     monkeypatch.setattr(window, "report", reports.append)
+
+    window._store_still(item, indexed_still)
+    saved = application.session.pairings.get(pairings.Identity.of(item))
+    assert saved is not None and saved.still == indexed_still
+    assert application.pairing_updates == 1
+
+    window._store_still(item, outside)
+    window._store_still(item, indexed_video)
+    assert application.pairing_updates == 1
+    assert "not an indexed library item" in reports[0]
+    assert "add its folder in Settings" in reports[0]
+    assert "indexed as video, not as a still image" in reports[1]
+    reports.clear()
 
     def favourite_failure(_path: Path) -> None:
         raise favourites.FavouritesError("local-io", "disk full")
@@ -716,7 +743,7 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
 
     failure = pairing_failure
     monkeypatch.setattr(application.session.pairings, "choose_still", failure)
-    window._store_still(item, root / "other.png")
+    window._store_still(item, indexed_still)
     monkeypatch.setattr(application.session.pairings, "reset", failure)
     window._on_reset_pairing(None, GLib.Variant.new_string(str(item.path)))  # type: ignore[arg-type]
     monkeypatch.setattr(application.session.pairings, "choose_palette", failure)
@@ -725,7 +752,7 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
         GLib.Variant("(ss)", (str(item.path), pairings.PalettePolicy().encode())),
     )
 
-    assert application.pairing_updates == 0
+    assert application.pairing_updates == 1
     assert len(reports) == 4
     assert all("nothing changed" in message for message in reports)
     window.destroy()
@@ -771,6 +798,76 @@ def test_quick_choice_menu_action_really_plays_instead_of_opening_the_editor(
 
     assert application.played == [wallpaper]
     assert window._content_stack.get_visible_child_name() == "primary"
+    window.destroy()
+    application.session.shutdown()
+
+
+def test_borked_media_has_a_warning_and_no_global_or_targeted_play_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one import config
+    from wall_in_one.library import scan
+    from wall_in_one.session import Session
+    from wall_in_one.ui.window import MainWindow
+
+    root = tmp_path / "library"
+    root.mkdir()
+    wallpaper = root / "one.png"
+    _png(wallpaper)
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.BorkedMediaActionsTest")
+            self.settings = config.Settings(
+                roots=(root,), display_mode=config.DISPLAY_MODE_INDEPENDENT
+            )
+            self.resolved_palette = None
+            self.session = Session(self.settings, scanner=lambda _roots: scan.scan((root,)))
+            self.session.refresh()
+            self.played: list[Path] = []
+
+        def refresh_library(self) -> None: ...
+
+        def play_item_async(self, chosen: MediaItem) -> bool:
+            self.played.append(chosen.path)
+            return True
+
+    application = FakeApp()
+    item = application.session.library.items[0]
+    application.session.pairings.mark_borked(item, "renderer crashed", "automatic-apply")
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    reports: list[str] = []
+    monkeypatch.setattr(window, "report", reports.append)
+    window.show_library(application.session)
+    window._runtime_media_status = {
+        "status_version": 2,
+        "displays": [
+            {"connector": "DP-1", "connected": True},
+            {"connector": "DP-2", "connected": True},
+        ],
+    }
+
+    tile = window._grid._tiles[wallpaper]
+    assert tile.has_css_class("wio-tile-borked")
+    assert "playback disabled" in (tile._frame.get_tooltip_text() or "")
+    menu = window._menu_for(item)
+    labels = [
+        value.get_string()
+        for index in range(menu.get_n_items())
+        if (
+            value := menu.get_item_attribute_value(
+                index, Gio.MENU_ATTRIBUTE_LABEL, GLib.VariantType.new("s")
+            )
+        )
+        is not None
+    ]
+    assert "Borked · playback disabled" in labels
+    assert not any(label.startswith("Play") for label in labels)
+
+    window._quick_apply(item)
+
+    assert application.played == []
+    assert reports and "cannot play" in reports[-1]
     window.destroy()
     application.session.shutdown()
 
@@ -982,7 +1079,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
             "last_error": "mpvpaper exited for evening-second",
         }
     )
-    assert "Static fallback" in window._runtime_control_status.get_text()
+    assert "Renderer stopped · Retry available" in window._runtime_control_status.get_text()
     assert "Retry motion" in (window._runtime_play.get_tooltip_text() or "")
     window._runtime_play.emit("clicked")
     assert calls[-1] == ("play", None)
@@ -998,15 +1095,15 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
             "paused": False,
             "cycle_enabled": True,
             "shuffle": False,
-            "renderer_failed": True,
+            # This occurrence did not own the renderer which discovered the
+            # equivalent media crash, and its record has fallen outside the
+            # bounded diagnostic inventory. The explicit safety bit alone
+            # must still remove Play from the global control.
+            "renderer_failed": False,
+            "entry_taboo": True,
             "last_error": "mpvpaper repeatedly failed for evening-second",
-            "taboo_entries": [
-                {
-                    "playlist_id": "evening",
-                    "entry_id": "evening-second",
-                    "reason": "mpvpaper repeatedly failed for evening-second",
-                }
-            ],
+            "taboo_entries": [],
+            "taboo_entries_omitted": 1,
         }
     )
     assert "Borked" in window._runtime_control_status.get_text()

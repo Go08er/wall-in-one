@@ -19,8 +19,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-from wall_in_one.library import manage, pairings
-from wall_in_one.library.model import IMAGE_EXTENSIONS, Kind, MediaItem
+from wall_in_one.library import manage, pairings, scan
+from wall_in_one.library.model import (
+    IMAGE_EXTENSIONS,
+    Kind,
+    MediaItem,
+    RepresentativeStillError,
+)
 from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Mode as PaletteMode
 from wall_in_one.theme.palette import Palette, PalettePair
@@ -195,25 +200,28 @@ class PairingsPage(Gtk.Box):
         self._editor.append(source)
 
         self._health_group: Adw.PreferencesGroup | None = None
+        self._health_row: Adw.ActionRow | None = None
         self._health_action: Gtk.Button | None = None
         if bundle.health.is_borked:
             self._health_group = Adw.PreferencesGroup(
-                title="Borked wallpaper · automatic playback is taboo",
+                title="Borked wallpaper · known renderer crasher",
                 description=(
                     f"{bundle.health.reason}\n\n"
-                    "Playback and Quick choice are disabled. The service keeps the paired "
-                    "still visible and skips this wallpaper during automatic rotation."
+                    "Playback, Quick choice, and transport retry are disabled. If this "
+                    "wallpaper was active when it failed, its paired still may remain visible; "
+                    "the service will not select it again."
                 ),
             )
             self._health_group.add_css_class("error")
             health_row = Adw.ActionRow(
-                title="Playback disabled · static fallback only",
+                title="Playback disabled · remove or uninstall to reset",
             )
+            self._health_row = health_row
             removable = manage.is_removable(item, session.library.roots)
             if removable and self._on_remove is not None:
                 health_row.set_subtitle(
                     f"Reported by {bundle.health.source or 'the runtime'} · "
-                    "removing it clears the Borked marker"
+                    "removing it also clears its saved pairing and Borked marker"
                 )
                 self._health_action = Gtk.Button(
                     label="Delete wallpaper…" if item.deletable else "Move to Trash"
@@ -226,8 +234,9 @@ class PairingsPage(Gtk.Box):
                 health_row.add_suffix(self._health_action)
             else:
                 unavailable = (
-                    "Delete unavailable here; uninstall this Workshop item in Steam, then rescan"
-                    if item.kind is Kind.SCENE or item.provider == "workshop"
+                    "Delete unavailable here; uninstall this Workshop item in Steam, then "
+                    "rescan. A later reinstall starts clean"
+                    if item.kind is Kind.SCENE or item.provider == scan.WORKSHOP_PROVIDER
                     else "Delete unavailable here; remove it from its source, then rescan"
                 )
                 health_row.set_subtitle(unavailable)
@@ -358,8 +367,8 @@ class PairingsPage(Gtk.Box):
         group.add(self._still_more)
 
         self._manual_still = Adw.ActionRow(
-            title="Choose another image…",
-            subtitle="Manual escape hatch for an image outside the indexed library",
+            title="Browse indexed library images…",
+            subtitle="Choose a still already found by the latest library refresh",
         )
         choose = Gtk.Button(label="Choose")
         choose.set_valign(Gtk.Align.CENTER)
@@ -486,17 +495,23 @@ class PairingsPage(Gtk.Box):
             candidate.path == self._still_selected for candidate in self._still_inventory
         )
         self._manual_still.set_subtitle(
-            str(self._still_selected)
+            (
+                f"Saved choice is no longer indexed: {self._still_selected}. "
+                "Move or copy it into a library folder, or add its folder in Settings, "
+                "then refresh."
+            )
             if self._still_selected is not None and not known
-            else "Manual escape hatch for an image outside the indexed library"
+            else "Choose a still already found by the latest library refresh"
         )
 
     def _choose_picker_still(self, item: MediaItem, still: Path | None) -> None:
         if self._reflecting_still or still == self._still_selected:
             return
         try:
+            if still is not None:
+                still = self._app.session.library.require_representative_still(still).path
             self._app.session.pairings.choose_still(item, still)
-        except pairings.PairingError as error:
+        except (RepresentativeStillError, pairings.PairingError) as error:
             self._app.window_report(str(error))
             self._reflect_still_selection()
             return

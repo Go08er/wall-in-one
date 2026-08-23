@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
-from wall_in_one.library import pairing, state_file
+from wall_in_one.library import pairing, state_file, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
 
@@ -143,8 +143,10 @@ class Identity:
     def of(cls, item: MediaItem) -> Identity:
         """A scene is keyed by its Workshop id, not by where Steam put it.
 
-        Which is the point of `medium:source`: a reinstall moves the directory
-        and must not lose the still somebody chose for it.
+        Which is the point of `medium:source`: moving an installed directory
+        does not change the pairing.  A *confirmed uninstall* is a different
+        lifecycle event and :class:`Session` explicitly forgets this record,
+        so a later reinstall of the same id starts clean.
         """
         source = item.scene if item.kind is Kind.SCENE and item.scene else str(item.path)
         return cls(medium=Medium.of(item.kind), source=source)
@@ -645,13 +647,13 @@ def apply(
     roots: Sequence[Path] = (),
     records: Mapping[str, Pairing] | None = None,
 ) -> tuple[MediaItem, ...]:
-    """Attach each item's representative still, and drop the stills spent as one.
+    """Attach representative stills and hide only app-generated children.
 
-    A still whose whole job is standing in for a video is not a separate
-    wallpaper: leaving it in would put the same picture in the rotation twice,
-    once by itself and once as the paused form of the video. A still that
-    nobody points at stays, which is why a user's own `*-still.png` files
-    survive when no video claims them.
+    A manually supplied still is a first-class library item even when one or
+    more moving wallpapers select it.  The only images absorbed by a moving
+    item are captures at that item's exact deterministic path in an app-owned
+    ``Automatic Stills`` directory.  This is the same ownership boundary used
+    when deletion derives which capture goes away with the moving item.
 
     This replaces `library.pairing.apply`, which could only ever compute the
     default. The difference is the ``records`` argument.
@@ -659,17 +661,19 @@ def apply(
     materialised = list(items)
     resolved = {item.path: resolve(item, roots, records) for item in materialised}
 
-    spent = {
-        bundle.still
-        for bundle in resolved.values()
-        if bundle.is_moving and bundle.still is not None
+    generated = {
+        destination
+        for item in materialised
+        if item.is_moving
+        for root in roots
+        if (destination := stills.automatic_destination(item, root)) is not None
     }
     kept: list[MediaItem] = []
     for item in materialised:
         bundle = resolved[item.path]
         if bundle.is_moving:
             kept.append(item.with_still(bundle.still))
-        elif item.path not in spent:
+        elif item.path not in generated:
             kept.append(item)
     return tuple(kept)
 
@@ -867,6 +871,46 @@ class Store:
 
         return self._mutate(forget)
 
+    def forget_item(
+        self,
+        item: MediaItem,
+        *,
+        removed_stills: Iterable[Path] = (),
+    ) -> bool:
+        """Forget one explicitly deleted item and every deleted still link.
+
+        This is intentionally stronger than noticing a missing file.  An
+        unmounted drive must retain its choices; a delete/trash gesture is an
+        authoritative lifecycle boundary.  The item's complete record goes,
+        while another moving wallpaper which chose the deleted image merely
+        returns its still field to automatic/default.  Its palette and health
+        remain exactly as authored.
+
+        ``removed_stills`` names proven app-generated captures deleted beside
+        a moving item.  Scrubbing those in the same rebased transaction keeps
+        another pairing from retaining a pointer to an automatic still which
+        no longer exists.
+        """
+        identity = Identity.of(item)
+        deleted_stills = {item.path, *(Path(path) for path in removed_stills)}
+
+        def forget(records: dict[str, Pairing]) -> tuple[bool, bool]:
+            changed = records.pop(identity.key, None) is not None
+            # A still is a first-class media item, so deleting it drops its own
+            # record too even when the caller's scanned kind was ambiguous.
+            for path in deleted_stills:
+                still_key = Identity(Medium.STILL, str(path)).key
+                if still_key != identity.key and records.pop(still_key, None) is not None:
+                    changed = True
+            for key, existing in tuple(records.items()):
+                if existing.still not in deleted_stills:
+                    continue
+                records[key] = replace(existing, still=None)
+                changed = True
+            return changed, changed
+
+        return self._mutate(forget)
+
     def forget_path(self, path: Path) -> bool:
         """Drop any record naming ``path`` as its source, whatever the medium.
 
@@ -878,11 +922,15 @@ class Store:
 
         def forget(records: dict[str, Pairing]) -> tuple[bool, bool]:
             present = [key for key in keys if key in records]
-            if not present:
-                return False, False
+            changed = bool(present)
             for key in present:
                 del records[key]
-            return True, True
+            for key, existing in tuple(records.items()):
+                if existing.still != path:
+                    continue
+                records[key] = replace(existing, still=None)
+                changed = True
+            return changed, changed
 
         return self._mutate(forget)
 

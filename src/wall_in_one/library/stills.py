@@ -108,6 +108,20 @@ def destination(video: Path, root: Path) -> Path:
     return pairing.still_directory(root) / f"{pairing.automatic_still_stem(video)}{STILL_SUFFIX}"
 
 
+def automatic_destination(item: MediaItem, root: Path) -> Path | None:
+    """The exact app-generated still owned by ``item`` under ``root``.
+
+    Keeping this derivation shared with library de-duplication and deletion is
+    important: a manually selected image may represent a moving wallpaper,
+    but only this deterministic path is an app-owned child of that wallpaper.
+    """
+    if item.kind is Kind.VIDEO:
+        return destination(item.path, root)
+    if item.kind is Kind.SCENE and item.scene:
+        return pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    return None
+
+
 def write_sidecar(video: Path, still: Path) -> Path:
     """Record that ``still`` represents ``video``, and return the sidecar.
 

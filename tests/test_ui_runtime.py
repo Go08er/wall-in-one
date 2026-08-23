@@ -29,6 +29,7 @@ from wall_in_one import paths, runtime_config, runtime_health  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import (  # noqa: E402
+    favourites,
     pairings,
     playlists,
 )
@@ -202,40 +203,33 @@ def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
         _close(application)
 
 
-def test_retry_borked_holds_compiler_transaction_through_publication(
+def test_every_global_and_targeted_quick_choice_path_refuses_borked_media(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application = _application(tmp_path, monkeypatch)
     path = tmp_path / "library" / "paper.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"image")
     item = MediaItem(path=path, kind=Kind.STILL, size=1, mtime=1)
     application.session.adopt_library(Library(roots=(path.parent,), items=(item,)))
     application.session.pairings.mark_borked(item, "renderer crashed", "automatic-apply")
-    entered = False
+    calls: list[tuple[str, ...]] = []
 
-    class ObservedLock:
-        def __enter__(self) -> None:
-            nonlocal entered
-            entered = True
+    def send(*arguments: str, **_kwargs: object) -> Response:
+        calls.append(arguments)
+        return Response.success("unexpected")
 
-        def __exit__(
-            self,
-            _kind: type[BaseException] | None,
-            _error: BaseException | None,
-            _traceback: object,
-        ) -> None:
-            nonlocal entered
-            entered = False
-
-    def play(_item: MediaItem) -> bool:
-        assert entered, "Quick choice publication escaped the clear transaction"
-        return True
-
-    monkeypatch.setattr(runtime_config, "compiler_lock", ObservedLock)
-    monkeypatch.setattr(application, "play_item_async", play)
+    monkeypatch.setattr(client, "send_runtime", send)
+    monkeypatch.setattr(client, "send_runtime_on", send)
     try:
-        assert application.retry_borked(item)
-        assert not entered
-        assert not application.session.pairings.health(pairings.Identity.of(item)).is_borked
+        response = application.play_item(item)
+        assert not response.ok and "Borked" in response.message
+        assert not application.play_item_async(item)
+        assert not application.play_item_on_async(item, "DP-1")
+
+        assert calls == []
+        assert application.session.playlists.get("quick-choice") is None
+        assert application.session.playlists.get(playlists.display_quick_choice_id("DP-1")) is None
     finally:
         _close(application)
 
@@ -359,14 +353,72 @@ def test_forgetting_destroyed_media_removes_every_playlist_entry(
 ) -> None:
     application = _application(tmp_path, monkeypatch)
     deleted = tmp_path / "wallpapers" / "gone.png"
+    deleted.parent.mkdir()
+    deleted.write_bytes(b"image")
+    item = MediaItem(deleted, Kind.STILL, 5, 1)
     try:
+        application.session.adopt_library(Library((deleted.parent,), (item,)))
         playlist = application.session.playlists.create("Keep clean")
         application.session.playlists.add(playlist.id, deleted)
         application.session.playlists.add(playlist.id, deleted)
 
-        application.forget(deleted)
+        intent = application.prepare_item_removal(item)
+        deleted.unlink()
+        assert application.forget_item(item, intent=intent) == ()
 
         assert application.session.playlists.find(playlist.id).entries == ()
+    finally:
+        _close(application)
+
+
+def test_item_cleanup_aggregates_store_failures_and_keeps_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    path = tmp_path / "library" / "gone.png"
+    path.parent.mkdir()
+    path.write_bytes(b"image")
+    removed = MediaItem(path, Kind.STILL, 5, 1)
+    application.session.adopt_library(Library((path.parent,), (removed,)))
+    intent = application.prepare_item_removal(removed)
+    path.unlink()
+
+    def fail_favourite(_path: Path) -> bool:
+        raise favourites.FavouritesError("local-io", "favourites are read-only")
+
+    def fail_pairing(
+        _item: MediaItem,
+        *,
+        removed_stills: tuple[Path, ...] = (),
+    ) -> bool:
+        del removed_stills
+        raise pairings.PairingError("local-io", "pairings are read-only")
+
+    def fail_playlist(_path: Path) -> bool:
+        raise playlists.PlaylistError("local-io", "playlists are read-only")
+
+    monkeypatch.setattr(application.session.favourites, "discard", fail_favourite)
+    monkeypatch.setattr(application.session.pairings, "forget_item", fail_pairing)
+    monkeypatch.setattr(application.session.playlists, "forget_path", fail_playlist)
+    try:
+        failures = application.forget_item(removed, intent=intent)
+
+        assert len(failures) == 3
+        assert "favourites are read-only" in failures[0]
+        assert "pairings are read-only" in failures[1]
+        assert "playlists are read-only" in failures[2]
+        assert application.session.removal_journal.records
+
+        monkeypatch.setattr(application.session.favourites, "discard", lambda _path: False)
+        monkeypatch.setattr(
+            application.session.pairings,
+            "forget_item",
+            lambda _item, *, removed_stills=(): False,
+        )
+        monkeypatch.setattr(application.session.playlists, "forget_path", lambda _path: False)
+
+        assert application.session.retry_removals() == ()
+        assert application.session.removal_journal.records == ()
     finally:
         _close(application)
 
@@ -585,7 +637,11 @@ def test_failed_playlist_mode_change_does_not_mutate_python_session(
     application = _application(tmp_path, monkeypatch)
     window = FakeWindow()
     _attach(application, window)
+    path = tmp_path / "evening.png"
+    item = MediaItem(path, Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library((tmp_path,), (item,)))
     playlist = application.session.playlists.create("Evening", entry_id="evening")
+    application.session.playlists.add(playlist.id, path)
     if verb == "schedule-follow":
         application.session.use_playlist(playlist.id)
     before = application.session.manual_playlist

@@ -15,13 +15,13 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
+import wall_in_one.theme.palettes as palettes  # noqa: E402
+import wall_in_one.ui.pairings_page as pairings_page  # noqa: E402
 from wall_in_one import config  # noqa: E402
-from wall_in_one.library import pairings  # noqa: E402
-from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
+from wall_in_one.library import pairings, scan  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem, Ownership  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
-from wall_in_one.theme import palettes  # noqa: E402
 from wall_in_one.theme.palette import Palette, PalettePair  # noqa: E402
-from wall_in_one.ui import pairings_page  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -56,18 +56,12 @@ class PairingApp:
         self.resolved_palette = None
         self.changes = 0
         self.messages: list[str] = []
-        self.retried: list[Path] = []
 
     def pairing_changed(self, _item: MediaItem) -> None:
         self.changes += 1
 
     def window_report(self, message: str) -> None:
         self.messages.append(message)
-
-    def retry_borked(self, item: MediaItem) -> bool:
-        self.session.pairings.clear_borked(item)
-        self.retried.append(item.path)
-        return True
 
 
 def _item(path: Path, kind: Kind = Kind.STILL) -> MediaItem:
@@ -98,7 +92,7 @@ def _put_scroll_at(scroller: Gtk.ScrolledWindow, value: float) -> None:
     scroller.get_vadjustment().configure(value, 0.0, 200.0, 1.0, 10.0, 20.0)
 
 
-def test_borked_pairing_is_obvious_and_can_be_cleared_for_retry(
+def test_borked_pairing_is_obvious_and_offers_removal_not_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
@@ -109,15 +103,56 @@ def test_borked_pairing_is_obvious_and_can_be_cleared_for_retry(
     session = _session(tmp_path, item=media, stills=())
     session.pairings.mark_borked(media, "linux-wallpaperengine crashed", "renderer-crash")
     application = PairingApp(session)
-    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    removals: list[MediaItem] = []
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None, removals.append)
     page.edit(session, media)
 
     assert page._health_group is not None
-    assert page._retry_button is not None
+    assert page._health_action is not None
     assert "Borked" in page._health_group.get_title()
-    page._retry_button.emit("clicked")
-    assert application.retried == [picture]
-    assert not session.pairings.health(pairings.Identity.of(media)).is_borked
+    assert "Playback, Quick choice, and transport retry are disabled" in (
+        page._health_group.get_description() or ""
+    )
+    assert page._health_action.get_label() == "Move to Trash"
+    page._health_action.emit("clicked")
+    assert removals == [media]
+    assert session.pairings.health(pairings.Identity.of(media)).is_borked
+
+    page.shutdown()
+    session.shutdown()
+
+
+def test_borked_workshop_item_honestly_defers_uninstall_to_steam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    scene_path = tmp_path / "steamapps" / "workshop" / "content" / "431960" / "42"
+    scene_path.mkdir(parents=True)
+    scene = MediaItem(
+        path=scene_path,
+        kind=Kind.SCENE,
+        size=1,
+        mtime=1,
+        ownership=Ownership.USER,
+        provider=scan.WORKSHOP_PROVIDER,
+        scene="42",
+    )
+    session = _session(tmp_path, item=scene, stills=())
+    session.pairings.mark_borked(scene, "scene crashed", "renderer-crash")
+    page = pairings_page.PairingsPage(
+        cast(Any, PairingApp(session)),
+        lambda: None,
+        lambda _item: pytest.fail("must not delete Workshop"),
+    )
+
+    page.edit(session, scene)
+
+    assert page._health_action is None
+    assert page._health_row is not None
+    subtitle = page._health_row.get_subtitle() or ""
+    assert "uninstall this Workshop item in Steam" in subtitle
+    assert "reinstall starts clean" in subtitle
 
     page.shutdown()
     session.shutdown()
@@ -142,7 +177,7 @@ def test_still_picker_is_searchable_bounded_and_survives_refresh(
 
     session = _session(tmp_path, item=video, stills=tuple(stills))
     application = PairingApp(session)
-    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
     page.edit(session, video)
     root = Gtk.Window()
     root.set_child(page)
@@ -221,7 +256,7 @@ def test_palette_swatches_follow_the_pairing_mode_in_place(
         lambda palette, **_arguments: Gtk.Label(label=palette.mode),
     )
 
-    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
     page.edit(session, media)
     box = page._adaptive_boxes["custom:Test palette"]
     first = cast(Gtk.Label, box.get_first_child())
@@ -240,7 +275,7 @@ def test_palette_swatches_follow_the_pairing_mode_in_place(
     session.shutdown()
 
 
-def test_manual_still_remains_an_explicit_escape_hatch(
+def test_file_picker_refuses_an_existing_but_unindexed_still(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
@@ -251,13 +286,38 @@ def test_manual_still_remains_an_explicit_escape_hatch(
     manual.write_bytes(b"image")
     session = _session(tmp_path, item=video, stills=())
     application = PairingApp(session)
-    page = pairings_page.PairingsPage(application, lambda: None)  # type: ignore[arg-type]
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
     page.edit(session, video)
 
     page._choose_picker_still(video, manual)
 
-    assert page._manual_still.get_subtitle() == str(manual)
-    saved = session.pairings.get(pairings.Identity.of(video))
-    assert saved is not None and saved.still == manual
+    assert session.pairings.get(pairings.Identity.of(video)) is None
+    assert application.changes == 0
+    assert len(application.messages) == 1
+    assert "not an indexed library item" in application.messages[0]
+    assert "add its folder in Settings" in application.messages[0]
+    assert "latest library refresh" in (page._manual_still.get_subtitle() or "")
+    page.shutdown()
+    session.shutdown()
+
+
+def test_file_picker_refuses_an_indexed_video_as_a_still(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    source = _item(tmp_path / "source.mp4", Kind.VIDEO)
+    candidate = _item(tmp_path / "candidate.mp4", Kind.VIDEO)
+    session = _session(tmp_path, item=source, stills=(candidate,))
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    page.edit(session, source)
+
+    page._choose_picker_still(source, candidate.path)
+
+    assert session.pairings.get(pairings.Identity.of(source)) is None
+    assert application.changes == 0
+    assert len(application.messages) == 1
+    assert "indexed as video, not as a still image" in application.messages[0]
     page.shutdown()
     session.shutdown()

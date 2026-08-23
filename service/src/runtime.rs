@@ -93,6 +93,10 @@ pub struct Status<'a> {
     pub playlist: &'a str,
     pub source: &'a str,
     pub entry_id: Option<&'a str>,
+    /// True when any current connected route resolves to an entry in the
+    /// complete taboo set. Unlike `taboo_entries`, this playback-safety bit is
+    /// never lost when the diagnostic inventory is capped.
+    pub entry_taboo: bool,
     pub kind: Option<&'a str>,
     pub still: Option<String>,
     pub motion_active: Option<bool>,
@@ -188,6 +192,10 @@ pub struct DisplayStatus<'a> {
     pub playlist_id: &'a str,
     pub playlist: &'a str,
     pub entry_id: &'a str,
+    /// Exact current-entry safety truth for this route. This is deliberately
+    /// independent of renderer failure: an equivalent occurrence can become
+    /// taboo because a renderer on another output crashed.
+    pub entry_taboo: bool,
     pub kind: &'a str,
     pub still: String,
     pub motion_active: bool,
@@ -771,7 +779,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|reference| !reference.is_empty())
-                .is_some_and(|reference| self.config.playlist(reference).is_some()),
+                .and_then(|reference| self.config.playlist(reference))
+                .is_some_and(|playlist| self.playlist_has_usable_entry(&playlist.id)),
             "shuffle" => Self::runtime_boolean_override(
                 request.argument.as_deref(),
                 "shuffle on|off|default",
@@ -781,8 +790,28 @@ impl<D: WallpaperDriver> Runtime<D> {
                 Self::runtime_boolean_override(request.argument.as_deref(), "cycle on|off|default")
                     .is_ok()
             }
-            "schedule-follow" | "play" | "pause" | "toggle" | "stop" | "next" | "previous"
-            | "random" | "quit" => request.argument.is_none(),
+            "schedule-follow" => {
+                request.argument.is_none()
+                    && self
+                        .scheduled_selection(self.current_time)
+                        .ok()
+                        .is_some_and(|(_, _, playlists)| {
+                            !playlists.is_empty()
+                                && playlists
+                                    .iter()
+                                    .all(|playlist| self.playlist_has_usable_entry(playlist))
+                        })
+            }
+            "play" => {
+                request.argument.is_none()
+                    && self
+                        .current_targets(&self.target_outputs)
+                        .iter()
+                        .all(|target| !self.is_taboo(&target.playlist_id, &target.entry.id))
+            }
+            "pause" | "toggle" | "stop" | "next" | "previous" | "random" | "quit" => {
+                request.argument.is_none()
+            }
             "status" | "reload" | "on" => false,
             _ => false,
         }
@@ -803,7 +832,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                     }
                 }
                 if let Some(route) = self.routes.get_mut(&failure.output) {
-                    route.playback_state = PlaybackState::Stopped;
+                    // A renderer exit is a failed attempt to satisfy the
+                    // route's desired state, not an explicit Stop command.
+                    // Keep Playing as the logical state so clients can offer
+                    // Play as a retry, while renderer_failed/motion_active
+                    // describe what is actually resident. Only an explicit
+                    // Stop is sticky across late child-exit observations.
+                    if route.playback_state != PlaybackState::Stopped {
+                        route.playback_state = PlaybackState::Playing;
+                    }
                     route.renderer_failed = true;
                     route.last_error = truncate_middle(&failure.message, MAX_LAST_ERROR_BYTES);
                 } else {
@@ -840,6 +877,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             // work to do instead of treating the still fallback as healthy
             // playback.  Scene retries still reach SystemDriver's session
             // suppression and fail with the attributable scene diagnostic.
+            if self.playback_state != PlaybackState::Stopped {
+                self.playback_state = PlaybackState::Playing;
+            }
             self.renderer_failed = true;
         }
         let had_pending = self.pending_automatic.is_some();
@@ -965,7 +1005,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let baseline = self.selection_state();
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
-            moved |= self.move_cursor_forward(&playlist, true);
+            moved |= self.move_cursor_forward(&playlist);
         }
         if !moved {
             self.restore_selection(&baseline);
@@ -982,20 +1022,10 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.current_time = at;
         if now.saturating_duration_since(self.last_output_probe) >= OUTPUT_PROBE_INTERVAL {
             self.last_output_probe = now;
-            let previous: HashSet<String> = self.target_outputs.iter().cloned().collect();
             self.driver.begin_apply();
             match self.probe_outputs() {
                 Ok(outputs) if self.live_outputs.as_ref() != Some(&outputs) => {
-                    let _ = self.apply_current_in_batch(Ok(outputs));
-                    for connector in self
-                        .target_outputs
-                        .iter()
-                        .filter(|connector| !previous.contains(*connector))
-                    {
-                        if let Some(route) = self.routes.get_mut(connector) {
-                            route.last_cycle = now;
-                        }
-                    }
+                    self.reconcile_hotplug_in_batch(outputs, now);
                 }
                 Ok(outputs) => {
                     self.live_outputs = Some(outputs);
@@ -1100,7 +1130,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 && now.duration_since(route.last_cycle)
                     >= Duration::from_secs(self.config.settings.cycle_interval_seconds)
             {
-                if self.move_route_forward(connector, true) {
+                if self.move_route_forward(connector) {
                     let candidate = self.routes[connector].clone();
                     self.routes.insert(connector.clone(), before.clone());
                     self.start_route_automatic(connector.clone(), before, candidate, "cycle", now);
@@ -1112,6 +1142,149 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         }
+    }
+
+    /// Reconcile a compositor hotplug using the discovery snapshot already
+    /// opened by `tick_independent`. Existing outputs keep their renderer
+    /// processes and route state. Only newly connected outputs are applied,
+    /// and their first failure enters the same bounded three-attempt machine as
+    /// other automatic transitions.
+    fn reconcile_hotplug_in_batch(&mut self, mut outputs: Vec<String>, now: Instant) {
+        outputs.sort();
+        outputs.dedup();
+        let previous: HashSet<String> = self.target_outputs.iter().cloned().collect();
+        let previous_theme = self.effective_theme_source().map(str::to_owned);
+
+        self.live_outputs = Some(outputs.clone());
+        self.output_discovery_error.clear();
+        self.target_outputs = outputs;
+        let connected = self.target_outputs.clone();
+        if let Err(error) = self.reconcile_independent_routes(&connected) {
+            self.output_discovery_error = truncate_middle(&error, MAX_OUTPUT_DISCOVERY_ERROR_BYTES);
+            return;
+        }
+
+        let newly_connected: Vec<String> = connected
+            .iter()
+            .filter(|connector| !previous.contains(*connector))
+            .cloned()
+            .collect();
+        for connector in &newly_connected {
+            if let Err(error) = self.refresh_route_decision(connector, true) {
+                if let Some(route) = self.routes.get_mut(connector) {
+                    route.last_error = truncate_middle(&error, MAX_LAST_ERROR_BYTES);
+                    route.renderer_failed = true;
+                }
+            }
+        }
+
+        let selected: HashSet<String> = newly_connected.iter().cloned().collect();
+        if selected.is_empty() {
+            // retain_outputs is what tears down renderers belonging to a
+            // disconnected output. It does not disturb survivors.
+            self.driver.retain_outputs(&connected);
+        } else {
+            let result = self.apply_independent_in_batch(&selected);
+            self.remember_hotplug_attempt(&selected, result.as_ref().err(), now);
+        }
+
+        let current_theme = self.effective_theme_source().map(str::to_owned);
+        if previous_theme != current_theme
+            && current_theme
+                .as_ref()
+                .is_some_and(|connector| !selected.contains(connector))
+        {
+            let palette_result = current_theme
+                .as_deref()
+                .and_then(|connector| {
+                    self.current_targets(&self.target_outputs)
+                        .into_iter()
+                        .find(|target| target.output == connector)
+                })
+                .map(|target| (target.output, self.driver.apply_palette_only(&target.entry)));
+            if let Some((connector, Err(error))) = palette_result {
+                if let Some(route) = self.routes.get_mut(&connector) {
+                    route.last_error = truncate_middle(
+                        &format!(
+                            "theme source changed after an output hotplug, but its palette could not be applied: {error}"
+                        ),
+                        MAX_LAST_ERROR_BYTES,
+                    );
+                }
+            }
+        }
+        self.refresh_independent_last_error();
+    }
+
+    fn remember_hotplug_attempt(
+        &mut self,
+        selected: &HashSet<String>,
+        batch_error: Option<&String>,
+        now: Instant,
+    ) {
+        let recorded_failures = self.last_apply_failures.clone();
+        for connector in selected {
+            let mut failures: Vec<ApplyFailure> = recorded_failures
+                .iter()
+                .filter(|failure| failure.output == *connector)
+                .cloned()
+                .collect();
+            if failures.is_empty() && recorded_failures.is_empty() {
+                if let (Some(error), Some(entry)) =
+                    (batch_error, self.route_current_entry(connector))
+                {
+                    failures.push(ApplyFailure {
+                        key: EntryKey {
+                            playlist_id: self.routes[connector].active_playlist.clone(),
+                            entry_id: entry.id.clone(),
+                        },
+                        output: connector.clone(),
+                        reason: error.clone(),
+                    });
+                }
+            }
+
+            if failures.is_empty() {
+                if let Some(route) = self.routes.get_mut(connector) {
+                    route.last_cycle = now;
+                }
+                self.pending_routes.remove(connector);
+                continue;
+            }
+
+            let Some(candidate) = self.routes.get(connector).cloned() else {
+                continue;
+            };
+            let reason = bounded_failure_summary(
+                &failures
+                    .iter()
+                    .map(|failure| failure.reason.clone())
+                    .collect::<Vec<_>>(),
+            );
+            self.pending_routes.insert(
+                connector.clone(),
+                PendingRouteAutomatic {
+                    connector: connector.clone(),
+                    baseline: candidate.clone(),
+                    candidate,
+                    attempts: 1,
+                    next_attempt: now + AUTOMATIC_RETRY_DELAY,
+                    reason: "hotplug",
+                    restore_baseline: false,
+                    failures,
+                },
+            );
+            if let Some(route) = self.routes.get_mut(connector) {
+                route.last_error = truncate_middle(
+                    &format!(
+                        "automatic hotplug attempt 1/{AUTOMATIC_APPLY_ATTEMPTS} failed: {reason}; paired still remains the fallback"
+                    ),
+                    MAX_LAST_ERROR_BYTES,
+                );
+                route.renderer_failed = true;
+            }
+        }
+        self.refresh_independent_last_error();
     }
 
     fn start_route_automatic(
@@ -1213,7 +1386,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         ),
                         MAX_LAST_ERROR_BYTES,
                     );
-                    if !pending.restore_baseline && self.move_route_forward(&connector, true) {
+                    if !pending.restore_baseline && self.move_route_forward(&connector) {
                         let candidate = self.routes[&connector].clone();
                         let mut next = PendingRouteAutomatic {
                             connector: connector.clone(),
@@ -1345,7 +1518,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             .map(|failure| failure.key.playlist_id.clone())
                             .collect();
                         for playlist in playlists {
-                            moved |= self.move_cursor_forward(&playlist, true);
+                            moved |= self.move_cursor_forward(&playlist);
                         }
                         if moved {
                             let candidate = self.selection_state();
@@ -1542,6 +1715,23 @@ impl<D: WallpaperDriver> Runtime<D> {
         })
     }
 
+    fn playlist_has_usable_entry(&self, playlist_id: &str) -> bool {
+        self.config.playlist(playlist_id).is_some_and(|playlist| {
+            playlist
+                .entries
+                .iter()
+                .any(|entry| !self.is_taboo(&playlist.id, &entry.id))
+        })
+    }
+
+    fn taboo_playlist_error(&self, playlist_id: &str) -> String {
+        let name = self
+            .config
+            .playlist(playlist_id)
+            .map_or(playlist_id, |playlist| playlist.name.as_str());
+        format!("playlist {name:?} has no usable entries; every entry is marked taboo (Borked)")
+    }
+
     fn taboo_fallback_diagnostic(&self, playlist_id: &str, entry_id: &str) -> Option<String> {
         let record = self.taboo.get(&EntryKey {
             playlist_id: playlist_id.to_string(),
@@ -1718,7 +1908,6 @@ impl<D: WallpaperDriver> Runtime<D> {
                     },
                 );
             }
-            self.refresh_route_decision(connector, true)?;
         }
         while self
             .routes
@@ -1900,6 +2089,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         discovered: Result<Vec<String>, String>,
     ) -> Result<String, String> {
         let independent = self.is_independent();
+        let previous_outputs: HashSet<String> = self.target_outputs.iter().cloned().collect();
         self.target_outputs = match discovered {
             Ok(outputs) => {
                 self.live_outputs = Some(outputs.clone());
@@ -1946,6 +2136,12 @@ impl<D: WallpaperDriver> Runtime<D> {
         if independent {
             let outputs = self.target_outputs.clone();
             self.reconcile_independent_routes(&outputs)?;
+            for connector in outputs
+                .iter()
+                .filter(|connector| !previous_outputs.contains(*connector))
+            {
+                self.refresh_route_decision(connector, true)?;
+            }
             let selected: HashSet<String> = outputs.iter().cloned().collect();
             return self.apply_independent_in_batch(&selected);
         }
@@ -2065,6 +2261,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             .cloned()
             .collect();
         let result = self.reconcile_independent_routes(&outputs).and_then(|()| {
+            for connector in &newly_connected {
+                self.refresh_route_decision(connector, true)?;
+            }
             if selected
                 .iter()
                 .any(|connector| !outputs.contains(connector))
@@ -2380,6 +2579,30 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
     }
 
+    fn refuse_taboo_routes(&self, connectors: &[String]) -> Result<(), String> {
+        let blocked: Vec<String> = connectors
+            .iter()
+            .filter_map(|connector| {
+                let route = self.routes.get(connector)?;
+                let entry = self.route_current_entry(connector)?;
+                self.is_taboo(&route.active_playlist, &entry.id).then(|| {
+                    format!(
+                        "{connector}: entry {:?} in playlist {:?} is marked taboo (Borked) and cannot play",
+                        entry.id, route.active_playlist
+                    )
+                })
+            })
+            .collect();
+        if blocked.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}; use Next to choose a usable wallpaper, or remove/uninstall the Borked item",
+                blocked.join("; ")
+            ))
+        }
+    }
+
     fn handle_independent_command(
         &mut self,
         connector: Option<&str>,
@@ -2401,6 +2624,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .playlist(reference)
                     .ok_or_else(|| format!("no such playlist {reference:?}"))?;
                 let playlist_id = playlist.id.clone();
+                if !self.playlist_has_usable_entry(&playlist_id) {
+                    return Err(self.taboo_playlist_error(&playlist_id));
+                }
                 self.cancel_route_retries(&connectors);
                 let mut changed = HashSet::new();
                 let now = Instant::now();
@@ -2410,7 +2636,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                             && route.active_playlist == playlist_id
                             && route.playback_state == PlaybackState::Playing
                             && !route.renderer_failed
-                    }) && self.route_current_entry(connector).is_some();
+                    }) && self
+                        .route_current_entry(connector)
+                        .is_some_and(|entry| !self.is_taboo(&playlist_id, &entry.id));
                     if already_active {
                         self.routes
                             .get_mut(connector)
@@ -2423,7 +2651,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .get(connector)
                         .ok_or_else(|| format!("display route {connector:?} is missing"))?
                         .shuffle_enabled(self.config.settings.shuffle);
-                    let cursor = self.new_route_cursor(&playlist_id, None, shuffle, false)?;
+                    let cursor = self.new_route_cursor(&playlist_id, None, shuffle, true)?;
                     let route = self.routes.get_mut(connector).expect("route was checked");
                     route.manual_playlist = Some(playlist_id.clone());
                     route.active_playlist = playlist_id.clone();
@@ -2441,35 +2669,71 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             "schedule-follow" => {
                 Self::independent_no_argument(request, "schedule-follow")?;
+                let mut decisions = HashMap::new();
+                for connector in &connectors {
+                    let decision = self.route_decision(connector, None, self.current_time)?;
+                    if !self.playlist_has_usable_entry(&decision.0) {
+                        return Err(format!(
+                            "{connector}: {}",
+                            self.taboo_playlist_error(&decision.0)
+                        ));
+                    }
+                    decisions.insert(connector.clone(), decision);
+                }
                 self.cancel_route_retries(&connectors);
                 let mut changed_routes = HashSet::new();
+                let mut provenance_changed = false;
                 for connector in &connectors {
                     let route = self
                         .routes
                         .get(connector)
                         .expect("connector came from active routes");
-                    let (wanted, source, rule_id) =
-                        self.route_decision(connector, None, self.current_time)?;
-                    let unchanged = route.manual_playlist.is_none()
+                    let (wanted, source, rule_id) = decisions
+                        .get(connector)
+                        .expect("every selected connector was preflighted")
+                        .clone();
+                    let current_is_usable = self
+                        .route_current_entry(connector)
+                        .is_some_and(|entry| !self.is_taboo(&route.active_playlist, &entry.id));
+                    let unchanged_target = route.active_playlist == wanted && current_is_usable;
+                    let unchanged_provenance = route.manual_playlist.is_none()
                         && route.active_playlist == wanted
                         && route.source == source
                         && route.schedule_rule_id == rule_id;
-                    if unchanged {
+                    if unchanged_target {
+                        if !unchanged_provenance {
+                            let route = self
+                                .routes
+                                .get_mut(connector)
+                                .expect("connector came from active routes");
+                            route.manual_playlist = None;
+                            route.source = source;
+                            route.schedule_rule_id = rule_id;
+                            provenance_changed = true;
+                        }
                         continue;
                     }
-                    self.routes
+                    let shuffle = route.shuffle_enabled(self.config.settings.shuffle);
+                    let cursor = self.new_route_cursor(&wanted, None, shuffle, true)?;
+                    let route = self
+                        .routes
                         .get_mut(connector)
-                        .expect("connector came from active routes")
-                        .manual_playlist = None;
-                    self.refresh_route_decision(connector, true)?;
-                    self.routes
-                        .get_mut(connector)
-                        .expect("route exists")
-                        .last_cycle = Instant::now();
+                        .expect("connector came from active routes");
+                    route.manual_playlist = None;
+                    route.active_playlist = wanted;
+                    route.source = source;
+                    route.schedule_rule_id = rule_id;
+                    route.cursor = cursor;
+                    route.last_cycle = Instant::now();
                     changed_routes.insert(connector.clone());
                 }
                 if changed_routes.is_empty() {
-                    Ok("already following schedule".into())
+                    Ok(if provenance_changed {
+                        "following schedule; wallpaper unchanged"
+                    } else {
+                        "already following schedule"
+                    }
+                    .into())
                 } else {
                     self.apply_independent_transaction(
                         &changed_routes,
@@ -2480,6 +2744,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             "play" => {
                 Self::independent_no_argument(request, "play")?;
+                self.refuse_taboo_routes(&connectors)?;
                 self.cancel_route_retries(&connectors);
                 self.independent_play(&connectors)
             }
@@ -2490,14 +2755,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             "toggle" => {
                 Self::independent_no_argument(request, "toggle")?;
-                self.cancel_route_retries(&connectors);
                 if connectors.iter().any(|one| {
                     self.routes
                         .get(one)
                         .is_some_and(|route| route.playback_state == PlaybackState::Playing)
                 }) {
+                    self.cancel_route_retries(&connectors);
                     self.independent_pause(&connectors)?;
                 } else {
+                    self.refuse_taboo_routes(&connectors)?;
+                    self.cancel_route_retries(&connectors);
                     self.independent_play(&connectors)?;
                 }
                 Ok("toggled selected display routes".into())
@@ -2581,7 +2848,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let mut changed = HashSet::new();
                 for connector in &connectors {
                     let moved = match request.verb.as_str() {
-                        "next" => self.move_route_forward(connector, false),
+                        "next" => self.move_route_forward(connector),
                         "previous" => self.move_route_backward(connector),
                         "random" => self.move_route_random(connector),
                         _ => unreachable!(),
@@ -2726,7 +2993,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
     }
 
-    fn move_route_forward(&mut self, connector: &str, automatic: bool) -> bool {
+    fn move_route_forward(&mut self, connector: &str) -> bool {
         let Some(route) = self.routes.get(connector) else {
             return false;
         };
@@ -2741,7 +3008,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .collect();
         let eligible: Vec<bool> = entry_ids
             .iter()
-            .map(|entry| !automatic || !self.is_taboo(&playlist_id, entry))
+            .map(|entry| !self.is_taboo(&playlist_id, entry))
             .collect();
         let shuffle = route.shuffle_enabled(self.config.settings.shuffle);
         let route = self.routes.get_mut(connector).expect("route exists");
@@ -2806,28 +3073,41 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn move_route_backward(&mut self, connector: &str) -> bool {
-        let Some(route) = self.routes.get_mut(connector) else {
+        let Some(route) = self.routes.get(connector) else {
             return false;
         };
+        let playlist_id = route.active_playlist.clone();
+        let Some(playlist) = self.config.playlist(&playlist_id) else {
+            return false;
+        };
+        let eligible: Vec<bool> = playlist
+            .entries
+            .iter()
+            .map(|entry| !self.is_taboo(&playlist_id, &entry.id))
+            .collect();
+        let route = self.routes.get_mut(connector).expect("route exists");
         let cursor = &mut route.cursor;
-        let Some(previous) = cursor.history.pop() else {
-            return false;
-        };
         let Some(&current) = cursor.order.get(cursor.position) else {
             return false;
         };
-        push_bounded(&mut cursor.forward, current);
-        cursor.position = if let Some(position) = cursor
-            .order
-            .iter()
-            .position(|candidate| *candidate == previous)
-        {
-            position
-        } else {
-            cursor.order.push(previous);
-            cursor.order.len() - 1
-        };
-        true
+        while let Some(previous) = cursor.history.pop() {
+            if !eligible.get(previous).copied().unwrap_or(false) || previous == current {
+                continue;
+            }
+            push_bounded(&mut cursor.forward, current);
+            cursor.position = if let Some(position) = cursor
+                .order
+                .iter()
+                .position(|candidate| *candidate == previous)
+            {
+                position
+            } else {
+                cursor.order.push(previous);
+                cursor.order.len() - 1
+            };
+            return true;
+        }
+        false
     }
 
     fn move_route_random(&mut self, connector: &str) -> bool {
@@ -2856,11 +3136,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .collect();
             if remaining.is_empty() {
                 let mut next = eligible;
-                if next.len() <= 1 {
+                if next.is_empty() {
                     return false;
                 }
                 self.rng.shuffle(&mut next);
                 if next[0] == current {
+                    if next.len() == 1 {
+                        return false;
+                    }
                     next.swap(0, 1);
                 }
                 push_bounded(&mut cursor.history, current);
@@ -2906,10 +3189,19 @@ impl<D: WallpaperDriver> Runtime<D> {
             .playlist(reference)
             .ok_or_else(|| format!("no such playlist {reference:?}"))?;
         let playlist_id = playlist.id.clone();
+        if !self.playlist_has_usable_entry(&playlist_id) {
+            return self.fail(self.taboo_playlist_error(&playlist_id));
+        }
+        let baseline = self.selection_state();
+        let previous_manual = self.manual_playlist.clone();
         self.manual_playlist = Some(playlist_id.clone());
         self.active_playlist = playlist_id.clone();
         self.schedule_overrode_default = false;
-        self.reset_cursor(&playlist_id);
+        if !self.reset_cursor_automatic(&playlist_id) {
+            self.manual_playlist = previous_manual;
+            self.restore_selection(&baseline);
+            return self.fail(self.taboo_playlist_error(&playlist_id));
+        }
         let result = self.apply_current();
         if result.is_ok() {
             self.last_cycle = Instant::now();
@@ -2917,15 +3209,64 @@ impl<D: WallpaperDriver> Runtime<D> {
         result
     }
 
-    fn follow_schedule(&mut self, at: NaiveDateTime) -> Result<String, String> {
-        self.manual_playlist = None;
+    fn scheduled_selection(
+        &self,
+        at: NaiveDateTime,
+    ) -> Result<(String, bool, Vec<String>), String> {
         let scheduled = schedule::resolve_override(&self.config.schedules, at)
             .map_err(|error| error.to_string())?;
-        self.schedule_overrode_default = scheduled.is_some();
-        self.active_playlist = scheduled
+        let overrode = scheduled.is_some();
+        let active = scheduled
             .unwrap_or(&self.config.default_playlist)
             .to_string();
-        self.reset_cursor(&self.active_playlist.clone());
+        if overrode || self.config.displays.is_empty() {
+            return Ok((active.clone(), overrode, vec![active]));
+        }
+
+        // With no schedule override, mirrored mode returns to each connected
+        // display's assignment (or the default for an unassigned output), not
+        // merely to `active`. Preflight and reset those effective playlists so
+        // an inactive cursor which became taboo cannot be selected on return.
+        let mut seen = HashSet::new();
+        let effective = self
+            .target_outputs
+            .iter()
+            .filter_map(|output| {
+                let reference = self
+                    .config
+                    .displays
+                    .iter()
+                    .find(|display| display.connector == *output)
+                    .map_or(self.config.default_playlist.as_str(), |display| {
+                        display.playlist.as_str()
+                    });
+                let playlist = self.config.playlist(reference)?;
+                seen.insert(playlist.id.clone())
+                    .then(|| playlist.id.clone())
+            })
+            .collect();
+        Ok((active, overrode, effective))
+    }
+
+    fn follow_schedule(&mut self, at: NaiveDateTime) -> Result<String, String> {
+        let (playlist_id, overrode, effective) = self.scheduled_selection(at)?;
+        if let Some(blocked) = effective
+            .iter()
+            .find(|playlist| !self.playlist_has_usable_entry(playlist))
+        {
+            return self.fail(self.taboo_playlist_error(blocked));
+        }
+        let baseline = self.selection_state();
+        let previous_manual = self.manual_playlist.take();
+        self.schedule_overrode_default = overrode;
+        self.active_playlist.clone_from(&playlist_id);
+        for effective_playlist in &effective {
+            if !self.reset_cursor_automatic(effective_playlist) {
+                self.manual_playlist = previous_manual;
+                self.restore_selection(&baseline);
+                return self.fail(self.taboo_playlist_error(effective_playlist));
+            }
+        }
         let result = self.apply_current();
         if result.is_ok() {
             self.last_cycle = Instant::now();
@@ -3003,6 +3344,16 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn play(&mut self) -> Result<String, String> {
+        if let Some(target) = self
+            .current_targets(&self.target_outputs)
+            .into_iter()
+            .find(|target| self.is_taboo(&target.playlist_id, &target.entry.id))
+        {
+            return self.fail(format!(
+                "entry {:?} in playlist {:?} is marked taboo (Borked) and cannot play; use Next to choose a usable wallpaper, or remove/uninstall it",
+                target.entry.id, target.playlist_id
+            ));
+        }
         match self.playback_state {
             PlaybackState::Playing => {
                 if self.renderer_failed {
@@ -3087,7 +3438,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             moved |= if delta < 0 {
                 self.move_cursor_backward(&playlist)
             } else {
-                self.move_cursor_forward(&playlist, false)
+                self.move_cursor_forward(&playlist)
             };
         }
         if !moved {
@@ -3110,7 +3461,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             moved |= self.move_cursor_random(&playlist);
         }
         if !moved {
-            return self.fail("active display playlists are empty");
+            return self.fail("active display playlists are empty or taboo");
         }
         let result = self.apply_current();
         if result.is_ok() {
@@ -3123,6 +3474,13 @@ impl<D: WallpaperDriver> Runtime<D> {
         let next = Config::load(&self.config_path).map_err(|error| error.to_string())?;
         let mode_changed = next.settings.display_mode != self.config.settings.display_mode;
         let old_targets = self.current_targets(&self.target_outputs);
+        let old_theme_source = self.effective_theme_source().map(str::to_owned);
+        let old_theme_entry = old_theme_source.as_deref().and_then(|connector| {
+            old_targets
+                .iter()
+                .find(|target| target.output == connector)
+                .map(|target| target.entry.clone())
+        });
         let old_entries = self.current_entry_ids();
         let old_route_entries: HashMap<String, (String, String)> = self
             .routes
@@ -3168,10 +3526,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         let dynamics_changed =
             next.settings.dynamics_enabled != self.config.settings.dynamics_enabled;
         let displays_changed = next.displays != self.config.displays;
-        let display_routing_changed = next.settings.display_mode
-            != self.config.settings.display_mode
-            || next.settings.theme_source_connector != self.config.settings.theme_source_connector
-            || next.schedules != self.config.schedules;
         let nondurable_findings = self.snapshot_nondurable_findings();
 
         // Adopt the candidate only in memory until every required driver change
@@ -3223,6 +3577,29 @@ impl<D: WallpaperDriver> Runtime<D> {
         // the successful return. Rollback restores the snapshot's epoch.
         self.config_epoch = self.config_epoch.saturating_add(1);
         self.reconcile_configured_taboo(&nondurable_findings);
+        if mode_changed || (displays_changed && self.live_outputs.is_none()) {
+            self.target_outputs = if self.is_independent() {
+                self.live_outputs.clone().unwrap_or_else(|| {
+                    self.config
+                        .displays
+                        .iter()
+                        .map(|display| display.connector.clone())
+                        .collect()
+                })
+            } else if self.config.displays.is_empty() {
+                vec![String::new()]
+            } else {
+                self.live_outputs.clone().unwrap_or_else(|| {
+                    self.config
+                        .displays
+                        .iter()
+                        .map(|display| display.connector.clone())
+                        .collect()
+                })
+            };
+            self.target_outputs.sort();
+            self.target_outputs.dedup();
+        }
         if let Err(error) = self.rebuild_cursors(&old_entries) {
             self.restore_reload_snapshot(snapshot);
             return Err(error);
@@ -3236,16 +3613,43 @@ impl<D: WallpaperDriver> Runtime<D> {
 
         let new_targets = self.current_targets(&self.target_outputs);
         let targets_changed = !targets_equal_ignoring_taboo(&old_targets, &new_targets);
+        let changed_outputs = changed_target_outputs(&old_targets, &new_targets);
+        let output_removed = old_targets
+            .iter()
+            .any(|old| !new_targets.iter().any(|new| new.output == old.output));
+        let new_theme_source = self.effective_theme_source().map(str::to_owned);
         let residency_changed = snapshot.active_playlist != self.active_playlist
             || snapshot.manual_playlist != self.manual_playlist
             || snapshot.schedule_overrode_default != self.schedule_overrode_default
             || targets_changed;
-        let apply_needed = renderer_changed
-            || dynamics_changed
-            || displays_changed
-            || display_routing_changed
-            || targets_changed;
+        let independent_apply_outputs: HashSet<String> = if self.is_independent() {
+            if mode_changed || renderer_changed || dynamics_changed {
+                self.target_outputs.iter().cloned().collect()
+            } else {
+                changed_outputs
+                    .into_iter()
+                    .filter(|output| self.target_outputs.contains(output))
+                    .collect()
+            }
+        } else {
+            HashSet::new()
+        };
+        let apply_needed = if self.is_independent() {
+            !independent_apply_outputs.is_empty()
+        } else {
+            mode_changed || renderer_changed || dynamics_changed || targets_changed
+        };
+        // Noctalia owns one shell-global palette. Changing only which display
+        // supplies it must not tear down any otherwise unchanged renderer.
+        // If that route is already part of a necessary hand-over, the normal
+        // staged apply has applied its palette and no extra command is needed.
+        let palette_only_needed = self.is_independent()
+            && old_theme_source != new_theme_source
+            && new_theme_source
+                .as_ref()
+                .is_some_and(|connector| !independent_apply_outputs.contains(connector));
         let mut apply_attempted = false;
+        let mut palette_only_attempted = false;
         let mut failure = None;
 
         if renderer_changed {
@@ -3258,14 +3662,45 @@ impl<D: WallpaperDriver> Runtime<D> {
                 failure = Some(error);
             }
         }
+        if failure.is_none() && self.is_independent() && output_removed && !apply_needed {
+            self.driver.retain_outputs(&self.target_outputs);
+        }
         if failure.is_none() && apply_needed {
             apply_attempted = true;
-            if let Err(error) = self.apply_current() {
+            let applied = if self.is_independent() {
+                self.apply_independent_selected(&independent_apply_outputs)
+            } else {
+                self.apply_current()
+            };
+            if let Err(error) = applied {
                 failure = Some(error);
+            }
+        }
+        if failure.is_none() && palette_only_needed {
+            palette_only_attempted = true;
+            let applied = new_theme_source
+                .as_deref()
+                .and_then(|connector| {
+                    self.current_targets(&self.target_outputs)
+                        .into_iter()
+                        .find(|target| target.output == connector)
+                })
+                .ok_or_else(|| "the selected theme-source display has no active entry".to_string())
+                .and_then(|target| self.driver.apply_palette_only(&target.entry));
+            if let Err(error) = applied {
+                failure = Some(format!(
+                    "could not apply the selected theme-source palette: {error}"
+                ));
             }
         }
 
         if let Some(error) = failure {
+            let candidate_palette_may_have_changed = palette_only_attempted
+                || (apply_attempted
+                    && self.is_independent()
+                    && new_theme_source
+                        .as_ref()
+                        .is_some_and(|connector| independent_apply_outputs.contains(connector)));
             let previous_last_error = snapshot.last_error.clone();
             let previous_renderer_failed = snapshot.renderer_failed;
             self.restore_reload_snapshot(snapshot);
@@ -3281,9 +3716,38 @@ impl<D: WallpaperDriver> Runtime<D> {
                     rollback_errors.push(format!("could not restore video audio: {rollback}"));
                 }
             }
+            let scoped_independent_rollback =
+                apply_attempted && !mode_changed && self.is_independent();
+            let mut wallpaper_rollback_failed = false;
             if apply_attempted {
-                if let Err(rollback) = self.apply_current() {
+                let rollback = if scoped_independent_rollback {
+                    self.apply_independent_selected(&independent_apply_outputs)
+                } else {
+                    self.apply_current()
+                };
+                if let Err(rollback) = rollback {
+                    wallpaper_rollback_failed = true;
                     rollback_errors.push(format!("could not restore wallpaper: {rollback}"));
+                }
+            }
+            let wallpaper_rollback_restored_palette = apply_attempted
+                && !wallpaper_rollback_failed
+                && (!scoped_independent_rollback
+                    || old_theme_source
+                        .as_ref()
+                        .is_some_and(|connector| independent_apply_outputs.contains(connector)));
+            if candidate_palette_may_have_changed && !wallpaper_rollback_restored_palette {
+                match old_theme_entry.as_ref() {
+                    Some(entry) => {
+                        if let Err(rollback) = self.driver.apply_palette_only(entry) {
+                            rollback_errors
+                                .push(format!("could not restore previous palette: {rollback}"));
+                        }
+                    }
+                    None => rollback_errors.push(
+                        "could not restore previous palette: previous theme source is missing"
+                            .into(),
+                    ),
                 }
             }
 
@@ -3399,16 +3863,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         Ok(())
     }
 
-    fn reset_cursor(&mut self, reference: &str) {
-        if let Some(playlist) = self.config.playlist(reference) {
-            if let Some(cursor) = self.cursors.get_mut(&playlist.id) {
-                cursor.position = 0;
-                cursor.history.clear();
-                cursor.forward.clear();
-            }
-        }
-    }
-
     fn reset_cursor_automatic(&mut self, reference: &str) -> bool {
         let Some(playlist) = self.config.playlist(reference) else {
             return false;
@@ -3436,7 +3890,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         true
     }
 
-    fn move_cursor_forward(&mut self, reference: &str, automatic: bool) -> bool {
+    fn move_cursor_forward(&mut self, reference: &str) -> bool {
         let Some(playlist) = self.config.playlist(reference) else {
             return false;
         };
@@ -3451,11 +3905,10 @@ impl<D: WallpaperDriver> Runtime<D> {
             .shuffle_override
             .unwrap_or(self.config.settings.shuffle);
         let eligible = |index: usize| {
-            !automatic
-                || !taboo.contains_key(&EntryKey {
-                    playlist_id: playlist_id.clone(),
-                    entry_id: entry_ids[index].clone(),
-                })
+            !taboo.contains_key(&EntryKey {
+                playlist_id: playlist_id.clone(),
+                entry_id: entry_ids[index].clone(),
+            })
         };
         let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
             return false;
@@ -3526,27 +3979,36 @@ impl<D: WallpaperDriver> Runtime<D> {
         let Some(playlist) = self.config.playlist(reference) else {
             return false;
         };
-        let Some(cursor) = self.cursors.get_mut(&playlist.id) else {
-            return false;
-        };
-        let Some(previous) = cursor.history.pop() else {
+        let playlist_id = playlist.id.clone();
+        let eligible: Vec<bool> = playlist
+            .entries
+            .iter()
+            .map(|entry| !self.is_taboo(&playlist_id, &entry.id))
+            .collect();
+        let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
             return false;
         };
         let Some(&current) = cursor.order.get(cursor.position) else {
             return false;
         };
-        push_bounded(&mut cursor.forward, current);
-        cursor.position = if let Some(position) = cursor
-            .order
-            .iter()
-            .position(|candidate| *candidate == previous)
-        {
-            position
-        } else {
-            cursor.order.push(previous);
-            cursor.order.len() - 1
-        };
-        true
+        while let Some(previous) = cursor.history.pop() {
+            if !eligible.get(previous).copied().unwrap_or(false) || previous == current {
+                continue;
+            }
+            push_bounded(&mut cursor.forward, current);
+            cursor.position = if let Some(position) = cursor
+                .order
+                .iter()
+                .position(|candidate| *candidate == previous)
+            {
+                position
+            } else {
+                cursor.order.push(previous);
+                cursor.order.len() - 1
+            };
+            return true;
+        }
+        false
     }
 
     fn move_cursor_random(&mut self, reference: &str) -> bool {
@@ -3575,11 +4037,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .collect();
             if remaining_positions.is_empty() {
                 let mut next: Vec<usize> = eligible;
-                if next.len() <= 1 {
+                if next.is_empty() {
                     return false;
                 }
                 self.rng.shuffle(&mut next);
                 if next[0] == current {
+                    if next.len() == 1 {
+                        return false;
+                    }
                     next.swap(0, 1);
                 }
                 push_bounded(&mut cursor.history, current);
@@ -3733,8 +4198,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .map(|rule| self.schedule_rule_status(rule, selected_rule))
             .collect::<Result<Vec<_>, _>>()?;
         let mut displays = Vec::new();
+        let mut entry_taboo = false;
         if self.config.displays.is_empty() {
             if let Some(entry) = entry {
+                let display_entry_taboo = self.is_taboo(&active_playlist.id, &entry.id);
+                entry_taboo |= display_entry_taboo;
                 let assigned = self
                     .config
                     .playlist(&self.config.default_playlist)
@@ -3748,6 +4216,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     playlist_id: &active_playlist.id,
                     playlist: &active_playlist.name,
                     entry_id: &entry.id,
+                    entry_taboo: display_entry_taboo,
                     kind: entry_kind(entry.kind),
                     still: entry.still.display().to_string(),
                     motion_active: self.driver.motion_active(""),
@@ -3824,6 +4293,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .playlist(reference)
                     .ok_or_else(|| format!("display {output} names a missing playlist"))?;
                 if let Some(entry) = self.current_entry_for(&effective.id) {
+                    let display_entry_taboo = self.is_taboo(&effective.id, &entry.id);
+                    if self.target_outputs.iter().any(|target| target == output) {
+                        entry_taboo |= display_entry_taboo;
+                    }
                     displays.push(DisplayStatus {
                         connector: output,
                         connected: self.target_outputs.iter().any(|target| target == output),
@@ -3837,6 +4310,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         playlist_id: &effective.id,
                         playlist: &effective.name,
                         entry_id: &entry.id,
+                        entry_taboo: display_entry_taboo,
                         kind: entry_kind(entry.kind),
                         still: entry.still.display().to_string(),
                         motion_active: self.target_outputs.iter().any(|target| target == output)
@@ -3906,6 +4380,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "schedule"
             },
             entry_id: entry.map(|entry| entry.id.as_str()),
+            entry_taboo,
             kind,
             still: entry.map(|entry| entry.still.display().to_string()),
             motion_active: summary_playlist.map(|_| {
@@ -3993,6 +4468,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             .iter()
             .map(|target| target.playlist_id.as_str())
             .collect();
+        let entry_taboo = live_targets
+            .iter()
+            .any(|target| self.is_taboo(&target.playlist_id, &target.entry.id));
         let taboo_total = self.taboo.len();
         let taboo_entries: Vec<TabooStatus<'_>> = self
             .taboo_order
@@ -4142,6 +4620,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 playlist_id: &effective.id,
                 playlist: &effective.name,
                 entry_id: &target.entry.id,
+                entry_taboo: self.is_taboo(&effective.id, &target.entry.id),
                 kind: entry_kind(target.entry.kind),
                 still: target.entry.still.display().to_string(),
                 motion_active: self.target_outputs.contains(&target.output)
@@ -4240,6 +4719,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "mixed"
             },
             entry_id: summary_entry.map(|target| target.entry.id.as_str()),
+            entry_taboo,
             kind: summary_entry.map(|target| entry_kind(target.entry.kind)),
             still: summary_entry.map(|target| target.entry.still.display().to_string()),
             motion_active: Some(
@@ -4368,16 +4848,42 @@ fn targets_equal_ignoring_taboo(left: &[Target], right: &[Target]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    left.iter().zip(right).all(|(left, right)| {
-        if left.playlist_id != right.playlist_id || left.output != right.output {
-            return false;
-        }
-        let mut left_entry = left.entry.clone();
-        let mut right_entry = right.entry.clone();
-        left_entry.taboo = None;
-        right_entry.taboo = None;
-        left_entry == right_entry
-    })
+    left.iter()
+        .zip(right)
+        .all(|(left, right)| target_equal_ignoring_taboo(left, right))
+}
+
+fn target_equal_ignoring_taboo(left: &Target, right: &Target) -> bool {
+    if left.playlist_id != right.playlist_id || left.output != right.output {
+        return false;
+    }
+    let mut left_entry = left.entry.clone();
+    let mut right_entry = right.entry.clone();
+    left_entry.taboo = None;
+    right_entry.taboo = None;
+    left_entry == right_entry
+}
+
+fn changed_target_outputs(left: &[Target], right: &[Target]) -> HashSet<String> {
+    let left_by_output: HashMap<&str, &Target> = left
+        .iter()
+        .map(|target| (target.output.as_str(), target))
+        .collect();
+    let right_by_output: HashMap<&str, &Target> = right
+        .iter()
+        .map(|target| (target.output.as_str(), target))
+        .collect();
+    left_by_output
+        .keys()
+        .chain(right_by_output.keys())
+        .filter_map(|output| {
+            let changed = match (left_by_output.get(output), right_by_output.get(output)) {
+                (Some(left), Some(right)) => !target_equal_ignoring_taboo(left, right),
+                _ => true,
+            };
+            changed.then(|| (*output).to_string())
+        })
+        .collect()
 }
 
 fn playback_state(state: PlaybackState) -> &'static str {

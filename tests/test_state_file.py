@@ -137,3 +137,16 @@ def test_reentrant_atomic_writes_have_distinct_private_temporaries(
     assert all(source.parent == target.parent for source in sources)
     assert target.read_text(encoding="utf-8") == "outer\n"
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_mutation_lock_refuses_a_predictable_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "state.json"
+    sentinel = tmp_path / "outside"
+    sentinel.write_text("do not touch", encoding="utf-8")
+    lock = target.with_name(f".{target.name}.mutation.lock")
+    lock.symlink_to(sentinel)
+
+    with pytest.raises(OSError), state_file.mutation_lock(target, description="fixture"):
+        pytest.fail("a symlink must not grant the mutation lock")
+
+    assert sentinel.read_text(encoding="utf-8") == "do not touch"

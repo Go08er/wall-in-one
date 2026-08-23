@@ -63,8 +63,18 @@ A video finds its still three ways, in this order:
    `<first root>/Wall-in-One/Automatic Stills/`;
 3. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
 
-A still that exists only to represent a video is not listed as a wallpaper of
-its own, or the same picture would turn up twice in the rotation.
+Only the exact deterministic capture in `Automatic Stills` is absorbed by its
+moving wallpaper. A sibling or manually selected image is user-provided and
+remains a separate library item with its own Pairing, even while one or more
+moving wallpapers use it as their representative.
+
+An explicit representative choice must already be a still item in the latest
+library scan. The picker and `wall-in-one ctl still` refuse an outside file, an
+unindexed file, or an indexed video. Wall-in-One does not silently import,
+copy, move, or later delete an external picture. To use one, copy or move it
+into a configured library folder, or add its folder under **Settings**, refresh
+the library, and choose the newly indexed still. Automatic generated captures
+remain internal defaults rather than separate choices in the picker.
 
 ### Stills the app makes for itself
 
@@ -194,10 +204,57 @@ by an overwriting rename. Concurrent files with the same basename therefore
 receive distinct names, and both their bytes and `.trashinfo` records are
 synced before the original directory entry is removed.
 
-Removing a wallpaper also drops it from favourites, pairings and every
-playlist entry that refers to it. Those records normally outlive a missing
-file because the file might come back; that is not true of one the app just
-destroyed.
+Removing a wallpaper also drops it from favourites, every playlist occurrence,
+and its complete Pairing record: palette policy, representative-still choice
+and any recorded Borked/crasher health. It removes only automatic stills and
+sidecars whose exact generated paths prove they belong to that wallpaper.
+Those records normally outlive a missing file because the file might come
+back; that is not true of one the app just destroyed.
+
+A manually chosen still remains a separate library item. Removing the moving
+wallpaper deletes the association but never the still file or that still's own
+Pairing metadata. Conversely, explicitly removing the still clears only the
+representative-still field in other Pairings which selected it; their palette
+and health remain, and they fall back to automatic/default still selection.
+An unavailable drive or temporarily missing file is not an explicit removal
+and does not trigger either cleanup path.
+
+Before a local deletion or trash move can touch the media, Wall-in-One writes a
+bounded removal intent to `pending-removals.json`. If that intent cannot be
+persisted, the operation is refused and the file stays where it was. The
+journal binds a unique transaction token to the source inode and the selected
+library-root/source-parent identities. A replacement at the same path is
+refused, another process cannot borrow or cancel the live transaction, and an
+unmarked missing source is not interpreted as a completed delete while its
+drive is unavailable. Media and generated-artifact directory entries are
+synced before their cleanup intent can be discarded. The journal survives a
+crash after the media operation commits and is cleared only after favourites,
+Pairings, playlists and exact generated artifacts have all been cleaned. If
+any cleanup fails, the UI reports the partial failure and each GUI startup or
+library refresh retries it. Fix the reported state-directory problem and
+refresh to finish the cleanup. The headless runtime-config compiler checks the
+journal for damage but does not mutate authoring state from its short-lived
+snapshot.
+
+An item marked **Borked** after repeated renderer failures is visibly labelled
+and has no Quick-choice playback action. Delete/Trash is its recovery boundary:
+the health marker is part of the Pairing record removed with the item, so a
+later reinstall starts clean. Workshop items remain Steam-owned; Wall-in-One
+clears their metadata only after a scan sees the concrete item absent while
+the Workshop content root is still mounted, never merely because that drive or
+library is unavailable. A transient malformed project or missing video entry
+does not erase the process's last-known installation, so a later observed
+directory removal can still be recognized. Because Steam has already committed
+that external uninstall, an unwritable removal journal cannot stop it;
+Wall-in-One keeps an in-process retry and reports the state-directory failure
+until a refresh can record and finish the cleanup durably.
+
+Workshop absence is intentionally not inferred from Pairings after a restart:
+scene Pairings do not retain the last content root, video Pairings do not carry
+trusted Workshop provenance, and uncustomized installs may have no Pairing at
+all. An uninstall that happens entirely while Wall-in-One is stopped therefore
+cannot yet be distinguished safely from an unavailable Steam library. Once an
+observed uninstall reaches the removal journal, its cleanup is restart-safe.
 
 ## Thumbnails
 
@@ -225,6 +282,7 @@ Deleting the whole directory is safe -- it is rebuilt on demand.
 | `~/.config/wall-in-one/settings.toml` | settings (see the README) |
 | `~/.config/wall-in-one/wallhaven-api-key` | the stored Wallhaven key, 0600 |
 | `~/.local/state/wall-in-one/favourites.json` | the stars |
+| `~/.local/state/wall-in-one/pending-removals.json` | crash-safe removal intents retained until all item metadata and generated artifacts are clean |
 | `~/.local/state/wall-in-one/palette.json` | where Noctalia renders the live palette |
 | `~/.cache/wall-in-one/thumbnails` | the thumbnail cache |
 | `$XDG_RUNTIME_DIR/wall-in-one.sock` | the control socket, 0600 |

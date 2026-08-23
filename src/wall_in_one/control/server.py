@@ -383,7 +383,12 @@ def describe_playlist(playlist: playlists.Playlist, library: Library) -> str:
     return "\n".join(lines)
 
 
-def remove_wallpaper(item: MediaItem, roots: tuple[Path, ...]) -> str:
+def remove_wallpaper(
+    item: MediaItem,
+    roots: tuple[Path, ...],
+    *,
+    expected_source: manage.SourceIdentity | None = None,
+) -> str:
     """Take one wallpaper away, and say which of the two ways it went.
 
     Here rather than in `ui.app` because nothing about it needs a toolkit, and
@@ -399,10 +404,10 @@ def remove_wallpaper(item: MediaItem, roots: tuple[Path, ...]) -> str:
     recoverable.
     """
     if item.deletable:
-        result = manage.remove(item, roots)
-        return f"{result.describe()} - deleted, which cannot be undone"
-    landed = manage.trash(item, roots)
-    return f"{item.path.name} moved to the trash - {landed}"
+        result = manage.remove(item, roots, expected_source=expected_source)
+        return f"{result.describe()} - deleted, which cannot be undone{result.cleanup_note()}"
+    landed = manage.trash(item, roots, expected_source=expected_source)
+    return f"{item.path.name} moved to the trash - {landed.destination}{landed.cleanup_note()}"
 
 
 # -- rendering for a terminal --------------------------------------------

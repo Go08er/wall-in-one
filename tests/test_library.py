@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import pairing, pairings, scan
+from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.wallpaper import renderer
@@ -63,6 +63,25 @@ def test_paused_video_without_a_still_is_unplayable(tmp_path: Path) -> None:
 def test_only_managed_items_are_deletable(tmp_path: Path) -> None:
     assert not _item(tmp_path / "a.png").deletable
     assert _item(tmp_path / "b.png", ownership=Ownership.MANAGED).deletable
+
+
+def test_representative_still_must_be_a_first_class_indexed_still(tmp_path: Path) -> None:
+    picture = _item(tmp_path / "cover.png")
+    video = _item(tmp_path / "clip.mp4", Kind.VIDEO)
+    internal = _item(tmp_path / "Wall-in-One" / "Automatic Stills" / "clip.png")
+    library = Library(
+        roots=(tmp_path,),
+        items=(picture, video),
+        still_inventory=(picture, internal),
+    )
+
+    assert library.require_representative_still(picture.path) is picture
+    with pytest.raises(ValueError, match="not an indexed library item"):
+        library.require_representative_still(tmp_path / "outside.png")
+    with pytest.raises(ValueError, match="indexed as video, not as a still image"):
+        library.require_representative_still(video.path)
+    with pytest.raises(ValueError, match="not an indexed library item"):
+        library.require_representative_still(internal.path)
 
 
 # -- pairing -------------------------------------------------------------
@@ -131,7 +150,7 @@ def test_automatic_stills_directory_is_searched(tmp_path: Path) -> None:
     assert pairing.find_still(video, roots=[tmp_path]) == generated
 
 
-def test_apply_drops_stills_that_only_represent_a_video(tmp_path: Path) -> None:
+def test_apply_keeps_a_user_provided_still_that_represents_a_video(tmp_path: Path) -> None:
     video = _item(tmp_path / "clip.mp4", Kind.VIDEO)
     paired = _item(tmp_path / "clip-still.png")
     standalone = _item(tmp_path / "china-town-still.png")
@@ -139,20 +158,32 @@ def test_apply_drops_stills_that_only_represent_a_video(tmp_path: Path) -> None:
     paired.path.write_bytes(b"\x89PNG\r\n\x1a\n")
     result = pairings.apply([video, paired, standalone], roots=[tmp_path])
 
-    assert [item.path for item in result] == [video.path, standalone.path]
+    assert [item.path for item in result] == [video.path, paired.path, standalone.path]
     assert result[0].paired_still == paired.path
 
 
-def test_scan_keeps_spent_stills_in_the_authoring_inventory(tmp_path: Path) -> None:
-    """Rotation de-duplication must not remove a still from pairing choices."""
+def test_scan_keeps_a_manual_representative_as_a_library_item(tmp_path: Path) -> None:
     _touch(tmp_path / "clip.mp4")
     paired = _touch(tmp_path / "clip.png")
     standalone = _touch(tmp_path / "landscape.png")
 
     library = scan.scan([tmp_path])
 
-    assert paired not in {item.path for item in library.stills}
+    assert paired in {item.path for item in library.stills}
     assert {item.path for item in library.reusable_stills} == {paired, standalone}
+
+
+def test_scan_hides_only_the_exact_automatic_capture(tmp_path: Path) -> None:
+    video = _touch(tmp_path / "clip.mp4")
+    generated = _touch(stills.destination(video, tmp_path))
+    manually_supplied = _touch(tmp_path / "clip-still.png")
+
+    library = scan.scan([tmp_path])
+
+    assert generated not in {item.path for item in library.items}
+    assert manually_supplied in {item.path for item in library.items}
+    assert generated in {item.path for item in library.still_inventory}
+    assert generated not in {item.path for item in library.reusable_stills}
 
 
 def test_apply_leaves_an_unpaired_video_alone(tmp_path: Path) -> None:
@@ -345,9 +376,10 @@ def test_scan_pairs_what_it_finds(tmp_path: Path) -> None:
 
     library = scan.scan([tmp_path])
 
-    assert len(library.items) == 1
+    assert len(library.items) == 2
     assert library.items[0].kind is Kind.VIDEO
     assert library.items[0].paired_still == tmp_path / "clip-still.png"
+    assert library.items[1].path == tmp_path / "clip-still.png"
 
 
 def test_scan_does_not_follow_directory_symlinks(tmp_path: Path) -> None:

@@ -22,6 +22,19 @@ VIDEO_EXTENSIONS: Final[frozenset[str]] = frozenset(
 #: `classify`, not by the extension alone.
 AMBIGUOUS_EXTENSIONS: Final[frozenset[str]] = IMAGE_EXTENSIONS & VIDEO_EXTENSIONS
 
+#: Kept in one place because the pairing editor, the grid menu and the control
+#: socket must give the same recovery advice.  Merely existing on disk is not
+#: enough: a user-provided representative has its own library identity and
+#: metadata, so it must have appeared in the current scan.
+INDEXED_STILL_GUIDANCE: Final = (
+    "Copy or move it into a configured library folder, or add its folder in "
+    "Settings, then refresh the library."
+)
+
+
+class RepresentativeStillError(ValueError):
+    """A requested representative is not a first-class indexed still."""
+
 
 class Kind(Enum):
     """How a wallpaper is shown.
@@ -144,10 +157,10 @@ class Library:
     items: tuple[MediaItem, ...]
     #: Directories that were skipped: unreadable, or past the scan ceiling.
     skipped: tuple[str, ...] = ()
-    #: Every still the scanner found before pairing hides representatives from
-    #: playback.  A picture already used behind one video remains a perfectly
-    #: valid representative for another; authoring must not inherit the
-    #: rotation-only de-duplication performed by ``pairings.apply``.
+    #: Every still the scanner found before pairing hides app-generated
+    #: captures from playback. It retains that internal scan inventory for
+    #: diagnostics without turning automatic captures into authoring choices;
+    #: explicit choices come from the first-class ``items`` above.
     still_inventory: tuple[MediaItem, ...] = ()
 
     def __len__(self) -> int:
@@ -165,6 +178,26 @@ class Library:
                 return item
         return None
 
+    def require_representative_still(self, path: Path) -> MediaItem:
+        """Return the indexed still at ``path``, or explain how to make one.
+
+        This is deliberately a library-level check rather than a restriction
+        in the Pairing store.  The store must remain able to load old choices
+        and internal automatic/default paths, while every current user-facing
+        authoring route shares this stricter lifecycle rule.
+        """
+        candidate = self.find(path)
+        if candidate is None:
+            raise RepresentativeStillError(
+                f"{path} is not an indexed library item. {INDEXED_STILL_GUIDANCE}"
+            )
+        if candidate.kind is not Kind.STILL:
+            raise RepresentativeStillError(
+                f"{path} is indexed as {candidate.kind.value}, not as a still image. "
+                f"Choose an indexed still image instead. {INDEXED_STILL_GUIDANCE}"
+            )
+        return candidate
+
     @property
     def videos(self) -> tuple[MediaItem, ...]:
         return tuple(item for item in self.items if item.kind is Kind.VIDEO)
@@ -179,10 +212,11 @@ class Library:
 
     @property
     def reusable_stills(self) -> tuple[MediaItem, ...]:
-        """All still images available to an authoring picker.
+        """First-class still images available to an authoring picker.
 
-        Hand-built ``Library`` values in callers and tests predate the
-        inventory field, so falling back to the playback-visible stills keeps
-        those useful without weakening scanner-backed libraries.
+        ``still_inventory`` also contains exact app-generated captures hidden
+        from rotation.  Those remain internal defaults; explicitly choosing a
+        representative is limited to the still items in ``items`` so its own
+        Pairing metadata has the lifecycle the user expects.
         """
-        return self.still_inventory or self.stills
+        return self.stills

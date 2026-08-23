@@ -198,13 +198,20 @@ Python authoring protocol remain bounded at 64 KiB.
 
 Every display and the top-level summary also report `motion_active`. If an
 owned renderer exits, the service explicitly reaps its process group, reapplies
-that entry's still and records an attributed `last_error`; it never restarts
-the child automatically. Selecting an entry already marked taboo is an honest
-static fallback, not healthy motion: its row keeps `renderer_failed = true`,
-`motion_active = false`, and the attributable reason until the app clears the
-marker. A scene that crashed linux-wallpaperengine is suppressed for the rest
-of the service session, while a video may be attempted again only if rotation
-later revisits it.
+that entry's still and records an attributed `last_error`. That automatic
+failure fallback is not a playable mode: explicit Next, Previous, Random,
+playlist and schedule choices skip taboo entries, and Play refuses a taboo
+current entry. If every candidate is taboo, the command fails without changing
+the selection. Status keeps `renderer_failed = true`, `motion_active = false`,
+and the attributable reason while a crash fallback remains visible. Its durable
+marker is part of the app-owned Pairing metadata and is removed only with an
+explicit Delete/Trash or confirmed external uninstall, so reinstalling the
+media starts clean without turning a temporarily missing drive into recovery.
+`entry_taboo` is reported both per display and at the top level (where it means
+any connected current route). It is complete playback-safety truth rather than
+a diagnostic list entry, so the GUI still removes Play when the matching
+`taboo_entries` record is older than the bounded inventory or the crash was
+observed by an equivalent occurrence on another display.
 
 The same snapshot reports `automatic_retry` while a candidate is waiting,
 along with `taboo_entries` containing stable playlist/entry identities, kind,

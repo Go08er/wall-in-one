@@ -89,6 +89,7 @@ def _display_status(
         "playlist_id": playlist_id,
         "playlist": playlist,
         "entry_id": f"entry-{connector}",
+        "entry_taboo": False,
         "kind": "still",
         "still": f"/library/{connector}.png",
         "motion_active": False,
@@ -108,6 +109,32 @@ def _display_status(
         "last_error": "",
         "automatic_retry": None,
     }
+
+
+def test_explicit_current_taboo_truth_survives_a_capped_diagnostic_inventory() -> None:
+    status: dict[str, object] = {
+        "entry_taboo": True,
+        "renderer_failed": False,
+        "playlist_id": "old",
+        "entry_id": "omitted",
+        "taboo_entries": [],
+        "taboo_entries_omitted": 99,
+        "displays": [],
+    }
+
+    assert runtime_truth.current_renderer_failure_is_taboo(status)
+
+    status["entry_taboo"] = False
+    status["displays"] = [
+        {
+            "connected": True,
+            "entry_taboo": True,
+            "renderer_failed": False,
+            "playlist_id": "same-media",
+            "entry_id": "other-occurrence",
+        }
+    ]
+    assert runtime_truth.current_renderer_failure_is_taboo(status)
 
 
 def test_status_v2_preserves_mixed_per_display_truth_and_palette_fallback() -> None:

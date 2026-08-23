@@ -281,6 +281,12 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("! kill -0 " + second_child, timeout=10)
 
     with subtest("every workflow page renders"):
+        # Begin the double-driver observation before the GUI exists. Holding
+        # the timer keeps the screenshots deterministic; any wallpaper apply
+        # during page launch/navigation would therefore be a GUI-side driver,
+        # and the parent-PID audit below will reject it.
+        assert ctl("cycle off") == "cycle off (manual)"
+        machine.succeed("rm -f ${driverLog}")
         page_hashes = {}
         page_titles = {
             "browse": "Browse",
@@ -333,7 +339,9 @@ pkgs.testers.runNixOSTest {
     with subtest("closing the GUI does not stop service rotation"):
         ctl("playlist-use day")
         before = machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")).strip()
-        machine.succeed("rm -f ${driverLog}")
+        applications_before_close = machine.succeed(
+            "test ! -e ${driverLog} || cat ${driverLog}"
+        ).splitlines()
         niri("action close-window")
         machine.wait_until_succeeds(
             as_user(
@@ -342,6 +350,7 @@ pkgs.testers.runNixOSTest {
             ),
             timeout=20,
         )
+        assert ctl("cycle default") == "cycle on (config)"
         for _attempt in range(20):
             current = machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -r .entry_id")).strip()
             if current != before:
@@ -349,13 +358,20 @@ pkgs.testers.runNixOSTest {
             machine.sleep(1)
         else:
             raise AssertionError("cycle timer did not advance after the GUI closed")
-        machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.cycle_enabled == true'"))
+        # Stop the next deadline before inspecting the log: the one observed
+        # cursor change must correspond to exactly one wallpaper application.
+        assert ctl("cycle off") == "cycle off (manual)"
+        machine.succeed(as_user("${app} ctl status | ${lib.getExe pkgs.jq} -e '.cycle_enabled == false'"))
         machine.wait_for_file("${driverLog}")
         applications = machine.succeed("cat ${driverLog}").splitlines()
-        assert len(applications) == 1, applications
-        parent, command = applications[0].split("\t", 1)
-        assert parent == service_pid, (parent, service_pid, command)
-        assert command.startswith("msg wallpaper-set "), command
+        assert len(applications) == len(applications_before_close) + 1, (
+            applications_before_close,
+            applications,
+        )
+        for application in applications:
+            parent, command = application.split("\t", 1)
+            assert parent == service_pid, (parent, service_pid, command)
+            assert command.startswith("msg wallpaper-set "), command
 
     with subtest("the socket switches the active playlist"):
         assert ctl("playlist-use night") == "playing night-grid"

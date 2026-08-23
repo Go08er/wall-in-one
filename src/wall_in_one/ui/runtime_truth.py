@@ -29,6 +29,7 @@ class DisplayRuntimeTruth:
     playlist_id: str
     playlist: str
     entry_id: str
+    entry_taboo: bool
     motion_active: bool
     schedule_rule_id: str | None
     playback_state: str
@@ -363,6 +364,7 @@ def _display_truth(
         route_source = record.get("route_source", "default")
         manual_override = record.get("manual_override", False)
         motion_active = record.get("motion_active", False)
+        entry_taboo = record.get("entry_taboo", False)
         schedule_rule = record.get("schedule_rule_id")
         playback_state = record.get("playback_state", "playing")
         assignment_source = record.get("assignment_source", "default")
@@ -382,6 +384,7 @@ def _display_truth(
             or route_source not in ("manual", "schedule", "assignment", "default")
             or type(manual_override) is not bool
             or type(motion_active) is not bool
+            or type(entry_taboo) is not bool
             or (schedule_rule is not None and not isinstance(schedule_rule, str))
             or playback_state not in ("playing", "paused", "stopped")
             or assignment_source not in ("explicit", "default")
@@ -407,6 +410,7 @@ def _display_truth(
                 playlist_id=playlist_id,
                 playlist=playlist,
                 entry_id=entry_id,
+                entry_taboo=entry_taboo,
                 motion_active=motion_active,
                 schedule_rule_id=schedule_rule or None,
                 playback_state=playback_state,
@@ -566,9 +570,25 @@ def entry_is_taboo(
 
 
 def current_renderer_failure_is_taboo(status: Mapping[str, object] | None) -> bool:
-    """Tell controls when Play cannot retry the currently failed wallpaper."""
-    if status is None or status.get("renderer_failed") is not True:
+    """Tell controls when Play cannot start any current connected route.
+
+    The explicit bits are complete even when the diagnostic inventory is
+    capped, and do not depend on the renderer on this particular display being
+    the process which discovered an equivalent media failure. Inventory lookup
+    remains as backwards compatibility for older version-two services.
+    """
+    if status is None:
         return False
+    if status.get("entry_taboo") is True:
+        return True
+    displays = status.get("displays")
+    if isinstance(displays, list) and any(
+        isinstance(record, Mapping)
+        and record.get("connected") is not False
+        and record.get("entry_taboo") is True
+        for record in displays
+    ):
+        return True
     playlist_id = status.get("playlist_id")
     entry_id = status.get("entry_id")
     if (
@@ -577,13 +597,11 @@ def current_renderer_failure_is_taboo(status: Mapping[str, object] | None) -> bo
         and entry_is_taboo(status, playlist_id, entry_id)
     ):
         return True
-    displays = status.get("displays")
     if not isinstance(displays, list):
         return False
     return any(
         isinstance(record, Mapping)
         and record.get("connected") is not False
-        and record.get("renderer_failed") is True
         and isinstance(record.get("playlist_id"), str)
         and isinstance(record.get("entry_id"), str)
         and entry_is_taboo(

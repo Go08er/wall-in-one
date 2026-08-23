@@ -13,8 +13,12 @@ serde_json = "1"
 toml = "1"
 
 [profile.release]
+# The daemon is resident for the whole graphical session. Its event loop is
+# intentionally tiny and measured far below the idle CPU ceiling, while every
+# additional code page counts against the one-display RSS target. Prefer the
+# smallest optimized machine code and keep the CPU/RSS matrix as the arbiter.
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
-

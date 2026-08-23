@@ -751,7 +751,8 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         },
         at,
     );
-    assert!(suppressed.ok);
+    assert!(!suppressed.ok);
+    assert!(suppressed.message.contains("every entry is marked taboo"));
     assert_eq!(fs::read_to_string(&launches).unwrap().lines().count(), 1);
 
     let durable = document.replace(
@@ -1686,7 +1687,8 @@ fn display_mode_switch_clears_hidden_session_overrides_in_both_directions() {
     assert_eq!(status(&mut runtime, at)["source"], "manual");
 
     fs::write(&config_path, &independent_document).unwrap();
-    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
     let independent = status(&mut runtime, at);
     assert_ne!(independent["source"], "manual");
     assert!(independent["displays"]
@@ -1769,7 +1771,7 @@ fn independent_renderer_crash_is_attributed_without_poisoning_a_healthy_route() 
     assert_eq!(dp["motion_active"], true);
     assert_eq!(dp["renderer_failed"], false);
     assert_eq!(dp["last_error"], "");
-    assert_eq!(hdmi["playback_state"], "stopped");
+    assert_eq!(hdmi["playback_state"], "playing");
     assert_eq!(hdmi["motion_active"], false);
     assert_eq!(hdmi["renderer_failed"], true);
     assert!(hdmi["last_error"]
@@ -1783,6 +1785,24 @@ fn independent_renderer_crash_is_attributed_without_poisoning_a_healthy_route() 
         state.lock().unwrap().stage_events.is_empty(),
         "Play on the healthy route must not reapply either wallpaper"
     );
+
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 stop")).ok);
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "video-two".into(),
+            kind: wall_in_one_service::config::EntryKind::Video,
+            scene_id: None,
+            output: "HDMI-A-1".into(),
+            message: "late child exit observed after explicit stop".into(),
+            permanent_for_session: false,
+        });
+    runtime.tick(at, Instant::now());
+    let explicitly_stopped = display_status(&mut runtime, at, "HDMI-A-1");
+    assert_eq!(explicitly_stopped["playback_state"], "stopped");
+    assert_eq!(explicitly_stopped["renderer_failed"], true);
 
     state.lock().unwrap().connected_outputs = Some(vec!["DP-1".into()]);
     runtime.tick(at, Instant::now() + Duration::from_secs(6));
@@ -3143,14 +3163,108 @@ fn taboo_propagates_across_equivalent_resolved_scene_and_video_occurrences() {
         );
     }
 
-    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("scene-copy-list")).ok);
-    assert!(!state.lock().unwrap().applies.last().unwrap().1);
-    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("video-copy-list")).ok);
-    assert!(!state.lock().unwrap().applies.last().unwrap().1);
+    let applies_before = state.lock().unwrap().applies.len();
+    for playlist in ["scene-copy-list", "video-copy-list"] {
+        let refused = runtime_command(&mut runtime, at, "playlist-use", Some(playlist));
+        assert!(!refused.ok, "{playlist} unexpectedly bypassed quarantine");
+        assert!(refused.message.contains("every entry is marked taboo"));
+    }
+    assert_eq!(state.lock().unwrap().applies.len(), applies_before);
+    assert_eq!(status(&mut runtime, at)["playlist_id"], "day");
 }
 
 #[test]
-fn active_taboo_entry_reports_attributable_static_fallback_in_both_display_modes() {
+fn manual_navigation_and_playlist_routing_skip_taboo_entries_in_both_display_modes() {
+    let summer = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+        .unwrap()
+        .and_hms_opt(23, 0, 0)
+        .unwrap();
+    for independent in [false, true] {
+        let mut parsed: Config = toml::from_str(
+            &(if independent {
+                independent_config()
+            } else {
+                config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+            })
+            .replace(
+                "motion = \"/tmp/two.mp4\"",
+                "motion = \"/tmp/two.mp4\"\n\
+                 taboo = { reason = \"known decoder failure\", source = \"authoring\" }",
+            )
+            .replace(
+                "scene_id = \"12345\"",
+                "scene_id = \"12345\"\n\
+                 taboo = { reason = \"known scene crash\", source = \"authoring\" }",
+            ),
+        )
+        .unwrap();
+        let mut safe = parsed.playlists[0].entries[0].clone();
+        safe.id = "still-safe".into();
+        safe.still = "/tmp/safe.png".into();
+        parsed.playlists[0].entries.push(safe);
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: independent.then(|| vec!["DP-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state.clone()),
+            summer,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+
+        let command = |runtime: &mut Runtime<RuntimeDriver>, verb: &str| {
+            if independent {
+                runtime_command(runtime, summer, "on", Some(&format!("DP-1 {verb}")))
+            } else {
+                runtime_command(runtime, summer, verb, None)
+            }
+        };
+        assert!(command(&mut runtime, "next").ok);
+        assert_eq!(status(&mut runtime, summer)["entry_id"], "still-safe");
+        assert!(command(&mut runtime, "previous").ok);
+        assert_eq!(status(&mut runtime, summer)["entry_id"], "still-one");
+        assert!(command(&mut runtime, "random").ok);
+        assert_eq!(status(&mut runtime, summer)["entry_id"], "still-safe");
+        assert!(state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .all(|(entry, _)| entry != "video-two"));
+
+        let applies_before = state.lock().unwrap().applies.len();
+        let refused_playlist = if independent {
+            runtime_command(&mut runtime, summer, "on", Some("DP-1 playlist-use night"))
+        } else {
+            runtime_command(&mut runtime, summer, "playlist-use", Some("night"))
+        };
+        assert!(!refused_playlist.ok);
+        assert!(refused_playlist
+            .message
+            .contains("every entry is marked taboo"));
+        assert_eq!(status(&mut runtime, summer)["playlist_id"], "day");
+
+        let following = if independent {
+            runtime_command(&mut runtime, winter, "on", Some("DP-1 schedule-follow"))
+        } else {
+            runtime_command(&mut runtime, winter, "schedule-follow", None)
+        };
+        assert!(!following.ok);
+        assert!(following.message.contains("every entry is marked taboo"));
+        assert_eq!(status(&mut runtime, winter)["playlist_id"], "day");
+        assert_eq!(state.lock().unwrap().applies.len(), applies_before);
+    }
+}
+
+#[test]
+fn shuffled_random_escapes_a_taboo_current_entry_when_only_one_safe_item_remains() {
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)
         .unwrap()
         .and_hms_opt(12, 0, 0)
@@ -3161,6 +3275,227 @@ fn active_taboo_entry_reports_attributable_static_fallback_in_both_display_modes
         } else {
             config(Path::new("/bin/true"), Path::new("/bin/true"), false)
         })
+        .replace("shuffle = false", "shuffle = true");
+        let parsed: Config = toml::from_str(&document).unwrap();
+        let output = if independent { "DP-1" } else { "" };
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: independent.then(|| vec!["DP-1".into(), "HDMI-A-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state.clone()),
+            at,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+
+        assert!(runtime_command(&mut runtime, at, "next", None).ok);
+        assert_eq!(status(&mut runtime, at)["entry_id"], "video-two");
+        state
+            .lock()
+            .unwrap()
+            .renderer_failures
+            .push(RendererFailure {
+                entry_id: "video-two".into(),
+                kind: wall_in_one_service::config::EntryKind::Video,
+                scene_id: None,
+                output: output.into(),
+                message: "decoder permanently rejected this video".into(),
+                permanent_for_session: true,
+            });
+        runtime.tick(at, Instant::now());
+
+        let taboo = status(&mut runtime, at);
+        assert_eq!(taboo["entry_taboo"], true);
+        assert!(taboo["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|display| display["connected"] == true)
+            .all(|display| display["entry_taboo"] == true));
+        if independent {
+            let healthy_occurrence = taboo["displays"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|display| display["connector"] == "HDMI-A-1")
+                .unwrap();
+            assert_eq!(healthy_occurrence["renderer_failed"], false);
+            assert_eq!(healthy_occurrence["entry_taboo"], true);
+
+            let quick_choice =
+                runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 playlist-use day"));
+            assert!(
+                quick_choice.ok,
+                "same-playlist Quick Choice did not escape an equivalent taboo occurrence: {quick_choice:?}"
+            );
+            let after_choice = display_status(&mut runtime, at, "HDMI-A-1");
+            assert_eq!(after_choice["entry_id"], "still-one");
+            assert_eq!(after_choice["entry_taboo"], false);
+        }
+
+        let escaped = runtime_command(&mut runtime, at, "random", None);
+        assert!(
+            escaped.ok,
+            "Random did not escape the taboo shuffle tail: {escaped:?}"
+        );
+        let safe = status(&mut runtime, at);
+        assert_eq!(safe["entry_id"], "still-one");
+        assert_eq!(safe["entry_taboo"], false);
+    }
+}
+
+#[test]
+fn mirrored_schedule_follow_preflights_and_resets_effective_display_assignments() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let mut parsed: Config = toml::from_str(&format!(
+        "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    ))
+    .unwrap();
+    parsed.schedules.clear();
+    let mut scene_copy = parsed.playlists[1].entries[0].clone();
+    scene_copy.id = "scene-copy".into();
+    parsed.playlists[0].entries.push(scene_copy);
+    let mut safe = parsed.playlists[0].entries[0].clone();
+    safe.id = "night-safe".into();
+    safe.still = "/tmp/night-safe.png".into();
+    parsed.playlists[1].entries.push(safe);
+    parsed.validate().unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert_eq!(status(&mut runtime, at)["entry_id"], "scene-three");
+
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("day")).ok);
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert_eq!(status(&mut runtime, at)["entry_id"], "scene-copy");
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "scene-copy".into(),
+            kind: wall_in_one_service::config::EntryKind::Scene,
+            scene_id: Some("12345".into()),
+            output: "DP-1".into(),
+            message: "scene engine crashed on the manual occurrence".into(),
+            permanent_for_session: true,
+        });
+    runtime.tick(at, Instant::now());
+
+    let following = runtime_command(&mut runtime, at, "schedule-follow", None);
+    assert!(
+        following.ok,
+        "safe display assignment was not selected: {following:?}"
+    );
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["source"], "schedule");
+    assert_eq!(snapshot["displays"][0]["playlist_id"], "night");
+    assert_eq!(snapshot["displays"][0]["entry_id"], "night-safe");
+    assert_eq!(snapshot["displays"][0]["entry_taboo"], false);
+    assert_eq!(
+        state.lock().unwrap().applies.last().unwrap().0,
+        "night-safe"
+    );
+}
+
+#[test]
+fn previous_discards_a_newly_taboo_history_entry_without_losing_the_safe_forward_path() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    for independent in [false, true] {
+        let document = if independent {
+            independent_config()
+        } else {
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        };
+        let mut parsed: Config = toml::from_str(&document).unwrap();
+        parsed.schedules.clear();
+        let mut safe = parsed.playlists[0].entries[0].clone();
+        safe.id = "still-safe".into();
+        safe.still = "/tmp/safe.png".into();
+        parsed.playlists[0].entries.push(safe);
+        let output = if independent { "DP-1" } else { "" };
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: independent.then(|| vec![output.into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state.clone()),
+            at,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        let command = |runtime: &mut Runtime<RuntimeDriver>, verb: &str| {
+            if independent {
+                runtime_command(runtime, at, "on", Some(&format!("DP-1 {verb}")))
+            } else {
+                runtime_command(runtime, at, verb, None)
+            }
+        };
+        assert!(command(&mut runtime, "next").ok);
+        assert_eq!(status(&mut runtime, at)["entry_id"], "video-two");
+        assert!(command(&mut runtime, "next").ok);
+        assert_eq!(status(&mut runtime, at)["entry_id"], "still-safe");
+
+        state
+            .lock()
+            .unwrap()
+            .renderer_failures
+            .push(RendererFailure {
+                entry_id: "video-two".into(),
+                kind: wall_in_one_service::config::EntryKind::Video,
+                scene_id: None,
+                output: output.into(),
+                message: "late decoder crash from the previous wallpaper".into(),
+                permanent_for_session: true,
+            });
+        runtime.tick(at, Instant::now());
+
+        assert!(command(&mut runtime, "previous").ok);
+        assert_eq!(status(&mut runtime, at)["entry_id"], "still-one");
+        assert!(command(&mut runtime, "next").ok);
+        assert_eq!(status(&mut runtime, at)["entry_id"], "still-safe");
+    }
+}
+
+#[test]
+fn all_taboo_startup_keeps_a_static_fallback_but_manual_play_is_refused() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    for independent in [false, true] {
+        let document = (if independent {
+            independent_config()
+        } else {
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        })
+        .replace(
+            "still = \"/tmp/one.png\"",
+            "still = \"/tmp/one.png\"\n\
+             taboo = { reason = \"known image failure\", source = \"authoring\" }",
+        )
         .replace(
             "motion = \"/tmp/two.mp4\"",
             "motion = \"/tmp/two.mp4\"\n\
@@ -3174,30 +3509,53 @@ fn active_taboo_entry_reports_attributable_static_fallback_in_both_display_modes
         let mut runtime = Runtime::new(
             PathBuf::from("/tmp/runtime.toml"),
             parsed,
-            RuntimeDriver(state),
+            RuntimeDriver(state.clone()),
             at,
         )
         .unwrap();
         runtime.apply_current().unwrap();
-        let response = if independent {
-            runtime_command(&mut runtime, at, "on", Some("DP-1 next"))
-        } else {
-            runtime_command(&mut runtime, at, "next", None)
-        };
-        assert!(response.ok, "{}", response.message);
+        let applies_before = state.lock().unwrap().applies.len();
         let row = if independent {
             display_status(&mut runtime, at, "DP-1")
         } else {
             status(&mut runtime, at)["displays"][0].clone()
         };
-        assert_eq!(row["entry_id"], "video-two");
+        assert_eq!(row["entry_id"], "still-one");
         assert_eq!(row["playback_state"], "playing");
         assert_eq!(row["motion_active"], false);
         assert_eq!(row["renderer_failed"], true);
         let diagnostic = row["last_error"].as_str().unwrap();
-        assert!(diagnostic.contains("video-two"), "{diagnostic}");
-        assert!(diagnostic.contains("known decoder failure"), "{diagnostic}");
+        assert!(diagnostic.contains("still-one"), "{diagnostic}");
+        assert!(diagnostic.contains("known image failure"), "{diagnostic}");
         assert!(diagnostic.contains("paired still"), "{diagnostic}");
+
+        let next = if independent {
+            runtime_command(&mut runtime, at, "on", Some("DP-1 next"))
+        } else {
+            runtime_command(&mut runtime, at, "next", None)
+        };
+        assert!(!next.ok);
+        assert!(next.message.contains("empty or taboo"));
+        let still_selected = if independent {
+            display_status(&mut runtime, at, "DP-1")
+        } else {
+            status(&mut runtime, at)["displays"][0].clone()
+        };
+        assert_eq!(still_selected["entry_id"], "still-one");
+
+        let play = if independent {
+            runtime_command(&mut runtime, at, "on", Some("DP-1 play"))
+        } else {
+            runtime_command(&mut runtime, at, "play", None)
+        };
+        assert!(!play.ok, "taboo Play unexpectedly succeeded");
+        assert!(play.message.contains("marked taboo (Borked)"));
+        assert_eq!(state.lock().unwrap().applies.len(), applies_before);
+        assert!(status(&mut runtime, at)["taboo_entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["entry_id"] == "still-one"));
     }
 }
 
@@ -4234,6 +4592,86 @@ fn output_hotplug_reconciles_targets_without_a_second_probe() {
 }
 
 #[test]
+fn independent_hotplug_keeps_surviving_renderers_and_quarantines_only_the_new_route() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        toml::from_str::<Config>(&independent_config()).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["DP-1".to_string(), "HDMI-A-1".to_string()])
+    );
+
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.stage_events.clear();
+        recorded.applies.clear();
+        recorded.applied_outputs.clear();
+        recorded.connected_outputs = Some(vec!["DP-1".into(), "HDMI-A-1".into(), "USB-C-1".into()]);
+        recorded.fail_stage_entry_id = Some("still-one".into());
+        recorded.fail_stage_output = Some("USB-C-1".into());
+        recorded.fail_stage_attempts_remaining = 3;
+    }
+
+    let base = Instant::now();
+    runtime.tick(at, base + Duration::from_secs(6));
+    {
+        let recorded = state.lock().unwrap();
+        assert!(recorded
+            .stage_events
+            .iter()
+            .all(|event| { !event.contains("DP-1") && !event.contains("HDMI-A-1") }));
+        assert!(recorded.active_outputs.contains("DP-1"));
+        assert!(recorded.active_outputs.contains("HDMI-A-1"));
+    }
+    let first = display_status(&mut runtime, at, "USB-C-1");
+    assert_eq!(first["automatic_retry"]["attempt"], 1);
+    assert_eq!(first["automatic_retry"]["maximum_attempts"], 3);
+    assert_eq!(first["automatic_retry"]["reason"], "hotplug");
+
+    runtime.tick(at, base + Duration::from_secs(8));
+    assert_eq!(
+        display_status(&mut runtime, at, "USB-C-1")["automatic_retry"]["attempt"],
+        2
+    );
+    runtime.tick(at, base + Duration::from_secs(10));
+    let quarantined = status(&mut runtime, at);
+    assert!(quarantined["taboo_entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["entry_id"] == "still-one"));
+    assert_eq!(
+        quarantined["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|display| display["connector"] == "USB-C-1")
+            .unwrap()["automatic_retry"]["attempt"],
+        0
+    );
+
+    runtime.tick(at, base + Duration::from_secs(12));
+    let recovered = display_status(&mut runtime, at, "USB-C-1");
+    assert_eq!(recovered["entry_id"], "video-two");
+    assert!(recovered["automatic_retry"].is_null());
+    assert_eq!(recovered["playback_state"], "playing");
+}
+
+#[test]
 fn schedule_transition_replaces_and_then_restores_per_display_baselines() {
     let parsed: Config = toml::from_str(&format!(
         "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"night\"\n",
@@ -4485,6 +4923,218 @@ fn reload_of_inactive_authoring_state_does_not_reapply_the_wallpaper() {
 
     assert!(response.ok);
     assert!(events.lock().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn independent_reload_of_inactive_schedule_and_detached_assignment_is_quiet() {
+    let root = directory("quiet-independent-routing-reload");
+    let config_path = root.join("runtime.toml");
+    let original = independent_config();
+    fs::write(&config_path, &original).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        Config::load(&config_path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    state.lock().unwrap().stage_events.clear();
+
+    let inactive_schedule_edit = original.replace("months = [12]", "months = [11]");
+    fs::write(&config_path, &inactive_schedule_edit).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    assert!(
+        state.lock().unwrap().stage_events.is_empty(),
+        "an inactive schedule edit restarted a live renderer"
+    );
+
+    let detached_assignment_edit = inactive_schedule_edit.replace(
+        "connector = \"HDMI-A-1\"\nplaylist = \"day\"",
+        "connector = \"HDMI-A-1\"\nplaylist = \"night\"",
+    );
+    fs::write(&config_path, detached_assignment_edit).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    assert!(
+        state.lock().unwrap().stage_events.is_empty(),
+        "a detached assignment edit restarted a live renderer"
+    );
+    let detached = display_status(&mut runtime, at, "HDMI-A-1");
+    assert_eq!(detached["connected"], false);
+    assert_eq!(detached["assigned_playlist_id"], "night");
+    assert_eq!(detached["playlist_id"], "night");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn theme_source_only_reload_changes_only_the_palette_and_rolls_back_on_failure() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let original = independent_config().replace(
+        "connector = \"HDMI-A-1\"\nplaylist = \"day\"",
+        "connector = \"HDMI-A-1\"\nplaylist = \"night\"",
+    );
+    let updated = original.replace(
+        "theme_source_connector = \"DP-1\"",
+        "theme_source_connector = \"HDMI-A-1\"",
+    );
+
+    for fail in [false, true] {
+        let root = directory(if fail {
+            "theme-source-rollback"
+        } else {
+            "theme-source-palette-only"
+        });
+        let config_path = root.join("runtime.toml");
+        fs::write(&config_path, &original).unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let mut runtime = Runtime::new(
+            config_path.clone(),
+            Config::load(&config_path).unwrap(),
+            RuntimeDriver(state.clone()),
+            at,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        {
+            let mut recorded = state.lock().unwrap();
+            recorded.stage_events.clear();
+            if fail {
+                recorded.fail_palette_attempts_remaining = 1;
+            }
+        }
+        fs::write(&config_path, &updated).unwrap();
+
+        let response = runtime_command(&mut runtime, at, "reload", None);
+        let events = state.lock().unwrap().stage_events.clone();
+        assert!(events.iter().all(|event| !event.starts_with("stop ")
+            && !event.starts_with("still ")
+            && !event.starts_with("motion ")));
+        if fail {
+            assert!(!response.ok);
+            assert_eq!(events, ["palette scene-three", "palette still-one"]);
+            let snapshot = status(&mut runtime, at);
+            assert_eq!(snapshot["config_epoch"], 1);
+            assert_eq!(snapshot["theme_source"]["configured"], "DP-1");
+            assert_eq!(snapshot["theme_source"]["effective"], "DP-1");
+        } else {
+            assert!(response.ok, "{}", response.message);
+            assert_eq!(events, ["palette scene-three"]);
+            let snapshot = status(&mut runtime, at);
+            assert_eq!(snapshot["config_epoch"], 2);
+            assert_eq!(snapshot["theme_source"]["configured"], "HDMI-A-1");
+            assert_eq!(snapshot["theme_source"]["effective"], "HDMI-A-1");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn failed_independent_reload_rolls_back_only_its_route_and_restores_the_old_palette() {
+    let root = directory("scoped-independent-reload-rollback");
+    let config_path = root.join("runtime.toml");
+    let original = independent_config().replace(
+        "theme_source_connector = \"DP-1\"",
+        "theme_source_connector = \"HDMI-A-1\"",
+    );
+    let updated = original
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"day\"",
+            "connector = \"DP-1\"\nplaylist = \"night\"",
+        )
+        .replace(
+            "theme_source_connector = \"HDMI-A-1\"",
+            "theme_source_connector = \"DP-1\"",
+        );
+    fs::write(&config_path, &original).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        Config::load(&config_path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 next")).ok);
+    assert_eq!(
+        display_status(&mut runtime, at, "HDMI-A-1")["entry_id"],
+        "video-two"
+    );
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.stage_events.clear();
+        // The candidate source palette is the last staged operation before the
+        // simulated failure. Rollback must explicitly restore HDMI-A-1's old
+        // palette without restarting HDMI-A-1's surviving renderer.
+        recorded.fail_palette_attempts_remaining = 1;
+    }
+    fs::write(&config_path, updated).unwrap();
+
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(!response.ok);
+    assert!(response.message.contains("previous configuration restored"));
+    let events = state.lock().unwrap().stage_events.clone();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.as_str() == "stop DP-1")
+            .count(),
+        2,
+        "the changed route needs one candidate hand-over and one rollback: {events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !event.contains("HDMI-A-1")),
+        "the unchanged survivor was restarted during rollback: {events:?}"
+    );
+    assert_eq!(
+        events,
+        [
+            "stop DP-1",
+            "still DP-1 scene-three",
+            "palette scene-three",
+            "stop DP-1",
+            "still DP-1 still-one",
+            "motion DP-1 still-one",
+            "palette video-two",
+        ]
+    );
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["config_epoch"], 1);
+    assert_eq!(snapshot["theme_source"]["configured"], "HDMI-A-1");
+    assert_eq!(snapshot["theme_source"]["effective"], "HDMI-A-1");
+    let dp = display_status(&mut runtime, at, "DP-1");
+    assert_eq!(dp["assigned_playlist_id"], "day");
+    assert_eq!(dp["playlist_id"], "day");
+    assert_eq!(dp["entry_id"], "still-one");
+    let hdmi = display_status(&mut runtime, at, "HDMI-A-1");
+    assert_eq!(hdmi["entry_id"], "video-two");
+    assert_eq!(hdmi["motion_active"], true);
+    assert_eq!(hdmi["renderer_failed"], false);
     fs::remove_dir_all(root).unwrap();
 }
 

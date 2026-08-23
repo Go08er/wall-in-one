@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config, runtime_config
-from wall_in_one.library import displays, favourites, pairings, playlists, schedules
+from wall_in_one.library import displays, favourites, pairings, playlists, removals, schedules
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.session import Session
 
@@ -183,6 +183,7 @@ def test_headless_settings_obey_rust_wire_bounds_without_replacing_runtime(
         (schedules.state_path, "schedules"),
         (displays.state_path, "display assignments"),
         (favourites.state_path, "favourites"),
+        (removals.state_path, "pending removals"),
     ),
 )
 def test_write_config_refuses_unreadable_authoring_state_without_replacing_runtime(
@@ -217,6 +218,33 @@ def test_write_config_refuses_unreadable_authoring_state_without_replacing_runti
     assert target.read_text(encoding="utf-8") == previous
 
 
+def test_write_config_does_not_consume_a_valid_pending_removal(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A short-lived compiler must not race the GUI's metadata cleanup."""
+    from wall_in_one import cli
+
+    media = tmp_path / "media"
+    media.mkdir()
+    removed_path = media / "removed.png"
+    removed_path.write_bytes(b"removed")
+    (media / "survivor.png").write_bytes(b"survivor")
+    config.save(config.Settings(roots=(media,), scan_workshop=False))
+    removed = MediaItem(removed_path, Kind.STILL, 7, 1)
+    pairing_store = pairings.Store.open()
+    pairing_store.mark_borked(removed, "renderer crashed", "renderer-crash")
+    removals.Store.open().prepare(removed, (media,))
+    removed_path.unlink()
+
+    assert cli.main(["--write-config"]) == 0
+    assert "wrote:" in capsys.readouterr().out
+
+    assert removals.Store.open().records
+    saved = pairings.Store.open().get(pairings.Identity.of(removed))
+    assert saved is not None and saved.health.is_borked
+
+
 @pytest.mark.parametrize(
     ("state_path", "store_name", "valid", "malformed"),
     (
@@ -249,6 +277,22 @@ def test_write_config_refuses_unreadable_authoring_state_without_replacing_runti
             "favourites",
             {"version": 1, "paths": []},
             {"version": 1, "paths": ["relative/wallpaper.png"]},
+        ),
+        (
+            removals.state_path,
+            "pending removals",
+            {"version": 1, "removals": []},
+            {
+                "version": 1,
+                "removals": [
+                    {
+                        "identity": "still:relative.png",
+                        "path": "relative.png",
+                        "kind": "still",
+                        "roots": ["/wallpapers"],
+                    }
+                ],
+            },
         ),
     ),
 )
@@ -382,7 +426,7 @@ def _session(
 
 def test_status_inventory_budget_matches_the_rust_protocol_limit() -> None:
     """A sub-8-MiB TOML document may still expand beyond one status reply."""
-    lines = ['schema_version = 4', 'default_playlist = "p0"']
+    lines = ["schema_version = 4", 'default_playlist = "p0"']
     for index in range(513):
         lines.extend(
             (

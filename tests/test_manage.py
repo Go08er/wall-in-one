@@ -107,21 +107,64 @@ def item_for(
     )
 
 
+def _expected(path: Path) -> manage.SourceIdentity:
+    try:
+        status = path.lstat()
+    except OSError:
+        return 0, 0
+    return status.st_dev, status.st_ino
+
+
+def _remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> manage.Removal:
+    """Unit-level authority matching the identity a journal prepare records."""
+    return manage.remove(item, roots, expected_source=_expected(item.path))
+
+
+def _trash(item: MediaItem, roots: tuple[Path, ...] = ()) -> manage.Trashed:
+    """Unit-level authority matching the identity a journal prepare records."""
+    return manage.trash(item, roots, expected_source=_expected(item.path))
+
+
 # -- what it removes ------------------------------------------------------
 
 
 def test_a_downloaded_wallpaper_goes_away(root: Path) -> None:
     item = downloaded(root)
-    result = manage.remove(item, (root,))
+    result = _remove(item, (root,))
     assert not item.path.exists()
     assert item.path in result.removed
+
+
+def test_remove_refuses_a_same_path_replacement_after_prepare(root: Path) -> None:
+    item = downloaded(root)
+    expected = _expected(item.path)
+    original = item.path.with_name("original.jpg")
+    item.path.rename(original)
+    replacement = item.path
+    replacement.write_bytes(b"different download")
+
+    with pytest.raises(ManageError) as caught:
+        manage.remove(item, (root,), expected_source=expected)
+
+    assert caught.value.kind == "changed"
+    assert replacement.read_bytes() == b"different download"
+
+
+def test_remove_without_a_prepared_source_identity_is_refused(root: Path) -> None:
+    item = downloaded(root)
+
+    with pytest.raises(ManageError) as caught:
+        manage.remove(item, (root,))
+
+    assert caught.value.kind == "unrecorded"
+    assert item.path.is_file()
 
 
 def test_the_sidecar_goes_with_it(root: Path) -> None:
     """Left behind, it would be an orphan claiming a file that is not there."""
     item = downloaded(root)
     sidecar = item.path.with_name(item.path.name + ".wallhaven.json")
-    manage.remove(item, (root,))
+    _remove(item, (root,))
     assert not sidecar.exists()
 
 
@@ -130,14 +173,14 @@ def test_an_unrelated_provider_named_json_is_not_removed_as_a_companion(root: Pa
     unrelated = item.path.with_name(item.path.name + ".motionbgs.json")
     unrelated.write_text("{}", encoding="utf-8")
 
-    manage.remove(item, (root,))
+    _remove(item, (root,))
 
     assert unrelated.read_text(encoding="utf-8") == "{}"
 
 
 def test_the_marker_stays_because_the_directory_is_still_ours(root: Path) -> None:
     item = downloaded(root)
-    manage.remove(item, (root,))
+    _remove(item, (root,))
     assert (item.path.parent / MARKER).is_file()
 
 
@@ -155,11 +198,108 @@ def test_a_generated_still_goes_with_its_video(root: Path) -> None:
     still_sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
     still_sidecar.write_text(json.dumps({"still_path": str(still)}), encoding="utf-8")
 
-    manage.remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, still), (root,))
+    _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, still), (root,))
 
     assert not video.exists()
     assert not still.exists()
     assert not still_sidecar.exists()
+
+
+def test_an_old_generated_still_is_removed_even_when_a_custom_still_is_selected(
+    root: Path,
+) -> None:
+    """The resolved choice must not hide an app-owned capture during cleanup."""
+    directory = managed_directory(root, "MotionBGS")
+    video = directory / "clip.mp4"
+    video.write_bytes(b"0" * 64)
+    video.with_name(video.name + ".motionbgs.json").write_text(
+        provenance(video, "MotionBGS"), encoding="utf-8"
+    )
+    automatic = pairing.still_directory(root) / (f"{pairing.automatic_still_stem(video)}.png")
+    automatic.parent.mkdir(parents=True)
+    automatic.write_bytes(b"\x89PNG\r\n\x1a\n")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": str(automatic)}), encoding="utf-8")
+    custom = root / "my-chosen-frame.png"
+    custom.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, custom), (root,))
+
+    assert not automatic.exists()
+    assert not sidecar.exists()
+    assert custom.is_file(), "a representative image the user chose is not app-owned"
+
+
+def test_trashing_a_user_video_cleans_only_its_app_owned_pairing_artifacts(
+    root: Path,
+) -> None:
+    video = root / "clip.mp4"
+    video.write_bytes(b"0" * 64)
+    automatic = pairing.still_directory(root) / (f"{pairing.automatic_still_stem(video)}.png")
+    automatic.parent.mkdir(parents=True)
+    automatic.write_bytes(b"\x89PNG\r\n\x1a\n")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": str(automatic)}), encoding="utf-8")
+    custom = root / "chosen.png"
+    custom.write_bytes(b"\x89PNG\r\n\x1a\n")
+    media = item_for(video, Kind.VIDEO, Ownership.USER, custom)
+
+    landed = _trash(media, (root,))
+
+    assert landed.destination.is_file()
+    assert not automatic.exists()
+    assert not sidecar.exists()
+    assert custom.is_file()
+
+
+def test_a_committed_trash_reports_pairing_artifacts_it_could_not_clean(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = root / "clip.mp4"
+    video.write_bytes(b"0" * 64)
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == sidecar:
+            raise PermissionError("read only")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    result = _trash(item_for(video, Kind.VIDEO, Ownership.USER), (root,))
+
+    assert result.destination.is_file(), "cleanup cannot roll back a committed trash move"
+    assert result.kept_artifacts == (sidecar,)
+    assert sidecar.name in result.cleanup_note()
+
+
+def test_a_committed_remove_reports_pairing_artifacts_it_could_not_clean(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = managed_directory(root, "MotionBGS")
+    video = directory / "clip.mp4"
+    video.write_bytes(b"0" * 64)
+    video.with_name(video.name + ".motionbgs.json").write_text(
+        provenance(video, "MotionBGS"), encoding="utf-8"
+    )
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == sidecar:
+            raise PermissionError("read only")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    result = _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED), (root,))
+
+    assert not video.exists(), "artifact cleanup cannot roll back committed media removal"
+    assert result.kept == (sidecar,)
+    assert sidecar.name in result.cleanup_note()
 
 
 def test_a_legacy_shared_still_is_not_deleted_with_one_video(root: Path) -> None:
@@ -179,7 +319,7 @@ def test_a_legacy_shared_still_is_not_deleted_with_one_video(root: Path) -> None
         json.dumps({"still_path": str(legacy)}), encoding="utf-8"
     )
 
-    manage.remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, legacy), (root,))
+    _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, legacy), (root,))
 
     assert legacy.is_file()
 
@@ -196,7 +336,7 @@ def test_a_still_the_user_made_themselves_stays(root: Path) -> None:
     sibling = directory / "clip-still.png"
     sibling.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    manage.remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, sibling), (root,))
+    _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, sibling), (root,))
 
     assert not video.exists()
     assert sibling.is_file()
@@ -204,7 +344,7 @@ def test_a_still_the_user_made_themselves_stays(root: Path) -> None:
 
 def test_the_report_says_what_went(root: Path) -> None:
     item = downloaded(root)
-    assert manage.remove(item, (root,)).describe() == "removed picture.jpg and 1 file beside it"
+    assert _remove(item, (root,)).describe() == "removed picture.jpg and 1 file beside it"
 
 
 # -- what it refuses ------------------------------------------------------
@@ -215,7 +355,7 @@ def test_a_file_the_user_put_there_is_refused(root: Path) -> None:
     theirs = root / "holiday.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
     with pytest.raises(ManageError) as caught:
-        manage.remove(item_for(theirs), (root,))
+        _remove(item_for(theirs), (root,))
     assert caught.value.kind == "not-ours"
     assert theirs.is_file()
 
@@ -227,7 +367,7 @@ def test_a_file_in_a_managed_directory_but_without_a_sidecar_is_refused(root: Pa
     theirs = directory / "theirs.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
     with pytest.raises(ManageError) as caught:
-        manage.remove(item_for(theirs, ownership=Ownership.MANAGED), (root,))
+        _remove(item_for(theirs, ownership=Ownership.MANAGED), (root,))
     assert caught.value.kind == "not-ours"
     assert theirs.is_file()
 
@@ -262,7 +402,7 @@ def test_a_forged_or_copied_sidecar_cannot_authorise_deletion(
     )
 
     with pytest.raises(ManageError) as caught:
-        manage.remove(item_for(theirs, ownership=Ownership.MANAGED), (root,))
+        _remove(item_for(theirs, ownership=Ownership.MANAGED), (root,))
 
     assert caught.value.kind == "not-ours"
     assert theirs.read_bytes() == b"precious"
@@ -283,7 +423,7 @@ def test_pairing_metadata_never_grants_download_ownership(root: Path) -> None:
     assert item.ownership is Ownership.USER
 
     with pytest.raises(ManageError) as caught:
-        manage.remove(item, (root,))
+        _remove(item, (root,))
     assert caught.value.kind == "not-ours"
     assert theirs.is_file()
 
@@ -298,7 +438,7 @@ def test_a_sidecar_without_a_marker_is_refused(root: Path) -> None:
         provenance(path, "Wallhaven"), encoding="utf-8"
     )
     with pytest.raises(ManageError) as caught:
-        manage.remove(item_for(path, ownership=Ownership.MANAGED), (root,))
+        _remove(item_for(path, ownership=Ownership.MANAGED), (root,))
     assert caught.value.kind == "not-ours"
     assert path.is_file()
 
@@ -309,7 +449,7 @@ def test_the_item_claiming_to_be_managed_does_not_make_it_so(root: Path) -> None
     item = downloaded(root)
     (item.path.parent / MARKER).unlink()
     with pytest.raises(ManageError) as caught:
-        manage.remove(item, (root,))
+        _remove(item, (root,))
     assert caught.value.kind == "not-ours"
     assert item.path.is_file()
 
@@ -320,7 +460,7 @@ def test_a_file_outside_every_root_is_refused(root: Path, tmp_path: Path) -> Non
     path = outside / "picture.jpg"
     path.write_bytes(b"\xff\xd8\xff")
     with pytest.raises(ManageError) as caught:
-        manage.remove(item_for(path, ownership=Ownership.MANAGED), (root,))
+        _remove(item_for(path, ownership=Ownership.MANAGED), (root,))
     assert caught.value.kind == "outside-root"
     assert path.is_file()
 
@@ -339,7 +479,7 @@ def test_a_symlink_is_refused_rather_than_followed(root: Path, tmp_path: Path) -
         path=link, kind=Kind.STILL, size=1, mtime=0, ownership=Ownership.MANAGED
     )
     with pytest.raises(ManageError) as caught:
-        manage.remove(through_the_link, (root,))
+        _remove(through_the_link, (root,))
     assert caught.value.kind == "symlink"
     assert precious.is_file()
 
@@ -358,7 +498,7 @@ def test_a_symlinked_still_is_not_followed_either(root: Path, tmp_path: Path) ->
     link = still_directory / "clip.png"
     link.symlink_to(precious)
 
-    manage.remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, link), (root,))
+    _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED, link), (root,))
 
     assert not video.exists()
     assert precious.is_file()
@@ -368,7 +508,7 @@ def test_a_file_already_gone_says_so(root: Path) -> None:
     item = downloaded(root)
     item.path.unlink()
     with pytest.raises(ManageError) as caught:
-        manage.remove(item, (root,))
+        _remove(item, (root,))
     assert caught.value.kind == "missing"
 
 
@@ -376,7 +516,7 @@ def test_no_roots_given_refuses_to_delete(root: Path) -> None:
     """An absent containment boundary can never authorise an unlink."""
     item = downloaded(root)
     with pytest.raises(ManageError) as caught:
-        manage.remove(item)
+        _remove(item)
     assert caught.value.kind == "outside-root"
     assert item.path.is_file()
 
@@ -387,18 +527,18 @@ def test_no_roots_given_refuses_to_delete(root: Path) -> None:
 def test_a_users_own_file_can_be_trashed(root: Path, data_home: Path) -> None:
     theirs = root / "holiday.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
-    landed = manage.trash(item_for(theirs), (root,))
+    landed = _trash(item_for(theirs), (root,))
     assert not theirs.exists()
-    assert landed.is_file()
-    assert landed.parent == data_home / "Trash" / "files"
+    assert landed.destination.is_file()
+    assert landed.destination.parent == data_home / "Trash" / "files"
 
 
 def test_the_trash_record_can_restore_it(root: Path, data_home: Path) -> None:
     """A file with no record is a file the user cannot get back."""
     theirs = root / "holiday.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
-    landed = manage.trash(item_for(theirs), (root,))
-    record = data_home / "Trash" / "info" / f"{landed.name}.trashinfo"
+    landed = _trash(item_for(theirs), (root,))
+    record = data_home / "Trash" / "info" / f"{landed.destination.name}.trashinfo"
     text = record.read_text(encoding="utf-8")
     assert text.startswith("[Trash Info]\n")
     recorded = next(line for line in text.splitlines() if line.startswith("Path="))
@@ -416,19 +556,72 @@ def test_trash_persists_record_destination_and_source_directories(
     synced: list[Path] = []
     monkeypatch.setattr("wall_in_one.library.manage.paths.fsync_directory", synced.append)
 
-    manage.trash(item_for(theirs), (root,))
+    _trash(item_for(theirs), (root,))
 
     assert data_home / "Trash" / "info" in synced
     assert data_home / "Trash" / "files" in synced
     assert root in synced
 
 
+def test_trash_refuses_a_same_path_replacement_after_prepare(root: Path) -> None:
+    path = root / "holiday.png"
+    path.write_bytes(b"original")
+    item = item_for(path)
+    expected = _expected(path)
+    path.rename(root / "old-holiday.png")
+    path.write_bytes(b"replacement")
+
+    with pytest.raises(ManageError) as caught:
+        manage.trash(item, (root,), expected_source=expected)
+
+    assert caught.value.kind == "changed"
+    assert path.read_bytes() == b"replacement"
+
+
+def test_remove_syncs_the_media_and_artifact_directories(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = downloaded(root)
+    pairing_sidecar = item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
+    pairing_sidecar.write_text('{"still_path": "/nowhere"}', encoding="utf-8")
+    synced: list[Path] = []
+    monkeypatch.setattr("wall_in_one.library.manage.paths.fsync_directory", synced.append)
+
+    _remove(item, (root,))
+
+    assert item.path.parent in synced
+    assert synced.count(item.path.parent) >= 2
+
+
+def test_trash_error_identifies_a_move_already_committed_at_the_source(
+    root: Path,
+    data_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    theirs = root / "holiday.png"
+    theirs.write_bytes(b"image")
+
+    def fail_source_sync(directory: Path) -> None:
+        if directory == root:
+            raise OSError("source directory is read-only")
+
+    monkeypatch.setattr("wall_in_one.library.manage.paths.fsync_directory", fail_source_sync)
+
+    with pytest.raises(ManageError) as caught:
+        _trash(item_for(theirs), (root,))
+
+    assert caught.value.kind == "local-io"
+    assert caught.value.committed
+    assert not theirs.exists()
+    assert tuple((data_home / "Trash" / "files").iterdir())
+
+
 def test_a_path_with_a_space_is_recorded_encoded(root: Path, data_home: Path) -> None:
     """The user's own library really is under a directory with a space in it."""
     awkward = root / "holiday photo.png"
     awkward.write_bytes(b"\x89PNG\r\n\x1a\n")
-    landed = manage.trash(item_for(awkward), (root,))
-    record = data_home / "Trash" / "info" / f"{landed.name}.trashinfo"
+    landed = _trash(item_for(awkward), (root,))
+    record = data_home / "Trash" / "info" / f"{landed.destination.name}.trashinfo"
     text = record.read_text(encoding="utf-8")
     assert "%20" in text
     recorded = next(line for line in text.splitlines() if line.startswith("Path="))
@@ -442,9 +635,9 @@ def test_a_second_file_of_the_same_name_keeps_its_extension(root: Path, data_hom
     for path in (first, second):
         path.parent.mkdir()
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
-    manage.trash(item_for(first), (root,))
-    landed = manage.trash(item_for(second), (root,))
-    assert landed.name == "holiday (1).png"
+    _trash(item_for(first), (root,))
+    landed = _trash(item_for(second), (root,))
+    assert landed.destination.name == "holiday (1).png"
     assert (data_home / "Trash" / "info" / "holiday (1).png.trashinfo").is_file()
 
 
@@ -457,7 +650,7 @@ def test_trashing_something_that_is_not_there_says_so(root: Path) -> None:
         ownership=Ownership.USER,
     )
     with pytest.raises(ManageError) as caught:
-        manage.trash(absent, (root,))
+        _trash(absent, (root,))
     assert caught.value.kind == "missing"
 
 
@@ -491,7 +684,7 @@ def test_a_failed_move_leaves_no_orphan_record(
 
     monkeypatch.setattr("os.link", explode)
     with pytest.raises(ManageError) as caught:
-        manage.trash(item_for(theirs), (root,))
+        _trash(item_for(theirs), (root,))
     assert caught.value.kind == "cross-device"
     assert theirs.is_file()
     assert list((data_home / "Trash" / "info").iterdir()) == []
@@ -511,13 +704,13 @@ def test_concurrent_same_name_trash_never_replaces_an_earlier_file(
         expected.add(payload)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        destinations = tuple(pool.map(lambda item: manage.trash(item, (root,)), sources))
+        destinations = tuple(pool.map(lambda item: _trash(item, (root,)), sources))
 
-    assert len(set(destinations)) == len(sources)
-    assert {path.read_bytes() for path in destinations} == expected
+    assert len({result.destination for result in destinations}) == len(sources)
+    assert {result.destination.read_bytes() for result in destinations} == expected
     records = data_home / "Trash" / "info"
     assert {path.name for path in records.iterdir()} == {
-        f"{path.name}.trashinfo" for path in destinations
+        f"{result.destination.name}.trashinfo" for result in destinations
     }
 
 
@@ -539,7 +732,7 @@ def test_workshop_media_is_not_offered_or_trashed_even_inside_a_root(root: Path)
     assert not manage.is_removable(workshop, (root,))
 
     with pytest.raises(ManageError) as caught:
-        manage.trash(workshop, (root,))
+        _trash(workshop, (root,))
 
     assert caught.value.kind == "not-ours"
     assert wallpaper.is_file()
@@ -561,7 +754,7 @@ def test_workshop_identity_overrides_managed_markers(root: Path) -> None:
     )
 
     with pytest.raises(ManageError) as caught:
-        manage.remove(workshop, (root,))
+        _remove(workshop, (root,))
     assert caught.value.kind == "not-ours"
     assert wallpaper.is_file()
 
@@ -569,7 +762,7 @@ def test_workshop_identity_overrides_managed_markers(root: Path) -> None:
 def test_a_file_inside_the_roots_is_still_trashed(root: Path) -> None:
     theirs = root / "holiday.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
-    assert manage.trash(item_for(theirs), (root,)).is_file()
+    assert _trash(item_for(theirs), (root,)).destination.is_file()
     assert not theirs.exists()
 
 
@@ -578,7 +771,7 @@ def test_with_no_roots_given_trash_fails_closed(root: Path) -> None:
     theirs = root / "holiday.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
     with pytest.raises(ManageError) as caught:
-        manage.trash(item_for(theirs))
+        _trash(item_for(theirs))
     assert caught.value.kind == "not-ours"
     assert theirs.is_file()
 

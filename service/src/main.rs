@@ -297,6 +297,22 @@ fn initial_apply(runtime: &mut Runtime<SystemDriver>, now: Instant) -> Option<St
     }
 }
 
+fn release_startup_allocator_slack() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // Config decoding, route construction, and the first staged apply use
+        // short-lived buffers that are much larger than the steady-state event
+        // loop. glibc otherwise keeps those free arenas resident indefinitely.
+        // This is deliberately one-shot: trimming on status/tick would trade a
+        // small RSS win for ongoing allocator and CPU overhead.
+        // SAFETY: malloc_trim accepts any `pad` value and only asks glibc to
+        // release completely free allocator pages owned by this process.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 fn retry_initial_apply(
     retry: &mut Option<StartupRetry>,
     runtime: &mut Runtime<SystemDriver>,
@@ -362,6 +378,7 @@ fn run() -> Result<(), String> {
     let socket = claim_socket(&options.socket)?;
     let listener = &socket.listener;
     let mut startup_retry = initial_apply(&mut runtime, Instant::now());
+    release_startup_allocator_slack();
     let mut known = fingerprint(&options.config);
     let mut next_config_check = Instant::now() + Duration::from_secs(1);
     while !runtime.should_quit() && !TERMINATE.load(Ordering::Relaxed) {

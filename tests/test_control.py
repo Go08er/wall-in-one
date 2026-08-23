@@ -43,7 +43,7 @@ from wall_in_one.control.server import (
     render_search,
     resolve,
 )
-from wall_in_one.library import favourites
+from wall_in_one.library import favourites, manage, pairings, removals
 from wall_in_one.library.filter import Kinds, Query
 from wall_in_one.library.manage import ManageError
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
@@ -966,9 +966,18 @@ def _on_disk(path: Path, ownership: Ownership) -> MediaItem:
     )
 
 
+def _source_identity(path: Path) -> manage.SourceIdentity:
+    status = path.lstat()
+    return status.st_dev, status.st_ino
+
+
 def test_a_downloaded_wallpaper_is_deleted_and_the_reply_says_which(sandbox: Path) -> None:
     path = _downloaded(sandbox)
-    message = remove_wallpaper(_on_disk(path, Ownership.MANAGED), (sandbox,))
+    message = remove_wallpaper(
+        _on_disk(path, Ownership.MANAGED),
+        (sandbox,),
+        expected_source=_source_identity(path),
+    )
 
     assert not path.exists()
     assert message == "removed aurora.jpg and 1 file beside it - deleted, which cannot be undone"
@@ -980,7 +989,11 @@ def test_a_wallpaper_of_the_users_own_is_trashed_and_the_reply_says_which(
     """Two very different things to have done to somebody's file, and only one
     of them can be undone, so the sentence may not be the same either."""
     path = _their_own(sandbox)
-    message = remove_wallpaper(_on_disk(path, Ownership.USER), (sandbox,))
+    message = remove_wallpaper(
+        _on_disk(path, Ownership.USER),
+        (sandbox,),
+        expected_source=_source_identity(path),
+    )
 
     assert not path.exists()
     landed = tmp_path / "data" / "Trash" / "files" / "holiday.png"
@@ -994,7 +1007,11 @@ def test_a_stale_claim_of_ownership_still_does_not_delete_anything(sandbox: Path
     path = _downloaded(sandbox, sidecar=False)
 
     with pytest.raises(ManageError) as caught:
-        remove_wallpaper(_on_disk(path, Ownership.MANAGED), (sandbox,))
+        remove_wallpaper(
+            _on_disk(path, Ownership.MANAGED),
+            (sandbox,),
+            expected_source=_source_identity(path),
+        )
 
     assert caught.value.kind == "not-ours"
     assert path.is_file()
@@ -1055,6 +1072,25 @@ class _FakeApp:
 
     def forget(self, path: Path) -> None:
         self.forgotten.append(path)
+
+    def prepare_item_removal(self, item: MediaItem) -> removals.Intent:
+        return self.session.prepare_removal(item, self.session.library.roots)
+
+    def cancel_item_removal(self, intent: removals.Intent) -> tuple[str, ...]:
+        try:
+            self.session.cancel_removal(intent)
+        except removals.RemovalJournalError as error:
+            return (f"removal journal: {error}",)
+        return ()
+
+    def forget_item(
+        self,
+        item: MediaItem,
+        *,
+        intent: removals.Intent,
+    ) -> tuple[str, ...]:
+        self.forgotten.append(item.path)
+        return self.session.commit_removal(intent)
 
     def pairing_changed(self, item: MediaItem) -> None:
         self.repaired.append(item.path)
@@ -1290,6 +1326,60 @@ def test_removing_a_wallpaper_deletes_it_and_tells_the_window(sandbox: Path) -> 
     assert app.forgotten == [path]
 
 
+def test_committed_removal_reports_incomplete_metadata_cleanup(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _downloaded(sandbox)
+    item = _on_disk(path, Ownership.MANAGED)
+    commands, app = _commands(sandbox, [item])
+
+    def incomplete(
+        removed: MediaItem,
+        *,
+        intent: removals.Intent,
+    ) -> tuple[str, ...]:
+        del intent
+        app.forgotten.append(removed.path)
+        return (
+            "pairing: local-io: pairings.json is read-only",
+            "playlists: local-io: disk is full",
+        )
+
+    monkeypatch.setattr(app, "forget_item", incomplete)
+
+    response = commands.remove_wallpaper(str(path))
+
+    assert not response.ok
+    assert response.kind == "metadata-cleanup"
+    assert not path.exists(), "the response must be honest that deletion already committed"
+    assert "pairings.json is read-only" in response.message
+    assert "disk is full" in response.message
+    assert "refresh the library to retry" in response.message
+
+
+def test_removal_journal_failure_refuses_before_touching_media(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _downloaded(sandbox)
+    item = _on_disk(path, Ownership.MANAGED)
+    commands, app = _commands(sandbox, [item])
+
+    def refuse(_records: object, _path: Path) -> None:
+        raise removals.RemovalJournalError("local-io", "state directory is read-only")
+
+    monkeypatch.setattr(removals, "_save", refuse)
+
+    response = commands.remove_wallpaper(str(path))
+
+    assert not response.ok
+    assert response.kind == "local-io"
+    assert "state directory is read-only" in response.message
+    assert path.is_file(), "no physical operation may start without a durable intent"
+    assert app.forgotten == []
+
+
 def test_a_removal_the_library_did_not_authorise_never_reaches_the_disk(
     sandbox: Path, tmp_path: Path
 ) -> None:
@@ -1329,6 +1419,20 @@ def test_selecting_a_wallpaper_by_path_applies_that_wallpaper(
 
     assert response.message == "set clip.png"
     assert applied == [second.path]
+
+
+def test_legacy_socket_select_refuses_a_borked_wallpaper(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    crasher = _wallpaper("crasher", Kind.VIDEO)
+    commands, app = _commands(sandbox, [crasher])
+    app.session.pairings.mark_borked(crasher, "decoder crashed", "renderer-crash")
+
+    response = commands.select_wallpaper(str(crasher.path))
+
+    assert not response.ok
+    assert "marked Borked and cannot play" in response.message
+    assert applied == []
 
 
 def test_selecting_something_not_in_the_library_applies_nothing(
@@ -1506,9 +1610,9 @@ def test_a_pairing_reads_back_as_rows(sandbox: Path, applied: list[Path]) -> Non
 
 def test_choosing_a_still_over_the_socket_sticks(sandbox: Path, applied: list[Path]) -> None:
     clip = _wallpaper("clip.mp4", kind=Kind.VIDEO)
-    commands, app = _commands(sandbox, [clip])
     chosen = sandbox / "chosen.png"
     chosen.write_bytes(b"\x89PNG\r\n\x1a\n")
+    commands, app = _commands(sandbox, [clip, _on_disk(chosen, Ownership.USER)])
 
     response = commands.set_still(f"{clip.path} {chosen}")
 
@@ -1521,15 +1625,47 @@ def test_a_still_that_is_not_there_is_refused(sandbox: Path, applied: list[Path]
     nothing, and the caller would have no way to know."""
     wallpaper = _wallpaper("aurora")
     commands, _app = _commands(sandbox, [wallpaper])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not an indexed library item"):
         commands.set_still(f"{wallpaper.path} {sandbox / 'nowhere.png'}")
+
+
+def test_an_existing_but_unindexed_still_is_refused_with_import_advice(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    wallpaper = _wallpaper("aurora")
+    commands, app = _commands(sandbox, [wallpaper])
+    outside = sandbox / "outside" / "chosen.png"
+    outside.parent.mkdir()
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    with pytest.raises(ValueError) as caught:
+        commands.set_still(f"{wallpaper.path} {outside}")
+
+    message = str(caught.value)
+    assert "not an indexed library item" in message
+    assert "configured library folder" in message
+    assert "add its folder in Settings" in message
+    assert app.session.pairings.get(pairings.Identity.of(wallpaper)) is None
+
+
+def test_an_indexed_video_cannot_be_chosen_as_a_representative_still(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    wallpaper = _wallpaper("aurora")
+    candidate = _wallpaper("loop", Kind.VIDEO, root=str(sandbox))
+    commands, app = _commands(sandbox, [wallpaper, candidate])
+
+    with pytest.raises(ValueError, match="indexed as video, not as a still image"):
+        commands.set_still(f"{wallpaper.path} {candidate.path}")
+
+    assert app.session.pairings.get(pairings.Identity.of(wallpaper)) is None
 
 
 def test_the_word_default_stops_choosing_a_still(sandbox: Path, applied: list[Path]) -> None:
     clip = _wallpaper("clip.mp4", kind=Kind.VIDEO)
-    commands, app = _commands(sandbox, [clip])
     chosen = sandbox / "chosen.png"
     chosen.write_bytes(b"\x89PNG\r\n\x1a\n")
+    commands, app = _commands(sandbox, [clip, _on_disk(chosen, Ownership.USER)])
     commands.set_still(f"{clip.path} {chosen}")
 
     commands.set_still(f"{clip.path} default")

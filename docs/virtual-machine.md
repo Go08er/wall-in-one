@@ -67,29 +67,41 @@ $ cat result/summary.txt
 ```
 
 That check starts three fresh one-display services and three fresh
-three-display services from handwritten resolved configs, warms every
-connector through the public runtime socket, and samples each service's own
-`VmRSS` 20 times. A one-display run must stay at or below 5 MiB; a
-three-display run must stay at or below 10 MiB. Each run also records the
-service's CPU-tick delta over six idle seconds after warm-up. The interval is
-long enough to include the five-second compositor poll, but CPU is reported
-without a brittle CI threshold.
+three-display services from handwritten resolved configs representing a
+600-item library (900 resolved occurrences across All media and three authored
+playlists), warms every connector through the public runtime socket, and
+samples each service's own `VmRSS` 20 times. A one-display run must stay at or
+below 5 MiB; a three-display run must stay at or below 10 MiB. Each run also
+records the service's CPU-tick delta over ten idle seconds after warm-up. That
+window spans two five-second compositor polls, and idle consumption must remain
+at or below 2% of one CPU core. The reported millipercent value is
+`cpu_ticks * 100000000 / (CLK_TCK * elapsed_ms)`. Elapsed nanoseconds are
+rounded down to milliseconds, which conservatively overstates CPU use, and the
+hard comparison uses the unrounded numerator and denominator so quotient
+truncation cannot hide a value just over the limit.
 
 A separate launch discovers the supported ceiling of 64 synthetic connectors,
 routes commands to all of them, and validates the resulting atomic status
 snapshot. That is a correctness stress, not a memory promise for a normal
 desktop. `samples-kib.tsv`, `idle-cpu.tsv`, `summary.json`, the status snapshots,
-and service logs are retained in the result for review. The Python app and GUI
-are never started; a small isolated Python client only speaks the public socket
-and validates the returned JSON.
+per-process `status`/`smaps_rollup` snapshots, and service logs are retained in
+the result for review. `library-slope.tsv` records one-display observations at
+64, 300, and 600 library items to make allocator growth diagnosable; those
+smaller shapes do not replace the 600-item gate. The Python app and GUI are
+never started; a small isolated Python client only speaks the public socket and
+validates the returned JSON, including all four playlist entry counts.
 
-The 2026-08-22 release-package measurement was flat across all 20 samples in
-each run: the one-display peaks were `3660, 3660, 3660 KiB` (3.574 MiB), and
-the three-display peaks were `3668, 3668, 3668 KiB` (3.582 MiB). Six-second
-idle windows consumed zero or one scheduler tick: at most 0.166% of one CPU in
-this test environment. These numbers document that build rather than replacing
-the gates; CI repeats the measurement because libc, allocator, and toolchain
-updates can change RSS.
+The 2026-08-22 release-package measurement with that 600-item fixture produced
+one-display peaks of `4896, 4896, 4896 KiB` (4.781 MiB) and three-display peaks
+of `4820, 4820, 4824 KiB` (at most 4.711 MiB). The maximum includes observations
+before any client connects, after the first atomic status response, after the
+routed control warm-up, and after the idle window; the contract therefore does
+not depend on the plugin running. Ten-second idle windows used at most 0.199%
+of one CPU for both one and three displays. Optimizing the always-resident
+release for size reduced the stripped service binary from `1,612,184` to
+`1,386,160` bytes (14.0%) without an observed idle-CPU regression. These
+numbers document that build rather than replacing the gates; CI repeats the
+measurement because libc, allocator, and toolchain updates can change RSS.
 
 The result contains PNG screenshots named `wall-in-one-browse.png`,
 `wall-in-one-media.png`, `wall-in-one-playlists.png`,
@@ -105,9 +117,11 @@ verifies that:
   and its comparison image excludes Noctalia's clock-bearing panel so a stuck
   app cannot pass merely because the clock changed;
 - closing the GUI leaves the same service process alive and rotation advances;
-- an isolated Noctalia probe observes exactly one `wallpaper-set` for that
-  advance and records the Rust service as its parent, proving the GUI did not
-  start a second Python wallpaper driver;
+- an isolated Noctalia probe starts recording before the GUI launches, checks
+  every `wallpaper-set` across its open/close lifecycle has the Rust service as
+  its parent, and observes exactly one new application for the deliberately
+  released timer deadline; this proves the GUI did not start a second Python
+  wallpaper driver;
 - a control-socket playlist switch changes the active media;
 - a generated video launches one instrumented mpvpaper child with the compiled
   hardware-decode and interpolation options; Pause freezes it, Stop releases

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 
@@ -20,6 +21,15 @@ import pytest
 from wall_in_one.library import playlists, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Playlist, PlaylistError, Store
+
+
+def _add_playlist_entry_from_process(
+    target: str,
+    playlist: str,
+    source: str,
+) -> None:
+    """Spawn target used to prove Store mutations rebase across processes."""
+    Store.open(Path(target)).add(playlist, Path(source), entry_id="other-process")
 
 
 @pytest.fixture(autouse=True)
@@ -316,6 +326,35 @@ def test_a_deleted_wallpaper_leaves_every_list(store: Store) -> None:
     assert len(store.find(first.id)) == 0
     assert [entry.path.stem for entry in store.find(second.id).entries] == ["kept"]
     assert store.forget_path(Path("/w/gone.png")) is False
+
+
+def test_delete_cleanup_preserves_an_unrelated_cross_process_playlist_entry(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "playlists.json"
+    seed = Store(path=target)
+    made = seed.create("Evening", entry_id="evening")
+    seed.add(made.id, Path("/w/gone.png"), entry_id="gone")
+    stale_cleanup = Store.open(target)
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_add_playlist_entry_from_process,
+        args=(str(target), made.id, "/w/kept.png"),
+    )
+    process.start()
+    try:
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    assert stale_cleanup.forget_path(Path("/w/gone.png"))
+    reopened = Store.open(target).find(made.id)
+    assert [(entry.id, entry.source) for entry in reopened.entries] == [
+        ("other-process", "/w/kept.png")
+    ]
 
 
 # -- resolving against a library ------------------------------------------

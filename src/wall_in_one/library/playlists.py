@@ -27,10 +27,10 @@ import hashlib
 import json
 import math
 import secrets
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
 from wall_in_one.library import state_file
@@ -70,6 +70,8 @@ RESERVED_IDENTITIES: Final = (
 DISPLAY_QUICK_CHOICE_ID_PREFIX: Final = "quick-choice:"
 DISPLAY_QUICK_CHOICE_NAME_PREFIX: Final = "Quick choice · "
 MAX_DISPLAY_CONNECTOR_BYTES: Final = 256
+
+_MutationResult = TypeVar("_MutationResult")
 
 #: Where a file we could not parse is moved before it would be overwritten.
 BROKEN_SUFFIX: Final = ".broken"
@@ -607,17 +609,24 @@ class Store:
     """
 
     def __init__(
-        self, playlists: Mapping[str, Playlist] | None = None, path: Path | None = None
+        self,
+        playlists: Mapping[str, Playlist] | None = None,
+        path: Path | None = None,
+        *,
+        _loaded: bool = False,
     ) -> None:
         self._playlists: dict[str, Playlist] = dict(playlists or {})
         self._path = path
         self._fault: str | None = None
+        # Direct construction may intentionally seed an absent file. ``open``
+        # is always a disk snapshot, including when that snapshot was empty.
+        self._loaded = _loaded
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         target = path if path is not None else state_path()
         found, fault = _read(target)
-        store = cls(found, target)
+        store = cls(found, target, _loaded=True)
         store._fault = fault
         return store
 
@@ -658,11 +667,30 @@ class Store:
             raise PlaylistError("no-such-playlist", f"no playlist called {reference!r}")
         return found
 
+    @staticmethod
+    def _find_in(authored: Mapping[str, Playlist], reference: str) -> Playlist:
+        """The transaction-local equivalent of :meth:`find`."""
+        found = authored.get(reference)
+        if found is None:
+            wanted = reference.casefold().strip()
+            found = next(
+                (
+                    playlist
+                    for playlist in sorted(authored.values(), key=lambda one: one.name.casefold())
+                    if playlist.name.casefold() == wanted
+                ),
+                None,
+            )
+        if found is None:
+            raise PlaylistError("no-such-playlist", f"no playlist called {reference!r}")
+        return found
+
     def _validate_identity(
         self,
         identifier: str,
         name: str,
         *,
+        authored: Mapping[str, Playlist] | None = None,
         replacing: str | None = None,
         generated: bool = False,
         generated_display: bool = False,
@@ -691,7 +719,8 @@ class Store:
                         "reserved for a generated playlist; choose a different name",
                     )
 
-        for playlist in self._playlists.values():
+        occupied_playlists = self._playlists if authored is None else authored
+        for playlist in occupied_playlists.values():
             if playlist.id == replacing:
                 continue
             occupied = {
@@ -714,46 +743,71 @@ class Store:
 
     def create(self, name: str, entry_id: str | None = None) -> Playlist:
         """A new, empty playlist with an unambiguous id and display name."""
-        authored = sum(not _is_generated_playlist_id(identifier) for identifier in self._playlists)
-        if authored >= MAX_AUTHORED_PLAYLISTS:
-            raise PlaylistError(
-                "full", f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists"
-            )
         identifier = new_id() if entry_id is None else _identifier(entry_id)
         tidy = tidy_name(name)
-        self._validate_identity(identifier, tidy)
-        playlist = Playlist(id=identifier, name=tidy)
-        return self._commit(playlist)
+
+        def create(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            authored_count = sum(not _is_generated_playlist_id(found) for found in authored)
+            if authored_count >= MAX_AUTHORED_PLAYLISTS:
+                raise PlaylistError(
+                    "full",
+                    f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists",
+                )
+            self._validate_identity(identifier, tidy, authored=authored)
+            playlist = Playlist(id=identifier, name=tidy)
+            authored[playlist.id] = playlist
+            return playlist, True
+
+        return self._mutate(create)
 
     def rename(self, identifier: str, name: str) -> Playlist:
-        playlist = self.find(identifier)
         tidy = tidy_name(name)
-        if tidy == playlist.name:
-            return playlist
-        if _fold_identity(playlist.id) in {
-            _fold_identity(generated_id) for generated_id, _name in RESERVED_IDENTITIES
-        } or _fold_identity(playlist.id).startswith(_fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)):
-            raise PlaylistError(
-                "identity-conflict",
-                f"{playlist.name} is generated automatically and cannot be renamed",
+
+        def rename(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            playlist = self._find_in(authored, identifier)
+            if tidy == playlist.name:
+                return playlist, False
+            if _fold_identity(playlist.id) in {
+                _fold_identity(generated_id) for generated_id, _name in RESERVED_IDENTITIES
+            } or _fold_identity(playlist.id).startswith(
+                _fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)
+            ):
+                raise PlaylistError(
+                    "identity-conflict",
+                    f"{playlist.name} is generated automatically and cannot be renamed",
+                )
+            self._validate_identity(
+                playlist.id,
+                tidy,
+                authored=authored,
+                replacing=playlist.id,
             )
-        self._validate_identity(playlist.id, tidy, replacing=playlist.id)
-        return self._commit(replace(playlist, name=tidy))
+            renamed = replace(playlist, name=tidy)
+            authored[playlist.id] = renamed
+            return renamed, True
+
+        return self._mutate(rename)
 
     def delete(self, identifier: str) -> bool:
-        playlist = self.get(identifier)
-        if playlist is None:
-            playlist = self.by_name(identifier)
-        if playlist is None:
-            return False
-        updated = dict(self._playlists)
-        del updated[playlist.id]
-        self._write(updated)
-        self._playlists = updated
-        return True
+        def delete(authored: dict[str, Playlist]) -> tuple[bool, bool]:
+            try:
+                playlist = self._find_in(authored, identifier)
+            except PlaylistError as error:
+                if error.kind != "no-such-playlist":
+                    raise
+                return False, False
+            del authored[playlist.id]
+            return True, True
+
+        return self._mutate(delete)
 
     def add(self, identifier: str, source: Path, entry_id: str | None = None) -> Playlist:
-        return self._commit(self.find(identifier).with_added(source, entry_id))
+        def add(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            updated = self._find_in(authored, identifier).with_added(source, entry_id)
+            authored[updated.id] = updated
+            return updated, True
+
+        return self._mutate(add)
 
     def set_singleton(
         self,
@@ -770,21 +824,37 @@ class Store:
         hidden direct-apply path, so there remains exactly one playback model
         and the choice can be inspected or edited on the Playlists page.
         """
-        existing = self.get(identifier)
-        generated_global = (identifier, name) in RESERVED_IDENTITIES
-        authored = sum(not _is_generated_playlist_id(found) for found in self._playlists)
-        if existing is None and generated_global and len(self._playlists) >= MAX_PLAYLISTS:
-            raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
-        if existing is None and not generated_global and authored >= MAX_AUTHORED_PLAYLISTS:
-            raise PlaylistError(
-                "full", f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists"
-            )
         identifier = _identifier(identifier)
         tidy = tidy_name(name)
-        self._validate_identity(identifier, tidy, replacing=identifier, generated=True)
-        entry = Entry(id=entry_id or new_id(), source=str(source))
-        playlist = Playlist(id=identifier, name=tidy, entries=(entry,))
-        return self._commit(playlist)
+
+        def set_singleton(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            existing = authored.get(identifier)
+            generated_global = (identifier, name) in RESERVED_IDENTITIES
+            authored_count = sum(not _is_generated_playlist_id(found) for found in authored)
+            if existing is None and generated_global and len(authored) >= MAX_PLAYLISTS:
+                raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+            if (
+                existing is None
+                and not generated_global
+                and authored_count >= MAX_AUTHORED_PLAYLISTS
+            ):
+                raise PlaylistError(
+                    "full",
+                    f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists",
+                )
+            self._validate_identity(
+                identifier,
+                tidy,
+                authored=authored,
+                replacing=identifier,
+                generated=True,
+            )
+            entry = Entry(id=entry_id or new_id(), source=str(source))
+            playlist = Playlist(id=identifier, name=tidy, entries=(entry,))
+            authored[playlist.id] = playlist
+            return playlist, True
+
+        return self._mutate(set_singleton)
 
     def set_display_singleton(
         self,
@@ -802,38 +872,55 @@ class Store:
         """
         identifier = display_quick_choice_id(connector)
         name = display_quick_choice_name(connector)
-        existing = self.get(identifier)
-        if existing is not None and existing.name != name:
-            raise PlaylistError(
-                "identity-conflict",
-                f"generated playlist id {identifier!r} is already owned by "
-                f"{existing.name!r}; nothing was overwritten",
+
+        def set_display(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            existing = authored.get(identifier)
+            if existing is not None and existing.name != name:
+                raise PlaylistError(
+                    "identity-conflict",
+                    f"generated playlist id {identifier!r} is already owned by "
+                    f"{existing.name!r}; nothing was overwritten",
+                )
+            generated_displays = sum(
+                _fold_identity(found).startswith(_fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX))
+                for found in authored
             )
-        generated_displays = sum(
-            _fold_identity(found).startswith(_fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX))
-            for found in self._playlists
-        )
-        if existing is None and generated_displays >= MAX_DISPLAY_QUICK_CHOICES:
-            raise PlaylistError(
-                "full",
-                f"there are already {MAX_DISPLAY_QUICK_CHOICES} display Quick choices",
+            if existing is None and generated_displays >= MAX_DISPLAY_QUICK_CHOICES:
+                raise PlaylistError(
+                    "full",
+                    f"there are already {MAX_DISPLAY_QUICK_CHOICES} display Quick choices",
+                )
+            if existing is None and len(authored) >= MAX_PLAYLISTS:
+                raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
+            self._validate_identity(
+                identifier,
+                name,
+                authored=authored,
+                replacing=identifier,
+                generated_display=True,
             )
-        if existing is None and len(self._playlists) >= MAX_PLAYLISTS:
-            raise PlaylistError("full", f"there are already {MAX_PLAYLISTS} playlists")
-        self._validate_identity(
-            identifier,
-            name,
-            replacing=identifier,
-            generated_display=True,
-        )
-        entry = Entry(id=entry_id or new_id(), source=str(source))
-        return self._commit(Playlist(id=identifier, name=name, entries=(entry,)))
+            entry = Entry(id=entry_id or new_id(), source=str(source))
+            playlist = Playlist(id=identifier, name=name, entries=(entry,))
+            authored[playlist.id] = playlist
+            return playlist, True
+
+        return self._mutate(set_display)
 
     def remove_entry(self, identifier: str, entry: str) -> Playlist:
-        return self._commit(self.find(identifier).without(entry))
+        def remove(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            updated = self._find_in(authored, identifier).without(entry)
+            authored[updated.id] = updated
+            return updated, True
+
+        return self._mutate(remove)
 
     def move_entry(self, identifier: str, entry: str, position: int) -> Playlist:
-        return self._commit(self.find(identifier).moved(entry, position))
+        def move(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            updated = self._find_in(authored, identifier).moved(entry, position)
+            authored[updated.id] = updated
+            return updated, True
+
+        return self._mutate(move)
 
     def forget_path(self, path: Path) -> bool:
         """Drop every entry naming ``path``, across every playlist.
@@ -842,37 +929,73 @@ class Store:
         file on purpose; not one we unlinked.
         """
         source = str(path)
-        updated = dict(self._playlists)
-        changed = False
-        for identifier, playlist in self._playlists.items():
-            kept = tuple(entry for entry in playlist.entries if entry.source != source)
-            if len(kept) != len(playlist.entries):
-                updated[identifier] = replace(playlist, entries=kept)
-                changed = True
-        if changed:
-            self._write(updated)
-            self._playlists = updated
-        return changed
 
-    def _commit(self, playlist: Playlist) -> Playlist:
-        updated = dict(self._playlists)
-        updated[playlist.id] = playlist
-        self._write(updated)
-        self._playlists = updated
-        return playlist
+        def forget(authored: dict[str, Playlist]) -> tuple[bool, bool]:
+            changed = False
+            for identifier, playlist in tuple(authored.items()):
+                kept = tuple(entry for entry in playlist.entries if entry.source != source)
+                if len(kept) != len(playlist.entries):
+                    authored[identifier] = replace(playlist, entries=kept)
+                    changed = True
+            return changed, changed
 
-    def _write(self, authored: Mapping[str, Playlist]) -> None:
+        return self._mutate(forget)
+
+    def _mutate(
+        self,
+        change: Callable[[dict[str, Playlist]], tuple[_MutationResult, bool]],
+    ) -> _MutationResult:
+        """Apply one lock-read-change-write transaction over the latest file.
+
+        Atomic replacement alone cannot prevent a stale GUI, control helper,
+        or crash replayer from overwriting a valid concurrent edit.  Every
+        semantic mutation is therefore recomputed after acquiring the shared
+        state-file lock, including removal cleanup across every playlist.
+        """
         target = self._path if self._path is not None else state_path()
-        if self._fault is not None:
-            try:
-                state_file.preserve_faulted(target)
-            except OSError as error:
-                raise PlaylistError(
-                    "local-io",
-                    f"could not preserve unreadable {target}: {error.strerror or error}",
-                ) from error
-            self._fault = None
-        save(authored, target)
+        try:
+            with state_file.mutation_lock(target, description="playlists"):
+                try:
+                    target.lstat()
+                except FileNotFoundError:
+                    present = False
+                except OSError as error:
+                    raise PlaylistError(
+                        "local-io",
+                        f"could not inspect {target}: {error.strerror or error}",
+                    ) from error
+                else:
+                    present = True
+
+                current, fault = _read(target)
+                authored = dict(current) if present or self._loaded else dict(self._playlists)
+                result, changed = change(authored)
+                if changed:
+                    if fault is not None:
+                        try:
+                            state_file.preserve_faulted(target)
+                        except OSError as error:
+                            raise PlaylistError(
+                                "local-io",
+                                f"could not preserve unreadable {target}: "
+                                f"{error.strerror or error}",
+                            ) from error
+                    save(authored, target)
+                    fault = None
+
+                # Adopt memory only after the durable write, so an exception
+                # leaves the Store on its previous known-good snapshot.
+                self._playlists = authored
+                self._fault = fault
+                self._loaded = True
+                return result
+        except PlaylistError:
+            raise
+        except OSError as error:
+            raise PlaylistError(
+                "local-io",
+                f"could not safely update playlists at {target}: {error.strerror or error}",
+            ) from error
 
 
 def rotation(

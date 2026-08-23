@@ -2638,14 +2638,20 @@ fn mirrored_startup_failure_retries_three_times_then_quarantines_and_advances() 
     assert!(runtime.apply_current().is_err());
     assert!(runtime.schedule_initial_apply_retry(started));
     runtime.tick(at, started + Duration::from_secs(2));
-    runtime.tick(at, started + Duration::from_secs(4));
     let retrying = status(&mut runtime, at);
-    assert_eq!(retrying["taboo_entries"][0]["entry_id"], "still-one");
-    assert_eq!(retrying["automatic_retry"]["attempt"], 0);
+    assert_eq!(retrying["automatic_retry"]["attempt"], 2);
+    assert_eq!(retrying["renderer_failed"], true);
+    assert_eq!(retrying["motion_active"], false);
+    runtime.tick(at, started + Duration::from_secs(4));
+    let quarantined = status(&mut runtime, at);
+    assert_eq!(quarantined["taboo_entries"][0]["entry_id"], "still-one");
+    assert_eq!(quarantined["automatic_retry"]["attempt"], 0);
+    assert_eq!(quarantined["renderer_failed"], true);
     runtime.tick(at, started + Duration::from_secs(6));
     let recovered = status(&mut runtime, at);
     assert_eq!(recovered["entry_id"], "video-two");
     assert_eq!(recovered["motion_active"], true);
+    assert_eq!(recovered["renderer_failed"], false);
     assert_eq!(state.lock().unwrap().fail_entry_attempts_remaining, 0);
 }
 
@@ -2676,20 +2682,103 @@ fn independent_startup_failure_quarantines_only_the_failed_route_and_advances() 
     assert!(runtime.schedule_initial_apply_retry(started));
     assert!(display_status(&mut runtime, at, "HDMI-A-1")["automatic_retry"].is_null());
     runtime.tick(at, started + Duration::from_secs(2));
+    let retrying = display_status(&mut runtime, at, "DP-1");
+    assert_eq!(retrying["automatic_retry"]["attempt"], 2);
+    assert_eq!(retrying["renderer_failed"], true);
+    assert_eq!(retrying["motion_active"], false);
+    assert_eq!(
+        display_status(&mut runtime, at, "HDMI-A-1")["renderer_failed"],
+        false
+    );
     runtime.tick(at, started + Duration::from_secs(4));
     let quarantined = status(&mut runtime, at);
     assert_eq!(quarantined["taboo_entries"][0]["entry_id"], "still-one");
     assert_eq!(quarantined["displays"][0]["automatic_retry"]["attempt"], 0);
+    assert_eq!(quarantined["displays"][0]["renderer_failed"], true);
     runtime.tick(at, started + Duration::from_secs(6));
     let recovered = status(&mut runtime, at);
     assert_eq!(recovered["displays"][0]["entry_id"], "video-two");
     assert_eq!(recovered["displays"][0]["motion_active"], true);
+    assert_eq!(recovered["displays"][0]["renderer_failed"], false);
     assert!(state
         .lock()
         .unwrap()
         .stage_events
         .iter()
         .all(|event| !event.contains("HDMI-A-1")));
+}
+
+#[test]
+fn mirrored_automatic_retry_keeps_renderer_failed_when_rollback_fails() {
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let mut parsed: Config = toml::from_str(&document).unwrap();
+    parsed.schedules.clear();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    state.lock().unwrap().fail_apply = true;
+
+    runtime.tick(at, Instant::now() + Duration::from_secs(600));
+
+    let failed = status(&mut runtime, at);
+    assert_eq!(failed["entry_id"], "still-one");
+    assert_eq!(failed["automatic_retry"]["attempt"], 1);
+    assert_eq!(failed["renderer_failed"], true);
+    assert_eq!(failed["motion_active"], false);
+    assert!(failed["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("could not restore the previous wallpaper"));
+}
+
+#[test]
+fn independent_automatic_retry_keeps_renderer_failed_when_rollback_fails() {
+    let document = independent_config()
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    state.lock().unwrap().fail_apply = true;
+
+    runtime.tick(at, Instant::now() + Duration::from_secs(600));
+
+    let failed = display_status(&mut runtime, at, "DP-1");
+    assert_eq!(failed["entry_id"], "still-one");
+    assert_eq!(failed["automatic_retry"]["attempt"], 1);
+    assert_eq!(failed["renderer_failed"], true);
+    assert_eq!(failed["motion_active"], false);
+    assert!(failed["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("could not restore the previous wallpaper"));
+    assert_eq!(status(&mut runtime, at)["renderer_failed"], true);
 }
 
 #[test]

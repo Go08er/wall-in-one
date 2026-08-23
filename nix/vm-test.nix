@@ -175,8 +175,13 @@ pkgs.testers.runNixOSTest {
                 "${app} ctl status | ${lib.getExe pkgs.jq} -e "
                 "'.status_version == 2 and .display_mode == \"mirrored\" "
                 "and (.displays | length) == 1 "
-                "and .displays[0].connector == \"winit\" "
+                # Mirrored mode deliberately retains one efficient mpvpaper ALL
+                # route. The niri and Noctalia assertions above prove that this
+                # VM's physical connector is winit; the empty discovery error
+                # proves the runtime saw that live snapshot too.
+                "and .displays[0].connector == \"ALL\" "
                 "and .displays[0].connected == true "
+                "and .output_discovery_error == \"\" "
                 "and .theme_source.configured == \"\" "
                 "and .theme_source.effective == null'"
             ),

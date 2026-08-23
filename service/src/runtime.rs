@@ -1360,6 +1360,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     None
                 };
                 let rollback_failed = rollback.is_some();
+                let renderer_failed = !pending.restore_baseline || rollback_failed;
                 let diagnostic = match rollback.as_deref() {
                     Some(rollback) => format!(
                         "automatic {} attempt {}/{} failed: {error}; could not restore the previous wallpaper: {rollback}",
@@ -1408,7 +1409,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
                 if let Some(route) = self.routes.get_mut(&connector) {
                     route.last_error = diagnostic;
-                    route.renderer_failed = rollback_failed;
+                    route.renderer_failed = renderer_failed;
                 }
                 self.refresh_independent_last_error();
             }
@@ -1481,6 +1482,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 } else {
                     None
                 };
+                let rollback_failed = rollback.is_some();
                 let diagnostic = match (pending.restore_baseline, rollback) {
                     (true, Some(rollback)) => format!(
                         "automatic {} attempt {}/{} failed: {error}; could not restore the previous wallpaper: {rollback}",
@@ -1496,7 +1498,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     ),
                 };
                 self.last_error = truncate_middle(&diagnostic, MAX_LAST_ERROR_BYTES);
-                self.renderer_failed = false;
+                self.renderer_failed = !pending.restore_baseline || rollback_failed;
 
                 if pending.attempts >= AUTOMATIC_APPLY_ATTEMPTS {
                     for failure in &pending.failures {

@@ -305,6 +305,7 @@ def test_playlist_editor_is_navigable_and_unclipped_at_800_by_600(
         assert window.get_default_size() == (800, 600)
         assert page.get_width() < playlists_page.COMPACT_WIDTH
         assert page._editor_header.get_show_back_button()
+        assert not page._editor_header.get_show_end_title_buttons()
         assert page._arranger.get_width() >= playlists_page.MIN_ARRANGER_WIDTH
         assert page._source_scroll.get_width() > 0
         assert page._order_scroll.get_width() > 0

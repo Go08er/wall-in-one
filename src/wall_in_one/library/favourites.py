@@ -41,7 +41,7 @@ whatever was in there is still recoverable by hand.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -240,18 +240,29 @@ class Store:
     decision a user will make and then never think about again.
     """
 
-    def __init__(self, favourites: Favourites | None = None, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        favourites: Favourites | None = None,
+        path: Path | None = None,
+        *,
+        _loaded: bool = False,
+    ) -> None:
         self._favourites = favourites if favourites is not None else Favourites()
         self._path = path
         self._paths = self._favourites.paths
         self._fault: str | None = None
+        # A directly constructed Store may carry an intentional unsaved seed
+        # (mostly useful to tests and importers). ``open`` is different: even
+        # when its file was absent, a later mutation must re-read disk rather
+        # than resurrecting that original snapshot over another process.
+        self._loaded = _loaded
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         """Load from disk. Always succeeds; ``fault`` says if something was lost."""
         target = path if path is not None else state_path()
         favourites, fault = _read(target)
-        store = cls(favourites, target)
+        store = cls(favourites, target, _loaded=True)
         store._fault = fault
         return store
 
@@ -286,53 +297,95 @@ class Store:
 
     # -- mutation --------------------------------------------------------
 
-    def _commit(self, updated: Favourites) -> None:
-        """Adopt ``updated`` and persist it.
+    def _mutate(self, change: Callable[[Favourites], tuple[bool, Favourites]]) -> bool:
+        """Apply one rebased mutation while excluding other app processes.
 
-        The file first, then memory. A failed write is reported to the caller
-        and leaves both views on the last state known to be durable; otherwise
-        a retry could claim a favourite was already added while disk never saw
-        it.
+        Atomic replacement prevents torn JSON, but without this lock two
+        valid Store snapshots can still replace one another.  Removal cleanup
+        is especially sensitive: a stale ``discard`` must not erase an
+        unrelated favourite another process just added.
         """
-        self._write(updated)
-        self._favourites = updated
-        self._paths = updated.paths
-
-    def _write(self, updated: Favourites) -> None:
         target = self._path if self._path is not None else state_path()
-        if self._fault is not None:
-            # Do not overwrite bytes we could not understand. They are the
-            # user's list, in some form, and a copy costs nothing.
-            try:
-                state_file.preserve_faulted(target)
-            except OSError as error:
-                raise FavouritesError(
-                    "local-io",
-                    f"could not preserve unreadable {target}: {error.strerror or error}",
-                ) from error
-            self._fault = None
-        save(updated, target)
+        try:
+            with state_file.mutation_lock(target, description="favourites"):
+                try:
+                    target.lstat()
+                except FileNotFoundError:
+                    present = False
+                except OSError as error:
+                    raise FavouritesError(
+                        "local-io",
+                        f"could not inspect {target}: {error.strerror or error}",
+                    ) from error
+                else:
+                    present = True
+
+                current, fault = _read(target)
+                # Preserve the historical direct-construction contract: an
+                # explicit in-memory seed is the base only until a real file
+                # has ever existed. Store.open(...), including an absent file,
+                # is always a disk snapshot and therefore sets ``_loaded``.
+                base = current if present or self._loaded else self._favourites
+                changed, updated = change(base)
+                if changed:
+                    if fault is not None:
+                        # Do not overwrite bytes we could not understand. They
+                        # are the user's list, in some form, and a copy costs
+                        # nothing.
+                        try:
+                            state_file.preserve_faulted(target)
+                        except OSError as error:
+                            raise FavouritesError(
+                                "local-io",
+                                f"could not preserve unreadable {target}: "
+                                f"{error.strerror or error}",
+                            ) from error
+                    save(updated, target)
+                    fault = None
+
+                # File first, then memory. A failed write leaves this Store on
+                # its last known durable snapshot, while a successful/no-op
+                # transaction adopts the disk rebase it just observed.
+                self._favourites = updated
+                self._paths = updated.paths
+                self._fault = fault
+                self._loaded = True
+                return changed
+        except FavouritesError:
+            raise
+        except OSError as error:
+            raise FavouritesError(
+                "local-io",
+                f"could not safely update favourites at {target}: {error.strerror or error}",
+            ) from error
 
     def add(self, path: Path) -> bool:
         """Mark ``path``. False if it was already marked."""
-        updated = self._favourites.with_added(path)
-        if updated is self._favourites:
-            return False
-        self._commit(updated)
-        return True
+
+        def add(current: Favourites) -> tuple[bool, Favourites]:
+            updated = current.with_added(path)
+            return updated is not current, updated
+
+        return self._mutate(add)
 
     def discard(self, path: Path) -> bool:
         """Unmark ``path``. False if it was not marked."""
-        updated = self._favourites.without(path)
-        if updated is self._favourites:
-            return False
-        self._commit(updated)
-        return True
+
+        def discard(current: Favourites) -> tuple[bool, Favourites]:
+            updated = current.without(path)
+            return updated is not current, updated
+
+        return self._mutate(discard)
 
     def toggle(self, path: Path) -> bool:
         """Flip ``path``, and answer with what it is now."""
-        if self.is_favourite(path):
-            self.discard(path)
-            return False
-        self.add(path)
-        return True
+        now_favourite = False
+
+        def toggle(current: Favourites) -> tuple[bool, Favourites]:
+            nonlocal now_favourite
+            now_favourite = path not in current
+            updated = current.with_added(path) if now_favourite else current.without(path)
+            return True, updated
+
+        self._mutate(toggle)
+        return now_favourite

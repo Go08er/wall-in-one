@@ -93,11 +93,11 @@ validates the returned JSON, including all four playlist entry counts.
 
 The 2026-08-22 release-package measurement with that 600-item fixture produced
 one-display peaks of `4896, 4896, 4896 KiB` (4.781 MiB) and three-display peaks
-of `4820, 4820, 4824 KiB` (at most 4.711 MiB). The maximum includes observations
+of `4824, 4824, 4824 KiB` (4.711 MiB). The maximum includes observations
 before any client connects, after the first atomic status response, after the
 routed control warm-up, and after the idle window; the contract therefore does
 not depend on the plugin running. Ten-second idle windows used at most 0.199%
-of one CPU for both one and three displays. Optimizing the always-resident
+of one CPU for one display and 0.299% for three. Optimizing the always-resident
 release for size reduced the stripped service binary from `1,612,184` to
 `1,386,160` bytes (14.0%) without an observed idle-CPU regression. These
 numbers document that build rather than replacing the gates; CI repeats the

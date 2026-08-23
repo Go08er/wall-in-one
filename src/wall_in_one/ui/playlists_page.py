@@ -741,6 +741,10 @@ class PlaylistsPage(Gtk.Box):
         editor_view = Adw.ToolbarView()
         self._editor_header = Adw.HeaderBar()
         self._editor_header.set_show_title(False)
+        # This header belongs to the nested compact editor, not the window.
+        # Leaving the Adwaita default enabled draws a second minimize/maximize/
+        # close cluster inside the page in wide mode.
+        self._editor_header.set_show_end_title_buttons(False)
         # NavigationSplitView supplies the actual back action when collapsed.
         # Spell out the HeaderBar side so a future global header preference
         # cannot strand the editor without a route back to the playlist list.

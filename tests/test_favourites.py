@@ -15,6 +15,7 @@ can reach the real list.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 from pathlib import Path
 
@@ -26,6 +27,11 @@ from wall_in_one.library.favourites import Favourites, FavouritesError, Store
 ONE = Path("/w/one.png")
 TWO = Path("/w/two.png")
 THREE = Path("/w/three.mp4")
+
+
+def _add_favourite_from_process(target: str, path: str) -> None:
+    """Spawn target used to prove Store mutations rebase across processes."""
+    Store.open(Path(target)).add(Path(path))
 
 
 @pytest.fixture(autouse=True)
@@ -210,6 +216,31 @@ def test_adding_twice_reports_the_second_as_a_no_op(tmp_path: Path) -> None:
     store = Store(path=tmp_path / "favourites.json")
     assert store.add(ONE) is True
     assert store.add(ONE) is False
+
+
+def test_delete_cleanup_preserves_an_unrelated_cross_process_favourite(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "favourites.json"
+    seed = Store(path=target)
+    seed.add(ONE)
+    stale_cleanup = Store.open(target)
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_add_favourite_from_process,
+        args=(str(target), str(TWO)),
+    )
+    process.start()
+    try:
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    assert stale_cleanup.discard(ONE)
+    assert Store.open(target).paths == frozenset({TWO})
 
 
 def test_a_store_write_failure_does_not_change_the_in_memory_favourites(

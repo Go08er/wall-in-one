@@ -74,9 +74,11 @@ cancel its work. Shutting the application down does: queued search, detail,
 preview and download work is cancelled, active HTTP response sockets and preview
 transcodes are interrupted, and late replies are suppressed. A request still
 inside system DNS is the OS-defined residual; connect/TLS has a separate
-five-second bound. Providers stage bytes under hidden temporary names and link a
-complete media/sidecar pair into place only at the end, so an interrupted
-transfer never becomes a visible, falsely finished library item.
+five-second bound. Providers stage bytes under hidden temporary names, commit
+the media without replacement, and only then bind and publish its exact
+provenance sidecar. An interruption before media commit stays hidden; a crash
+after it can leave visible media, but without the exact sidecar it is safely
+scanned as user-owned rather than falsely finished.
 
 ## Browsing without the window
 
@@ -222,9 +224,10 @@ holiday.png moved to the trash - /home/you/.local/share/Trash/files/holiday.png
 ```
 
 Which of those two happened is in the reply, because only one of them can be
-undone. A downloaded wallpaper is unlinked along with the sidecar and any still
-this app generated for it; one of your own is moved to the freedesktop trash,
-where your file manager can put it back. Ownership is re-derived from disk at
+undone. A downloaded wallpaper is unlinked along with its provider sidecar and
+every exact generated still/pairing-sidecar artifact found for it under the
+configured roots; one of your own is moved to the freedesktop trash, where
+your file manager can put it back. Ownership is re-derived from disk at
 the moment of deletion rather than taken from the listing, which may be minutes
 old, and a file that fails that check comes back refused with the kind
 `not-ours` and is left exactly where it was. The wallpaper also loses its star,
@@ -359,12 +362,15 @@ than inventing a location.
 | directory marker | `.managed-by-wall-in-one-v1.json` | `.wall-in-one-motionbgs-managed.json` |
 
 Those four names are inherited from the previous implementation rather than
-chosen, so a library downloaded by it keeps its ownership across the rewrite.
+chosen. Predecessor marker shapes remain recognized, but an old sidecar with no
+exact media-generation binding is historical metadata rather than deletion
+authority. Its media remains playable, scans as user-owned, and gets Move to
+Trash instead of irreversible Remove.
 
 The **sidecar** records where a file came from: the provider, the source page,
 the URL the bytes actually arrived from, the byte count, a SHA-256 of the file,
-and a UTC timestamp. The **directory marker** records only that this app created
-the directory.
+a UTC timestamp, and the final media device/inode/size/mtime/ctime generation.
+The **directory marker** records only that this app created the directory.
 
 Installation never overwrites or installs one provider identity twice. Before
 network I/O, Browse takes a nonblocking per-login cross-process claim keyed by
@@ -374,31 +380,40 @@ configured library root. A simultaneous GUI, `ctl`, or second-process request
 for that identity gets `busy`; a sequential repeat gets `conflict`, and choosing
 HD after 4K (or the reverse) does not create a second copy.
 
-For a new identity, the staged download is hard-linked into place alongside a
-freshly written sidecar, and `os.link` fails rather than replacing an existing
-name. The sidecar lands and is synced first; the media link is the irreversible
-commit point. A pre-commit interruption may leave only an inert, age-recoverable
-sidecar. Once a final pathname has been published it is never blindly unlinked
-for rollback, because a concurrent local writer could have replaced that name;
-a later sync failure is reported as committed with final durability unknown.
+For a new identity, the staged media is atomically renamed without replacement
+and its directory is synced first; that is the irreversible commit. Wall-in-One
+then captures the exact post-rename device/inode/size/mtime/ctime generation,
+hashes the retained inode, writes and syncs a sidecar carrying that generation
+plus the byte count and SHA-256, rechecks the named media, and publishes the
+sidecar without replacement. No cancellation is accepted after the media
+commit. A crash or conflict in this interval can leave visible media, but
+without exact authority it scans as user-owned and can only be trashed. Final
+names are never blindly unlinked for rollback, because a concurrent local
+writer could have replaced them.
 Wallhaven's id-derived name must be unique. Distinct MotionBGS ids can share a
 slug, so only that filename
 collision counts up — `<slug>.4k-1.mp4` — and a name is free only when both the
-media file and its sidecar are absent. A sidecar with no media means an
-interrupted install and is never attached to new bytes.
+media file and its sidecar are absent. A predecessor sidecar with no media is
+inert, age-recoverable, and never attached to new bytes. Recovery never removes
+visible media left by the current media-first protocol.
 
 ## What makes a file ours
 
 The library scan calls a file `Ownership.MANAGED` only when **both** are true:
 
 1. its directory carries one of the two directory markers, and
-2. the file itself has an adjacent sidecar.
+2. the file has a bounded regular sidecar naming the exact provider and logical
+   path whose full device/inode/size/mtime/ctime generation matches it.
 
 A marker on its own is never enough. That is the whole point: a wallpaper you
 copied into `Wall-in-One/Wallhaven/` by hand has no sidecar, so it stays
 `Ownership.USER`. Ownership is what decides whether a file counts as deletable
 by the app, and it is also what puts the provider's name on a tile as a badge in
 the library grid — an unbadged tile in a managed directory is yours, not ours.
+At Remove time the app pins the exact media and sidecar again, hashes that media
+inode, and requires the recorded byte count and SHA-256 before withdrawing all
+matching authority and vacating the public name. A stale or unbound sidecar is
+left untouched and cannot authorize deletion.
 
 The scan skips dot-files entirely, and downloads are staged under a dot-prefixed
 temporary name, so a staged file left behind by a hard kill is invisible to the

@@ -3,10 +3,12 @@
 The media operation and the three authoring stores cannot be one filesystem
 transaction.  This journal is the small durable bridge: a local Delete/Trash
 gesture is recorded *before* the media can move, then retained until
-favourites, Pairings, playlists, and deterministic generated artifacts have
-all been cleaned.  A restart can therefore finish an interrupted cleanup
-without guessing that an ordinary missing path was deleted; only paths named
-by this explicit journal cross that lifecycle boundary.
+the live transaction has consumed every deterministic artifact generation it
+pinned before commit and favourites, Pairings, and playlists have been
+cleaned. A restart can finish authored metadata and an exact token-owned media
+claim, but never rediscovers physical companions after commit: a same-name file
+could belong to a later lifecycle. Only paths named by this explicit journal
+cross the missing-media boundary.
 """
 
 from __future__ import annotations
@@ -17,12 +19,13 @@ import json
 import os
 import secrets
 import stat
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, TypeVar
+from typing import Final, Literal, TypeVar
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 from wall_in_one.library.model import Kind, MediaItem
 
@@ -37,6 +40,13 @@ MAX_TOKEN_BYTES: Final = 128
 OPERATION_LOCK_SUFFIX: Final = ".operation.lock"
 
 _Result = TypeVar("_Result")
+OriginalGenerationState = Literal[
+    "exact",
+    "missing",
+    "different",
+    "ambiguous",
+    "unavailable",
+]
 
 
 class RemovalJournalError(Exception):
@@ -86,6 +96,9 @@ class Intent:
     committed: bool = False
     device: int | None = None
     inode: int | None = None
+    source_size: int | None = None
+    source_mtime_ns: int | None = None
+    source_ctime_ns: int | None = None
     source_root: Path | None = None
     root_device: int | None = None
     root_inode: int | None = None
@@ -109,14 +122,52 @@ class Intent:
         )
 
     def original_is_present(self) -> bool:
-        """Whether the exact pre-delete inode is still at the source path."""
-        if self.device is None or self.inode is None:
-            return False
+        """Whether the exact pre-delete file generation is still at its path."""
+        return self.original_generation_state() == "exact"
+
+    def original_generation_state(
+        self,
+        *,
+        lookup_path: Path | None = None,
+    ) -> OriginalGenerationState:
+        """Classify the public source without guessing across a rollback crash.
+
+        A claim moved back to its original pathname keeps its device, inode,
+        size, and mtime, but both renames advance ctime.  If the process dies
+        after that safe restore and before cancelling the journal, the changed
+        ctime is therefore ambiguous rather than evidence that deletion
+        committed.  The same conservative answer covers an already-open writer
+        changing the restored inode.  Inode reuse after process death means the
+        journal cannot prove that either case is still the original, so replay
+        must retain the intent instead of cancelling it or cleaning metadata.
+        """
+        identity = self.source_identity
+        if identity is None:
+            return "unavailable"
+        target = self.path if lookup_path is None else lookup_path
         try:
-            status = self.path.lstat()
+            status = target.lstat()
+        except FileNotFoundError:
+            return "missing"
         except OSError:
-            return False
-        return (status.st_dev, status.st_ino) == (self.device, self.inode)
+            return "unavailable"
+        if not stat.S_ISREG(status.st_mode):
+            return "different"
+        expected = self.source_fingerprint
+        if expected is None:
+            # Backward-compatible v1 records use this only to cancel a
+            # prepared, uncommitted intent. A false positive therefore
+            # revokes authority; it can never authorize a physical mutation.
+            return "exact" if (status.st_dev, status.st_ino) == identity else "different"
+        try:
+            current = file_io.file_fingerprint(status)
+        except ValueError:
+            return "different"
+        if current == expected:
+            return "exact"
+        if current[:2] == expected[:2]:
+            return "ambiguous"
+        return "different"
 
     @property
     def source_identity(self) -> tuple[int, int] | None:
@@ -125,28 +176,55 @@ class Intent:
             return None
         return self.device, self.inode
 
+    @property
+    def source_fingerprint(self) -> file_io.FileFingerprint | None:
+        """Persisted evidence distinguishing an inode from a reused successor."""
+        if (
+            self.device is None
+            or self.inode is None
+            or self.source_size is None
+            or self.source_mtime_ns is None
+            or self.source_ctime_ns is None
+        ):
+            return None
+        return (
+            self.device,
+            self.inode,
+            self.source_size,
+            self.source_mtime_ns,
+            self.source_ctime_ns,
+        )
+
     def source_context_is_present(self) -> bool:
         """Whether replay still sees the filesystem context captured at prepare.
 
-        A missing source means the unlink committed only while both the
+        A missing source means physical removal committed only while both the
         selected library root and the source's parent directory are the same
         objects. Otherwise an unmounted drive is indistinguishable from a
         deletion and cleanup must wait.
         """
-        expected = (
-            (self.source_root, self.root_device, self.root_inode),
-            (self.path.parent, self.parent_device, self.parent_inode),
+        try:
+            with self.pin_source_context():
+                return True
+        except OSError, ValueError:
+            return False
+
+    def pin_source_context(self) -> file_io.PinnedDirectoryContext:
+        """Retain the journaled root and parent for one replay decision."""
+        if (
+            self.source_root is None
+            or self.root_device is None
+            or self.root_inode is None
+            or self.parent_device is None
+            or self.parent_inode is None
+        ):
+            raise OSError("the pending removal has no journaled source directory context")
+        return file_io.pin_directory_beneath(
+            self.source_root,
+            self.path.parent,
+            expected_root_identity=(self.root_device, self.root_inode),
+            expected_directory_identity=(self.parent_device, self.parent_inode),
         )
-        for path, device, inode in expected:
-            if path is None or device is None or inode is None:
-                return False
-            try:
-                current = path.stat()
-            except OSError:
-                return False
-            if (current.st_dev, current.st_ino) != (device, inode):
-                return False
-        return True
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -161,6 +239,9 @@ class Intent:
             "committed": self.committed,
             "device": self.device,
             "inode": self.inode,
+            "source_size": self.source_size,
+            "source_mtime_ns": self.source_mtime_ns,
+            "source_ctime_ns": self.source_ctime_ns,
             "source_root": str(self.source_root) if self.source_root is not None else None,
             "root_device": self.root_device,
             "root_inode": self.root_inode,
@@ -195,6 +276,9 @@ def _parse_intent(raw: object) -> Intent | None:
     committed = raw.get("committed", False)
     device = raw.get("device")
     inode = raw.get("inode")
+    source_size = raw.get("source_size")
+    source_mtime_ns = raw.get("source_mtime_ns")
+    source_ctime_ns = raw.get("source_ctime_ns")
     source_root_raw = raw.get("source_root")
     source_root = _bounded_absolute(source_root_raw) if source_root_raw is not None else None
     root_device = raw.get("root_device")
@@ -214,6 +298,19 @@ def _parse_intent(raw: object) -> Intent | None:
         or (inode is not None and (type(inode) is not int or inode < 0))
         or (device is None) != (inode is None)
         or any(
+            value is not None and type(value) is not int
+            for value in (source_size, source_mtime_ns, source_ctime_ns)
+        )
+        or (source_size is not None and source_size < 0)
+        or len(
+            {
+                source_size is None,
+                source_mtime_ns is None,
+                source_ctime_ns is None,
+            }
+        )
+        != 1
+        or any(
             value is not None and (type(value) is not int or value < 0)
             for value in (root_device, root_inode, parent_device, parent_inode)
         )
@@ -231,6 +328,7 @@ def _parse_intent(raw: object) -> Intent | None:
             not committed
             or not roots
             or device is not None
+            or source_size is not None
             or source_root is not None
             or root_device is not None
             or parent_device is not None
@@ -257,6 +355,9 @@ def _parse_intent(raw: object) -> Intent | None:
         committed=committed,
         device=device,
         inode=inode,
+        source_size=source_size,
+        source_mtime_ns=source_mtime_ns,
+        source_ctime_ns=source_ctime_ns,
         source_root=source_root,
         root_device=root_device,
         root_inode=root_inode,
@@ -355,6 +456,7 @@ class Store:
         self._fault = fault
         self._operation_descriptor: int | None = None
         self._operation_token: str | None = None
+        self._source_pin: file_io.PinnedPath | None = None
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
@@ -454,13 +556,30 @@ class Store:
                 raise RemovalJournalError(
                     "busy", "another wallpaper removal is still in progress"
                 ) from error
+            secured = os.fstat(descriptor)
+            current = lock_path.lstat()
+            if (
+                not stat.S_ISREG(secured.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or (secured.st_dev, secured.st_ino) != (opened.st_dev, opened.st_ino)
+                or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+                or secured.st_uid != os.getuid()
+                or current.st_uid != os.getuid()
+                or secured.st_nlink != 1
+                or current.st_nlink != 1
+                or stat.S_IMODE(secured.st_mode) != 0o600
+                or stat.S_IMODE(current.st_mode) != 0o600
+            ):
+                raise OSError(f"removal operation lock {lock_path} changed while it was secured")
         except RemovalJournalError:
             if descriptor is not None:
-                os.close(descriptor)
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
             raise
         except OSError as error:
             if descriptor is not None:
-                os.close(descriptor)
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
             raise RemovalJournalError(
                 "local-io", f"could not lock wallpaper removal operations: {error}"
             ) from error
@@ -473,12 +592,33 @@ class Store:
         if token is not None and token != self._operation_token:
             return
         descriptor = self._operation_descriptor
+        source_pin = self._source_pin
         self._operation_descriptor = None
         self._operation_token = None
+        self._source_pin = None
+        active_error = sys.exception()
+
+        def note(cleanup: str, error: OSError) -> None:
+            if active_error is not None:
+                active_error.add_note(f"also could not {cleanup}: {error}")
+
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError as error:
+                note("unlock the removal operation lease", error)
         finally:
-            os.close(descriptor)
+            try:
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    note("close the removal operation lease", error)
+            finally:
+                if source_pin is not None:
+                    try:
+                        source_pin.close()
+                    except OSError as error:
+                        note("close the prepared removal source pin", error)
 
     def operation_is_active(self) -> bool:
         """Whether a live process is between durable prepare and finish."""
@@ -501,6 +641,10 @@ class Store:
         self._release_operation_lease()
 
     def __del__(self) -> None:
+        source_pin = getattr(self, "_source_pin", None)
+        if source_pin is not None:
+            with contextlib.suppress(OSError):
+                source_pin.close()
         descriptor = getattr(self, "_operation_descriptor", None)
         if descriptor is not None:
             with contextlib.suppress(OSError):
@@ -539,11 +683,14 @@ class Store:
         token = secrets.token_hex(16)
         self._take_operation_lease(token)
         try:
-            status = item.path.lstat()
-            root_status = source_root.stat()
-            parent_status = item.path.parent.stat()
+            scoped_pin = file_io.pin_regular_path_beneath(source_root, item.path)
+            source_pin = scoped_pin.source
+            self._source_pin = source_pin
+            status = source_pin.status()
             confirmed = item.path.lstat()
-            if (status.st_dev, status.st_ino) != (confirmed.st_dev, confirmed.st_ino):
+            if not stat.S_ISREG(confirmed.st_mode) or file_io.file_fingerprint(
+                status
+            ) != file_io.file_fingerprint(confirmed):
                 raise OSError(f"{item.path} changed while its removal was being prepared")
         except (OSError, ValueError) as error:
             self._release_operation_lease(token)
@@ -560,11 +707,14 @@ class Store:
             token=token,
             device=status.st_dev,
             inode=status.st_ino,
+            source_size=status.st_size,
+            source_mtime_ns=status.st_mtime_ns,
+            source_ctime_ns=status.st_ctime_ns,
             source_root=source_root,
-            root_device=root_status.st_dev,
-            root_inode=root_status.st_ino,
-            parent_device=parent_status.st_dev,
-            parent_inode=parent_status.st_ino,
+            root_device=scoped_pin.root_identity[0],
+            root_inode=scoped_pin.root_identity[1],
+            parent_device=scoped_pin.parent_identity[0],
+            parent_inode=scoped_pin.parent_identity[1],
         )
 
         def insert(records: dict[str, Intent]) -> Intent:
@@ -587,6 +737,35 @@ class Store:
         except Exception:
             self._release_operation_lease(token)
             raise
+
+    def source_pin(self, intent: Intent) -> file_io.PinnedPath:
+        """Borrow the live prepare capability for this exact operation."""
+        pin = self._source_pin
+        if (
+            self._operation_token != intent.token
+            or pin is None
+            or pin.path != intent.path
+            or intent.source_identity is None
+            or intent.source_fingerprint is None
+        ):
+            raise RemovalJournalError(
+                "invalid-state",
+                "the prepared removal no longer owns its live source reference",
+            )
+        try:
+            if (
+                pin.identity != intent.source_identity
+                or pin.fingerprint != intent.source_fingerprint
+            ):
+                raise RemovalJournalError(
+                    "changed",
+                    f"{intent.path} changed after its removal was prepared",
+                )
+        except OSError as error:
+            raise RemovalJournalError(
+                "local-io", f"could not verify the prepared source reference: {error}"
+            ) from error
+        return pin
 
     def record_external(self, item: MediaItem, roots: Sequence[Path]) -> Intent:
         """Best-effort durable record for an already-confirmed external uninstall."""

@@ -559,7 +559,12 @@ def load(path: Path | None = None) -> dict[str, Pairing]:
     return records
 
 
-def save(records: Mapping[str, Pairing], path: Path | None = None) -> Path:
+def save(
+    records: Mapping[str, Pairing],
+    path: Path | None = None,
+    *,
+    replace_existing: bool = True,
+) -> Path:
     """Write the customizations atomically, and return where they went.
 
     An exclusively-created temporary in the same directory is atomically
@@ -581,7 +586,9 @@ def save(records: Mapping[str, Pairing], path: Path | None = None) -> Path:
     }
     try:
         state_file.write_atomic_text(
-            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            target,
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            replace_existing=replace_existing,
         )
     except OSError as error:
         raise PairingError(
@@ -1087,41 +1094,57 @@ class Store:
     ) -> _MutationResult:
         """Reload, rebase and optionally replace one authoring transaction."""
         target = self._path if self._path is not None else state_path()
-        with _mutation_lock(target):
-            records, fault = _read(target)
-            if fault is not None and refuse_fault:
-                raise PairingError(
-                    "invalid-state",
-                    f"cannot persist runtime health because {fault}; "
-                    "the unreadable pairings file was left untouched",
-                )
-            updated = dict(records)
-            result, changed = operation(updated)
-            if changed:
-                previous_fault = self._fault
+        try:
+            with _mutation_lock(target), state_file.observe(target) as observed:
+                records, fault = _read(target)
+                if fault is not None and refuse_fault:
+                    raise PairingError(
+                        "invalid-state",
+                        f"cannot persist runtime health because {fault}; "
+                        "the unreadable pairings file was left untouched",
+                    )
+                updated = dict(records)
+                result, changed = operation(updated)
+                if changed:
+                    previous_fault = self._fault
+                    self._fault = fault
+                    try:
+                        self._write(updated, observed=observed)
+                    except PairingError:
+                        self._fault = previous_fault if fault is None else fault
+                        raise
+                    fault = None
+                self._records = updated
                 self._fault = fault
-                try:
-                    self._write(updated)
-                except PairingError:
-                    self._fault = previous_fault if fault is None else fault
-                    raise
-                fault = None
-            self._records = updated
-            self._fault = fault
-            self._loaded = True
-            return result
+                self._loaded = True
+                return result
+        except PairingError:
+            raise
+        except OSError as error:
+            raise PairingError(
+                "local-io",
+                f"could not safely update pairings at {target}: {error.strerror or error}",
+            ) from error
 
-    def _write(self, records: Mapping[str, Pairing]) -> None:
+    def _write(
+        self,
+        records: Mapping[str, Pairing],
+        *,
+        observed: state_file.StateFileObservation,
+    ) -> None:
         target = self._path if self._path is not None else state_path()
-        if self._fault is not None:
+        recovering_fault = self._fault is not None
+        if recovering_fault:
             # Do not overwrite bytes we could not understand: they are
             # somebody's choices, in some form, and a copy costs nothing.
             try:
-                state_file.preserve_faulted(target)
+                state_file.preserve_faulted(target, observed=observed)
             except OSError as error:
                 raise PairingError(
                     "local-io",
                     f"could not preserve unreadable {target}: {error.strerror or error}",
                 ) from error
             self._fault = None
-        save(records, target)
+            save(records, target, replace_existing=False)
+        else:
+            save(records, target)

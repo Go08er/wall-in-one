@@ -13,13 +13,15 @@ from __future__ import annotations
 import os
 import random
 import subprocess
+import tempfile
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from wall_in_one import config
-from wall_in_one.library import pairing, pairings, scan, state_file, stills
+from wall_in_one import config, file_io, paths
+from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
@@ -167,7 +169,14 @@ def test_a_file_that_is_not_a_video_leaves_no_torn_still(root: Path, tmp_path: P
     with pytest.raises(stills.StillError):
         stills.generate(impostor, root)
     directory = pairing.still_directory(root)
-    assert not directory.exists() or list(directory.iterdir()) == []
+    assert not stills.destination(impostor, root).exists()
+    assert not any(path.name.endswith(".tmp.png") for path in directory.iterdir())
+    assert not any(path.name.startswith(".wall-in-one-capture-") for path in directory.iterdir())
+    retained = tuple((directory / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
+    tombstones = tuple(path for path in retained if path.is_file())
+    assert len(tombstones) == 1 and tombstones[0].stat().st_size == 0
+    directories = tuple(path for path in retained if path.is_dir())
+    assert len(directories) == 1 and tuple(directories[0].iterdir()) == ()
 
 
 def test_a_video_mutated_in_place_during_capture_cannot_publish(
@@ -198,6 +207,314 @@ def test_a_video_mutated_in_place_during_capture_cannot_publish(
 
     assert not target.exists()
     assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
+    assert not any(
+        path.name.startswith(".wall-in-one-capture-") for path in target.parent.iterdir()
+    )
+    retained = tuple((target.parent / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
+    tombstones = tuple(path for path in retained if path.is_file())
+    assert len(tombstones) == 1 and tombstones[0].stat().st_size == 0
+    directories = tuple(path for path in retained if path.is_dir())
+    assert len(directories) == 1 and tuple(directories[0].iterdir()) == ()
+
+
+def test_a_late_nonlocking_still_target_wins_without_being_overwritten(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    late = b"late non-participating writer"
+
+    def render_then_publish_late(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        target.write_bytes(late)
+        return ""
+
+    monkeypatch.setattr(stills, "_run", render_then_publish_late)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root)
+
+    assert target.read_bytes() == late
+
+
+def test_force_never_claims_a_preobserved_target_after_external_output_changes(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    target.parent.mkdir(parents=True)
+    original = b"pre-observed app still"
+    target.write_bytes(original)
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"precious")
+
+    def redirect_external_output(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.symlink_to(sentinel)
+        return ""
+
+    monkeypatch.setattr(stills, "_run", redirect_external_output)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root, force=True)
+
+    assert target.read_bytes() == original
+    assert sentinel.read_bytes() == b"precious"
+
+
+def test_force_preserves_a_late_replacement_of_the_frozen_target(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    target.parent.mkdir(parents=True)
+    original = b"pre-observed app still"
+    target.write_bytes(original)
+    saved = tmp_path / "saved-original-still"
+    late = b"late target generation"
+
+    def replace_target_after_render(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        target.rename(saved)
+        target.write_bytes(late)
+        return ""
+
+    monkeypatch.setattr(stills, "_run", replace_target_after_render)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root, force=True)
+
+    assert target.read_bytes() == late
+    assert saved.read_bytes() == original
+
+
+def test_force_preserves_an_in_place_mutation_of_the_frozen_target(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"pre-observed app still")
+    mutated = b"changed through an open writer"
+
+    def mutate_target_after_render(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        target.write_bytes(mutated)
+        return ""
+
+    monkeypatch.setattr(stills, "_run", mutate_target_after_render)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root, force=True)
+
+    assert target.read_bytes() == mutated
+
+
+def test_unrelated_still_directory_entries_are_preserved_during_capture_cleanup(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"source")
+
+    def add_extra_then_change_source(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        (pairing.still_directory(root) / "unrecognised").write_bytes(b"keep")
+        video.write_bytes(b"changed source")
+        return ""
+
+    monkeypatch.setattr(stills, "_run", add_extra_then_change_source)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root)
+
+    still_directory = pairing.still_directory(root)
+    unrecognised = still_directory / "unrecognised"
+    assert unrecognised.read_bytes() == b"keep"
+    retained = tuple((still_directory / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
+    retained_directories = tuple(path for path in retained if path.is_dir())
+    assert len(retained_directories) == 1
+    assert tuple(retained_directories[0].iterdir()) == ()
+    tombstones = tuple(path for path in retained if path.is_file())
+    assert len(tombstones) == 1 and tombstones[0].stat().st_size == 0
+
+
+def test_capture_cleanup_stays_in_the_pinned_target_directory_generation(
+    root: Path,
+) -> None:
+    target = pairing.still_directory(root) / "capture.png"
+    target.parent.mkdir(parents=True)
+    context = stills._pin_target_directory(root, target)
+    temporary = stills._private_image_temporary(target, context)
+    output_name = temporary.path.name
+    saved = target.parent.with_name("saved-automatic-stills")
+    target.parent.rename(saved)
+    target.parent.mkdir(mode=0o755)
+    sentinel = target.parent / "keep"
+    sentinel.write_bytes(b"replacement")
+
+    try:
+        temporary.close()
+    finally:
+        context.close()
+
+    assert sentinel.read_bytes() == b"replacement"
+    assert not (saved / output_name).exists()
+
+
+def test_capture_output_close_failure_still_releases_the_output_descriptor(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = pairing.still_directory(root) / "capture.png"
+    target.parent.mkdir(parents=True)
+    context = stills._pin_target_directory(root, target)
+    temporary = stills._private_image_temporary(target, context)
+    temporary.path.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+    temporary.retain_rendered()
+    temporary.mark_published()
+    output_pin = temporary.pin
+    assert output_pin is not None
+    output_descriptor = output_pin.descriptor
+    logical_path = temporary.logical_path
+    real_close = file_io.PinnedPath.close
+    injected = False
+
+    def fail_after_output_close(pin: file_io.PinnedPath) -> None:
+        nonlocal injected
+        is_output = pin is output_pin
+        real_close(pin)
+        if is_output and not injected:
+            injected = True
+            raise OSError("injected output close failure after release")
+
+    monkeypatch.setattr(file_io.PinnedPath, "close", fail_after_output_close)
+    try:
+        with pytest.raises(OSError, match="injected output close failure"):
+            temporary.close()
+    finally:
+        context.close()
+
+    assert injected
+    with pytest.raises(OSError):
+        os.fstat(output_descriptor)
+    assert logical_path.read_bytes() == b"\x89PNG\r\n\x1a\nrendered"
+
+
+def test_capture_mkstemp_handoff_replacement_is_never_treated_as_owned(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = pairing.still_directory(root) / "capture.png"
+    target.parent.mkdir(parents=True)
+    context = stills._pin_target_directory(root, target)
+    real_mkstemp = tempfile.mkstemp
+    saved = target.parent / "creation-time-output.png"
+    replacement: Path | None = None
+
+    def replace_before_return(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        nonlocal replacement
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        if kwargs.get("prefix") != ".capture.png.":
+            return descriptor, name
+        created = Path(name)
+        created.rename(saved)
+        created.write_bytes(b"unrelated replacement")
+        replacement = target.parent / created.name
+        return descriptor, name
+
+    monkeypatch.setattr(tempfile, "mkstemp", replace_before_return)
+    try:
+        with pytest.raises(file_io.PathChangedError):
+            stills._private_image_temporary(target, context)
+    finally:
+        context.close()
+
+    assert replacement is not None
+    assert replacement.read_bytes() == b"unrelated replacement"
+    assert saved.is_file() and saved.stat().st_size == 0
+
+
+def test_target_directory_replacement_cannot_redirect_video_publication(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    saved_directory = target.parent.with_name("saved-automatic-stills")
+    sentinel = b"replacement target"
+
+    def replace_target_directory(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        target.parent.rename(saved_directory)
+        target.parent.mkdir(mode=0o755)
+        target.write_bytes(sentinel)
+        return ""
+
+    monkeypatch.setattr(stills, "_run", replace_target_directory)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root)
+
+    assert target.read_bytes() == sentinel
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
+    assert (saved_directory / file_io.RETAINED_ENTRY_DIRECTORY).is_dir()
 
 
 # -- pairing the two -----------------------------------------------------
@@ -211,6 +528,338 @@ def test_generating_writes_a_sidecar_the_reader_understands(root: Path) -> None:
     video = make_video(root / "clip.mp4")
     still = stills.generate(video, root)
     assert pairing.read_sidecar(video) == still
+
+
+def test_a_late_pairing_sidecar_wins_without_being_overwritten(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = make_video(root / "clip.mp4")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    late = b'{"notes":"keep"}\n'
+    real_move = file_io.atomic_move_no_replace
+
+    def publish_late(
+        source: Path,
+        destination: Path,
+        **keywords: object,
+    ) -> None:
+        if destination.name == sidecar.name:
+            destination.write_bytes(late)
+        real_move(source, destination, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", publish_late)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root)
+
+    assert sidecar.read_bytes() == late
+    assert not stills.destination(video, root).exists()
+
+
+def test_target_rebind_during_sidecar_publication_rolls_back_the_new_sidecar(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    saved_directory = target.parent.with_name("saved-sidecar-target")
+    sentinel = b"replacement still"
+    real_record = stills._record_beside
+
+    def render(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        return ""
+
+    def rebind_then_record(
+        video_path: Path,
+        still: Path,
+        library_root: Path,
+        source: stills._SourceSnapshot,
+    ) -> object:
+        target.parent.rename(saved_directory)
+        target.parent.mkdir(mode=0o755)
+        target.write_bytes(sentinel)
+        return real_record(video_path, still, library_root, source)
+
+    monkeypatch.setattr(stills, "_record_beside", rebind_then_record)
+    monkeypatch.setattr(stills, "_run", render)
+
+    with pytest.raises(stills.StillError):
+        stills.generate(video, root)
+
+    assert target.read_bytes() == sentinel
+    assert not (saved_directory / target.name).exists()
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
+
+
+@pytest.mark.parametrize("reuse_existing", (False, True))
+def test_source_replacement_during_sidecar_publication_rolls_back_the_new_sidecar(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reuse_existing: bool,
+) -> None:
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source generation A")
+    target = stills.destination(video, root)
+    if reuse_existing:
+        target.parent.mkdir(parents=True)
+        existing_target = b"\x89PNG\r\n\x1a\nexisting"
+        target.write_bytes(existing_target)
+    old_source = root / "source-generation-a.mp4"
+    replacement = b"unrelated generation B"
+    real_record = stills._record_beside
+    swapped = False
+
+    def render(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        return ""
+
+    def replace_source_then_record(
+        video_path: Path,
+        still: Path,
+        library_root: Path,
+        source: stills._SourceSnapshot,
+    ) -> object:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            video_path.rename(old_source)
+            video_path.write_bytes(replacement)
+        return real_record(video_path, still, library_root, source)
+
+    monkeypatch.setattr(stills, "_record_beside", replace_source_then_record)
+    monkeypatch.setattr(stills, "_run", render)
+
+    with pytest.raises(stills.StillError, match="changed while its still was being made"):
+        stills.generate(video, root)
+
+    assert swapped
+    assert video.read_bytes() == replacement
+    assert old_source.read_bytes() == b"source generation A"
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
+    if reuse_existing:
+        assert target.read_bytes() == existing_target
+    else:
+        assert not target.exists()
+
+
+def test_video_parent_aba_renders_through_the_retained_source_descriptor(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir()
+    video = source_parent / "clip.mp4"
+    generation_a = b"source generation A"
+    video.write_bytes(generation_a)
+    saved_parent = tmp_path / "saved-source-parent"
+    replacement_parent = tmp_path / "replacement-source-parent"
+    rendered = b""
+
+    def render_during_parent_aba(
+        retained_video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        nonlocal rendered
+        del processes
+        source_parent.rename(saved_parent)
+        source_parent.mkdir()
+        video.write_bytes(b"unrelated generation B")
+        rendered = retained_video.read_bytes()
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\n" + rendered)
+        source_parent.rename(replacement_parent)
+        saved_parent.rename(source_parent)
+        return ""
+
+    monkeypatch.setattr(stills, "_run", render_during_parent_aba)
+
+    target = stills.generate(video, root)
+
+    assert rendered == generation_a
+    assert target.read_bytes().endswith(generation_a)
+    assert (replacement_parent / video.name).read_bytes() == b"unrelated generation B"
+
+
+def test_video_parent_aba_cannot_redirect_sidecar_publication(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_parent = root / "videos"
+    source_parent.mkdir(parents=True)
+    video = source_parent / "clip.mp4"
+    video.write_bytes(b"source generation A")
+    saved_parent = root / "saved-video-parent"
+    replacement_parent = root / "replacement-video-parent"
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_move = file_io.atomic_move_no_replace
+    raced = False
+
+    def render(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\ngenerated")
+        return ""
+
+    def rebind_parent_around_sidecar_move(
+        source: Path,
+        destination: Path,
+        **keywords: object,
+    ) -> None:
+        nonlocal raced
+        if destination.name == sidecar.name and not raced:
+            raced = True
+            source_parent.rename(saved_parent)
+            source_parent.mkdir()
+            video.write_bytes(b"unrelated generation B")
+            real_move(source, destination, **keywords)  # type: ignore[arg-type]
+            source_parent.rename(replacement_parent)
+            saved_parent.rename(source_parent)
+            return
+        real_move(source, destination, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", rebind_parent_around_sidecar_move)
+    monkeypatch.setattr(stills, "_run", render)
+
+    target = stills.generate(video, root)
+
+    assert raced
+    assert pairing.read_sidecar(video) == target
+    assert not (replacement_parent / sidecar.name).exists()
+
+
+def test_sidecar_directory_sync_failure_rolls_back_sidecar_and_fresh_still(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = make_video(root / "clip.mp4")
+    target = stills.destination(video, root)
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_sync = paths.fsync_directory
+    failed = False
+
+    def fail_sidecar_sync(directory: Path) -> None:
+        nonlocal failed
+        directory_status = directory.stat()
+        source_status = video.parent.stat()
+        same_directory = (directory_status.st_dev, directory_status.st_ino) == (
+            source_status.st_dev,
+            source_status.st_ino,
+        )
+        if sidecar.exists() and same_directory and not failed:
+            failed = True
+            raise OSError("injected sidecar directory fsync failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(paths, "fsync_directory", fail_sidecar_sync)
+
+    with pytest.raises(stills.StillError, match="fsync failure"):
+        stills.generate(video, root)
+
+    assert failed
+    assert not sidecar.exists()
+    assert not target.exists()
+
+
+def test_sidecar_publication_never_acquires_rollback_authority_over_a_replacement(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    chosen = root / "chosen.png"
+    chosen.write_bytes(b"image")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    saved = root / "saved-published-sidecar"
+    real_sync = paths.fsync_directory
+    swapped = False
+    expected = b""
+
+    def replace_after_publish(directory: Path) -> None:
+        nonlocal expected, swapped
+        if directory == sidecar.parent and sidecar.exists() and not swapped:
+            swapped = True
+            expected = sidecar.read_bytes()
+            sidecar.rename(saved)
+            sidecar.write_bytes(expected)
+        real_sync(directory)
+
+    monkeypatch.setattr(paths, "fsync_directory", replace_after_publish)
+
+    with pytest.raises(stills.StillError):
+        stills._write_sidecar_publication(video, chosen)
+
+    assert swapped
+    assert sidecar.read_bytes() == expected
+    assert saved.read_bytes() == expected
+
+
+def test_sidecar_staging_close_failure_releases_the_unreturned_public_pin(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    chosen = root / "chosen.png"
+    chosen.write_bytes(b"image")
+    real_dup = os.dup
+    real_close = file_io.PinnedPath.close
+    public_descriptor: int | None = None
+    injected = False
+
+    def record_public_duplicate(descriptor: int) -> int:
+        nonlocal public_descriptor
+        duplicated = real_dup(descriptor)
+        public_descriptor = duplicated
+        return duplicated
+
+    def fail_after_closing_staging(pin: file_io.PinnedPath) -> None:
+        nonlocal injected
+        staging = pin.path.name.startswith(f".{video.name}{pairing.SIDECAR_SUFFIX}.")
+        real_close(pin)
+        if staging and not injected:
+            injected = True
+            raise OSError("injected staging close failure after release")
+
+    monkeypatch.setattr(os, "dup", record_public_duplicate)
+    monkeypatch.setattr(file_io.PinnedPath, "close", fail_after_closing_staging)
+
+    with pytest.raises(stills.StillError, match="injected staging close failure"):
+        stills._write_sidecar_publication(video, chosen)
+
+    assert injected
+    assert public_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(public_descriptor)
 
 
 def test_existing_target_never_writes_a_sidecar_after_source_removal(
@@ -300,18 +949,22 @@ def test_generated_still_publication_syncs_its_directory(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     video = make_video(tmp_path / "clip.mp4")
-    synced: list[Path] = []
-    original = state_file.fsync_parent
+    target = stills.destination(video, root)
+    synced: list[tuple[int, int]] = []
+    original = paths.fsync_directory
 
-    def record(path: Path) -> None:
-        synced.append(path)
-        original(path)
+    def record(directory: Path) -> None:
+        status = directory.stat()
+        synced.append((status.st_dev, status.st_ino))
+        original(directory)
 
-    monkeypatch.setattr(state_file, "fsync_parent", record)
+    monkeypatch.setattr(paths, "fsync_directory", record)
 
-    target = stills.generate(video, root)
+    generated = stills.generate(video, root)
 
-    assert target in synced
+    target_directory = target.parent.stat()
+    assert generated == target
+    assert synced == [(target_directory.st_dev, target_directory.st_ino)]
 
 
 def test_legacy_predictable_image_temporary_cannot_redirect_ffmpeg(
@@ -436,8 +1089,15 @@ def test_scene_capture_replaces_the_managed_still_atomically(
     scene = _scene("1647046763", target, directory=installation)
     monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
 
-    def capture(_scene_id: str, destination: Path, *, size: tuple[int, int]) -> Path:
+    def capture(
+        _scene_id: str,
+        destination: Path,
+        *,
+        size: tuple[int, int],
+        prepared_output: bool,
+    ) -> Path:
         assert size == (2560, 1600)
+        assert prepared_output
         _png_header(destination, 3840, 2400)
         return destination
 
@@ -446,6 +1106,158 @@ def test_scene_capture_replaces_the_managed_still_atomically(
     assert stills.capture_scene(scene, root) == target
     assert stills._png_size(target) == (3840, 2400)
     assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
+
+
+def test_scene_capture_never_overwrites_a_late_target(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", directory=installation)
+    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    late = b"late non-participating scene still"
+
+    def capture(
+        _scene_id: str,
+        destination: Path,
+        *,
+        size: tuple[int, int],
+        prepared_output: bool,
+    ) -> Path:
+        assert size == (2560, 1600)
+        assert prepared_output
+        _png_header(destination, 3840, 2400)
+        target.write_bytes(late)
+        return destination
+
+    monkeypatch.setattr(scenes, "screenshot", capture)
+
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(scene, root)
+
+    assert target.read_bytes() == late
+
+
+def test_scene_target_directory_replacement_cannot_redirect_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", directory=installation)
+    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    saved_directory = target.parent.with_name("saved-scene-stills")
+    sentinel = b"replacement scene target"
+
+    def capture(
+        _scene_id: str,
+        destination: Path,
+        *,
+        size: tuple[int, int],
+        prepared_output: bool,
+    ) -> Path:
+        assert size == (2560, 1600)
+        assert prepared_output
+        _png_header(destination, 3840, 2400)
+        target.parent.rename(saved_directory)
+        target.parent.mkdir(mode=0o755)
+        target.write_bytes(sentinel)
+        return destination
+
+    monkeypatch.setattr(scenes, "screenshot", capture)
+
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(scene, root)
+
+    assert target.read_bytes() == sentinel
+    assert not (saved_directory / target.name).exists()
+
+
+def test_scene_source_change_after_publication_restores_the_prior_still(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    _png_header(target, 1270, 1537)
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", target, directory=installation)
+    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+
+    def capture(
+        _scene_id: str,
+        destination: Path,
+        *,
+        size: tuple[int, int],
+        prepared_output: bool,
+    ) -> Path:
+        assert size == (2560, 1600)
+        assert prepared_output
+        _png_header(destination, 3840, 2400)
+        return destination
+
+    real_publish = stills._publish_image
+
+    def change_source_after_publish(
+        temporary: stills._ImageTemporary,
+        published_target: Path,
+        target_access: Path,
+        target_context: file_io.PinnedDirectoryContext,
+        existing: stills._ExistingTarget | None,
+    ) -> stills._ImagePublication:
+        publication = real_publish(
+            temporary,
+            published_target,
+            target_access,
+            target_context,
+            existing,
+        )
+        (installation / "late-change").write_bytes(b"changed source directory")
+        return publication
+
+    monkeypatch.setattr(scenes, "screenshot", capture)
+    monkeypatch.setattr(stills, "_publish_image", change_source_after_publish)
+
+    with pytest.raises(stills.StillError, match="changed while its still was being made"):
+        stills.capture_scene(scene, root)
+
+    assert stills._png_size(target) == (1270, 1537)
+
+
+def test_scene_capture_preserves_an_in_place_target_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> None:
+    target = pairing.still_directory(root) / "1647046763.png"
+    _png_header(target, 1270, 1537)
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", target, directory=installation)
+    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    mutated = b"changed through an open writer"
+
+    def capture(
+        _scene_id: str,
+        destination: Path,
+        *,
+        size: tuple[int, int],
+        prepared_output: bool,
+    ) -> Path:
+        assert size == (2560, 1600)
+        assert prepared_output
+        _png_header(destination, 3840, 2400)
+        target.write_bytes(mutated)
+        return destination
+
+    monkeypatch.setattr(scenes, "screenshot", capture)
+
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(scene, root)
+
+    assert target.read_bytes() == mutated
 
 
 # -- pausing a video that has no still ------------------------------------

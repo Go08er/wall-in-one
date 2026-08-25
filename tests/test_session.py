@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +11,7 @@ from threading import Event
 
 import pytest
 
-from wall_in_one import config
+from wall_in_one import config, file_io, paths
 from wall_in_one.library import (
     favourites,
     manage,
@@ -20,11 +22,35 @@ from wall_in_one.library import (
     scan,
     schedules,
 )
-from wall_in_one.library.model import Kind, Library, MediaItem
+from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper.applier import Applier, ApplyError
 from wall_in_one.wallpaper.renderer import RendererError
+
+
+def _download_authority(
+    path: Path,
+    *,
+    expected_path: Path | None = None,
+) -> dict[str, object]:
+    contents = path.read_bytes()
+    status = path.stat()
+    return {
+        "schema": 1,
+        "plugin": "goober/wall-in-one",
+        "provider": "Wallhaven",
+        "path": str(path if expected_path is None else expected_path),
+        "bytes": len(contents),
+        "sha256": hashlib.sha256(contents).hexdigest(),
+        "media_generation": {
+            "device": status.st_dev,
+            "inode": status.st_ino,
+            "bytes": status.st_size,
+            "mtime_ns": status.st_mtime_ns,
+            "ctime_ns": status.st_ctime_ns,
+        },
+    }
 
 
 class FakeRenderer:
@@ -736,7 +762,7 @@ def test_an_applier_handed_in_is_left_as_its_owner_configured_it() -> None:
     assert fake.when_hidden == "play"
 
 
-def test_confirmed_workshop_uninstall_forgets_authoring_and_generated_still(
+def test_confirmed_workshop_uninstall_forgets_authoring_but_preserves_generated_still(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "wallpapers"
@@ -782,7 +808,7 @@ def test_confirmed_workshop_uninstall_forgets_authoring_and_generated_still(
     assert scene.path not in favourite_store.paths
     assert playlist_store.get(playlist.id) is not None
     assert playlist_store.get(playlist.id).entries == ()  # type: ignore[union-attr]
-    assert not generated.exists()
+    assert generated.exists(), "external cleanup cannot safely attribute an unpinned artifact"
     assert custom.is_file(), "a chosen representative is the user's file"
 
     # The stable Workshop id is no longer poisoned after reinstall.
@@ -1092,13 +1118,285 @@ def test_crash_after_local_delete_replays_durable_metadata_cleanup(
     assert survivor is not None and survivor.still is None
     assert reopened_playlists.get(playlist.id) is not None
     assert reopened_playlists.get(playlist.id).entries == ()  # type: ignore[union-attr]
-    assert not generated.exists()
+    assert generated.exists(), "crash replay cannot safely attribute an unpinned artifact"
     assert removals.Store.open(journal_path).records == ()
 
     # Reinstalling the same path cannot inherit the deleted item's Borked bit.
     source.write_bytes(b"reinstalled")
     assert not reopened_pairings.resolve(motion, (root,)).health.is_borked
     restarted.shutdown()
+
+
+def test_crash_after_safe_claim_restore_retains_media_metadata_and_journal(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "clip.mp4"
+    source.write_bytes(b"video")
+    motion = MediaItem(source, Kind.VIDEO, 5, 1)
+    favourite_path = tmp_path / "favourites.json"
+    pairing_path = tmp_path / "pairings.json"
+    playlist_path = tmp_path / "playlists.json"
+    journal_path = tmp_path / "pending-removals.json"
+    favourite_store = favourites.Store(path=favourite_path)
+    pairing_store = pairings.Store(path=pairing_path)
+    playlist_store = playlists.Store(path=playlist_path)
+    journal = removals.Store.open(journal_path)
+    favourite_store.add(source)
+    pairing_store.mark_borked(motion, "renderer crashed", "renderer-crash")
+    playlist = playlist_store.create("Saved")
+    playlist_store.add(playlist.id, source)
+
+    intent = journal.prepare(motion, (root,))
+    source_identity = intent.source_identity
+    source_fingerprint = intent.source_fingerprint
+    assert source_identity is not None
+    assert source_fingerprint is not None
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=source_identity,
+        operation_token=intent.token,
+        expected_fingerprint=source_fingerprint,
+        pinned_source=journal.source_pin(intent),
+    )
+    assert claim.restore()
+    # A same-filesystem restore advances ctime while retaining every
+    # rename-invariant field. Changing only the mode makes that distinction
+    # deterministic even on a filesystem with coarse timestamp granularity.
+    source.chmod(0o600)
+    restored = file_io.regular_file_fingerprint(source)
+    assert restored[:4] == source_fingerprint[:4]
+    assert restored != source_fingerprint
+    journal.close()
+    assert intent.original_generation_state() == "ambiguous"
+
+    reopened_pairings = pairings.Store.open(pairing_path)
+    reopened_favourites = favourites.Store.open(favourite_path)
+    reopened_playlists = playlists.Store.open(playlist_path)
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=reopened_favourites,
+        pairing_store=reopened_pairings,
+        playlist_store=reopened_playlists,
+        removal_store=removals.Store.open(journal_path),
+    )
+
+    failures = restarted.retry_removals()
+
+    assert "cannot prove whether" in " ".join(failures)
+    assert source.read_bytes() == b"video"
+    assert reopened_favourites.is_favourite(source)
+    assert reopened_pairings.health(pairings.Identity.of(motion)).is_borked
+    saved = reopened_playlists.get(playlist.id)
+    assert saved is not None and tuple(entry.path for entry in saved.entries) == (source,)
+    assert removals.Store.open(journal_path).records == (intent,)
+    restarted.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("trash", "ownership", "provider"),
+    (
+        (True, Ownership.USER, "local"),
+        (False, Ownership.MANAGED, "Wallhaven"),
+    ),
+)
+def test_removal_prepare_rejects_an_ancestor_symlink_outside_the_selected_root(
+    tmp_path: Path,
+    *,
+    trash: bool,
+    ownership: Ownership,
+    provider: str,
+) -> None:
+    root = tmp_path / "wallpapers"
+    parent = root / "album"
+    parent.mkdir(parents=True)
+    source = parent / "paper.png"
+    source.write_bytes(b"inside original")
+    item = MediaItem(
+        source,
+        Kind.STILL,
+        len(b"inside original"),
+        1,
+        ownership=ownership,
+        provider=provider,
+    )
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(item,)))
+    plan = session.prepare_removal_plan(item, trash=trash)
+
+    archived = tmp_path / "archived-album"
+    parent.rename(archived)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / source.name
+    outside_file.write_bytes(b"outside replacement")
+    parent.symlink_to(outside, target_is_directory=True)
+
+    result = plan.run()
+
+    assert not result.committed
+    assert result.error_kind == "local-io"
+    assert outside_file.read_bytes() == b"outside replacement"
+    assert (archived / source.name).read_bytes() == b"inside original"
+    assert removals.Store.open(journal_path).records == ()
+    assert not removals.Store.open(journal_path).operation_is_active()
+    session.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("trash", "ownership", "provider"),
+    (
+        (True, Ownership.USER, "local"),
+        (False, Ownership.MANAGED, "Wallhaven"),
+    ),
+)
+def test_live_removal_uses_pinned_context_after_root_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    trash: bool,
+    ownership: Ownership,
+    provider: str,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"prepared original")
+    replacement_root = tmp_path / "replacement-wallpapers"
+    replacement_root.mkdir()
+    replacement_source = replacement_root / source.name
+    replacement_source.hardlink_to(source)
+    original_sidecar = source.with_name(source.name + pairing.SIDECAR_SUFFIX)
+    original_sidecar.write_bytes(b"old pairing")
+    replacement_sidecar = replacement_source.with_name(
+        replacement_source.name + pairing.SIDECAR_SUFFIX
+    )
+    replacement_sidecar.write_bytes(b"replacement pairing")
+    if not trash:
+        source.with_name(source.name + ".wallhaven.json").write_text(
+            json.dumps(_download_authority(source)),
+            encoding="utf-8",
+        )
+        replacement_source.with_name(replacement_source.name + ".wallhaven.json").write_text(
+            json.dumps(_download_authority(replacement_source, expected_path=source)),
+            encoding="utf-8",
+        )
+    item = MediaItem(
+        source,
+        Kind.STILL,
+        len(b"prepared original"),
+        1,
+        ownership=ownership,
+        provider=provider,
+    )
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(item,)))
+    plan = session.prepare_removal_plan(item, trash=trash)
+    disconnected = tmp_path / "disconnected-drive"
+    real_source_pin = removals.Store.source_pin
+    swapped = False
+
+    def pin_then_replace(
+        store: removals.Store,
+        intent: removals.Intent,
+    ) -> file_io.PinnedPath:
+        nonlocal swapped
+        pin = real_source_pin(store, intent)
+        if not swapped:
+            root.rename(disconnected)
+            replacement_root.rename(root)
+            swapped = True
+        return pin
+
+    monkeypatch.setattr(removals.Store, "source_pin", pin_then_replace)
+    if not trash:
+        monkeypatch.setattr(
+            manage,
+            "_is_managed_on_disk",
+            lambda _path, **_kwargs: True,
+        )
+
+    result = plan.run()
+
+    assert result.committed
+    assert swapped
+    assert not (disconnected / source.name).exists()
+    assert not (disconnected / original_sidecar.name).exists()
+    assert source.read_bytes() == b"prepared original"
+    assert (root / replacement_sidecar.name).read_bytes() == b"replacement pairing"
+    assert result.physical is not None
+    if trash:
+        assert isinstance(result.physical, manage.Trashed)
+        assert result.physical.destination.read_bytes() == b"prepared original"
+    else:
+        assert isinstance(result.physical, manage.Removal)
+        assert source in result.physical.removed
+    assert removals.Store.open(journal_path).records == ()
+    session.shutdown()
+
+
+def test_committed_trash_sync_error_keeps_precommit_artifact_cleanup_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    video = root / "clip.mp4"
+    video.write_bytes(b"video")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text('{"still_path":"/nowhere"}', encoding="utf-8")
+    item = MediaItem(video, Kind.VIDEO, 5, 1)
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=favourites.Store(path=tmp_path / "favourites.json"),
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+        playlist_store=playlists.Store(path=tmp_path / "playlists.json"),
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(item,)))
+    plan = session.prepare_removal_plan(item, trash=True)
+    root_status = root.stat()
+    real_sync = paths.fsync_directory
+    failed = False
+
+    def fail_final_source_sync(directory: Path) -> None:
+        nonlocal failed
+        current = directory.stat()
+        if (
+            not failed
+            and not video.exists()
+            and (current.st_dev, current.st_ino) == (root_status.st_dev, root_status.st_ino)
+        ):
+            failed = True
+            raise OSError("injected final source-directory fsync failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(paths, "fsync_directory", fail_final_source_sync)
+
+    result = plan.run()
+
+    assert failed
+    assert result.committed
+    assert result.error_kind == "local-io"
+    assert isinstance(result.physical, manage.Trashed)
+    assert sidecar in result.physical.removed_artifacts
+    assert not sidecar.exists()
+    assert removals.Store.open(journal_path).records == ()
+    session.shutdown()
 
 
 def test_detached_removal_keeps_its_operation_lease_after_live_session_shutdown(
@@ -1142,6 +1440,183 @@ def test_detached_removal_keeps_its_operation_lease_after_live_session_shutdown(
     assert result.committed
     assert not removals.Store.open(journal_path).operation_is_active()
     assert not source.exists()
+
+
+def test_removal_pin_verification_failure_cancels_without_touching_the_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "personal.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(picture,)))
+    plan = session.prepare_removal_plan(picture, trash=True)
+
+    def refuse_pin(
+        _store: removals.Store,
+        _intent: removals.Intent,
+    ) -> file_io.PinnedPath:
+        raise removals.RemovalJournalError("changed", "injected pin mismatch")
+
+    monkeypatch.setattr(removals.Store, "source_pin", refuse_pin)
+
+    result = plan.run()
+
+    assert not result.committed
+    assert result.error_kind == "changed"
+    assert result.cancellation_failures == ()
+    assert source.read_bytes() == b"image"
+    assert removals.Store.open(journal_path).records == ()
+    assert not removals.Store.open(journal_path).operation_is_active()
+    session.shutdown()
+
+
+def test_restore_conflict_keeps_an_uncommitted_intent_and_both_replacements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "managed.png"
+    source.write_bytes(b"prepared A")
+    source.with_name(source.name + ".wallhaven.json").write_text(
+        json.dumps(_download_authority(source)),
+        encoding="utf-8",
+    )
+    item = MediaItem(source, Kind.STILL, len(b"prepared A"), 1)
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(item,)))
+    plan = session.prepare_removal_plan(item, trash=False)
+    original = root / "prepared-original.png"
+    real_rename = file_io._rename_noreplace
+    preserved: Path | None = None
+    raced = False
+
+    def move_replacement_then_reoccupy(current: Path, destination: Path) -> None:
+        nonlocal preserved, raced
+        if current.resolve() == source and not raced:
+            raced = True
+            preserved = destination.resolve()
+            current.rename(original)
+            current.write_bytes(b"replacement B")
+            real_rename(current, destination)
+            current.write_bytes(b"replacement C")
+            return
+        real_rename(current, destination)
+
+    monkeypatch.setattr(
+        manage,
+        "_is_managed_on_disk",
+        lambda _path, **_kwargs: True,
+    )
+    monkeypatch.setattr(file_io, "_rename_noreplace", move_replacement_then_reoccupy)
+
+    result = plan.run()
+
+    assert not result.committed
+    assert result.error_kind == "changed"
+    assert "pending removal record was retained" in result.error_message
+    assert preserved is not None
+    assert str(preserved) in result.error_message
+    assert source.read_bytes() == b"replacement C"
+    assert preserved.read_bytes() == b"replacement B"
+    assert original.read_bytes() == b"prepared A"
+    (intent,) = removals.Store.open(journal_path).records
+    assert not intent.committed
+    assert file_io.deletion_claim_directory(source, intent.token) / "entry" == preserved
+    assert not removals.Store.open(journal_path).operation_is_active()
+
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    failures = restarted.retry_removals()
+    assert str(preserved) in " ".join(failures)
+    assert removals.Store.open(journal_path).records == (intent,)
+    assert source.read_bytes() == b"replacement C"
+    assert preserved.read_bytes() == b"replacement B"
+    restarted.shutdown()
+    session.shutdown()
+
+
+def test_retry_consumes_an_exact_claim_retained_after_discard_and_restore_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "managed.png"
+    source.write_bytes(b"prepared A")
+    source.with_name(source.name + ".wallhaven.json").write_text(
+        json.dumps(_download_authority(source)),
+        encoding="utf-8",
+    )
+    item = MediaItem(source, Kind.STILL, len(b"prepared A"), 1)
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(item,)))
+    plan = session.prepare_removal_plan(item, trash=False)
+    real_discard = file_io.ClaimedPath.discard
+    failed = False
+
+    def fail_once_after_reoccupying_source(claim: file_io.ClaimedPath) -> None:
+        nonlocal failed
+        if claim.original == source and not failed:
+            failed = True
+            claim.original.write_bytes(b"replacement C")
+            raise PermissionError("injected claim unlink failure")
+        real_discard(claim)
+
+    monkeypatch.setattr(
+        manage,
+        "_is_managed_on_disk",
+        lambda _path, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        file_io.ClaimedPath,
+        "discard",
+        fail_once_after_reoccupying_source,
+    )
+
+    result = plan.run()
+
+    assert not result.committed
+    assert result.error_kind == "local-io"
+    assert "pending removal record was retained" in result.error_message
+    (intent,) = removals.Store.open(journal_path).records
+    claim = file_io.deletion_claim_directory(source, intent.token) / "entry"
+    assert claim.read_bytes() == b"prepared A"
+    assert source.read_bytes() == b"replacement C"
+
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        removal_store=removals.Store.open(journal_path),
+    )
+    assert restarted.retry_removals() == ()
+    assert removals.Store.open(journal_path).records == ()
+    assert not claim.exists()
+    assert source.read_bytes() == b"replacement C"
+    restarted.shutdown()
+    session.shutdown()
 
 
 def test_restart_cancels_prepared_intent_when_original_was_never_removed(
@@ -1233,8 +1708,71 @@ def test_uncommitted_missing_source_waits_for_the_same_library_filesystem(
         restarted.shutdown()
 
 
-def test_explicit_committed_removal_replays_after_the_source_root_changes(
+def test_replay_uses_pinned_source_context_if_root_is_replaced_after_check(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    favourite_path = tmp_path / "favourites.json"
+    pairing_path = tmp_path / "pairings.json"
+    playlist_path = tmp_path / "playlists.json"
+    journal_path = tmp_path / "pending-removals.json"
+    favourite_store = favourites.Store(path=favourite_path)
+    pairing_store = pairings.Store(path=pairing_path)
+    playlist_store = playlists.Store(path=playlist_path)
+    favourite_store.add(source)
+    pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
+    playlist = playlist_store.create("Saved")
+    playlist_store.add(playlist.id, source)
+    owner = removals.Store.open(journal_path)
+    owner.prepare(picture, (root,))
+    owner.close()
+
+    disconnected = tmp_path / "disconnected-drive"
+    real_pin = removals.Intent.pin_source_context
+    swapped = False
+
+    def pin_then_replace(
+        intent: removals.Intent,
+    ) -> file_io.PinnedDirectoryContext:
+        nonlocal swapped
+        context = real_pin(intent)
+        if not swapped:
+            root.rename(disconnected)
+            root.mkdir()
+            swapped = True
+        return context
+
+    monkeypatch.setattr(removals.Intent, "pin_source_context", pin_then_replace)
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=favourites.Store.open(favourite_path),
+        pairing_store=pairings.Store.open(pairing_path),
+        playlist_store=playlists.Store.open(playlist_path),
+        removal_store=removals.Store.open(journal_path),
+    )
+    try:
+        assert restarted.retry_removals() == ()
+        assert swapped
+        assert (disconnected / source.name).read_bytes() == b"image"
+        assert not source.exists()
+        assert restarted.favourites.is_favourite(source)
+        assert restarted.pairings.health(pairings.Identity.of(picture)).is_borked
+        saved = restarted.playlists.get(playlist.id)
+        assert saved is not None and tuple(entry.path for entry in saved.entries) == (source,)
+        assert restarted.removal_journal.records == ()
+    finally:
+        restarted.shutdown()
+
+
+def test_replay_consumes_claim_through_pinned_context_after_root_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "wallpapers"
     root.mkdir()
@@ -1247,11 +1785,31 @@ def test_explicit_committed_removal_replays_after_the_source_root_changes(
     pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
     owner = removals.Store.open(journal_path)
     intent = owner.prepare(picture, (root,))
-    source.unlink()
-    committed = owner.mark_committed(intent)
-    owner.finish_operation(committed)
-    root.rename(tmp_path / "disconnected-drive")
-    root.mkdir()
+    assert intent.source_identity is not None
+    assert intent.source_fingerprint is not None
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=intent.source_identity,
+        operation_token=intent.token,
+        expected_fingerprint=intent.source_fingerprint,
+        pinned_source=owner.source_pin(intent),
+    )
+    claim.close()
+    owner.close()
+
+    disconnected = tmp_path / "disconnected-drive"
+    claim_name = file_io.deletion_claim_directory(source, intent.token).name
+    real_pin = removals.Intent.pin_source_context
+
+    def pin_then_replace(
+        pending: removals.Intent,
+    ) -> file_io.PinnedDirectoryContext:
+        context = real_pin(pending)
+        root.rename(disconnected)
+        root.mkdir()
+        return context
+
+    monkeypatch.setattr(removals.Intent, "pin_source_context", pin_then_replace)
     restarted = Session(
         replace(config.Settings(), roots=(root,)).validated(),
         applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
@@ -1260,8 +1818,53 @@ def test_explicit_committed_removal_replays_after_the_source_root_changes(
     )
     try:
         assert restarted.retry_removals() == ()
+        retained_claim = disconnected / claim_name
+        assert retained_claim.is_dir()
+        assert tuple(retained_claim.iterdir()) == ()
         assert not restarted.pairings.health(pairings.Identity.of(picture)).is_borked
         assert restarted.removal_journal.records == ()
+    finally:
+        restarted.shutdown()
+
+
+def test_explicit_committed_removal_replays_after_the_source_root_changes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "paper.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    pairing_path = tmp_path / "pairings.json"
+    journal_path = tmp_path / "pending-removals.json"
+    pairing_store = pairings.Store(path=pairing_path)
+    pairing_store.mark_borked(picture, "renderer crashed", "renderer-crash")
+    sidecar = source.with_name(source.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_bytes(b"old pairing")
+    owner = removals.Store.open(journal_path)
+    intent = owner.prepare(picture, (root,))
+    source.unlink()
+    committed = owner.mark_committed(intent)
+    owner.finish_operation(committed)
+    disconnected = tmp_path / "disconnected-drive"
+    root.rename(disconnected)
+    root.mkdir()
+    replacement_sidecar = source.with_name(source.name + pairing.SIDECAR_SUFFIX)
+    replacement_sidecar.write_bytes(b"replacement pairing")
+    restarted = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        pairing_store=pairings.Store.open(pairing_path),
+        removal_store=removals.Store.open(journal_path),
+    )
+    try:
+        failures = restarted.retry_removals()
+
+        assert failures == ()
+        assert not restarted.pairings.health(pairings.Identity.of(picture)).is_borked
+        assert restarted.removal_journal.records == ()
+        assert (disconnected / sidecar.name).read_bytes() == b"old pairing"
+        assert replacement_sidecar.read_bytes() == b"replacement pairing"
     finally:
         restarted.shutdown()
 

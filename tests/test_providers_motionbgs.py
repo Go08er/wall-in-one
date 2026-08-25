@@ -18,7 +18,9 @@ from tests.test_providers_fakes import (
     mp4_bytes,
     names_in,
 )
+from wall_in_one import file_io
 from wall_in_one.library.model import Kind
+from wall_in_one.providers import download as download_module
 from wall_in_one.providers import http, motionbgs
 from wall_in_one.providers.base import (
     CancellationProbe,
@@ -91,6 +93,11 @@ def provider(routes: dict[str, Reply | list[Reply]]) -> tuple[motionbgs.MotionBg
         ),
         client,
     )
+
+
+def published_names(root: Path) -> set[str]:
+    """Managed entries other than exact-inode cleanup residue."""
+    return names_in(managed(root)) - {file_io.RETAINED_ENTRY_DIRECTORY}
 
 
 # -- URL admission -------------------------------------------------------
@@ -504,6 +511,61 @@ def test_a_download_installs_media_marker_and_sidecar(tmp_path: Path) -> None:
     assert sidecar["quality"] == "hd"
     assert sidecar["sha256"] == result.sha256
     assert sidecar["bytes"] == result.size
+    status = result.path.stat()
+    assert sidecar["media_generation"] == {
+        "device": status.st_dev,
+        "inode": status.st_ino,
+        "bytes": status.st_size,
+        "mtime_ns": status.st_mtime_ns,
+        "ctime_ns": status.st_ctime_ns,
+    }
+
+
+def test_validation_refuses_a_public_path_swap_even_when_the_original_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_bytes = mp4_bytes(b"\x11" * 64)
+    replacement_bytes = mp4_bytes(b"\x22" * 64)
+    engine, _ = provider(
+        download_routes(**{MEDIA_URL: Reply(body=original_bytes, content_type="video/mp4")})
+    )
+    validate = motionbgs.validate_mp4
+
+    def validate_while_replaced(
+        path: Path,
+        content_type: str,
+        *,
+        cancelled: CancellationProbe | None = None,
+    ) -> tuple[int, str]:
+        public = Path(str(path))
+        retained = public.with_name(public.name + ".retained")
+        public.rename(retained)
+        public.write_bytes(replacement_bytes)
+        try:
+            return validate(path, content_type, cancelled=cancelled)
+        finally:
+            public.unlink()
+            retained.rename(public)
+
+    monkeypatch.setattr(motionbgs, "validate_mp4", validate_while_replaced)
+
+    with pytest.raises(ProviderError) as caught:
+        engine.download(candidate(), tmp_path)
+
+    assert caught.value.kind == "local-io"
+    directory = managed(tmp_path)
+    stages = tuple(
+        entry for entry in directory.iterdir() if entry.name.startswith(http.STAGING_PREFIX)
+    )
+    assert len(stages) == 1 and stages[0].read_bytes() == original_bytes
+    assert names_in(directory) - {file_io.RETAINED_ENTRY_DIRECTORY} == {
+        MOTIONBGS_LOCATION.marker_name,
+        stages[0].name,
+    }
+    retained = directory / file_io.RETAINED_ENTRY_DIRECTORY
+    assert retained.is_dir() and tuple(retained.iterdir())
+    assert download_module._STAGED_FILES == {}
 
 
 def test_shutdown_after_transfer_cancels_validation_and_installs_nothing(
@@ -547,7 +609,7 @@ def test_shutdown_after_transfer_cancels_validation_and_installs_nothing(
         pool.shutdown(wait=True, cancel_futures=True)
 
     assert caught.value.kind == "cancelled"
-    assert names_in(managed(tmp_path)) == {MOTIONBGS_LOCATION.marker_name}
+    assert published_names(tmp_path) == {MOTIONBGS_LOCATION.marker_name}
 
 
 def test_a_download_redirected_to_another_media_id_installs_nothing(tmp_path: Path) -> None:
@@ -564,7 +626,7 @@ def test_a_download_redirected_to_another_media_id_installs_nothing(tmp_path: Pa
     with pytest.raises(ProviderError) as caught:
         engine.download(candidate(), tmp_path)
     assert caught.value.kind == "redirects"
-    assert names_in(managed(tmp_path)) == {MOTIONBGS_LOCATION.marker_name}
+    assert published_names(tmp_path) == {MOTIONBGS_LOCATION.marker_name}
 
 
 def test_a_download_redirected_off_origin_installs_nothing(tmp_path: Path) -> None:
@@ -576,7 +638,7 @@ def test_a_download_redirected_off_origin_installs_nothing(tmp_path: Path) -> No
     with pytest.raises(ProviderError) as caught:
         engine.download(candidate(), tmp_path)
     assert caught.value.kind == "invalid-url"
-    assert names_in(managed(tmp_path)) == {MOTIONBGS_LOCATION.marker_name}
+    assert published_names(tmp_path) == {MOTIONBGS_LOCATION.marker_name}
 
 
 @pytest.mark.parametrize(
@@ -594,7 +656,7 @@ def test_bad_download_bytes_never_reach_the_library(
     with pytest.raises(ProviderError) as caught:
         engine.download(candidate(), tmp_path)
     assert caught.value.kind == kind
-    assert names_in(managed(tmp_path)) == {MOTIONBGS_LOCATION.marker_name}
+    assert published_names(tmp_path) == {MOTIONBGS_LOCATION.marker_name}
 
 
 def test_an_existing_file_is_never_replaced(tmp_path: Path) -> None:

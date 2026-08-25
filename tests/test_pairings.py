@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one import file_io
 from wall_in_one.library import pairing, pairings, state_file, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.pairings import (
@@ -552,7 +553,9 @@ def test_the_write_is_a_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "first" in observed[0]
 
 
-def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_write_leaves_only_inert_private_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def explode(_source: object, _destination: object) -> None:
         raise OSError("no space left on device")
 
@@ -563,7 +566,12 @@ def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.Mon
             tmp_path / "pairings.json",
         )
     assert caught.value.kind == "local-io"
-    assert list(tmp_path.iterdir()) == []
+    retained = tmp_path / file_io.RETAINED_ENTRY_DIRECTORY
+    assert set(tmp_path.iterdir()) == {retained}
+    residues = tuple(retained.iterdir())
+    assert len(residues) == 2
+    assert any(path.is_file() and path.stat().st_size == 0 for path in residues)
+    assert any(path.is_dir() and tuple(path.iterdir()) == () for path in residues)
 
 
 def test_a_store_write_failure_does_not_change_its_in_memory_record(
@@ -670,6 +678,102 @@ def test_runtime_health_refuses_a_fault_that_appeared_after_store_open(tmp_path:
     assert not target.with_name(target.name + pairings.BROKEN_SUFFIX).exists()
 
 
+def test_a_valid_manual_repair_after_the_fault_read_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "pairings.json"
+    target.write_text("not json", encoding="utf-8")
+    store = Store.open(target)
+    manual_item = item(png(tmp_path / "manual.png"))
+    app_item = item(png(tmp_path / "app.png"))
+    manual_identity = Identity.of(manual_item)
+    manual = Pairing(
+        identity=manual_identity,
+        palette=PalettePolicy(kind=pairings.KEEP),
+        customized=True,
+    )
+    preserve = state_file.preserve_faulted
+
+    def repair_then_preserve(
+        path: Path,
+        *,
+        observed: state_file.StateFileObservation,
+    ) -> Path:
+        pairings.save({manual_identity.key: manual}, path)
+        return preserve(path, observed=observed)
+
+    monkeypatch.setattr(state_file, "preserve_faulted", repair_then_preserve)
+
+    with pytest.raises(PairingError) as caught:
+        store.choose_palette(app_item, PalettePolicy(kind=pairings.KEEP))
+
+    assert caught.value.kind == "local-io"
+    assert Store.open(target).get(manual_identity) == manual
+    assert not target.with_name(target.name + pairings.BROKEN_SUFFIX).exists()
+
+
+def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "pairings.json"
+    original = "not json"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+    manual_item = item(png(tmp_path / "manual.png"))
+    app_item = item(png(tmp_path / "app.png"))
+    manual_identity = Identity.of(manual_item)
+    manual = Pairing(
+        identity=manual_identity,
+        palette=PalettePolicy(kind=pairings.KEEP),
+        customized=True,
+    )
+    save = pairings.save
+
+    def repair_then_save(
+        updated: dict[str, Pairing],
+        path: Path | None = None,
+        *,
+        replace_existing: bool = True,
+    ) -> Path:
+        assert path == target
+        assert not replace_existing
+        save({manual_identity.key: manual}, target)
+        return save(updated, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(pairings, "save", repair_then_save)
+
+    with pytest.raises(PairingError) as caught:
+        store.choose_palette(app_item, PalettePolicy(kind=pairings.KEEP))
+
+    assert caught.value.kind == "local-io"
+    assert store.fault is not None
+    assert Store.open(target).get(manual_identity) == manual
+    assert target.with_name(target.name + pairings.BROKEN_SUFFIX).read_text() == original
+
+
+def test_state_observation_failure_keeps_the_pairings_error_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "pairings.json"
+    picture = item(png(tmp_path / "paper.png"))
+    store = Store(path=target)
+
+    def fail_observation(_path: Path) -> None:
+        raise OSError("injected observation failure")
+
+    monkeypatch.setattr(state_file, "observe", fail_observation)
+
+    with pytest.raises(PairingError) as caught:
+        store.choose_palette(picture, PalettePolicy(kind=pairings.KEEP))
+
+    assert caught.value.kind == "local-io"
+    assert "injected observation failure" in str(caught.value)
+    assert not target.exists()
+
+
 def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -678,7 +782,8 @@ def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     target.write_text(original, encoding="utf-8")
     store = Store.open(target)
 
-    def fail(_path: Path) -> Path:
+    def fail(_path: Path, *, observed: state_file.StateFileObservation) -> Path:
+        assert observed.present
         raise OSError("injected relocation failure")
 
     monkeypatch.setattr(state_file, "preserve_faulted", fail)

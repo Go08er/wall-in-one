@@ -230,6 +230,67 @@ def test_a_fault_which_appears_after_open_is_still_preserved(tmp_path: Path) -> 
     assert Store.open(target).playlist_for("eDP-1") == "Quiet"
 
 
+def test_a_valid_manual_repair_after_the_fault_read_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "displays.json"
+    target.write_text("{not json", encoding="utf-8")
+    store = Store.open(target)
+    manual = {"DP-2": "Manual"}
+    preserve = state_file.preserve_faulted
+
+    def repair_then_preserve(
+        path: Path,
+        *,
+        observed: state_file.StateFileObservation,
+    ) -> Path:
+        displays.save(manual, path)
+        return preserve(path, observed=observed)
+
+    monkeypatch.setattr(state_file, "preserve_faulted", repair_then_preserve)
+
+    with pytest.raises(DisplayError) as caught:
+        store.assign("eDP-1", "App")
+
+    assert caught.value.kind == "local-io"
+    assert Store.open(target).all() == (("DP-2", "Manual"),)
+    assert not target.with_name(target.name + displays.BROKEN_SUFFIX).exists()
+
+
+def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "displays.json"
+    original = "{not json"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+    manual = {"DP-2": "Manual"}
+    save = displays.save
+
+    def repair_then_save(
+        updated: dict[str, str],
+        path: Path | None = None,
+        *,
+        replace_existing: bool = True,
+    ) -> Path:
+        assert path == target
+        assert not replace_existing
+        save(manual, target)
+        return save(updated, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(displays, "save", repair_then_save)
+
+    with pytest.raises(DisplayError) as caught:
+        store.assign("eDP-1", "App")
+
+    assert caught.value.kind == "local-io"
+    assert store.fault is not None
+    assert Store.open(target).all() == (("DP-2", "Manual"),)
+    assert target.with_name(target.name + displays.BROKEN_SUFFIX).read_text() == original
+
+
 def test_a_symlinked_mutation_lock_is_reported_without_touching_its_target(
     tmp_path: Path,
 ) -> None:
@@ -274,7 +335,8 @@ def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     store = Store.open(target)
     target.write_text(original, encoding="utf-8")
 
-    def fail(_path: Path) -> Path:
+    def fail(_path: Path, *, observed: state_file.StateFileObservation) -> Path:
+        assert observed.present
         raise OSError("injected relocation failure")
 
     monkeypatch.setattr(state_file, "preserve_faulted", fail)

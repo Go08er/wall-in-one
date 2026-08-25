@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -35,11 +36,26 @@ def _install(
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / name
     if media:
-        target.write_bytes(b"not really an image")
+        contents = b"not really an image"
+        target.write_bytes(contents)
     document = dict(payload)
     document.setdefault("schema", 1)
     document.setdefault("plugin", "goober/wall-in-one")
     document.setdefault("path", str(target))
+    if media:
+        status = target.stat()
+        document.setdefault("bytes", len(contents))
+        document.setdefault("sha256", hashlib.sha256(contents).hexdigest())
+        document.setdefault(
+            "media_generation",
+            {
+                "device": status.st_dev,
+                "inode": status.st_ino,
+                "bytes": status.st_size,
+                "mtime_ns": status.st_mtime_ns,
+                "ctime_ns": status.st_ctime_ns,
+            },
+        )
     (directory / f"{name}{suffix}").write_text(json.dumps(document), encoding="utf-8")
     return target
 
@@ -70,13 +86,8 @@ def test_the_sidecars_provider_casing_does_not_matter(tmp_path: Path) -> None:
     assert owned.read([tmp_path]).holds(_candidate())
 
 
-def test_an_old_motionbgs_sidecar_matches_on_its_page(tmp_path: Path) -> None:
-    """Sidecars written before `id` was recorded still have to be recognised.
-
-    MotionBGS never wrote one, so every download that predates this module is
-    matchable only by its source page. Dropping them would mean the browser
-    forgetting everything the user had already downloaded.
-    """
+def test_a_bound_motionbgs_sidecar_without_an_id_matches_on_its_page(tmp_path: Path) -> None:
+    """MotionBGS records without an id remain matchable by source page."""
     installed = _install(
         tmp_path / "MotionBGS",
         "misty-forest.mp4",

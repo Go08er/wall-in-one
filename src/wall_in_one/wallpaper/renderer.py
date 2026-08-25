@@ -11,17 +11,19 @@ what `ALL` means to mpvpaper.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
 import signal
 import socket
 import subprocess
+import tempfile
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.wallpaper import outputs
 
 #: mpvpaper's selector for every connected output.
@@ -56,6 +58,7 @@ MAX_VOLUME: Final = 100
 
 #: How long to wait for a polite shutdown before insisting.
 TERMINATE_TIMEOUT: Final = 3.0
+PROCESS_GROUP_POLL_SECONDS: Final = 0.05
 
 #: mpv IPC replies are small; this only stops a wedged socket eating memory.
 MAX_IPC_REPLY_BYTES: Final = 64 * 1024
@@ -72,6 +75,117 @@ class RendererError(Exception):
 
 class MpvpaperUnavailableError(RendererError):
     """mpvpaper is not installed."""
+
+
+def _signal_process_group(pgid: int, requested: signal.Signals) -> None:
+    """Signal the retained process group, tolerating an already-dead group."""
+    try:
+        os.killpg(pgid, requested)
+    except ProcessLookupError:
+        return
+    except OSError as error:
+        raise RendererError(f"cannot signal mpvpaper process group {pgid}: {error}") from error
+
+
+def _process_group_exists(pgid: int) -> bool:
+    """Whether the retained process-group identity still names any process."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It still exists even when a changed credential would forbid a signal.
+        return True
+    except OSError as error:
+        raise RendererError(f"cannot inspect mpvpaper process group {pgid}: {error}") from error
+    return True
+
+
+def _wait_for_process_group_shutdown(
+    process: subprocess.Popen[bytes], pgid: int, timeout: float
+) -> tuple[bool, bool]:
+    """Boundedly reap the leader and prove that every group member is gone."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    try:
+        leader_reaped = process.poll() is not None
+    except OSError as error:
+        raise RendererError(f"cannot inspect mpvpaper while stopping it: {error}") from error
+
+    while True:
+        group_gone = not _process_group_exists(pgid)
+        if leader_reaped and group_gone:
+            return True, True
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return leader_reaped, group_gone
+        interval = min(PROCESS_GROUP_POLL_SECONDS, remaining)
+        if leader_reaped:
+            time.sleep(interval)
+            continue
+        try:
+            process.wait(timeout=interval)
+        except subprocess.TimeoutExpired:
+            pass
+        except OSError as error:
+            raise RendererError(f"cannot reap mpvpaper while stopping it: {error}") from error
+        else:
+            leader_reaped = True
+
+
+def _stop_process_group(process: subprocess.Popen[bytes], pgid: int) -> None:
+    """Stop one exact process group or fail without surrendering ownership."""
+    _signal_process_group(pgid, signal.SIGTERM)
+    graceful_error: RendererError | None = None
+    try:
+        leader_reaped, group_gone = _wait_for_process_group_shutdown(
+            process, pgid, TERMINATE_TIMEOUT
+        )
+    except RendererError as error:
+        # A broken wait/probe is not evidence of death.  Still make the bounded
+        # best effort to stop the owned group, then report the lost proof.
+        graceful_error = error
+        leader_reaped = group_gone = False
+
+    if graceful_error is None and leader_reaped and group_gone:
+        return
+
+    _signal_process_group(pgid, signal.SIGKILL)
+    try:
+        leader_reaped, group_gone = _wait_for_process_group_shutdown(
+            process, pgid, TERMINATE_TIMEOUT
+        )
+    except RendererError as error:
+        raise RendererError(f"cannot confirm mpvpaper shutdown: {error}") from error
+
+    if graceful_error is not None:
+        raise RendererError(
+            f"cannot confirm mpvpaper shutdown after an earlier wait failure: {graceful_error}"
+        ) from graceful_error
+    if not group_gone:
+        raise RendererError(f"mpvpaper process group {pgid} did not exit after SIGKILL")
+    if not leader_reaped:
+        raise RendererError("mpvpaper did not exit after SIGKILL")
+
+
+@dataclass(slots=True)
+class _SocketNamespace:
+    """One exact private directory retained for an mpv IPC lifetime."""
+
+    directory: Path
+    pin: file_io.PinnedPath = field(repr=False)
+
+    @property
+    def logical_socket(self) -> Path:
+        return self.directory / "ipc.sock"
+
+    @property
+    def access_socket(self) -> Path:
+        return Path("/proc/self/fd") / str(self.pin.descriptor) / "ipc.sock"
+
+    @property
+    def writer_socket(self) -> Path:
+        return Path("/proc") / str(os.getpid()) / "fd" / str(self.pin.descriptor) / "ipc.sock"
 
 
 def is_available() -> bool:
@@ -102,8 +216,9 @@ class Renderer:
         self.muted = muted
         self.volume = volume
         self._process: subprocess.Popen[bytes] | None = None
+        self._pgid: int | None = None
         self._video: Path | None = None
-        self._socket: Path | None = None
+        self._socket: _SocketNamespace | None = None
 
     # -- state -----------------------------------------------------------
 
@@ -119,7 +234,7 @@ class Renderer:
     @property
     def ipc_socket(self) -> Path | None:
         """mpv's IPC socket, if one could be created."""
-        return self._socket if self.is_running else None
+        return self._socket.access_socket if self.is_running and self._socket is not None else None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -154,12 +269,53 @@ class Renderer:
             options.append(f"input-ipc-server={ipc_socket}")
         return " ".join(options)
 
-    def _socket_path(self) -> Path | None:
-        candidate = paths.runtime_dir() / f"{paths.APP_ID}-mpv.sock"
-        if len(os.fsencode(candidate)) > MAX_SOCKET_PATH_BYTES:
+    def _allocate_socket_path(self) -> _SocketNamespace | None:
+        """Reserve a private namespace for one mpv IPC socket.
+
+        A fixed public pathname would need to decide whether an entry left
+        there belongs to an old renderer.  A fresh mode-0700 directory avoids
+        that destructive guess entirely and lets an old socket remain merely
+        stale rather than making an unrelated replacement disposable.
+        """
+        try:
+            directory = Path(
+                tempfile.mkdtemp(prefix=f".{paths.APP_ID}-mpv-", dir=paths.runtime_dir())
+            )
+        except OSError:
+            # IPC is optional; wallpaper playback still works without it.
             return None
-        candidate.unlink(missing_ok=True)
-        return candidate
+        namespace: _SocketNamespace | None = None
+        try:
+            created = directory.lstat()
+            pin = file_io.pin_directory_path(
+                directory,
+                expected_identity=(created.st_dev, created.st_ino),
+                require_private=True,
+            )
+            namespace = _SocketNamespace(directory, pin)
+            if len(os.fsencode(namespace.writer_socket)) <= MAX_SOCKET_PATH_BYTES:
+                return namespace
+        except OSError:
+            pass
+        if namespace is not None:
+            self._cleanup_socket_path(namespace)
+        # If the directory could not be pinned, its random name is not enough
+        # authority to remove whatever now occupies it.
+        return None
+
+    @staticmethod
+    def _cleanup_socket_path(namespace: _SocketNamespace | None) -> None:
+        """Release the capability without treating a random name as ownership.
+
+        Linux cannot create a directory and return its descriptor atomically.
+        Even a random mode-0700 name can therefore be replaced before it is
+        pinned.  The descriptor keeps later socket access on one exact
+        directory generation, but it does not authorize deleting or moving
+        that directory.  Leaving the now-inert namespace is the safe outcome.
+        """
+        if namespace is None:
+            return
+        namespace.pin.close()
 
     def start(self, video: Path) -> None:
         """Play ``video``, replacing whatever was playing."""
@@ -169,20 +325,22 @@ class Renderer:
             raise RendererError(f"no such video: {video}")
 
         self.stop()
-        ipc_socket = self._socket_path()
-        command = ["mpvpaper", "--layer", self.layer]
-        if self.when_hidden == "pause":
-            command.append("--auto-pause")
-        elif self.when_hidden == "stop":
-            command.append("--auto-stop")
-        refresh_hz = None
-        if self.interpolation != "off":
-            refresh_hz = outputs.unambiguous_refresh_hz(
-                outputs.discover(), "" if self.output == ALL_OUTPUTS else self.output
-            )
-        command += ["-o", self._mpv_options(ipc_socket, refresh_hz), self.output, str(video)]
-
+        ipc_namespace = self._allocate_socket_path()
+        handed_off = False
         try:
+            command = ["mpvpaper", "--layer", self.layer]
+            if self.when_hidden == "pause":
+                command.append("--auto-pause")
+            elif self.when_hidden == "stop":
+                command.append("--auto-stop")
+            refresh_hz = None
+            if self.interpolation != "off":
+                refresh_hz = outputs.unambiguous_refresh_hz(
+                    outputs.discover(), "" if self.output == ALL_OUTPUTS else self.output
+                )
+            ipc_socket = ipc_namespace.writer_socket if ipc_namespace is not None else None
+            command += ["-o", self._mpv_options(ipc_socket, refresh_hz), self.output, str(video)]
+
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -194,37 +352,41 @@ class Renderer:
             )
         except OSError as error:
             raise RendererError(f"cannot start mpvpaper: {error}") from error
-
-        self._process = process
-        self._video = video
-        self._socket = ipc_socket
+        else:
+            self._process = process
+            # start_new_session makes the child both session leader and group
+            # leader.  Retain that identity now: querying it after the leader
+            # exits loses the descendants which are precisely what stop owns.
+            self._pgid = process.pid
+            self._video = video
+            self._socket = ipc_namespace
+            handed_off = True
+        finally:
+            if not handed_off:
+                self._cleanup_socket_path(ipc_namespace)
 
     def stop(self) -> None:
         """Stop playback. Safe to call when nothing is running."""
         process = self._process
+        socket_namespace = self._socket
+        if process is not None:
+            # All successful starts set this alongside the process.  Falling
+            # back to its pid keeps manually injected/legacy state safe too;
+            # store it before any fallible work so a failed stop retains it.
+            pgid = self._pgid if self._pgid is not None else process.pid
+            self._pgid = pgid
+            _stop_process_group(process, pgid)
+        elif self._pgid is not None and _process_group_exists(self._pgid):
+            raise RendererError("mpvpaper process-group ownership has no process handle")
+
+        # Only a proven-dead group releases process and socket ownership.  If
+        # any bounded wait above fails, start() will call stop() again and
+        # cannot launch a second renderer over the still-owned group.
         self._process = None
+        self._pgid = None
         self._video = None
-        socket_path = self._socket
         self._socket = None
-
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            except OSError, ProcessLookupError:
-                process.terminate()
-            try:
-                process.wait(timeout=TERMINATE_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except OSError, ProcessLookupError:
-                    process.kill()
-                # Reap it, or it lingers as a zombie for the app's lifetime.
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    process.wait(timeout=TERMINATE_TIMEOUT)
-
-        if socket_path is not None:
-            socket_path.unlink(missing_ok=True)
+        self._cleanup_socket_path(socket_namespace)
 
     # -- mpv IPC ---------------------------------------------------------
 

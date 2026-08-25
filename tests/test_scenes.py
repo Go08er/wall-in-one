@@ -14,6 +14,7 @@ programs fighting over one wallpaper.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,69 @@ def test_capture_size_can_derive_pixels_or_fall_back() -> None:
     scaled = outputs.Output("DP-1", width=1280, height=720, scale=2.0)
     assert scenes.capture_size("DP-1", (scaled,)) == (2560, 1440)
     assert scenes.capture_size("missing", (scaled,)) == scenes.DEFAULT_CAPTURE_SIZE
+
+
+def test_a_prepared_screenshot_output_is_kept_and_written_in_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "prepared.png"
+    destination.touch()
+    created = destination.stat()
+
+    class FakeProcess:
+        pid = 701
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def render(
+        output: Path,
+        _process: object,
+        _timeout: float,
+        *,
+        cancelled: object = None,
+    ) -> None:
+        assert cancelled is None
+        opened = output.stat()
+        assert (opened.st_dev, opened.st_ino) == (created.st_dev, created.st_ino)
+        output.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(scenes, "_wait_for", render)
+    monkeypatch.setattr(scenes, "_end", lambda *args, **kwargs: None)
+
+    assert (
+        scenes.screenshot(
+            "12345",
+            destination,
+            size=(2560, 1600),
+            prepared_output=True,
+        )
+        == destination
+    )
+    published = destination.stat()
+    assert (published.st_dev, published.st_ino) == (created.st_dev, created.st_ino)
+
+
+def test_a_prepared_screenshot_refuses_nonempty_or_nonregular_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nonempty = tmp_path / "nonempty.png"
+    nonempty.write_bytes(b"do not truncate")
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+
+    with pytest.raises(scenes.SceneError, match="not an empty regular file"):
+        scenes.screenshot("12345", nonempty, prepared_output=True)
+    with pytest.raises(scenes.SceneError, match="not an empty regular file"):
+        scenes.screenshot("12345", directory, prepared_output=True)
+
+    assert nonempty.read_bytes() == b"do not truncate"
 
 
 def test_the_layer_is_the_one_niri_wants() -> None:

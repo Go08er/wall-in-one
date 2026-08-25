@@ -188,15 +188,15 @@ automated unit/process tests, including synthetic connector stress. Neither the
 development machine nor this VM exposes two outputs, so different playlists on
 two physical monitors remain unverified.
 
-The final recorded VM run deliberately used the locked preceding companion
-revision, `a5e23c9`. It proves that revision loads and can drive the basic
-integration; it does not prove the coordinated release pair. Before the app is
-published, the matching companion candidate must be pushed to a non-default
-release branch, `flake.lock` must pin that exact commit, and the normal
-Git-backed checks must pass again. The app is then published before immediate
-promotion and tagging of companion `0.1.1`, so the strict status-v2
-client is never served to users of the older app. The contract and old-revision
-limits are documented in
+That dated VM run deliberately used the then-locked preceding companion
+revision, `a5e23c9`. It proves that revision loaded and drove the basic
+integration; it is not evidence for the coordinated release pair. The current
+tree instead pins reviewed companion candidate
+`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. Its final normal Git-backed VM and
+flake results must be recorded here after the release tree is clean. At
+publication the app is promoted before immediate promotion and tagging of
+companion `0.1.1`, so the strict status-v2 client is never served to users of
+the older app. The contract and old-revision limits are documented in
 [`migrating.md`](migrating.md#companion-noctalia-plugin-compatibility).
 
 The RSS check's 64-connector stress exercises bounded per-connector runtime state,

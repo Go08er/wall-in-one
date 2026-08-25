@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import os
+import signal
+import socket
+import stat
 import subprocess
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from wall_in_one import file_io, paths
 from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
-from wall_in_one.wallpaper import renderer, scenes
+from wall_in_one.wallpaper import outputs, renderer, scenes
 from wall_in_one.wallpaper.applier import Applier, ApplyError
 
 
@@ -192,6 +200,13 @@ def test_shutdown_stops_the_renderer(tmp_path: Path, set_calls: list[Path]) -> N
 # -- renderer ------------------------------------------------------------
 
 
+@pytest.fixture
+def short_runtime_dir() -> Iterator[Path]:
+    """Keep AF_UNIX test addresses below Linux's 108-byte ceiling."""
+    with tempfile.TemporaryDirectory(prefix="wio-renderer-", dir="/tmp") as directory:
+        yield Path(directory)
+
+
 def test_renderer_refuses_a_missing_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(renderer, "is_available", lambda: True)
     with pytest.raises(renderer.RendererError, match="no such video"):
@@ -204,8 +219,410 @@ def test_renderer_reports_mpvpaper_missing(tmp_path: Path, monkeypatch: pytest.M
         renderer.Renderer().start(tmp_path / "clip.mp4")
 
 
+def test_a_failed_start_leaves_its_empty_private_socket_namespace_inert(
+    tmp_path: Path,
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("not really starting mpvpaper")
+
+    monkeypatch.setattr(renderer, "is_available", lambda: True)
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    monkeypatch.setattr(subprocess, "Popen", fail)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"0")
+
+    with pytest.raises(renderer.RendererError):
+        renderer.Renderer().start(video)
+
+    (namespace,) = tuple(short_runtime_dir.glob(f".{paths.APP_ID}-mpv-*"))
+    assert namespace.is_dir()
+    assert tuple(namespace.iterdir()) == ()
+    assert not (short_runtime_dir / file_io.RETAINED_ENTRY_DIRECTORY).exists()
+
+
+def test_start_setup_failure_leaves_its_private_socket_namespace_inert(
+    tmp_path: Path,
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_discovery() -> tuple[()]:
+        raise RuntimeError("injected output discovery failure")
+
+    monkeypatch.setattr(renderer, "is_available", lambda: True)
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    monkeypatch.setattr(outputs, "discover", fail_discovery)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"0")
+
+    with pytest.raises(RuntimeError, match="output discovery"):
+        renderer.Renderer(interpolation="oversample").start(video)
+
+    (namespace,) = tuple(short_runtime_dir.glob(f".{paths.APP_ID}-mpv-*"))
+    assert namespace.is_dir()
+    assert tuple(namespace.iterdir()) == ()
+    assert not (short_runtime_dir / file_io.RETAINED_ENTRY_DIRECTORY).exists()
+
+
+def test_start_retains_the_session_leader_pid_as_the_process_group_identity(
+    tmp_path: Path,
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StartedProcess:
+        pid = 987653
+        exited = False
+
+        def poll(self) -> int | None:
+            return 0 if self.exited else None
+
+        def wait(self, *, timeout: float) -> int:
+            del timeout
+            return 0
+
+    process = StartedProcess()
+    launch_keywords: dict[str, object] = {}
+
+    owned_process = cast(subprocess.Popen[bytes], process)
+
+    def launch(_command: list[str], **keywords: object) -> subprocess.Popen[bytes]:
+        launch_keywords.update(keywords)
+        return owned_process
+
+    def process_group(pgid: int, requested: int) -> None:
+        assert pgid == process.pid
+        if requested == signal.SIGTERM:
+            process.exited = True
+        if requested == 0 and process.exited:
+            raise ProcessLookupError("group exited")
+
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    monkeypatch.setattr(renderer, "is_available", lambda: True)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(os, "killpg", process_group)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"0")
+    instance = renderer.Renderer()
+
+    instance.start(video)
+
+    assert launch_keywords["start_new_session"] is True
+    assert instance._process is owned_process
+    assert instance._pgid == process.pid
+
+    instance.stop()
+
+
 def test_stopping_an_idle_renderer_is_harmless() -> None:
     renderer.Renderer().stop()
+
+
+def test_renderer_never_reuses_or_removes_the_legacy_fixed_socket_name(
+    short_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user entry at the old public path is neither stale nor ours."""
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    legacy_path = short_runtime_dir / f"{paths.APP_ID}-mpv.sock"
+    legacy_path.write_text("keep me", encoding="utf-8")
+
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+
+    assert namespace is not None
+    ipc_path = namespace.logical_socket
+    assert ipc_path != legacy_path
+    assert ipc_path.parent.parent == short_runtime_dir
+    assert stat.S_IMODE(ipc_path.parent.stat().st_mode) == 0o700
+    assert legacy_path.read_text(encoding="utf-8") == "keep me"
+    instance._cleanup_socket_path(namespace)
+    assert ipc_path.parent.is_dir()
+
+
+def test_stopping_leaves_the_exact_socket_namespace_inert(
+    short_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+    assert namespace is not None
+    ipc_path = namespace.logical_socket
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(namespace.access_socket))
+    listener.close()
+    instance._socket = namespace
+
+    instance.stop()
+
+    assert ipc_path.is_socket()
+    assert ipc_path.parent.is_dir()
+    assert not (short_runtime_dir / file_io.RETAINED_ENTRY_DIRECTORY).exists()
+
+
+def test_stop_process_exit_race_still_checks_the_retained_process_group(
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExitedProcess:
+        pid = 987654
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def terminate() -> None:
+            raise ProcessLookupError("already exited")
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            del timeout
+            return 0
+
+    signals: list[tuple[int, int]] = []
+
+    def absent_group(pgid: int, requested: int) -> None:
+        signals.append((pgid, requested))
+        raise ProcessLookupError("already exited")
+
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    monkeypatch.setattr(os, "killpg", absent_group)
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+    assert namespace is not None
+    instance._socket = namespace
+    instance._process = ExitedProcess()  # type: ignore[assignment]
+    instance._pgid = ExitedProcess.pid
+
+    instance.stop()
+
+    assert signals[0] == (ExitedProcess.pid, signal.SIGTERM)
+    assert (ExitedProcess.pid, 0) in signals
+    assert namespace.directory.is_dir()
+    assert instance._process is None
+    assert instance._pgid is None
+
+
+def test_stop_kills_retained_group_children_after_the_leader_has_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExitedLeader:
+        pid = 987655
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            del timeout
+            return 0
+
+    group_exists = True
+    signals: list[int] = []
+
+    def process_group(pgid: int, requested: int) -> None:
+        nonlocal group_exists
+        assert pgid == ExitedLeader.pid
+        if requested == 0:
+            if group_exists:
+                return
+            raise ProcessLookupError("group exited")
+        signals.append(requested)
+        if requested == signal.SIGKILL:
+            group_exists = False
+
+    monkeypatch.setattr(os, "killpg", process_group)
+    monkeypatch.setattr(renderer, "TERMINATE_TIMEOUT", 0.0)
+    instance = renderer.Renderer()
+    instance._process = ExitedLeader()  # type: ignore[assignment]
+    instance._pgid = ExitedLeader.pid
+
+    instance.stop()
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert instance._process is None
+    assert instance._pgid is None
+
+
+def test_persistent_process_group_retains_all_state_and_blocks_a_second_start(
+    tmp_path: Path,
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PersistentProcess:
+        pid = 987656
+        stuck = True
+
+        def poll(self) -> int | None:
+            return None if self.stuck else 0
+
+        def wait(self, *, timeout: float) -> int:
+            if self.stuck:
+                raise subprocess.TimeoutExpired("mpvpaper", timeout)
+            return 0
+
+    process = PersistentProcess()
+    owned_process = cast(subprocess.Popen[bytes], process)
+
+    def process_group(pgid: int, requested: int) -> None:
+        assert pgid == process.pid
+        if not process.stuck:
+            raise ProcessLookupError("group exited")
+
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    monkeypatch.setattr(os, "killpg", process_group)
+    monkeypatch.setattr(renderer, "TERMINATE_TIMEOUT", 0.001)
+    monkeypatch.setattr(renderer, "PROCESS_GROUP_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(renderer, "is_available", lambda: True)
+    launches: list[object] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: launches.append(object()))
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"0")
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+    assert namespace is not None
+    instance._process = owned_process
+    instance._pgid = process.pid
+    instance._video = video
+    instance._socket = namespace
+
+    with pytest.raises(renderer.RendererError, match=r"process group .* did not exit"):
+        instance.stop()
+
+    assert instance._process is owned_process
+    assert instance._pgid == process.pid
+    assert instance._video == video
+    assert instance._socket is namespace
+    assert namespace.pin.status().st_ino
+
+    with pytest.raises(renderer.RendererError, match=r"process group .* did not exit"):
+        instance.start(video)
+    assert launches == []
+    assert instance._process is owned_process
+    assert instance._socket is namespace
+
+    process.stuck = False
+    instance.stop()
+    assert not instance.is_running
+    assert instance.ipc_socket is None
+    assert namespace.directory.is_dir()
+
+
+def test_a_wait_failure_retains_state_even_when_kill_makes_the_group_disappear(
+    tmp_path: Path,
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenWaitProcess:
+        pid = 987657
+        killed = False
+        wait_failed = False
+
+        def poll(self) -> int | None:
+            return 0 if self.killed else None
+
+        def wait(self, *, timeout: float) -> int:
+            del timeout
+            if not self.wait_failed:
+                self.wait_failed = True
+                raise OSError("injected wait failure")
+            return 0
+
+    process = BrokenWaitProcess()
+    owned_process = cast(subprocess.Popen[bytes], process)
+
+    def process_group(pgid: int, requested: int) -> None:
+        assert pgid == process.pid
+        if requested == signal.SIGKILL:
+            process.killed = True
+        if requested == 0 and process.killed:
+            raise ProcessLookupError("group exited")
+
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    monkeypatch.setattr(os, "killpg", process_group)
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+    assert namespace is not None
+    instance._process = owned_process
+    instance._pgid = process.pid
+    instance._video = tmp_path / "clip.mp4"
+    instance._socket = namespace
+
+    with pytest.raises(renderer.RendererError, match="earlier wait failure"):
+        instance.stop()
+
+    assert instance._process is owned_process
+    assert instance._pgid == process.pid
+    assert instance._socket is namespace
+    assert namespace.pin.status().st_ino
+
+    instance.stop()
+    assert not instance.is_running
+    assert namespace.directory.is_dir()
+
+
+def test_stopping_preserves_a_replacement_private_directory(
+    short_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allocation-time pin anchors access but authorizes no directory cleanup."""
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+    assert namespace is not None
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(namespace.access_socket))
+    listener.close()
+    instance._socket = namespace
+    moved = short_runtime_dir / "moved-original"
+    namespace.directory.rename(moved)
+    namespace.directory.mkdir(mode=0o700)
+    replacement = namespace.directory / "keep"
+    replacement.write_text("replacement", encoding="utf-8")
+
+    instance.stop()
+
+    assert replacement.read_text(encoding="utf-8") == "replacement"
+    assert (moved / "ipc.sock").is_socket()
+
+
+def test_socket_directory_creation_to_pin_replacement_is_never_moved_or_deleted(
+    short_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A random mkdir name is not proof that the directory still belongs to us."""
+    monkeypatch.setattr(paths, "runtime_dir", lambda: short_runtime_dir)
+    real_lstat = Path.lstat
+    original = short_runtime_dir / "original-allocation"
+    replacement_payload: Path | None = None
+    swapped = False
+
+    def replace_before_first_inspection(path: Path) -> os.stat_result:
+        nonlocal replacement_payload, swapped
+        if (
+            not swapped
+            and path.parent == short_runtime_dir
+            and path.name.startswith(f".{paths.APP_ID}-mpv-")
+        ):
+            swapped = True
+            path.rename(original)
+            path.mkdir(mode=0o700)
+            replacement_payload = path / "keep"
+            replacement_payload.write_text("unrelated replacement", encoding="utf-8")
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", replace_before_first_inspection)
+    instance = renderer.Renderer()
+    namespace = instance._allocate_socket_path()
+    assert namespace is not None
+    instance._cleanup_socket_path(namespace)
+
+    assert original.is_dir()
+    assert tuple(original.iterdir()) == ()
+    assert replacement_payload is not None
+    assert replacement_payload.read_text(encoding="utf-8") == "unrelated replacement"
+    assert namespace.directory == replacement_payload.parent
+    assert not (short_runtime_dir / file_io.RETAINED_ENTRY_DIRECTORY).exists()
 
 
 def test_ipc_is_absent_until_something_is_playing() -> None:

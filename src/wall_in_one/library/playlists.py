@@ -576,7 +576,12 @@ def load(path: Path | None = None) -> dict[str, Playlist]:
     return found
 
 
-def save(playlists: Mapping[str, Playlist], path: Path | None = None) -> Path:
+def save(
+    playlists: Mapping[str, Playlist],
+    path: Path | None = None,
+    *,
+    replace_existing: bool = True,
+) -> Path:
     """Write them atomically, and return where they went."""
     target = path if path is not None else state_path()
     try:
@@ -592,7 +597,9 @@ def save(playlists: Mapping[str, Playlist], path: Path | None = None) -> Path:
     }
     try:
         state_file.write_atomic_text(
-            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            target,
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            replace_existing=replace_existing,
         )
     except OSError as error:
         raise PlaylistError(
@@ -1017,7 +1024,10 @@ class Store:
         """
         target = self._path if self._path is not None else state_path()
         try:
-            with state_file.mutation_lock(target, description="playlists"):
+            with (
+                state_file.mutation_lock(target, description="playlists"),
+                state_file.observe(target) as observed,
+            ):
                 try:
                     target.lstat()
                 except FileNotFoundError:
@@ -1036,14 +1046,16 @@ class Store:
                 if changed:
                     if fault is not None:
                         try:
-                            state_file.preserve_faulted(target)
+                            state_file.preserve_faulted(target, observed=observed)
                         except OSError as error:
                             raise PlaylistError(
                                 "local-io",
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                    save(authored, target)
+                        save(authored, target, replace_existing=False)
+                    else:
+                        save(authored, target)
                     fault = None
 
                 # Adopt memory only after the durable write, so an exception

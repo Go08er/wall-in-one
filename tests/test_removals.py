@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one import file_io
 from wall_in_one.library import removals, state_file
 from wall_in_one.library.model import Kind, MediaItem
 
@@ -100,6 +101,55 @@ def test_prepared_intent_remembers_the_exact_original_inode(tmp_path: Path) -> N
     source.write_bytes(b"replacement")
 
     assert not intent.original_is_present()
+
+
+def test_prepare_records_the_directory_context_used_to_reach_the_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    parent = root / "album"
+    parent.mkdir(parents=True)
+    source = parent / "paper.png"
+    source.write_bytes(b"image")
+
+    replacement_root = tmp_path / "replacement-wallpapers"
+    replacement_parent = replacement_root / parent.name
+    replacement_parent.mkdir(parents=True)
+    replacement_source = replacement_parent / source.name
+    replacement_source.hardlink_to(source)
+
+    expected_root = file_io.path_identity(root)
+    expected_parent = file_io.path_identity(parent)
+    replacement_root_identity = file_io.path_identity(replacement_root)
+    replacement_parent_identity = file_io.path_identity(replacement_parent)
+    archived_root = tmp_path / "archived-wallpapers"
+    real_pin = file_io.pin_regular_path_beneath
+    swapped = False
+
+    def swap_after_descriptor_traversal(
+        selected_root: Path,
+        selected_source: Path,
+    ) -> file_io.RootScopedPin:
+        nonlocal swapped
+        result = real_pin(selected_root, selected_source)
+        selected_root.rename(archived_root)
+        replacement_root.rename(selected_root)
+        swapped = True
+        return result
+
+    monkeypatch.setattr(file_io, "pin_regular_path_beneath", swap_after_descriptor_traversal)
+    store = removals.Store.open(tmp_path / "pending.json")
+    intent = store.prepare(_item(source), (root,))
+    try:
+        assert swapped
+        assert (intent.root_device, intent.root_inode) == expected_root
+        assert (intent.parent_device, intent.parent_inode) == expected_parent
+        assert file_io.path_identity(root) == replacement_root_identity
+        assert file_io.path_identity(parent) == replacement_parent_identity
+        assert not intent.source_context_is_present()
+    finally:
+        store.discard(intent)
 
 
 def test_faulted_journal_is_never_overwritten_by_prepare(tmp_path: Path) -> None:

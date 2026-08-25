@@ -13,6 +13,7 @@ import json
 import os
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -59,6 +60,19 @@ _MEDIA_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class DownloadAuthority:
+    """A provider authority document carrying generation and digest bindings."""
+
+    provider: str
+    size: int
+    sha256: str
+    generation: file_io.FileFingerprint
+
+    def matches_generation(self, fingerprint: file_io.FileFingerprint) -> bool:
+        return fingerprint == self.generation
+
+
 def _read_marker(directory: Path) -> tuple[str, dict[str, object]] | None:
     for name in _DIRECTORY_MARKERS:
         marker = directory / name
@@ -95,14 +109,20 @@ def _read_marker(directory: Path) -> tuple[str, dict[str, object]] | None:
     return None
 
 
-def download_provenance(path: Path) -> str | None:
+def download_provenance(
+    path: Path,
+    *,
+    expected_path: Path | None = None,
+) -> str | None:
     """Provider proven by an exact, adjacent provenance sidecar.
 
-    A suffix is a naming convention, not deletion authority.  Both providers
-    have always emitted the four identity fields checked here; accepting a
-    bare ``{}`` (or a sidecar copied from another file) would let arbitrary
-    user files be classified and later unlinked as app-owned downloads.
+    A suffix is a naming convention, not deletion authority. New records bind
+    the provider identity, logical path, exact media generation and validated
+    digest. Unbound predecessor records fail closed as local files: accepting
+    a bare identity document would let a crash-left sidecar attach to unrelated
+    bytes which later appeared at the same pathname.
     """
+    logical_path = path if expected_path is None else expected_path
     expected = {
         ".motionbgs.json": "MotionBGS",
         ".wallhaven.json": "Wallhaven",
@@ -113,19 +133,96 @@ def download_provenance(path: Path) -> str | None:
             raw = file_io.read_regular_bytes(sidecar, pairing.MAX_SIDECAR_BYTES)
             if raw is None:
                 continue
-            document: object = json.loads(raw)
         except OSError, ValueError, RecursionError:
             continue
-        if (
-            isinstance(document, dict)
-            and type(document.get("schema")) is int
-            and document.get("schema") == 1
-            and document.get("plugin") == "goober/wall-in-one"
-            and document.get("provider") == provider
-            and document.get("path") == str(path)
-        ):
-            return provider
+        authority = download_authority_from_bytes(
+            raw,
+            expected_path=logical_path,
+            expected_provider=provider,
+        )
+        if authority is None:
+            continue
+        try:
+            with file_io.pin_regular_path(path) as media_pin:
+                if authority.matches_generation(media_pin.fingerprint):
+                    return authority.provider
+        except OSError, ValueError:
+            continue
     return None
+
+
+def download_authority_from_bytes(
+    raw: bytes,
+    *,
+    expected_path: Path,
+    expected_provider: str,
+) -> DownloadAuthority | None:
+    """Parse one exact provenance document with media-generation authority."""
+    try:
+        document: object = json.loads(raw)
+    except ValueError, RecursionError:
+        return None
+    if not (
+        isinstance(document, dict)
+        and type(document.get("schema")) is int
+        and document.get("schema") == 1
+        and document.get("plugin") == "goober/wall-in-one"
+        and document.get("provider") == expected_provider
+        and document.get("path") == str(expected_path)
+    ):
+        return None
+
+    size = document.get("bytes")
+    digest = document.get("sha256")
+    generation = document.get("media_generation")
+    if (
+        type(size) is not int
+        or size < 0
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        or not isinstance(generation, dict)
+    ):
+        return None
+    device = generation.get("device")
+    inode = generation.get("inode")
+    generation_size = generation.get("bytes")
+    mtime_ns = generation.get("mtime_ns")
+    ctime_ns = generation.get("ctime_ns")
+    if not all(
+        type(value) is int for value in (device, inode, generation_size, mtime_ns, ctime_ns)
+    ):
+        return None
+    assert isinstance(device, int)
+    assert isinstance(inode, int)
+    assert isinstance(generation_size, int)
+    assert isinstance(mtime_ns, int)
+    assert isinstance(ctime_ns, int)
+    if device < 0 or inode < 0 or generation_size != size:
+        return None
+    return DownloadAuthority(
+        provider=expected_provider,
+        size=size,
+        sha256=digest,
+        generation=(device, inode, generation_size, mtime_ns, ctime_ns),
+    )
+
+
+def download_provenance_from_bytes(
+    raw: bytes,
+    *,
+    expected_path: Path,
+    expected_provider: str,
+) -> bool:
+    """Whether exact sidecar bytes carry generation-bound authority."""
+    return (
+        download_authority_from_bytes(
+            raw,
+            expected_path=expected_path,
+            expected_provider=expected_provider,
+        )
+        is not None
+    )
 
 
 def _has_download_sidecar(path: Path) -> bool:
@@ -150,9 +247,13 @@ def is_managed_directory(directory: Path) -> bool:
     return _read_marker(directory) is not None
 
 
-def has_download_sidecar(path: Path) -> bool:
+def has_download_sidecar(
+    path: Path,
+    *,
+    expected_path: Path | None = None,
+) -> bool:
     """Whether ``path`` has provider provenance proving it was downloaded."""
-    return _has_download_sidecar(path)
+    return download_provenance(path, expected_path=expected_path) is not None
 
 
 def wallpaper_directory_from_noctalia() -> Path | None:

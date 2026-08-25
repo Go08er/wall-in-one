@@ -374,7 +374,12 @@ def load(path: Path | None = None) -> tuple[Rule, ...]:
     return rules
 
 
-def save(rules: Sequence[Rule], path: Path | None = None) -> Path:
+def save(
+    rules: Sequence[Rule],
+    path: Path | None = None,
+    *,
+    replace_existing: bool = True,
+) -> Path:
     target = path if path is not None else state_path()
     try:
         paths.ensure_directory(target.parent)
@@ -386,7 +391,9 @@ def save(rules: Sequence[Rule], path: Path | None = None) -> Path:
     payload = {"version": FORMAT_VERSION, "rules": [rule.to_json() for rule in rules]}
     try:
         state_file.write_atomic_text(
-            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            target,
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            replace_existing=replace_existing,
         )
     except (OSError, UnicodeError) as error:
         detail = getattr(error, "strerror", None) or str(error)
@@ -626,7 +633,10 @@ class Store:
         """
         target = self._path if self._path is not None else state_path()
         try:
-            with state_file.mutation_lock(target, description="schedules"):
+            with (
+                state_file.mutation_lock(target, description="schedules"),
+                state_file.observe(target) as observed,
+            ):
                 try:
                     target.lstat()
                 except FileNotFoundError:
@@ -653,14 +663,16 @@ class Store:
                 if changed:
                     if fault is not None:
                         try:
-                            state_file.preserve_faulted(target)
+                            state_file.preserve_faulted(target, observed=observed)
                         except OSError as error:
                             raise ScheduleError(
                                 "local-io",
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                    save(rules, target)
+                        save(rules, target, replace_existing=False)
+                    else:
+                        save(rules, target)
                     fault = None
 
                 # File first, then memory: failed persistence cannot make the

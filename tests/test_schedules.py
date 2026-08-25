@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one import file_io
 from wall_in_one.library import schedules, state_file
 from wall_in_one.library.schedules import Rule, ScheduleError, Store
 
@@ -590,7 +591,9 @@ def test_half_a_stored_window_is_read_as_no_window(tmp_path: Path) -> None:
     assert Store.open(target).fault is not None
 
 
-def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_write_leaves_only_inert_private_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def explode(_source: object, _destination: object) -> None:
         raise OSError("no space left on device")
 
@@ -598,7 +601,12 @@ def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(ScheduleError) as caught:
         schedules.save([Rule(id="r", playlist="E")], tmp_path / "schedules.json")
     assert caught.value.kind == "local-io"
-    assert list(tmp_path.iterdir()) == []
+    retained = tmp_path / file_io.RETAINED_ENTRY_DIRECTORY
+    assert set(tmp_path.iterdir()) == {retained}
+    residues = tuple(retained.iterdir())
+    assert len(residues) == 2
+    assert any(path.is_file() and path.stat().st_size == 0 for path in residues)
+    assert any(path.is_dir() and tuple(path.iterdir()) == () for path in residues)
 
 
 def test_a_store_write_failure_does_not_change_the_in_memory_schedule(
@@ -644,6 +652,67 @@ def test_a_fault_which_appears_after_open_is_still_preserved(tmp_path: Path) -> 
     assert Store.open(target).rules[0].id == "new"
 
 
+def test_a_valid_manual_repair_after_the_fault_read_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_text("not json", encoding="utf-8")
+    store = Store.open(target)
+    manual = Rule(id="manual", playlist="Manual")
+    preserve = state_file.preserve_faulted
+
+    def repair_then_preserve(
+        path: Path,
+        *,
+        observed: state_file.StateFileObservation,
+    ) -> Path:
+        schedules.save((manual,), path)
+        return preserve(path, observed=observed)
+
+    monkeypatch.setattr(state_file, "preserve_faulted", repair_then_preserve)
+
+    with pytest.raises(ScheduleError) as caught:
+        store.add("App", rule_id="app")
+
+    assert caught.value.kind == "local-io"
+    assert Store.open(target).rules == (manual,)
+    assert not target.with_name(target.name + schedules.BROKEN_SUFFIX).exists()
+
+
+def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "schedules.json"
+    original = "not json"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+    manual = Rule(id="manual", playlist="Manual")
+    save = schedules.save
+
+    def repair_then_save(
+        updated: tuple[Rule, ...],
+        path: Path | None = None,
+        *,
+        replace_existing: bool = True,
+    ) -> Path:
+        assert path == target
+        assert not replace_existing
+        save((manual,), target)
+        return save(updated, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(schedules, "save", repair_then_save)
+
+    with pytest.raises(ScheduleError) as caught:
+        store.add("App", rule_id="app")
+
+    assert caught.value.kind == "local-io"
+    assert store.fault is not None
+    assert Store.open(target).rules == (manual,)
+    assert target.with_name(target.name + schedules.BROKEN_SUFFIX).read_text() == original
+
+
 def test_a_symlinked_mutation_lock_is_reported_without_touching_its_target(
     tmp_path: Path,
 ) -> None:
@@ -670,7 +739,8 @@ def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     store = Store.open(target)
     target.write_text(original, encoding="utf-8")
 
-    def fail(_path: Path) -> Path:
+    def fail(_path: Path, *, observed: state_file.StateFileObservation) -> Path:
+        assert observed.present
         raise OSError("injected relocation failure")
 
     monkeypatch.setattr(state_file, "preserve_faulted", fail)

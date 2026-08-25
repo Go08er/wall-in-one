@@ -20,7 +20,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config, legacy_migration, paths, runtime_config, runtime_health
+from wall_in_one import config, file_io, legacy_migration, paths, runtime_config, runtime_health
 from wall_in_one.browse import Browser, source_page_url
 from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
@@ -502,10 +502,13 @@ class Application(Adw.Application):
                 self._provider,
                 APPLICATION_STYLE_PRIORITY,
             )
+        # Bind the private control socket before submitting any background
+        # work: its creation uses one narrowly scoped process umask so the
+        # filesystem socket is mode 0600 from its first visible instant.
+        self._start_control_socket()
         self._start_palette_monitor()
         self._install_accelerators()
         self._start_windowless_migration_probe()
-        self._start_control_socket()
 
     def _open_authoring_after_migration(self) -> None:
         """Repair interrupted playlist tails before opening profile writes."""
@@ -1909,9 +1912,10 @@ class Application(Adw.Application):
 
     def _finish_library_refresh(self, *, scan_generation: int | None = None) -> None:
         """Reconcile and render one installed scan, always on the main thread."""
-        # A confirmed Workshop uninstall clears its generated still.  Let a
-        # reinstall at the same path enter the still-maker again instead of
-        # inheriting the process-local "already attempted" memo.
+        # A confirmed Workshop uninstall clears authored metadata, not an
+        # unpinned generated still. Let a reinstall at the same path enter the
+        # still-maker again instead of inheriting the process-local "already
+        # attempted" memo.
         for item in self._session.removed_workshop:
             self._stills.forget(item.path)
         if self._session.workshop_cleanup_failures:
@@ -4159,11 +4163,23 @@ class Application(Adw.Application):
         item: MediaItem,
         *,
         intent: removals.Intent,
+        artifacts_already_clean: bool = True,
+        artifact_source_root: Path | None = None,
+        artifact_lookup_root: Path | None = None,
+        artifact_lookup_parent: Path | None = None,
+        artifact_source_context: file_io.PinnedDirectoryContext | None = None,
     ) -> tuple[str, ...]:
         """Finish one committed deletion, retaining its journal until clean."""
         if (item.path, item.kind, item.scene) != (intent.path, intent.kind, intent.scene):
             raise ValueError("removal intent does not identify the removed library item")
-        failures = self._session.commit_removal(intent)
+        failures = self._session.commit_removal(
+            intent,
+            artifacts_already_clean=artifacts_already_clean,
+            artifact_source_root=artifact_source_root,
+            artifact_lookup_root=artifact_lookup_root,
+            artifact_lookup_parent=artifact_lookup_parent,
+            artifact_source_context=artifact_source_context,
+        )
         self._stills.forget(item.path)
         GLib.idle_add(self.refresh_library)
         return failures
@@ -5665,35 +5681,94 @@ class _Commands:
                     intent = self._app.prepare_item_removal(item)
                 except removals.RemovalJournalError as error:
                     return server.failed(error)
+                source_context: file_io.PinnedDirectoryContext | None = None
                 try:
-                    message = server.remove_wallpaper(
-                        item,
-                        session.library.roots,
-                        expected_source=intent.source_identity,
-                        operation_token=intent.token,
-                    )
-                except manage.ManageError as error:
-                    if not error.committed:
+                    try:
+                        source_context = intent.pin_source_context()
+                    except (OSError, ValueError) as error:
                         cancellation = self._app.cancel_item_removal(intent)
                         detail = (
-                            "; the file was not removed, but its prepared removal intent "
-                            f"could not be cleared: {'; '.join(cancellation)}"
+                            "; the prepared removal intent could not be cleared: "
+                            f"{'; '.join(cancellation)}"
+                            if cancellation
+                            else ""
+                        )
+                        return Response.failure(
+                            "could not retain the prepared source directory for "
+                            f"{item.path}: {error}{detail}",
+                            kind="local-io",
+                        )
+                    try:
+                        source_pin = session.removal_journal.source_pin(intent)
+                    except removals.RemovalJournalError as error:
+                        cancellation = self._app.cancel_item_removal(intent)
+                        detail = (
+                            "; the prepared removal intent could not be cleared: "
+                            f"{'; '.join(cancellation)}"
                             if cancellation
                             else ""
                         )
                         return Response.failure(str(error) + detail, kind=error.kind)
-                    failures = self._app.forget_item(item, intent=intent)
-                    return Response.failure(
-                        str(error) + manage.metadata_cleanup_note(failures),
-                        kind=error.kind,
+
+                    anchored_source = source_context.child(intent.path.name)
+                    try:
+                        message = server.remove_wallpaper(
+                            item,
+                            session.library.roots,
+                            expected_source=intent.source_identity,
+                            expected_fingerprint=intent.source_fingerprint,
+                            prepared_pin=source_pin,
+                            operation_token=intent.token,
+                            lookup_path=anchored_source,
+                            source_root=intent.source_root,
+                            lookup_root=source_context.root_anchor,
+                            lookup_parent=source_context.directory_anchor,
+                            source_context=source_context,
+                        )
+                    except manage.ManageError as error:
+                        if not error.committed:
+                            if error.retain_intent:
+                                session.retain_removal(intent)
+                                return Response.failure(str(error), kind=error.kind)
+                            cancellation = self._app.cancel_item_removal(intent)
+                            detail = (
+                                "; the file was not removed, but its prepared removal intent "
+                                f"could not be cleared: {'; '.join(cancellation)}"
+                                if cancellation
+                                else ""
+                            )
+                            return Response.failure(str(error) + detail, kind=error.kind)
+                        failures = self._app.forget_item(
+                            item,
+                            intent=intent,
+                            artifacts_already_clean=True,
+                            artifact_source_root=intent.source_root,
+                            artifact_lookup_root=source_context.root_anchor,
+                            artifact_lookup_parent=source_context.directory_anchor,
+                            artifact_source_context=source_context,
+                        )
+                        return Response.failure(
+                            str(error) + manage.metadata_cleanup_note(failures),
+                            kind=error.kind,
+                        )
+                    failures = self._app.forget_item(
+                        item,
+                        intent=intent,
+                        artifacts_already_clean=True,
+                        artifact_source_root=intent.source_root,
+                        artifact_lookup_root=source_context.root_anchor,
+                        artifact_lookup_parent=source_context.directory_anchor,
+                        artifact_source_context=source_context,
                     )
-                failures = self._app.forget_item(item, intent=intent)
-                if failures:
-                    return Response.failure(
-                        message + manage.metadata_cleanup_note(failures),
-                        kind="metadata-cleanup",
-                    )
-                return Response.success(message)
+                    if failures:
+                        return Response.failure(
+                            message + manage.metadata_cleanup_note(failures),
+                            kind="metadata-cleanup",
+                        )
+                    return Response.success(message)
+                finally:
+                    if source_context is not None:
+                        source_context.close()
 
             def guarded_remove_legacy() -> Response:
                 with runtime_config.compiler_lock():

@@ -205,7 +205,12 @@ def load(path: Path | None = None) -> Favourites:
     return favourites
 
 
-def save(favourites: Favourites, path: Path | None = None) -> Path:
+def save(
+    favourites: Favourites,
+    path: Path | None = None,
+    *,
+    replace_existing: bool = True,
+) -> Path:
     """Write ``favourites`` atomically, and return where they went.
 
     An exclusively-created temporary in the same directory is atomically
@@ -223,7 +228,11 @@ def save(favourites: Favourites, path: Path | None = None) -> Path:
         ) from error
 
     try:
-        state_file.write_atomic_text(target, favourites.to_json())
+        state_file.write_atomic_text(
+            target,
+            favourites.to_json(),
+            replace_existing=replace_existing,
+        )
     except OSError as error:
         raise FavouritesError(
             "local-io", f"could not write {target}: {error.strerror or error}"
@@ -332,7 +341,10 @@ class Store:
         """
         target = self._path if self._path is not None else state_path()
         try:
-            with state_file.mutation_lock(target, description="favourites"):
+            with (
+                state_file.mutation_lock(target, description="favourites"),
+                state_file.observe(target) as observed,
+            ):
                 try:
                     target.lstat()
                 except FileNotFoundError:
@@ -358,14 +370,16 @@ class Store:
                         # are the user's list, in some form, and a copy costs
                         # nothing.
                         try:
-                            state_file.preserve_faulted(target)
+                            state_file.preserve_faulted(target, observed=observed)
                         except OSError as error:
                             raise FavouritesError(
                                 "local-io",
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                    save(updated, target)
+                        save(updated, target, replace_existing=False)
+                    else:
+                        save(updated, target)
                     fault = None
 
                 # File first, then memory. A failed write leaves this Store on

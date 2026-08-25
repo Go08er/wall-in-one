@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from wall_in_one import config
+from wall_in_one import config, file_io
 from wall_in_one.library import (
     displays,
     favourites,
@@ -200,6 +200,7 @@ class RemovalPlan:
         )
         cleanups: list[RemovalCleanup] = []
         snapshot._cleanup_observer = cleanups.append
+        source_context: file_io.PinnedDirectoryContext | None = None
         try:
             try:
                 intent = snapshot.prepare_removal(self.item, self.roots)
@@ -214,22 +215,87 @@ class RemovalPlan:
                 )
 
             try:
+                source_context = intent.pin_source_context()
+            except (OSError, ValueError) as error:
+                context_cancellation_failures: tuple[str, ...] = ()
+                try:
+                    snapshot.cancel_removal(intent)
+                except removals.RemovalJournalError as cancellation:
+                    context_cancellation_failures = (f"removal journal: {cancellation}",)
+                return RemovalResult(
+                    item=self.item,
+                    trash=self.trash,
+                    committed=False,
+                    error_kind="local-io",
+                    error_message=(
+                        f"could not retain the prepared source directory for {self.item.path}: "
+                        f"{error}"
+                    ),
+                    cancellation_failures=context_cancellation_failures,
+                    repaired_faults=repaired_faults,
+                )
+
+            try:
+                source_pin = snapshot.removal_journal.source_pin(intent)
+            except removals.RemovalJournalError as error:
+                source_context.close()
+                pin_cancellation_failures: tuple[str, ...] = ()
+                try:
+                    snapshot.cancel_removal(intent)
+                except removals.RemovalJournalError as cancellation:
+                    pin_cancellation_failures = (f"removal journal: {cancellation}",)
+                return RemovalResult(
+                    item=self.item,
+                    trash=self.trash,
+                    committed=False,
+                    error_kind=error.kind,
+                    error_message=str(error),
+                    cancellation_failures=pin_cancellation_failures,
+                    repaired_faults=repaired_faults,
+                )
+
+            try:
                 physical: manage.Removal | manage.Trashed
+                anchored_source = source_context.child(intent.path.name)
                 if self.trash:
                     physical = manage.trash(
                         self.item,
                         self.roots,
                         expected_source=intent.source_identity,
+                        expected_fingerprint=intent.source_fingerprint,
+                        prepared_pin=source_pin,
+                        lookup_path=anchored_source,
+                        source_root=intent.source_root,
+                        lookup_root=source_context.root_anchor,
+                        lookup_parent=source_context.directory_anchor,
+                        source_context=source_context,
                     )
                 else:
                     physical = manage.remove(
                         self.item,
                         self.roots,
                         expected_source=intent.source_identity,
+                        expected_fingerprint=intent.source_fingerprint,
+                        prepared_pin=source_pin,
                         operation_token=intent.token,
+                        lookup_path=anchored_source,
+                        source_root=intent.source_root,
+                        lookup_root=source_context.root_anchor,
+                        lookup_parent=source_context.directory_anchor,
+                        source_context=source_context,
                     )
             except manage.ManageError as error:
                 if not error.committed:
+                    if error.retain_intent:
+                        snapshot.retain_removal(intent)
+                        return RemovalResult(
+                            item=self.item,
+                            trash=self.trash,
+                            committed=False,
+                            error_kind=error.kind,
+                            error_message=str(error),
+                            repaired_faults=repaired_faults,
+                        )
                     cancellation_failures: tuple[str, ...] = ()
                     try:
                         snapshot.cancel_removal(intent)
@@ -244,11 +310,19 @@ class RemovalPlan:
                         cancellation_failures=cancellation_failures,
                         repaired_faults=repaired_faults,
                     )
-                cleanup_failures = snapshot.commit_removal(intent)
+                cleanup_failures = snapshot.commit_removal(
+                    intent,
+                    artifacts_already_clean=True,
+                    artifact_source_root=intent.source_root,
+                    artifact_lookup_root=source_context.root_anchor,
+                    artifact_lookup_parent=source_context.directory_anchor,
+                    artifact_source_context=source_context,
+                )
                 return RemovalResult(
                     item=self.item,
                     trash=self.trash,
                     committed=True,
+                    physical=error.physical,
                     error_kind=error.kind,
                     error_message=str(error),
                     cleanup_failures=cleanup_failures,
@@ -256,7 +330,17 @@ class RemovalPlan:
                     repaired_faults=repaired_faults,
                 )
 
-            cleanup_failures = snapshot.commit_removal(intent)
+            cleanup_failures = snapshot.commit_removal(
+                intent,
+                # The physical phase already attempted every companion it
+                # pinned before the media commit. Re-discovery here could
+                # mistake a newly installed same-path lifecycle for leftovers.
+                artifacts_already_clean=True,
+                artifact_source_root=intent.source_root,
+                artifact_lookup_root=source_context.root_anchor,
+                artifact_lookup_parent=source_context.directory_anchor,
+                artifact_source_context=source_context,
+            )
             return RemovalResult(
                 item=self.item,
                 trash=self.trash,
@@ -267,7 +351,11 @@ class RemovalPlan:
                 repaired_faults=repaired_faults,
             )
         finally:
-            snapshot.shutdown()
+            try:
+                if source_context is not None:
+                    source_context.close()
+            finally:
+                snapshot.shutdown()
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,8 +789,38 @@ class Session:
         """Cancel an intent whose physical operation did not commit."""
         self._removals.discard(intent)
 
-    def commit_removal(self, intent: removals.Intent) -> tuple[str, ...]:
+    def retain_removal(self, intent: removals.Intent) -> None:
+        """Release a failed operation while preserving its uncommitted intent.
+
+        A no-replace restore conflict can leave an unverified entry in the
+        token claim. The media deletion did not commit, so metadata cleanup
+        must not start, but discarding the journal would orphan the only
+        durable authority which makes that private location discoverable.
+        """
+        self._removals.finish_operation(intent)
+
+    def commit_removal(
+        self,
+        intent: removals.Intent,
+        *,
+        artifacts_already_clean: bool = False,
+        artifact_cleanup_deferred: bool = False,
+        artifact_source_root: Path | None = None,
+        artifact_lookup_root: Path | None = None,
+        artifact_lookup_parent: Path | None = None,
+        artifact_source_context: file_io.PinnedDirectoryContext | None = None,
+    ) -> tuple[str, ...]:
         """Finish a committed removal and clear its journal only when clean."""
+        if (
+            not artifacts_already_clean
+            and not artifact_cleanup_deferred
+            and artifact_source_context is None
+        ):
+            # A pathname alone is not deletion authority after the media
+            # commit: a remount or rename could redirect artifact cleanup into
+            # a replacement library. Keep the journal actionable until the
+            # prepared directory context can be repinned.
+            artifact_cleanup_deferred = True
         journal_failure: str | None = None
         try:
             try:
@@ -715,7 +833,18 @@ class Session:
                 if error.kind != "local-io" or not self._removals.owns(intent):
                     return (f"removal journal: {error}",)
                 journal_failure = f"removal journal: {error}"
-            failures = list(self._cleanup_removed_item(intent.item, intent.roots))
+            failures = list(
+                self._cleanup_removed_item(
+                    intent.item,
+                    intent.roots,
+                    artifacts_already_clean=artifacts_already_clean,
+                    artifact_cleanup_deferred=artifact_cleanup_deferred,
+                    artifact_source_root=artifact_source_root,
+                    artifact_lookup_root=artifact_lookup_root,
+                    artifact_lookup_parent=artifact_lookup_parent,
+                    artifact_source_context=artifact_source_context,
+                )
+            )
             if failures:
                 if journal_failure is not None:
                     failures.insert(0, journal_failure)
@@ -762,36 +891,79 @@ class Session:
                         f"{intent.item.name}: removal is still active in another process"
                     )
                     continue
-                if not intent.source_context_is_present():
+                try:
+                    source_context = intent.pin_source_context()
+                except OSError, ValueError:
                     failures.append(
                         f"{intent.item.name}: the prepared library filesystem is unavailable "
                         "or changed; reconnect the same root and refresh before cleanup"
                     )
                     continue
-                if not intent.external:
-                    try:
-                        recovered_claim = manage.recover_removal_claim(
-                            intent.path,
-                            expected_source=intent.source_identity,
-                            operation_token=intent.token,
+                with source_context:
+                    anchored_source = source_context.child(intent.path.name)
+                    if not intent.external:
+                        try:
+                            recovered_claim = manage.recover_removal_claim(
+                                intent.path,
+                                expected_source=intent.source_identity,
+                                expected_fingerprint=intent.source_fingerprint,
+                                operation_token=intent.token,
+                                lookup_path=anchored_source,
+                            )
+                        except manage.ManageError as error:
+                            failures.append(f"{intent.item.name}: {error}")
+                            continue
+                        if recovered_claim:
+                            current = self.commit_removal(
+                                intent,
+                                artifacts_already_clean=True,
+                                artifact_source_root=intent.source_root,
+                                artifact_lookup_root=source_context.root_anchor,
+                                artifact_lookup_parent=source_context.directory_anchor,
+                                artifact_source_context=source_context,
+                            )
+                            failures.extend(f"{intent.item.name}: {failure}" for failure in current)
+                            continue
+                    original_state = intent.original_generation_state(lookup_path=anchored_source)
+                    if original_state == "exact":
+                        # A crash before the physical operation left only a
+                        # prepared intent. The exact original generation is still
+                        # present, so this is safe to cancel and must not become
+                        # missing-drive pruning.
+                        try:
+                            self._removals.discard(intent)
+                        except removals.RemovalJournalError as error:
+                            failures.append(f"{intent.item.name}: removal journal: {error}")
+                        continue
+                    if original_state == "ambiguous":
+                        failures.append(
+                            f"{intent.item.name}: pending removal cannot prove whether "
+                            f"{intent.path} was safely restored or replaced after its claim; "
+                            "the file, its metadata, and the removal journal were left untouched. "
+                            "Move the preserved file aside or replace it with a fresh inode, then "
+                            "refresh to finish the old cleanup"
                         )
-                    except manage.ManageError as error:
-                        failures.append(f"{intent.item.name}: {error}")
                         continue
-                    if recovered_claim:
-                        current = self.commit_removal(intent)
-                        failures.extend(f"{intent.item.name}: {failure}" for failure in current)
+                    if original_state == "unavailable":
+                        failures.append(
+                            f"{intent.item.name}: pending removal could not safely inspect "
+                            f"{intent.path}; restore access to that path and refresh before cleanup"
+                        )
                         continue
-            if not intent.committed and intent.original_is_present():
-                # A crash before the physical operation left only a prepared
-                # intent. The exact original inode is still present, so this
-                # is safe to cancel and must not become missing-drive pruning.
-                try:
-                    self._removals.discard(intent)
-                except removals.RemovalJournalError as error:
-                    failures.append(f"{intent.item.name}: removal journal: {error}")
-                continue
-            current = self.commit_removal(intent)
+                    current = self.commit_removal(
+                        intent,
+                        artifacts_already_clean=True,
+                        artifact_source_root=intent.source_root,
+                        artifact_lookup_root=source_context.root_anchor,
+                        artifact_lookup_parent=source_context.directory_anchor,
+                        artifact_source_context=source_context,
+                    )
+                    failures.extend(f"{intent.item.name}: {failure}" for failure in current)
+                    continue
+            # A committed lifecycle has no crash-surviving artifact-generation
+            # pins. Clear authored metadata, but never rediscover and unlink
+            # same-name files which may belong to a later installation.
+            current = self.commit_removal(intent, artifacts_already_clean=True)
             failures.extend(f"{intent.item.name}: {failure}" for failure in current)
         return tuple(failures)
 
@@ -799,6 +971,13 @@ class Session:
         self,
         item: MediaItem,
         roots: Sequence[Path],
+        *,
+        artifacts_already_clean: bool = False,
+        artifact_cleanup_deferred: bool = False,
+        artifact_source_root: Path | None = None,
+        artifact_lookup_root: Path | None = None,
+        artifact_lookup_parent: Path | None = None,
+        artifact_source_context: file_io.PinnedDirectoryContext | None = None,
     ) -> tuple[str, ...]:
         """Attempt every durable association and deterministic child artifact."""
         failures: list[str] = []
@@ -836,14 +1015,24 @@ class Session:
             playlist_succeeded = self._playlists.fault is None
             if not playlist_succeeded:
                 failures.append(f"playlists: {self._playlists.fault}")
-        _discarded, retained = manage.discard_pairing_artifacts(
-            item,
-            roots,
-            legacy_selected_still=legacy_selected,
-        )
-        if retained:
-            names = ", ".join(path.name for path in retained[:3])
-            failures.append(f"pairing files could not be removed: {names}")
+        if artifact_cleanup_deferred:
+            failures.append(
+                "pairing files were not inspected because the prepared library filesystem "
+                "is unavailable or changed"
+            )
+        elif not artifacts_already_clean:
+            _discarded, retained = manage.discard_pairing_artifacts(
+                item,
+                roots,
+                legacy_selected_still=legacy_selected,
+                source_root=artifact_source_root,
+                lookup_root=artifact_lookup_root,
+                lookup_parent=artifact_lookup_parent,
+                source_context=artifact_source_context,
+            )
+            if retained:
+                names = ", ".join(path.name for path in retained[:3])
+                failures.append(f"pairing files could not be removed: {names}")
         if self._cleanup_observer is not None:
             self._cleanup_observer(
                 RemovalCleanup(
@@ -932,14 +1121,18 @@ class Session:
                 # removed the install. Keep the in-process record even if all
                 # stores succeed, though, and say why. Otherwise an unwritable
                 # journal would be silently presented as a durable reset.
-                item_failures = self._cleanup_removed_item(pending.item, pending.roots)
+                item_failures = self._cleanup_removed_item(
+                    pending.item,
+                    pending.roots,
+                    artifacts_already_clean=True,
+                )
                 failures.append(
                     f"{pending.item.name}: removal journal: {error}; repair the state "
                     "directory and refresh so this confirmed uninstall can be recorded durably"
                 )
                 failures.extend(f"{pending.item.name}: {failure}" for failure in item_failures)
                 continue
-            item_failures = self.commit_removal(intent)
+            item_failures = self.commit_removal(intent, artifacts_already_clean=True)
             failures.extend(f"{pending.item.name}: {failure}" for failure in item_failures)
             # Once the journal accepted the lifecycle boundary, it owns any
             # remaining retry across process exit. The in-memory fallback is

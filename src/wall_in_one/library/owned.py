@@ -12,8 +12,8 @@ Two keys, because the two providers record different things. Wallhaven writes
 an `id`, so `(provider, identifier)` works. MotionBGS writes no id at all --
 its identifier is a slug that only appears inside `source_page` -- so the page
 URL is the key that both providers can be matched on. Both are indexed and
-either will answer, which also means sidecars written before this module
-existed still match.
+either will answer. Only current generation-bound sidecars are indexed;
+predecessor records remain non-authoritative origin metadata.
 
 Deliberately a snapshot rather than a live view. It is built once when the
 browse dialog opens and thrown away when it closes: a search is a handful of
@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
+from wall_in_one.library import scan
 from wall_in_one.providers.base import WallpaperCandidate
 
 #: The sidecar suffixes that record a download. `library.scan` knows a third,
@@ -156,6 +157,19 @@ def _entry(sidecar: Path) -> tuple[Origin | None, str, Path] | None:
         and payload.get("provider") == expected_provider
         and payload.get("path") == str(media)
     ):
+        return None
+    authority = scan.download_authority_from_bytes(
+        raw,
+        expected_path=media,
+        expected_provider=expected_provider,
+    )
+    if authority is None:
+        return None
+    try:
+        with file_io.pin_regular_path(media) as media_pin:
+            if not authority.matches_generation(media_pin.fingerprint):
+                return None
+    except OSError, ValueError:
         return None
 
     provider = payload.get("provider")

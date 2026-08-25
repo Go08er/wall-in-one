@@ -122,7 +122,12 @@ def _read(path: Path) -> tuple[dict[str, str], str | None]:
     return found, state_file.joined_faults(faults)
 
 
-def save(assignments: Mapping[str, str], path: Path | None = None) -> Path:
+def save(
+    assignments: Mapping[str, str],
+    path: Path | None = None,
+    *,
+    replace_existing: bool = True,
+) -> Path:
     """Write the assignments, atomically."""
     target = path if path is not None else state_path()
     payload = {"version": FORMAT_VERSION, "displays": dict(assignments)}
@@ -134,7 +139,9 @@ def save(assignments: Mapping[str, str], path: Path | None = None) -> Path:
         ) from error
     try:
         state_file.write_atomic_text(
-            target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            target,
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            replace_existing=replace_existing,
         )
     except (OSError, UnicodeError) as error:
         detail = getattr(error, "strerror", None) or str(error)
@@ -265,7 +272,10 @@ class Store:
         """Apply one connector mutation to the latest durable assignments."""
         target = self._path if self._path is not None else state_path()
         try:
-            with state_file.mutation_lock(target, description="display assignments"):
+            with (
+                state_file.mutation_lock(target, description="display assignments"),
+                state_file.observe(target) as observed,
+            ):
                 try:
                     target.lstat()
                 except FileNotFoundError:
@@ -291,14 +301,16 @@ class Store:
                 if changed:
                     if fault is not None:
                         try:
-                            state_file.preserve_faulted(target)
+                            state_file.preserve_faulted(target, observed=observed)
                         except OSError as error:
                             raise DisplayError(
                                 "local-io",
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                    save(assignments, target)
+                        save(assignments, target, replace_existing=False)
+                    else:
+                        save(assignments, target)
                     fault = None
 
                 # Adopt only after persistence, so a failed save leaves the

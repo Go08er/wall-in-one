@@ -35,6 +35,7 @@ import contextlib
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Callable
@@ -305,6 +306,7 @@ def screenshot(
     renderer: SceneRenderer | None = None,
     size: tuple[int, int] | None = None,
     processes: worker_processes.Cancellation | None = None,
+    prepared_output: bool = False,
 ) -> Path:
     """Render ``scene`` until it has written one frame, then stop it.
 
@@ -325,8 +327,16 @@ def screenshot(
         silent=True,
         pause_when_covered=False,
     )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.unlink(missing_ok=True)
+    if prepared_output:
+        try:
+            opened = destination.stat()
+        except OSError as error:
+            raise SceneError(f"prepared scene screenshot output is unavailable: {error}") from error
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != 0:
+            raise SceneError("prepared scene screenshot output is not an empty regular file")
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.unlink(missing_ok=True)
 
     try:
         process = subprocess.Popen(
@@ -360,7 +370,8 @@ def screenshot(
         _end(process, immediate=bool(processes is not None and processes.cancelled()))
 
     if not destination.is_file() or destination.stat().st_size == 0:
-        destination.unlink(missing_ok=True)
+        if not prepared_output:
+            destination.unlink(missing_ok=True)
         raise SceneError(f"linux-wallpaperengine wrote no screenshot for {scene}")
     return destination
 
@@ -395,12 +406,12 @@ def _wait_for(
     while time.monotonic() < deadline:
         if cancelled is not None and cancelled():
             raise SceneError("scene screenshot was cancelled")
-        if process.poll() is not None and not destination.is_file():
-            raise SceneError("linux-wallpaperengine stopped before writing a screenshot")
         try:
             size = destination.stat().st_size
         except OSError:
             size = 0
+        if process.poll() is not None and size <= 0:
+            raise SceneError("linux-wallpaperengine stopped before writing a screenshot")
         if size > 0:
             if settled_at == size:
                 return

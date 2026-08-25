@@ -28,9 +28,9 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
-import secrets
 import socket
 import stat
+import threading
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -433,7 +433,14 @@ def remove_wallpaper(
     roots: tuple[Path, ...],
     *,
     expected_source: manage.SourceIdentity | None = None,
+    expected_fingerprint: manage.SourceFingerprint | None = None,
+    prepared_pin: file_io.PinnedPath | None = None,
     operation_token: str | None = None,
+    lookup_path: Path | None = None,
+    source_root: Path | None = None,
+    lookup_root: Path | None = None,
+    lookup_parent: Path | None = None,
+    source_context: file_io.PinnedDirectoryContext | None = None,
 ) -> str:
     """Take one wallpaper away, and say which of the two ways it went.
 
@@ -454,10 +461,28 @@ def remove_wallpaper(
             item,
             roots,
             expected_source=expected_source,
+            expected_fingerprint=expected_fingerprint,
+            prepared_pin=prepared_pin,
             operation_token=operation_token,
+            lookup_path=lookup_path,
+            source_root=source_root,
+            lookup_root=lookup_root,
+            lookup_parent=lookup_parent,
+            source_context=source_context,
         )
         return f"{result.describe()} - deleted, which cannot be undone{result.cleanup_note()}"
-    landed = manage.trash(item, roots, expected_source=expected_source)
+    landed = manage.trash(
+        item,
+        roots,
+        expected_source=expected_source,
+        expected_fingerprint=expected_fingerprint,
+        prepared_pin=prepared_pin,
+        lookup_path=lookup_path,
+        source_root=source_root,
+        lookup_root=lookup_root,
+        lookup_parent=lookup_parent,
+        source_context=source_context,
+    )
     return f"{item.path.name} moved to the trash - {landed.destination}{landed.cleanup_note()}"
 
 
@@ -776,7 +801,11 @@ READ_CHUNK_BYTES: Final = 4096
 READ_DEADLINE_MILLISECONDS: Final = 5_000
 WRITE_DEADLINE_MILLISECONDS: Final = 5_000
 MAX_ACTIVE_CONNECTIONS: Final = 8
-_QUARANTINE_ATTEMPTS: Final = 4
+_BIND_PROOF_TIMEOUT_SECONDS: Final = 0.5
+# ``umask`` is process-wide. Socket startup happens before the application's
+# worker submissions, and this gate also prevents two in-process test/service
+# instances from changing it concurrently during the single bind syscall.
+_SOCKET_BIND_GATE = threading.Lock()
 
 
 class SocketServer:
@@ -790,6 +819,7 @@ class SocketServer:
         self._path = path if path is not None else paths.socket_path()
         self._service: object | None = None
         self._socket_identity: tuple[int, int] | None = None
+        self._socket_descriptor: int | None = None
         self._lock_descriptor: int | None = None
         self._lock_identity: tuple[int, int] | None = None
         # A Deferred answer intentionally outlives the incoming callback. Keep
@@ -893,54 +923,28 @@ class SocketServer:
         with contextlib.suppress(OSError):
             os.close(descriptor)
 
-    def _quarantine_path(self) -> Path:
-        token = secrets.token_hex(16)
-        return self._path.with_name(f".{self._path.name}.quarantine-{token}")
-
     def _remove_exact_socket(
         self,
         identity: tuple[int, int],
         *,
         strict: bool,
+        externally_pinned: bool,
     ) -> None:
-        """Move one proven socket out of the public name, then discard it.
+        """Move one proven socket out of the public name and retain it inert.
 
         `renameat2(RENAME_NOREPLACE)` is the destructive authority boundary.
         If the public path changes after its last inspection, the helper moves
-        nothing and the replacement remains untouched.  The random private
-        name is verified once more before it is unlinked.
+        nothing and the replacement remains untouched. Linux cannot make a
+        later unlink conditional on inode identity, so the random private name
+        is deliberately retained rather than making another pathname guess.
         """
-        quarantine: Path | None = None
         try:
-            for _attempt in range(_QUARANTINE_ATTEMPTS):
-                candidate = self._quarantine_path()
-                try:
-                    file_io.atomic_move_no_replace(
-                        self._path,
-                        candidate,
-                        expected_identity=identity,
-                        require_regular=False,
-                    )
-                except FileExistsError:
-                    continue
-                quarantine = candidate
-                break
-            if quarantine is None:
-                raise OSError("could not allocate an unused socket quarantine name")
-            moved = quarantine.lstat()
-            if (
-                not stat.S_ISSOCK(moved.st_mode)
-                or (
-                    moved.st_dev,
-                    moved.st_ino,
-                )
-                != identity
-            ):
-                raise file_io.PathChangedError(
-                    f"control socket {self._path} changed in quarantine",
-                    preserved_path=quarantine,
-                )
-            quarantine.unlink()
+            file_io._retain_exact_entry(
+                self._path,
+                expected_identity=identity,
+                expected_file_type=stat.S_IFSOCK,
+                externally_pinned=externally_pinned,
+            )
         except FileNotFoundError:
             # Another actor may remove an already-dead path, but no unknown
             # replacement is ever inferred from absence.
@@ -959,49 +963,158 @@ class SocketServer:
         """
         if self._lock_descriptor is None:
             raise RuntimeError("control ownership lock must be held before stale cleanup")
+        descriptor: int | None = None
         try:
-            existing = self._path.lstat()
-        except FileNotFoundError:
-            return
-        except OSError as error:
-            raise RuntimeError(
-                f"cannot inspect existing control path {self._path}: {error.strerror or error}"
-            ) from error
-        if not stat.S_ISSOCK(existing.st_mode):
-            raise RuntimeError(f"refusing to replace non-socket control path {self._path}")
-
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        probe.settimeout(0.5)
-        try:
-            probe.connect(str(self._path))
-        except FileNotFoundError:
-            return
-        except ConnectionRefusedError:
-            # The path may have been replaced while connect was in flight.
-            # Remove only the exact dead socket inspected above.
             try:
-                current = self._path.lstat()
+                descriptor = os.open(
+                    self._path,
+                    os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                )
             except FileNotFoundError:
                 return
             except OSError as error:
                 raise RuntimeError(
-                    f"cannot recheck stale control socket {self._path}: {error.strerror or error}"
+                    f"cannot pin existing control path {self._path}: {error.strerror or error}"
+                ) from error
+            existing = os.fstat(descriptor)
+            try:
+                named = self._path.lstat()
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                raise RuntimeError(
+                    f"cannot inspect existing control path {self._path}: {error.strerror or error}"
                 ) from error
             identity = (existing.st_dev, existing.st_ino)
-            if not stat.S_ISSOCK(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+            if not stat.S_ISSOCK(existing.st_mode):
+                raise RuntimeError(f"refusing to replace non-socket control path {self._path}")
+            if not stat.S_ISSOCK(named.st_mode) or (named.st_dev, named.st_ino) != identity:
                 raise RuntimeError(
                     f"control path {self._path} changed while it was being checked"
                 ) from None
-            self._remove_exact_socket(identity, strict=True)
-            return
+
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.5)
+            try:
+                probe.connect(str(self._path))
+            except FileNotFoundError:
+                return
+            except ConnectionRefusedError:
+                # The O_PATH descriptor keeps the inspected inode alive.  A
+                # pathname replacement therefore cannot masquerade as it even
+                # on a filesystem which immediately reuses free inode numbers.
+                try:
+                    current = self._path.lstat()
+                except FileNotFoundError:
+                    return
+                except OSError as error:
+                    raise RuntimeError(
+                        f"cannot recheck stale control socket {self._path}: "
+                        f"{error.strerror or error}"
+                    ) from error
+                if (
+                    not stat.S_ISSOCK(current.st_mode)
+                    or (
+                        current.st_dev,
+                        current.st_ino,
+                    )
+                    != identity
+                ):
+                    raise RuntimeError(
+                        f"control path {self._path} changed while it was being checked"
+                    ) from None
+                self._remove_exact_socket(
+                    identity,
+                    strict=True,
+                    externally_pinned=True,
+                )
+                return
+            except OSError as error:
+                raise RuntimeError(
+                    f"cannot probe existing control socket {self._path}: {error.strerror or error}"
+                ) from error
+            else:
+                raise RuntimeError(f"another instance is already listening on {self._path}")
+            finally:
+                probe.close()
+        finally:
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+    def _prove_bound_listener(
+        self,
+        listener: Gio.Socket,
+        descriptor: int,
+        identity: tuple[int, int],
+    ) -> None:
+        """Prove the pinned public pathname reaches ``listener`` itself.
+
+        A listening socket's file descriptor names the kernel socket object,
+        not the separate filesystem inode created by ``bind``.  Device/inode
+        comparison therefore cannot associate those two objects.  Instead a
+        private client connects through the public pathname and the still-local
+        listener must accept that exact process's connection.  Rechecking the
+        retained O_PATH descriptor afterwards closes every ordinary
+        bind-to-pin pathname replacement window.
+        """
+        from gi.repository import Gio, GLib
+
+        accepted: Gio.Socket | None = None
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(_BIND_PROOF_TIMEOUT_SECONDS)
+                try:
+                    probe.connect(str(self._path))
+                except OSError as error:
+                    raise RuntimeError(
+                        f"control path {self._path} could not reach the socket just bound: "
+                        f"{error.strerror or error}"
+                    ) from error
+                try:
+                    accepted = listener.accept(None)
+                except GLib.Error as error:
+                    if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.WOULD_BLOCK):
+                        raise RuntimeError(
+                            f"control path {self._path} does not reach the socket just bound"
+                        ) from error
+                    raise RuntimeError(
+                        f"cannot verify the socket bound at {self._path}: {error.message}"
+                    ) from error
+
+                credentials = accepted.get_credentials()
+                if (
+                    credentials.get_unix_pid() != os.getpid()
+                    or credentials.get_unix_user() != os.getuid()
+                ):
+                    raise RuntimeError(
+                        f"control path {self._path} accepted a connection from the wrong process"
+                    )
+        finally:
+            if accepted is not None:
+                with contextlib.suppress(GLib.Error):
+                    accepted.close()
+
+        try:
+            pinned = os.fstat(descriptor)
+            named = self._path.lstat()
         except OSError as error:
             raise RuntimeError(
-                f"cannot probe existing control socket {self._path}: {error.strerror or error}"
+                f"cannot recheck the socket bound at {self._path}: {error.strerror or error}"
             ) from error
-        else:
-            raise RuntimeError(f"another instance is already listening on {self._path}")
-        finally:
-            probe.close()
+        if (
+            not stat.S_ISSOCK(pinned.st_mode)
+            or not stat.S_ISSOCK(named.st_mode)
+            or pinned.st_uid != os.getuid()
+            or named.st_uid != os.getuid()
+            or pinned.st_nlink != 1
+            or named.st_nlink != 1
+            or stat.S_IMODE(pinned.st_mode) != 0o600
+            or stat.S_IMODE(named.st_mode) != 0o600
+            or (pinned.st_dev, pinned.st_ino) != identity
+            or (named.st_dev, named.st_ino) != identity
+        ):
+            raise RuntimeError(f"control path {self._path} changed during its listener proof")
 
     def start(self) -> None:
         """Listen, or raise `RuntimeError` saying why not.
@@ -1030,6 +1143,22 @@ class SocketServer:
             raise RuntimeError(
                 f"cannot create {self._path.parent}: {error.strerror or error}"
             ) from error
+        unowned_listener: Gio.Socket | None = None
+        unowned_descriptor: int | None = None
+
+        def release_unowned() -> None:
+            nonlocal unowned_descriptor, unowned_listener
+            descriptor = unowned_descriptor
+            unowned_descriptor = None
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            listener = unowned_listener
+            unowned_listener = None
+            if listener is not None:
+                with contextlib.suppress(GLib.Error):
+                    listener.close()
+
         try:
             self._acquire_instance_lock()
             self._clear_stale_socket()
@@ -1037,53 +1166,110 @@ class SocketServer:
             service = Gio.SocketService.new()
             self._service = service
             address = Gio.UnixSocketAddress.new(str(self._path))
+            listener = Gio.Socket.new(
+                Gio.SocketFamily.UNIX,
+                Gio.SocketType.STREAM,
+                Gio.SocketProtocol.DEFAULT,
+            )
+            unowned_listener = listener
             try:
-                service.add_address(
-                    address,
-                    Gio.SocketType.STREAM,
-                    Gio.SocketProtocol.DEFAULT,
-                    None,
-                )
+                # A filesystem Unix socket is created as 0777 masked by the
+                # process umask.  Make it private at birth: pathname chmod
+                # would follow a symlink substituted after bind and could
+                # modify an unrelated user file before our identity recheck.
+                with _SOCKET_BIND_GATE:
+                    previous_umask = os.umask(0o177)
+                    try:
+                        if not listener.bind(address, False):
+                            raise OSError(f"cannot bind {self._path}")
+                    finally:
+                        os.umask(previous_umask)
             except GLib.Error as error:
                 raise RuntimeError(f"cannot bind {self._path}: {error.message}") from error
-
-            service.connect("incoming", self._on_incoming)
-            service.start()
+            listener.set_listen_backlog(self.BACKLOG)
+            try:
+                if not listener.listen():
+                    raise OSError(f"cannot listen on {self._path}")
+            except GLib.Error as error:
+                raise RuntimeError(f"cannot listen on {self._path}: {error.message}") from error
+            listener.set_blocking(False)
             bound = self._path.lstat()
             if (
                 not stat.S_ISSOCK(bound.st_mode)
                 or bound.st_uid != os.getuid()
                 or bound.st_nlink != 1
+                or stat.S_IMODE(bound.st_mode) != 0o600
             ):
-                raise OSError(f"{self._path} is not the socket that was just bound")
-            self._socket_identity = (bound.st_dev, bound.st_ino)
-            # The socket carries control of the wallpaper; no reason for anyone
-            # else on the system to reach it.
-            os.chmod(self._path, 0o600)
-            secured = self._path.lstat()
+                raise OSError(f"{self._path} is not the private socket that was just bound")
+            socket_identity = (bound.st_dev, bound.st_ino)
+            descriptor = os.open(
+                self._path,
+                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            unowned_descriptor = descriptor
+            pinned = os.fstat(descriptor)
+            named = self._path.lstat()
             if (
-                not stat.S_ISSOCK(secured.st_mode)
-                or secured.st_uid != os.getuid()
-                or secured.st_nlink != 1
-                or stat.S_IMODE(secured.st_mode) != 0o600
-                or (secured.st_dev, secured.st_ino) != self._socket_identity
+                not stat.S_ISSOCK(pinned.st_mode)
+                or not stat.S_ISSOCK(named.st_mode)
+                or pinned.st_uid != os.getuid()
+                or pinned.st_nlink != 1
+                or stat.S_IMODE(pinned.st_mode) != 0o600
+                or (pinned.st_dev, pinned.st_ino) != socket_identity
+                or (named.st_dev, named.st_ino) != socket_identity
             ):
-                raise OSError(f"{self._path} changed while its permissions were secured")
+                raise OSError(f"{self._path} changed while its inode was pinned")
+            self._prove_bound_listener(listener, descriptor, socket_identity)
+            if not service.add_socket(listener, None):
+                raise OSError(f"cannot add the verified control listener at {self._path}")
+            unowned_listener = None
+            # Transfer the retained VFS pin only after Gio owns the proven
+            # listener. Failures before then deliberately leave the public name
+            # untouched instead of publishing partial ownership to ``stop``.
+            try:
+                self._socket_descriptor = descriptor
+            finally:
+                unowned_descriptor = None
+            self._socket_identity = socket_identity
+            service.connect("incoming", self._on_incoming)
+            service.start()
+        except GLib.Error as error:
+            release_unowned()
+            self.stop()
+            raise RuntimeError(
+                f"cannot start control listener at {self._path}: {error.message}"
+            ) from error
         except OSError as error:
-            # A service is already listening on a socket we could not secure.
-            # Stop it and take the address back down: half-started is worse
-            # than not started, since the reply would be that we have no
-            # control socket while one sat there readable by the machine.
+            # Stop every resource whose ownership was proved. A failure before
+            # the listener/path association proof deliberately leaves the
+            # public entry untouched; its provenance is still unknown.
+            release_unowned()
             self.stop()
             raise RuntimeError(f"cannot secure {self._path}: {error.strerror or error}") from error
         except Exception:
+            release_unowned()
             self.stop()
             raise
 
     def stop(self) -> None:
+        socket_descriptor = self._socket_descriptor
+        self._socket_descriptor = None
         try:
             service = self._service
+            identity = self._socket_identity
+            self._socket_identity = None
+            if identity is not None:
+                # Keep the lifetime O_PATH descriptor alive until the pathname
+                # has been claimed. If that invariant is ever weakened, the
+                # atomic helper must create and verify its own pin instead.
+                self._remove_exact_socket(
+                    identity,
+                    strict=False,
+                    externally_pinned=socket_descriptor is not None,
+                )
             if service is not None:
+                # Once the public name is gone, stop accepting and close the
+                # listener. Existing client connections are closed below.
                 service.stop()  # type: ignore[attr-defined]
                 service.close()  # type: ignore[attr-defined]
                 self._service = None
@@ -1107,11 +1293,10 @@ class SocketServer:
                 for connection in connections:
                     with contextlib.suppress(GLib.Error):
                         connection.close(None)  # type: ignore[attr-defined]
-            identity = self._socket_identity
-            self._socket_identity = None
-            if identity is not None:
-                self._remove_exact_socket(identity, strict=False)
         finally:
+            if socket_descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(socket_descriptor)
             self._release_instance_lock()
 
     def _on_incoming(self, _service: object, connection: object, _source: object) -> bool:

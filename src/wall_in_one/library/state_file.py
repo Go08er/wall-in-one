@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -30,6 +31,76 @@ MUTATION_LOCK_POLL_SECONDS: Final = 0.025
 # the same worker while retaining process-wide exclusion. Reentrancy is only
 # same-thread; other workers remain serialized exactly as before.
 _MUTATION_GATE = threading.RLock()
+
+
+@dataclass(frozen=True, slots=True)
+class StateFileObservation:
+    """One pathname generation held across a Store read and fault recovery."""
+
+    path: Path
+    identity: file_io.PathIdentity | None
+    expected_file_type: int | None
+    expected_fingerprint: file_io.FileFingerprint | None
+    pinned: file_io.PinnedPath | None = field(repr=False)
+
+    @property
+    def present(self) -> bool:
+        return self.identity is not None
+
+
+@contextlib.contextmanager
+def observe(path: Path) -> Iterator[StateFileObservation]:
+    """Pin the entry a locked Store transaction is about to read.
+
+    The app's mutation lock excludes cooperating processes, but a text editor
+    does not take that lock.  Holding this observation through
+    :func:`preserve_faulted` binds a later destructive move to the generation
+    which preceded the read.  A regular-file fingerprint also detects an
+    in-place repair, where the inode remains the same.
+    """
+    try:
+        inspected = path.lstat()
+    except FileNotFoundError:
+        yield StateFileObservation(path, None, None, None, None)
+        return
+
+    identity = inspected.st_dev, inspected.st_ino
+    expected_file_type = stat.S_IFMT(inspected.st_mode)
+    expected_fingerprint = (
+        file_io.file_fingerprint(inspected) if expected_file_type == stat.S_IFREG else None
+    )
+    if expected_file_type == stat.S_IFDIR:
+        # Directories are never moved by fault recovery.  Retaining their
+        # observation still lets the caller report the existing state as
+        # present before preserve_faulted fails closed.
+        yield StateFileObservation(
+            path,
+            identity,
+            expected_file_type,
+            expected_fingerprint,
+            None,
+        )
+        return
+
+    try:
+        pinned = file_io.pin_path(
+            path,
+            expected_file_type=expected_file_type,
+            expected_identity=identity,
+            expected_fingerprint=expected_fingerprint,
+        )
+    except ValueError as error:
+        raise OSError(f"cannot observe unsupported entry type at {path}") from error
+    try:
+        yield StateFileObservation(
+            path,
+            identity,
+            expected_file_type,
+            expected_fingerprint,
+            pinned,
+        )
+    finally:
+        pinned.close()
 
 
 def read_object(
@@ -115,7 +186,96 @@ def fsync_parent(path: Path) -> None:
         os.close(descriptor)
 
 
-def write_atomic_text(path: Path, contents: str) -> None:
+def _restore_relocated_publication_entry(
+    temporary: Path,
+    path: Path,
+    candidate: file_io.PinnedPath,
+    candidate_fingerprint: file_io.FileFingerprint,
+    candidate_document: bytes,
+) -> str | None:
+    """Restore a post-publication replacement relocated to our temporary.
+
+    ``atomic_move_no_replace`` restores an unverified destination to its
+    source name.  During no-replace publication that source is our private
+    temporary, so the restored entry can be a concurrent manual repair rather
+    than our candidate.  The candidate remains pinned while this comparison
+    and no-replace restoration run.
+    """
+    try:
+        current = temporary.lstat()
+        pinned = candidate.status()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return f"could not inspect a relocated concurrent state entry: {error}"
+    current_type = stat.S_IFMT(current.st_mode)
+    same_candidate = False
+    current_fingerprint = (
+        file_io.file_fingerprint(current) if current_type == stat.S_IFREG else None
+    )
+    if (
+        current_type == stat.S_IFREG
+        and (current.st_dev, current.st_ino) == candidate_fingerprint[:2]
+        and (pinned.st_dev, pinned.st_ino) == candidate_fingerprint[:2]
+        and current_fingerprint == file_io.file_fingerprint(pinned)
+    ):
+        chunks: list[bytes] = []
+        offset = 0
+        remaining = len(candidate_document) + 1
+        try:
+            while remaining:
+                chunk = os.pread(candidate.descriptor, min(remaining, 64 * 1024), offset)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                offset += len(chunk)
+                remaining -= len(chunk)
+            after = candidate.status()
+            named_after = temporary.lstat()
+        except OSError as error:
+            return f"could not inspect a relocated concurrent state entry: {error}"
+        same_candidate = (
+            b"".join(chunks) == candidate_document
+            and stat.S_ISREG(after.st_mode)
+            and stat.S_ISREG(named_after.st_mode)
+            and (named_after.st_dev, named_after.st_ino) == candidate_fingerprint[:2]
+            and file_io.file_fingerprint(after)
+            == file_io.file_fingerprint(named_after)
+            == current_fingerprint
+            and (after.st_dev, after.st_ino) == candidate_fingerprint[:2]
+        )
+    relocated_description = "publication candidate" if same_candidate else "concurrent entry"
+    if current_type == 0 or current_type == stat.S_IFDIR:
+        return f"a concurrent directory entry remains preserved at {temporary}"
+    current_identity = current.st_dev, current.st_ino
+    try:
+        file_io.atomic_move_no_replace(
+            temporary,
+            path,
+            expected_identity=current_identity,
+            expected_file_type=current_type,
+            expected_fingerprint=current_fingerprint,
+        )
+    except FileExistsError:
+        return (
+            f"a newer concurrent entry remains at {path}; "
+            f"the {relocated_description} remains preserved at {temporary}"
+        )
+    except OSError as error:
+        return f"the {relocated_description} remains preserved at {temporary}: {error}"
+    try:
+        fsync_parent(path)
+    except OSError as error:
+        return f"the concurrent entry was restored to {path}, but sync failed: {error}"
+    return f"the {relocated_description} was restored to {path}"
+
+
+def write_atomic_text(
+    path: Path,
+    contents: str,
+    *,
+    replace_existing: bool = True,
+) -> None:
     """Durably replace ``path`` from a private same-directory temporary.
 
     ``mkstemp`` is important here rather than a name derived from the process
@@ -123,25 +283,82 @@ def write_atomic_text(path: Path, contents: str) -> None:
     two re-entrant saves in one process select the same temporary.  The file
     descriptor returned here is opened with exclusive creation, so neither is
     possible.  The same-directory replace remains atomic, and syncing both the
-    file and its parent preserves the stores' power-loss contract.
+    file and its parent preserves the stores' power-loss contract. Fault
+    recovery sets ``replace_existing=False`` after moving the unreadable
+    generation aside: if a manual repair appears in that newly empty pathname,
+    the repair wins instead of being overwritten by the recovered mutation.
     """
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
     temporary_status = os.fstat(descriptor)
     temporary_identity = temporary_status.st_dev, temporary_status.st_ino
+    temporary_fingerprint: file_io.FileFingerprint | None = None
+    temporary_pin: file_io.PinnedPath | None = None
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        temporary_pin = file_io.PinnedPath(
+            temporary,
+            os.dup(descriptor),
+            stat.S_IFREG,
+        )
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        # ``fdopen`` owns the descriptor from this point. Transfer ownership
+        # before write/flush/fsync can fail so the outer cleanup never closes a
+        # recycled numeric descriptor after the handle has already closed it.
+        descriptor = -1
+        with handle:
             handle.write(contents)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        temporary_fingerprint = temporary_pin.fingerprint
+        candidate_document = contents.encode("utf-8")
+        if replace_existing:
+            os.replace(temporary, path)
+        else:
+            try:
+                file_io.atomic_move_no_replace(
+                    temporary,
+                    path,
+                    expected_identity=temporary_identity,
+                    expected_fingerprint=temporary_fingerprint,
+                    pinned_source=temporary_pin,
+                )
+            except file_io.PathChangedError as error:
+                restoration = _restore_relocated_publication_entry(
+                    temporary,
+                    path,
+                    temporary_pin,
+                    temporary_fingerprint,
+                    candidate_document,
+                )
+                if restoration is None:
+                    raise
+                raise file_io.PathChangedError(
+                    f"{error}; {restoration}",
+                    preserved_path=error.preserved_path,
+                ) from error
         fsync_parent(path)
-    except OSError:
+    except OSError, UnicodeError:
+        if temporary_pin is None:
+            # Even descriptor exhaustion must not make cleanup identify the
+            # private temporary only by a recyclable inode number.
+            temporary_pin = file_io.PinnedPath(temporary, descriptor, stat.S_IFREG)
+            descriptor = -1
+        if temporary_fingerprint is None:
+            with contextlib.suppress(OSError):
+                temporary_fingerprint = temporary_pin.fingerprint
         file_io.discard_regular_if_same(
             temporary,
             expected_identity=temporary_identity,
+            expected_fingerprint=temporary_fingerprint,
+            pinned_source=temporary_pin,
         )
         raise
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if temporary_pin is not None:
+            temporary_pin.close()
 
 
 @contextlib.contextmanager
@@ -223,18 +440,32 @@ def mutation_lock(
                 _MUTATION_GATE.release()
 
 
-def preserve_faulted(path: Path) -> Path:
+def preserve_faulted(
+    path: Path,
+    *,
+    observed: StateFileObservation | None = None,
+) -> Path:
     """Move an unreadable state object aside without replacing any backup.
 
     The source is moved with the kernel's no-replace operation and verified at
     the destination before the public name is considered released. Directories
     fail safely: the caller must never recursively relocate an unexpected tree
-    just to make room for a JSON document.
+    just to make room for a JSON document. A Store passes the observation held
+    across its read so a valid manual repair cannot be mistaken for the bytes
+    which produced the fault. Direct callers get the same protection from a
+    fresh observation.
     """
-    inspected = path.lstat()
-    if stat.S_ISDIR(inspected.st_mode):
+    if observed is None:
+        with observe(path) as current:
+            return preserve_faulted(path, observed=current)
+    if observed.path != path:
+        raise ValueError("the state-file observation belongs to a different path")
+    if not observed.present:
+        raise FileNotFoundError(path)
+    if observed.expected_file_type == stat.S_IFDIR:
         raise OSError(f"cannot preserve directory at {path}")
-    expected = inspected.st_dev, inspected.st_ino
+    if observed.identity is None or observed.expected_file_type is None or observed.pinned is None:
+        raise file_io.PathChangedError(f"cannot prove the faulted generation at {path}")
     for index in range(10_000):
         suffix = ".broken" if index == 0 else f".broken.{index}"
         backup = path.with_name(path.name + suffix)
@@ -242,8 +473,10 @@ def preserve_faulted(path: Path) -> Path:
             file_io.atomic_move_no_replace(
                 path,
                 backup,
-                expected_identity=expected,
-                require_regular=False,
+                expected_identity=observed.identity,
+                expected_file_type=observed.expected_file_type,
+                expected_fingerprint=observed.expected_fingerprint,
+                pinned_source=observed.pinned,
             )
         except FileExistsError:
             continue

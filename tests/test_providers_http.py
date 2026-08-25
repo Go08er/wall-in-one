@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import io
+import os
 import socket
+import stat
 import threading
 import time
 import urllib.error
@@ -16,12 +19,42 @@ from typing import IO
 import pytest
 
 from tests.test_providers_fakes import FrozenClock
+from wall_in_one import file_io
 from wall_in_one.providers import base, cache, download, http, motionbgs, registry, wallhaven
 from wall_in_one.providers.base import ProviderError
 from wall_in_one.providers.cache import TtlCache
 
 #: Everything in the package except the transport itself.
 PROVIDER_MODULES = (base, cache, download, motionbgs, registry, wallhaven)
+
+
+def _spoof_identity(
+    status: os.stat_result,
+    identity: file_io.PathIdentity,
+) -> os.stat_result:
+    fields = list(status)
+    fields[stat.ST_DEV] = identity[0]
+    fields[stat.ST_INO] = identity[1]
+    return os.stat_result(fields)
+
+
+def _open_fd_count() -> int:
+    gc.collect()
+    return len(os.listdir("/proc/self/fd"))
+
+
+def _visible_entries(directory: Path) -> set[Path]:
+    """Entries other than the exact-inode safe-retention namespace."""
+    return {path for path in directory.iterdir() if path.name != file_io.RETAINED_ENTRY_DIRECTORY}
+
+
+def _assert_zeroed_regular_residue(directory: Path, *, count: int = 1) -> None:
+    retained_directory = directory / file_io.RETAINED_ENTRY_DIRECTORY
+    retained = tuple(retained_directory.iterdir()) if retained_directory.exists() else ()
+    regulars = tuple(path for path in retained if path.is_file())
+    assert len(regulars) == count
+    assert all(path.stat().st_size == 0 for path in regulars)
+    assert all(path.is_file() or path.is_dir() for path in retained)
 
 
 # -- the seam is single --------------------------------------------------
@@ -166,6 +199,47 @@ def test_the_client_sends_its_headers_and_reads_the_body() -> None:
     assert opener.timeouts == [5.0]
 
 
+def test_response_metadata_failure_closes_the_unregistered_stream() -> None:
+    class BrokenMetadata(io.BytesIO):
+        @property
+        def status(self) -> int:
+            raise RuntimeError("injected metadata failure")
+
+        def close(self) -> None:
+            super().close()
+            raise RuntimeError("injected unregistered response close failure")
+
+    stream = BrokenMetadata(b"payload")
+    client, _ = _client(stream)
+
+    with pytest.raises(RuntimeError, match="injected metadata failure"):
+        client.fetch(http.Request(url="https://a.test/", accept="*/*", timeout=5.0, max_bytes=64))
+
+    assert stream.closed
+    assert client._active == {}
+
+
+def test_response_close_failure_does_not_mask_a_body_failure() -> None:
+    class BrokenBodyAndClose(_Fixed):
+        def read(self, _size: int | None = -1, /) -> bytes:
+            raise OSError("injected body failure")
+
+        def close(self) -> None:
+            super().close()
+            raise RuntimeError("injected response close failure")
+
+    stream = BrokenBodyAndClose(b"payload", 200, {}, "https://a.test/")
+    client, _ = _client(stream)
+
+    with pytest.raises(ProviderError, match="injected body failure") as caught:
+        client.fetch(http.Request(url="https://a.test/", accept="*/*", timeout=5.0, max_bytes=64))
+
+    assert caught.value.kind == "transport"
+    assert any("injected response close failure" in note for note in caught.value.__notes__)
+    assert stream.closed
+    assert client._active == {}
+
+
 def test_a_media_request_keeps_its_body_deadline_but_bounds_connect() -> None:
     client, opener = _client(_Fixed(b"ok", 200, {}, "https://a.test/"))
 
@@ -283,7 +357,8 @@ def test_an_oversized_download_leaves_no_file_behind(tmp_path: Path) -> None:
             tmp_path,
         )
     assert caught.value.kind == "size-limit"
-    assert list(tmp_path.iterdir()) == []
+    assert _visible_entries(tmp_path) == set()
+    _assert_zeroed_regular_residue(tmp_path)
 
 
 def test_a_staging_creation_failure_releases_the_registered_response(
@@ -292,7 +367,7 @@ def test_a_staging_creation_failure_releases_the_registered_response(
     stream = _Fixed(b"payload", 200, {}, "https://a.test/f")
     client, _ = _client(stream)
     monkeypatch.setattr(
-        "wall_in_one.providers.http.tempfile.mkstemp",
+        "wall_in_one.providers.download.tempfile.mkstemp",
         lambda **_keywords: (_ for _ in ()).throw(OSError("disk refused staging")),
     )
 
@@ -306,6 +381,105 @@ def test_a_staging_creation_failure_releases_the_registered_response(
     assert client._active == {}
 
 
+def test_an_fdopen_failure_closes_the_owned_staging_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_fds = _open_fd_count()
+    stream = _Fixed(b"payload", 200, {}, "https://a.test/f")
+    client, _ = _client(stream)
+
+    def fail_fdopen(*_arguments: object, **_keywords: object) -> IO[bytes]:
+        raise OSError("injected fdopen failure")
+
+    monkeypatch.setattr(os, "fdopen", fail_fdopen)
+
+    with pytest.raises(OSError, match="injected fdopen failure"):
+        client.download(
+            http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
+            tmp_path,
+        )
+
+    assert stream.closed and client._active == {}
+    assert not any(path.name.startswith(http.STAGING_PREFIX) for path in tmp_path.iterdir())
+    _assert_zeroed_regular_residue(tmp_path)
+    assert _open_fd_count() == initial_fds
+
+
+def test_a_staging_fingerprint_failure_closes_the_fd_pin_and_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_fds = _open_fd_count()
+    stream = _Fixed(b"payload", 200, {}, "https://a.test/f")
+    client, _ = _client(stream)
+    accesses = 0
+
+    def fail_second_access(pin: file_io.PinnedPath) -> file_io.FileFingerprint:
+        nonlocal accesses
+        if pin.path.name.startswith(http.STAGING_PREFIX):
+            accesses += 1
+            if accesses == 2:
+                raise OSError("injected download fingerprint failure")
+        return file_io.file_fingerprint(pin.status())
+
+    monkeypatch.setattr(
+        file_io.PinnedPath,
+        "fingerprint",
+        property(fail_second_access),
+    )
+
+    with pytest.raises(OSError, match="injected download fingerprint failure"):
+        client.download(
+            http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
+            tmp_path,
+        )
+
+    assert accesses == 2
+    assert stream.closed and client._active == {}
+    assert not any(path.name.startswith(http.STAGING_PREFIX) for path in tmp_path.iterdir())
+    _assert_zeroed_regular_residue(tmp_path)
+    assert download._STAGED_FILES == {}
+    assert _open_fd_count() == initial_fds
+
+
+def test_a_transfer_handoff_failure_retires_the_stage_and_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_fds = _open_fd_count()
+    stream = _Fixed(b"payload", 200, {}, "https://a.test/f")
+    client, _ = _client(stream)
+    created_pin: file_io.PinnedPath | None = None
+    real_pin_created_temporary = download._pin_created_temporary
+
+    def capture_pin(descriptor: int, path: Path) -> file_io.PinnedPath:
+        nonlocal created_pin
+        created_pin = real_pin_created_temporary(descriptor, path)
+        return created_pin
+
+    def fail_handoff(_staged: download._StagedFile) -> Path:
+        raise RuntimeError("injected transfer handoff failure")
+
+    monkeypatch.setattr(download, "_pin_created_temporary", capture_pin)
+    monkeypatch.setattr(download, "_validation_path", fail_handoff)
+
+    with pytest.raises(RuntimeError, match="injected transfer handoff failure"):
+        client.download(
+            http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
+            tmp_path,
+        )
+
+    assert stream.closed and client._active == {}
+    assert not any(path.name.startswith(http.STAGING_PREFIX) for path in tmp_path.iterdir())
+    _assert_zeroed_regular_residue(tmp_path)
+    assert download._STAGED_FILES == {}
+    assert created_pin is not None
+    with pytest.raises(OSError):
+        created_pin.status()
+    assert _open_fd_count() == initial_fds
+
+
 def test_a_download_stages_into_the_directory_it_was_given(tmp_path: Path) -> None:
     client, _ = _client(_Fixed(b"payload", 200, {"Content-Type": "video/mp4"}, "https://a.test/f"))
     transfer = client.download(
@@ -317,7 +491,51 @@ def test_a_download_stages_into_the_directory_it_was_given(tmp_path: Path) -> No
     assert transfer.path.read_bytes() == b"payload"
     assert transfer.size == 7
     transfer.discard()
-    assert list(tmp_path.iterdir()) == []
+    assert _visible_entries(tmp_path) == set()
+    _assert_zeroed_regular_residue(tmp_path)
+
+
+def test_download_staging_uses_retained_directory_after_a_post_check_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory, marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    assert isinstance(directory, download._AnchoredPath)
+    anchor = directory._directory_anchor
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "precious"
+    sentinel.write_bytes(b"outside data")
+    logical_directory = Path(os.fspath(directory))
+    preserved_directory = tmp_path / "retained-provider-directory"
+    real_verify = download._DirectoryAnchor.verify_public
+    swapped = False
+
+    def verify_then_swap(current: download._DirectoryAnchor) -> None:
+        nonlocal swapped
+        real_verify(current)
+        if current is anchor and not swapped:
+            swapped = True
+            logical_directory.rename(preserved_directory)
+            logical_directory.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(download._DirectoryAnchor, "verify_public", verify_then_swap)
+    stream = _Fixed(b"payload", 200, {"Content-Type": "video/mp4"}, "https://a.test/f")
+    client, _opener = _client(stream)
+
+    with pytest.raises(ProviderError) as caught:
+        client.download(
+            http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
+            directory,
+        )
+
+    assert caught.value.kind == "invalid-path"
+    assert stream.closed and client._active == {}
+    assert set(outside.iterdir()) == {sentinel}
+    assert {path.name for path in _visible_entries(preserved_directory)} == {marker.name}
+    _assert_zeroed_regular_residue(preserved_directory)
+    assert logical_directory.is_symlink()
+    assert download._STAGED_FILES == {}
 
 
 def test_a_redirected_download_stages_nothing(tmp_path: Path) -> None:
@@ -334,6 +552,7 @@ def test_a_redirected_download_stages_nothing(tmp_path: Path) -> None:
 
 
 def test_a_transfer_used_as_a_context_manager_cleans_up(tmp_path: Path) -> None:
+    initial_fds = _open_fd_count()
     client, _ = _client(_Fixed(b"payload", 200, {}, "https://a.test/f"))
     transfer = client.download(
         http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
@@ -341,7 +560,156 @@ def test_a_transfer_used_as_a_context_manager_cleans_up(tmp_path: Path) -> None:
     )
     with transfer:
         assert transfer.path is not None and transfer.path.exists()
-    assert list(tmp_path.iterdir()) == []
+    assert _visible_entries(tmp_path) == set()
+    _assert_zeroed_regular_residue(tmp_path)
+    assert download._STAGED_FILES == {}
+    assert _open_fd_count() == initial_fds
+
+
+def test_transfer_discard_preserves_same_type_reuse_with_spoofed_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged = tmp_path / f"{http.STAGING_PREFIX}abcdefgh"
+    staged.write_bytes(b"transport-owned generation")
+    transfer = http.Transfer(
+        url="https://a.test/f",
+        status=200,
+        content_type="application/octet-stream",
+        size=staged.stat().st_size,
+        path=staged,
+    )
+    retained = transfer._staged_file
+    assert retained is not None
+    expected_identity = retained.fingerprint[:2]
+    preserved_original = tmp_path / "preserved-transport-generation"
+    replacement = b"different regular replacement generation"
+    staged.rename(preserved_original)
+    staged.write_bytes(replacement)
+    real_lstat = Path.lstat
+
+    def spoofed_lstat(path: Path) -> os.stat_result:
+        status = real_lstat(path)
+        return _spoof_identity(status, expected_identity) if path == staged else status
+
+    monkeypatch.setattr(Path, "lstat", spoofed_lstat)
+
+    transfer.discard()
+    transfer.discard()
+
+    assert staged.read_bytes() == replacement
+    assert preserved_original.read_bytes() == b"transport-owned generation"
+    assert retained.consumed and retained.references == 0
+    assert download._STAGED_FILES == {}
+
+
+def test_transfer_discard_reports_a_replacement_preserved_in_a_private_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged = tmp_path / f"{http.STAGING_PREFIX}abcdefgh"
+    staged.write_bytes(b"transport-owned generation")
+    transfer = http.Transfer(
+        url="https://a.test/f",
+        status=200,
+        content_type="application/octet-stream",
+        size=staged.stat().st_size,
+        path=staged,
+    )
+    retained = transfer._staged_file
+    assert retained is not None
+    preserved_original = tmp_path / "preserved-original-claim"
+    public_replacement = b"public regular replacement"
+    claimed_replacement = b"private-claim regular replacement"
+    real_rename = file_io._rename_noreplace
+    claimed: Path | None = None
+
+    def replace_both_names_after_claim(source: Path, destination: Path) -> None:
+        nonlocal claimed
+        real_rename(source, destination)
+        if source == staged and claimed is None:
+            claimed = destination
+            destination.rename(preserved_original)
+            destination.write_bytes(claimed_replacement)
+            source.write_bytes(public_replacement)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", replace_both_names_after_claim)
+
+    with pytest.raises(ProviderError, match="transfer cleanup preserved") as caught:
+        transfer.discard()
+
+    assert caught.value.kind == "local-io"
+    assert claimed is not None
+    public_claims = tuple(
+        (tmp_path / file_io.RETAINED_ENTRY_DIRECTORY).glob(
+            f"{file_io.RETAINED_ENTRY_PREFIX}*/entry"
+        )
+    )
+    assert len(public_claims) == 1
+    public_claim = public_claims[0]
+    assert str(public_claim) in str(caught.value)
+    assert staged.read_bytes() == public_replacement
+    assert public_claim.read_bytes() == claimed_replacement
+    assert preserved_original.read_bytes() == b"transport-owned generation"
+    assert retained.consumed and retained.references == 0
+    assert download._STAGED_FILES == {}
+
+
+def test_download_failure_preserves_same_type_reuse_with_spoofed_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_fds = _open_fd_count()
+    client, _ = _client(_Fixed(b"downloaded payload", 200, {}, "https://a.test/f"))
+    preserved_original = tmp_path / "preserved-failed-download"
+    replacement = b"different regular failure replacement"
+    real_lstat = Path.lstat
+    raced_path: Path | None = None
+    expected_identity: file_io.PathIdentity | None = None
+    created_pin: file_io.PinnedPath | None = None
+    real_pin_created_temporary = download._pin_created_temporary
+
+    def spoofed_lstat(path: Path) -> os.stat_result:
+        status = real_lstat(path)
+        if raced_path is not None and expected_identity is not None and path == raced_path:
+            return _spoof_identity(status, expected_identity)
+        return status
+
+    def replace_then_fail(_descriptor: int) -> None:
+        nonlocal expected_identity, raced_path
+        candidates = tuple(
+            path for path in tmp_path.iterdir() if path.name.startswith(http.STAGING_PREFIX)
+        )
+        assert len(candidates) == 1
+        raced_path = candidates[0]
+        expected_identity = file_io.path_identity(raced_path)
+        raced_path.rename(preserved_original)
+        raced_path.write_bytes(replacement)
+        raise OSError("forced download fsync failure")
+
+    def capture_pin(descriptor: int, path: Path) -> file_io.PinnedPath:
+        nonlocal created_pin
+        created_pin = real_pin_created_temporary(descriptor, path)
+        return created_pin
+
+    monkeypatch.setattr(Path, "lstat", spoofed_lstat)
+    monkeypatch.setattr(os, "fsync", replace_then_fail)
+    monkeypatch.setattr(download, "_pin_created_temporary", capture_pin)
+
+    with pytest.raises(OSError, match="forced download fsync failure"):
+        client.download(
+            http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
+            tmp_path,
+        )
+
+    assert raced_path is not None
+    assert raced_path.read_bytes() == replacement
+    assert preserved_original.read_bytes() == b"downloaded payload"
+    assert download._STAGED_FILES == {}
+    assert created_pin is not None
+    with pytest.raises(OSError):
+        created_pin.status()
+    assert _open_fd_count() == initial_fds
 
 
 def test_the_redirect_handler_declines_every_redirect() -> None:

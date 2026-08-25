@@ -130,8 +130,10 @@ The importer preserves, subject to current typed limits:
 - installed Wallpaper Engine video identity as its actual video path and true
   scene identity as its stable Workshop id; and
 - legacy Wallhaven/MotionBGS directory markers and per-file sidecars already on
-  disk. The current scanner and deletion boundary recognize the predecessor
-  marker shapes, so downloaded media does not become falsely user-owned.
+  disk. Predecessor marker shapes remain recognized and the sidecars are
+  preserved as historical metadata, but an unbound predecessor sidecar cannot
+  prove the current media lifecycle. That media remains playable, deliberately
+  scans as user-owned, and uses Move to Trash rather than irreversible Remove.
 
 Independent-display import targets a software-supported code path. Routing,
 schedules, cursors, renderers and transport are covered by automated tests, but
@@ -144,9 +146,12 @@ paths and are called out in the report. No replacement file is invented.
 Unknown/uninstalled Workshop ids keep the expected Steam path with a warning;
 reinstall or rebind them before playback.
 
-Deleting an imported moving item later removes its pairing metadata and a
-provably generated automatic still. A user-selected still remains its own
-library item; deleting the association never deletes that still.
+Explicitly using local **Remove** or **Move to Trash** on an imported moving
+item later removes its pairing metadata and every provably generated automatic
+artifact found under the configured roots. A user-selected still remains its
+own library item; deleting the association never deletes that still. An
+externally observed Steam Workshop uninstall clears authored metadata only; it
+does not rediscover or delete unpinned generated files.
 
 ## Intentional non-equivalences
 
@@ -234,12 +239,11 @@ The matching companion revision requires status version 2, enqueues one health
 sync for a visible non-durable taboo record, and raises the callback deadline
 to 55 seconds (below Noctalia's 60-second clamp and above the app's 45-second
 bound). Do not combine this application release with a companion revision
-through `a5e23c9`; `flake.lock` must pin the reviewed, tested companion commit
-before the app is released. Users of an older companion should prefer the
-packaged user service/timer and treat the app's status UI as authoritative.
-The coordinated release uses a non-default companion release branch for that
-initial pin and validation. The compatible app is published first, followed
-immediately by promotion and tagging of companion `0.1.1`; publishing the strict
-companion first would temporarily break users whose app still emits the older
-status contract. This repository neither publishes nor silently modifies the
-companion.
+through `a5e23c9`. This tree's `flake.lock` already pins the reviewed candidate
+`a17eb70f653afb4cf5c04afc912cdca8b14ac06e` on its non-default release branch.
+Users of an older companion should prefer the packaged user service/timer and
+treat the app's status UI as authoritative. The compatible app is published
+first, followed immediately by promotion and tagging of companion `0.1.1`;
+publishing the strict companion first would temporarily break users whose app
+still emits the older status contract. This repository neither publishes nor
+silently modifies the companion.

@@ -28,21 +28,22 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
-import tempfile
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.message import Message as HTTPMessage
 from pathlib import Path
 from types import TracebackType
 from typing import IO, BinaryIO, Final, Protocol, cast
 from urllib.parse import urlsplit
 
+from wall_in_one import file_io
+from wall_in_one.providers import download as download_files
 from wall_in_one.providers.base import ProviderError
-from wall_in_one.providers.download import MEDIA_STAGING_PREFIX
 
 #: Sent on every request. Identifying the client honestly is the price of using
 #: someone else's public API.
@@ -60,7 +61,7 @@ REDIRECT_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
 
 #: Staged downloads are dot-files so a library scan already ignores them if one
 #: is ever left behind by a hard kill.
-STAGING_PREFIX: Final = MEDIA_STAGING_PREFIX
+STAGING_PREFIX: Final = download_files.MEDIA_STAGING_PREFIX
 
 # Media transfers retain their published 120/300-second *stall* ceilings, but
 # establishing a socket is a separate operation.  A UI shutdown cannot close a
@@ -104,8 +105,10 @@ class Transfer:
     """A body streamed to a temporary file, because it may be hundreds of MiB.
 
     ``path`` is a file in the directory the caller nominated and belongs to the
-    caller: install it or :meth:`discard` it. It is ``None`` when the remote
-    answered with a redirect or an error, where there is no body worth staging.
+    caller: install it or :meth:`discard` it. A hidden shared capability keeps
+    that exact inode pinned across provider wrappers until commit or cleanup.
+    It is ``None`` when the remote answered with a redirect or an error, where
+    there is no body worth staging.
     """
 
     url: str
@@ -114,14 +117,66 @@ class Transfer:
     size: int
     path: Path | None = None
     location: str = ""
+    _staged_pin: file_io.PinnedPath | None = field(default=None, repr=False, compare=False)
+    _staged_fingerprint: file_io.FileFingerprint | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _staged_file: download_files._StagedFile | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+    _release_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.path is None:
+            if self._staged_pin is not None or self._staged_fingerprint is not None:
+                if self._staged_pin is not None:
+                    self._staged_pin.close()
+                raise ValueError("a bodyless transfer cannot retain a staged file")
+            return
+        staged_file = download_files._retain_staged_file(
+            self.path,
+            pinned_source=self._staged_pin,
+            expected_fingerprint=self._staged_fingerprint,
+        )
+        try:
+            validation_path = download_files._validation_path(staged_file)
+        except BaseException:
+            download_files._release_staged_file(staged_file)
+            raise
+        object.__setattr__(self, "_staged_file", staged_file)
+        object.__setattr__(self, "path", validation_path)
 
     @property
     def is_redirect(self) -> bool:
         return self.status in REDIRECT_STATUSES
 
     def discard(self) -> None:
-        if self.path is not None:
-            self.path.unlink(missing_ok=True)
+        self._release(discard=True)
+
+    def _release(self, *, discard: bool) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            object.__setattr__(self, "_released", True)
+            staged_file = self._staged_file
+            if staged_file is None:
+                return
+            try:
+                if discard:
+                    download_files._consume_staged_file(staged_file, discard=True)
+            finally:
+                download_files._release_staged_file(staged_file)
 
     def __enter__(self) -> Transfer:
         return self
@@ -133,6 +188,12 @@ class Transfer:
         traceback: TracebackType | None,
     ) -> None:
         self.discard()
+
+    def __del__(self) -> None:
+        # Destructors cannot report a cleanup failure. Explicit discard or a
+        # context manager remains the observable cleanup path.
+        with contextlib.suppress(Exception):
+            self._release(discard=False)
 
 
 class Client(Protocol):
@@ -266,16 +327,21 @@ class UrllibClient:
             raise ProviderError("transport", f"could not reach {url}: {error.reason}") from error
         except OSError as error:
             raise ProviderError("transport", f"could not reach {url}: {error}") from error
-        opened = _describe(raw, url)
-        # urllib applies the open timeout to the resulting socket too. Restore
-        # the request's published body-stall deadline after the bounded
-        # connect/TLS phase, so cancellation does not weaken slow-download
-        # behaviour.
-        _set_stream_timeout(opened.stream, request.timeout)
-        if not self._register(opened.stream):
-            _interrupt_stream(opened.stream)
-            raise ProviderError("cancelled", "request cancelled during shutdown")
-        return opened
+        try:
+            opened = _describe(raw, url)
+            # urllib applies the open timeout to the resulting socket too. Restore
+            # the request's published body-stall deadline after the bounded
+            # connect/TLS phase, so cancellation does not weaken slow-download
+            # behaviour.
+            _set_stream_timeout(opened.stream, request.timeout)
+            if not self._register(opened.stream):
+                raise ProviderError("cancelled", "request cancelled during shutdown")
+            return opened
+        except BaseException:
+            # Ownership begins when urllib returns, not after response metadata
+            # happens to parse successfully.
+            _interrupt_stream(raw)
+            raise
 
     def fetch(self, request: Request) -> Response:
         opened = self._open(request)
@@ -283,8 +349,10 @@ class UrllibClient:
             _refuse_declared_overflow(opened, request.max_bytes)
             body = read_bounded(opened.stream, request.max_bytes)
         finally:
-            self._unregister(opened.stream)
-            opened.stream.close()
+            try:
+                self._unregister(opened.stream)
+            finally:
+                _close_stream_preserving_error(opened.stream)
         return Response(
             url=opened.url,
             status=opened.status,
@@ -304,11 +372,22 @@ class UrllibClient:
                     size=0,
                     location=opened.location,
                 )
-            descriptor, name = tempfile.mkstemp(prefix=STAGING_PREFIX, dir=directory)
-            staged = Path(name)
+            descriptor, staged = download_files._mkstemp(
+                prefix=STAGING_PREFIX,
+                directory=directory,
+            )
+            staged_pin = download_files._pin_created_temporary(descriptor, staged)
+            staged_descriptor: int | None = descriptor
+            staged_fingerprint: file_io.FileFingerprint | None = None
+            pin_owned = True
             total = 0
             try:
-                with os.fdopen(descriptor, "wb") as sink:
+                staged_fingerprint = staged_pin.fingerprint
+                owned_descriptor = staged_descriptor
+                staged_descriptor = None
+                if owned_descriptor is None:
+                    raise RuntimeError("download creation descriptor was already consumed")
+                with download_files._fdopen_owned(owned_descriptor, "wb") as sink:
                     _refuse_declared_overflow(opened, request.max_bytes)
                     remaining = request.max_bytes
                     while True:
@@ -325,20 +404,56 @@ class UrllibClient:
                         total += len(chunk)
                     sink.flush()
                     os.fsync(sink.fileno())
-            except BaseException:
-                staged.unlink(missing_ok=True)
-                raise
-            return Transfer(
-                url=opened.url,
-                status=opened.status,
-                content_type=opened.content_type,
-                size=total,
-                path=staged,
-                location=opened.location,
-            )
+                staged_fingerprint = staged_pin.fingerprint
+                pin_owned = False
+                transfer = Transfer(
+                    url=opened.url,
+                    status=opened.status,
+                    content_type=opened.content_type,
+                    size=total,
+                    path=staged,
+                    location=opened.location,
+                    _staged_pin=staged_pin,
+                    _staged_fingerprint=staged_fingerprint,
+                )
+                return transfer
+            finally:
+                try:
+                    if staged_descriptor is not None:
+                        download_files._close_descriptor_preserving_error(
+                            staged_descriptor,
+                            f"the download staging file {staged}",
+                        )
+                finally:
+                    if pin_owned:
+                        download_files._discard_pinned_temporary(
+                            staged,
+                            staged_pin,
+                            fallback=staged_fingerprint,
+                        )
+                    elif sys.exception() is not None:
+                        # Transfer consumes the supplied pin even when its
+                        # constructor rejects the handoff. Re-pin by full
+                        # generation for exact cleanup rather than touching a
+                        # potentially reused public name.
+                        active_error = sys.exception()
+                        try:
+                            if staged_fingerprint is not None:
+                                download_files._discard_owned(
+                                    staged,
+                                    expected_fingerprint=staged_fingerprint,
+                                )
+                        except BaseException as cleanup_error:
+                            if active_error is not None:
+                                active_error.add_note(
+                                    f"also could not retire provider temporary {staged}: "
+                                    f"{cleanup_error}"
+                                )
         finally:
-            self._unregister(opened.stream)
-            opened.stream.close()
+            try:
+                self._unregister(opened.stream)
+            finally:
+                _close_stream_preserving_error(opened.stream)
 
 
 def _stream_socket(stream: BinaryIO) -> socket.socket | None:
@@ -368,14 +483,28 @@ def _set_stream_timeout(stream: BinaryIO, timeout: float) -> None:
 
 def _interrupt_stream(stream: BinaryIO) -> None:
     """Wake a blocked body read, then release urllib's response object."""
-    connection = _stream_socket(stream)
+    connection: socket.socket | None = None
+    with contextlib.suppress(Exception):
+        connection = _stream_socket(stream)
     if connection is not None:
         with contextlib.suppress(OSError):
             connection.shutdown(socket.SHUT_RDWR)
         with contextlib.suppress(OSError):
             connection.close()
-    with contextlib.suppress(OSError, ValueError):
+    with contextlib.suppress(Exception):
         stream.close()
+
+
+def _close_stream_preserving_error(stream: BinaryIO) -> None:
+    """Close a response without replacing a body/validation failure."""
+    active_error = sys.exception()
+    try:
+        stream.close()
+    except Exception as close_error:
+        if active_error is not None:
+            active_error.add_note(f"also could not close the HTTP response: {close_error}")
+            return
+        raise
 
 
 def _describe(raw: BinaryIO, requested: str) -> _Opened:

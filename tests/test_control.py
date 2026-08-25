@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -47,7 +48,7 @@ from wall_in_one.control.server import (
     render_search,
     resolve,
 )
-from wall_in_one.library import favourites, manage, pairings, removals
+from wall_in_one.library import favourites, manage, pairing, pairings, removals
 from wall_in_one.library.filter import Kinds, Query
 from wall_in_one.library.manage import ManageError
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
@@ -1181,6 +1182,26 @@ def test_no_favourites_at_all_says_none_rather_than_nothing() -> None:
 MANAGED_MARKER = ".managed-by-wall-in-one-v1.json"
 
 
+def _provenance(path: Path, *, expected_path: Path | None = None) -> dict[str, object]:
+    contents = path.read_bytes()
+    status = path.stat()
+    return {
+        "schema": 1,
+        "plugin": "goober/wall-in-one",
+        "provider": "Wallhaven",
+        "path": str(path if expected_path is None else expected_path),
+        "bytes": len(contents),
+        "sha256": hashlib.sha256(contents).hexdigest(),
+        "media_generation": {
+            "device": status.st_dev,
+            "inode": status.st_ino,
+            "bytes": status.st_size,
+            "mtime_ns": status.st_mtime_ns,
+            "ctime_ns": status.st_ctime_ns,
+        },
+    }
+
+
 @pytest.fixture
 def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A library root, with the state and data homes pointed away from the user's.
@@ -1215,14 +1236,7 @@ def _downloaded(root: Path, name: str = "aurora.jpg", *, sidecar: bool = True) -
     path.write_bytes(b"\xff\xd8\xff" + b"0" * 32)
     if sidecar:
         path.with_name(path.name + ".wallhaven.json").write_text(
-            json.dumps(
-                {
-                    "schema": 1,
-                    "plugin": "goober/wall-in-one",
-                    "provider": "Wallhaven",
-                    "path": str(path),
-                }
-            ),
+            json.dumps(_provenance(path)),
             encoding="utf-8",
         )
     return path
@@ -1250,6 +1264,10 @@ def _source_identity(path: Path) -> manage.SourceIdentity:
     return status.st_dev, status.st_ino
 
 
+def _source_fingerprint(path: Path) -> manage.SourceFingerprint:
+    return file_io.regular_file_fingerprint(path)
+
+
 REMOVAL_TOKEN = "0123456789abcdef0123456789abcdef"
 
 
@@ -1259,6 +1277,7 @@ def test_a_downloaded_wallpaper_is_deleted_and_the_reply_says_which(sandbox: Pat
         _on_disk(path, Ownership.MANAGED),
         (sandbox,),
         expected_source=_source_identity(path),
+        expected_fingerprint=_source_fingerprint(path),
         operation_token=REMOVAL_TOKEN,
     )
 
@@ -1276,6 +1295,7 @@ def test_a_wallpaper_of_the_users_own_is_trashed_and_the_reply_says_which(
         _on_disk(path, Ownership.USER),
         (sandbox,),
         expected_source=_source_identity(path),
+        expected_fingerprint=_source_fingerprint(path),
     )
 
     assert not path.exists()
@@ -1294,6 +1314,7 @@ def test_a_stale_claim_of_ownership_still_does_not_delete_anything(sandbox: Path
             _on_disk(path, Ownership.MANAGED),
             (sandbox,),
             expected_source=_source_identity(path),
+            expected_fingerprint=_source_fingerprint(path),
             operation_token=REMOVAL_TOKEN,
         )
 
@@ -1372,9 +1393,21 @@ class _FakeApp:
         item: MediaItem,
         *,
         intent: removals.Intent,
+        artifacts_already_clean: bool = True,
+        artifact_source_root: Path | None = None,
+        artifact_lookup_root: Path | None = None,
+        artifact_lookup_parent: Path | None = None,
+        artifact_source_context: file_io.PinnedDirectoryContext | None = None,
     ) -> tuple[str, ...]:
         self.forgotten.append(item.path)
-        return self.session.commit_removal(intent)
+        return self.session.commit_removal(
+            intent,
+            artifacts_already_clean=artifacts_already_clean,
+            artifact_source_root=artifact_source_root,
+            artifact_lookup_root=artifact_lookup_root,
+            artifact_lookup_parent=artifact_lookup_parent,
+            artifact_source_context=artifact_source_context,
+        )
 
     def pairing_changed(self, item: MediaItem) -> None:
         self.repaired.append(item.path)
@@ -1639,6 +1672,108 @@ def test_removing_a_wallpaper_deletes_it_and_tells_the_window(sandbox: Path) -> 
     assert app.forgotten == [path]
 
 
+def test_legacy_remove_uses_the_prepared_root_after_a_same_inode_root_swap(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _downloaded(sandbox)
+    item = _on_disk(path, Ownership.MANAGED)
+    original_pairing = path.with_name(path.name + pairing.SIDECAR_SUFFIX)
+    original_pairing.write_bytes(b"old pairing")
+    replacement_root = sandbox.parent / "replacement-wallpapers"
+    replacement_parent = replacement_root / path.parent.relative_to(sandbox)
+    replacement_parent.mkdir(parents=True)
+    (replacement_parent / MANAGED_MARKER).write_bytes((path.parent / MANAGED_MARKER).read_bytes())
+    replacement_source = replacement_parent / path.name
+    replacement_source.hardlink_to(path)
+    # Creating the deliberate same-inode alias advances ctime. Refresh the
+    # original app authority so this remains a root-capability test rather
+    # than correctly failing the independent lifecycle binding first.
+    path.with_name(path.name + ".wallhaven.json").write_text(
+        json.dumps(_provenance(path)),
+        encoding="utf-8",
+    )
+    replacement_source.with_name(path.name + ".wallhaven.json").write_text(
+        json.dumps(_provenance(replacement_source, expected_path=path)),
+        encoding="utf-8",
+    )
+    replacement_pairing = replacement_source.with_name(
+        replacement_source.name + pairing.SIDECAR_SUFFIX
+    )
+    replacement_pairing.write_bytes(b"replacement pairing")
+    commands, app = _commands(sandbox, [item])
+    disconnected = sandbox.parent / "disconnected-wallpapers"
+    real_source_pin = removals.Store.source_pin
+    swapped = False
+
+    def pin_then_replace(
+        store: removals.Store,
+        intent: removals.Intent,
+    ) -> file_io.PinnedPath:
+        nonlocal swapped
+        pin = real_source_pin(store, intent)
+        if not swapped:
+            sandbox.rename(disconnected)
+            replacement_root.rename(sandbox)
+            swapped = True
+        return pin
+
+    monkeypatch.setattr(removals.Store, "source_pin", pin_then_replace)
+
+    response = _immediate(commands.remove_wallpaper(str(path)))
+
+    assert response.ok
+    assert swapped
+    disconnected_path = disconnected / path.relative_to(sandbox)
+    assert not disconnected_path.exists()
+    assert not disconnected_path.with_name(disconnected_path.name + pairing.SIDECAR_SUFFIX).exists()
+    assert path.read_bytes().startswith(b"\xff\xd8\xff")
+    assert path.with_name(path.name + pairing.SIDECAR_SUFFIX).read_bytes() == b"replacement pairing"
+    assert app.session.removal_journal.records == ()
+
+
+def test_legacy_remove_retains_the_journal_when_a_replacement_cannot_be_restored(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _downloaded(sandbox)
+    item = _on_disk(path, Ownership.MANAGED)
+    commands, app = _commands(sandbox, [item])
+    original = sandbox / "prepared-original.jpg"
+    real_rename = file_io._rename_noreplace
+    preserved: Path | None = None
+    raced = False
+
+    def move_replacement_then_reoccupy(source: Path, destination: Path) -> None:
+        nonlocal preserved, raced
+        if source.name == path.name and not raced:
+            raced = True
+            preserved = destination.resolve()
+            source.rename(original)
+            source.write_bytes(b"replacement B")
+            real_rename(source, destination)
+            source.write_bytes(b"replacement C")
+            return
+        real_rename(source, destination)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move_replacement_then_reoccupy)
+
+    response = _immediate(commands.remove_wallpaper(str(path)))
+
+    assert not response.ok
+    assert response.kind == "changed"
+    assert "pending removal record was retained" in response.message
+    assert preserved is not None
+    assert str(preserved) in response.message
+    assert path.read_bytes() == b"replacement C"
+    assert preserved.read_bytes() == b"replacement B"
+    assert original.read_bytes().startswith(b"\xff\xd8\xff")
+    (intent,) = app.session.removal_journal.records
+    assert not intent.committed
+    assert not app.session.removal_journal.operation_is_active()
+    assert app.forgotten == []
+
+
 def test_committed_removal_reports_incomplete_metadata_cleanup(
     sandbox: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1651,6 +1786,7 @@ def test_committed_removal_reports_incomplete_metadata_cleanup(
         removed: MediaItem,
         *,
         intent: removals.Intent,
+        **_cleanup: object,
     ) -> tuple[str, ...]:
         del intent
         app.forgotten.append(removed.path)
@@ -1803,7 +1939,7 @@ def test_a_socket_path_too_long_to_bind_is_refused_before_anything_is_created(
 ) -> None:
     """AF_UNIX caps the path near 108 bytes, and `Gio.SocketService.add_address`
     does not say so -- it returns having created nothing, and the failure used
-    to surface two lines later as the `os.chmod` no window ever came back from.
+    to surface only after the bind attempt, when no window ever came back.
     """
     from wall_in_one.control.server import SocketServer
 
@@ -1879,6 +2015,8 @@ def test_a_dead_unix_socket_is_the_only_path_start_removes(tmp_path: Path) -> No
         server.stop()
 
     assert not path.exists()
+    retained = tuple((tmp_path / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
+    assert len(retained) == 1 and retained[0].is_socket()
 
 
 def test_a_live_unix_socket_is_never_stolen(tmp_path: Path) -> None:
@@ -1922,10 +2060,14 @@ def test_stale_cleanup_preserves_a_replacement_after_the_final_recheck(
         destination: Path,
         *,
         expected_identity: tuple[int, int],
-        require_regular: bool = True,
+        expected_file_type: int = stat.S_IFREG,
+        expected_fingerprint: file_io.FileFingerprint | None = None,
+        pinned_source: file_io.PinnedPath | None = None,
+        externally_pinned: bool = False,
     ) -> None:
         nonlocal replaced
         if source == path and not replaced:
+            assert expected_file_type == stat.S_IFSOCK
             replaced = True
             source.unlink()
             source.write_text("replacement", encoding="utf-8")
@@ -1933,7 +2075,10 @@ def test_stale_cleanup_preserves_a_replacement_after_the_final_recheck(
             source,
             destination,
             expected_identity=expected_identity,
-            require_regular=require_regular,
+            expected_file_type=expected_file_type,
+            expected_fingerprint=expected_fingerprint,
+            pinned_source=pinned_source,
+            externally_pinned=externally_pinned,
         )
 
     monkeypatch.setattr(file_io, "atomic_move_no_replace", replace_after_recheck)
@@ -1948,6 +2093,126 @@ def test_stale_cleanup_preserves_a_replacement_after_the_final_recheck(
     assert path.read_text(encoding="utf-8") == "replacement"
 
 
+def test_stale_cleanup_pins_the_socket_inode_through_the_atomic_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held O_PATH reference prevents same-type inode-number reuse."""
+    from wall_in_one.control import server as server_module
+
+    path = tmp_path / "wall-in-one.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+    server = server_module.SocketServer(_StubCommands(), path)
+    real_open = os.open
+    real_move = file_io.atomic_move_no_replace
+    pinned_descriptor: int | None = None
+
+    def watch_open(
+        candidate: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal pinned_descriptor
+        descriptor = real_open(candidate, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(candidate) == os.fsdecode(path) and flags & os.O_PATH:
+            pinned_descriptor = descriptor
+        return descriptor
+
+    def observe_claim(
+        source: Path,
+        destination: Path,
+        *,
+        expected_identity: tuple[int, int],
+        expected_file_type: int = stat.S_IFREG,
+        expected_fingerprint: file_io.FileFingerprint | None = None,
+        pinned_source: file_io.PinnedPath | None = None,
+        externally_pinned: bool = False,
+    ) -> None:
+        assert pinned_descriptor is not None
+        pinned = os.fstat(pinned_descriptor)
+        assert stat.S_ISSOCK(pinned.st_mode)
+        assert (pinned.st_dev, pinned.st_ino) == expected_identity
+        assert expected_file_type == stat.S_IFSOCK
+        real_move(
+            source,
+            destination,
+            expected_identity=expected_identity,
+            expected_file_type=expected_file_type,
+            expected_fingerprint=expected_fingerprint,
+            pinned_source=pinned_source,
+            externally_pinned=externally_pinned,
+        )
+
+    monkeypatch.setattr(os, "open", watch_open)
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", observe_claim)
+    server._acquire_instance_lock()
+    try:
+        server._clear_stale_socket()
+        assert pinned_descriptor is not None
+        with pytest.raises(OSError):
+            os.fstat(pinned_descriptor)
+    finally:
+        server.stop()
+
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("replacement_kind", ("regular", "socket"))
+def test_stale_cleanup_preserves_a_post_claim_retained_name_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+    server = SocketServer(_StubCommands(), path)
+    retain = file_io._retain_exact_entry
+    preserved_original: Path | None = None
+    replacement_socket: socket.socket | None = None
+
+    def replace_after_claim(source: Path, **keywords: object) -> Path:
+        nonlocal preserved_original, replacement_socket
+        retained = retain(source, **keywords)  # type: ignore[arg-type]
+        preserved_original = retained.with_name("preserved-original-socket")
+        retained.rename(preserved_original)
+        if replacement_kind == "regular":
+            retained.write_text("unrelated replacement", encoding="utf-8")
+        else:
+            replacement_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # Bind at the shorter public name first: Linux's AF_UNIX pathname
+            # limit is lower than pytest's nested temporary path plus the
+            # retained random name. Renaming preserves the socket inode/type.
+            replacement_socket.bind(str(path))
+            path.rename(retained)
+        return retained
+
+    monkeypatch.setattr(file_io, "_retain_exact_entry", replace_after_claim)
+    server._acquire_instance_lock()
+    try:
+        server._clear_stale_socket()
+
+        assert not path.exists()
+        assert preserved_original is not None and preserved_original.is_socket()
+        retained_entries = tuple((tmp_path / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
+        replacement = next(entry for entry in retained_entries if entry != preserved_original)
+        if replacement_kind == "regular":
+            assert replacement.read_text(encoding="utf-8") == "unrelated replacement"
+        else:
+            assert replacement.is_socket()
+    finally:
+        server.stop()
+        if replacement_socket is not None:
+            replacement_socket.close()
+
+
 def test_stop_preserves_a_path_that_replaced_the_owned_socket(tmp_path: Path) -> None:
     from wall_in_one.control.server import SocketServer
 
@@ -1960,6 +2225,145 @@ def test_stop_preserves_a_path_that_replaced_the_owned_socket(tmp_path: Path) ->
     server.stop()
 
     assert path.read_text(encoding="utf-8") == "replacement"
+
+
+def test_stop_pins_the_owned_socket_inode_through_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    server = SocketServer(_StubCommands(), path)
+    server.start()
+    pinned_descriptor = server._socket_descriptor
+    identity = server._socket_identity
+    assert pinned_descriptor is not None
+    assert identity is not None
+    real_move = file_io.atomic_move_no_replace
+
+    def observe_claim(
+        source: Path,
+        destination: Path,
+        *,
+        expected_identity: tuple[int, int],
+        expected_file_type: int = stat.S_IFREG,
+        expected_fingerprint: file_io.FileFingerprint | None = None,
+        pinned_source: file_io.PinnedPath | None = None,
+        externally_pinned: bool = False,
+    ) -> None:
+        pinned = os.fstat(pinned_descriptor)
+        assert stat.S_ISSOCK(pinned.st_mode)
+        assert (pinned.st_dev, pinned.st_ino) == identity == expected_identity
+        assert expected_file_type == stat.S_IFSOCK
+        real_move(
+            source,
+            destination,
+            expected_identity=expected_identity,
+            expected_file_type=expected_file_type,
+            expected_fingerprint=expected_fingerprint,
+            pinned_source=pinned_source,
+            externally_pinned=externally_pinned,
+        )
+
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", observe_claim)
+
+    server.stop()
+
+    with pytest.raises(OSError):
+        os.fstat(pinned_descriptor)
+    assert not path.exists()
+
+
+def test_start_failure_before_path_proof_preserves_the_public_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unpinned pathname is never inferred to be the listener we created."""
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    server = SocketServer(_StubCommands(), path)
+    real_open = os.open
+
+    def fail_bound_socket_pin(
+        candidate: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(candidate) == os.fsdecode(path) and flags & os.O_PATH and path.exists():
+            raise PermissionError("injected O_PATH failure")
+        return real_open(candidate, flags, mode, dir_fd=dir_fd)
+
+    def refuse_unproven_removal(*_arguments: object, **_keywords: object) -> None:
+        raise AssertionError("an unproven public socket must not be removed")
+
+    monkeypatch.setattr(os, "open", fail_bound_socket_pin)
+    monkeypatch.setattr(SocketServer, "_remove_exact_socket", refuse_unproven_removal)
+
+    with pytest.raises(RuntimeError, match="injected O_PATH failure"):
+        server.start()
+
+    assert server._service is None
+    assert path.is_socket()
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(ConnectionRefusedError):
+            probe.connect(str(path))
+    finally:
+        probe.close()
+
+
+def test_start_never_adopts_a_socket_substituted_immediately_after_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listener proof binds ownership to reachability, not the first lstat."""
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    server = SocketServer(_StubCommands(), path)
+    lstat = Path.lstat
+    replacement: socket.socket | None = None
+    replacement_identity: tuple[int, int] | None = None
+    replaced = False
+
+    def replace_before_first_bound_inspection(candidate: Path) -> os.stat_result:
+        nonlocal replaced, replacement, replacement_identity
+        if candidate == path and not replaced:
+            replaced = True
+            candidate.unlink()
+            replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            replacement.bind(str(candidate))
+            replacement.listen(1)
+            candidate.chmod(0o600)
+            status = lstat(candidate)
+            replacement_identity = status.st_dev, status.st_ino
+        return lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", replace_before_first_bound_inspection)
+
+    try:
+        with pytest.raises(RuntimeError, match="does not reach the socket just bound"):
+            server.start()
+
+        assert replaced
+        assert replacement is not None
+        assert replacement_identity is not None
+        assert path.is_socket()
+        assert file_io.path_identity(path) == replacement_identity
+        assert server._socket_identity is None
+        assert server._socket_descriptor is None
+        assert server._service is None
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            probe.connect(str(path))
+    finally:
+        server.stop()
+        if replacement is not None:
+            replacement.close()
 
 
 def test_only_one_server_owns_a_reachable_control_path(tmp_path: Path) -> None:
@@ -2005,56 +2409,67 @@ def test_only_one_server_owns_a_reachable_control_path(tmp_path: Path) -> None:
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
 
 
-def test_a_socket_that_cannot_be_secured_leaves_nothing_listening(
+def test_a_bound_socket_is_private_at_birth_and_restores_the_process_umask(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Half-started is worse than not started: the app would report that it has
-    no control socket while one sat there readable by the rest of the machine.
-    """
+    """Socket creation never exposes a permissive pathname, even briefly."""
     from wall_in_one.control.server import SocketServer
 
-    def refuse(*_arguments: object, **_keywords: object) -> None:
-        raise PermissionError(1, "Operation not permitted")
+    def refuse_path_chmod(*_arguments: object, **_keywords: object) -> None:
+        raise AssertionError("the bound socket pathname must never be chmodded")
 
-    monkeypatch.setattr("os.chmod", refuse)
-    # Short, because this one really does bind: the address has to fit.
+    monkeypatch.setattr("os.chmod", refuse_path_chmod)
     server = SocketServer(_StubCommands(), tmp_path / "w.sock")
-
-    with pytest.raises(RuntimeError, match="cannot secure"):
+    original_umask = os.umask(0o027)
+    try:
         server.start()
+        restored = os.umask(original_umask)
+        assert restored == 0o027
+    finally:
+        os.umask(original_umask)
 
-    assert not server.path.exists()
+    try:
+        assert server.path.is_socket()
+        assert stat.S_IMODE(server.path.lstat().st_mode) == 0o600
+    finally:
+        server.stop()
 
 
-def test_bound_socket_replacement_during_chmod_is_preserved(
+def test_bound_socket_start_never_chmods_a_replacement_symlink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Securing the pathname is followed by an exact identity recheck."""
+    """There is no pathname permission operation for a symlink to exploit."""
     from wall_in_one.control.server import SocketServer
 
     path = tmp_path / "chmod-race.sock"
-    chmod = os.chmod
-    replaced = False
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("keep me", encoding="utf-8")
+    sentinel.chmod(0o640)
+    real_chmod = os.chmod
+    chmod_called = False
 
-    def replace_after_chmod(
+    def replace_before_path_chmod(
         target: str | bytes | os.PathLike[str] | os.PathLike[bytes], mode: int
     ) -> None:
-        nonlocal replaced
-        chmod(target, mode)
-        if Path(os.fsdecode(target)) == path and not replaced:
-            replaced = True
-            path.unlink()
-            path.write_text("replacement", encoding="utf-8")
+        nonlocal chmod_called
+        chmod_called = True
+        path.unlink()
+        path.symlink_to(sentinel)
+        real_chmod(target, mode)
 
-    monkeypatch.setattr(os, "chmod", replace_after_chmod)
+    monkeypatch.setattr(os, "chmod", replace_before_path_chmod)
     server = SocketServer(_StubCommands(), path)
-
-    with pytest.raises(RuntimeError, match="changed while its permissions were secured"):
+    try:
         server.start()
+        assert not chmod_called
+        assert sentinel.read_text(encoding="utf-8") == "keep me"
+        assert stat.S_IMODE(sentinel.stat().st_mode) == 0o640
+    finally:
+        server.stop()
 
-    assert replaced
-    assert path.read_text(encoding="utf-8") == "replacement"
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+    assert stat.S_IMODE(sentinel.stat().st_mode) == 0o640
 
 
 def test_an_oversized_unterminated_socket_request_is_bounded(tmp_path: Path) -> None:

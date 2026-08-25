@@ -46,6 +46,12 @@ Three properties of the list are worth knowing:
   drive shows in the Settings tab as `-- not there right now` and comes
   back when the drive does.
 
+Scanning may still show files reached through an intentionally configured
+symbolic link, but Delete and Move to Trash refuse destructive authority
+through symbolic-link directory components. Configure the real absolute root
+when you want those actions available. This keeps a link swapped between scan
+and removal from redirecting an operation outside the selected library.
+
 Changing the list rescans immediately; nothing else notices otherwise, and a
 folder you just added would stay invisible until the next launch.
 
@@ -60,13 +66,18 @@ A video finds its still three ways, in this order:
 
 1. a `<video>.wall-in-one.json` sidecar naming one;
 2. its deterministic path-keyed file under
-   `<first root>/Wall-in-One/Automatic Stills/`;
+   `<each configured root>/Wall-in-One/Automatic Stills/`, searched in root
+   order;
 3. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
 
 Only the exact deterministic capture in `Automatic Stills` is absorbed by its
 moving wallpaper. A sibling or manually selected image is user-provided and
 remains a separate library item with its own Pairing, even while one or more
 moving wallpapers use it as their representative.
+
+New automatic captures are written under the first configured root. Existing
+deterministic captures are discovered under every configured root so changing
+root order does not strand an older representative.
 
 An explicit representative choice must already be a still item in the latest
 library scan. The picker and `wall-in-one ctl still` refuse an outside file, an
@@ -86,11 +97,23 @@ jumped to an unrelated wallpaper instead.
 Now every video without a still gets one. The frame is taken three seconds in
 -- videos routinely open on black or on a fade, and a black still looks like a
 bug and generates a grey palette -- at full resolution, as PNG, and a sidecar
-is written alongside recording the pairing.
+records the pairing when the video itself is inside the target library root.
+Videos from another configured root still use the deterministic managed still;
+the app does not write a pairing file beside a source outside that target root.
 
 Generated filenames include a digest of the video's absolute path. Two files
 named `intro.mp4` in different folders therefore get different stills rather
 than silently overwriting each other.
+
+Those deterministic names form an app-reserved namespace. Rendering reads the
+retained source and writes one pre-created hidden output inode through
+descriptor-backed paths beneath the pinned `Automatic Stills` directory. Any
+public target already present is pinned before the long renderer call.
+Publication rechecks the source, output, parent and frozen target before a
+no-replace move. A target which appeared after rendering began, or whose
+original inode changed in place, wins and is preserved. A hard kill may leave
+only the inert hidden output; it cannot redirect the renderer into an unrelated
+public file.
 
 - It happens after each rescan, on a single background worker. One, not four:
   each job is ffmpeg decoding a large video, so the disk is the limit rather
@@ -180,9 +203,11 @@ The last menu entry is **Remove** or **Move to Trash**.
 Which of the two you get is named for what it does to *that* file, because one
 of them cannot be undone:
 
-- **Remove** appears for a file we downloaded. It unlinks it along with
-  everything we wrote beside it -- the sidecar proving we owned it, a still we
-  generated for it, and that still's sidecar. It asks for confirmation.
+- **Remove** appears for a generation-bound file we downloaded. It permanently
+  removes that public media entry and the exact app-owned companions pinned
+  before the commit -- its provider sidecar and every generated still/pairing
+  sidecar pair found for it under the configured roots. It asks for
+  confirmation.
 - **Move to Trash** appears for your own files inside a configured library
   root. It moves them to the
   freedesktop home trash under `~/.local/share/Trash`, where a file manager can
@@ -194,23 +219,32 @@ renamed into it and is refused with a reason, rather than being silently
 unlinked when you expected to get it back.
 
 A file is only ours when two things agree: a marker file says we made the
-directory, and a provider provenance sidecar says we fetched that particular
-file. Both are required, so anything you drop into a downloads folder by hand
-stays yours. A `.wall-in-one.json` pairing sidecar only records the chosen
-representative still; it never grants deletion authority.
-Ownership is re-checked on disk at the moment of deletion, not trusted from a
-scan that may be minutes old.
+directory, and a bounded regular provider sidecar names the exact provider,
+logical path and final media generation. That generation contains device,
+inode, byte count, modification time and change time. The scan compares all
+five fields; irreversible Remove also hashes the exact retained media inode and
+requires the sidecar's byte count and SHA-256 before withdrawing that authority.
+Anything which fails one check stays yours. A `.wall-in-one.json` pairing
+sidecar only records the chosen representative still; it never grants deletion
+authority. Ownership is re-checked on disk at the moment of deletion, not
+trusted from a scan that may be minutes old.
 
-Provider installs publish and sync that provenance sidecar before making the
-media filename visible. A killed process can therefore leave only an ignored
-sidecar, never a visible download whose ownership became ambiguous. Hidden
-staging files and sidecars with no media are removed after 24 hours; recent
-ones, symlinks and unknown files are left alone in case another process is
-still working.
+Provider installs first move the media into place without replacement and sync
+its directory. They then capture and hash that exact post-rename generation,
+write and sync its bound sidecar, recheck the named media, and publish the
+sidecar without replacement. Cancellation is not accepted after the media
+commit. A kill, conflict or local error in that interval can leave visible
+media, but without its exact authority it scans as user-owned and can only be
+moved to Trash. Hidden staging files and unmistakable predecessor orphan
+sidecars with no media are removed after 24 hours; recent entries, symlinks,
+unknown files and visible media are left alone.
 
 Trash metadata names are reserved with no-replace links, then the exact
-journaled media inode is moved to the matching Trash name with Linux's atomic
-no-replace rename. Concurrent files with the same basename therefore receive
+journaled media generation is moved to the matching Trash name with Linux's
+atomic no-replace rename. A live no-follow inode reference spans preparation
+through the move, and the journal also records size and change timestamps, so
+even immediate reuse of the same device/inode numbers cannot authorize a
+replacement. Concurrent files with the same basename therefore receive
 distinct names; neither a same-path replacement nor an existing Trash entry
 can be overwritten. Both the moved bytes and `.trashinfo` record are synced
 before the operation is reported durable.
@@ -233,28 +267,58 @@ and does not trigger either cleanup path.
 Before a local deletion or trash move can touch the media, Wall-in-One writes a
 bounded removal intent to `pending-removals.json`. If that intent cannot be
 persisted, the operation is refused and the file stays where it was. The
-journal binds a unique transaction token to the source inode and the selected
-library-root/source-parent identities. A replacement at the same path is
-refused, another process cannot borrow or cancel the live transaction, and an
-unmarked missing source is not interpreted as a completed delete while its
-drive is unavailable. Media and generated-artifact directory entries are
-synced before their cleanup intent can be discarded. The journal survives a
-crash after the media operation commits and is cleared only after favourites,
-Pairings, playlists and exact generated artifacts have all been cleaned. If
-any cleanup fails, the UI reports the partial failure and each GUI startup or
-library refresh retries it. Fix the reported state-directory problem and
-refresh to finish the cleanup. The headless runtime-config compiler checks the
-journal for damage but does not mutate authoring state from its short-lived
-snapshot.
+journal binds a unique transaction token to the pinned source generation and
+the selected library-root/source-parent identities. A replacement at the same
+path is refused, another process cannot borrow or cancel the live transaction,
+and an unmarked missing source is not interpreted as a completed delete while
+its drive is unavailable. Both the live Delete/Trash commit and later crash
+replay retain descriptor-backed references to that exact root and source
+parent; a renamed, unmounted or replaced public root therefore cannot redirect
+the source or its private claim.
+
+Every visible provider, pairing and generated artifact which the physical
+operation may remove is pinned before the media commit. Cleanup acts only
+through those exact retained generations. A crash replay has no surviving
+artifact pins, so it clears durable favourites, Pairings and playlists but
+never rediscovers a same-name physical companion which could belong to a later
+installation. A live cleanup failure is reported with the preserved paths; it
+is not converted into authority to delete them on a later refresh.
+
+A crash-left private media claim is replayed only when its journaled generation
+still matches. Before truncating a singly linked regular inode, Wall-in-One
+persists a generation marker through the exact writable descriptor; replay can
+therefore distinguish an already-consumed zero tombstone from an arbitrary
+empty replacement. Linux has no inode-conditional unlink, so exact residues
+are moved under a private `.wall-in-one-retained/entry-*` namespace instead:
+singly linked regular files are zeroed, while multiply linked files and sockets
+remain intact. The scanner ignores this hidden namespace. If durable marking or
+safe centralisation fails, the exact private claim or temporary is preserved.
+Linux also cannot create a directory and return its descriptor atomically, so a
+pin first obtained after directory creation grants anchored access, not proof of
+ownership. Wall-in-One never relocates or removes a container on that basis:
+transient deletion-claim containers begin in the retained namespace, durable
+claim-token containers remain beside their source, and renderer IPC namespaces
+remain inert under the runtime directory. New template transactions use only
+atomically created regular sibling entries; recovery reclaims independently
+proven children from older transaction directories but leaves each container
+inert. A kill before the fixed transaction locator is published may leave
+random, mode-0600 candidate/lock/record stages; they are inert and are not
+guessed away by name. Cleanup never uses a pathname-only `rmdir` or treats a
+post-creation directory pin as relocation authority.
+
+The journal survives a crash after the media operation commits and is cleared
+only after durable authored metadata is clean. If metadata cleanup fails, the
+UI reports the partial failure and each GUI startup or library refresh retries
+it. Fix the reported state-directory problem and refresh to finish that
+cleanup. The headless runtime-config compiler checks the journal for damage but
+does not mutate authoring state from its short-lived snapshot.
 
 Automatic-still rendering does not hold deletion hostage for the duration of
-ffmpeg or a scene capture. Rendering happens outside a per-item cross-process
-lease; only the short final publication and generated-artifact cleanup share
-it. Publication rechecks the opened source's device, inode, type and change
-metadata before making an image or sidecar visible. If cleanup cannot acquire
-that bounded lease, even deterministic paths which are not visible yet remain
-in the removal journal: a stalled publisher can finish, but the next refresh
-will then remove its output before the journal is cleared.
+ffmpeg or a scene capture. Rendering happens outside the per-item process
+locks; only the short final publication and pre-commit artifact pinning share
+them. Publication rechecks the exact opened source before a no-replace move. If
+removal wins first, the publisher observes the missing or changed source and
+discards its private capture rather than resurrecting a deterministic still.
 
 An item marked **Borked** after three failed automatic hand-over attempts, or an
 attributable Wallpaper Engine scene crash, is visibly labelled and has no
@@ -266,9 +330,11 @@ the Workshop content root is still mounted, never merely because that drive or
 library is unavailable. A transient malformed project or missing video entry
 does not erase the process's last-known installation, so a later observed
 directory removal can still be recognized. Because Steam has already committed
-that external uninstall, an unwritable removal journal cannot stop it;
-Wall-in-One keeps an in-process retry and reports the state-directory failure
-until a refresh can record and finish the cleanup durably.
+that external uninstall, Wall-in-One records and retries authored metadata
+cleanup only. It never deletes Steam content or rediscovers deterministic
+stills and sidecars for an external uninstall. If the removal journal is
+unwritable, an in-process retry remains and the state-directory failure is
+reported until a refresh can record the metadata boundary durably.
 
 Playlist authoring follows the same prohibition rather than creating a second
 way around it. A Borked library card remains visible with its diagnostic, but
@@ -311,6 +377,15 @@ Two name shapes are written and therefore the only two that are ever deleted;
 anything else you leave in that directory survives both eviction and a clear.
 Deleting the whole directory is safe -- it is rebuilt on demand.
 
+## State-file recovery
+
+If favourites, Pairings, playlists, schedules or display assignments contain
+unreadable JSON, a later repair mutation first moves the exact generation that
+failed to a numbered `.broken` file. Recovery publishes without replacement:
+if an editor installs a valid document before or during that boundary, the
+manual repair remains canonical and the app reports its own mutation as
+failed. The same rule applies to an in-place repair of the original inode.
+
 ## Where things live
 
 | path | what |
@@ -318,11 +393,12 @@ Deleting the whole directory is safe -- it is rebuilt on demand.
 | `~/.config/wall-in-one/settings.toml` | settings (see the README) |
 | `~/.config/wall-in-one/wallhaven-api-key` | the stored Wallhaven key, 0600 |
 | `~/.local/state/wall-in-one/favourites.json` | the stars |
-| `~/.local/state/wall-in-one/pending-removals.json` | crash-safe removal intents retained until all item metadata and generated artifacts are clean |
+| `~/.local/state/wall-in-one/pending-removals.json` | crash-safe removal intents retained until durable authored metadata is clean |
 | `~/.local/state/wall-in-one/palette.json` | where Noctalia renders the live palette |
 | `~/.cache/wall-in-one/thumbnails` | the thumbnail cache |
 | `$XDG_RUNTIME_DIR/wall-in-one.sock` | the control socket, 0600 |
 | `$XDG_RUNTIME_DIR/wall-in-one-runtime.sock` | Rust runtime commands and status, 0600; falls back to `$XDG_STATE_HOME/wall-in-one/wall-in-one-runtime.sock` when unset |
 | `$XDG_STATE_HOME/wall-in-one/runtime.toml` | atomically compiled, fully resolved service config |
-| `<first root>/Wall-in-One/Automatic Stills/` | generated stills |
+| `<each configured root>/Wall-in-One/Automatic Stills/` | generated stills are discovered under every root; new captures use the first root |
 | `<first root>/Wall-in-One/Wallhaven/`, `.../MotionBGS/` | downloads |
+| `<affected parent>/.wall-in-one-retained/entry-*` | private exact cleanup residue; zero tombstones, intact retired transaction records/candidates, and empty transient claim containers are expected, while multiply linked files, sockets and unexpected evidence remain intact |

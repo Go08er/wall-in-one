@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -22,6 +23,26 @@ def _touch(path: Path, body: bytes = b"x") -> Path:
 
 def _item(path: Path, kind: Kind = Kind.STILL, **extra: object) -> MediaItem:
     return MediaItem(path=path, kind=kind, size=1, mtime=0, **extra)  # type: ignore[arg-type]
+
+
+def _download_authority(path: Path, provider: str) -> dict[str, object]:
+    contents = path.read_bytes()
+    status = path.stat()
+    return {
+        "schema": 1,
+        "plugin": "goober/wall-in-one",
+        "provider": provider,
+        "path": str(path),
+        "bytes": len(contents),
+        "sha256": hashlib.sha256(contents).hexdigest(),
+        "media_generation": {
+            "device": status.st_dev,
+            "inode": status.st_ino,
+            "bytes": status.st_size,
+            "mtime_ns": status.st_mtime_ns,
+            "ctime_ns": status.st_ctime_ns,
+        },
+    }
 
 
 # -- classification ------------------------------------------------------
@@ -259,14 +280,7 @@ def test_managed_needs_both_a_directory_marker_and_a_file_sidecar(tmp_path: Path
     downloaded = _touch(managed / "downloaded.mp4")
     _touch(
         managed / "downloaded.mp4.motionbgs.json",
-        json.dumps(
-            {
-                "schema": 1,
-                "plugin": "goober/wall-in-one",
-                "provider": "MotionBGS",
-                "path": str(downloaded),
-            }
-        ).encode(),
+        json.dumps(_download_authority(downloaded, "MotionBGS")).encode(),
     )
     # Dropped in by hand: the directory is ours, this file is not.
     _touch(managed / "mine.mp4")
@@ -293,6 +307,11 @@ def test_managed_needs_both_a_directory_marker_and_a_file_sidecar(tmp_path: Path
             "schema": 1,
             "plugin": "goober/wall-in-one",
             "provider": "Wallhaven",
+        },
+        {
+            "schema": 1,
+            "plugin": "goober/wall-in-one",
+            "provider": "MotionBGS",
         },
     ),
 )

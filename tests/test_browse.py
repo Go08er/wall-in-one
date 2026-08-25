@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_providers_fakes import FakeClient, Reply, png_bytes
-from wall_in_one import browse
+from wall_in_one import browse, file_io
 from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import base, wallhaven
@@ -179,7 +180,9 @@ def _record_download(root: Path, wanted: WallpaperCandidate) -> DownloadResult:
     directory = root / "Wall-in-One" / provider_title
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"wallhaven-{wanted.identifier}.png"
-    path.write_bytes(b"png")
+    contents = b"png"
+    path.write_bytes(contents)
+    fingerprint = file_io.regular_file_fingerprint(path)
     sidecar = Path(str(path) + suffix)
     sidecar.write_text(
         json.dumps(
@@ -190,6 +193,15 @@ def _record_download(root: Path, wanted: WallpaperCandidate) -> DownloadResult:
                 "id": wanted.identifier,
                 "path": str(path),
                 "source_page": wanted.page_url,
+                "bytes": len(contents),
+                "sha256": hashlib.sha256(contents).hexdigest(),
+                "media_generation": {
+                    "device": fingerprint[0],
+                    "inode": fingerprint[1],
+                    "bytes": fingerprint[2],
+                    "mtime_ns": fingerprint[3],
+                    "ctime_ns": fingerprint[4],
+                },
             }
         ),
         encoding="utf-8",
@@ -204,7 +216,7 @@ def _record_download(root: Path, wanted: WallpaperCandidate) -> DownloadResult:
         size=path.stat().st_size,
         source_url=wanted.page_url,
         download_url="https://w.wallhaven.cc/full/ab/wallhaven-ab1234.png",
-        sha256="0" * 64,
+        sha256=hashlib.sha256(contents).hexdigest(),
         downloaded_at="2026-01-01T00:00:00Z",
     )
 
@@ -269,7 +281,7 @@ def test_download_provenance_snapshot_always_includes_its_destination(
     assert not contacted
 
 
-def test_identifier_only_control_candidate_matches_a_legacy_motionbgs_sidecar(
+def test_identifier_only_control_candidate_matches_a_bound_motionbgs_sidecar_without_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "library"
@@ -300,6 +312,37 @@ def test_identifier_only_control_candidate_matches_a_legacy_motionbgs_sidecar(
 
     assert caught.value.kind == "conflict"
     assert not contacted
+
+
+def test_an_unbound_predecessor_sidecar_does_not_block_a_fresh_provider_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    wanted = candidate(provider="motionbgs")
+    result = _record_download(root, wanted)
+    document = json.loads(result.sidecar.read_text(encoding="utf-8"))
+    document.pop("media_generation")
+    result.sidecar.write_text(json.dumps(document), encoding="utf-8")
+    engine = browser(root=root)
+    contacted = False
+
+    class Stub:
+        def download(
+            self, selected: WallpaperCandidate, destination: Path, *, variant: str = ""
+        ) -> DownloadResult:
+            nonlocal contacted
+            del selected, destination, variant
+            contacted = True
+            raise ProviderError("conflict", "provider found the predecessor path")
+
+    monkeypatch.setattr(engine, "provider", lambda _name: Stub())
+
+    with pytest.raises(ProviderError) as caught:
+        engine.download(wanted, variant="4k")
+
+    assert caught.value.kind == "conflict"
+    assert contacted
 
 
 def test_concurrent_download_of_one_candidate_is_nonblocking_busy(

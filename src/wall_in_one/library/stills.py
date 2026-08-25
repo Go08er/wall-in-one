@@ -30,6 +30,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -38,7 +39,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io, paths, worker_processes
-from wall_in_one.library import pairing, state_file
+from wall_in_one.library import pairing
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
 
@@ -76,6 +77,16 @@ class StillError(Exception):
     """A still could not be made. Never fatal: the video still plays."""
 
 
+def _close_descriptor_preserving_error(descriptor: int, purpose: str) -> None:
+    """Close one capability without replacing an exception already in flight."""
+    active_error = sys.exception()
+    try:
+        os.close(descriptor)
+    except OSError as close_error:
+        if active_error is not None:
+            active_error.add_note(f"also could not close {purpose}: {close_error}")
+
+
 @dataclass(frozen=True, slots=True)
 class _SourceSnapshot:
     """The exact filesystem object rendered into one automatic still."""
@@ -86,10 +97,154 @@ class _SourceSnapshot:
     changed_ns: int
     size: int | None
     modified_ns: int | None
+    parent_device: int
+    parent_inode: int
+    parent_changed_ns: int | None
+    parent_modified_ns: int | None
     descriptor: int = field(compare=False, repr=False)
+    parent_pin: file_io.PinnedPath = field(compare=False, repr=False)
+
+    @property
+    def writer_path(self) -> Path:
+        """Descriptor path an external renderer can open from this process."""
+        return Path("/proc") / str(os.getpid()) / "fd" / str(self.descriptor)
 
     def close(self) -> None:
-        os.close(self.descriptor)
+        descriptor = self.descriptor
+        if descriptor < 0:
+            return
+        object.__setattr__(self, "descriptor", -1)
+        try:
+            _close_descriptor_preserving_error(descriptor, "the automatic-still source pin")
+        finally:
+            self.parent_pin.close()
+
+
+@dataclass(slots=True)
+class _ImageTemporary:
+    """One atomically created image inode retained across an external write."""
+
+    path: Path
+    logical_path: Path
+    pin: file_io.PinnedPath | None = field(repr=False)
+    published: bool = False
+
+    @property
+    def writer_path(self) -> Path:
+        """Exact pre-created output inode usable from the external child."""
+        if self.pin is None:
+            raise OSError(f"the private still output {self.logical_path} is closed")
+        return Path("/proc") / str(os.getpid()) / "fd" / str(self.pin.descriptor)
+
+    def retain_rendered(self) -> file_io.FileFingerprint:
+        """Pin and validate the exact nonempty output produced by the renderer."""
+        if self.pin is None:
+            raise file_io.PathChangedError(
+                f"the private still output at {self.logical_path} is closed"
+            )
+        fingerprint = self.pin.fingerprint
+        if fingerprint[2] <= 0:
+            raise file_io.PathChangedError(f"the private still output at {self.path} is empty")
+        return fingerprint
+
+    def mark_published(self) -> None:
+        self.published = True
+
+    def close(self) -> None:
+        """Release only the exact output inode created by ``mkstemp``."""
+        pin = self.pin
+        try:
+            if pin is not None and not self.published:
+                with contextlib.suppress(OSError, ValueError):
+                    file_io.discard_regular_if_same(
+                        self.path,
+                        expected_identity=pin.identity,
+                        expected_fingerprint=pin.fingerprint,
+                        pinned_source=pin,
+                        retained_parent=self.path.parent,
+                        logical_retained_parent=self.logical_path.parent,
+                    )
+        finally:
+            if pin is not None:
+                pin.close()
+            self.pin = None
+
+
+@dataclass(slots=True)
+class _ExistingTarget:
+    """The exact app-reserved target generation frozen before rendering."""
+
+    pin: file_io.PinnedPath = field(repr=False)
+    fingerprint: file_io.FileFingerprint
+
+    def close(self) -> None:
+        self.pin.close()
+
+
+@dataclass(slots=True)
+class _ImagePublication:
+    """A public still generation retaining exact commit and rollback authority."""
+
+    target: Path
+    access: Path
+    context: file_io.PinnedDirectoryContext = field(repr=False)
+    fingerprint: file_io.FileFingerprint
+    pin: file_io.PinnedPath = field(repr=False)
+    prior: file_io.ClaimedPath | None = field(default=None, repr=False)
+    settled: bool = False
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def verify(self) -> None:
+        _require_public_target(
+            self.context,
+            self.target,
+            self.access,
+            self.fingerprint,
+        )
+
+    def commit(self) -> None:
+        if self.settled:
+            return
+        self.verify()
+        if self.prior is not None:
+            self.prior.discard()
+        self.verify()
+        self.settled = True
+
+    def rollback(self) -> None:
+        if self.settled:
+            return
+        published_claim: file_io.ClaimedPath | None = None
+        try:
+            published_claim = file_io.claim_for_deletion(
+                self.access,
+                expected_identity=self.fingerprint[:2],
+                expected_fingerprint=self.fingerprint,
+                pinned_source=self.pin,
+                logical_path=self.target,
+            )
+            if self.prior is not None and not self.prior.restore():
+                raise file_io.PathChangedError(
+                    f"could not restore the prior automatic still at {self.target}",
+                    preserved_path=self.prior.path,
+                )
+            published_claim.discard()
+            paths.fsync_directory(self.access.parent)
+            self.settled = True
+        finally:
+            if published_claim is not None:
+                published_claim.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.prior is not None:
+                self.prior.close()
+                self.prior = None
+        finally:
+            self.pin.close()
 
 
 def _lifecycle_material(path: Path, kind: Kind, scene: str = "") -> bytes:
@@ -101,8 +256,9 @@ def _lifecycle_material(path: Path, kind: Kind, scene: str = "") -> bytes:
     return b"\0".join((kind.value.encode("ascii"), source))
 
 
-def _lifecycle_lock_path(path: Path, kind: Kind, scene: str = "") -> Path:
-    identity = hashlib.sha256(_lifecycle_material(path, kind, scene)).hexdigest()
+def _lifecycle_lock_path_from_material(material: bytes) -> Path:
+    """Private flock path for one stable, namespaced lifecycle identity."""
+    identity = hashlib.sha256(material).hexdigest()
     directory = paths.runtime_dir() / LIFECYCLE_LOCK_DIRECTORY
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     opened = directory.lstat()
@@ -111,25 +267,26 @@ def _lifecycle_lock_path(path: Path, kind: Kind, scene: str = "") -> Path:
         or stat.S_ISLNK(opened.st_mode)
         or opened.st_uid != os.getuid()
     ):
-        raise OSError(f"automatic-still lifecycle path is not a private directory: {directory}")
+        raise OSError(f"media lifecycle path is not a private directory: {directory}")
     os.chmod(directory, 0o700, follow_symlinks=False)
     return directory / f"{identity}.lock"
 
 
+def _lifecycle_lock_path(path: Path, kind: Kind, scene: str = "") -> Path:
+    return _lifecycle_lock_path_from_material(_lifecycle_material(path, kind, scene))
+
+
 @contextlib.contextmanager
-def _source_lifecycle_lock(
-    path: Path,
-    kind: Kind,
-    scene: str = "",
+def _lifecycle_lock(
+    lock_path: Path,
     *,
     timeout: float | None = None,
 ) -> Iterator[None]:
-    """Serialize the short publication/cleanup commit for one media identity."""
+    """Hold one trusted lifecycle flock for a bounded commit section."""
     wait = LIFECYCLE_LOCK_TIMEOUT_SECONDS if timeout is None else timeout
     if wait < 0:
-        raise OSError("automatic-still lifecycle lock timeout cannot be negative")
+        raise OSError("media lifecycle lock timeout cannot be negative")
     deadline = time.monotonic() + wait
-    lock_path = _lifecycle_lock_path(path, kind, scene)
     descriptor: int | None = None
     locked = False
     try:
@@ -146,9 +303,7 @@ def _source_lifecycle_lock(
             or opened.st_uid != os.getuid()
             or opened.st_nlink != 1
         ):
-            raise OSError(
-                f"automatic-still lifecycle lock {lock_path} is not a private regular file"
-            )
+            raise OSError(f"media lifecycle lock {lock_path} is not a private regular file")
         os.fchmod(descriptor, 0o600)
         while True:
             try:
@@ -159,21 +314,46 @@ def _source_lifecycle_lock(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"timed out after {wait:g}s waiting for automatic-still lifecycle "
-                        f"lock {lock_path}"
+                        f"timed out after {wait:g}s waiting for media lifecycle lock {lock_path}"
                     ) from None
                 time.sleep(min(LIFECYCLE_LOCK_POLL_SECONDS, remaining))
         opened = os.fstat(descriptor)
         current = lock_path.lstat()
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise OSError(f"automatic-still lifecycle lock {lock_path} changed while waiting")
+            raise OSError(f"media lifecycle lock {lock_path} changed while waiting")
         yield
     finally:
         if descriptor is not None:
+            owned_descriptor = descriptor
+            descriptor = None
             if locked:
                 with contextlib.suppress(OSError):
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
+                    fcntl.flock(owned_descriptor, fcntl.LOCK_UN)
+            _close_descriptor_preserving_error(
+                owned_descriptor,
+                f"media lifecycle lock {lock_path}",
+            )
+
+
+@contextlib.contextmanager
+def _source_lifecycle_lock(
+    path: Path,
+    kind: Kind,
+    scene: str = "",
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
+    """Serialize the short still publication/cleanup commit for one source."""
+    with _lifecycle_lock(_lifecycle_lock_path(path, kind, scene), timeout=timeout):
+        yield
+
+
+@contextlib.contextmanager
+def media_path_lifecycle_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """Serialize provider publication and removal at one logical media path."""
+    material = b"media-path\0" + os.fsencode(path.absolute())
+    with _lifecycle_lock(_lifecycle_lock_path_from_material(material), timeout=timeout):
+        yield
 
 
 @contextlib.contextmanager
@@ -189,12 +369,29 @@ def _snapshot_source(path: Path, kind: Kind) -> _SourceSnapshot:
     if kind is Kind.SCENE:
         flags |= os.O_DIRECTORY
     try:
-        descriptor = os.open(path, flags)
+        parent_status = path.parent.lstat()
     except OSError as error:
+        raise StillError(f"no such source: {path}") from error
+    if not stat.S_ISDIR(parent_status.st_mode):
+        raise StillError(f"no such source directory: {path.parent}")
+    try:
+        parent_pin = file_io.pin_directory_path(
+            path.parent,
+            expected_identity=(parent_status.st_dev, parent_status.st_ino),
+        )
+    except OSError as error:
+        raise StillError(f"no such source: {path}") from error
+    access = Path("/proc/self/fd") / str(parent_pin.descriptor) / path.name
+    try:
+        descriptor = os.open(access, flags)
+    except OSError as error:
+        parent_pin.close()
         raise StillError(f"no such source: {path}") from error
     try:
         opened = os.fstat(descriptor)
         current = path.lstat()
+        retained_parent = parent_pin.status()
+        current_parent = path.parent.lstat()
         valid_type = (
             stat.S_ISDIR(opened.st_mode) if kind is Kind.SCENE else stat.S_ISREG(opened.st_mode)
         )
@@ -202,6 +399,8 @@ def _snapshot_source(path: Path, kind: Kind) -> _SourceSnapshot:
             not valid_type
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
             or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(current.st_mode)
+            or (retained_parent.st_dev, retained_parent.st_ino)
+            != (current_parent.st_dev, current_parent.st_ino)
         ):
             expected = "directory" if kind is Kind.SCENE else "regular video file"
             raise StillError(f"{path} is not the same {expected} that was opened")
@@ -212,10 +411,18 @@ def _snapshot_source(path: Path, kind: Kind) -> _SourceSnapshot:
             opened.st_ctime_ns,
             opened.st_size if kind is Kind.VIDEO else None,
             opened.st_mtime_ns if kind is Kind.VIDEO else None,
+            retained_parent.st_dev,
+            retained_parent.st_ino,
+            retained_parent.st_ctime_ns if kind is Kind.SCENE else None,
+            retained_parent.st_mtime_ns if kind is Kind.SCENE else None,
             descriptor,
+            parent_pin,
         )
     except BaseException:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        finally:
+            parent_pin.close()
         raise
 
 
@@ -223,8 +430,10 @@ def _require_unchanged_source(path: Path, kind: Kind, expected: _SourceSnapshot)
     """Fail closed if delete/reinstall won while capture ran outside the lock."""
     try:
         current = path.lstat()
+        current_parent = path.parent.lstat()
     except OSError as error:
         raise StillError(f"{path} was removed while its still was being made") from error
+    retained_parent = expected.parent_pin.status()
     actual = _SourceSnapshot(
         current.st_dev,
         current.st_ino,
@@ -232,12 +441,22 @@ def _require_unchanged_source(path: Path, kind: Kind, expected: _SourceSnapshot)
         current.st_ctime_ns,
         current.st_size if kind is Kind.VIDEO else None,
         current.st_mtime_ns if kind is Kind.VIDEO else None,
+        retained_parent.st_dev,
+        retained_parent.st_ino,
+        retained_parent.st_ctime_ns if kind is Kind.SCENE else None,
+        retained_parent.st_mtime_ns if kind is Kind.SCENE else None,
         expected.descriptor,
+        expected.parent_pin,
     )
     valid_type = (
         stat.S_ISDIR(current.st_mode) if kind is Kind.SCENE else stat.S_ISREG(current.st_mode)
     )
-    if not valid_type or actual != expected:
+    if (
+        not valid_type
+        or (current_parent.st_dev, current_parent.st_ino)
+        != (expected.parent_device, expected.parent_inode)
+        or actual != expected
+    ):
         raise StillError(f"{path} changed while its still was being made")
 
 
@@ -323,24 +542,365 @@ def write_sidecar(video: Path, still: Path) -> Path:
     survives the still being moved, and it is what makes a hand-picked still
     stick when the conventions would choose a different one.
     """
-    path = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    payload = json.dumps({pairing.SIDECAR_STILL_KEY: str(still)}, indent=2) + "\n"
+    source = _snapshot_source(video, Kind.VIDEO)
+    publication: _SidecarPublication | None = None
     try:
-        state_file.write_atomic_text(path, payload)
+        _require_unchanged_source(video, Kind.VIDEO, source)
+        publication = _write_sidecar_publication(video, still, source=source)
+        try:
+            _require_unchanged_source(video, Kind.VIDEO, source)
+        except BaseException:
+            publication.rollback()
+            raise
+        return publication.path
+    finally:
+        if publication is not None:
+            publication.close()
+        source.close()
+
+
+@dataclass(slots=True)
+class _SidecarPublication:
+    """A newly published sidecar generation which can be rolled back exactly."""
+
+    path: Path
+    access_path: Path
+    pin: file_io.PinnedPath | None = field(default=None, repr=False)
+
+    def rollback(self) -> None:
+        pin = self.pin
+        if pin is None:
+            return
+        try:
+            file_io.discard_regular_if_same(
+                self.access_path,
+                expected_identity=pin.identity,
+                expected_fingerprint=pin.fingerprint,
+                pinned_source=pin,
+                logical_retained_parent=self.path.parent,
+            )
+        finally:
+            pin.close()
+            self.pin = None
+
+    def close(self) -> None:
+        if self.pin is not None:
+            self.pin.close()
+            self.pin = None
+
+
+def _write_sidecar_publication(
+    video: Path,
+    still: Path,
+    *,
+    source: _SourceSnapshot | None = None,
+) -> _SidecarPublication:
+    """Publish a sidecar and retain rollback authority only when it was new."""
+    path = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    access_path = (
+        Path("/proc/self/fd") / str(source.parent_pin.descriptor) / path.name
+        if source is not None
+        else path
+    )
+    encoded = (json.dumps({pairing.SIDECAR_STILL_KEY: str(still)}, indent=2) + "\n").encode()
+    temporary_pin: file_io.PinnedPath | None = None
+    public_pin: file_io.PinnedPath | None = None
+    publication: _SidecarPublication | None = None
+    committed = False
+    handed_off = False
+    try:
+        existing = file_io.read_regular_bytes(access_path, pairing.MAX_SIDECAR_BYTES)
+        if existing is not None:
+            if existing == encoded:
+                return _SidecarPublication(path, access_path)
+            raise StillError(
+                f"could not write {path}: an existing pairing record was left untouched"
+            )
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=access_path.parent)
+        temporary = Path(name)
+        temporary_pin = file_io.PinnedPath(temporary, descriptor, stat.S_IFREG)
+        created = temporary_pin.status()
+        named = temporary.lstat()
+        if not file_io._same_pinned_entry(created, named, stat.S_IFREG):
+            raise file_io.PathChangedError(
+                f"the private pairing candidate {temporary} changed after creation"
+            )
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError(f"could not finish writing pairing candidate {temporary}")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        candidate_fingerprint = temporary_pin.fingerprint
+        if (
+            file_io.read_pinned_regular_bytes(
+                temporary_pin,
+                pairing.MAX_SIDECAR_BYTES,
+                expected_fingerprint=candidate_fingerprint,
+            )
+            != encoded
+        ):
+            raise StillError(f"could not retain the pairing candidate for {path}")
+        file_io.atomic_move_no_replace(
+            temporary,
+            access_path,
+            expected_identity=candidate_fingerprint[:2],
+            expected_fingerprint=candidate_fingerprint,
+            pinned_source=temporary_pin,
+        )
+        committed = True
+        public_pin = file_io.PinnedPath(
+            access_path,
+            os.dup(temporary_pin.descriptor),
+            stat.S_IFREG,
+        )
+        publication = _SidecarPublication(path, access_path, public_pin)
+        paths.fsync_directory(access_path.parent)
+        published = public_pin.status()
+        public_named = access_path.lstat()
+        if not file_io._same_pinned_entry(published, public_named, stat.S_IFREG):
+            raise file_io.PathChangedError(
+                f"the published pairing record {path} changed before it could be retained"
+            )
+        if source is not None:
+            _require_unchanged_source(video, Kind.VIDEO, source)
+            logical_named = path.lstat()
+            if not file_io._same_pinned_entry(published, logical_named, stat.S_IFREG):
+                raise file_io.PathChangedError(
+                    f"the public pairing record {path} changed parent generation"
+                )
+        temporary_pin.close()
+        temporary_pin = None
+        handed_off = True
+        return publication
+    except FileExistsError as error:
+        raise StillError(
+            f"could not write {path}: an existing pairing record was left untouched"
+        ) from error
+    except StillError:
+        raise
     except OSError as error:
         raise StillError(f"could not write {path}: {error.strerror or error}") from error
-    return path
+    finally:
+        try:
+            if temporary_pin is not None:
+                try:
+                    if not committed:
+                        with contextlib.suppress(OSError, ValueError):
+                            file_io.discard_regular_if_same(
+                                temporary_pin.path,
+                                expected_identity=temporary_pin.identity,
+                                expected_fingerprint=temporary_pin.fingerprint,
+                                pinned_source=temporary_pin,
+                            )
+                finally:
+                    temporary_pin.close()
+        finally:
+            if publication is not None and not handed_off:
+                # Any error after the atomic move still owns exact rollback
+                # authority. Do not strand a sidecar merely because its fsync
+                # or final visibility check failed.
+                publication.rollback()
+            elif public_pin is not None and publication is None:
+                public_pin.close()
 
 
-def _private_image_temporary(target: Path) -> Path:
-    """Reserve an unpredictable same-directory name for an external writer."""
-    descriptor, name = tempfile.mkstemp(
-        prefix=f".{target.stem}.",
-        suffix=f".tmp{target.suffix}",
-        dir=target.parent,
+def _private_image_temporary(
+    target: Path,
+    target_context: file_io.PinnedDirectoryContext,
+) -> _ImageTemporary:
+    """Atomically create and retain the exact output an external writer receives."""
+    output_pin: file_io.PinnedPath | None = None
+    try:
+        output_descriptor, output_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp.png",
+            dir=target_context.directory_anchor,
+        )
+        access_path = Path(output_name)
+        output_pin = file_io.PinnedPath(access_path, output_descriptor, stat.S_IFREG)
+        created_output = output_pin.status()
+        named_output = access_path.lstat()
+        if not file_io._same_pinned_entry(created_output, named_output, stat.S_IFREG):
+            raise file_io.PathChangedError(
+                f"the private still output {access_path} changed after creation"
+            )
+        logical_path = target_context.directory / access_path.name
+        return _ImageTemporary(
+            path=access_path,
+            logical_path=logical_path,
+            pin=output_pin,
+        )
+    except BaseException:
+        if output_pin is not None:
+            try:
+                with contextlib.suppress(OSError, ValueError):
+                    file_io.discard_regular_if_same(
+                        output_pin.path,
+                        expected_identity=output_pin.identity,
+                        expected_fingerprint=output_pin.fingerprint,
+                        pinned_source=output_pin,
+                        retained_parent=access_path.parent,
+                        logical_retained_parent=target_context.directory,
+                    )
+            finally:
+                output_pin.close()
+        raise
+
+
+def _pin_target_directory(
+    root: Path,
+    target: Path,
+) -> file_io.PinnedDirectoryContext:
+    """Retain the no-symlink root and Automatic Stills directory."""
+    absolute_root = root.absolute()
+    absolute_directory = target.parent.absolute()
+    try:
+        root_status = absolute_root.lstat()
+        directory_status = absolute_directory.lstat()
+        if not stat.S_ISDIR(root_status.st_mode) or not stat.S_ISDIR(directory_status.st_mode):
+            raise OSError("automatic-still root contains a non-directory entry")
+        return file_io.pin_directory_beneath(
+            absolute_root,
+            absolute_directory,
+            expected_root_identity=(root_status.st_dev, root_status.st_ino),
+            expected_directory_identity=(directory_status.st_dev, directory_status.st_ino),
+        )
+    except (OSError, ValueError) as error:
+        raise StillError(
+            f"could not safely retain automatic-still directory {target.parent}: {error}"
+        ) from error
+
+
+def _pin_existing_target(
+    target: Path,
+    access: Path,
+) -> _ExistingTarget | None:
+    """Freeze the app-reserved target generation observed before rendering."""
+    try:
+        pin = file_io.pin_regular_path(access)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise StillError(f"could not safely retain existing still {target}: {error}") from error
+    try:
+        return _ExistingTarget(pin, pin.fingerprint)
+    except BaseException:
+        pin.close()
+        raise
+
+
+def _publish_image(
+    temporary: _ImageTemporary,
+    target: Path,
+    target_access: Path,
+    target_context: file_io.PinnedDirectoryContext,
+    existing: _ExistingTarget | None,
+) -> _ImagePublication:
+    """Publish while retaining rollback authority over new and prior stills."""
+    fingerprint = temporary.retain_rendered()
+    claim: file_io.ClaimedPath | None = None
+    media_committed = False
+    publication: _ImagePublication | None = None
+    handed_off = False
+    try:
+        target_context.verify_public()
+        if existing is not None:
+            claim = file_io.claim_for_deletion(
+                target_access,
+                expected_identity=existing.fingerprint[:2],
+                expected_fingerprint=existing.fingerprint,
+                pinned_source=existing.pin,
+                logical_path=target,
+            )
+        try:
+            assert temporary.pin is not None
+            file_io.atomic_move_no_replace(
+                temporary.path,
+                target_access,
+                expected_identity=fingerprint[:2],
+                expected_fingerprint=fingerprint,
+                pinned_source=temporary.pin,
+            )
+            media_committed = True
+            temporary.mark_published()
+        except BaseException as error:
+            if claim is not None:
+                try:
+                    restored = claim.restore()
+                except OSError as restore_error:
+                    restore_error.add_note(f"publication also failed: {error}")
+                    raise
+                if not restored:
+                    raise file_io.PathChangedError(
+                        f"a later still won {target}; the prior app-reserved generation "
+                        f"was preserved at {claim.path}",
+                        preserved_path=claim.path,
+                    ) from error
+            raise
+        assert temporary.pin is not None
+        public_pin = file_io.PinnedPath(
+            target_access,
+            os.dup(temporary.pin.descriptor),
+            stat.S_IFREG,
+        )
+        committed_fingerprint = public_pin.fingerprint
+        publication = _ImagePublication(
+            target,
+            target_access,
+            target_context,
+            committed_fingerprint,
+            public_pin,
+            claim,
+        )
+        paths.fsync_directory(target_access.parent)
+        publication.verify()
+        handed_off = True
+        return publication
+    finally:
+        if not handed_off:
+            if publication is not None:
+                try:
+                    publication.rollback()
+                finally:
+                    publication.close()
+            elif claim is not None:
+                claim.close()
+        # A post-commit sync/retirement failure must never make cleanup try to
+        # discard the now-public exact generation through its old temp name.
+        if media_committed:
+            temporary.mark_published()
+
+
+def _require_public_target(
+    target_context: file_io.PinnedDirectoryContext,
+    target: Path,
+    target_access: Path,
+    expected_fingerprint: file_io.FileFingerprint,
+) -> None:
+    """Require the logical still name to expose the exact committed generation."""
+    target_context.verify_public()
+    pin = file_io.pin_regular_path(
+        target_access,
+        expected_identity=expected_fingerprint[:2],
+        expected_fingerprint=expected_fingerprint,
     )
-    os.close(descriptor)
-    return Path(name)
+    try:
+        named = target.lstat()
+        try:
+            named_fingerprint = file_io.file_fingerprint(named)
+        except ValueError as error:
+            raise file_io.PathChangedError(
+                f"the public automatic-still target {target} is no longer a regular file"
+            ) from error
+        if named_fingerprint != pin.fingerprint:
+            raise file_io.PathChangedError(
+                f"the public automatic-still target {target} changed generation"
+            )
+        target_context.verify_public()
+    finally:
+        pin.close()
 
 
 def is_available() -> bool:
@@ -362,6 +922,10 @@ def _command(video: Path, target: Path, seek: float) -> list[str]:
         str(video),
         "-frames:v",
         "1",
+        "-c:v",
+        "png",
+        "-f",
+        "image2",
         str(target),
     ]
 
@@ -435,64 +999,146 @@ def _generate_from_source(
     """Capture and publish while retaining the opened source identity."""
 
     target = destination(video, root)
-    if not force:
-        try:
-            # Reusing a target can still publish its sidecar. It therefore has
-            # the same lifecycle boundary as a newly rendered frame.
-            with _source_lifecycle_lock(video, Kind.VIDEO):
-                _require_unchanged_source(video, Kind.VIDEO, source)
-                if _nonempty_regular(target):
-                    _record_beside(video, target, root)
-                    return target
-        except StillError:
-            raise
-        except OSError as error:
-            raise StillError(
-                f"could not safely publish a still for {video.name}: {error}"
-            ) from error
-
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
         raise StillError(f"could not create {target.parent}: {error.strerror or error}") from error
-
-    # A half-written still is worse than none: `pairing` would find it, and the
-    # user would get a torn frame as their wallpaper.
+    target_context = _pin_target_directory(root, target)
+    target_access = target_context.child(target.name)
     try:
-        temporary = _private_image_temporary(target)
-    except OSError as error:
-        raise StillError(
-            f"could not create a temporary still in {target.parent}: {error}"
-        ) from error
-    try:
-        complaint = _run(video, temporary, SEEK_SECONDS, processes=processes)
-        if complaint:
-            # The seek landing past the end of a short loop is the ordinary way
-            # this fails, and the first frame is a fine answer for a clip that
-            # short. Anything still wrong after that is worth reporting.
-            complaint = _run(video, temporary, FALLBACK_SEEK_SECONDS, processes=processes)
-        if complaint:
-            raise StillError(f"ffmpeg could not take a still from {video.name}: {complaint}")
-        # ffmpeg can take minutes on a pathological input; never make Delete,
-        # Trash or Workshop cleanup wait for it. Only the short commit is
-        # serialized, and the exact source captured above is checked before
-        # either the image or its sidecar becomes visible.
-        with _source_lifecycle_lock(video, Kind.VIDEO):
-            _require_unchanged_source(video, Kind.VIDEO, source)
-            os.replace(temporary, target)
-            state_file.fsync_parent(target)
-            _record_beside(video, target, root)
-    except StillError:
-        temporary.unlink(missing_ok=True)
-        raise
-    except OSError as error:
-        temporary.unlink(missing_ok=True)
-        raise StillError(f"could not write {target}: {error.strerror or error}") from error
+        if not force:
+            # Reusing a target can still publish its sidecar. It therefore has
+            # the same lifecycle boundary as a newly rendered frame.
+            try:
+                with _source_lifecycle_lock(video, Kind.VIDEO):
+                    _require_unchanged_source(video, Kind.VIDEO, source)
+                    if _nonempty_regular(target_access):
+                        reused = file_io.regular_file_fingerprint(target_access)
+                        _require_public_target(
+                            target_context,
+                            target,
+                            target_access,
+                            reused,
+                        )
+                        reused_sidecar_publication = _record_beside_guarded(
+                            video,
+                            target,
+                            root,
+                            target_context,
+                            target_access,
+                            reused,
+                            source,
+                        )
+                        try:
+                            _require_unchanged_source(video, Kind.VIDEO, source)
+                            _require_public_target(
+                                target_context,
+                                target,
+                                target_access,
+                                reused,
+                            )
+                        except BaseException:
+                            if reused_sidecar_publication is not None:
+                                reused_sidecar_publication.rollback()
+                            raise
+                        finally:
+                            if reused_sidecar_publication is not None:
+                                reused_sidecar_publication.close()
+                        return target
+            except StillError:
+                raise
+            except OSError as error:
+                raise StillError(
+                    f"could not safely publish a still for {video.name}: {error}"
+                ) from error
 
-    return target
+        existing = _pin_existing_target(target, target_access)
+        # A half-written still is worse than none: `pairing` would find it, and
+        # the user would get a torn frame as their wallpaper.
+        try:
+            temporary = _private_image_temporary(target, target_context)
+        except OSError as error:
+            if existing is not None:
+                existing.close()
+            raise StillError(
+                f"could not create a temporary still in {target.parent}: {error}"
+            ) from error
+        try:
+            complaint = _run(
+                source.writer_path,
+                temporary.writer_path,
+                SEEK_SECONDS,
+                processes=processes,
+            )
+            if complaint:
+                # The seek landing past the end of a short loop is the ordinary
+                # way this fails, and the first frame is a fine answer for a
+                # clip that short.
+                complaint = _run(
+                    source.writer_path,
+                    temporary.writer_path,
+                    FALLBACK_SEEK_SECONDS,
+                    processes=processes,
+                )
+            if complaint:
+                raise StillError(f"ffmpeg could not take a still from {video.name}: {complaint}")
+            # Only the short commit is serialized; the expensive renderer wrote
+            # the descriptor-backed hidden output above.
+            with _source_lifecycle_lock(video, Kind.VIDEO):
+                _require_unchanged_source(video, Kind.VIDEO, source)
+                image_publication = _publish_image(
+                    temporary,
+                    target,
+                    target_access,
+                    target_context,
+                    existing,
+                )
+                sidecar_publication: _SidecarPublication | None = None
+                try:
+                    image_publication.verify()
+                    sidecar_publication = _record_beside_guarded(
+                        video,
+                        target,
+                        root,
+                        target_context,
+                        target_access,
+                        image_publication.fingerprint,
+                        source,
+                    )
+                    _require_unchanged_source(video, Kind.VIDEO, source)
+                    image_publication.verify()
+                    image_publication.commit()
+                except BaseException:
+                    try:
+                        if sidecar_publication is not None:
+                            sidecar_publication.rollback()
+                    finally:
+                        image_publication.rollback()
+                    raise
+                else:
+                    if sidecar_publication is not None:
+                        sidecar_publication.close()
+                finally:
+                    image_publication.close()
+        except StillError:
+            raise
+        except OSError as error:
+            raise StillError(f"could not write {target}: {error.strerror or error}") from error
+        finally:
+            temporary.close()
+            if existing is not None:
+                existing.close()
+        return target
+    finally:
+        target_context.close()
 
 
-def _record_beside(video: Path, still: Path, root: Path) -> None:
+def _record_beside(
+    video: Path,
+    still: Path,
+    root: Path,
+    source: _SourceSnapshot,
+) -> _SidecarPublication | None:
     """Write the sidecar, but only into a directory this app is entitled to.
 
     A Wallpaper Engine wallpaper lives in Steam's Workshop tree, and writing
@@ -507,8 +1153,42 @@ def _record_beside(video: Path, still: Path, root: Path) -> None:
     except OSError, ValueError:
         inside = False
     if not inside:
-        return
-    write_sidecar(video, still)
+        return None
+    return _write_sidecar_publication(video, still, source=source)
+
+
+def _record_beside_guarded(
+    video: Path,
+    still: Path,
+    root: Path,
+    target_context: file_io.PinnedDirectoryContext,
+    target_access: Path,
+    expected_fingerprint: file_io.FileFingerprint,
+    source: _SourceSnapshot,
+) -> _SidecarPublication | None:
+    """Publish the optional sidecar only while source and still stay exact."""
+    _require_unchanged_source(video, Kind.VIDEO, source)
+    publication = _record_beside(video, still, root, source)
+    try:
+        _require_unchanged_source(video, Kind.VIDEO, source)
+        _require_public_target(
+            target_context,
+            still,
+            target_access,
+            expected_fingerprint,
+        )
+    except BaseException as publication_error:
+        if publication is not None:
+            try:
+                publication.rollback()
+            except OSError as rollback_error:
+                rollback_error.add_note(
+                    f"the source or public still also changed during sidecar publication: "
+                    f"{publication_error}"
+                )
+                raise
+        raise
+    return publication
 
 
 def capture_scene(
@@ -538,6 +1218,7 @@ def capture_scene(
     try:
         return _capture_scene_from_source(
             item,
+            root=root,
             target=target,
             size=size,
             processes=processes,
@@ -550,6 +1231,7 @@ def capture_scene(
 def _capture_scene_from_source(
     item: MediaItem,
     *,
+    root: Path,
     target: Path,
     size: tuple[int, int],
     processes: worker_processes.Cancellation | None,
@@ -560,31 +1242,68 @@ def _capture_scene_from_source(
         paths.ensure_directory(target.parent)
     except OSError as error:
         raise StillError(f"could not create {target.parent}: {error.strerror or error}") from error
+    target_context = _pin_target_directory(root, target)
+    target_access = target_context.child(target.name)
     try:
-        temporary = _private_image_temporary(target)
+        existing = _pin_existing_target(target, target_access)
+    except BaseException:
+        target_context.close()
+        raise
+    try:
+        temporary = _private_image_temporary(target, target_context)
     except OSError as error:
+        if existing is not None:
+            existing.close()
+        target_context.close()
         raise StillError(
             f"could not create a temporary still in {target.parent}: {error}"
         ) from error
     try:
         if processes is None:
-            scenes.screenshot(item.scene, temporary, size=size)
+            scenes.screenshot(
+                item.scene,
+                temporary.writer_path,
+                size=size,
+                prepared_output=True,
+            )
         else:
-            scenes.screenshot(item.scene, temporary, size=size, processes=processes)
+            scenes.screenshot(
+                item.scene,
+                temporary.writer_path,
+                size=size,
+                processes=processes,
+                prepared_output=True,
+            )
         with _source_lifecycle_lock(item.path, Kind.SCENE, item.scene):
             _require_unchanged_source(item.path, Kind.SCENE, source)
-            os.replace(temporary, target)
-            state_file.fsync_parent(target)
+            image_publication = _publish_image(
+                temporary,
+                target,
+                target_access,
+                target_context,
+                existing,
+            )
+            try:
+                _require_unchanged_source(item.path, Kind.SCENE, source)
+                image_publication.verify()
+                image_publication.commit()
+            except BaseException:
+                image_publication.rollback()
+                raise
+            finally:
+                image_publication.close()
         return target
     except StillError:
-        temporary.unlink(missing_ok=True)
         raise
     except scenes.SceneError as error:
-        temporary.unlink(missing_ok=True)
         raise StillError(str(error)) from error
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise StillError(f"could not replace {target}: {error.strerror or error}") from error
+    finally:
+        temporary.close()
+        if existing is not None:
+            existing.close()
+        target_context.close()
 
 
 def ensure(

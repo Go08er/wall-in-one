@@ -68,13 +68,13 @@ direct-runtime fallback does not persist a newly observed Borked item, and
 their eight-second callback deadline is shorter than Wall-in-One's legitimate
 45-second action bound. The matching companion requires status version 2,
 requests the health hand-off after a non-durable crash finding, and allows 55
-seconds for the bounded action. Before the app is released, `flake.lock` must
-pin the tested companion commit. To avoid exposing that strict client to the
-older public app, the coordinated release first pushes the companion candidate
-to a non-default release branch, publishes the app against that exact commit,
-and then immediately promotes the companion release. Users of an older companion
-should use the packaged service/health timer and the app's own status as the
-authority. The exact compatibility boundary is recorded in
+seconds for the bounded action. This tree's `flake.lock` pins the reviewed
+companion candidate `a17eb70f653afb4cf5c04afc912cdca8b14ac06e` from its
+non-default release branch. To avoid exposing that strict client to the older
+public app, the coordinated publication promotes the app against that exact
+commit first and then immediately promotes the companion release. Users of an
+older companion should use the packaged service/health timer and the app's own
+status as the authority. The exact compatibility boundary is recorded in
 [`docs/migrating.md`](docs/migrating.md#companion-noctalia-plugin-compatibility).
 
 ## Why it exists
@@ -412,9 +412,11 @@ $ noctalia msg templates-apply
 
 That registers a `[theme.templates.user.wall-in-one]` entry in Noctalia's
 settings. It is a real schema field, so Noctalia round-trips it through its own
-settings writes rather than dropping it. The block is fenced with markers, the
-previous file is backed up first, and a hand-written entry under the same id is
-never overwritten. `--uninstall-theme-template` removes it again.
+settings writes rather than dropping it. The bundled template is copied once to
+a content-addressed file under Wall-in-One's state directory, without replacing
+an existing name. The settings block is fenced with markers, the previous file
+is backed up first, and a hand-written entry under the same id is never
+overwritten. `--uninstall-theme-template` removes the settings block again.
 
 Check what you have with `--theme-status`, `--print-palette`, or `--print-css`.
 
@@ -494,11 +496,11 @@ suite.
 
 The [GitHub Actions workflow](.github/workflows/ci.yml) evaluates the complete
 flake and builds the Python, Rust, lint, type and packaging checks on every
-push to `main` and pull request. The hardware-heavier niri + Noctalia VM runs
-weekly and on manual dispatch: hosted runners do not promise KVM, so forcing a
-software-emulated desktop boot into every quick change would turn the red/green
-signal into a timeout lottery. The workflow is read-only and cancels obsolete
-runs for the same ref.
+push to `main` or `release/**` and on every pull request. The hardware-heavier
+niri + Noctalia VM runs weekly, on manual dispatch, and for every release-branch
+push. Hosted runners do not promise KVM, so ordinary main/PR changes keep that
+software-emulated desktop boot out of the fast signal. The workflow is
+read-only and cancels obsolete runs for the same ref.
 
 Tests that need a display are marked `gui`; tests that need a live Noctalia are
 marked `noctalia`. The packaged build remains display-independent and excludes

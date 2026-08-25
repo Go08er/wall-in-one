@@ -195,8 +195,9 @@ The companion revision paired with this application requires status version 2,
 performs the direct-launch health hand-off, and permits the runtime's bounded
 45-second action. Companion revisions through `a5e23c9` understand only the
 compatibility summary and must not be combined with this application release.
-The app's `flake.lock` must pin the reviewed, tested companion commit before
-publication.
+This tree's `flake.lock` pins the reviewed candidate
+`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`; coordinated publication promotes
+the compatible app first and the strict companion immediately afterward.
 
 The same atomic snapshot carries `schedule` (whether the calendar is being
 followed, the playlist it currently selects, and the last matching rule), the

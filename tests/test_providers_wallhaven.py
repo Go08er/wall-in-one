@@ -19,7 +19,9 @@ from tests.test_providers_fakes import (
     names_in,
     png_bytes,
 )
+from wall_in_one import file_io
 from wall_in_one.library.model import Kind
+from wall_in_one.providers import download as download_module
 from wall_in_one.providers import http, wallhaven
 from wall_in_one.providers.base import (
     CancellationProbe,
@@ -477,7 +479,15 @@ def installed(root: Path) -> set[str]:
     directory = managed(root)
     if not directory.is_dir():
         return set()
-    return {entry.name for entry in directory.iterdir()} - {WALLHAVEN_LOCATION.marker_name}
+    return {entry.name for entry in directory.iterdir()} - {
+        WALLHAVEN_LOCATION.marker_name,
+        file_io.RETAINED_ENTRY_DIRECTORY,
+    }
+
+
+def published_names(root: Path) -> set[str]:
+    """Managed entries other than exact-inode cleanup residue."""
+    return names_in(managed(root)) - {file_io.RETAINED_ENTRY_DIRECTORY}
 
 
 def test_a_download_installs_media_marker_and_sidecar(tmp_path: Path) -> None:
@@ -494,6 +504,72 @@ def test_a_download_installs_media_marker_and_sidecar(tmp_path: Path) -> None:
     assert sidecar["provider"] == "Wallhaven"
     assert sidecar["id"] == "ab1234"
     assert sidecar["sha256"] == result.sha256
+    status = result.path.stat()
+    assert sidecar["media_generation"] == {
+        "device": status.st_dev,
+        "inode": status.st_ino,
+        "bytes": status.st_size,
+        "mtime_ns": status.st_mtime_ns,
+        "ctime_ns": status.st_ctime_ns,
+    }
+
+
+def test_validation_refuses_a_public_path_swap_even_when_the_original_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_bytes = jpeg_bytes(4, 3, entropy=b"\x11" * 8)
+    replacement_bytes = jpeg_bytes(4, 3, entropy=b"\x22" * 8)
+    detail = record(
+        file_size=len(original_bytes),
+        dimension_x=4,
+        dimension_y=3,
+        resolution="4x3",
+    )
+    media_url = "https://w.wallhaven.cc/full/ab/wallhaven-ab1234.jpg"
+    engine, _ = provider(
+        {
+            "https://wallhaven.cc/api/v1/w/ab1234": json_reply({"data": detail}),
+            media_url: Reply(body=original_bytes, content_type="image/jpeg"),
+        }
+    )
+    validate = wallhaven.validate_image
+
+    def validate_while_replaced(
+        path: Path,
+        content_type: str,
+        wallpaper: wallhaven.WallhavenWallpaper,
+        *,
+        cancelled: CancellationProbe | None = None,
+    ) -> tuple[int, str]:
+        public = Path(str(path))
+        retained = public.with_name(public.name + ".retained")
+        public.rename(retained)
+        public.write_bytes(replacement_bytes)
+        try:
+            return validate(path, content_type, wallpaper, cancelled=cancelled)
+        finally:
+            public.unlink()
+            retained.rename(public)
+
+    monkeypatch.setattr(wallhaven, "validate_image", validate_while_replaced)
+
+    with pytest.raises(ProviderError) as caught:
+        engine.download(candidate(), tmp_path)
+
+    assert caught.value.kind == "local-io"
+    directory = managed(tmp_path)
+    stages = tuple(
+        entry for entry in directory.iterdir() if entry.name.startswith(http.STAGING_PREFIX)
+    )
+    assert len(stages) == 1 and stages[0].read_bytes() == original_bytes
+    assert names_in(directory) - {file_io.RETAINED_ENTRY_DIRECTORY} == {
+        WALLHAVEN_LOCATION.marker_name,
+        stages[0].name,
+    }
+    retained = directory / file_io.RETAINED_ENTRY_DIRECTORY
+    assert retained.is_dir() and tuple(retained.iterdir())
+    assert download_module._STAGED_FILES == {}
 
 
 def test_shutdown_after_transfer_cancels_validation_and_installs_nothing(
@@ -538,7 +614,7 @@ def test_shutdown_after_transfer_cancels_validation_and_installs_nothing(
         pool.shutdown(wait=True, cancel_futures=True)
 
     assert caught.value.kind == "cancelled"
-    assert names_in(managed(tmp_path)) == {WALLHAVEN_LOCATION.marker_name}
+    assert published_names(tmp_path) == {WALLHAVEN_LOCATION.marker_name}
 
 
 def test_a_wallpaper_already_in_the_library_is_not_fetched_again(tmp_path: Path) -> None:
@@ -590,7 +666,7 @@ def test_a_media_response_of_the_wrong_type_is_never_installed(tmp_path: Path) -
     with pytest.raises(ProviderError) as caught:
         engine.download(candidate(), tmp_path)
     assert caught.value.kind == "content-type"
-    assert names_in(managed(tmp_path)) == {WALLHAVEN_LOCATION.marker_name}
+    assert published_names(tmp_path) == {WALLHAVEN_LOCATION.marker_name}
 
 
 def test_a_media_redirect_is_never_installed(tmp_path: Path) -> None:
@@ -606,7 +682,7 @@ def test_a_media_redirect_is_never_installed(tmp_path: Path) -> None:
     with pytest.raises(ProviderError) as caught:
         engine.download(candidate(), tmp_path)
     assert caught.value.kind == "redirects"
-    assert names_in(managed(tmp_path)) == {WALLHAVEN_LOCATION.marker_name}
+    assert published_names(tmp_path) == {WALLHAVEN_LOCATION.marker_name}
 
 
 def test_the_download_ceiling_is_the_advertised_size(tmp_path: Path) -> None:

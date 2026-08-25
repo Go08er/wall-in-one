@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from wall_in_one import file_io
 from wall_in_one.library import favourites, state_file
 from wall_in_one.library.favourites import Favourites, FavouritesError, Store
 
@@ -116,7 +117,9 @@ def test_the_write_is_a_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert str(ONE) in observed[0]
 
 
-def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_write_leaves_only_inert_private_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "favourites.json"
 
     def explode(_source: object, _destination: object) -> None:
@@ -126,7 +129,12 @@ def test_a_failed_write_leaves_no_debris(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(FavouritesError) as caught:
         favourites.save(Favourites().with_added(ONE), target)
     assert caught.value.kind == "local-io"
-    assert list(tmp_path.iterdir()) == []
+    retained = tmp_path / file_io.RETAINED_ENTRY_DIRECTORY
+    assert set(tmp_path.iterdir()) == {retained}
+    residues = tuple(retained.iterdir())
+    assert len(residues) == 2
+    assert any(path.is_file() and path.stat().st_size == 0 for path in residues)
+    assert any(path.is_dir() and tuple(path.iterdir()) == () for path in residues)
 
 
 # -- what a broken file does ---------------------------------------------
@@ -287,6 +295,67 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     assert list(favourites.load(target)) == [ONE]
 
 
+def test_a_valid_manual_repair_after_the_fault_read_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "favourites.json"
+    target.write_text("not json", encoding="utf-8")
+    store = Store.open(target)
+    manual = Favourites().with_added(TWO)
+    preserve = state_file.preserve_faulted
+
+    def repair_then_preserve(
+        path: Path,
+        *,
+        observed: state_file.StateFileObservation,
+    ) -> Path:
+        favourites.save(manual, path)
+        return preserve(path, observed=observed)
+
+    monkeypatch.setattr(state_file, "preserve_faulted", repair_then_preserve)
+
+    with pytest.raises(FavouritesError) as caught:
+        store.add(ONE)
+
+    assert caught.value.kind == "local-io"
+    assert Store.open(target).favourites == manual
+    assert not target.with_name(target.name + favourites.BROKEN_SUFFIX).exists()
+
+
+def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "favourites.json"
+    original = "not json"
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+    manual = Favourites().with_added(TWO)
+    save = favourites.save
+
+    def repair_then_save(
+        updated: Favourites,
+        path: Path | None = None,
+        *,
+        replace_existing: bool = True,
+    ) -> Path:
+        assert path == target
+        assert not replace_existing
+        save(manual, target)
+        return save(updated, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(favourites, "save", repair_then_save)
+
+    with pytest.raises(FavouritesError) as caught:
+        store.add(ONE)
+
+    assert caught.value.kind == "local-io"
+    assert store.fault is not None
+    assert Store.open(target).favourites == manual
+    assert target.with_name(target.name + favourites.BROKEN_SUFFIX).read_text() == original
+
+
 def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -295,7 +364,8 @@ def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     target.write_text(original, encoding="utf-8")
     store = Store.open(target)
 
-    def fail(_path: Path) -> Path:
+    def fail(_path: Path, *, observed: state_file.StateFileObservation) -> Path:
+        assert observed.present
         raise OSError("injected relocation failure")
 
     monkeypatch.setattr(state_file, "preserve_faulted", fail)

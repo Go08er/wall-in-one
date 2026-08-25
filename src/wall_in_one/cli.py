@@ -11,7 +11,8 @@ Six modes:
   importing GTK or opening a window
 * ``--sync-runtime-health`` -- persist Rust's bounded failure inventory through
   the app-owned authoring/config path, also without GTK
-* maintenance flags such as ``--install-theme-template``
+* maintenance flags such as ``--install-theme-template`` and the explicit
+  no-overwrite legacy importer
 
 The GTK import is deliberately deferred so that ``ctl`` and the maintenance
 flags stay fast and work with no display attached.
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -119,6 +120,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sync-runtime-health",
         action="store_true",
         help="persist newly reported runtime wallpaper failures without opening the GUI",
+    )
+    parser.add_argument(
+        "--sync-runtime-health-on-stop",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+
+    migration = parser.add_argument_group("Legacy Noctalia plugin migration")
+    migration.add_argument(
+        "--migrate-legacy",
+        action="store_true",
+        help="import an untouched goober/wall-in-one Noctalia plugin profile",
+    )
+    migration.add_argument(
+        "--legacy-migration-status",
+        action="store_true",
+        help="report whether legacy plugin authoring needs an import decision",
     )
 
     maintenance = parser.add_argument_group("Noctalia integration")
@@ -225,6 +243,64 @@ def _run_maintenance(options: argparse.Namespace) -> int | None:
     return None
 
 
+def _run_legacy_migration(options: argparse.Namespace) -> int | None:
+    """Handle migration flags before GTK, service construction, or config writes."""
+    from wall_in_one import legacy_migration
+
+    if options.legacy_migration_status:
+        found = legacy_migration.probe()
+        print(f"{found.status}: {found.detail}")
+        print(f"source: {found.source}")
+        if found.schema is not None:
+            print(f"schema: {found.schema}; playlists: {found.playlists}; outputs: {found.outputs}")
+        for conflict in found.conflicts:
+            print(f"conflict: {conflict}")
+        return 1 if found.status in ("conflict", "corrupt", "in-progress") else 0
+
+    if options.migrate_legacy:
+        try:
+            outcome = legacy_migration.migrate()
+        except legacy_migration.MigrationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        print(outcome.detail)
+        if outcome.report is not None:
+            print(f"report: {outcome.report}")
+        return 0
+    return None
+
+
+def _guard_unattended_migration() -> int | None:
+    """Refuse a headless writer while predecessor import needs a decision.
+
+    Runtime compilation and health persistence both mutate the current
+    profile.  A resumable import may already have linked some target files, so
+    even an otherwise valid health update could change those bytes and make
+    the journal impossible to resume.  Every unattended writer crosses this
+    boundary before status, authoring, or runtime configuration is read.
+    """
+    from wall_in_one import legacy_migration
+
+    try:
+        legacy_migration.unattended_guard()
+    except legacy_migration.MigrationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return None
+
+
+def _run_unattended_writer(write: Callable[[], int]) -> int:
+    """Hold migration exclusion across one complete headless publication."""
+    from wall_in_one import legacy_migration
+
+    try:
+        with legacy_migration.unattended_transaction():
+            return write()
+    except legacy_migration.MigrationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
 def _write_runtime_config() -> int:
     """Compile authoring state for Rust without constructing a GTK application."""
     from wall_in_one import config, runtime_config
@@ -256,7 +332,7 @@ def _write_runtime_config() -> int:
     return 0
 
 
-def _sync_runtime_health() -> int:
+def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
     """Persist one atomic Rust failure snapshot through the sole app writer."""
     from wall_in_one import config, runtime_config, runtime_health
     from wall_in_one.control import client
@@ -393,7 +469,7 @@ def _sync_runtime_health() -> int:
             f"warning: runtime omitted {omitted} older taboo entries; none were cleared",
             file=sys.stderr,
         )
-    if reload_needed:
+    if reload_needed and reload_runtime:
         saved_subject = "current authoring configuration" if refresh_only else "runtime health"
         try:
             reload_response = client.send_runtime("reload")
@@ -474,15 +550,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return client.dispatch(options.verb, " ".join(words) if words else None)
 
+    migration = _run_legacy_migration(options)
+    if migration is not None:
+        return migration
+
     if options.write_config:
-        return _write_runtime_config()
+        return _run_unattended_writer(_write_runtime_config)
 
     if options.sync_runtime_health:
-        return _sync_runtime_health()
+        return _run_unattended_writer(_sync_runtime_health)
+
+    if options.sync_runtime_health_on_stop:
+        # The systemd unit bounds this best-effort final persistence attempt.
+        # The runtime is about to exit, so compiling its saved health into the
+        # next-start document is sufficient and avoids a pointless reload.
+        return _run_unattended_writer(lambda: _sync_runtime_health(reload_runtime=False))
 
     maintenance = _run_maintenance(options)
     if maintenance is not None:
         return maintenance
+
+    if options.service:
+        blocked = _guard_unattended_migration()
+        if blocked is not None:
+            return blocked
 
     from wall_in_one.ui.app import run
 

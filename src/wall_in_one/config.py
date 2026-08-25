@@ -12,7 +12,7 @@ import contextlib
 import json
 import math
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Self
@@ -139,6 +139,11 @@ class Settings:
     #: left alone: mpv's post-decode FPS filter does not reduce decode work.
     scene_fps: int = scenes.DEFAULT_FPS
 
+    #: Typed linux-wallpaperengine presentation controls. Empty means use the
+    #: renderer's own default rather than forwarding an arbitrary flag.
+    scene_scaling: str = scenes.DEFAULT_SCALING
+    scene_clamp: str = scenes.DEFAULT_CLAMP
+
     #: ``mirrored`` is the cheap, predictable default: every attached display
     #: follows one cursor and one schedule. ``independent`` unlocks authored
     #: connector assignments, targeted calendar rules, cursors and renderers.
@@ -206,6 +211,14 @@ class Settings:
             if self.video_interpolation in renderer.INTERPOLATION_CHOICES
             else renderer.DEFAULT_INTERPOLATION
         )
+        scene_scaling = (
+            self.scene_scaling
+            if self.scene_scaling in scenes.SCALING_CHOICES
+            else scenes.DEFAULT_SCALING
+        )
+        scene_clamp = (
+            self.scene_clamp if self.scene_clamp in scenes.CLAMP_CHOICES else scenes.DEFAULT_CLAMP
+        )
         display_mode = (
             self.display_mode if self.display_mode in DISPLAY_MODES else DISPLAY_MODE_MIRRORED
         )
@@ -225,6 +238,8 @@ class Settings:
             video_when_hidden=hidden,
             video_interpolation=interpolation,
             scene_fps=min(scenes.MAX_FPS, max(scenes.MIN_FPS, self.scene_fps)),
+            scene_scaling=scene_scaling,
+            scene_clamp=scene_clamp,
             display_mode=display_mode,
             theme_source_connector=theme_source_connector,
             roots=_tidy_roots(self.roots),
@@ -270,6 +285,8 @@ class Settings:
             video_interpolation=text("video_interpolation", renderer.DEFAULT_INTERPOLATION),
             video_hardware_decode=boolean("video_hardware_decode", True),
             scene_fps=int(number("scene_fps", scenes.DEFAULT_FPS)),
+            scene_scaling=text("scene_scaling", scenes.DEFAULT_SCALING),
+            scene_clamp=text("scene_clamp", scenes.DEFAULT_CLAMP),
             display_mode=text("display_mode", DISPLAY_MODE_MIRRORED),
             theme_source_connector=text("theme_source_connector", ""),
             cycle_favourites_only=boolean("cycle_favourites_only", False),
@@ -298,6 +315,8 @@ class Settings:
             f'video_interpolation = "{self.video_interpolation}"',
             f"video_hardware_decode = {str(self.video_hardware_decode).lower()}",
             f"scene_fps = {self.scene_fps}",
+            f"scene_scaling = {json.dumps(self.scene_scaling)}",
+            f"scene_clamp = {json.dumps(self.scene_clamp)}",
             f"display_mode = {json.dumps(self.display_mode)}",
             f"theme_source_connector = {json.dumps(self.theme_source_connector)}",
             f"cycle_favourites_only = {str(self.cycle_favourites_only).lower()}",
@@ -332,7 +351,7 @@ def load(path: Path | None = None) -> Settings:
         if document is None:
             return Settings()
         raw = tomllib.loads(document.decode("utf-8"))
-    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
         # A corrupt settings file should not be fatal; defaults are always
         # usable and the user can fix or delete the file.
         return Settings()
@@ -357,7 +376,7 @@ def load_strict(path: Path | None = None) -> Settings:
         raw = tomllib.loads(document.decode("utf-8"))
     except OSError as error:
         raise ConfigError(f"cannot read {target}: {error}") from error
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as error:
         raise ConfigError(f"cannot parse {target}: {error}") from error
     _validate_strict_mapping(raw, target)
     return Settings.from_mapping(raw)
@@ -425,6 +444,8 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "preview_scheme",
         "video_when_hidden",
         "video_interpolation",
+        "scene_scaling",
+        "scene_clamp",
         "display_mode",
         "theme_source_connector",
         "active_playlist",
@@ -438,6 +459,8 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "preview_scheme": ALL_SCHEMES,
         "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES,
         "video_interpolation": renderer.INTERPOLATION_CHOICES,
+        "scene_scaling": scenes.SCALING_CHOICES,
+        "scene_clamp": scenes.CLAMP_CHOICES,
         "display_mode": DISPLAY_MODES,
     }
     for key, allowed in choices.items():
@@ -519,3 +542,73 @@ def save(settings: Settings, path: Path | None = None) -> Path:
     except OSError as error:
         raise ConfigError(f"cannot write {target}: {error}") from error
     return target
+
+
+def update(
+    changes: dict[str, Any],
+    path: Path | None = None,
+) -> Settings:
+    """Rebase a semantic settings edit on the latest durable document.
+
+    ``save(replace(app.settings, ...))`` is safe against torn TOML, but it can
+    still erase an unrelated edit made by another process after this GUI
+    opened.  Interactive authoring uses this lock/read/change/write operation
+    on its I/O worker instead.  The returned immutable value is the exact
+    snapshot which reached disk and is therefore the only value GTK may adopt.
+
+    A present malformed document is refused rather than repaired here.  The
+    forgiving :func:`load` remains useful for opening the recovery UI; an edit
+    must not silently replace the bytes somebody still needs to repair.
+    """
+    target = path if path is not None else paths.settings_path()
+    unknown = sorted(set(changes) - set(Settings.__dataclass_fields__))
+    if unknown:
+        raise ConfigError(f"unknown setting(s): {', '.join(unknown)}")
+    return mutate(lambda current: replace(current, **changes), target)
+
+
+def mutate(
+    change: Callable[[Settings], Settings],
+    path: Path | None = None,
+) -> Settings:
+    """Apply one settings transformation to the lock-owned latest snapshot."""
+    target = path if path is not None else paths.settings_path()
+    try:
+        with state_file.mutation_lock(target, description="settings"):
+            current = load_strict(target)
+            candidate = change(current).validated()
+            _validate_strict_mapping(tomllib.loads(candidate.to_toml()), target)
+            paths.ensure_directory(target.parent)
+            state_file.write_atomic_text(target, candidate.to_toml())
+            return candidate
+    except ConfigError:
+        raise
+    except (OSError, TimeoutError) as error:
+        raise ConfigError(f"cannot safely update {target}: {error}") from error
+
+
+def forget_playlist_default(
+    playlist: str,
+    path: Path | None = None,
+) -> Settings | None:
+    """Clear ``active_playlist`` iff it still names a deleted playlist.
+
+    The condition is evaluated under the settings mutation lock.  A concurrent
+    user choice of a different default therefore survives a delayed playlist
+    deletion instead of being replaced by an unconditional empty value.
+    ``None`` means no settings write was needed.
+    """
+    target = path if path is not None else paths.settings_path()
+    try:
+        with state_file.mutation_lock(target, description="settings"):
+            current = load_strict(target)
+            if current.active_playlist != playlist:
+                return None
+            candidate = replace(current, active_playlist="").validated()
+            paths.ensure_directory(target.parent)
+            state_file.write_atomic_text(target, candidate.to_toml())
+            return candidate
+    except ConfigError:
+        raise
+    except (OSError, TimeoutError) as error:
+        raise ConfigError(f"cannot safely update {target}: {error}") from error

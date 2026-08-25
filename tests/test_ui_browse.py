@@ -125,13 +125,13 @@ class _StubBrowser:
         return b""
 
 
-def _candidate(provider: str = "wallhaven") -> WallpaperCandidate:
+def _candidate(provider: str = "wallhaven", identifier: str = "abc123") -> WallpaperCandidate:
     return WallpaperCandidate(
         provider=provider,
-        identifier="abc123",
+        identifier=identifier,
         title="A wallpaper",
         kind=Kind.STILL,
-        page_url="https://wallhaven.cc/w/abc123",
+        page_url=f"https://wallhaven.cc/w/{identifier}",
     )
 
 
@@ -250,6 +250,10 @@ class _StubApp:
     def refresh_library(self) -> None:
         self.refreshes += 1
 
+    def require_authoring_ready(self, *, report: bool = True) -> bool:
+        del report
+        return True
+
 
 def _result(*identifiers: str, page: int = 1, has_next: bool = False) -> SearchResult:
     return SearchResult(
@@ -320,6 +324,66 @@ def test_filters_expand_inline_without_a_popover(dialog: browse_dialog.BrowseDia
     dialog._filters.set_active(True)
 
     assert dialog._filter_revealer.get_reveal_child()
+
+
+def test_search_and_batch_controls_wrap_without_clipping_at_large_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        registry,
+        "describe",
+        lambda: (
+            SimpleNamespace(name="wallhaven", title="Wallhaven", usable=True, limitations=()),
+            SimpleNamespace(name="motionbgs", title="MotionBGS", usable=True, limitations=()),
+        ),
+    )
+    settings = Gtk.Settings.get_default()
+    if settings is None:  # pragma: no cover - Gtk is initialised under Xvfb
+        pytest.skip("no GTK settings")
+    old_font = settings.get_property("gtk-font-name")
+    settings.set_property("gtk-font-name", "Sans 24")
+    page = browse_dialog.BrowsePage(_StubApp(tmp_path))  # type: ignore[arg-type]
+    surface = page._surface
+    surface._summary.set_label("showing the first 10000 results of about 12000")
+    surface._result_page_label.set_label("Page 1 of 250 · more online")
+    surface._more.set_label("Loading next page…")
+    surface._queue.set_label("downloading 10 of 12")
+    surface._picked.set_label("40 selected")
+    for widget in (surface._picked, surface._clear_picked, surface._download_picked):
+        widget.set_visible(True)
+    window = Gtk.Window(default_width=800, default_height=600)
+    window.set_child(page)
+    window.present()
+
+    try:
+        assert isinstance(surface._search_controls, Adw.WrapBox)
+        assert isinstance(surface._pager, Adw.WrapBox)
+        assert _settle(
+            lambda: surface._search_controls.get_width() > 0 and surface._pager.get_width() > 0
+        )
+        for bar in (surface._search_controls, surface._pager):
+            bounds = bar.get_allocation()
+            child = bar.get_first_child()
+            while child is not None:
+                if child.get_visible():
+                    allocation = child.get_allocation()
+                    assert allocation.width > 0, (
+                        type(child).__name__,
+                        child.get_mapped(),
+                        child.get_child_visible(),
+                        getattr(child, "get_label", lambda: "")(),
+                    )
+                    assert allocation.height > 0
+                    assert allocation.x >= 0
+                    assert allocation.x + allocation.width <= bounds.width
+                    assert allocation.y >= 0
+                    assert allocation.y + allocation.height <= bounds.height
+                child = child.get_next_sibling()
+    finally:
+        window.set_child(None)
+        window.destroy()
+        page.shutdown()
+        settings.set_property("gtk-font-name", old_font)
 
 
 def test_opening_inline_filters_refreshes_nsfw_availability(
@@ -592,6 +656,33 @@ def test_failing_to_load_more_keeps_what_is_already_shown(
     assert len(dialog._cards) == 2
     assert dialog._stack.get_visible_child_name() == "results"
     assert not dialog._has_next
+
+
+def test_failed_fresh_search_clears_invisible_previous_batch_actions(
+    dialog: browse_dialog.BrowseDialog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error page must not download checked cards hidden behind it."""
+    _answer(dialog, monkeypatch, {1: _result("aaa111", "bbb222", page=1)})
+    dialog.start_search(page=1)
+    assert _settle(lambda: len(dialog._cards) == 2)
+    dialog._cards[0]._check.set_active(True)
+    assert dialog._download_picked.get_visible()
+
+    def fail(_name: str, _query: object) -> SearchResult:
+        raise ProviderError("network", "the site is unavailable")
+
+    monkeypatch.setattr(dialog._browser, "search", fail)
+    dialog._entry.set_text("a different query")
+    dialog.start_search(page=1)
+
+    assert not dialog._picked_keys
+    assert not dialog._candidates
+    assert not dialog._cards
+    assert not dialog._download_picked.get_visible()
+    assert _settle(lambda: not dialog._searching)
+    assert dialog._stack.get_visible_child_name() == "empty"
+    assert dialog._status.get_title() == "That search did not work"
 
 
 def test_the_summary_counts_everything_on_screen_not_the_last_page(
@@ -1059,6 +1150,54 @@ def test_enter_opens_the_detail_view(
 
     assert _press(dialog._cards[0], Gdk.KEY_Return)
     assert opened == ["aaa111"]
+
+
+def test_many_detail_views_share_one_bounded_worker_lane(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opening many candidates cannot create one provider thread per dialog."""
+    started: list[str] = []
+    release = threading.Event()
+
+    def describe(candidate: WallpaperCandidate) -> CandidateDetail:
+        started.append(candidate.identifier)
+        release.wait(timeout=5)
+        return CandidateDetail(candidate=candidate)
+
+    monkeypatch.setattr(dialog._browser, "describe", describe)
+    monkeypatch.setattr(dialog._browser, "preview", lambda _url: b"")
+
+    for index in range(8):
+        dialog._open_detail(_candidate(identifier=f"detail-{index}"))
+
+    try:
+        assert _settle(lambda: len(started) == 2)
+        # The remaining six requests are queued behind the shared two-worker
+        # lane; another scheduler turn cannot start a third one.
+        time.sleep(0.05)
+        assert len(started) == 2
+        assert {detail._pool for detail in dialog._detail_dialogs.values()} == {dialog._details}
+        assert not any(detail._owns_pool for detail in dialog._detail_dialogs.values())
+    finally:
+        dialog._on_closed(dialog)
+        release.set()
+
+
+def test_closing_browse_cancels_transport_and_refuses_late_work(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed: list[bool] = []
+    submitted: list[bool] = []
+    monkeypatch.setattr(dialog._browser, "shutdown", lambda: closed.append(True))
+    monkeypatch.setattr(dialog._searches, "submit", lambda *_args: submitted.append(True))
+
+    dialog._on_closed(dialog)
+    dialog.start_search(page=1)
+    dialog._on_download(_candidate())
+
+    assert closed == [True]
+    assert submitted == []
+    assert not dialog._downloads_in_flight
 
 
 def test_space_picks_rather_than_downloads(

@@ -15,9 +15,13 @@ filtering is needed.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
+import signal
 import subprocess
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -48,12 +52,22 @@ ALL_SCHEMES: Final[tuple[str, ...]] = MATERIAL_SCHEMES + CUSTOM_SCHEMES
 DEFAULT_SCHEME: Final = "m3-tonal-spot"
 
 PaletteSource = Literal["builtin", "wallpaper", "community", "custom"]
+CancelCheck = Callable[[], bool]
 
 #: Generous. Palette generation measures ~0.25s; this only bounds a hang.
 GENERATE_TIMEOUT: Final = 30.0
 #: IPC round-trips are sub-millisecond when the shell is up, and fail fast when
 #: it is not.
 MESSAGE_TIMEOUT: Final = 10.0
+
+# Active CLI children are few (the application serialises live-theme work),
+# but they still need explicit ownership.  ThreadPoolExecutor workers are
+# joined at interpreter exit even after ``shutdown(wait=False)``; without this
+# registry a wedged 30-second palette generation can therefore keep the whole
+# graphical process alive after its last window has closed.
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE: dict[int, subprocess.Popen[bytes]] = {}
+_CANCEL_GENERATION = 0
 
 
 class NoctaliaError(Exception):
@@ -83,33 +97,100 @@ def _executable() -> str:
     return found
 
 
-def _run(arguments: Sequence[str], *, timeout: float) -> str:
-    command = [_executable(), *arguments]
+def _signal_group(process: subprocess.Popen[bytes], requested: signal.Signals) -> None:
+    if process.poll() is not None:
+        return
     try:
-        completed = subprocess.run(
+        # Every child below starts its own session.  Killing the group also
+        # catches a CLI wrapper which has spawned the real Noctalia process.
+        os.killpg(process.pid, requested)
+    except OSError, ProcessLookupError:
+        with contextlib.suppress(OSError):
+            process.send_signal(requested)
+
+
+def cancel_pending() -> None:
+    """Cancel every currently running Noctalia CLI call.
+
+    This is a process-shutdown hook, not ordinary error recovery.  New calls
+    remain possible (tests and the explicit compatibility service reuse this
+    module), while a generation closes the spawn-versus-cancel race.
+    """
+    global _CANCEL_GENERATION
+    with _ACTIVE_LOCK:
+        _CANCEL_GENERATION += 1
+        active = tuple(_ACTIVE.values())
+    for process in active:
+        _signal_group(process, signal.SIGKILL)
+
+
+def _run(
+    arguments: Sequence[str],
+    *,
+    timeout: float,
+    cancelled: CancelCheck | None = None,
+) -> str:
+    command = [_executable(), *arguments]
+    with _ACTIVE_LOCK:
+        if cancelled is not None and cancelled():
+            raise NoctaliaError(f"noctalia {arguments[0]} was cancelled")
+        generation = _CANCEL_GENERATION
+    try:
+        process = subprocess.Popen(
             command,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as error:
-        raise NoctaliaError(f"noctalia {arguments[0]} timed out after {timeout}s") from error
     except OSError as error:
         raise NoctaliaError(f"cannot run noctalia: {error}") from error
 
-    if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", "replace").strip()
-        summary = detail.splitlines()[-1] if detail else f"exit {completed.returncode}"
+    with _ACTIVE_LOCK:
+        cancelled_before_registration = generation != _CANCEL_GENERATION or (
+            cancelled is not None and cancelled()
+        )
+        _ACTIVE[process.pid] = process
+    if cancelled_before_registration:
+        _signal_group(process, signal.SIGKILL)
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            _signal_group(process, signal.SIGTERM)
+            try:
+                process.communicate(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                _signal_group(process, signal.SIGKILL)
+                process.communicate()
+            raise NoctaliaError(f"noctalia {arguments[0]} timed out after {timeout}s") from error
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE.pop(process.pid, None)
+
+    with _ACTIVE_LOCK:
+        was_cancelled = generation != _CANCEL_GENERATION or (cancelled is not None and cancelled())
+    if was_cancelled:
+        raise NoctaliaError(f"noctalia {arguments[0]} was cancelled")
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", "replace").strip()
+        summary = detail.splitlines()[-1] if detail else f"exit {process.returncode}"
         raise NoctaliaError(f"noctalia {' '.join(arguments)}: {summary}")
 
-    return completed.stdout.decode("utf-8", "replace")
+    return stdout.decode("utf-8", "replace")
 
 
 def is_available() -> bool:
     return shutil.which("noctalia") is not None
 
 
-def generate(image: Path, scheme: str = DEFAULT_SCHEME, *, pure_black: bool = False) -> PalettePair:
+def generate(
+    image: Path,
+    scheme: str = DEFAULT_SCHEME,
+    *,
+    pure_black: bool = False,
+    cancelled: CancelCheck | None = None,
+) -> PalettePair:
     """Generate the dark and light palettes for ``image``.
 
     This is the same code path Noctalia uses for its own wallpaper-derived
@@ -125,22 +206,34 @@ def generate(image: Path, scheme: str = DEFAULT_SCHEME, *, pure_black: bool = Fa
     if pure_black:
         arguments.append("--pure-black")
 
-    document = _run(arguments, timeout=GENERATE_TIMEOUT)
+    document = _run(arguments, timeout=GENERATE_TIMEOUT, cancelled=cancelled)
     try:
         return PalettePair.from_json(document)
     except PaletteError as error:
         raise NoctaliaError(f"could not parse generated palette: {error}") from error
 
 
-def message(command: str, *arguments: str) -> str:
+def message(
+    command: str,
+    *arguments: str,
+    cancelled: CancelCheck | None = None,
+) -> str:
     """Send an IPC command to the running shell and return its stdout."""
-    return _run(["msg", command, *arguments], timeout=MESSAGE_TIMEOUT).strip()
+    return _run(
+        ["msg", command, *arguments],
+        timeout=MESSAGE_TIMEOUT,
+        cancelled=cancelled,
+    ).strip()
 
 
-def current_wallpaper(connector: str | None = None) -> Path | None:
+def current_wallpaper(
+    connector: str | None = None,
+    *,
+    cancelled: CancelCheck | None = None,
+) -> Path | None:
     """The default wallpaper path, or the effective one for a given output."""
     arguments = [connector] if connector else []
-    reply = message("wallpaper-get", *arguments)
+    reply = message("wallpaper-get", *arguments, cancelled=cancelled)
     return Path(reply) if reply else None
 
 
@@ -155,17 +248,17 @@ def set_wallpaper(path: Path, connector: str | None = None) -> None:
     message("wallpaper-set", *arguments, str(path))
 
 
-def current_scheme_selection() -> ColourSchemeSelection:
+def current_scheme_selection(*, cancelled: CancelCheck | None = None) -> ColourSchemeSelection:
     """Parse ``color-scheme-get``, which replies ``<source> <name>``."""
-    reply = message("color-scheme-get")
+    reply = message("color-scheme-get", cancelled=cancelled)
     source, _, name = reply.partition(" ")
     if source not in ("builtin", "wallpaper", "community", "custom"):
         raise NoctaliaError(f"unexpected colour scheme source {source!r}")
     return ColourSchemeSelection(source=source, name=name.strip())  # type: ignore[arg-type]
 
 
-def current_mode() -> Mode:
-    reply = message("theme-mode-get").strip()
+def current_mode(*, cancelled: CancelCheck | None = None) -> Mode:
+    reply = message("theme-mode-get", cancelled=cancelled).strip()
     if reply not in ("dark", "light"):
         raise NoctaliaError(f"unexpected theme mode {reply!r}")
     return reply  # type: ignore[return-value]

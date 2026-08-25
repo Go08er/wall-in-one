@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from tests.test_providers_fakes import (
+    CancellableFakeClient,
     FakeClient,
     FrozenClock,
     Reply,
@@ -18,7 +21,12 @@ from tests.test_providers_fakes import (
 )
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import http, wallhaven
-from wall_in_one.providers.base import ProviderError, SearchQuery, WallpaperCandidate
+from wall_in_one.providers.base import (
+    CancellationProbe,
+    ProviderError,
+    SearchQuery,
+    WallpaperCandidate,
+)
 from wall_in_one.providers.download import WALLHAVEN_LOCATION
 
 SEARCH_URL = "https://wallhaven.cc/api/v1/search?categories=111&purity=100&sorting=date_added&order=desc&page=1"
@@ -486,6 +494,51 @@ def test_a_download_installs_media_marker_and_sidecar(tmp_path: Path) -> None:
     assert sidecar["provider"] == "Wallhaven"
     assert sidecar["id"] == "ab1234"
     assert sidecar["sha256"] == result.sha256
+
+
+def test_shutdown_after_transfer_cancels_validation_and_installs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete HTTP transfer cannot outlive its Browser transport owner."""
+    client = CancellableFakeClient(routes=download_routes())
+    clock = FrozenClock()
+    engine = wallhaven.Wallhaven(
+        client,
+        rate_limiter=http.RateLimiter(0.0, clock=clock, sleep=clock.sleep),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original = wallhaven.validate_image
+
+    def gated_validation(
+        path: Path,
+        content_type: str,
+        wallpaper: wallhaven.WallhavenWallpaper,
+        *,
+        cancelled: CancellationProbe | None = None,
+    ) -> tuple[int, str]:
+        assert path.name.startswith(http.STAGING_PREFIX)
+        assert path.read_bytes() == png_bytes(4, 3)
+        entered.set()
+        assert release.wait(2)
+        return original(path, content_type, wallpaper, cancelled=cancelled)
+
+    monkeypatch.setattr(wallhaven, "validate_image", gated_validation)
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(engine.download, candidate(), tmp_path)
+    try:
+        assert entered.wait(1)
+        assert any(name.startswith(http.STAGING_PREFIX) for name in names_in(managed(tmp_path)))
+        client.close()
+        release.set()
+        with pytest.raises(ProviderError) as caught:
+            future.result(timeout=2)
+    finally:
+        release.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+    assert caught.value.kind == "cancelled"
+    assert names_in(managed(tmp_path)) == {WALLHAVEN_LOCATION.marker_name}
 
 
 def test_a_wallpaper_already_in_the_library_is_not_fetched_again(tmp_path: Path) -> None:

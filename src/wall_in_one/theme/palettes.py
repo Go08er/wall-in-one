@@ -33,14 +33,14 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final
 from urllib.parse import unquote
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 from wall_in_one.theme.palette import (
     MAX_PALETTE_BYTES,
@@ -117,6 +117,12 @@ BUILTIN_NAMES: Final[tuple[str, ...]] = (
 #: Ceiling on one discovery pass. A palette directory is small by nature; this
 #: only stops a directory that has become something else from stalling the UI.
 MAX_ENTRIES: Final = 512
+
+#: Discovery runs in a cancellable UI worker.  The filesystem calls themselves
+#: are already non-following and non-blocking for file payloads; checking
+#: between directory entries and documents gives window shutdown and a newer
+#: generation a prompt, bounded way to abandon the rest of a large catalogue.
+CancelCheck = Callable[[], bool]
 
 #: The core keys a palette file carries, mapped onto the canonical tokens each
 #: one drives. Derived by diffing a real community palette against what
@@ -271,7 +277,7 @@ def parse_document(document: str | bytes) -> PalettePair:
     """Parse a palette file into the dark and light variants it describes."""
     try:
         decoded: object = json.loads(document)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise PaletteError(f"palette is not valid JSON: {error}") from error
     if not isinstance(decoded, dict):
         raise PaletteError("palette document must be an object")
@@ -285,18 +291,14 @@ def read_document(path: Path) -> dict[str, object]:
     do not model -- the terminal block, and `mHover` on older files.
     """
     try:
-        size = path.stat().st_size
-    except OSError as error:
-        raise PaletteError(f"cannot stat palette {path}: {error}") from error
-    if size > MAX_PALETTE_BYTES:
-        raise PaletteError(f"palette {path} is {size} bytes, over the {MAX_PALETTE_BYTES} limit")
-    try:
-        raw = path.read_bytes()
+        raw = file_io.read_regular_bytes(path, MAX_PALETTE_BYTES)
     except OSError as error:
         raise PaletteError(f"cannot read palette {path}: {error}") from error
+    if raw is None:
+        raise PaletteError(f"cannot read palette {path}: file does not exist")
     try:
         decoded: object = json.loads(raw)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise PaletteError(f"palette {path} is not valid JSON: {error}") from error
     if not isinstance(decoded, dict):
         raise PaletteError(f"palette {path} is not an object")
@@ -381,7 +383,11 @@ def entry_name(path: Path, origin: Origin) -> str:
     return path.stem
 
 
-def _candidates(directory: Path, skipped: list[str]) -> list[Path]:
+def _candidates(
+    directory: Path,
+    skipped: list[str],
+    cancelled: CancelCheck | None = None,
+) -> list[Path]:
     """Palette files directly inside ``directory``, in a stable order.
 
     `os.scandir` rather than `Path.glob` because glob swallows the permission
@@ -390,13 +396,24 @@ def _candidates(directory: Path, skipped: list[str]) -> list[Path]:
     """
     try:
         with os.scandir(directory) as entries:
-            found = [
-                Path(entry.path)
-                for entry in entries
-                if not entry.name.startswith(".")
-                and entry.name.endswith(".json")
-                and entry.is_file()
-            ]
+            found: list[Path] = []
+            examined = 0
+            for entry in entries:
+                if cancelled is not None and cancelled():
+                    return found
+                if entry.name.startswith(".") or not entry.name.endswith(".json"):
+                    continue
+                examined += 1
+                if examined > MAX_ENTRIES:
+                    skipped.append(f"{directory}: stopped at {MAX_ENTRIES} palettes")
+                    break
+                if entry.is_symlink():
+                    skipped.append(f"{entry.name}: is a symlink, not a palette file")
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    skipped.append(f"{entry.name}: is not a regular palette file")
+                    continue
+                found.append(Path(entry.path))
     except FileNotFoundError:
         # A source nobody has used yet. Empty, not broken.
         return []
@@ -406,9 +423,16 @@ def _candidates(directory: Path, skipped: list[str]) -> list[Path]:
     return sorted(found)
 
 
-def _scan_directory(directory: Path, origin: Origin, skipped: list[str]) -> list[PaletteEntry]:
+def _scan_directory(
+    directory: Path,
+    origin: Origin,
+    skipped: list[str],
+    cancelled: CancelCheck | None = None,
+) -> list[PaletteEntry]:
     entries: list[PaletteEntry] = []
-    for candidate in _candidates(directory, skipped):
+    for candidate in _candidates(directory, skipped, cancelled):
+        if cancelled is not None and cancelled():
+            break
         if len(entries) >= MAX_ENTRIES:
             skipped.append(f"{directory}: stopped at {MAX_ENTRIES} palettes")
             break
@@ -419,7 +443,11 @@ def _scan_directory(directory: Path, origin: Origin, skipped: list[str]) -> list
     return entries
 
 
-def _legacy_payload(scheme: Path, skipped: list[str]) -> Path | None:
+def _legacy_payload(
+    scheme: Path,
+    skipped: list[str],
+    cancelled: CancelCheck | None = None,
+) -> Path | None:
     """The one palette file inside a pre-5.x scheme directory, if there is one.
 
     Found by extension rather than by name, since the inner file does not
@@ -432,8 +460,13 @@ def _legacy_payload(scheme: Path, skipped: list[str]) -> Path | None:
     try:
         with os.scandir(scheme) as entries:
             for entry in entries:
+                if cancelled is not None and cancelled():
+                    return None
                 if entry.name.startswith(".") or not entry.name.endswith(".json"):
                     continue
+                if len(found) >= MAX_ENTRIES:
+                    skipped.append(f"{scheme.name}: stopped after {MAX_ENTRIES} palette files")
+                    break
                 if entry.is_symlink():
                     skipped.append(f"{scheme.name}: {entry.name} is a symlink")
                     return None
@@ -455,7 +488,11 @@ def _legacy_payload(scheme: Path, skipped: list[str]) -> Path | None:
     return None
 
 
-def _scan_legacy(directory: Path, skipped: list[str]) -> list[PaletteEntry]:
+def _scan_legacy(
+    directory: Path,
+    skipped: list[str],
+    cancelled: CancelCheck | None = None,
+) -> list[PaletteEntry]:
     """The pre-5.x layout, one directory per scheme.
 
     Bounded on directories examined rather than on palettes loaded, because a
@@ -468,11 +505,16 @@ def _scan_legacy(directory: Path, skipped: list[str]) -> list[PaletteEntry]:
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
+                if cancelled is not None and cancelled():
+                    return []
                 if entry.name.startswith(".") or not entry.is_dir():
                     continue
                 if entry.is_symlink():
                     skipped.append(f"{entry.name}: is a symlink, not a scheme directory")
                     continue
+                if len(schemes) >= MAX_ENTRIES:
+                    skipped.append(f"{directory}: stopped at {MAX_ENTRIES} palettes")
+                    break
                 schemes.append(Path(entry.path))
     except FileNotFoundError:
         # Nobody ever ran the old Noctalia here. Empty, not broken.
@@ -481,12 +523,11 @@ def _scan_legacy(directory: Path, skipped: list[str]) -> list[PaletteEntry]:
         skipped.append(f"{directory}: {error.strerror or error}")
         return []
     schemes.sort()
-    if len(schemes) > MAX_ENTRIES:
-        skipped.append(f"{directory}: stopped at {MAX_ENTRIES} palettes")
-        schemes = schemes[:MAX_ENTRIES]
     loaded: list[PaletteEntry] = []
     for scheme in schemes:
-        payload = _legacy_payload(scheme, skipped)
+        if cancelled is not None and cancelled():
+            break
+        payload = _legacy_payload(scheme, skipped, cancelled)
         if payload is None:
             continue
         try:
@@ -502,8 +543,16 @@ def discover(
     community: Path | None = None,
     legacy: Path | None = None,
     builtins: Sequence[str] | None = None,
+    cancelled: CancelCheck | None = None,
 ) -> Discovery:
-    """Every palette this machine can offer. Never raises."""
+    """Every palette this machine can offer. Never raises.
+
+    ``cancelled`` is checked between bounded filesystem operations.  A caller
+    abandoning the result receives a harmless partial snapshot, which a
+    generation-aware owner must discard rather than publish.
+    """
+    if cancelled is not None and cancelled():
+        return Discovery(())
     skipped: list[str] = []
     entries: list[PaletteEntry] = [
         PaletteEntry(name=name, origin=Origin.BUILTIN, path=None, colours=None)
@@ -513,13 +562,25 @@ def discover(
         community if community is not None else community_directory(),
         Origin.COMMUNITY,
         skipped,
+        cancelled,
     )
+    if cancelled is not None and cancelled():
+        return Discovery(())
     entries += _scan_directory(
         custom if custom is not None else custom_directory(),
         Origin.CUSTOM,
         skipped,
+        cancelled,
     )
-    entries += _scan_legacy(legacy if legacy is not None else legacy_directory(), skipped)
+    if cancelled is not None and cancelled():
+        return Discovery(())
+    entries += _scan_legacy(
+        legacy if legacy is not None else legacy_directory(),
+        skipped,
+        cancelled,
+    )
+    if cancelled is not None and cancelled():
+        return Discovery(())
     order = {Origin.BUILTIN: 0, Origin.COMMUNITY: 1, Origin.CUSTOM: 2, Origin.LEGACY: 3}
     entries.sort(key=lambda entry: (order[entry.origin], entry.name.casefold()))
     return Discovery(entries=tuple(entries), skipped=tuple(skipped))

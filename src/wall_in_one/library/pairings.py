@@ -48,7 +48,7 @@ from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
 from wall_in_one.library import pairing, state_file, stills
-from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.theme import noctalia
 
 #: The file, under `paths.app_state_dir()`, beside the favourites.
@@ -687,20 +687,49 @@ class Store:
     """
 
     def __init__(
-        self, records: Mapping[str, Pairing] | None = None, path: Path | None = None
+        self,
+        records: Mapping[str, Pairing] | None = None,
+        path: Path | None = None,
+        *,
+        _loaded: bool = False,
     ) -> None:
         self._records: dict[str, Pairing] = dict(records or {})
         self._path = path
         self._fault: str | None = None
+        # Distinguish an intentional direct seed from Store.open observing an
+        # absent durable file.  A worker rebase may retain only the former.
+        self._loaded = _loaded
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         """Read the file. Never raises; a broken one degrades to no records."""
         target = path if path is not None else state_path()
         records, fault = _read(target)
-        store = cls(records, target)
+        store = cls(records, target, _loaded=True)
         store._fault = fault
         return store
+
+    def worker_copy(self, *, rebase: bool = False) -> Store:
+        """Return an unshared copy, optionally reloaded from durable state.
+
+        The optional read is used only after ownership has moved to a worker.
+        Keeping it out of the default path makes taking a GUI work snapshot a
+        pure in-memory operation.
+        """
+        target = self._path if self._path is not None else state_path()
+        if rebase:
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                if self._loaded:
+                    return type(self).open(target)
+            except OSError:
+                return type(self).open(target)
+            else:
+                return type(self).open(target)
+        copied = type(self)(self._records, target, _loaded=self._loaded)
+        copied._fault = self._fault
+        return copied
 
     @property
     def records(self) -> Mapping[str, Pairing]:
@@ -727,6 +756,44 @@ class Store:
 
     def resolve(self, item: MediaItem, roots: Sequence[Path] = ()) -> Pairing:
         return resolve(item, roots, self._records)
+
+    def resolve_accepted(self, item: MediaItem, library: Library) -> Pairing:
+        """Resolve only from the latest immutable scan and in-memory record.
+
+        Interactive GTK callbacks must not restat sidecars, siblings, saved
+        overrides or generated-still roots: a configured mount can stall those
+        probes for seconds.  The scanner already resolved that filesystem
+        truth into ``MediaItem.paired_still`` and retained every discovered
+        still in ``Library.still_inventory``.  This pure view also makes a
+        just-saved first-class manual still visible before the follow-up scan.
+        """
+        identity = Identity.of(item)
+        default_still = item.path if not item.is_moving else item.paired_still
+        default = Pairing(
+            identity=identity,
+            still=default_still,
+            motion=item.path if item.is_moving else None,
+        )
+        saved = self._records.get(identity.key)
+        if saved is None:
+            return default
+        indexed_stills = {
+            candidate.path
+            for candidate in (*library.items, *library.still_inventory)
+            if candidate.kind is Kind.STILL
+        }
+        chosen = saved.still
+        missing = (
+            chosen is not None and chosen != item.paired_still and chosen not in indexed_stills
+        )
+        return replace(
+            default,
+            still=default.still if chosen is None or missing else chosen,
+            palette=saved.palette,
+            customized=saved.customized,
+            override_missing=missing,
+            health=saved.health,
+        )
 
     def apply(
         self, items: Iterable[MediaItem], roots: Sequence[Path] = ()
@@ -801,28 +868,70 @@ class Store:
         an unreadable store. An unattended diagnostic must never turn a
         faulted authoring file into a sparse replacement.
         """
-        requested: dict[str, tuple[Identity, Health]] = {}
-        for item, reason, source in findings:
-            identity = Identity.of(item)
-            requested[identity.key] = (identity, Health.borked(reason, source))
+        requested = self._borked_requests(findings)
         if not requested:
             return 0
 
         def mark(records: dict[str, Pairing]) -> tuple[int, bool]:
-            changed = 0
-            for key, (identity, health) in requested.items():
-                existing = records.get(key)
-                if existing is not None and existing.health == health:
-                    continue
-                records[key] = (
-                    replace(existing, health=health)
-                    if existing is not None
-                    else Pairing(identity=identity, health=health)
-                )
-                changed += 1
+            changed = self._apply_borked_requests(records, requested)
             return changed, changed > 0
 
         return self._mutate(mark, refuse_fault=True)
+
+    def mark_borked_many_if_unchanged(
+        self,
+        findings: Iterable[tuple[MediaItem, str, str]],
+        expected: Mapping[str, Pairing],
+    ) -> tuple[int, bool]:
+        """Persist health only when Pairings still equals a validated snapshot.
+
+        Runtime health is validated and rendered on a background worker.  An
+        interactive delete may legitimately remove the same media while that
+        validation is running.  Comparing again *inside* the Pairings mutation
+        lock prevents the delayed health write from resurrecting metadata the
+        delete just removed.  ``accepted`` is false for that race; callers can
+        safely wait for a status from the newly compiled generation instead.
+        """
+        requested = self._borked_requests(findings)
+        if not requested:
+            return 0, True
+        baseline = dict(expected)
+
+        def mark(records: dict[str, Pairing]) -> tuple[tuple[int, bool], bool]:
+            if records != baseline:
+                return (0, False), False
+            changed = self._apply_borked_requests(records, requested)
+            return (changed, True), changed > 0
+
+        return self._mutate(mark, refuse_fault=True)
+
+    @staticmethod
+    def _borked_requests(
+        findings: Iterable[tuple[MediaItem, str, str]],
+    ) -> dict[str, tuple[Identity, Health]]:
+        requested: dict[str, tuple[Identity, Health]] = {}
+        for item, reason, source in findings:
+            identity = Identity.of(item)
+            requested[identity.key] = (identity, Health.borked(reason, source))
+        return requested
+
+    @staticmethod
+    def _apply_borked_requests(
+        records: dict[str, Pairing],
+        requested: Mapping[str, tuple[Identity, Health]],
+    ) -> int:
+        changed = 0
+        for key, (identity, health) in requested.items():
+            existing = records.get(key)
+            if existing is not None and existing.health == health:
+                continue
+            records[key] = (
+                replace(existing, health=health)
+                if existing is not None
+                else Pairing(identity=identity, health=health)
+            )
+            changed += 1
+        return changed
 
     def clear_borked(self, item: MediaItem) -> bool:
         """Clear the durable judgement while retaining authored choices."""
@@ -911,6 +1020,42 @@ class Store:
 
         return self._mutate(forget)
 
+    def adopt_worker_forget_item(
+        self,
+        item: MediaItem,
+        *,
+        removed_stills: Iterable[Path] = (),
+    ) -> bool:
+        """Mirror only a worker-completed cleanup into live memory.
+
+        The durable worker already ran the locked/rebased transaction.  This
+        method deliberately edits the current mapping in place semantically,
+        so unrelated GTK authoring performed during the scan is preserved.
+        """
+        identity = Identity.of(item)
+        deleted_stills = {item.path, *(Path(path) for path in removed_stills)}
+        changed = self._records.pop(identity.key, None) is not None
+        for path in deleted_stills:
+            still_key = Identity(Medium.STILL, str(path)).key
+            if still_key != identity.key and self._records.pop(still_key, None) is not None:
+                changed = True
+        for key, existing in tuple(self._records.items()):
+            if existing.still not in deleted_stills:
+                continue
+            self._records[key] = replace(existing, still=None)
+            changed = True
+        self._fault = None
+        self._loaded = True
+        return changed
+
+    def adopt_worker_repair(self, expected: str) -> bool:
+        """Clear only the same fault a detached worker proved repaired."""
+        if self._fault != expected:
+            return False
+        self._fault = None
+        self._loaded = True
+        return True
+
     def forget_path(self, path: Path) -> bool:
         """Drop any record naming ``path`` as its source, whatever the medium.
 
@@ -963,6 +1108,7 @@ class Store:
                 fault = None
             self._records = updated
             self._fault = fault
+            self._loaded = True
             return result
 
     def _write(self, records: Mapping[str, Pairing]) -> None:

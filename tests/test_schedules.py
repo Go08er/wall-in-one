@@ -11,8 +11,10 @@ is one window to a person.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 from datetime import datetime
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,31 @@ def store(tmp_path: Path) -> Store:
 def at(text: str) -> datetime:
     """A moment, written as `YYYY-MM-DD HH:MM`."""
     return datetime.strptime(text, "%Y-%m-%d %H:%M")
+
+
+def _add_rule_from_stale_process(
+    target: str,
+    ready: Connection,
+    proceed: Connection,
+) -> None:
+    """Open before the other writer, then append to that stale Store."""
+    store = Store.open(Path(target))
+    ready.send(True)
+    proceed.recv()
+    store.add("Child", rule_id="child")
+
+
+def _disable_rule_from_stale_process(
+    target: str,
+    rule_id: str,
+    ready: Connection,
+    proceed: Connection,
+) -> None:
+    """Apply a narrow same-record edit after another process changed it."""
+    store = Store.open(Path(target))
+    ready.send(True)
+    proceed.recv()
+    store.set_enabled(rule_id, False)
 
 
 # 2026-08-07 is a Friday; 2026-08-09 is a Sunday; 2026-12-25 is a Friday.
@@ -89,6 +116,37 @@ def test_a_window_whose_end_is_before_its_start_wraps_midnight() -> None:
     assert rule.matches(at("2026-08-07 23:30"))
     assert rule.matches(at("2026-08-07 02:00"))
     assert not rule.matches(at("2026-08-07 12:00"))
+
+
+def test_a_wrapped_window_keeps_the_start_days_calendar_filters() -> None:
+    """The Tuesday tail belongs to Monday's authored night, as in the legacy app."""
+    rule = Rule(
+        id="r",
+        playlist="Monday night",
+        months=frozenset({8}),
+        weekdays=schedules.parse_weekdays(["mon"]),
+        start=schedules.parse_time("22:00"),
+        end=schedules.parse_time("06:00"),
+    )
+
+    assert rule.matches(at("2026-08-03 23:59"))
+    assert rule.matches(at("2026-08-04 00:00"))
+    assert rule.matches(at("2026-08-04 05:59"))
+    assert not rule.matches(at("2026-08-04 06:00"))
+    assert not rule.matches(at("2026-08-04 23:00"))
+
+
+def test_a_wrapped_window_keeps_the_start_month_across_new_year() -> None:
+    rule = Rule(
+        id="r",
+        playlist="New year",
+        months=frozenset({12}),
+        start=schedules.parse_time("22:00"),
+        end=schedules.parse_time("06:00"),
+    )
+
+    assert rule.matches(at("2027-01-01 02:00"))
+    assert not rule.matches(at("2027-01-02 02:00"))
 
 
 def test_a_zero_length_window_reads_as_always() -> None:
@@ -174,9 +232,20 @@ def test_the_pinned_default_is_used_when_no_rule_matches() -> None:
 
 def test_a_rule_is_added_at_the_end(store: Store) -> None:
     """Appending is how you override, because the last match wins."""
-    store.add("First")
+    first = store.add("First")
     store.add("Second")
     assert [rule.playlist for rule in store.rules] == ["First", "Second"]
+    assert store.rules[0] is first
+
+
+def test_an_explicit_rule_id_cannot_make_the_store_fault_its_own_file(store: Store) -> None:
+    store.add("First", rule_id="same")
+
+    with pytest.raises(ScheduleError) as caught:
+        store.add("Second", rule_id="same")
+
+    assert caught.value.kind == "identity-conflict"
+    assert [rule.playlist for rule in store.rules] == ["First"]
 
 
 @pytest.mark.parametrize("raw", ["25:00", "09:60", "nine", "0900", ""])
@@ -297,6 +366,68 @@ def test_deleting_a_playlist_takes_its_rules(store: Store) -> None:
     assert store.forget_playlist("Evening") is False
 
 
+def test_stale_cross_process_add_preserves_rule_order_and_both_writes(tmp_path: Path) -> None:
+    """The later transaction appends to current disk, not its empty snapshot."""
+    target = tmp_path / "schedules.json"
+    parent = Store.open(target)
+    context = multiprocessing.get_context("spawn")
+    ready_parent, ready_child = context.Pipe()
+    proceed_parent, proceed_child = context.Pipe()
+    process = context.Process(
+        target=_add_rule_from_stale_process,
+        args=(str(target), ready_child, proceed_child),
+    )
+    process.start()
+    try:
+        assert ready_parent.poll(5), "child did not open its stale schedule Store"
+        assert ready_parent.recv() is True
+        parent.add("Parent", rule_id="parent")
+        proceed_parent.send(True)
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+    assert [(rule.id, rule.playlist) for rule in Store.open(target).rules] == [
+        ("parent", "Parent"),
+        ("child", "Child"),
+    ]
+
+
+def test_stale_same_rule_edit_merges_with_latest_cross_process_fields(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    seeded = Store(path=target)
+    seeded.add("Original", weekdays=("mon",), rule_id="shared")
+    parent = Store.open(target)
+    context = multiprocessing.get_context("spawn")
+    ready_parent, ready_child = context.Pipe()
+    proceed_parent, proceed_child = context.Pipe()
+    process = context.Process(
+        target=_disable_rule_from_stale_process,
+        args=(str(target), "shared", ready_child, proceed_child),
+    )
+    process.start()
+    try:
+        assert ready_parent.poll(5), "child did not open its stale schedule Store"
+        assert ready_parent.recv() is True
+        parent.update("shared", "Parent edit", months=(12,), weekdays=("fri",))
+        proceed_parent.send(True)
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+    rule = Store.open(target).rules[0]
+    assert rule.playlist == "Parent edit"
+    assert rule.months == frozenset({12})
+    assert rule.weekdays == frozenset({4})
+    assert rule.enabled is False
+
+
 # -- the file -------------------------------------------------------------
 
 
@@ -308,6 +439,20 @@ def test_a_rule_outlives_the_process(tmp_path: Path) -> None:
     assert reopened[0].playlist == "Evening"
     assert reopened[0].weekdays == frozenset({5, 6})
     assert reopened[0].start == schedules.parse_time("22:00")
+
+
+def test_a_direct_absent_file_seed_is_retained_on_its_first_mutation(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    seeded = Rule(id="seed", playlist="Seed")
+    store = Store((seeded,), target)
+
+    assert store.remove("missing") is False
+    store.add("Added", rule_id="added")
+
+    assert [(rule.id, rule.playlist) for rule in Store.open(target).rules] == [
+        ("seed", "Seed"),
+        ("added", "Added"),
+    ]
 
 
 def test_version_one_schedule_migrates_on_the_next_authoring_write(tmp_path: Path) -> None:
@@ -385,6 +530,56 @@ def test_one_bad_rule_costs_only_itself(tmp_path: Path) -> None:
     assert Store.open(target).fault is not None
 
 
+def test_surrogate_rule_text_is_dropped_and_refused_without_crashing(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_text(
+        '{"version": 2, "rules": ['
+        '{"id": "bad", "playlist": "\\ud800"}, '
+        '{"id": "good", "playlist": "Evening"}]\n}',
+        encoding="utf-8",
+    )
+
+    opened = Store.open(target)
+
+    assert [rule.id for rule in opened.rules] == ["good"]
+    assert opened.fault is not None
+    with pytest.raises(ScheduleError) as caught:
+        opened.add("\ud800")
+    assert caught.value.kind == "no-such-rule"
+
+
+def test_duplicate_rule_ids_recover_to_the_first_before_an_authoring_write(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "schedules.json"
+    original = json.dumps(
+        {
+            "version": schedules.FORMAT_VERSION,
+            "rules": [
+                {"id": "same", "playlist": "First"},
+                {"id": "same", "playlist": "Second"},
+            ],
+        }
+    )
+    target.write_text(original, encoding="utf-8")
+    store = Store.open(target)
+
+    assert [rule.playlist for rule in store.rules] == ["First"]
+    assert store.fault is not None
+    store.add("Added", rule_id="added")
+
+    assert (
+        target.with_name(target.name + schedules.BROKEN_SUFFIX).read_text(encoding="utf-8")
+        == original
+    )
+    reopened = Store.open(target)
+    assert [(rule.id, rule.playlist) for rule in reopened.rules] == [
+        ("same", "First"),
+        ("added", "Added"),
+    ]
+    assert reopened.fault is None
+
+
 def test_half_a_stored_window_is_read_as_no_window(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     target.write_text(
@@ -434,13 +629,46 @@ def test_a_broken_file_is_moved_aside_rather_than_overwritten(tmp_path: Path) ->
     assert kept.read_text(encoding="utf-8") == "not json but somebody's schedule"
 
 
+def test_a_fault_which_appears_after_open_is_still_preserved(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    store = Store.open(target)
+    original = "a concurrent broken schedule"
+    target.write_text(original, encoding="utf-8")
+
+    store.add("Evening", rule_id="new")
+
+    assert (
+        target.with_name(target.name + schedules.BROKEN_SUFFIX).read_text(encoding="utf-8")
+        == original
+    )
+    assert Store.open(target).rules[0].id == "new"
+
+
+def test_a_symlinked_mutation_lock_is_reported_without_touching_its_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "schedules.json"
+    sentinel = tmp_path / "outside"
+    sentinel.write_text("do not touch", encoding="utf-8")
+    target.with_name(f".{target.name}.mutation.lock").symlink_to(sentinel)
+    store = Store(path=target)
+
+    with pytest.raises(ScheduleError) as caught:
+        store.add("Evening", rule_id="new")
+
+    assert caught.value.kind == "local-io"
+    assert sentinel.read_text(encoding="utf-8") == "do not touch"
+    assert not target.exists()
+    assert len(store) == 0
+
+
 def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "schedules.json"
     original = "not json but somebody's schedule"
-    target.write_text(original, encoding="utf-8")
     store = Store.open(target)
+    target.write_text(original, encoding="utf-8")
 
     def fail(_path: Path) -> Path:
         raise OSError("injected relocation failure")

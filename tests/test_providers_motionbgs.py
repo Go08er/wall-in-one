@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from tests.test_providers_fakes import FakeClient, FrozenClock, Reply, mp4_bytes, names_in
+from tests.test_providers_fakes import (
+    CancellableFakeClient,
+    FakeClient,
+    FrozenClock,
+    Reply,
+    mp4_bytes,
+    names_in,
+)
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import http, motionbgs
-from wall_in_one.providers.base import ProviderError, SearchQuery, WallpaperCandidate
+from wall_in_one.providers.base import (
+    CancellationProbe,
+    ProviderError,
+    SearchQuery,
+    WallpaperCandidate,
+)
 from wall_in_one.providers.download import MOTIONBGS_LOCATION
 
 ORIGIN = motionbgs.ORIGIN
@@ -490,6 +504,50 @@ def test_a_download_installs_media_marker_and_sidecar(tmp_path: Path) -> None:
     assert sidecar["quality"] == "hd"
     assert sidecar["sha256"] == result.sha256
     assert sidecar["bytes"] == result.size
+
+
+def test_shutdown_after_transfer_cancels_validation_and_installs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the shared transport also cancels post-transfer MP4 work."""
+    client = CancellableFakeClient(routes=download_routes())
+    clock = FrozenClock()
+    engine = motionbgs.MotionBgs(
+        client,
+        rate_limiter=http.RateLimiter(0.0, clock=clock, sleep=clock.sleep),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original = motionbgs.validate_mp4
+
+    def gated_validation(
+        path: Path,
+        content_type: str,
+        *,
+        cancelled: CancellationProbe | None = None,
+    ) -> tuple[int, str]:
+        assert path.name.startswith(http.STAGING_PREFIX)
+        assert path.read_bytes() == mp4_bytes()
+        entered.set()
+        assert release.wait(2)
+        return original(path, content_type, cancelled=cancelled)
+
+    monkeypatch.setattr(motionbgs, "validate_mp4", gated_validation)
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(engine.download, candidate(), tmp_path)
+    try:
+        assert entered.wait(1)
+        assert any(name.startswith(http.STAGING_PREFIX) for name in names_in(managed(tmp_path)))
+        client.close()
+        release.set()
+        with pytest.raises(ProviderError) as caught:
+            future.result(timeout=2)
+    finally:
+        release.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+    assert caught.value.kind == "cancelled"
+    assert names_in(managed(tmp_path)) == {MOTIONBGS_LOCATION.marker_name}
 
 
 def test_a_download_redirected_to_another_media_id_installs_nothing(tmp_path: Path) -> None:

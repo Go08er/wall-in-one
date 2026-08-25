@@ -22,9 +22,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 
+from wall_in_one import file_io
+
 MUTATION_LOCK_TIMEOUT_SECONDS: Final = 5.0
 MUTATION_LOCK_POLL_SECONDS: Final = 0.025
-_MUTATION_GATE = threading.Lock()
+# A migration transaction deliberately nests target-specific Store locks on
+# the same worker while retaining process-wide exclusion. Reentrancy is only
+# same-thread; other workers remain serialized exactly as before.
+_MUTATION_GATE = threading.RLock()
 
 
 def read_object(
@@ -122,6 +127,8 @@ def write_atomic_text(path: Path, contents: str) -> None:
     """
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
+    temporary_status = os.fstat(descriptor)
+    temporary_identity = temporary_status.st_dev, temporary_status.st_ino
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(contents)
@@ -130,7 +137,10 @@ def write_atomic_text(path: Path, contents: str) -> None:
         os.replace(temporary, path)
         fsync_parent(path)
     except OSError:
-        temporary.unlink(missing_ok=True)
+        file_io.discard_regular_if_same(
+            temporary,
+            expected_identity=temporary_identity,
+        )
         raise
 
 
@@ -140,6 +150,7 @@ def mutation_lock(
     *,
     description: str,
     timeout: float = MUTATION_LOCK_TIMEOUT_SECONDS,
+    process_gate: bool = True,
 ) -> Iterator[None]:
     """Serialize one private state-file rebase/write across processes.
 
@@ -153,10 +164,13 @@ def mutation_lock(
     lock_path = target.absolute().with_name(f".{target.name}.mutation.lock")
     deadline = time.monotonic() + timeout
     remaining = max(0.0, deadline - time.monotonic())
-    if not _MUTATION_GATE.acquire(timeout=remaining):
-        raise TimeoutError(
-            f"timed out after {timeout:g}s waiting for {description} mutation lock {lock_path}"
-        )
+    gate_acquired = False
+    if process_gate:
+        if not _MUTATION_GATE.acquire(timeout=remaining):
+            raise TimeoutError(
+                f"timed out after {timeout:g}s waiting for {description} mutation lock {lock_path}"
+            )
+        gate_acquired = True
 
     descriptor: int | None = None
     locked = False
@@ -205,30 +219,34 @@ def mutation_lock(
                         fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
         finally:
-            _MUTATION_GATE.release()
+            if gate_acquired:
+                _MUTATION_GATE.release()
 
 
 def preserve_faulted(path: Path) -> Path:
     """Move an unreadable state object aside without replacing any backup.
 
-    A hard link followed by unlink gives regular files, symlinks, and other
-    linkable objects a same-filesystem, no-replace move.  Directories cannot be
-    hard-linked and therefore fail safely: the caller must never recursively
-    relocate an unexpected directory just to make room for a JSON document.
+    The source is moved with the kernel's no-replace operation and verified at
+    the destination before the public name is considered released. Directories
+    fail safely: the caller must never recursively relocate an unexpected tree
+    just to make room for a JSON document.
     """
+    inspected = path.lstat()
+    if stat.S_ISDIR(inspected.st_mode):
+        raise OSError(f"cannot preserve directory at {path}")
+    expected = inspected.st_dev, inspected.st_ino
     for index in range(10_000):
         suffix = ".broken" if index == 0 else f".broken.{index}"
         backup = path.with_name(path.name + suffix)
         try:
-            os.link(path, backup, follow_symlinks=False)
+            file_io.atomic_move_no_replace(
+                path,
+                backup,
+                expected_identity=expected,
+                require_regular=False,
+            )
         except FileExistsError:
             continue
-        try:
-            path.unlink()
-            fsync_parent(path)
-        except OSError:
-            # The no-replace backup is already a faithful recovery copy. Keep
-            # it too; deleting it would turn a failed move into data loss.
-            raise
+        fsync_parent(path)
         return backup
     raise OSError(f"could not preserve {path}: too many recovery backups")

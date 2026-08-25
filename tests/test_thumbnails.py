@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -187,6 +188,27 @@ def test_generates_a_scene_thumbnail_from_its_still(cache_home: Path, tmp_path: 
     )
 
     assert thumbnails.generate(scene).is_file()
+
+
+@needs_ffmpeg
+def test_legacy_predictable_thumbnail_temporary_cannot_redirect_ffmpeg(
+    cache_home: Path, tmp_path: Path
+) -> None:
+    source = _make_png(tmp_path / "source.png")
+    status = source.stat()
+    item = _item(source, size=status.st_size, mtime=int(status.st_mtime))
+    destination = thumbnails.cached_path(item)
+    destination.parent.mkdir(parents=True)
+    sentinel = tmp_path / "sentinel.png"
+    sentinel.write_bytes(b"keep")
+    leftover = destination.with_name(f".{destination.stem}.{os.getpid()}.tmp{destination.suffix}")
+    leftover.symlink_to(sentinel)
+
+    assert thumbnails.generate(item) == destination
+
+    assert sentinel.read_bytes() == b"keep"
+    assert leftover.is_symlink()
+    assert destination.is_file()
 
 
 def test_missing_ffmpeg_is_reported(cache_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

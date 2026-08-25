@@ -110,8 +110,52 @@ pub struct RendererSettings {
     pub scene_muted: bool,
     pub scene_volume: u8,
     pub scene_pause_when_covered: bool,
-    pub scene_scaling: String,
-    pub scene_clamp: String,
+    pub scene_scaling: SceneScaling,
+    pub scene_clamp: SceneClamp,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SceneScaling {
+    #[default]
+    #[serde(rename = "")]
+    Default,
+    Stretch,
+    Fit,
+    Fill,
+}
+
+impl SceneScaling {
+    pub fn option(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Stretch => Some("stretch"),
+            Self::Fit => Some("fit"),
+            Self::Fill => Some("fill"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SceneClamp {
+    #[default]
+    #[serde(rename = "")]
+    Default,
+    Clamp,
+    Border,
+    Repeat,
+}
+
+impl SceneClamp {
+    pub fn option(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Clamp => Some("clamp"),
+            Self::Border => Some("border"),
+            Self::Repeat => Some("repeat"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -329,16 +373,6 @@ impl Config {
             return invalid("scene_fps must be between 1 and 240");
         }
         bounded_nonempty("renderer layer", &self.renderer.layer, MAX_OPTION_BYTES)?;
-        bounded_optional(
-            "renderer scene_scaling",
-            &self.renderer.scene_scaling,
-            MAX_OPTION_BYTES,
-        )?;
-        bounded_optional(
-            "renderer scene_clamp",
-            &self.renderer.scene_clamp,
-            MAX_OPTION_BYTES,
-        )?;
         for (label, path) in [
             ("noctalia_program", &self.renderer.noctalia_program),
             ("niri_program", &self.renderer.niri_program),
@@ -631,15 +665,6 @@ fn bounded_nonempty_chars(
     } else {
         invalid(format!(
             "{label} is empty, longer than {maximum_chars} characters, or contains control characters"
-        ))
-    }
-}
-fn bounded_optional(label: &str, value: &str, maximum_bytes: usize) -> Result<(), ConfigError> {
-    if value.len() <= maximum_bytes && !value.chars().any(char::is_control) {
-        Ok(())
-    } else {
-        invalid(format!(
-            "{label} is longer than {maximum_bytes} bytes or contains control characters"
         ))
     }
 }

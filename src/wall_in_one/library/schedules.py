@@ -23,11 +23,11 @@ from __future__ import annotations
 
 import json
 import secrets
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
 from wall_in_one.library import state_file
@@ -51,12 +51,15 @@ WEEKDAY_NAMES: Final[tuple[str, ...]] = ("mon", "tue", "wed", "thu", "fri", "sat
 MINUTES_IN_A_DAY: Final = 24 * 60
 MAX_CONNECTOR_BYTES: Final = 256
 
+_MutationResult = TypeVar("_MutationResult")
+
 
 class ScheduleError(Exception):
     """A rule could not be made or stored, with a machine-readable reason.
 
-    Kinds in use: ``local-io``, ``no-such-rule``, ``invalid-time``,
-    ``invalid-day``, ``invalid-month``, ``invalid-connector``, ``full``.
+    Kinds in use: ``local-io``, ``no-such-rule``, ``identity-conflict``,
+    ``invalid-time``, ``invalid-day``, ``invalid-month``,
+    ``invalid-connector``, ``full``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -168,11 +171,25 @@ class Rule:
             return False
         if not self.enabled:
             return False
-        if self.months and at.month not in self.months:
+        calendar_at = self._calendar_date(at)
+        if self.months and calendar_at.month not in self.months:
             return False
-        if self.weekdays and at.weekday() not in self.weekdays:
+        if self.weekdays and calendar_at.weekday() not in self.weekdays:
             return False
         return self._within(at.hour * 60 + at.minute)
+
+    def _calendar_date(self, at: datetime) -> datetime:
+        """Date which owns this occurrence of a possibly wrapped window.
+
+        The after-midnight tail of ``Mon 22:00-06:00`` is still Monday's
+        scheduled window.  The Luau predecessor used the previous weekday and
+        month there; retaining that reading also makes a Dec 31 window reach
+        Jan 1 instead of being cut off by its calendar filters.
+        """
+        if self.start is None or self.end is None or self.start <= self.end:
+            return at
+        minute = at.hour * 60 + at.minute
+        return at - timedelta(days=1) if minute < self.end else at
 
     def _within(self, minutes: int) -> bool:
         """Inclusive of the start, exclusive of the end, wrapping midnight.
@@ -229,6 +246,11 @@ def _rule(raw: object) -> Rule | None:
     if not isinstance(identifier, str) or not identifier.strip():
         return None
     if not isinstance(playlist, str) or not playlist.strip():
+        return None
+    try:
+        identifier.encode("utf-8")
+        playlist.encode("utf-8")
+    except UnicodeEncodeError:
         return None
     connector_value = raw.get("connector", "")
     if not isinstance(connector_value, str):
@@ -336,6 +358,7 @@ def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
             malformed += 1
         if rule.id in identifiers:
             duplicate += 1
+            continue
         identifiers.add(rule.id)
         found.append(rule)
     if malformed:
@@ -365,26 +388,35 @@ def save(rules: Sequence[Rule], path: Path | None = None) -> Path:
         state_file.write_atomic_text(
             target, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         )
-    except OSError as error:
-        raise ScheduleError(
-            "local-io", f"could not write {target}: {error.strerror or error}"
-        ) from error
+    except (OSError, UnicodeError) as error:
+        detail = getattr(error, "strerror", None) or str(error)
+        raise ScheduleError("local-io", f"could not write {target}: {detail}") from error
     return target
 
 
 class Store:
     """The schedule as the running app holds it: an ordered list and a file."""
 
-    def __init__(self, rules: Sequence[Rule] = (), path: Path | None = None) -> None:
+    def __init__(
+        self,
+        rules: Sequence[Rule] = (),
+        path: Path | None = None,
+        *,
+        _loaded: bool = False,
+    ) -> None:
         self._rules: list[Rule] = list(rules)
         self._path = path
         self._fault: str | None = None
+        # A directly constructed Store may intentionally seed an absent file.
+        # Store.open is different: even an absent file is a durable snapshot,
+        # so a later stale mutation must rebase rather than resurrect the seed.
+        self._loaded = _loaded
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         target = path if path is not None else state_path()
         rules, fault = _read(target)
-        store = cls(rules, target)
+        store = cls(rules, target, _loaded=True)
         store._fault = fault
         return store
 
@@ -414,12 +446,21 @@ class Store:
         rule_id: str | None = None,
     ) -> Rule:
         """Append a rule. Later rules win, so appending is how you override."""
-        if len(self._rules) >= MAX_RULES:
-            raise ScheduleError("full", f"there are already {MAX_RULES} rules")
         if bool(start) != bool(end):
             raise ScheduleError("invalid-time", "a window needs both a start and an end")
+        identifier = rule_id or new_id()
+        try:
+            identifier.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ScheduleError("identity-conflict", "a schedule id must be valid UTF-8") from error
+        try:
+            playlist.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ScheduleError(
+                "no-such-rule", "a playlist reference must be valid UTF-8"
+            ) from error
         rule = Rule(
-            id=rule_id or new_id(),
+            id=identifier,
             playlist=playlist.strip(),
             connector=clean_connector(connector),
             months=parse_months(months),
@@ -429,29 +470,40 @@ class Store:
         )
         if not rule.playlist:
             raise ScheduleError("no-such-rule", "a rule needs a playlist")
-        updated = [*self._rules, rule]
-        self._write(updated)
-        self._rules = updated
-        return rule
+
+        def append(rules: list[Rule]) -> tuple[Rule, bool]:
+            if len(rules) >= MAX_RULES:
+                raise ScheduleError("full", f"there are already {MAX_RULES} rules")
+            if any(current.id == rule.id for current in rules):
+                raise ScheduleError(
+                    "identity-conflict",
+                    f"there is already a schedule rule named {rule.id}",
+                )
+            rules.append(rule)
+            return rule, True
+
+        return self._mutate(append)
 
     def remove(self, rule_id: str) -> bool:
-        kept = [rule for rule in self._rules if rule.id != rule_id]
-        if len(kept) == len(self._rules):
-            return False
-        self._write(kept)
-        self._rules = kept
-        return True
+        def remove(rules: list[Rule]) -> tuple[bool, bool]:
+            kept = [rule for rule in rules if rule.id != rule_id]
+            changed = len(kept) != len(rules)
+            if changed:
+                rules[:] = kept
+            return changed, changed
+
+        return self._mutate(remove)
 
     def set_enabled(self, rule_id: str, enabled: bool) -> Rule:
-        for index, rule in enumerate(self._rules):
-            if rule.id == rule_id:
-                updated = replace(rule, enabled=enabled)
-                rules = list(self._rules)
-                rules[index] = updated
-                self._write(rules)
-                self._rules = rules
-                return updated
-        raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+        def set_enabled(rules: list[Rule]) -> tuple[Rule, bool]:
+            for index, rule in enumerate(rules):
+                if rule.id == rule_id:
+                    updated = replace(rule, enabled=enabled)
+                    rules[index] = updated
+                    return updated, updated != rule
+            raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
+        return self._mutate(set_enabled)
 
     def update(
         self,
@@ -469,38 +521,68 @@ class Store:
             raise ScheduleError("invalid-time", "a window needs both a start and an end")
         if not playlist.strip():
             raise ScheduleError("no-such-rule", "a rule needs a playlist")
-        for index, rule in enumerate(self._rules):
-            if rule.id != rule_id:
-                continue
-            updated = Rule(
-                id=rule.id,
-                playlist=playlist.strip(),
-                connector=clean_connector(connector),
-                months=parse_months(months),
-                weekdays=parse_weekdays(weekdays),
-                start=parse_time(start) if start else None,
-                end=parse_time(end) if end else None,
-                enabled=rule.enabled,
-            )
-            rules = list(self._rules)
-            rules[index] = updated
-            self._write(rules)
-            self._rules = rules
-            return updated
-        raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+        try:
+            playlist.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ScheduleError(
+                "no-such-rule", "a playlist reference must be valid UTF-8"
+            ) from error
+        chosen_playlist = playlist.strip()
+        chosen_connector = clean_connector(connector)
+        chosen_months = parse_months(months)
+        chosen_weekdays = parse_weekdays(weekdays)
+        chosen_start = parse_time(start) if start else None
+        chosen_end = parse_time(end) if end else None
+
+        def update(rules: list[Rule]) -> tuple[Rule, bool]:
+            for index, rule in enumerate(rules):
+                if rule.id != rule_id:
+                    continue
+                updated = Rule(
+                    id=rule.id,
+                    playlist=chosen_playlist,
+                    connector=chosen_connector,
+                    months=chosen_months,
+                    weekdays=chosen_weekdays,
+                    start=chosen_start,
+                    end=chosen_end,
+                    enabled=rule.enabled,
+                )
+                rules[index] = updated
+                return updated, updated != rule
+            raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
+        return self._mutate(update)
 
     def move(self, rule_id: str, position: int) -> Rule:
         """Move one stable rule to ``position``; later rows keep priority."""
-        for index, rule in enumerate(self._rules):
-            if rule.id == rule_id:
-                rules = list(self._rules)
+
+        def move(rules: list[Rule]) -> tuple[Rule, bool]:
+            for index, rule in enumerate(rules):
+                if rule.id != rule_id:
+                    continue
                 moving = rules.pop(index)
                 target = max(0, min(len(rules), position))
                 rules.insert(target, moving)
-                self._write(rules)
-                self._rules = rules
-                return moving
-        raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+                return moving, target != index
+            raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
+        return self._mutate(move)
+
+    def move_relative(self, rule_id: str, step: int) -> Rule:
+        """Move from the rule's latest durable position by ``step``."""
+
+        def move(rules: list[Rule]) -> tuple[Rule, bool]:
+            for index, rule in enumerate(rules):
+                if rule.id != rule_id:
+                    continue
+                target = max(0, min(len(rules) - 1, index + step))
+                moving = rules.pop(index)
+                rules.insert(target, moving)
+                return moving, target != index
+            raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
+        return self._mutate(move)
 
     def forget_playlist(self, playlist: str) -> bool:
         """Drop every rule naming a playlist that has just been deleted.
@@ -510,25 +592,101 @@ class Store:
         like the schedule silently not working rather than like a rule that
         should have gone.
         """
-        kept = [rule for rule in self._rules if rule.playlist != playlist]
-        if len(kept) == len(self._rules):
-            return False
-        self._write(kept)
-        self._rules = kept
-        return True
 
-    def _write(self, rules: Sequence[Rule]) -> None:
+        def forget(rules: list[Rule]) -> tuple[bool, bool]:
+            kept = [rule for rule in rules if rule.playlist != playlist]
+            changed = len(kept) != len(rules)
+            if changed:
+                rules[:] = kept
+            return changed, changed
+
+        return self._mutate(forget)
+
+    def adopt_worker_forget_playlists(self, playlists: Iterable[str]) -> int:
+        """Mirror detached dangling-reference cleanup without another write."""
+        removed = frozenset(playlists)
+        if not removed:
+            return 0
+        kept = [rule for rule in self._rules if rule.playlist not in removed]
+        changed = len(self._rules) - len(kept)
+        if changed:
+            self._rules[:] = kept
+        return changed
+
+    def _mutate(
+        self,
+        change: Callable[[list[Rule]], tuple[_MutationResult, bool]],
+    ) -> _MutationResult:
+        """Apply one semantic mutation to the latest durable rule order.
+
+        Atomic replacement prevents torn JSON, but it cannot stop a stale GUI
+        or helper process from replacing another process's valid edit. Every
+        Store operation therefore recomputes its change after acquiring the
+        shared state-file lock.
+        """
         target = self._path if self._path is not None else state_path()
-        if self._fault is not None:
-            try:
-                state_file.preserve_faulted(target)
-            except OSError as error:
-                raise ScheduleError(
-                    "local-io",
-                    f"could not preserve unreadable {target}: {error.strerror or error}",
-                ) from error
-            self._fault = None
-        save(rules, target)
+        try:
+            with state_file.mutation_lock(target, description="schedules"):
+                try:
+                    target.lstat()
+                except FileNotFoundError:
+                    present = False
+                except OSError as error:
+                    raise ScheduleError(
+                        "local-io",
+                        f"could not inspect {target}: {error.strerror or error}",
+                    ) from error
+                else:
+                    present = True
+
+                current, fault = _read(target)
+                using_durable = present or self._loaded
+                rules = self._reuse_unchanged_rules(current) if using_durable else list(self._rules)
+                if using_durable:
+                    # Fault/loaded provenance belongs to the disk snapshot we
+                    # just observed even if validation or persistence below
+                    # fails. The authored value itself is adopted only after
+                    # a successful or no-op transaction.
+                    self._fault = fault
+                    self._loaded = True
+                result, changed = change(rules)
+                if changed:
+                    if fault is not None:
+                        try:
+                            state_file.preserve_faulted(target)
+                        except OSError as error:
+                            raise ScheduleError(
+                                "local-io",
+                                f"could not preserve unreadable {target}: "
+                                f"{error.strerror or error}",
+                            ) from error
+                    save(rules, target)
+                    fault = None
+
+                # File first, then memory: failed persistence cannot make the
+                # live schedule claim a mutation which was never durable.
+                self._rules = rules
+                self._fault = fault
+                self._loaded = using_durable or changed
+                return result
+        except ScheduleError:
+            raise
+        except OSError as error:
+            raise ScheduleError(
+                "local-io",
+                f"could not safely update schedules at {target}: {error.strerror or error}",
+            ) from error
+
+    def _reuse_unchanged_rules(self, current: Sequence[Rule]) -> list[Rule]:
+        """Rebase values without needlessly invalidating live Rule objects."""
+        available: dict[Rule, list[Rule]] = {}
+        for rule in self._rules:
+            available.setdefault(rule, []).append(rule)
+        reused: list[Rule] = []
+        for rule in current:
+            matches = available.get(rule)
+            reused.append(matches.pop() if matches else rule)
+        return reused
 
 
 def describe(

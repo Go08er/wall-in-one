@@ -130,6 +130,21 @@ def test_file_format_maps_onto_canonical_tokens() -> None:
     assert pair.dark["terminal_cursor_text"].hex == "#141b1e"
 
 
+def test_a_recursive_json_decoder_failure_is_an_ordinary_palette_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "nested.json"
+    path.write_text("{}", encoding="utf-8")
+
+    def recurse(_document: object) -> object:
+        raise RecursionError("pathological nesting")
+
+    monkeypatch.setattr(json, "loads", recurse)
+
+    with pytest.raises(PaletteError, match="not valid JSON"):
+        palettes.read_document(path)
+
+
 def test_derived_tokens_are_left_missing_rather_than_guessed() -> None:
     """Noctalia computes the tonal ramps; inventing them would look like a bug."""
     pair = palettes.parse_document(json.dumps(_document()))
@@ -231,7 +246,7 @@ def test_oversized_files_are_skipped(directories: tuple[Path, Path]) -> None:
     found = palettes.discover(custom=custom, community=community)
 
     assert found.of_origin(Origin.CUSTOM) == ()
-    assert any("over the" in note for note in found.skipped)
+    assert any("limit" in note for note in found.skipped)
 
 
 def test_dotfiles_and_the_catalog_directory_are_ignored(directories: tuple[Path, Path]) -> None:
@@ -308,6 +323,24 @@ def test_a_symlinked_legacy_palette_is_refused(legacy: Path, tmp_path: Path) -> 
     assert any("Linked.json is a symlink" in note for note in found.skipped)
 
 
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_custom_palette_special_files_are_reported_without_being_read(
+    directories: tuple[Path, Path], tmp_path: Path, kind: str
+) -> None:
+    custom, community = directories
+    candidate = custom / "Unsafe.json"
+    if kind == "symlink":
+        outside = _write(tmp_path / "outside.json", _document())
+        candidate.symlink_to(outside)
+    else:
+        os.mkfifo(candidate)
+
+    found = palettes.discover(custom=custom, community=community, legacy=tmp_path / "none")
+
+    assert found.find(Origin.CUSTOM, "Unsafe") is None
+    assert any("Unsafe.json" in note for note in found.skipped)
+
+
 def test_a_symlinked_legacy_scheme_directory_is_refused(legacy: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     _write(outside / "Outside.json", _document())
@@ -338,7 +371,7 @@ def test_an_oversized_legacy_palette_is_skipped(legacy: Path) -> None:
     found = palettes.discover(legacy=legacy)
 
     assert found.of_origin(Origin.LEGACY) == ()
-    assert any("over the" in note for note in found.skipped)
+    assert any("limit" in note for note in found.skipped)
 
 
 def test_legacy_discovery_is_bounded(legacy: Path, monkeypatch: pytest.MonkeyPatch) -> None:

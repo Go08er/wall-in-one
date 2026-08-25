@@ -14,17 +14,22 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import unquote
 
 import pytest
 
-from wall_in_one.library import manage, pairing, scan
+from wall_in_one import file_io
+from wall_in_one.library import manage, pairing, scan, stills
 from wall_in_one.library.manage import ManageError
 from wall_in_one.library.model import Kind, MediaItem, Ownership
 
 MARKER = ".managed-by-wall-in-one-v1.json"
+REMOVAL_TOKEN = "0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +122,12 @@ def _expected(path: Path) -> manage.SourceIdentity:
 
 def _remove(item: MediaItem, roots: tuple[Path, ...] = ()) -> manage.Removal:
     """Unit-level authority matching the identity a journal prepare records."""
-    return manage.remove(item, roots, expected_source=_expected(item.path))
+    return manage.remove(
+        item,
+        roots,
+        expected_source=_expected(item.path),
+        operation_token=REMOVAL_TOKEN,
+    )
 
 
 def _trash(item: MediaItem, roots: tuple[Path, ...] = ()) -> manage.Trashed:
@@ -144,10 +154,48 @@ def test_remove_refuses_a_same_path_replacement_after_prepare(root: Path) -> Non
     replacement.write_bytes(b"different download")
 
     with pytest.raises(ManageError) as caught:
-        manage.remove(item, (root,), expected_source=expected)
+        manage.remove(
+            item,
+            (root,),
+            expected_source=expected,
+            operation_token=REMOVAL_TOKEN,
+        )
 
     assert caught.value.kind == "changed"
     assert replacement.read_bytes() == b"different download"
+
+
+def test_remove_restores_a_replacement_that_arrives_during_the_atomic_claim(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = downloaded(root)
+    expected = _expected(item.path)
+    original = root / "prepared-original.jpg"
+    real_rename = file_io._rename_noreplace
+    raced = False
+
+    def replace_then_rename(source: Path, destination: Path) -> None:
+        nonlocal raced
+        if source == item.path and not raced:
+            raced = True
+            source.rename(original)
+            source.write_bytes(b"late replacement")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", replace_then_rename)
+
+    with pytest.raises(ManageError) as caught:
+        manage.remove(
+            item,
+            (root,),
+            expected_source=expected,
+            operation_token=REMOVAL_TOKEN,
+        )
+
+    assert caught.value.kind == "changed"
+    assert item.path.read_bytes() == b"late replacement"
+    assert original.read_bytes().startswith(b"\xff\xd8\xff")
 
 
 def test_remove_without_a_prepared_source_identity_is_refused(root: Path) -> None:
@@ -158,6 +206,61 @@ def test_remove_without_a_prepared_source_identity_is_refused(root: Path) -> Non
 
     assert caught.value.kind == "unrecorded"
     assert item.path.is_file()
+
+
+_CRASH_AFTER_REMOVAL_CLAIM = r"""
+import os
+import sys
+from pathlib import Path
+from wall_in_one import file_io
+
+path = Path(sys.argv[1])
+identity = (int(sys.argv[2]), int(sys.argv[3]))
+file_io.claim_for_deletion(
+    path,
+    expected_identity=identity,
+    operation_token=sys.argv[4],
+)
+os._exit(77)
+"""
+
+
+def test_process_death_after_media_claim_is_replayable(root: Path) -> None:
+    item = downloaded(root)
+    expected = _expected(item.path)
+    project = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = str(project / "src") + (os.pathsep + existing if existing else "")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _CRASH_AFTER_REMOVAL_CLAIM,
+            str(item.path),
+            str(expected[0]),
+            str(expected[1]),
+            REMOVAL_TOKEN,
+        ],
+        cwd=project,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 77, completed.stderr
+    claim_directory = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN)
+    assert not item.path.exists()
+    assert (claim_directory / "entry").is_file()
+    assert manage.recover_removal_claim(
+        item.path,
+        expected_source=expected,
+        operation_token=REMOVAL_TOKEN,
+    )
+    assert not claim_directory.exists()
 
 
 def test_the_sidecar_goes_with_it(root: Path) -> None:
@@ -252,6 +355,157 @@ def test_trashing_a_user_video_cleans_only_its_app_owned_pairing_artifacts(
     assert custom.is_file()
 
 
+def test_delete_that_wins_during_video_capture_prevents_late_still_publication(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ffmpeg stays outside the lifecycle lock, then fails closed at commit."""
+    video = root / "clip.mp4"
+    video.write_bytes(b"video source")
+    media = item_for(video, Kind.VIDEO)
+    captured = threading.Event()
+    release_capture = threading.Event()
+
+    def held_capture(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+        captured.set()
+        assert release_capture.wait(5), "test did not release the held ffmpeg capture"
+        return ""
+
+    monkeypatch.setattr(stills, "is_available", lambda: True)
+    monkeypatch.setattr(stills, "_run", held_capture)
+    target = stills.destination(video, root)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        generated = pool.submit(stills.generate, video, root)
+        assert captured.wait(5), "capture did not reach its intentionally unlocked wait"
+        try:
+            trashed = _trash(media, (root,))
+        finally:
+            release_capture.set()
+        with pytest.raises(stills.StillError, match="removed while its still was being made"):
+            generated.result(timeout=5)
+
+    assert trashed.destination.is_file()
+    assert not target.exists()
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
+    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
+
+
+def test_workshop_delete_that_wins_during_scene_capture_prevents_late_publication(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed scene uninstall and screenshot publication share one lease."""
+    scene_id = "1647046763"
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / scene_id
+    installation.mkdir(parents=True)
+    scene = MediaItem(
+        path=installation,
+        kind=Kind.SCENE,
+        size=installation.stat().st_size,
+        mtime=int(installation.stat().st_mtime),
+        provider=scan.WORKSHOP_PROVIDER,
+        scene=scene_id,
+    )
+    captured = threading.Event()
+    release_capture = threading.Event()
+
+    def held_capture(
+        _scene_id: str,
+        temporary: Path,
+        *,
+        size: tuple[int, int],
+    ) -> Path:
+        del size
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+        captured.set()
+        assert release_capture.wait(5), "test did not release the held scene capture"
+        return temporary
+
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.screenshot", held_capture)
+    target = pairing.still_directory(root) / f"{scene_id}.png"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        generated = pool.submit(stills.capture_scene, scene, root)
+        assert captured.wait(5), "capture did not reach its intentionally unlocked wait"
+        installation.rmdir()
+        try:
+            assert manage.discard_pairing_artifacts(scene, (root,)) == ((), ())
+        finally:
+            release_capture.set()
+        with pytest.raises(stills.StillError, match="removed while its still was being made"):
+            generated.result(timeout=5)
+
+    assert not target.exists()
+    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
+
+
+def test_cleanup_waits_for_a_video_publication_commit_then_removes_its_artifacts(
+    root: Path,
+) -> None:
+    """If publication owns the lease first, cleanup observes all of its output."""
+    video = root / "clip.mp4"
+    video.write_bytes(b"video source")
+    media = item_for(video, Kind.VIDEO)
+    target = stills.destination(video, root)
+    target.parent.mkdir(parents=True)
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    cleanup_started = threading.Event()
+
+    def cleanup() -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        cleanup_started.set()
+        return manage.discard_pairing_artifacts(media, (root,))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with stills.source_lifecycle_lock(media):
+            # External removal may commit while publication holds the lease;
+            # its artifact phase must wait until the whole commit is visible.
+            video.unlink()
+            cleaned = pool.submit(cleanup)
+            assert cleanup_started.wait(5)
+            target.write_bytes(b"\x89PNG\r\n\x1a\npublished")
+            stills.write_sidecar(video, target)
+            assert not cleaned.done()
+        removed, kept = cleaned.result(timeout=5)
+
+    assert kept == ()
+    assert set(removed) == {target, sidecar}
+    assert not target.exists()
+    assert not sidecar.exists()
+
+
+def test_lifecycle_lock_timeout_retains_future_candidates_for_journal_retry(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stuck publisher cannot hang removal or make a later orphan invisible."""
+    video = root / "clip.mp4"
+    video.write_bytes(b"video source")
+    media = item_for(video, Kind.VIDEO)
+    cleanup_started = threading.Event()
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.05)
+
+    def cleanup() -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        cleanup_started.set()
+        return manage.discard_pairing_artifacts(media, (root,))
+
+    with ThreadPoolExecutor(max_workers=1) as pool, stills.source_lifecycle_lock(media):
+        pending = pool.submit(cleanup)
+        assert cleanup_started.wait(5)
+        removed, kept = pending.result(timeout=2)
+
+    assert removed == ()
+    assert set(kept) == set(manage.pairing_artifact_paths(media, (root,)))
+
+
 def test_a_committed_trash_reports_pairing_artifacts_it_could_not_clean(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,14 +513,14 @@ def test_a_committed_trash_reports_pairing_artifacts_it_could_not_clean(
     video.write_bytes(b"0" * 64)
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
     sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
-    real_unlink = Path.unlink
+    real_discard = file_io.discard_regular_if_same
 
-    def unlink(path: Path, missing_ok: bool = False) -> None:
+    def discard(path: Path, *, expected_identity: file_io.PathIdentity) -> bool:
         if path == sidecar:
-            raise PermissionError("read only")
-        real_unlink(path, missing_ok=missing_ok)
+            return False
+        return real_discard(path, expected_identity=expected_identity)
 
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(file_io, "discard_regular_if_same", discard)
 
     result = _trash(item_for(video, Kind.VIDEO, Ownership.USER), (root,))
 
@@ -286,20 +540,73 @@ def test_a_committed_remove_reports_pairing_artifacts_it_could_not_clean(
     )
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
     sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
-    real_unlink = Path.unlink
+    real_discard = file_io.discard_regular_if_same
 
-    def unlink(path: Path, missing_ok: bool = False) -> None:
+    def discard(path: Path, *, expected_identity: file_io.PathIdentity) -> bool:
         if path == sidecar:
-            raise PermissionError("read only")
-        real_unlink(path, missing_ok=missing_ok)
+            return False
+        return real_discard(path, expected_identity=expected_identity)
 
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(file_io, "discard_regular_if_same", discard)
 
     result = _remove(item_for(video, Kind.VIDEO, Ownership.MANAGED), (root,))
 
     assert not video.exists(), "artifact cleanup cannot roll back committed media removal"
     assert result.kept == (sidecar,)
     assert sidecar.name in result.cleanup_note()
+
+
+def test_an_artifact_that_vanishes_before_claim_is_an_idempotent_success(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = root / "clip.mp4"
+    video.write_bytes(b"0" * 64)
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    real_identity = file_io.path_identity
+
+    def vanish(path: Path) -> file_io.PathIdentity:
+        if path == sidecar:
+            path.unlink()
+            raise FileNotFoundError(path)
+        return real_identity(path)
+
+    monkeypatch.setattr(file_io, "path_identity", vanish)
+
+    result = _trash(item_for(video, Kind.VIDEO, Ownership.USER), (root,))
+
+    assert result.kept_artifacts == ()
+    assert not sidecar.exists()
+
+
+def test_artifact_cleanup_never_unlinks_a_same_path_replacement(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = root / "clip.mp4"
+    video.write_bytes(b"0" * 64)
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    original = root / "prepared-pairing-sidecar"
+    real_rename = file_io._rename_noreplace
+    raced = False
+
+    def replace_then_rename(source: Path, destination: Path) -> None:
+        nonlocal raced
+        if source == sidecar and not raced:
+            raced = True
+            source.rename(original)
+            source.write_bytes(b"late replacement")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", replace_then_rename)
+
+    result = _trash(item_for(video, Kind.VIDEO, Ownership.USER), (root,))
+
+    assert result.kept_artifacts == (sidecar,)
+    assert sidecar.read_bytes() == b"late replacement"
+    assert json.loads(original.read_text(encoding="utf-8")) == {"still_path": "/nowhere"}
 
 
 def test_a_legacy_shared_still_is_not_deleted_with_one_video(root: Path) -> None:
@@ -578,6 +885,39 @@ def test_trash_refuses_a_same_path_replacement_after_prepare(root: Path) -> None
     assert path.read_bytes() == b"replacement"
 
 
+def test_trash_restores_a_replacement_that_arrives_during_the_atomic_move(
+    root: Path,
+    data_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = root / "holiday.png"
+    path.write_bytes(b"expected")
+    item = item_for(path)
+    expected = _expected(path)
+    original = root / "prepared-original.png"
+    real_rename = file_io._rename_noreplace
+    raced = False
+
+    def replace_then_rename(source: Path, destination: Path) -> None:
+        nonlocal raced
+        if source == path and not raced:
+            raced = True
+            source.rename(original)
+            source.write_bytes(b"late replacement")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", replace_then_rename)
+
+    with pytest.raises(ManageError) as caught:
+        manage.trash(item, (root,), expected_source=expected)
+
+    assert caught.value.kind == "changed"
+    assert path.read_bytes() == b"late replacement"
+    assert original.read_bytes() == b"expected"
+    assert list((data_home / "Trash" / "files").iterdir()) == []
+    assert list((data_home / "Trash" / "info").iterdir()) == []
+
+
 def test_remove_syncs_the_media_and_artifact_directories(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -662,27 +1002,14 @@ def test_a_failed_move_leaves_no_orphan_record(
     theirs = root / "holiday.png"
     theirs.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    real_link = os.link
+    real_rename = file_io._rename_noreplace
 
-    def explode(
-        source: str | os.PathLike[str],
-        target: str | os.PathLike[str],
-        *,
-        src_dir_fd: int | None = None,
-        dst_dir_fd: int | None = None,
-        follow_symlinks: bool = True,
-    ) -> None:
-        if Path(source) == theirs:
+    def explode(source: Path, target: Path) -> None:
+        if source == theirs:
             raise OSError(18, "Invalid cross-device link")
-        real_link(
-            source,
-            target,
-            src_dir_fd=src_dir_fd,
-            dst_dir_fd=dst_dir_fd,
-            follow_symlinks=follow_symlinks,
-        )
+        real_rename(source, target)
 
-    monkeypatch.setattr("os.link", explode)
+    monkeypatch.setattr(file_io, "_rename_noreplace", explode)
     with pytest.raises(ManageError) as caught:
         _trash(item_for(theirs), (root,))
     assert caught.value.kind == "cross-device"

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import pytest
 
 from wall_in_one import config
 from wall_in_one.library import (
     favourites,
+    manage,
     pairing,
     pairings,
     playlists,
@@ -690,6 +693,15 @@ def test_the_scene_frame_rate_is_recorded_for_the_scene_backend(
     assert session._applier.scenes.fps == 75
 
 
+def test_scene_presentation_settings_are_recorded_for_the_scene_backend(
+    applied_paths: list[Path],
+) -> None:
+    session, _fake = _audio_session()
+    session.update_settings(replace(session.settings, scene_scaling="fill", scene_clamp="border"))
+    assert session._applier.scenes.scaling == "fill"
+    assert session._applier.scenes.clamp == "border"
+
+
 def test_a_session_that_builds_its_own_renderer_carries_the_settings() -> None:
     """`when_hidden` becomes a command-line flag, so it has to be right before
     the first video starts, not pushed afterwards."""
@@ -701,6 +713,8 @@ def test_a_session_that_builds_its_own_renderer_carries_the_settings() -> None:
         video_hardware_decode=False,
         video_interpolation="linear",
         scene_fps=75,
+        scene_scaling="fit",
+        scene_clamp="repeat",
     ).validated()
     built = Session(settings, scanner=lambda _roots: Library(roots=(), items=()))
     assert built._applier.renderer.muted is False
@@ -709,6 +723,8 @@ def test_a_session_that_builds_its_own_renderer_carries_the_settings() -> None:
     assert built._applier.renderer.hardware_decode is False
     assert built._applier.renderer.interpolation == "linear"
     assert built._applier.scenes.fps == 75
+    assert built._applier.scenes.scaling == "fit"
+    assert built._applier.scenes.clamp == "repeat"
     built.shutdown()
 
 
@@ -1083,6 +1099,49 @@ def test_crash_after_local_delete_replays_durable_metadata_cleanup(
     source.write_bytes(b"reinstalled")
     assert not reopened_pairings.resolve(motion, (root,)).health.is_borked
     restarted.shutdown()
+
+
+def test_detached_removal_keeps_its_operation_lease_after_live_session_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "personal.png"
+    source.write_bytes(b"image")
+    picture = MediaItem(source, Kind.STILL, 5, 1)
+    journal_path = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=favourites.Store(path=tmp_path / "favourites.json"),
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+        playlist_store=playlists.Store(path=tmp_path / "playlists.json"),
+        removal_store=removals.Store.open(journal_path),
+    )
+    session.adopt_library(Library(roots=(root,), items=(picture,)))
+    plan = session.prepare_removal_plan(picture, trash=True)
+    entered = Event()
+    release = Event()
+    original_trash = manage.trash
+
+    def held_trash(*args: object, **kwargs: object) -> manage.Trashed:
+        entered.set()
+        assert release.wait(2)
+        return original_trash(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(manage, "trash", held_trash)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(plan.run)
+        assert entered.wait(1)
+        session.shutdown()
+        assert removals.Store.open(journal_path).operation_is_active()
+        release.set()
+        result = future.result(timeout=2)
+
+    assert result.committed
+    assert not removals.Store.open(journal_path).operation_is_active()
+    assert not source.exists()
 
 
 def test_restart_cancels_prepared_intent_when_original_was_never_removed(

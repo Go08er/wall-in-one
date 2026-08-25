@@ -6,10 +6,14 @@ This is what the Noctalia plugin reaches: every plugin control is one
 
 from __future__ import annotations
 
+import os
+import shutil
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
@@ -22,18 +26,58 @@ from wall_in_one.control.protocol import (
     Response,
 )
 
-#: The app answers control messages from its main loop, so a slow answer means
-#: a busy UI, not a dead one. Still bounded -- `ctl` must never hang a plugin
-#: callback.
+#: Cheap read-only authoring queries and non-applying runtime commands should
+#: answer from already-owned state.  Keep their bound short so ``ctl status``
+#: remains useful as a liveness probe.
 TIMEOUT: Final = 5.0
+
+#: One ordinary durable authoring transaction may spend five seconds acquiring
+#: its cross-process mutation lock before the atomic write and parent-directory
+#: fsync begin.  The old five-second client deadline could therefore expire at
+#: the exact moment a successful commit started.  Fifteen seconds retains a
+#: finite UI/plugin boundary while leaving honest I/O margin after the lock.
+AUTHORING_TIMEOUT: Final = 15.0
 
 # Applying an entry is deliberately synchronous on the Rust wire: the reply
 # means the still, palette and renderer hand-over actually happened. Each
 # external desktop helper has its own three-second bound, and a multi-display
 # apply can legitimately outlive the authoring socket's five-second budget.
-# Keep this below the plugin's 55-second command ceiling while avoiding the
-# worse outcome where ctl reports failure and the wallpaper changes afterward.
+# Companion clients need a callback ceiling above this 45-second wire budget;
+# otherwise the UI can report failure while the confirmed handover completes.
+# The pinned plugin revision still uses eight seconds, tracked as an external
+# release blocker with its reviewable patch in .claude/COMPANION_PLUGIN_*.patch.
 RUNTIME_ACTION_TIMEOUT: Final = 45.0
+
+#: ``ctl displays`` runs compositor discovery on the ordered runtime worker.
+#: Discovery itself has a five-second ceiling; allow an equal margin for worker
+#: hand-off and response delivery instead of reproducing that inner boundary at
+#: the client.
+DISPLAY_DISCOVERY_TIMEOUT: Final = 10.0
+
+#: Playlist deletion is a cross-store cascade.  Each store has its own bounded
+#: five-second mutation lock, so it cannot honestly share a one-store deadline.
+CASCADE_TIMEOUT: Final = 45.0
+
+#: Delete/trash first journals authority, performs and durably records the
+#: filesystem operation, then cleans several independently durable stores and
+#: the journal.  A timeout cannot cancel that sequence safely.
+REMOVAL_TIMEOUT: Final = 60.0
+
+#: Select and the authoring-socket playlist compatibility path may perform one
+#: store transaction, take the compiler lock, reload a changed runtime document
+#: and finally apply the selected playlist.  The two runtime exchanges each
+#: have a 45-second wire ceiling; this is their bounded end-to-end envelope with
+#: the two five-second locks and a small delivery margin.
+COMPOSED_RUNTIME_TIMEOUT: Final = 110.0
+
+#: With no rendered template, live palette resolution can make three ten-second
+#: Noctalia queries, one 30-second generation, and a final ten-second fallback
+#: query.  A newly requested reload cannot unsafely kill an older resolution
+#: already executing on the single theme worker: its strict queue bound is the
+#: old 70-second resolution, one ten-second explicit action, one ten-second
+#: wallpaper query, then the new 70-second resolution.  Twenty seconds of
+#: delivery/reap margin keeps that worst 160-second chain inside the contract.
+PALETTE_RELOAD_TIMEOUT: Final = 180.0
 
 #: A search is answered on a worker, so the wait here is the website's rather
 #: than the window's -- the app stays responsive throughout. Generous enough to
@@ -44,12 +88,79 @@ SEARCH_TIMEOUT: Final = 60.0
 #: is the honest number on a domestic line.
 DOWNLOAD_TIMEOUT: Final = 600.0
 
-#: The verbs that wait on a remote site. Everything else answers immediately or
-#: is not answering at all.
+#: Complete authoring-socket deadline table.  Keeping every protocol verb here
+#: makes a new verb choose its latency contract deliberately instead of falling
+#: back unnoticed to the historical five-second authoring deadline.  Runtime
+#: requests use their separate branch in :func:`send`, even where a verb name
+#: overlaps (for example ``shuffle`` or ``playlist-use``).
 TIMEOUTS: Final[Mapping[str, float]] = {
+    "next": RUNTIME_ACTION_TIMEOUT,
+    "prev": RUNTIME_ACTION_TIMEOUT,
+    "random": RUNTIME_ACTION_TIMEOUT,
+    "shuffle": AUTHORING_TIMEOUT,
+    "cycle": AUTHORING_TIMEOUT,
+    "cycle-interval": AUTHORING_TIMEOUT,
+    "dynamics": AUTHORING_TIMEOUT,
+    "reload-palette": PALETTE_RELOAD_TIMEOUT,
+    "open": TIMEOUT,
+    "status": TIMEOUT,
+    "list": TIMEOUT,
+    "select": COMPOSED_RUNTIME_TIMEOUT,
+    "favourites": TIMEOUT,
+    "favourite": AUTHORING_TIMEOUT,
+    "unfavourite": AUTHORING_TIMEOUT,
+    "remove": REMOVAL_TIMEOUT,
+    "pairing": TIMEOUT,
+    "still": AUTHORING_TIMEOUT,
+    "palette": AUTHORING_TIMEOUT,
+    "reset-pairing": AUTHORING_TIMEOUT,
+    "playlists": TIMEOUT,
+    "playlist-new": AUTHORING_TIMEOUT,
+    "playlist-delete": CASCADE_TIMEOUT,
+    "playlist-add": AUTHORING_TIMEOUT,
+    "playlist-remove": AUTHORING_TIMEOUT,
+    "playlist-use": COMPOSED_RUNTIME_TIMEOUT,
+    "displays": DISPLAY_DISCOVERY_TIMEOUT,
+    "display-assign": AUTHORING_TIMEOUT,
+    "display-clear": AUTHORING_TIMEOUT,
+    "schedule": TIMEOUT,
+    "schedule-add": AUTHORING_TIMEOUT,
+    "schedule-remove": AUTHORING_TIMEOUT,
+    "providers": TIMEOUT,
     "search": SEARCH_TIMEOUT,
     "download": DOWNLOAD_TIMEOUT,
+    "quit": TIMEOUT,
 }
+
+#: Authoring requests for which a client timeout can occur after an atomic
+#: durability boundary.  Closing the socket cannot safely cancel an fsync or
+#: roll back a committed filesystem operation, so callers must verify rather
+#: than treating a timeout as a refusal and blindly retrying.  ``cycle-interval``
+#: is handled specially below because its argument-less form is a read.
+DURABLE_MUTATION_VERBS: Final[frozenset[str]] = frozenset(
+    {
+        "shuffle",
+        "cycle",
+        "cycle-interval",
+        "dynamics",
+        "select",
+        "favourite",
+        "unfavourite",
+        "remove",
+        "still",
+        "palette",
+        "reset-pairing",
+        "playlist-new",
+        "playlist-delete",
+        "playlist-add",
+        "playlist-remove",
+        "display-assign",
+        "display-clear",
+        "schedule-add",
+        "schedule-remove",
+        "download",
+    }
+)
 
 RUNTIME_VERBS: Final[frozenset[str]] = frozenset(
     {
@@ -126,6 +237,15 @@ PYTHON_RUNTIME_FALLBACKS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# A response deadline does not roll back work which already crossed the
+# receiver.  These commands can still change playback, external palette state,
+# application presentation, or process lifetime after their client socket has
+# closed even when they do not write an app-owned state file.
+AUTHORING_SIDE_EFFECT_VERBS: Final[frozenset[str]] = (
+    DURABLE_MUTATION_VERBS | (PYTHON_RUNTIME_FALLBACKS - {"status"}) | {"open", "reload-palette"}
+)
+RUNTIME_SIDE_EFFECT_VERBS: Final[frozenset[str]] = (RUNTIME_VERBS - {"status"}) | {"on"}
+
 OPEN_PAGE_ALIASES: Final[Mapping[str, str]] = {
     "browse": "browse",
     "media": "media",
@@ -149,19 +269,86 @@ class NotRunningError(ControlError):
     """No app is listening on the control socket."""
 
 
-def send(request: Request, *, path: Path | None = None, timeout: float | None = None) -> Response:
+class Cancellation:
+    """Close registered requests and refuse requests after app shutdown.
+
+    Executor shutdown does not terminate a running thread; Python joins it at
+    interpreter exit.  A runtime apply could therefore retain the authoring
+    process for its entire 45-second wire deadline.  Registration and
+    cancellation share one lock, so a socket is either closed by ``cancel`` or
+    observes the stopped state before performing I/O.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._connections: set[socket.socket] = set()
+
+    def register(self, connection: socket.socket) -> bool:
+        """Register ``connection`` unless this request group has stopped."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._connections.add(connection)
+            return True
+
+    def unregister(self, connection: socket.socket) -> None:
+        """Forget one request which reached its ordinary completion path."""
+        with self._lock:
+            self._connections.discard(connection)
+
+    def cancel(self) -> None:
+        """Atomically stop accepting requests and wake every socket waiter."""
+        with self._lock:
+            self._cancelled = True
+            connections = tuple(self._connections)
+        for connection in connections:
+            with suppress(OSError):
+                connection.shutdown(socket.SHUT_RDWR)
+            # A connect still in progress or a peer which already closed may
+            # not have a full-duplex stream to shut down. Closing is still the
+            # wake-up boundary and is normally idempotent.
+            with suppress(OSError):
+                connection.close()
+
+
+def _gui_launch_command(page: str) -> list[str]:
+    """Return a stable invocation for a fresh authoring application.
+
+    A console-script launch has a useful executable in ``argv[0]``. Module
+    launches instead point at ``wall_in_one/__main__.py``, which is normally
+    neither executable nor a valid standalone entry point, so reproduce that
+    invocation through the current interpreter.
+    """
+    argv0 = sys.argv[0]
+    executable = shutil.which(argv0) if os.sep not in argv0 else argv0
+    if executable is not None and Path(executable).is_file() and os.access(executable, os.X_OK):
+        return [executable, "--open-page", page]
+    return [sys.executable, "-m", "wall_in_one", "--open-page", page]
+
+
+def send(
+    request: Request,
+    *,
+    path: Path | None = None,
+    timeout: float | None = None,
+    cancellation: Cancellation | None = None,
+) -> Response:
     target = path if path is not None else paths.socket_path()
     max_reply = (
         MAX_RUNTIME_MESSAGE_BYTES if target == paths.runtime_socket_path() else MAX_MESSAGE_BYTES
     )
     if timeout is not None:
         wait = timeout
-    elif target == paths.runtime_socket_path() and request.verb in RUNTIME_APPLY_VERBS:
-        wait = RUNTIME_ACTION_TIMEOUT
+    elif target == paths.runtime_socket_path():
+        wait = RUNTIME_ACTION_TIMEOUT if request.verb in RUNTIME_APPLY_VERBS else TIMEOUT
     else:
         wait = TIMEOUTS.get(request.verb, TIMEOUT)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(wait)
+    if cancellation is not None and not cancellation.register(connection):
+        connection.close()
+        raise ControlError("control request cancelled during shutdown")
     try:
         try:
             connection.connect(str(target))
@@ -174,10 +361,12 @@ def send(request: Request, *, path: Path | None = None, timeout: float | None = 
             connection.sendall(request.encode())
             line = _read_line(connection, max_bytes=max_reply)
         except TimeoutError as error:
-            raise ControlError(f"timed out after {wait}s") from error
+            raise ControlError(_timeout_message(request, target=target, wait=wait)) from error
         except OSError as error:
             raise ControlError(f"control connection failed: {error}") from error
     finally:
+        if cancellation is not None:
+            cancellation.unregister(connection)
         connection.close()
 
     if not line:
@@ -186,6 +375,41 @@ def send(request: Request, *, path: Path | None = None, timeout: float | None = 
         return Response.decode(line, max_bytes=max_reply)
     except ProtocolError as error:
         raise ControlError(str(error)) from error
+
+
+def _timeout_message(request: Request, *, target: Path, wait: float) -> str:
+    """Describe a deadline without pretending an in-flight commit was refused."""
+    elapsed = f"{wait:g}"
+    if _is_durable_mutation(request, target=target):
+        return (
+            f"timed out after {elapsed}s; this durable change may already have committed, "
+            "so its outcome is unknown. Verify the current state before retrying"
+        )
+    if _has_side_effect(request, target=target):
+        return (
+            f"timed out after {elapsed}s; this command may still complete, so its outcome is "
+            "unknown. Verify the current state before retrying"
+        )
+    return f"timed out after {elapsed}s"
+
+
+def _is_durable_mutation(request: Request, *, target: Path) -> bool:
+    """Whether an authoring request can cross a durable boundary before reply."""
+    if target == paths.runtime_socket_path() or request.verb not in DURABLE_MUTATION_VERBS:
+        return False
+    # With no operand this is the one read hidden behind an otherwise mutating
+    # verb.  ``shuffle``/``cycle``/``dynamics`` default to toggle and therefore
+    # remain mutations when their operand is absent.
+    return request.verb != "cycle-interval" or request.argument is not None
+
+
+def _has_side_effect(request: Request, *, target: Path) -> bool:
+    """Whether a timed-out receiver may still produce an observable change."""
+    if target == paths.runtime_socket_path():
+        return request.verb in RUNTIME_SIDE_EFFECT_VERBS
+    if request.verb == "cycle-interval" and request.argument is None:
+        return False
+    return request.verb in AUTHORING_SIDE_EFFECT_VERBS
 
 
 def _read_line(connection: socket.socket, *, max_bytes: int = MAX_MESSAGE_BYTES) -> bytes:
@@ -254,7 +478,7 @@ def dispatch(verb: str, argument: str | None) -> int:
                 return 1
             try:
                 subprocess.Popen(
-                    [sys.argv[0], "--open-page", page],
+                    _gui_launch_command(page),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -303,13 +527,24 @@ def dispatch_on(connector: str, verb: str, argument: str | None) -> int:
 
 
 def send_runtime(
-    verb: str, argument: str | None = None, *, timeout: float | None = None
+    verb: str,
+    argument: str | None = None,
+    *,
+    timeout: float | None = None,
+    cancellation: Cancellation | None = None,
 ) -> Response:
     """Talk to the Rust runtime directly, without an authoring-socket fallback."""
+    if cancellation is None:
+        return send(
+            Request(verb=verb, argument=argument),
+            path=paths.runtime_socket_path(),
+            timeout=timeout,
+        )
     return send(
         Request(verb=verb, argument=argument),
         path=paths.runtime_socket_path(),
         timeout=timeout,
+        cancellation=cancellation,
     )
 
 
@@ -319,6 +554,7 @@ def send_runtime_on(
     argument: str | None = None,
     *,
     timeout: float | None = None,
+    cancellation: Cancellation | None = None,
 ) -> Response:
     """Send one strictly validated connector-scoped runtime command.
 
@@ -355,10 +591,17 @@ def send_runtime_on(
         raise ControlError(f"display runtime verb {verb!r} expects {choices}")
 
     wire = f"{connector} {verb}" + (f" {argument}" if argument is not None else "")
+    if cancellation is None:
+        return send_runtime(
+            "on",
+            wire,
+            timeout=RUNTIME_ACTION_TIMEOUT if timeout is None else timeout,
+        )
     return send_runtime(
         "on",
         wire,
         timeout=RUNTIME_ACTION_TIMEOUT if timeout is None else timeout,
+        cancellation=cancellation,
     )
 
 

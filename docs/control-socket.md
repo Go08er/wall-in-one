@@ -103,12 +103,18 @@ that grammar before contacting Rust and never falls back to the legacy global
 Python renderer. Assignment and schedule edits are still configuration and are
 not accepted through `on`.
 
-If mpvpaper or linux-wallpaperengine exits, the runtime immediately falls back
-to that entry's paired still and reports the exact entry in `last_error`; it
-does not enter an automatic restart loop. A Workshop scene that crashes the
-engine stays static for the rest of that service session, so later rotations
-do not repeatedly launch a known-incompatible scene. The app shows the same
-failure as a one-time toast and a persistent static-fallback subtitle.
+An automatic startup, schedule or cycle hand-over which cannot apply gets three
+attempts total, two seconds apart. The service keeps or restores the
+last-known-good still between attempts; after the third failure it marks that
+resolved entry taboo for the session and advances to another usable candidate.
+An already-started renderer which later exits does not enter that retry machine:
+the service reaps its process group, reapplies the paired still and records the
+exact entry in `last_error`. A Wallpaper Engine scene crash becomes taboo
+immediately; a failed video child may be tried on a later explicit visit rather
+than being restarted in place. The app shows the failure as a one-time toast and
+a persistent static-fallback subtitle, and removes Play for a taboo current
+entry. The complete retry and persistence contract is in
+[`runtime-config.md`](runtime-config.md).
 
 `open` validates the page name, presents the requested workflow in an existing
 app process, or requests a GUI launch when only the Rust service is running.
@@ -202,6 +208,44 @@ it reaches the code that deletes. What happens then is the same split as the
 tile menu -- a downloaded wallpaper is deleted and the reply says it cannot be
 undone, one of your own is moved to the trash, and if the trash is on another
 filesystem it is refused rather than quietly unlinked.
+
+### Deadlines and an unknown outcome
+
+Every client wait is bounded, but the bound reflects the work behind the verb
+rather than imposing the old five-second limit on every request:
+
+| Request | Client deadline |
+| --- | ---: |
+| Cheap authoring reads and non-applying runtime commands | 5 seconds |
+| `displays` compositor discovery | 10 seconds |
+| One-store Settings/library authoring | 15 seconds |
+| Direct runtime apply; legacy Next/Previous/Random; playlist-delete cascade | 45 seconds |
+| `search`; journalled `remove`/trash and metadata cleanup | 60 seconds |
+| `reload-palette` including an in-flight and replacement Noctalia fallback chain | 180 seconds |
+| `select`; authoring-socket playlist fallback including compile, reload and apply | 110 seconds |
+| `download` | 600 seconds |
+
+These are client response deadlines, not unsafe cancellation points. In
+particular, an atomic write, directory fsync, trash move or metadata cascade
+which has started must finish its durability boundary even if the caller goes
+away. A renderer command, palette reload, window-open request or process quit
+may likewise cross its observable boundary before its reply. A timed-out
+mutation therefore reports that its outcome is **unknown** and tells the caller
+to verify current state before retrying; it must not be interpreted as a
+refusal. This matters for non-idempotent commands such as Toggle and Next.
+Read-only timeouts retain the simple `timed out after ...` message. The
+graphical authoring actor refuses a second control mutation with
+`authoring-busy` while one is active, so it does not queue a new socket write
+which could begin only after that caller timed out.
+
+A successful ordinary authoring reply confirms the store/config transaction
+is durable and the running app adopted it. Runtime-document compilation and
+reload are queued afterward and may settle later; consult runtime `status` for
+effective playback truth. `select` and the authoring-socket `playlist-use`
+compatibility path are the deliberate exceptions: their reply waits through
+compile, any required reload, and the final runtime action. Playlist deletion
+confirms its durable cascade but does not wait for an independently requested
+return from a deleted manual override to schedule control.
 
 Exit code 3 means no instance is running -- distinct from 1, so a caller can
 react by launching it instead of reporting a failure.

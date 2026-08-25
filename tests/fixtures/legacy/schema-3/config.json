@@ -1,0 +1,45 @@
+{
+  "schema_version": 3,
+  "gestures": {
+    "left": "hub_open",
+    "middle": "playback_toggle",
+    "right": "native_next"
+  },
+  "playlists": {
+    "schema-three": {
+      "name": "Schema Three",
+      "order": "rotate",
+      "interval_seconds": 73,
+      "quick_choice": false,
+      "entries": [
+        {
+          "id": "schema-three-entry",
+          "label": "Schema 3 still",
+          "media": null,
+          "still": {"mode": "selected", "path": "/legacy/schema-3.png"},
+          "theme": {"mode": "auto", "source": "wallpaper", "selection": "m3-content"},
+          "customized": false
+        }
+      ]
+    }
+  },
+  "outputs": {
+    "eDP-1": {
+      "fallback_playlist": "schema-three",
+      "quick_choice_playlist": "",
+      "schedules": [
+        {
+          "id": "schema-three-night",
+          "name": "Night",
+          "playlist": "schema-three",
+          "enabled": true,
+          "weekdays": [0, 2],
+          "start_minute": 1320,
+          "end_minute": 360,
+          "all_day": false,
+          "priority": 10
+        }
+      ]
+    }
+  }
+}

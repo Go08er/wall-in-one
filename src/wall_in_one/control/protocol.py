@@ -19,6 +19,10 @@ MAX_MESSAGE_BYTES: Final = 64 * 1024
 #: A runtime status snapshot may contain the configured maximum of 512
 #: playlists and 512 schedule rules. It remains bounded independently.
 MAX_RUNTIME_MESSAGE_BYTES: Final = 1024 * 1024
+#: Protocol documents are deliberately shallow. A separate structural ceiling
+#: prevents parser recursion/pathological container allocation even when the
+#: encoded byte frame itself is within its limit.
+MAX_JSON_NESTING: Final = 64
 
 ENCODING: Final = "utf-8"
 
@@ -106,10 +110,35 @@ def _encode(payload: dict[str, Any]) -> bytes:
 def _decode(line: bytes, *, max_bytes: int = MAX_MESSAGE_BYTES) -> dict[str, Any]:
     if len(line) > max_bytes:
         raise ProtocolError(f"message is {len(line)} bytes, over the {max_bytes} limit")
+    _reject_deep_json(line)
     try:
         payload = json.loads(line.decode(ENCODING))
-    except (UnicodeDecodeError, ValueError) as error:
+    except (RecursionError, UnicodeDecodeError, ValueError) as error:
         raise ProtocolError(f"cannot decode message: {error}") from error
     if not isinstance(payload, dict):
         raise ProtocolError("message must be a JSON object")
     return payload
+
+
+def _reject_deep_json(line: bytes) -> None:
+    """Bound JSON container depth without mistaking delimiters in strings."""
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in line:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == ord("\\"):
+                escaped = True
+            elif byte == ord('"'):
+                quoted = False
+            continue
+        if byte == ord('"'):
+            quoted = True
+        elif byte in (ord("["), ord("{")):
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise ProtocolError(f"message nesting exceeds the {MAX_JSON_NESTING}-level limit")
+        elif byte in (ord("]"), ord("}")):
+            depth -= 1

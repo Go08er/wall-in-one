@@ -5,8 +5,8 @@ use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{
-    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, Palette, Playlist,
-    ScheduleRule, MAX_CONFIG_BYTES,
+    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, Palette, Playlist, SceneClamp,
+    SceneScaling, ScheduleRule, MAX_CONFIG_BYTES,
 };
 
 fn temp_file(name: &str) -> PathBuf {
@@ -215,6 +215,27 @@ fn unknown_video_interpolation_is_refused() {
         "video_interpolation = \"warp\"",
     ));
     assert!(decoded.is_err());
+}
+
+#[test]
+fn scene_presentation_modes_are_typed_and_unknown_values_are_refused() {
+    let configured: Config = toml::from_str(
+        &document(4)
+            .replace("scene_scaling = \"\"", "scene_scaling = \"fill\"")
+            .replace("scene_clamp = \"\"", "scene_clamp = \"border\""),
+    )
+    .unwrap();
+    assert_eq!(configured.renderer.scene_scaling, SceneScaling::Fill);
+    assert_eq!(configured.renderer.scene_clamp, SceneClamp::Border);
+
+    assert!(toml::from_str::<Config>(
+        &document(4).replace("scene_scaling = \"\"", "scene_scaling = \"shell words\"")
+    )
+    .is_err());
+    assert!(toml::from_str::<Config>(
+        &document(4).replace("scene_clamp = \"\"", "scene_clamp = \"mirror\"")
+    )
+    .is_err());
 }
 
 #[test]

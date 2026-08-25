@@ -40,6 +40,7 @@ from wall_in_one.providers import backend_workers, http
 from wall_in_one.providers import download as download_module
 from wall_in_one.providers.base import (
     MAX_RESULTS,
+    CancellationProbe,
     CandidateDetail,
     DownloadResult,
     Fact,
@@ -48,6 +49,8 @@ from wall_in_one.providers.base import (
     SearchResult,
     WallpaperCandidate,
     human_bytes,
+    optional_cancellation_probe,
+    refuse_cancellation,
 )
 from wall_in_one.providers.cache import TtlCache
 
@@ -723,11 +726,17 @@ def validate_download_route(value: str, quality: str, media_id: str) -> str:
     )
 
 
-def validate_mp4(path: Path, content_type: str) -> tuple[int, str]:
+def validate_mp4(
+    path: Path,
+    content_type: str,
+    *,
+    cancelled: CancellationProbe | None = None,
+) -> tuple[int, str]:
     """Confirm the bytes are an ISO-BMFF file, and hash them.
 
     The MIME type alone is the remote's opinion. The `ftyp` box is the file's.
     """
+    refuse_cancellation(cancelled)
     if content_type not in {"video/mp4", "application/octet-stream"}:
         raise ProviderError(
             "content-type", f"expected MP4 but received {content_type or 'unknown'}"
@@ -739,6 +748,7 @@ def validate_mp4(path: Path, content_type: str) -> tuple[int, str]:
             digest = hashlib.sha256()
             digest.update(prefix)
             while True:
+                refuse_cancellation(cancelled)
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
@@ -752,6 +762,7 @@ def validate_mp4(path: Path, content_type: str) -> tuple[int, str]:
     box_size = int.from_bytes(prefix[:4], "big")
     if box_size != 0 and (box_size < 12 or box_size > size):
         raise ProviderError("content-type", "MP4 ftyp box has an invalid declared size")
+    refuse_cancellation(cancelled)
     return size, digest.hexdigest()
 
 
@@ -950,16 +961,23 @@ class MotionBgs:
             if transfer.path is None:
                 raise ProviderError("transport", "download produced no body")
             effective = validate_download_route(transfer.url, option.quality, option.media_id)
-            size, digest = validate_mp4(transfer.path, transfer.content_type)
+            cancelled = optional_cancellation_probe(self._client)
+            size, digest = validate_mp4(
+                transfer.path,
+                transfer.content_type,
+                cancelled=cancelled,
+            )
             if size != transfer.size:
                 raise ProviderError(
                     "size-mismatch", "validated MP4 size did not match the transfer record"
                 )
+            refuse_cancellation(cancelled)
             destination = download_module.unique_destination(
                 directory,
                 f"{slug}.{option.quality}",
                 ".mp4",
                 download_module.MOTIONBGS_LOCATION.sidecar_suffix,
+                cancelled=cancelled,
             )
             downloaded_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             payload = download_module.encode_sidecar(
@@ -989,6 +1007,7 @@ class MotionBgs:
                 destination,
                 download_module.MOTIONBGS_LOCATION.sidecar_suffix,
                 payload,
+                cancelled=cancelled,
             )
         return DownloadResult(
             provider=self.name,

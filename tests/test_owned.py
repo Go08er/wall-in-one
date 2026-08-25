@@ -91,6 +91,16 @@ def test_an_old_motionbgs_sidecar_matches_on_its_page(tmp_path: Path) -> None:
         page_url="https://motionbgs.com/misty-forest/",
     )
     assert index.path_for(candidate) == installed
+    assert (
+        index.path_for(
+            _candidate(
+                provider="motionbgs",
+                identifier="misty-forest",
+                page_url="https://motionbgs.com/misty-forest",
+            )
+        )
+        == installed
+    )
 
 
 def test_a_sidecar_whose_file_is_gone_is_not_held(tmp_path: Path) -> None:

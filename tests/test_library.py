@@ -11,7 +11,7 @@ from wall_in_one import config
 from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 from wall_in_one.library.playlist import Playlist
-from wall_in_one.wallpaper import renderer
+from wall_in_one.wallpaper import renderer, scenes
 
 
 def _touch(path: Path, body: bytes = b"x") -> Path:
@@ -659,6 +659,17 @@ def test_settings_special_files_are_never_followed_or_waited_on(tmp_path: Path, 
     assert outside.read_text(encoding="utf-8") == 'roots = ["/precious"]\n'
 
 
+def test_pathologically_nested_settings_recover_interactively_and_fail_strictly(
+    tmp_path: Path,
+) -> None:
+    settings = tmp_path / "settings.toml"
+    settings.write_text("roots = " + "[" * 1_100 + '"/tmp"' + "]" * 1_100, encoding="utf-8")
+
+    assert config.load(settings) == config.Settings()
+    with pytest.raises(config.ConfigError, match="cannot parse"):
+        config.load_strict(settings)
+
+
 def test_an_empty_root_list_survives_the_round_trip(tmp_path: Path) -> None:
     """It is written out rather than omitted: a setting nobody can see is a
     setting nobody knows they have."""
@@ -718,6 +729,8 @@ def test_the_playback_settings_survive_a_toml_round_trip(tmp_path: Path) -> None
         video_interpolation="linear",
         video_hardware_decode=False,
         scene_fps=72,
+        scene_scaling="fill",
+        scene_clamp="border",
     )
     written = tmp_path / "settings.toml"
     config.save(settings, written)
@@ -729,6 +742,8 @@ def test_the_playback_settings_survive_a_toml_round_trip(tmp_path: Path) -> None
         read.video_interpolation,
         read.video_hardware_decode,
         read.scene_fps,
+        read.scene_scaling,
+        read.scene_clamp,
     ) == (
         False,
         35,
@@ -736,6 +751,8 @@ def test_the_playback_settings_survive_a_toml_round_trip(tmp_path: Path) -> None
         "linear",
         False,
         72,
+        "fill",
+        "border",
     )
 
 
@@ -756,6 +773,20 @@ def test_an_unknown_hidden_policy_falls_back_rather_than_failing() -> None:
 
 def test_an_unknown_interpolation_mode_is_safely_off() -> None:
     assert config.Settings(video_interpolation="warp").validated().video_interpolation == "off"
+
+
+@pytest.mark.parametrize(
+    ("field", "unknown", "fallback"),
+    [
+        ("scene_scaling", "zoomish", scenes.DEFAULT_SCALING),
+        ("scene_clamp", "mirror", scenes.DEFAULT_CLAMP),
+    ],
+)
+def test_unknown_scene_presentation_modes_use_the_renderer_default(
+    field: str, unknown: str, fallback: str
+) -> None:
+    settings = config.Settings(**{field: unknown}).validated()  # type: ignore[arg-type]
+    assert getattr(settings, field) == fallback
 
 
 def test_every_hidden_policy_survives_validation() -> None:

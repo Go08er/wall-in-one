@@ -192,6 +192,11 @@ let
     ${pkgs.systemd}/bin/systemctl --user import-environment \
       WAYLAND_DISPLAY NIRI_SOCKET XDG_CURRENT_DESKTOP \
       XDG_SESSION_DESKTOP XDG_SESSION_TYPE
+    # The VM activates the package's installed user unit verbatim.  Put the
+    # instrumented Noctalia wrapper in the user manager's environment instead
+    # of shadowing that unit merely to add a NixOS `path` entry.
+    ${pkgs.systemd}/bin/systemctl --user set-environment \
+      PATH=${lib.escapeShellArg "${if noctaliaProbe == null then pkgs.noctalia else noctaliaProbe}/bin:/run/current-system/sw/bin"}
     ${pkgs.systemd}/bin/systemctl --user restart \
       wall-in-one.service noctalia.service
 
@@ -249,25 +254,12 @@ in
     pkgs.noctalia
   ];
 
-  systemd.user.services.wall-in-one = {
-    description = "Wall-in-One wallpaper rotation service";
-    partOf = [ "graphical-session.target" ];
-    after = [ "graphical-session.target" ];
-    wantedBy = [ "graphical-session.target" ];
-    # Palette application is intentionally optional for the packaged app, but
-    # this desktop is specifically a Noctalia integration environment. Put the
-    # shell CLI on the service PATH so playlist changes exercise that boundary
-    # instead of silently degrading to wallpaper-only application.
-    path = [ (if noctaliaProbe == null then pkgs.noctalia else noctaliaProbe) ];
-    serviceConfig = {
-      # A failed compiler preserves the previous document. The runtime remains
-      # the authority on whether that last-known-good config is usable.
-      ExecStartPre = "-${wallInOnePackage}/bin/wall-in-one --write-config";
-      ExecStart = "${wallInOnePackage}/bin/wall-in-one-service --wait-for-config";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-  };
+  # The package is already in environment.systemPackages, whose
+  # share/systemd/user directory is on the user manager's unit search path.
+  # Only add the activation edge here: defining a NixOS service with the same
+  # name would shadow the installed unit and let the VM validate a hand-built
+  # approximation instead of what profile users actually receive.
+  systemd.user.targets.graphical-session.wants = [ "wall-in-one.service" ];
 
   # Everything the guest sees is constructed here. Nothing is mounted from the
   # host, and the app is explicitly pointed at this generated media directory.

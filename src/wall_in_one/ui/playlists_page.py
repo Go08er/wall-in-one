@@ -16,8 +16,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk, Pango
 
-from wall_in_one import config
-from wall_in_one.library import playlists
+from wall_in_one.library import pairings, playlists
 from wall_in_one.library.model import MediaItem
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.thumbnails import ThumbnailLoader
@@ -29,6 +28,10 @@ if TYPE_CHECKING:
 
 SOURCE_PREFIX = "media:"
 SOURCE_PAGE_SIZE: Final = 48
+#: Playlist storage deliberately permits very large rotations, but GTK rows
+#: are real widget trees with pictures, gestures and controls.  Keep the full
+#: model authorable while materialising one calm page at a time.
+ENTRY_PAGE_SIZE: Final = 72
 COMPACT_WIDTH: Final = 960
 #: Below this, preserving two honest authoring columns is better than letting
 #: GTK crush thumbnails and row controls. The outer editor scroller exposes a
@@ -72,6 +75,32 @@ def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
         + ", ".join(consequences)
         + ". Wallpaper files stay in the library. This cannot be undone."
     )
+
+
+def _borked_reason(session: Session, item: MediaItem | None) -> str:
+    """The durable reason ``item`` may not play, or an empty string."""
+    if item is None:
+        return ""
+    health = session.pairings.health(pairings.Identity.of(item))
+    return health.reason if health.is_borked else ""
+
+
+def _playlist_availability(
+    session: Session,
+    playlist: playlists.Playlist,
+) -> tuple[int, int]:
+    """Return playable and unavailable entry occurrence counts.
+
+    Entries, rather than unique media paths, are counted because duplicates
+    are meaningful in a playlist.  A missing file and a Borked item are both
+    unavailable to playback even though both remain visible for repair.
+    """
+    usable = 0
+    for entry in playlist.entries:
+        item = session.library.find(Path(entry.source))
+        if item is not None and not _borked_reason(session, item):
+            usable += 1
+    return usable, len(playlist.entries) - usable
 
 
 class _ReorderList(Gtk.Widget):
@@ -545,28 +574,53 @@ class _MediaCard(Gtk.Box):
         title.add_css_class("caption")
         self.append(title)
 
+        self._health = Gtk.Label(label="Borked · cannot play")
+        self._health.add_css_class("caption")
+        self._health.add_css_class("error")
+        self._health.set_visible(False)
+        self.append(self._health)
+
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         actions.set_halign(Gtk.Align.CENTER)
-        add = Gtk.Button(
+        self._add = Gtk.Button(
             icon_name="list-add-symbolic",
             tooltip_text="Add to playlist",
         )
-        add.add_css_class("flat")
-        add.connect("clicked", on_activate)
-        actions.append(add)
+        self._add.add_css_class("flat")
+        self._add.connect("clicked", on_activate)
+        actions.append(self._add)
         self.append(actions)
 
-        drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        drag.connect(
+        self._drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        self._drag.connect(
             "prepare",
             lambda *_arguments: Gdk.ContentProvider.new_for_value(payload),
         )
-        drag.connect("drag-begin", self._drag_begin)
-        drag.connect("drag-cancel", self._drag_cancel)
-        drag.connect("drag-end", self._drag_end)
+        self._drag.connect("drag-begin", self._drag_begin)
+        self._drag.connect("drag-cancel", self._drag_cancel)
+        self._drag.connect("drag-end", self._drag_end)
         self._on_drag_started = on_drag_started
         self._on_drag_finished = on_drag_finished
-        self.add_controller(drag)
+        self.add_controller(self._drag)
+
+    def set_borked(self, reason: str) -> None:
+        """Keep a known crasher inspectable without offering a play route."""
+        borked = bool(reason)
+        self._health.set_visible(borked)
+        self._health.set_tooltip_text(reason or None)
+        self._add.set_sensitive(not borked)
+        self._add.set_tooltip_text(
+            "Borked wallpaper: remove or uninstall it in Media/Pairings"
+            if borked
+            else "Add to playlist"
+        )
+        self._drag.set_actions(
+            Gdk.DragAction(0) if borked else Gdk.DragAction.COPY | Gdk.DragAction.MOVE
+        )
+        if borked:
+            self.add_css_class("error")
+        else:
+            self.remove_css_class("error")
 
     def _drag_begin(self, source: Gtk.DragSource, _drag: Gdk.Drag) -> None:
         """Keep the gesture visually tied to the image the person grabbed."""
@@ -656,8 +710,8 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         self.picture.set_content_fit(Gtk.ContentFit.COVER)
         self.surface.append(self.picture)
 
-        name = item.name if item is not None else f"Missing · {source.name}"
-        self.title = Gtk.Label(label=name, xalign=0.0, hexpand=True)
+        self._base_title = item.name if item is not None else f"Missing · {source.name}"
+        self.title = Gtk.Label(label=self._base_title, xalign=0.0, hexpand=True)
         self.title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.title.set_lines(2)
         self.title.set_wrap(True)
@@ -675,6 +729,16 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", on_key)
         self.add_controller(keys)
+
+    def set_borked(self, reason: str) -> None:
+        """Name an unusable retained entry without removing authoring data."""
+        borked = bool(reason)
+        self.title.set_label(f"Borked · {self._base_title}" if borked else self._base_title)
+        self.set_tooltip_text(reason or None)
+        if borked:
+            self.add_css_class("error")
+        else:
+            self.remove_css_class("error")
 
     def show_thumbnail(self, _item: MediaItem, texture: Gdk.Texture | None) -> None:
         self.picture.set_paintable(texture)
@@ -703,9 +767,15 @@ class PlaylistsPage(Gtk.Box):
         self._entry_cards = self._entry_rows
         self._entry_items: dict[str, MediaItem | None] = {}
         self._entry_positions: dict[str, int] = {}
+        self._entry_limit = ENTRY_PAGE_SIZE
+        # A click on a source card appends at the true model end.  Pin that one
+        # new row so the gesture has visible confirmation even when thousands
+        # of earlier entries have not been materialised.
+        self._entry_pin = ""
         self._revealed_slot = -1
         self._dragging = False
         self._playlist_change_after_drag = False
+        self._health_refresh_after_drag = False
         self._dragged_row: _PlaylistEntryRow | None = None
         self._drag_source_index = -1
         self._drag_target_slot = -1
@@ -867,6 +937,23 @@ class PlaylistsPage(Gtk.Box):
         if playlist is not None:
             self._sync_play_button(session, playlist)
 
+    def pairing_health_changed(self, session: Session) -> None:
+        """Reconcile Borked badges and playability without replacing widgets."""
+        self._session = session
+        if self._dragging:
+            # Changing a DragSource's accepted actions or a lifted row while
+            # GTK owns the sequence is undefined.  The status is durable and
+            # can wait until the gesture settles a few milliseconds later.
+            self._health_refresh_after_drag = True
+            return
+        for identifier, (_row, _name, detail) in self._playlist_rows_by_id.items():
+            playlist = session.playlists.get(identifier)
+            if playlist is not None:
+                detail.set_label(self._playlist_detail(session, playlist))
+        playlist = session.playlists.get(self._editor_id)
+        if playlist is not None:
+            self._sync_editor()
+
     @staticmethod
     def _new_playlist_row() -> tuple[Gtk.ListBoxRow, Gtk.Label, Gtk.Label]:
         row = Gtk.ListBoxRow()
@@ -904,8 +991,10 @@ class PlaylistsPage(Gtk.Box):
             )
         else:
             playing = ""
+        _usable, unavailable = _playlist_availability(session, playlist)
         return (
             f"{len(playlist)} item{'s' if len(playlist) != 1 else ''}"
+            + (f" · {unavailable} unavailable" if unavailable else "")
             + playing
             + (" · default" if playlist.id == session.settings.active_playlist else "")
         )
@@ -939,6 +1028,8 @@ class PlaylistsPage(Gtk.Box):
         self._entry_rows.clear()
         self._entry_items.clear()
         self._entry_positions.clear()
+        self._entry_limit = ENTRY_PAGE_SIZE
+        self._entry_pin = ""
         self._editor_id = ""
 
     def _show_empty(self) -> None:
@@ -1090,6 +1181,10 @@ class PlaylistsPage(Gtk.Box):
         self._order_scroll.set_child(self._order_drop_area)
         self._order_list.attach_reorder_gesture(self._order_scroll)
         pane.append(self._order_scroll)
+        self._entry_more = Gtk.Button()
+        self._entry_more.set_halign(Gtk.Align.CENTER)
+        self._entry_more.connect("clicked", self._show_more_entries)
+        pane.append(self._entry_more)
         return pane
 
     def _sync_editor(self) -> None:
@@ -1124,6 +1219,18 @@ class PlaylistsPage(Gtk.Box):
         scheduled = (
             truth is not None and playlist.id == truth.playlist_id and truth.follows_schedule
         )
+        usable, unavailable = _playlist_availability(session, playlist)
+        if not usable:
+            self._play_button.set_label(
+                "Cannot play · no usable items" if playlist.entries else "Play this playlist now"
+            )
+            self._play_button.set_tooltip_text(
+                "Every item is missing or marked Borked; repair or remove those entries first"
+                if playlist.entries
+                else "Add media before playing this playlist"
+            )
+            self._play_button.set_sensitive(False)
+            return
         self._play_button.set_label(
             "Playing now · manual override"
             if manual
@@ -1131,7 +1238,12 @@ class PlaylistsPage(Gtk.Box):
             if scheduled
             else "Play this playlist now"
         )
-        self._play_button.set_sensitive(bool(playlist.entries) and not manual)
+        self._play_button.set_tooltip_text(
+            f"{unavailable} unavailable entr{'y is' if unavailable == 1 else 'ies are'} skipped"
+            if unavailable
+            else None
+        )
+        self._play_button.set_sensitive(not manual)
 
     def _sync_source_cards(self, session: Session) -> None:
         self._source_inventory = session.library.items
@@ -1174,19 +1286,21 @@ class PlaylistsPage(Gtk.Box):
                 del self._source_cards_by_path[path]
         self._source_positions = {item.path: index for index, item in enumerate(visible)}
         for item in visible:
-            if item.path in self._source_cards_by_path:
-                continue
-            card = _MediaCard(
-                item,
-                f"{SOURCE_PREFIX}{item.path}",
-                self._make_add(item),
-                on_drag_started=self._begin_drag,
-                on_drag_finished=self._finish_drag,
-            )
-            self._source_cards[card] = item
-            self._source_cards_by_path[item.path] = card
-            self._source_flow.append(card)
-            self._loader.request(item, card.show_thumbnail)
+            source_card = self._source_cards_by_path.get(item.path)
+            if source_card is None:
+                source_card = _MediaCard(
+                    item,
+                    f"{SOURCE_PREFIX}{item.path}",
+                    self._make_add(item),
+                    on_drag_started=self._begin_drag,
+                    on_drag_finished=self._finish_drag,
+                )
+                self._source_cards[source_card] = item
+                self._source_cards_by_path[item.path] = source_card
+                self._source_flow.append(source_card)
+                self._loader.request(item, source_card.show_thumbnail)
+            session = self._session
+            source_card.set_borked(_borked_reason(session, item) if session is not None else "")
         self._source_flow.invalidate_sort()
         self._source_flow.invalidate_filter()
 
@@ -1209,7 +1323,18 @@ class PlaylistsPage(Gtk.Box):
         return item is None or self._source_matches(item, query)
 
     def _sync_entry_cards(self, session: Session, playlist: playlists.Playlist) -> None:
-        wanted = {entry.id: session.library.find(Path(entry.source)) for entry in playlist.entries}
+        entries_by_id = {entry.id: entry for entry in playlist.entries}
+        wanted_ids = {entry.id for entry in playlist.entries[: self._entry_limit]}
+        focused = self._focused_entry_id()
+        if focused in entries_by_id:
+            wanted_ids.add(focused)
+        if self._entry_pin in entries_by_id:
+            wanted_ids.add(self._entry_pin)
+        wanted = {
+            entry.id: session.library.find(Path(entry.source))
+            for entry in playlist.entries
+            if entry.id in wanted_ids
+        }
         membership_changes = set(wanted) != set(self._entry_rows) or any(
             self._entry_items.get(identifier) != item for identifier, item in wanted.items()
         )
@@ -1222,23 +1347,60 @@ class PlaylistsPage(Gtk.Box):
                 del self._entry_rows[identifier]
         self._entry_positions = {entry.id: index for index, entry in enumerate(playlist.entries)}
         for entry in playlist.entries:
-            if entry.id in self._entry_rows:
+            if entry.id not in wanted:
                 continue
             item = wanted[entry.id]
-            row = _PlaylistEntryRow(
-                entry.id,
-                item,
-                Path(entry.source),
-                self._make_remove(entry.id),
-                self._make_reorder_key(entry.id),
-            )
-            if item is not None:
-                self._loader.request(item, row.show_thumbnail)
-            self._entry_rows[entry.id] = row
-            self._entry_items[entry.id] = item
-            self._append_order_row(row)
+            row = self._entry_rows.get(entry.id)
+            if row is None:
+                row = _PlaylistEntryRow(
+                    entry.id,
+                    item,
+                    Path(entry.source),
+                    self._make_remove(entry.id),
+                    self._make_reorder_key(entry.id),
+                )
+                if item is not None:
+                    self._loader.request(item, row.show_thumbnail)
+                self._entry_rows[entry.id] = row
+                self._entry_items[entry.id] = item
+                self._append_order_row(row)
+            row.set_borked(_borked_reason(session, item))
         if not self._dragging:
             self._order_list.invalidate_sort()
+        self._update_entry_more(playlist)
+
+    def _focused_entry_id(self) -> str:
+        """Return the materialised playlist row containing keyboard focus."""
+        root = self.get_root()
+        if not isinstance(root, Gtk.Window):
+            return ""
+        focused = root.get_focus()
+        while focused is not None:
+            if isinstance(focused, _PlaylistEntryRow):
+                return focused.identifier
+            focused = focused.get_parent()
+        return ""
+
+    def _update_entry_more(self, playlist: playlists.Playlist) -> None:
+        materialised = self._entry_rows.keys()
+        next_limit = min(len(playlist.entries), self._entry_limit + ENTRY_PAGE_SIZE)
+        amount = sum(entry.id not in materialised for entry in playlist.entries[:next_limit])
+        remaining = max(0, len(playlist.entries) - len(self._entry_rows))
+        self._entry_more.set_visible(amount > 0)
+        self._entry_more.set_label(
+            f"Load {amount} more · {len(self._entry_rows)} of {len(playlist.entries)} shown"
+            if remaining
+            else f"All {len(playlist.entries)} shown"
+        )
+
+    def _show_more_entries(self, _button: Gtk.Button) -> None:
+        """Materialise one additional order page without replacing old rows."""
+        self._entry_limit += ENTRY_PAGE_SIZE
+        self._entry_pin = ""
+        session = self._session
+        playlist = session.playlists.get(self._selected) if session is not None else None
+        if session is not None and playlist is not None:
+            self._sync_entry_cards(session, playlist)
 
     def _compare_source_cards(self, first: Gtk.FlowBoxChild, second: Gtk.FlowBoxChild) -> int:
         first_card = first.get_child()
@@ -1485,11 +1647,13 @@ class PlaylistsPage(Gtk.Box):
     def _commit_row_drag(self, row: _PlaylistEntryRow, source: int, target: int) -> None:
         changed = target != source
         if changed:
-            try:
-                self._app.session.playlists.move_entry(self._selected, row.identifier, target)
-            except playlists.PlaylistError as error:
-                self._app.window_report(str(error))
-                changed = False
+            store = self._app.session.playlists
+            selected = self._selected
+            self._app.authoring_action_async(
+                lambda: store.move_entry(selected, row.identifier, target),
+                lambda _playlist: self._app.playlists_changed(),
+                failure=self._app.window_report,
+            )
         self._order_list.clear_motion()
         row.surface.remove_css_class("wio-reorder-lifted")
         self._drag_source_index = -1
@@ -1499,8 +1663,7 @@ class PlaylistsPage(Gtk.Box):
         self._drag_grab_offset_y = 0.0
         self._drag_start_scroll = 0.0
         self._dragging = False
-        if changed:
-            self._app.playlists_changed()
+        self._finish_deferred_health_refresh()
 
     def _begin_drag(self) -> None:
         self._assert_not_dragging()
@@ -1516,6 +1679,14 @@ class PlaylistsPage(Gtk.Box):
         self._dragging = False
         if publish:
             self._app.playlists_changed()
+        self._finish_deferred_health_refresh()
+
+    def _finish_deferred_health_refresh(self) -> None:
+        if not self._health_refresh_after_drag:
+            return
+        self._health_refresh_after_drag = False
+        if self._session is not None:
+            self.pairing_health_changed(self._session)
 
     def _accept_drop(
         self,
@@ -1532,23 +1703,68 @@ class PlaylistsPage(Gtk.Box):
         playlist = session.playlists.get(self._selected)
         if playlist is None:
             return False
-        try:
-            if value.startswith(SOURCE_PREFIX):
-                source = Path(value.removeprefix(SOURCE_PREFIX))
-                if session.library.find(source) is None:
-                    return False
-                updated = session.playlists.add(self._selected, source)
-                moving = updated.entries[-1].id
-            else:
-                return False
-            current = session.playlists.find(self._selected)
+        item: MediaItem | None = None
+        if not value.startswith(SOURCE_PREFIX):
+            return False
+        source = Path(value.removeprefix(SOURCE_PREFIX))
+        item = session.library.find(source)
+        if item is None:
+            return False
+        if reason := _borked_reason(session, item):
+            self._app.window_report(
+                f"{item.name} is marked Borked and cannot be added for playback: {reason}"
+            )
+            return False
+        store = session.playlists
+        selected = self._selected
+
+        def work() -> tuple[bool, str]:
+            updated = store.add(selected, source)
+            moving = updated.entries[-1].id
+            current = store.find(selected)
             position = playlists.drop_position(
                 tuple(entry.id for entry in current.entries), moving, anchor, after=after
             )
-            session.playlists.move_entry(self._selected, moving, position)
-        except playlists.PlaylistError as error:
-            self._app.window_report(str(error))
-            return False
+            try:
+                store.move_entry(selected, moving, position)
+            except playlists.PlaylistError as error:
+                try:
+                    store.remove_entry(selected, moving)
+                except playlists.PlaylistError as rollback_error:
+                    return (
+                        True,
+                        f"{item.name} was added at the end, but could not be placed: {error}; "
+                        f"rollback also failed: {rollback_error}",
+                    )
+                return (
+                    False,
+                    f"{item.name} was not added; placement failed and was rolled back: {error}",
+                )
+            return (True, "")
+
+        def finished(result: tuple[bool, str]) -> None:
+            committed, message = result
+            if committed:
+                self._publish_drop_change()
+            if message:
+                self._app.window_report(message)
+
+        def prepare() -> Any:
+            current = self._app.current_item_for_authoring(item)
+            if store.get(selected) is None:
+                raise ValueError("the selected playlist was deleted before the drop saved")
+            if reason := _borked_reason(self._app.session, current):
+                raise ValueError(f"{current.name} is marked Borked and cannot be added: {reason}")
+            return work
+
+        return self._app.authoring_action_async(
+            work,
+            finished,
+            prepare=prepare,
+            failure=self._app.window_report,
+        )
+
+    def _publish_drop_change(self) -> None:
         if self._dragging:
             # The store write is safe, but its normal synchronous refresh would
             # sort, append, or remove list rows before GTK has ended the drag.
@@ -1556,31 +1772,34 @@ class PlaylistsPage(Gtk.Box):
             self._playlist_change_after_drag = True
         else:
             self._app.playlists_changed()
-        return True
 
     def _create(self, *_arguments: object) -> None:
         session = self._session
         if session is None:
             return
-        try:
-            made = session.playlists.create(self._new_name.get_text())
-        except playlists.PlaylistError as error:
-            self._app.window_report(str(error))
-            return
-        self._selected = made.id
-        self._new_name.set_text("")
-        self._app.playlists_changed()
+        name = self._new_name.get_text()
+
+        def saved(made: playlists.Playlist) -> None:
+            self._selected = made.id
+            self._new_name.set_text("")
+            self._app.playlists_changed()
+
+        self._app.authoring_action_async(
+            lambda: session.playlists.create(name),
+            saved,
+            failure=self._app.window_report,
+        )
 
     def _rename(self, name: str) -> None:
         session = self._session
         if session is None:
             return
-        try:
-            session.playlists.rename(self._selected, name)
-        except playlists.PlaylistError as error:
-            self._app.window_report(str(error))
-            return
-        self._app.playlists_changed()
+        selected = self._selected
+        self._app.authoring_action_async(
+            lambda: session.playlists.rename(selected, name),
+            lambda _playlist: self._app.playlists_changed(),
+            failure=self._app.window_report,
+        )
 
     def _request_delete(self) -> None:
         session = self._session
@@ -1614,49 +1833,95 @@ class PlaylistsPage(Gtk.Box):
             # confirmation was open.  Treat that as already handled instead
             # of deleting whichever playlist is selected now.
             return
-        session.playlists.delete(playlist.id)
-        session.schedules.forget_playlist(playlist.id)
-        session.displays.forget_playlist(playlist.id)
-        if session.settings.active_playlist == playlist.id:
-            self._app.update_settings(active_playlist="")
-        if session.manual_playlist == playlist.id:
-            self._app.resume_schedule_async()
-        self._selected = ""
-        self._app.playlists_changed()
+
+        def deleted(
+            result: object,
+            cleanup_failures: tuple[str, ...],
+        ) -> None:
+            self._selected = ""
+            name = getattr(result, "name", playlist.name)
+            if cleanup_failures:
+                self._app.window_report(
+                    f"{name} was deleted, but cleanup needs attention: "
+                    + "; ".join(cleanup_failures)
+                )
+
+        self._app.delete_playlist_async(
+            playlist.id,
+            deleted,
+            on_error=lambda error: self._app.window_report(
+                f"{playlist.name} was not deleted; nothing changed: {error}"
+            ),
+        )
 
     def _set_default(self) -> None:
         if self._selected:
-            try:
-                self._app.update_settings(active_playlist=self._selected)
-            except config.ConfigError as error:
-                self._app.window_report(f"Default playlist was not saved; nothing changed: {error}")
-                return
-            self._app.playlists_changed()
+            selected = self._selected
+            self._app.update_settings_async(
+                active_playlist=selected,
+                on_success=lambda _settings: self._app.playlists_changed(),
+                on_error=lambda error: self._app.window_report(
+                    f"Default playlist was not saved; nothing changed: {error}"
+                ),
+            )
 
     def _play_now(self) -> None:
         if not self._selected:
+            return
+        playlist = self._app.session.playlists.get(self._selected)
+        if playlist is None:
+            return
+        usable, _unavailable = _playlist_availability(self._app.session, playlist)
+        if not usable:
+            self._app.window_report(
+                f"{playlist.name} has no usable items; repair its missing media or remove "
+                "Borked entries first"
+            )
             return
         self._app.activate_playlist_async(self._selected)
 
     def _make_add(self, item: MediaItem) -> Any:
         def add(_button: Gtk.Button) -> None:
-            try:
-                self._app.session.playlists.add(self._selected, item.path)
-            except playlists.PlaylistError as error:
-                self._app.window_report(str(error))
+            if reason := _borked_reason(self._app.session, item):
+                self._app.window_report(
+                    f"{item.name} is marked Borked and cannot be added for playback: {reason}"
+                )
                 return
-            self._app.playlists_changed()
+            store = self._app.session.playlists
+            selected = self._selected
+
+            def saved(updated: playlists.Playlist) -> None:
+                self._entry_pin = updated.entries[-1].id
+                self._app.playlists_changed()
+
+            def prepare() -> Any:
+                current = self._app.current_item_for_authoring(item)
+                if store.get(selected) is None:
+                    raise ValueError("the selected playlist was deleted before the item saved")
+                if reason := _borked_reason(self._app.session, current):
+                    raise ValueError(
+                        f"{current.name} is marked Borked and cannot be added: {reason}"
+                    )
+                return lambda: store.add(selected, current.path)
+
+            self._app.authoring_action_async(
+                lambda: store.add(selected, item.path),
+                saved,
+                prepare=prepare,
+                failure=self._app.window_report,
+            )
 
         return add
 
     def _make_remove(self, entry_id: str) -> Any:
         def remove(_button: Gtk.Button) -> None:
-            try:
-                self._app.session.playlists.remove_entry(self._selected, entry_id)
-            except playlists.PlaylistError as error:
-                self._app.window_report(str(error))
-                return
-            self._app.playlists_changed()
+            store = self._app.session.playlists
+            selected = self._selected
+            self._app.authoring_action_async(
+                lambda: store.remove_entry(selected, entry_id),
+                lambda _playlist: self._app.playlists_changed(),
+                failure=self._app.window_report,
+            )
 
         return remove
 
@@ -1683,16 +1948,24 @@ class PlaylistsPage(Gtk.Box):
             if entry_id not in entry_ids:
                 return True
             current = entry_ids.index(entry_id)
-            position = min(max(current + step, 0), len(entry_ids) - 1)
-            if position != current:
+            target = min(max(current + step, 0), len(entry_ids) - 1)
+            if target != current:
                 first = self._order_list.capture_positions()
-                try:
-                    self._app.session.playlists.move_entry(self._selected, entry_id, position)
-                except playlists.PlaylistError as error:
-                    self._app.window_report(str(error))
-                    return True
-                self._app.playlists_changed()
-                self._order_list.animate_from(first)
+                store = self._app.session.playlists
+                selected = self._selected
+
+                def saved(_playlist: playlists.Playlist) -> None:
+                    self._app.playlists_changed()
+                    self._order_list.animate_from(first)
+                    focused = self._entry_rows.get(entry_id)
+                    if focused is not None:
+                        focused.grab_focus()
+
+                self._app.authoring_action_async(
+                    lambda: store.move_entry_relative(selected, entry_id, step),
+                    saved,
+                    failure=self._app.window_report,
+                )
 
             # The keyed diff keeps this exact row alive. Reclaiming focus after
             # the synchronous FLIP sort makes repeated Ctrl+Arrow presses reliable.
@@ -1705,11 +1978,12 @@ class PlaylistsPage(Gtk.Box):
 
     def _make_move(self, entry_id: str, position: int) -> Any:
         def move(_button: Gtk.Button) -> None:
-            try:
-                self._app.session.playlists.move_entry(self._selected, entry_id, position)
-            except playlists.PlaylistError as error:
-                self._app.window_report(str(error))
-                return
-            self._app.playlists_changed()
+            store = self._app.session.playlists
+            selected = self._selected
+            self._app.authoring_action_async(
+                lambda: store.move_entry(selected, entry_id, position),
+                lambda _playlist: self._app.playlists_changed(),
+                failure=self._app.window_report,
+            )
 
         return move

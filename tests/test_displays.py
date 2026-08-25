@@ -6,12 +6,28 @@ Every test writes to `tmp_path`; nothing here can see the real state file.
 from __future__ import annotations
 
 import json
+import multiprocessing
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
 
 from wall_in_one.library import displays, state_file
 from wall_in_one.library.displays import DisplayError, Store
+
+
+def _unassign_display_from_stale_process(
+    target: str,
+    connector: str,
+    ready: Connection,
+    proceed: Connection,
+    outcome: Connection,
+) -> None:
+    """Open before another writer, then remove from that stale Store."""
+    store = Store.open(Path(target))
+    ready.send(True)
+    proceed.recv()
+    outcome.send(store.unassign(connector))
 
 
 @pytest.fixture
@@ -75,6 +91,41 @@ def test_a_deleted_playlist_takes_its_assignments_with_it(store: Store) -> None:
     assert store.all() == (("DP-3", "Cityscapes"),)
 
 
+def test_stale_same_display_delete_preserves_an_unrelated_cross_process_write(
+    tmp_path: Path,
+) -> None:
+    """The delete applies to latest disk and cannot replace the other screen."""
+    target = tmp_path / "displays.json"
+    seeded = Store(path=target)
+    seeded.assign("DP-2", "Original")
+    parent = Store.open(target)
+    context = multiprocessing.get_context("spawn")
+    ready_parent, ready_child = context.Pipe()
+    proceed_parent, proceed_child = context.Pipe()
+    outcome_parent, outcome_child = context.Pipe()
+    process = context.Process(
+        target=_unassign_display_from_stale_process,
+        args=(str(target), "DP-2", ready_child, proceed_child, outcome_child),
+    )
+    process.start()
+    try:
+        assert ready_parent.poll(5), "child did not open its stale display Store"
+        assert ready_parent.recv() is True
+        parent.assign("DP-2", "Parent edit")
+        parent.assign("eDP-1", "Quiet")
+        proceed_parent.send(True)
+        assert outcome_parent.poll(5), "child did not finish its display mutation"
+        assert outcome_parent.recv() is True
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+    assert Store.open(target).all() == (("eDP-1", "Quiet"),)
+
+
 def test_an_unplugged_screen_keeps_its_assignment(store: Store) -> None:
     """Unplugging a dock at the end of the day must not forget the arrangement."""
     store.assign("DP-2", "Cityscapes")
@@ -132,6 +183,16 @@ def test_a_missing_file_is_an_empty_store(tmp_path: Path) -> None:
     assert opened.fault is None
 
 
+def test_a_direct_absent_file_seed_is_retained_on_its_first_mutation(tmp_path: Path) -> None:
+    target = tmp_path / "displays.json"
+    store = Store({"DP-2": "Seed"}, target)
+
+    assert store.unassign("missing") is False
+    store.assign("eDP-1", "Added")
+
+    assert Store.open(target).all() == (("DP-2", "Seed"), ("eDP-1", "Added"))
+
+
 def test_unreadable_json_is_reported_rather_than_thrown(tmp_path: Path) -> None:
     target = tmp_path / "displays.json"
     target.write_text("{not json", encoding="utf-8")
@@ -152,6 +213,39 @@ def test_a_broken_file_is_set_aside_on_the_next_write(tmp_path: Path) -> None:
 
     assert (tmp_path / "displays.json.broken").read_text(encoding="utf-8") == "{not json"
     assert Store.open(target).playlist_for("eDP-1") == "Quiet"
+
+
+def test_a_fault_which_appears_after_open_is_still_preserved(tmp_path: Path) -> None:
+    target = tmp_path / "displays.json"
+    store = Store.open(target)
+    original = "a concurrent broken display file"
+    target.write_text(original, encoding="utf-8")
+
+    store.assign("eDP-1", "Quiet")
+
+    assert (
+        target.with_name(target.name + displays.BROKEN_SUFFIX).read_text(encoding="utf-8")
+        == original
+    )
+    assert Store.open(target).playlist_for("eDP-1") == "Quiet"
+
+
+def test_a_symlinked_mutation_lock_is_reported_without_touching_its_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "displays.json"
+    sentinel = tmp_path / "outside"
+    sentinel.write_text("do not touch", encoding="utf-8")
+    target.with_name(f".{target.name}.mutation.lock").symlink_to(sentinel)
+    store = Store(path=target)
+
+    with pytest.raises(DisplayError) as caught:
+        store.assign("eDP-1", "Quiet")
+
+    assert caught.value.kind == "local-io"
+    assert sentinel.read_text(encoding="utf-8") == "do not touch"
+    assert not target.exists()
+    assert len(store) == 0
 
 
 def test_a_store_write_failure_does_not_change_the_in_memory_assignment(
@@ -177,8 +271,8 @@ def test_a_failed_broken_file_relocation_keeps_the_fault_and_original(
 ) -> None:
     target = tmp_path / "displays.json"
     original = "{not json"
-    target.write_text(original, encoding="utf-8")
     store = Store.open(target)
+    target.write_text(original, encoding="utf-8")
 
     def fail(_path: Path) -> Path:
         raise OSError("injected relocation failure")
@@ -201,6 +295,19 @@ def test_entries_that_are_not_strings_are_dropped(tmp_path: Path) -> None:
 
     opened = Store.open(target)
     assert opened.all() == (("DP-2", "Quiet"),)
+    assert opened.fault is not None
+
+
+def test_surrogate_text_is_dropped_as_malformed_instead_of_crashing(tmp_path: Path) -> None:
+    target = tmp_path / "displays.json"
+    target.write_text(
+        '{"version": 1, "displays": {"DP-2": "\\ud800", "\\ud801": "Quiet"}}',
+        encoding="utf-8",
+    )
+
+    opened = Store.open(target)
+
+    assert opened.all() == ()
     assert opened.fault is not None
 
 

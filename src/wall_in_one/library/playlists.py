@@ -630,6 +630,28 @@ class Store:
         store._fault = fault
         return store
 
+    def worker_copy(self, *, rebase: bool = False) -> Store:
+        """Return a detached copy, optionally reading disk on its worker.
+
+        An unopened, directly constructed Store may intentionally seed an
+        absent file, so that value is retained until a file has existed.  An
+        opened Store instead treats absence as the current durable snapshot.
+        """
+        target = self._path if self._path is not None else state_path()
+        if rebase:
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                if self._loaded:
+                    return type(self).open(target)
+            except OSError:
+                return type(self).open(target)
+            else:
+                return type(self).open(target)
+        copied = type(self)(self._playlists, target, _loaded=self._loaded)
+        copied._fault = self._fault
+        return copied
+
     @property
     def fault(self) -> str | None:
         return self._fault
@@ -922,6 +944,25 @@ class Store:
 
         return self._mutate(move)
 
+    def move_entry_relative(self, identifier: str, entry: str, step: int) -> Playlist:
+        """Move from the latest durable position by one captured gesture step."""
+
+        def move(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            current = self._find_in(authored, identifier)
+            entry_ids = tuple(candidate.id for candidate in current.entries)
+            try:
+                position = entry_ids.index(entry)
+            except ValueError as error:
+                raise PlaylistError(
+                    "no-such-entry", f"playlist {current.name!r} has no entry {entry!r}"
+                ) from error
+            target = min(max(position + step, 0), len(entry_ids) - 1)
+            updated = current.moved(entry, target)
+            authored[updated.id] = updated
+            return updated, target != position
+
+        return self._mutate(move)
+
     def forget_path(self, path: Path) -> bool:
         """Drop every entry naming ``path``, across every playlist.
 
@@ -940,6 +981,28 @@ class Store:
             return changed, changed
 
         return self._mutate(forget)
+
+    def adopt_worker_forget_path(self, path: Path) -> bool:
+        """Mirror a durable cleanup while preserving unrelated live edits."""
+        source = str(path)
+        changed = False
+        for identifier, playlist in tuple(self._playlists.items()):
+            kept = tuple(entry for entry in playlist.entries if entry.source != source)
+            if len(kept) == len(playlist.entries):
+                continue
+            self._playlists[identifier] = replace(playlist, entries=kept)
+            changed = True
+        self._fault = None
+        self._loaded = True
+        return changed
+
+    def adopt_worker_repair(self, expected: str) -> bool:
+        """Clear only the same fault a detached worker proved repaired."""
+        if self._fault != expected:
+            return False
+        self._fault = None
+        self._loaded = True
+        return True
 
     def _mutate(
         self,

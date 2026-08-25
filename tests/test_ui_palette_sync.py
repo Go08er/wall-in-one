@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -19,11 +20,14 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from wall_in_one import paths  # noqa: E402
-from wall_in_one.theme import source  # noqa: E402
+from wall_in_one.control import server  # noqa: E402
+from wall_in_one.control.protocol import Response  # noqa: E402
+from wall_in_one.theme import noctalia, source  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
     APPLICATION_STYLE_PRIORITY,
     PALETTE_RELOAD_DEBOUNCE_MS,
     Application,
+    _Commands,
 )
 
 
@@ -41,6 +45,7 @@ def application() -> Iterator[Application]:
     instance = Application()
     yield instance
     instance._stop_palette_monitor()
+    instance._shutdown_theme_jobs(wait=True)
     instance._stills.shutdown()
     instance._session.shutdown()
 
@@ -68,6 +73,14 @@ def _spin_for(seconds: float) -> None:
     while time.monotonic() < deadline:
         context.iteration(False)
         time.sleep(0.005)
+
+
+def _resolved(detail: str) -> source.ResolvedPalette:
+    return source.ResolvedPalette(
+        palette=source.fallback_palette(),
+        origin=source.Origin.GENERATED,
+        detail=detail,
+    )
 
 
 def test_application_palette_wins_over_the_startup_user_stylesheet() -> None:
@@ -115,3 +128,244 @@ def test_rapid_atomic_palette_replacements_are_debounced(
     assert _spin_until(lambda: len(calls) == 1)
     _spin_for(PALETTE_RELOAD_DEBOUNCE_MS / 1000 * 3)
     assert len(calls) == 1
+
+
+def test_a_blocked_noctalia_resolution_does_not_stop_the_gtk_heartbeat(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    pulses = 0
+
+    def blocked(**_arguments: object) -> source.ResolvedPalette:
+        started.set()
+        assert release.wait(2.0)
+        return _resolved("worker result")
+
+    def heartbeat() -> bool:
+        nonlocal pulses
+        pulses += 1
+        return GLib.SOURCE_CONTINUE
+
+    monkeypatch.setattr(source, "resolve", blocked)
+    heartbeat_source = GLib.timeout_add(5, heartbeat)
+    try:
+        before = time.monotonic()
+        application.reload_palette()
+        assert time.monotonic() - before < 0.05
+        assert _spin_until(started.is_set)
+        _spin_for(0.08)
+        assert pulses >= 5
+    finally:
+        release.set()
+        GLib.source_remove(heartbeat_source)
+    assert _spin_until(
+        lambda: (
+            application.resolved_palette is not None
+            and application.resolved_palette.detail == "worker result"
+        )
+    )
+
+
+def test_a_newer_reload_suppresses_a_stale_worker_result(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    applied: list[str] = []
+
+    def resolve(*, scheme: str, **_arguments: object) -> source.ResolvedPalette:
+        if scheme == "vibrant":
+            started.set()
+            assert release.wait(2.0)
+        return _resolved(scheme)
+
+    monkeypatch.setattr(source, "resolve", resolve)
+    monkeypatch.setattr(
+        application,
+        "_apply_stylesheet",
+        lambda resolved: applied.append(resolved.detail),
+    )
+    application._resolved = _resolved("previous")
+    application._settings = replace(application.settings, preview_scheme="vibrant")
+    application.reload_palette()
+    assert _spin_until(started.is_set)
+
+    application._settings = replace(application.settings, preview_scheme="soft")
+    application.reload_palette()
+    release.set()
+
+    assert _spin_until(
+        lambda: (
+            application.resolved_palette is not None
+            and application.resolved_palette.detail == "soft"
+        )
+    )
+    assert applied == ["soft"]
+
+
+def test_an_explicit_choice_runs_before_a_pending_reload(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    def resolve(*, scheme: str, **_arguments: object) -> source.ResolvedPalette:
+        order.append(f"resolve {scheme}")
+        if scheme == "vibrant":
+            started.set()
+            assert release.wait(2.0)
+        return _resolved(scheme)
+
+    def message(
+        command: str,
+        palette_source: str,
+        name: str,
+        **_keywords: object,
+    ) -> str:
+        order.append(f"{command} {palette_source} {name}")
+        return ""
+
+    monkeypatch.setattr(source, "resolve", resolve)
+    monkeypatch.setattr(noctalia, "message", message)
+    application._settings = replace(application.settings, preview_scheme="vibrant")
+    application.reload_palette()
+    assert _spin_until(started.is_set)
+
+    application._settings = replace(application.settings, preview_scheme="soft")
+    application.reload_palette()
+    application.apply_noctalia_palette_async("custom", "Mine")
+    release.set()
+
+    assert _spin_until(lambda: order[-1:] == ["resolve soft"])
+    assert order == [
+        "resolve vibrant",
+        "color-scheme-set custom Mine",
+        "resolve soft",
+    ]
+
+
+def test_queued_palette_choices_coalesce_and_stale_callbacks_do_not_land(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    selected: list[str] = []
+    callbacks: list[str] = []
+
+    def message(
+        _command: str,
+        _palette_source: str,
+        name: str,
+        **_keywords: object,
+    ) -> str:
+        selected.append(name)
+        if name == "First":
+            started.set()
+            assert release.wait(2.0)
+        return ""
+
+    monkeypatch.setattr(noctalia, "message", message)
+    application._settings = replace(application.settings, follow_noctalia_palette=False)
+    application.apply_noctalia_palette_async(
+        "custom", "First", on_complete=lambda _error: callbacks.append("First")
+    )
+    assert _spin_until(started.is_set)
+    application.apply_noctalia_palette_async(
+        "custom", "Second", on_complete=lambda _error: callbacks.append("Second")
+    )
+    application.apply_noctalia_palette_async(
+        "custom", "Newest", on_complete=lambda _error: callbacks.append("Newest")
+    )
+    release.set()
+
+    assert _spin_until(lambda: callbacks == ["Newest"])
+    assert selected == ["First", "Newest"]
+
+
+def test_noctalia_action_failure_is_delivered_on_gtk(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gtk_thread = threading.get_ident()
+    landed: list[tuple[int, str]] = []
+
+    def fail(*_arguments: str, **_keywords: object) -> str:
+        raise noctalia.NoctaliaError("shell rejected the palette")
+
+    monkeypatch.setattr(noctalia, "message", fail)
+    application._settings = replace(application.settings, follow_noctalia_palette=False)
+    application.apply_noctalia_palette_async(
+        "custom",
+        "Broken",
+        on_complete=lambda error: landed.append((threading.get_ident(), error)),
+    )
+
+    assert _spin_until(lambda: bool(landed))
+    assert landed == [(gtk_thread, "shell rejected the palette")]
+
+
+def test_palette_worker_failures_are_reported_and_answer_deferred_control(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports: list[str] = []
+    replies: list[Response] = []
+    application._resolved = _resolved("last known good")
+    monkeypatch.setattr(application, "window_report", reports.append)
+    monkeypatch.setattr(
+        source,
+        "resolve",
+        lambda **_arguments: (_ for _ in ()).throw(RuntimeError("generator exploded")),
+    )
+
+    outcome = _Commands(application).reload_palette()
+    assert isinstance(outcome, server.Deferred)
+    outcome.start(replies.append)
+
+    assert _spin_until(lambda: bool(replies))
+    assert not replies[0].ok
+    assert "generator exploded" in replies[0].message
+    assert reports == ["Palette reload failed; keeping current colours: generator exploded"]
+    assert application.resolved_palette is not None
+    assert application.resolved_palette.detail == "last known good"
+
+
+def test_shutdown_invalidates_a_late_palette_delivery(
+    application: Application,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    applied: list[str] = []
+    callbacks: list[str] = []
+    application._resolved = _resolved("last known good")
+
+    def blocked(**_arguments: object) -> source.ResolvedPalette:
+        started.set()
+        assert release.wait(2.0)
+        return _resolved("too late")
+
+    monkeypatch.setattr(source, "resolve", blocked)
+    monkeypatch.setattr(
+        application,
+        "_apply_stylesheet",
+        lambda resolved: applied.append(resolved.detail),
+    )
+    application.reload_palette(lambda _resolved, _error: callbacks.append("landed"))
+    assert _spin_until(started.is_set)
+
+    application._shutdown_theme_jobs()
+    release.set()
+    assert _spin_until(lambda: not application._theme_draining)
+    _spin_for(0.03)
+
+    assert applied == []
+    assert callbacks == []
+    assert application.resolved_palette is not None
+    assert application.resolved_palette.detail == "last known good"

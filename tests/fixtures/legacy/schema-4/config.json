@@ -1,0 +1,44 @@
+{
+  "schema_version": 4,
+  "gestures": {
+    "left": "hub_open",
+    "middle": "playback_toggle",
+    "right": "native_next"
+  },
+  "pairings": {
+    "schema-four-profile": {
+      "id": "schema-four-profile",
+      "label": "Schema 4 video",
+      "media": {"kind": "video", "source": "/legacy/schema-4.mp4"},
+      "still": {"mode": "selected", "path": "/legacy/schema-4-still.png"},
+      "theme": {"mode": "dark", "source": "wallpaper", "selection": "m3-content"},
+      "customized": true
+    }
+  },
+  "playlists": {
+    "schema-four": {
+      "name": "Schema Four",
+      "order": "rotate",
+      "interval_seconds": 84,
+      "quick_choice": false,
+      "entries": [
+        {
+          "id": "schema-four-entry",
+          "pairing_id": "schema-four-profile",
+          "label": "Schema 4 video",
+          "media": {"kind": "video", "source": "/legacy/schema-4.mp4"},
+          "still": {"mode": "selected", "path": "/legacy/schema-4-still.png"},
+          "theme": {"mode": "dark", "source": "wallpaper", "selection": "m3-content"},
+          "customized": true
+        }
+      ]
+    }
+  },
+  "outputs": {
+    "eDP-1": {
+      "fallback_playlist": "schema-four",
+      "quick_choice_playlist": "",
+      "schedules": []
+    }
+  }
+}

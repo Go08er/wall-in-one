@@ -26,7 +26,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
-from wall_in_one import browse, thumbnails
+from wall_in_one import browse, thumbnails, worker_processes
 from wall_in_one.browse import Browser, Downloaded
 from wall_in_one.library import workshop
 from wall_in_one.library.model import Kind
@@ -153,6 +153,7 @@ class PreviewLoader:
         self._max_workers = max_workers
         self._max_cache_entries = max_cache_entries
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="preview")
+        self._processes = worker_processes.Cancellation()
         self._cache: OrderedDict[str, bytes] = OrderedDict()
         self._waiting: dict[str, tuple[float, int, WallpaperCandidate, PreviewCallback]] = {}
         self._active: set[str] = set()
@@ -227,7 +228,7 @@ class PreviewLoader:
             return b""
         # Decoding here rather than on the main thread: MotionBGS serves webp,
         # which means an ffmpeg call this closure's GdkPixbuf cannot avoid.
-        displayable = thumbnails.to_displayable(data)
+        displayable = thumbnails.to_displayable(data, processes=self._processes)
         # Cached after transcoding, so a webp preview costs one ffmpeg run
         # ever rather than one per session.
         thumbnails.store_preview(url, displayable)
@@ -267,6 +268,7 @@ class PreviewLoader:
             self._waiting.clear()
             self._active.clear()
             self._cache.clear()
+        self._processes.cancel()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 
@@ -476,6 +478,13 @@ class BrowseDialog(Adw.Dialog):
         # search, and two searches at once would only fight over the cache.
         self._searches = ThreadPoolExecutor(max_workers=1, thread_name_prefix="search")
         self._downloads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="download")
+        # Detail views share one small lane.  A dialog used to create its own
+        # executor, so opening a run of candidates could leave one provider
+        # request and one OS thread per window alive until every request
+        # timed out.  Two workers keep a slow provider from making the next
+        # detail feel dead without allowing unbounded request/thread growth.
+        self._details = ThreadPoolExecutor(max_workers=2, thread_name_prefix="detail")
+        self._detail_processes = worker_processes.Cancellation()
         self._infos = self._browser.available
         #: Only the current explicit page.  Keeping this list bounded is the
         #: memory contract: `_CandidateCard` owns several GTK widgets and a
@@ -667,7 +676,16 @@ class BrowseDialog(Adw.Dialog):
 
     def _build_search_bar(self) -> Gtk.Widget:
         area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # Provider names, the text field and the labelled Search action all
+        # grow with large-text accessibility.  A fixed horizontal box made
+        # the last controls disappear at narrow window sizes even though the
+        # results themselves already adapt.  Wrap whole controls so every
+        # action stays reachable without introducing a horizontal scrollbar.
+        bar = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        bar.set_child_spacing(6)
+        bar.set_line_spacing(6)
+        bar.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._search_controls = bar
         bar.set_margin_top(6)
         bar.set_margin_bottom(6)
         bar.set_margin_start(12)
@@ -817,7 +835,15 @@ class BrowseDialog(Adw.Dialog):
 
     def _build_pager(self) -> Gtk.Widget:
         """A real bounded pager plus count, batch state, and loading hint."""
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # Batch controls appear only after selection, so this row can grow by
+        # three widgets after the page has already been allocated.  Wrapping
+        # makes that transition honest at 800 px and under large text instead
+        # of clipping Clear/Download beyond the right edge.
+        bar = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        bar.set_child_spacing(6)
+        bar.set_line_spacing(6)
+        bar.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._pager = bar
         bar.set_margin_top(6)
         bar.set_margin_bottom(6)
         bar.set_margin_start(12)
@@ -1070,7 +1096,7 @@ class BrowseDialog(Adw.Dialog):
         of results to show. They differ only in whether what is already on
         screen survives.
         """
-        if page < 1:
+        if self._closed or page < 1:
             return
         current_fingerprint = (self.provider_name, self._read_filters())
         if self._searching:
@@ -1099,6 +1125,14 @@ class BrowseDialog(Adw.Dialog):
         name = self.provider_name
         fingerprint = (name, self._read_filters())
         generation = self._search_generation
+        if not append:
+            # Submission is the lifecycle boundary for a result selection.
+            # Waiting until a successful answer to clear it leaves a failed
+            # new search showing an error page with an actionable Download
+            # button for invisible candidates from the previous query.
+            self._clear()
+            self._summary.set_label("")
+            self._more.set_label("")
         self._active_search_generation = generation
         self._active_search_fingerprint = fingerprint
         self._searching = True
@@ -1421,6 +1455,8 @@ class BrowseDialog(Adw.Dialog):
             self._browser,
             candidate,
             self._on_download,
+            executor=self._details,
+            processes=self._detail_processes,
             held=self._browser.owned.holds(candidate),
         )
         self._detail_dialogs[key] = detail
@@ -1436,6 +1472,10 @@ class BrowseDialog(Adw.Dialog):
         detail.present(self._presentation_parent)
 
     def _on_download(self, candidate: WallpaperCandidate, variant: str = "") -> None:
+        if self._closed:
+            return
+        if not self._app.require_authoring_ready():
+            return
         key = _candidate_key(candidate)
         if key in self._downloads_in_flight:
             self.report(f"{candidate.title or candidate.identifier} is already downloading")
@@ -1518,11 +1558,17 @@ class BrowseDialog(Adw.Dialog):
 
     def _on_closed(self, _dialog: Adw.Dialog) -> None:
         self._closed = True
+        for detail in tuple(self._detail_dialogs.values()):
+            detail.cancel_pending()
+        self._detail_dialogs.clear()
+        self._browser.shutdown()
         self._loader.shutdown()
+        self._detail_processes.cancel()
         self._searches.shutdown(wait=False, cancel_futures=True)
-        # Not cancelling in flight downloads: the provider writes to a temp
-        # name and renames, so an interrupted one leaves nothing behind, and a
-        # finished one is already in the library.
+        self._details.shutdown(wait=False, cancel_futures=True)
+        # Closing the shared transport wakes active transfers. Providers stage
+        # under a private dot-name and only publish after validation, so a
+        # cancelled transfer leaves no half-wallpaper in the library.
         self._downloads.shutdown(wait=False, cancel_futures=True)
 
 
@@ -1719,6 +1765,8 @@ class DetailDialog(Adw.Dialog):
         candidate: WallpaperCandidate,
         on_download: Callable[[WallpaperCandidate, str], None],
         *,
+        executor: ThreadPoolExecutor | None = None,
+        processes: worker_processes.Cancellation | None = None,
         held: bool = False,
     ) -> None:
         super().__init__()
@@ -1728,7 +1776,16 @@ class DetailDialog(Adw.Dialog):
         self._held = held
         self._closed = False
         self._detail: CandidateDetail | None = None
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detail")
+        # BrowseDialog supplies its one shared bounded detail lane.  Keeping a
+        # private fallback makes the widget independently testable without
+        # restoring the production one-dialog/one-thread design.
+        self._pool = executor or ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="detail-standalone"
+        )
+        self._owns_pool = executor is None
+        self._processes = processes or worker_processes.Cancellation()
+        self._owns_processes = processes is None
+        self._future: Future[tuple[CandidateDetail, bytes]] | None = None
         self.connect("closed", self._on_closed)
 
         self.set_title(candidate.title or candidate.identifier)
@@ -1824,14 +1881,19 @@ class DetailDialog(Adw.Dialog):
             if cached:
                 return detail, cached
             picture = self._browser.preview(url)
-            displayable = thumbnails.to_displayable(picture) if picture else b""
+            displayable = (
+                thumbnails.to_displayable(picture, processes=self._processes) if picture else b""
+            )
             thumbnails.store_preview(url, displayable)
             return detail, displayable
 
         future = self._pool.submit(work)
+        self._future = future
         future.add_done_callback(self._deliver)
 
     def _deliver(self, future: Future[tuple[CandidateDetail, bytes]]) -> None:
+        if self._future is future:
+            self._future = None
         try:
             detail, picture = future.result()
         except ProviderError as error:
@@ -1922,5 +1984,16 @@ class DetailDialog(Adw.Dialog):
         self._download.set_label("Downloading…" if busy else "Download")
 
     def _on_closed(self, _dialog: Adw.Dialog) -> None:
+        self.cancel_pending()
+
+    def cancel_pending(self) -> None:
+        """Stop this view receiving a queued/running detail result."""
         self._closed = True
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        future = self._future
+        self._future = None
+        if future is not None:
+            future.cancel()
+        if self._owns_processes:
+            self._processes.cancel()
+        if self._owns_pool:
+            self._pool.shutdown(wait=False, cancel_futures=True)

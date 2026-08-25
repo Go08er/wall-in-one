@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import http
 from wall_in_one.providers.base import Provider, ProviderError
@@ -177,10 +177,12 @@ def _key_from_file(path: Path) -> tuple[str, str]:
                 f"it is larger than {MAX_KEY_FILE_BYTES} bytes",
                 f"a key file holds one line, so remove {path} and save the key again",
             )
-        raw = path.read_bytes()
+        raw = file_io.read_regular_bytes(path, MAX_KEY_FILE_BYTES)
     except OSError:
         # Absent, or in a directory we cannot even look into. Neither is
         # something to explain: there is no file we can claim to be ignoring.
+        return "", ""
+    if raw is None:
         return "", ""
     if not raw.strip():
         # An empty file is a key that was never stored, not a broken one.

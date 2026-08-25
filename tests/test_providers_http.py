@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
 from pathlib import Path
 from typing import IO
@@ -112,9 +114,11 @@ class _StubOpener:
     def __init__(self, result: object) -> None:
         self.result = result
         self.opened: list[urllib.request.Request] = []
+        self.timeouts: list[float | None] = []
 
     def open(self, request: urllib.request.Request, timeout: float | None = None) -> object:
         self.opened.append(request)
+        self.timeouts.append(timeout)
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
@@ -159,6 +163,81 @@ def test_the_client_sends_its_headers_and_reads_the_body() -> None:
     sent = opener.opened[0]
     assert sent.get_header("X-api-key") == "secret"
     assert sent.get_header("User-agent") == http.USER_AGENT
+    assert opener.timeouts == [5.0]
+
+
+def test_a_media_request_keeps_its_body_deadline_but_bounds_connect() -> None:
+    client, opener = _client(_Fixed(b"ok", 200, {}, "https://a.test/"))
+
+    assert (
+        client.fetch(
+            http.Request(url="https://a.test/", accept="*/*", timeout=300.0, max_bytes=64)
+        ).body
+        == b"ok"
+    )
+
+    assert opener.timeouts == [http.CONNECT_TIMEOUT_SECONDS]
+
+
+def test_close_wakes_an_active_response_reader() -> None:
+    entered = threading.Event()
+    released = threading.Event()
+
+    class Blocking(_Fixed):
+        def read(self, size: int | None = -1, /) -> bytes:
+            entered.set()
+            released.wait(timeout=2)
+            if self.closed:
+                raise OSError("response closed")
+            return super().read(size)
+
+        def close(self) -> None:
+            released.set()
+            super().close()
+
+    client, _opener = _client(Blocking(b"body", 200, {}, "https://a.test/"))
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(
+        client.fetch,
+        http.Request(url="https://a.test/", accept="*/*", timeout=300.0, max_bytes=64),
+    )
+    assert entered.wait(1)
+
+    started = time.monotonic()
+    client.close()
+    with pytest.raises(ProviderError):
+        future.result(timeout=1)
+    elapsed = time.monotonic() - started
+    pool.shutdown(wait=True, cancel_futures=True)
+
+    assert elapsed < 1.0
+    assert client.cancelled()
+
+
+def test_close_refuses_a_race_late_request_before_opening() -> None:
+    client, opener = _client(_Fixed(b"body", 200, {}, "https://a.test/"))
+    client.close()
+
+    with pytest.raises(ProviderError, match="cancelled") as caught:
+        client.fetch(http.Request(url="https://a.test/", accept="*/*", timeout=300.0, max_bytes=64))
+
+    assert caught.value.kind == "cancelled"
+    assert opener.opened == []
+
+
+def test_a_finished_transfer_retains_the_real_client_shutdown_probe(tmp_path: Path) -> None:
+    """Post-transfer validators can still observe close after the socket is gone."""
+    client, _ = _client(_Fixed(b"payload", 200, {}, "https://a.test/f"))
+    transfer = client.download(
+        http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=64),
+        tmp_path,
+    )
+    probe = base.optional_cancellation_probe(client)
+
+    assert probe is not None and not probe()
+    client.close()
+    assert probe()
+    transfer.discard()
 
 
 def test_a_redirect_is_reported_rather_than_followed() -> None:
@@ -205,6 +284,26 @@ def test_an_oversized_download_leaves_no_file_behind(tmp_path: Path) -> None:
         )
     assert caught.value.kind == "size-limit"
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_staging_creation_failure_releases_the_registered_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stream = _Fixed(b"payload", 200, {}, "https://a.test/f")
+    client, _ = _client(stream)
+    monkeypatch.setattr(
+        "wall_in_one.providers.http.tempfile.mkstemp",
+        lambda **_keywords: (_ for _ in ()).throw(OSError("disk refused staging")),
+    )
+
+    with pytest.raises(OSError, match="disk refused staging"):
+        client.download(
+            http.Request(url="https://a.test/f", accept="*/*", timeout=5.0, max_bytes=1024),
+            tmp_path,
+        )
+
+    assert stream.closed
+    assert client._active == {}
 
 
 def test_a_download_stages_into_the_directory_it_was_given(tmp_path: Path) -> None:

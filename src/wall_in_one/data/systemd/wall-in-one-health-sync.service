@@ -1,0 +1,14 @@
+[Unit]
+Description=Persist Wall-in-One runtime wallpaper health
+PartOf=wall-in-one.service
+After=wall-in-one.service
+
+[Service]
+Type=oneshot
+ExecStart=wall-in-one --sync-runtime-health
+# Exit 3 means the runtime disappeared before this best-effort poll. That is
+# expected during session transitions and must not leave a failed user unit.
+SuccessExitStatus=3
+# A no-change sync prints a useful interactive line, but at timer cadence it is
+# journal noise. Errors remain visible on stderr.
+StandardOutput=null

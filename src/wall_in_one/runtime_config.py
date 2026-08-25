@@ -28,6 +28,7 @@ from wall_in_one import config, file_io, paths
 from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
+from wall_in_one.wallpaper import scenes
 
 SCHEMA_VERSION: Final = 4
 FALLBACK_PLAYLIST_ID: Final = "all-media"
@@ -278,7 +279,7 @@ def _validate_status_budget(document_without_generation: str) -> None:
     """
     try:
         decoded = tomllib.loads(document_without_generation)
-    except tomllib.TOMLDecodeError as error:  # pragma: no cover - compiler invariant
+    except (tomllib.TOMLDecodeError, RecursionError) as error:  # pragma: no cover
         raise RuntimeConfigError(
             f"cannot parse generated runtime configuration: {error}"
         ) from error
@@ -379,7 +380,7 @@ def document_generation(document: str) -> str:
     """Return a strictly validated generation token from compiled TOML bytes."""
     try:
         decoded = tomllib.loads(document)
-    except tomllib.TOMLDecodeError as error:
+    except (tomllib.TOMLDecodeError, RecursionError) as error:
         raise RuntimeConfigError(f"cannot parse runtime configuration: {error}") from error
     generation = decoded.get("config_generation")
     if (
@@ -534,6 +535,10 @@ def _validate_settings_wire(settings: config.Settings) -> None:
         raise RuntimeConfigError("video hidden policy is not supported by the runtime")
     if settings.video_interpolation not in ("off", "oversample", "linear"):
         raise RuntimeConfigError("video interpolation mode is not supported by the runtime")
+    if settings.scene_scaling not in scenes.SCALING_CHOICES:
+        raise RuntimeConfigError("scene scaling mode is not supported by the runtime")
+    if settings.scene_clamp not in scenes.CLAMP_CHOICES:
+        raise RuntimeConfigError("scene clamp mode is not supported by the runtime")
     if settings.display_mode not in config.DISPLAY_MODES:
         raise RuntimeConfigError("display mode is not supported by the runtime")
     _bounded_text(
@@ -680,8 +685,8 @@ def render(settings: config.Settings, session: Session) -> str:
         "scene_muted = true",
         "scene_volume = 0",
         "scene_pause_when_covered = true",
-        'scene_scaling = ""',
-        'scene_clamp = ""',
+        f"scene_scaling = {_quote(settings.scene_scaling)}",
+        f"scene_clamp = {_quote(settings.scene_clamp)}",
     ]
 
     for playlist_id, name, entries in playlists:

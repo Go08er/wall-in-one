@@ -1,0 +1,54 @@
+{
+  "schema_version": 5,
+  "gestures": {
+    "left": "hub_open",
+    "middle": "playback_toggle",
+    "right": "native_next"
+  },
+  "pairings": {},
+  "playlists": {
+    "schema-five": {
+      "name": "Schema Five",
+      "order": "shuffle",
+      "interval_seconds": 95,
+      "quick_choice": true,
+      "entries": [
+        {
+          "id": "schema-five-entry",
+          "label": "Schema 5 still",
+          "media": null,
+          "still": {"mode": "selected", "path": "/legacy/schema-5.png"},
+          "theme": {"mode": "light", "source": "wallpaper", "selection": "m3-content"},
+          "customized": false
+        }
+      ]
+    }
+  },
+  "outputs": {
+    "eDP-1": {
+      "fallback_playlist": "schema-five",
+      "quick_choice_playlist": "schema-five",
+      "schedules": [],
+      "engines": {
+        "layer": "bottom",
+        "video": {
+          "enabled": true,
+          "mute": true,
+          "hardware_decode": true,
+          "auto_pause": true,
+          "auto_pause_mode": "FULL",
+          "options": ""
+        },
+        "workshop": {
+          "enabled": true,
+          "fps": 30,
+          "volume": 0,
+          "silent": true,
+          "scaling": "fill",
+          "clamp": "border",
+          "flags": {}
+        }
+      }
+    }
+  }
+}

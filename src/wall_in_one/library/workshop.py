@@ -178,7 +178,7 @@ def _read_project(directory: Path) -> WorkshopItem | None:
         return None
     try:
         document = json.loads(raw)
-    except ValueError:
+    except ValueError, RecursionError:
         return None
     if not isinstance(document, dict):
         return None

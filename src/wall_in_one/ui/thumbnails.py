@@ -24,6 +24,7 @@ This module only decides *when* to ask it, and on which thread.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -37,7 +38,7 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gdk, GLib
 
-from wall_in_one import thumbnails
+from wall_in_one import thumbnails, worker_processes
 from wall_in_one.library.model import MediaItem
 
 #: Enough to keep a few cores busy without turning a library refresh into a
@@ -45,6 +46,7 @@ from wall_in_one.library.model import MediaItem
 MAX_WORKERS: Final = 4
 
 Callback = Callable[[MediaItem, Gdk.Texture | None], None]
+LOGGER = logging.getLogger(__name__)
 
 
 class ThumbnailLoader:
@@ -56,12 +58,22 @@ class ThumbnailLoader:
         self._waiters: dict[Path, list[Callback]] = {}
         self._lock = Lock()
         self._closed = False
+        self._processes = worker_processes.Cancellation()
         # Bound the cache once at startup, on the pool rather than here. A user
         # who moves their wallpaper collection elsewhere generates nothing new,
         # so without this the thumbnails of a library they no longer own would
         # sit in `~/.cache` forever -- which is exactly what the plugin this
         # app replaces did.
-        self._pool.submit(thumbnails.prune)
+        maintenance = self._pool.submit(thumbnails.prune)
+        maintenance.add_done_callback(self._finish_maintenance)
+
+    @staticmethod
+    def _finish_maintenance(future: Future[int]) -> None:
+        """Observe startup maintenance failures without taking down the UI."""
+        try:
+            future.result()
+        except Exception as error:  # pragma: no cover - defensive worker boundary
+            LOGGER.warning("thumbnail cache pruning failed: %s", error)
 
     def request(self, item: MediaItem, callback: Callback) -> None:
         """Ask for ``item``'s thumbnail. ``callback`` runs on the main thread.
@@ -79,13 +91,16 @@ class ThumbnailLoader:
                 # consumers: every visible card still needs the result.
                 callbacks.append(callback)
                 return
-            future = self._pool.submit(self._texture_for, item)
+            future = self._pool.submit(self._texture_for, item, self._processes)
             self._pending[item.path] = future
             self._waiters[item.path] = [callback]
         future.add_done_callback(lambda done: self._finish(item, done))
 
     @staticmethod
-    def _texture_for(item: MediaItem) -> Gdk.Texture | None:
+    def _texture_for(
+        item: MediaItem,
+        processes: worker_processes.Cancellation | None = None,
+    ) -> Gdk.Texture | None:
         """Cache lookup, generation if needed, and the decode. Off-thread.
 
         `lookup` validates the entry before answering, so a thumbnail
@@ -93,7 +108,11 @@ class ThumbnailLoader:
         decode in a tile.
         """
         try:
-            path = thumbnails.lookup(item) or thumbnails.generate(item)
+            path = thumbnails.lookup(item) or (
+                thumbnails.generate(item, processes=processes)
+                if processes is not None
+                else thumbnails.generate(item)
+            )
         except thumbnails.ThumbnailError:
             # A wallpaper we cannot thumbnail is not an error worth stopping
             # for; the tile falls back to a placeholder.
@@ -106,16 +125,19 @@ class ThumbnailLoader:
             return None
 
     def _finish(self, item: MediaItem, future: Future[Gdk.Texture | None]) -> None:
+        try:
+            result = None if future.cancelled() else future.result()
+        except Exception as error:
+            # Known thumbnail/decode failures are converted to ``None`` by
+            # ``_texture_for``.  Reaching here means a programming or platform
+            # failure; retain the blank-tile fallback but leave evidence.
+            LOGGER.warning("thumbnail worker failed for %s: %s", item.path, error)
+            result = None
         with self._lock:
             self._pending.pop(item.path, None)
             callbacks = self._waiters.pop(item.path, [])
             if self._closed:
                 return
-        try:
-            result = future.result()
-        except Exception:
-            # Broad on purpose: a worker must never take the app down.
-            result = None
 
         def deliver() -> bool:
             if not self._closed:
@@ -126,11 +148,15 @@ class ThumbnailLoader:
         GLib.idle_add(deliver)
 
     def shutdown(self) -> None:
-        """Stop delivering results and let the pool drain."""
+        """Stop delivery, cancel queued work, and terminate owned children."""
         with self._lock:
             self._closed = True
+            pending = tuple(self._pending.values())
             self._pending.clear()
             self._waiters.clear()
+        self._processes.cancel()
+        for future in pending:
+            future.cancel()
         # Not waiting: an ffmpeg call can take seconds and quitting should be
         # immediate. The workers write to a temp name and rename, so a thumbnail
         # interrupted here leaves nothing half-written behind.

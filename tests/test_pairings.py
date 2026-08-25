@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one.library import pairing, pairings, state_file, stills
-from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.pairings import (
     Identity,
     Medium,
@@ -218,6 +218,69 @@ def test_a_chosen_still_that_is_not_there_falls_back_and_says_so(tmp_path: Path)
     assert bundle.override_missing
     assert bundle.customized
     assert store.get(Identity.of(item(clip, Kind.VIDEO))) is not None
+
+
+def test_accepted_resolver_uses_scan_truth_without_filesystem_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    automatic = tmp_path / "automatic.png"
+    chosen = tmp_path / "chosen.png"
+    moving = item(clip, Kind.VIDEO).with_still(automatic)
+    chosen_item = item(chosen)
+    library = Library(
+        (tmp_path,),
+        (moving, chosen_item),
+        still_inventory=(item(automatic), chosen_item),
+    )
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_still(moving, chosen)
+    store.choose_palette(moving, PalettePolicy("builtin", "Nord"))
+
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda _path: (_ for _ in ()).throw(AssertionError("GTK resolver touched disk")),
+    )
+    monkeypatch.setattr(
+        pairing,
+        "read_sidecar",
+        lambda _path: (_ for _ in ()).throw(AssertionError("GTK resolver read a sidecar")),
+    )
+
+    bundle = store.resolve_accepted(moving, library)
+    assert bundle.still == chosen
+    assert bundle.palette == PalettePolicy("builtin", "Nord")
+    assert not bundle.override_missing
+
+    missing = store.resolve_accepted(
+        moving,
+        Library((tmp_path,), (moving,), still_inventory=(item(automatic),)),
+    )
+    assert missing.still == automatic
+    assert missing.override_missing
+
+    # A migrated legacy choice may live outside today's first-class library.
+    # The accepted scan already proved it and attached it to the item, so the
+    # GTK view retains that truth without restatting the external path.
+    external = tmp_path.parent / "legacy-external.png"
+    legacy_store = Store(
+        {
+            Identity.of(moving).key: Pairing(
+                identity=Identity.of(moving),
+                still=external,
+                customized=True,
+            )
+        }
+    )
+    accepted_legacy = moving.with_still(external)
+    legacy = legacy_store.resolve_accepted(
+        accepted_legacy,
+        Library((tmp_path,), (accepted_legacy,)),
+    )
+    assert legacy.still == external
+    assert not legacy.override_missing
 
 
 def test_resetting_returns_an_item_to_the_default(tmp_path: Path) -> None:
@@ -779,6 +842,43 @@ def test_runtime_health_is_durable_without_pretending_to_be_a_customization(
     assert reopened.clear_borked(media)
     assert reopened.get(identity) is None
     assert not reopened.clear_borked(media)
+
+
+def test_delayed_runtime_health_cannot_resurrect_metadata_removed_after_validation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "pairings.json"
+    media = item(png(tmp_path / "paper.png"))
+    interactive = Store(path=target)
+    interactive.choose_palette(media, PalettePolicy("builtin", "Nord"))
+
+    worker = Store.open(target)
+    validated = dict(worker.records)
+    assert interactive.reset(media)
+
+    changed, accepted = worker.mark_borked_many_if_unchanged(
+        ((media, "renderer crashed", "automatic-apply"),),
+        validated,
+    )
+
+    assert (changed, accepted) == (0, False)
+    assert Store.open(target).get(Identity.of(media)) is None
+
+
+def test_guarded_runtime_health_commits_when_validated_pairings_are_unchanged(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "pairings.json"
+    media = item(png(tmp_path / "paper.png"))
+    worker = Store.open(target)
+
+    changed, accepted = worker.mark_borked_many_if_unchanged(
+        ((media, "renderer crashed", "automatic-apply"),),
+        dict(worker.records),
+    )
+
+    assert (changed, accepted) == (1, True)
+    assert Store.open(target).health(Identity.of(media)).is_borked
 
 
 def test_pairing_choices_and_borked_health_survive_each_other(tmp_path: Path) -> None:

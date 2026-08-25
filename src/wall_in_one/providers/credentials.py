@@ -139,6 +139,10 @@ def save_key(value: str) -> Path:
             sink.flush()
             os.fsync(sink.fileno())
         os.replace(temporary, destination)
+        # The key's bytes were synced before publication; sync the directory
+        # entry too so a successful save remains a save after an abrupt power
+        # loss rather than reverting to the previous key (or no key).
+        paths.fsync_directory(directory)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise ProviderError(
@@ -152,6 +156,7 @@ def clear_key() -> bool:
     path = key_path()
     try:
         path.unlink()
+        paths.fsync_directory(path.parent)
     except FileNotFoundError:
         return False
     except OSError as error:

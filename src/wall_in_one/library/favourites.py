@@ -266,6 +266,31 @@ class Store:
         store._fault = fault
         return store
 
+    def worker_copy(self, *, rebase: bool = False) -> Store:
+        """Return a detached Store which no caller can mutate through us.
+
+        GUI library reconciliation transfers this copy to its one I/O worker.
+        ``rebase`` is intentionally explicit because it reads the state file
+        and therefore belongs on that worker, never on GTK's main thread.
+        A directly constructed seed retains its historical absent-file
+        behaviour; an opened Store treats an absent file as an empty durable
+        snapshot.
+        """
+        target = self._path if self._path is not None else state_path()
+        if rebase:
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                if self._loaded:
+                    return type(self).open(target)
+            except OSError:
+                return type(self).open(target)
+            else:
+                return type(self).open(target)
+        copied = type(self)(self._favourites, target, _loaded=self._loaded)
+        copied._fault = self._fault
+        return copied
+
     # -- state -----------------------------------------------------------
 
     @property
@@ -376,6 +401,28 @@ class Store:
             return updated is not current, updated
 
         return self._mutate(discard)
+
+    def adopt_worker_discard(self, path: Path) -> bool:
+        """Mirror a worker-completed durable discard without another write.
+
+        This is a semantic delta, not a snapshot replacement: favourites
+        added concurrently for every other path remain in this live Store.
+        """
+        updated = self._favourites.without(path)
+        changed = updated is not self._favourites
+        self._favourites = updated
+        self._paths = updated.paths
+        self._fault = None
+        self._loaded = True
+        return changed
+
+    def adopt_worker_repair(self, expected: str) -> bool:
+        """Clear only the same fault a detached worker proved repaired."""
+        if self._fault != expected:
+            return False
+        self._fault = None
+        self._loaded = True
+        return True
 
     def toggle(self, path: Path) -> bool:
         """Flip ``path``, and answer with what it is now."""

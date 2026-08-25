@@ -14,12 +14,15 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gtk
 
 from wall_in_one import config
-from wall_in_one.library import displays, schedules
+from wall_in_one.library import schedules
 from wall_in_one.ui import runtime_truth
 
 if TYPE_CHECKING:
     from wall_in_one.session import Session
     from wall_in_one.ui.app import Application
+
+
+RULE_PAGE_SIZE = 48
 
 
 MONTH_LABELS = (
@@ -93,6 +96,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._built = False
         self._fingerprint: object = None
         self._rule_rows: list[Gtk.Widget] = []
+        self._rule_limit = RULE_PAGE_SIZE
+        self._rule_pin = ""
+        self._rule_more: Gtk.Button | None = None
         self._rule_choices: tuple[Any, ...] = ()
         self._playback_row: Adw.ComboRow | None = None
         self._playback_choices: tuple[Any, ...] = ()
@@ -347,6 +353,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
             title="Playback",
             subtitle="Pause freezes motion; Stop releases renderer resources and keeps the still",
         )
+        transport_buttons = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        transport_buttons.set_child_spacing(2)
+        transport_buttons.set_line_spacing(2)
+        transport_buttons.set_wrap_policy(Adw.WrapPolicy.NATURAL)
         for icon, tooltip, verb in (
             ("go-previous-symbolic", "Previous wallpaper", "previous"),
             ("applications-games-symbolic", "Random wallpaper", "random"),
@@ -355,37 +365,46 @@ class SchedulesPage(Gtk.ScrolledWindow):
             button = Gtk.Button(icon_name=icon, tooltip_text=tooltip)
             button.add_css_class("flat")
             button.connect("clicked", self._make_display_action(connector, verb))
-            transport.add_suffix(button)
-        play = Gtk.Button(icon_name="media-playback-pause-symbolic")
+            transport_buttons.append(button)
+        play = Gtk.Button(
+            icon_name="media-playback-pause-symbolic",
+            tooltip_text="Pause or resume this display",
+        )
         play.add_css_class("flat")
         play.connect("clicked", self._make_display_play_action(connector))
-        transport.add_suffix(play)
+        transport_buttons.append(play)
         stop = Gtk.Button(
             icon_name="media-playback-stop-symbolic",
             tooltip_text="Stop motion and release its resources",
         )
         stop.add_css_class("flat")
         stop.connect("clicked", self._make_display_action(connector, "stop"))
-        transport.add_suffix(stop)
+        transport_buttons.append(stop)
+        transport.add_suffix(transport_buttons)
         row.add_row(transport)
 
         modes = Adw.ActionRow(
             title="Rotation modes",
             subtitle="Cycle advances automatically; Shuffle changes that order",
         )
+        mode_buttons = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        mode_buttons.set_child_spacing(6)
+        mode_buttons.set_line_spacing(6)
+        mode_buttons.set_wrap_policy(Adw.WrapPolicy.NATURAL)
         shuffle = Gtk.ToggleButton(label="Shuffle")
         shuffle.connect("toggled", self._make_display_mode_changed(connector, "shuffle"))
-        modes.add_suffix(shuffle)
+        mode_buttons.append(shuffle)
         cycle = Gtk.ToggleButton(label="Cycle")
         cycle.connect("toggled", self._make_display_mode_changed(connector, "cycle"))
-        modes.add_suffix(cycle)
+        mode_buttons.append(cycle)
         mode_defaults = Gtk.Button(
             label="Use saved defaults",
             tooltip_text="Clear this display's temporary Cycle and Shuffle choices",
         )
         mode_defaults.add_css_class("flat")
         mode_defaults.connect("clicked", self._make_display_mode_defaults(connector))
-        modes.add_suffix(mode_defaults)
+        mode_buttons.append(mode_defaults)
+        modes.add_suffix(mode_buttons)
         row.add_row(modes)
         return _DisplayControls(
             row,
@@ -681,14 +700,22 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
     def _populate_rules(self, session: Session) -> None:
         self._rule_rows.clear()
+        self._rule_more = None
         names = {playlist.id: playlist.name for playlist in session.playlists.all()}
         if not session.schedules.rules:
+            self._rule_limit = RULE_PAGE_SIZE
+            self._rule_pin = ""
             empty = Adw.ActionRow(title="No scheduled overrides")
             self._rules_group.add(empty)
             self._rule_rows.append(empty)
             return
         total = len(session.schedules.rules)
+        materialised_ids = {rule.id for rule in session.schedules.rules[: self._rule_limit]}
+        if any(rule.id == self._rule_pin for rule in session.schedules.rules):
+            materialised_ids.add(self._rule_pin)
         for index, rule in enumerate(session.schedules.rules):
+            if rule.id not in materialised_ids:
+                continue
             target = rule.connector or "All displays"
             row = Adw.SwitchRow(
                 title=names.get(rule.playlist, f"Missing playlist {rule.playlist}"),
@@ -696,26 +723,55 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 active=rule.enabled,
             )
             row.connect("notify::active", self._make_enabled(rule.id))
+            actions = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+            actions.set_child_spacing(2)
+            actions.set_line_spacing(2)
+            actions.set_wrap_policy(Adw.WrapPolicy.NATURAL)
             up = Gtk.Button(icon_name="go-up-symbolic", tooltip_text="Lower priority")
             up.add_css_class("flat")
             up.set_sensitive(index > 0)
-            up.connect("clicked", self._make_move(rule.id, index - 1))
-            row.add_suffix(up)
+            up.connect("clicked", self._make_move_relative(rule.id, -1))
+            actions.append(up)
             down = Gtk.Button(icon_name="go-down-symbolic", tooltip_text="Higher priority")
             down.add_css_class("flat")
             down.set_sensitive(index + 1 < total)
-            down.connect("clicked", self._make_move(rule.id, index + 1))
-            row.add_suffix(down)
+            down.connect("clicked", self._make_move_relative(rule.id, 1))
+            actions.append(down)
             remove = Gtk.Button(icon_name="list-remove-symbolic", tooltip_text="Remove rule")
             remove.add_css_class("flat")
             remove.connect("clicked", self._make_remove(rule.id))
-            row.add_suffix(remove)
+            actions.append(remove)
             edit = Gtk.Button(icon_name="document-edit-symbolic", tooltip_text="Edit rule")
             edit.add_css_class("flat")
             edit.connect("clicked", lambda _button, chosen=rule: self._edit_rule(chosen))
-            row.add_suffix(edit)
+            actions.append(edit)
+            row.add_suffix(actions)
             self._rules_group.add(row)
             self._rule_rows.append(row)
+        remaining = max(0, total - len(materialised_ids))
+        if remaining:
+            next_limit = min(total, self._rule_limit + RULE_PAGE_SIZE)
+            amount = sum(
+                rule.id not in materialised_ids for rule in session.schedules.rules[:next_limit]
+            )
+            more_row = Adw.ActionRow(
+                title="More scheduled overrides",
+                subtitle=f"{len(materialised_ids)} of {total} shown",
+            )
+            more = Gtk.Button(label=f"Load {amount} more")
+            more.set_valign(Gtk.Align.CENTER)
+            more.connect("clicked", self._show_more_rules)
+            more_row.add_suffix(more)
+            more_row.set_activatable_widget(more)
+            self._rules_group.add(more_row)
+            self._rule_rows.append(more_row)
+            self._rule_more = more
+
+    def _show_more_rules(self, _button: Gtk.Button) -> None:
+        """Materialise one bounded rule page without changing priority."""
+        self._rule_limit += RULE_PAGE_SIZE
+        self._rule_pin = ""
+        self._refresh_rules()
 
     def _refresh_rules(self) -> None:
         session = self._session
@@ -769,8 +825,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         group.add(month_grid)
 
         group.add(self._label("Days of week (none selected means every day)"))
-        weekday_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        weekday_box.set_homogeneous(True)
+        weekday_box = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        weekday_box.set_child_spacing(6)
+        weekday_box.set_line_spacing(6)
+        weekday_box.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._weekday_box = weekday_box
         self._weekdays: list[Gtk.ToggleButton] = []
         for label in WEEKDAY_LABELS:
             button = Gtk.ToggleButton(label=label)
@@ -784,11 +843,14 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         self._time_enabled.connect("notify::active", self._time_window_changed)
         group.add(self._time_enabled)
-        self._time_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._start_hour = self._number_picker(24)
-        self._start_minute = self._number_picker(60)
-        self._end_hour = self._number_picker(24)
-        self._end_minute = self._number_picker(60)
+        self._time_box = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        self._time_box.set_child_spacing(8)
+        self._time_box.set_line_spacing(8)
+        self._time_box.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._start_hour = self._number_picker(24, "Start hour")
+        self._start_minute = self._number_picker(60, "Start minute")
+        self._end_hour = self._number_picker(24, "End hour")
+        self._end_minute = self._number_picker(60, "End minute")
         self._time_box.append(self._label("From"))
         self._time_box.append(self._start_hour)
         self._time_box.append(Gtk.Label(label=":"))
@@ -799,7 +861,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._time_box.append(self._end_minute)
         self._time_box.set_sensitive(False)
         group.add(self._time_box)
-        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        buttons = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        buttons.set_child_spacing(8)
+        buttons.set_line_spacing(8)
+        buttons.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._rule_buttons = buttons
         self._rule_commit = Gtk.Button(label="Add scheduled override")
         self._rule_commit.add_css_class("suggested-action")
         self._rule_commit.set_sensitive(bool(choices))
@@ -944,8 +1010,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
         return label
 
     @staticmethod
-    def _number_picker(limit: int) -> Gtk.DropDown:
-        return Gtk.DropDown.new_from_strings([f"{value:02d}" for value in range(limit)])
+    def _number_picker(limit: int, label: str) -> Gtk.DropDown:
+        picker = Gtk.DropDown.new_from_strings([f"{value:02d}" for value in range(limit)])
+        # The adjacent punctuation is visually compact but not a reliable
+        # accessible name. Tooltips are exposed as widget descriptions by GTK
+        # and also disambiguate the four otherwise-identical dropdowns.
+        picker.set_tooltip_text(label)
+        return picker
 
     def _time_window_changed(self, row: Adw.SwitchRow, _property: object) -> None:
         self._time_box.set_sensitive(row.get_active())
@@ -1097,15 +1168,21 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return
             index = row.get_selected()
             wanted = choices[index - 1].id if 0 < index <= len(choices) else ""
-            try:
-                self._app.update_settings(active_playlist=wanted)
-            except config.ConfigError as error:
+
+            def failed(error: str) -> None:
                 self._app.window_report(f"Default playlist was not saved; nothing changed: {error}")
                 self._fingerprint = None
                 self.refresh(self._app.session)
-                return
-            self._app.schedule_edited()
-            self._fingerprint = self._authoring_fingerprint(self._app.session)
+
+            def saved(_settings: config.Settings) -> None:
+                self._app.schedule_edited()
+                self._fingerprint = self._authoring_fingerprint(self._app.session)
+
+            self._app.update_settings_async(
+                active_playlist=wanted,
+                on_success=saved,
+                on_error=failed,
+            )
 
         return changed
 
@@ -1114,17 +1191,48 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if self._loading:
                 return
             index = row.get_selected()
-            try:
+            store = self._app.session.displays
+
+            def work() -> object:
                 if 0 < index <= len(choices):
-                    self._app.session.displays.assign(connector, choices[index - 1].id)
-                else:
-                    self._app.session.displays.unassign(connector)
-            except displays.DisplayError as error:
+                    store.assign(connector, choices[index - 1].id)
+                    return None
+                return store.unassign(connector)
+
+            def failed(error: str) -> None:
                 self._app.window_report(str(error))
-                return
-            self._app.runtime_config_changed()
-            self._app.window_report(f"Updated {connector}")
-            self._fingerprint = self._authoring_fingerprint(self._app.session)
+                # ComboRow has already adopted the clicked index. Put it back
+                # on the durable store so a failed write cannot masquerade as
+                # a saved connector assignment until the page is rebuilt.
+                current = self._app.session.displays.playlist_for(connector)
+                selected = next(
+                    (at for at, playlist in enumerate(choices, start=1) if playlist.id == current),
+                    0,
+                )
+                self._loading = True
+                try:
+                    row.set_selected(selected)
+                finally:
+                    self._loading = False
+
+            def saved(_result: object) -> None:
+                self._app.runtime_config_changed()
+                self._app.window_report(f"Updated {connector}")
+                self._fingerprint = self._authoring_fingerprint(self._app.session)
+
+            def prepare() -> Any:
+                if 0 < index <= len(choices):
+                    wanted = choices[index - 1].id
+                    if self._app.session.playlists.get(wanted) is None:
+                        raise ValueError("that playlist was deleted before the assignment saved")
+                return work
+
+            self._app.authoring_action_async(
+                work,
+                saved,
+                prepare=prepare,
+                failure=failed,
+            )
 
         return changed
 
@@ -1132,33 +1240,84 @@ class SchedulesPage(Gtk.ScrolledWindow):
         def changed(row: Adw.SwitchRow, _property: object) -> None:
             if self._loading:
                 return
-            try:
-                self._app.session.schedules.set_enabled(rule_id, row.get_active())
-            except schedules.ScheduleError as error:
+            wanted = row.get_active()
+            store = self._app.session.schedules
+
+            def failed(error: str) -> None:
                 self._app.window_report(str(error))
-                return
-            self._app.schedule_edited()
-            self._fingerprint = self._authoring_fingerprint(self._app.session)
+                current = next(
+                    (
+                        rule.enabled
+                        for rule in self._app.session.schedules.rules
+                        if rule.id == rule_id
+                    ),
+                    False,
+                )
+                self._loading = True
+                try:
+                    row.set_active(current)
+                finally:
+                    self._loading = False
+
+            def saved(_rule: schedules.Rule) -> None:
+                self._app.schedule_edited()
+                self._fingerprint = self._authoring_fingerprint(self._app.session)
+
+            self._app.authoring_action_async(
+                lambda: store.set_enabled(rule_id, wanted),
+                saved,
+                failure=failed,
+            )
 
         return changed
 
     def _make_move(self, rule_id: str, position: int) -> Any:
         def move(_button: Gtk.Button) -> None:
-            try:
-                self._app.session.schedules.move(rule_id, position)
-            except schedules.ScheduleError as error:
-                self._app.window_report(str(error))
-                return
-            self._app.schedule_edited()
-            self._refresh_rules()
+            store = self._app.session.schedules
+
+            def saved(_rule: schedules.Rule) -> None:
+                self._rule_pin = rule_id
+                self._app.schedule_edited()
+                self._refresh_rules()
+
+            self._app.authoring_action_async(
+                lambda: store.move(rule_id, position),
+                saved,
+                failure=self._app.window_report,
+            )
+
+        return move
+
+    def _make_move_relative(self, rule_id: str, step: int) -> Any:
+        def move(_button: Gtk.Button) -> None:
+            store = self._app.session.schedules
+
+            def saved(_rule: schedules.Rule) -> None:
+                self._rule_pin = rule_id
+                self._app.schedule_edited()
+                self._refresh_rules()
+
+            self._app.authoring_action_async(
+                lambda: store.move_relative(rule_id, step),
+                saved,
+                failure=self._app.window_report,
+            )
 
         return move
 
     def _make_remove(self, rule_id: str) -> Any:
         def remove(_button: Gtk.Button) -> None:
-            self._app.session.schedules.remove(rule_id)
-            self._app.schedule_edited()
-            self._refresh_rules()
+            store = self._app.session.schedules
+
+            def saved(_changed: bool) -> None:
+                self._app.schedule_edited()
+                self._refresh_rules()
+
+            self._app.authoring_action_async(
+                lambda: store.remove(rule_id),
+                saved,
+                failure=self._app.window_report,
+            )
 
         return remove
 
@@ -1172,43 +1331,59 @@ class SchedulesPage(Gtk.ScrolledWindow):
             for index, button in enumerate(self._weekdays)
             if button.get_active()
         ]
-        try:
-            start = (
-                self._clock_value(self._start_hour, self._start_minute)
-                if self._time_enabled.get_active()
-                else ""
-            )
-            end = (
-                self._clock_value(self._end_hour, self._end_minute)
-                if self._time_enabled.get_active()
-                else ""
-            )
-            if self._editing_rule:
-                self._app.session.schedules.update(
-                    self._editing_rule,
-                    choices[index].id,
+        start = (
+            self._clock_value(self._start_hour, self._start_minute)
+            if self._time_enabled.get_active()
+            else ""
+        )
+        end = (
+            self._clock_value(self._end_hour, self._end_minute)
+            if self._time_enabled.get_active()
+            else ""
+        )
+        editing = self._editing_rule
+        playlist_id = choices[index].id
+        connector = self._selected_rule_connector()
+        store = self._app.session.schedules
+
+        def work() -> schedules.Rule:
+            if editing:
+                return store.update(
+                    editing,
+                    playlist_id,
                     months=months,
                     weekdays=weekdays,
                     start=start,
                     end=end,
-                    connector=self._selected_rule_connector(),
+                    connector=connector,
                 )
-            else:
-                self._app.session.schedules.add(
-                    choices[index].id,
-                    months=months,
-                    weekdays=weekdays,
-                    start=start,
-                    end=end,
-                    connector=self._selected_rule_connector(),
-                )
-        except schedules.ScheduleError as error:
-            self._app.window_report(str(error))
-            return
-        self._editing_rule = ""
-        self._app.schedule_edited()
-        self._clear_rule_editor()
-        self._refresh_rules()
+            return store.add(
+                playlist_id,
+                months=months,
+                weekdays=weekdays,
+                start=start,
+                end=end,
+                connector=connector,
+            )
+
+        def saved(rule: schedules.Rule) -> None:
+            self._rule_pin = rule.id
+            self._editing_rule = ""
+            self._app.schedule_edited()
+            self._clear_rule_editor()
+            self._refresh_rules()
+
+        def prepare() -> Any:
+            if self._app.session.playlists.get(playlist_id) is None:
+                raise ValueError("that playlist was deleted before the schedule rule saved")
+            return work
+
+        self._app.authoring_action_async(
+            work,
+            saved,
+            prepare=prepare,
+            failure=self._app.window_report,
+        )
 
     def _edit_rule(self, rule: schedules.Rule) -> None:
         choices = self._session.playlists.all() if self._session is not None else ()
@@ -1235,6 +1410,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._end_hour.set_selected(rule.end // 60)
             self._end_minute.set_selected(rule.end % 60)
         self._editing_rule = rule.id
+        self._rule_pin = rule.id
         self._rule_commit.set_label("Save scheduled override")
         self._rule_cancel.set_visible(True)
 

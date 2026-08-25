@@ -20,6 +20,7 @@ is worth installing rather than optional.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -28,6 +29,8 @@ from typing import Final
 from wall_in_one import paths
 from wall_in_one.theme import noctalia
 from wall_in_one.theme.palette import Colour, Mode, Palette, PaletteError
+
+CancelCheck = Callable[[], bool]
 
 
 class Origin(Enum):
@@ -118,15 +121,27 @@ def from_template(path: Path | None = None) -> ResolvedPalette | None:
     )
 
 
-def from_current_wallpaper(scheme: str | None = None) -> ResolvedPalette | None:
+def from_current_wallpaper(
+    scheme: str | None = None,
+    *,
+    cancelled: CancelCheck | None = None,
+) -> ResolvedPalette | None:
     """Reproduce the palette Noctalia would derive from the live wallpaper."""
+    if cancelled is not None and cancelled():
+        return None
     try:
-        wallpaper = noctalia.current_wallpaper()
+        wallpaper = noctalia.current_wallpaper(cancelled=cancelled)
+        if cancelled is not None and cancelled():
+            return None
         if wallpaper is None or not wallpaper.is_file():
             return None
-        selection = noctalia.current_scheme_selection()
-        mode = noctalia.current_mode()
+        selection = noctalia.current_scheme_selection(cancelled=cancelled)
+        if cancelled is not None and cancelled():
+            return None
+        mode = noctalia.current_mode(cancelled=cancelled)
     except noctalia.NoctaliaError:
+        return None
+    if cancelled is not None and cancelled():
         return None
 
     # Only meaningful when Noctalia is actually deriving its palette from the
@@ -136,9 +151,13 @@ def from_current_wallpaper(scheme: str | None = None) -> ResolvedPalette | None:
         return None
 
     effective = scheme or selection.name or noctalia.DEFAULT_SCHEME
+    if cancelled is not None and cancelled():
+        return None
     try:
-        pair = noctalia.generate(wallpaper, effective)
+        pair = noctalia.generate(wallpaper, effective, cancelled=cancelled)
     except noctalia.NoctaliaError:
+        return None
+    if cancelled is not None and cancelled():
         return None
 
     return ResolvedPalette(
@@ -148,19 +167,27 @@ def from_current_wallpaper(scheme: str | None = None) -> ResolvedPalette | None:
     )
 
 
-def resolve(*, scheme: str | None = None) -> ResolvedPalette:
+def resolve(
+    *,
+    scheme: str | None = None,
+    cancelled: CancelCheck | None = None,
+) -> ResolvedPalette:
     """Best available palette. Never raises -- always returns something usable."""
+    if cancelled is not None and cancelled():
+        return fixed()
     from_file = from_template()
     if from_file is not None:
         return from_file
 
-    generated = from_current_wallpaper(scheme)
+    generated = from_current_wallpaper(scheme, cancelled=cancelled)
     if generated is not None:
         return generated
+    if cancelled is not None and cancelled():
+        return fixed()
 
     mode: Mode = "dark"
     with contextlib.suppress(noctalia.NoctaliaError):
-        mode = noctalia.current_mode()
+        mode = noctalia.current_mode(cancelled=cancelled)
 
     reason = (
         "Noctalia not available"

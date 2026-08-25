@@ -20,7 +20,6 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 from wall_in_one import config, display_policy
 from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
-from wall_in_one.providers.base import ProviderError
 from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
@@ -40,6 +39,20 @@ _INTERPOLATION_LABELS: dict[str, str] = {
     "off": "Off (source cadence)",
     "oversample": "Oversample (recommended)",
     "linear": "Linear (stronger blending)",
+}
+
+_SCALING_LABELS: dict[str, str] = {
+    "": "Renderer default",
+    "stretch": "Stretch (ignore aspect ratio)",
+    "fit": "Fit (show the whole scene)",
+    "fill": "Fill (crop to the display)",
+}
+
+_CLAMP_LABELS: dict[str, str] = {
+    "": "Renderer default",
+    "clamp": "Clamp to edge",
+    "border": "Border colour outside the scene",
+    "repeat": "Repeat texture outside the scene",
 }
 
 
@@ -165,25 +178,27 @@ class PreferencesPage(Adw.PreferencesPage):
 
     def _make_root_remover(self, root: Path) -> Any:
         def remove(_button: Gtk.Button) -> None:
-            self._set_roots(tuple(r for r in self._app.settings.roots if r != root))
+            self._set_roots(tuple(r for r in self._app.requested_settings.roots if r != root))
 
         return remove
 
     def _make_root_primary(self, root: Path) -> Any:
         def make_primary(_button: Gtk.Button) -> None:
-            roots = self._app.settings.roots
+            roots = self._app.requested_settings.roots
             self._set_roots((root, *(candidate for candidate in roots if candidate != root)))
 
         return make_primary
 
-    def _set_roots(self, roots: tuple[Path, ...]) -> None:
-        try:
-            self._app.update_settings(roots=roots)
-        except config.ConfigError as error:
+    def _set_roots(self, roots: tuple[Path, ...]) -> bool:
+        def failed(error: str) -> None:
             self.apply_settings(self._app.settings)
             self._report(f"Library folders were not saved; nothing changed: {error}")
-            return
-        self._refresh_roots()
+
+        return self._app.update_settings_async(
+            roots=roots,
+            on_success=lambda _settings: self._refresh_roots(),
+            on_error=failed,
+        )
 
     def _on_add_root(self, _button: Gtk.Button) -> None:
         dialog = Gtk.FileDialog(title="Add a wallpaper folder", modal=True)
@@ -205,11 +220,12 @@ class PreferencesPage(Adw.PreferencesPage):
             self._report("That folder is not on this machine's filesystem")
             return
         added = Path(path)
-        if added in self._app.settings.roots:
+        requested_roots = self._app.requested_settings.roots
+        if added in requested_roots:
             self._report(f"{added.name} is already in the library")
             return
-        self._set_roots((*self._app.settings.roots, added))
-        self._report(f"Scanning {added.name}")
+        if self._set_roots((*requested_roots, added)):
+            self._report(f"Scanning {added.name}")
 
     def _build_playback_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
@@ -356,6 +372,24 @@ class PreferencesPage(Adw.PreferencesPage):
         )
         self._scene_fps.connect("notify::value", self._on_changed)
         group.add(self._scene_fps)
+
+        self._scene_scaling = Adw.ComboRow(
+            title="Wallpaper Engine scaling",
+            subtitle="Global scene fit; videos keep their own Fill behavior",
+            model=Gtk.StringList.new(
+                [_SCALING_LABELS[choice] for choice in scenes.SCALING_CHOICES]
+            ),
+        )
+        self._scene_scaling.connect("notify::selected", self._on_changed)
+        group.add(self._scene_scaling)
+
+        self._scene_clamp = Adw.ComboRow(
+            title="Wallpaper Engine texture edges",
+            subtitle="Controls sampling outside a scene's texture bounds",
+            model=Gtk.StringList.new([_CLAMP_LABELS[choice] for choice in scenes.CLAMP_CHOICES]),
+        )
+        self._scene_clamp.connect("notify::selected", self._on_changed)
+        group.add(self._scene_clamp)
 
         self._when_hidden = Adw.ComboRow(
             title="When covered by a window",
@@ -525,11 +559,11 @@ class PreferencesPage(Adw.PreferencesPage):
         self._api_key_entry.connect(
             "changed", lambda _entry: self._api_key_entry.remove_css_class("error")
         )
-        save = Gtk.Button(label="Save")
-        save.set_valign(Gtk.Align.CENTER)
-        save.add_css_class("flat")
-        save.connect("clicked", self._on_save_api_key)
-        self._api_key_entry.add_suffix(save)
+        self._save_api_key = Gtk.Button(label="Save")
+        self._save_api_key.set_valign(Gtk.Align.CENTER)
+        self._save_api_key.add_css_class("flat")
+        self._save_api_key.connect("clicked", self._on_save_api_key)
+        self._api_key_entry.add_suffix(self._save_api_key)
         group.add(self._api_key_entry)
         return group
 
@@ -648,6 +682,8 @@ class PreferencesPage(Adw.PreferencesPage):
                     renderer.INTERPOLATION_CHOICES.index(settings.video_interpolation)
                 )
             self._scene_fps.set_value(settings.scene_fps)
+            self._scene_scaling.set_selected(scenes.SCALING_CHOICES.index(settings.scene_scaling))
+            self._scene_clamp.set_selected(scenes.CLAMP_CHOICES.index(settings.scene_clamp))
             if settings.video_when_hidden in renderer.WHEN_HIDDEN_CHOICES:
                 self._when_hidden.set_selected(
                     renderer.WHEN_HIDDEN_CHOICES.index(settings.video_when_hidden)
@@ -665,6 +701,8 @@ class PreferencesPage(Adw.PreferencesPage):
         scheme_index = self._scheme.get_selected()
         hidden_index = self._when_hidden.get_selected()
         interpolation_index = self._interpolation.get_selected()
+        scaling_index = self._scene_scaling.get_selected()
+        clamp_index = self._scene_clamp.get_selected()
         independent = self._display_mode.get_selected() == 1
         if independent and not self._selected_theme_connector():
             connected = self._live_theme_connectors()
@@ -696,7 +734,7 @@ class PreferencesPage(Adw.PreferencesPage):
                 finally:
                     self._loading = False
         self._theme_source.set_visible(independent)
-        changes: dict[str, object] = {
+        changes: dict[str, Any] = {
             "shuffle": self._shuffle.get_active(),
             "cycle_enabled": self._cycle.get_active(),
             "cycle_interval": int(self._interval.get_value()),
@@ -719,6 +757,12 @@ class PreferencesPage(Adw.PreferencesPage):
             if interpolation_index < len(renderer.INTERPOLATION_CHOICES)
             else renderer.DEFAULT_INTERPOLATION,
             "scene_fps": int(self._scene_fps.get_value()),
+            "scene_scaling": scenes.SCALING_CHOICES[scaling_index]
+            if scaling_index < len(scenes.SCALING_CHOICES)
+            else scenes.DEFAULT_SCALING,
+            "scene_clamp": scenes.CLAMP_CHOICES[clamp_index]
+            if clamp_index < len(scenes.CLAMP_CHOICES)
+            else scenes.DEFAULT_CLAMP,
             "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES[hidden_index]
             if hidden_index < len(renderer.WHEN_HIDDEN_CHOICES)
             else renderer.DEFAULT_WHEN_HIDDEN,
@@ -731,16 +775,16 @@ class PreferencesPage(Adw.PreferencesPage):
         # A failed write restores several widgets. Some GTK controls can emit
         # a trailing notification after that synchronous restore; do not turn
         # it into a second write attempt or a duplicate error toast.
-        if all(getattr(self._app.settings, key) == value for key, value in changes.items()):
+        if all(
+            getattr(self._app.requested_settings, key) == value for key, value in changes.items()
+        ):
             return
-        try:
-            self._app.update_settings(**changes)
-        except config.ConfigError as error:
-            # The application adopts only after a durable write. Put every
-            # control back on that last durable snapshot so a later edit cannot
-            # smuggle the rejected value into an unrelated save.
+
+        def failed(error: str) -> None:
             self.apply_settings(self._app.settings)
             self._report(f"Settings were not saved; nothing changed: {error}")
+
+        self._app.update_settings_async(on_error=failed, **changes)
 
     # -- the Wallhaven key -----------------------------------------------
 
@@ -776,38 +820,72 @@ class PreferencesPage(Adw.PreferencesPage):
         self._clear_api_key.set_sensitive(stored)
 
     def _on_save_api_key(self, _widget: Gtk.Widget) -> None:
-        try:
-            credentials.save_key(self._api_key_entry.get_text())
-        except ProviderError as error:
+        key = self._api_key_entry.get_text()
+        if not self._app.require_authoring_ready():
+            return
+        self._save_api_key.set_sensitive(False)
+
+        def saved(_path: Path) -> None:
+            self._save_api_key.set_sensitive(True)
+            self._api_key_entry.remove_css_class("error")
+            self._api_key_entry.set_text("")
+            self._refresh_api_key_status()
+            self._report("Wallhaven API key saved")
+
+        def failed(message: str) -> None:
+            self._save_api_key.set_sensitive(True)
             # Every message shown here is composed from the error's kind rather
             # than from the text the user typed, so that no path out of this
             # branch can put the key on screen or into the log.
             self._api_key_entry.add_css_class("error")
             self._report(
                 "That does not look like a Wallhaven API key"
-                if error.kind == "credential"
+                if "credential:" in message
                 else "The key could not be written to disk"
             )
-            return
-        self._api_key_entry.remove_css_class("error")
-        self._api_key_entry.set_text("")
-        self._refresh_api_key_status()
-        self._report("Wallhaven API key saved")
+
+        self._app.authoring_action_async(
+            lambda: credentials.save_key(key),
+            saved,
+            failure=failed,
+        )
 
     def _on_clear_api_key(self, _button: Gtk.Button) -> None:
-        try:
-            removed = credentials.clear_key()
-        except ProviderError:
-            self._report("The saved key could not be removed")
+        if not self._app.require_authoring_ready():
             return
-        self._refresh_api_key_status()
-        self._report("Wallhaven API key removed" if removed else "There was no saved key")
+        self._clear_api_key.set_sensitive(False)
+
+        def cleared(removed: bool) -> None:
+            self._clear_api_key.set_sensitive(True)
+            self._refresh_api_key_status()
+            self._report("Wallhaven API key removed" if removed else "There was no saved key")
+
+        def failed(_message: str) -> None:
+            self._clear_api_key.set_sensitive(True)
+            self._report("The saved key could not be removed")
+
+        self._app.authoring_action_async(
+            credentials.clear_key,
+            cleared,
+            failure=failed,
+        )
 
     def _report(self, message: str) -> None:
         self._app.window_report(message)
 
     def _on_reload_palette(self, _button: Gtk.Button) -> None:
-        self.show_palette(self._app.reload_palette())
+        self._app.reload_palette(self._on_palette_reloaded)
+
+    def _on_palette_reloaded(
+        self,
+        resolved: source.ResolvedPalette | None,
+        error: str,
+    ) -> None:
+        if error:
+            return
+        self.show_palette(resolved)
+        if resolved is not None:
+            self._report(f"Palette reloaded ({resolved.origin.value})")
 
     def show_palette(self, resolved: source.ResolvedPalette | None) -> None:
         if resolved is None:

@@ -254,7 +254,7 @@ class Renderer:
         line = reply.split(b"\n", 1)[0]
         try:
             decoded = json.loads(line)
-        except ValueError:
+        except ValueError, RecursionError:
             return None
         return decoded if isinstance(decoded, dict) else None
 

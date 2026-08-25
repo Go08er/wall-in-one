@@ -3,14 +3,13 @@
 Runs inside the GTK main loop via `Gio.SocketService`, so handlers execute on
 the main thread and can touch the UI directly without locking.
 
-That is the whole difficulty with `search` and `download`: a handler that waits
-for a website on this thread freezes every frame the app draws, for seconds or
-for minutes. So a handler may answer with a `Deferred` instead of a `Response`,
-which hands the reply to a callback later; the connection simply stays open
-until then. `ui.browse_dialog` already puts provider calls on a worker pool and
-comes back through `GLib.idle_add`, and the application's implementation of
-these verbs does exactly the same -- none of that machinery lives here, because
-this module has to stay importable and testable with no display attached.
+That is the whole difficulty with network search, downloads, and live theme
+resolution: a handler that waits on this thread freezes every frame the app
+draws. So a handler may answer with a `Deferred` instead of a `Response`, which
+hands the reply to a callback later; the connection simply stays open until
+then. The application puts each operation on its bounded worker lane and comes
+back through `GLib.idle_add`. None of that machinery lives here, because this
+module has to stay importable and testable with no display attached.
 
 The verb table is kept separate from the transport (`Commands`) so it can be
 tested without a socket or a display. The library verbs added later keep to the
@@ -27,15 +26,17 @@ in the library rather than by being believed; see `resolve`.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
+import secrets
 import socket
 import stat
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.control.protocol import (
     ENCODING,
     MAX_MESSAGE_BYTES,
@@ -48,6 +49,9 @@ from wall_in_one.library import manage, pairings, playlists
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.providers import registry
 from wall_in_one.providers.base import SearchResult
+
+if TYPE_CHECKING:
+    from gi.repository import Gio
 
 #: Handed a response, exactly once, whenever it turns up.
 Reply = Callable[[Response], None]
@@ -93,35 +97,35 @@ class Commands(Protocol):
     def next_wallpaper(self) -> Response: ...
     def previous_wallpaper(self) -> Response: ...
     def random_wallpaper(self) -> Response: ...
-    def set_shuffle(self, value: str | None) -> Response: ...
-    def set_cycle(self, value: str | None) -> Response: ...
-    def set_cycle_interval(self, value: str | None) -> Response: ...
-    def set_dynamics(self, value: str | None) -> Response: ...
-    def reload_palette(self) -> Response: ...
+    def set_shuffle(self, value: str | None) -> Outcome: ...
+    def set_cycle(self, value: str | None) -> Outcome: ...
+    def set_cycle_interval(self, value: str | None) -> Outcome: ...
+    def set_dynamics(self, value: str | None) -> Outcome: ...
+    def reload_palette(self) -> Outcome: ...
     def open_page(self, value: str | None) -> Response: ...
     def report_status(self) -> Response: ...
     def list_library(self, value: str | None) -> Response: ...
-    def select_wallpaper(self, value: str | None) -> Response: ...
+    def select_wallpaper(self, value: str | None) -> Outcome: ...
     def list_favourites(self) -> Response: ...
-    def add_favourite(self, value: str | None) -> Response: ...
-    def remove_favourite(self, value: str | None) -> Response: ...
-    def remove_wallpaper(self, value: str | None) -> Response: ...
+    def add_favourite(self, value: str | None) -> Outcome: ...
+    def remove_favourite(self, value: str | None) -> Outcome: ...
+    def remove_wallpaper(self, value: str | None) -> Outcome: ...
     def show_pairing(self, value: str | None) -> Response: ...
-    def set_still(self, value: str | None) -> Response: ...
-    def set_palette(self, value: str | None) -> Response: ...
-    def reset_pairing(self, value: str | None) -> Response: ...
+    def set_still(self, value: str | None) -> Outcome: ...
+    def set_palette(self, value: str | None) -> Outcome: ...
+    def reset_pairing(self, value: str | None) -> Outcome: ...
     def list_playlists(self, value: str | None) -> Response: ...
-    def make_playlist(self, value: str | None) -> Response: ...
-    def drop_playlist(self, value: str | None) -> Response: ...
-    def add_to_playlist(self, value: str | None) -> Response: ...
-    def remove_from_playlist(self, value: str | None) -> Response: ...
-    def use_playlist(self, value: str | None) -> Response: ...
-    def list_displays(self) -> Response: ...
-    def assign_display(self, value: str | None) -> Response: ...
-    def clear_display(self, value: str | None) -> Response: ...
+    def make_playlist(self, value: str | None) -> Outcome: ...
+    def drop_playlist(self, value: str | None) -> Outcome: ...
+    def add_to_playlist(self, value: str | None) -> Outcome: ...
+    def remove_from_playlist(self, value: str | None) -> Outcome: ...
+    def use_playlist(self, value: str | None) -> Outcome: ...
+    def list_displays(self) -> Outcome: ...
+    def assign_display(self, value: str | None) -> Outcome: ...
+    def clear_display(self, value: str | None) -> Outcome: ...
     def show_schedule(self) -> Response: ...
-    def add_schedule_rule(self, value: str | None) -> Response: ...
-    def drop_schedule_rule(self, value: str | None) -> Response: ...
+    def add_schedule_rule(self, value: str | None) -> Outcome: ...
+    def drop_schedule_rule(self, value: str | None) -> Outcome: ...
     def list_providers(self) -> Response: ...
     def search(self, value: str | None) -> Outcome: ...
     def download(self, value: str | None) -> Outcome: ...
@@ -129,7 +133,7 @@ class Commands(Protocol):
 
 
 def build_verb_table(commands: Commands) -> dict[str, Handler]:
-    return {
+    table: dict[str, Handler] = {
         "next": lambda _: commands.next_wallpaper(),
         "prev": lambda _: commands.previous_wallpaper(),
         "random": lambda _: commands.random_wallpaper(),
@@ -167,6 +171,47 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "download": commands.download,
         "quit": lambda _: commands.quit(),
     }
+    # Migration is a profile-wide transaction.  The GUI command object may
+    # therefore expose one central admission check instead of relying on each
+    # mutating handler to remember it.  Lightweight/fake Commands used by the
+    # protocol tests need no such policy and continue to work unchanged.
+    gate = getattr(commands, "authoring_gate", None)
+    if callable(gate):
+        mutating = (
+            "shuffle",
+            "cycle",
+            "cycle-interval",
+            "dynamics",
+            "select",
+            "favourite",
+            "unfavourite",
+            "remove",
+            "still",
+            "palette",
+            "reset-pairing",
+            "playlist-new",
+            "playlist-delete",
+            "playlist-add",
+            "playlist-remove",
+            "display-assign",
+            "display-clear",
+            "schedule-add",
+            "schedule-remove",
+            "download",
+        )
+        for verb in mutating:
+            handler = table[verb]
+
+            def admitted(
+                value: str | None,
+                *,
+                _handler: Handler = handler,
+            ) -> Outcome:
+                refused = gate()
+                return refused if isinstance(refused, Response) else _handler(value)
+
+            table[verb] = admitted
+    return table
 
 
 def parse_toggle(value: str | None, current: bool) -> bool:
@@ -388,6 +433,7 @@ def remove_wallpaper(
     roots: tuple[Path, ...],
     *,
     expected_source: manage.SourceIdentity | None = None,
+    operation_token: str | None = None,
 ) -> str:
     """Take one wallpaper away, and say which of the two ways it went.
 
@@ -404,7 +450,12 @@ def remove_wallpaper(
     recoverable.
     """
     if item.deletable:
-        result = manage.remove(item, roots, expected_source=expected_source)
+        result = manage.remove(
+            item,
+            roots,
+            expected_source=expected_source,
+            operation_token=operation_token,
+        )
         return f"{result.describe()} - deleted, which cannot be undone{result.cleanup_note()}"
     landed = manage.trash(item, roots, expected_source=expected_source)
     return f"{item.path.name} moved to the trash - {landed.destination}{landed.cleanup_note()}"
@@ -721,6 +772,11 @@ def dispatch(verbs: dict[str, Handler], line: bytes, reply: Reply) -> None:
 #: pretend we have one. The same ceiling, for the same reason, as
 #: `wallpaper.renderer.MAX_SOCKET_PATH_BYTES`, which found it first with mpv.
 MAX_SOCKET_PATH_BYTES: Final = 100
+READ_CHUNK_BYTES: Final = 4096
+READ_DEADLINE_MILLISECONDS: Final = 5_000
+WRITE_DEADLINE_MILLISECONDS: Final = 5_000
+MAX_ACTIVE_CONNECTIONS: Final = 8
+_QUARANTINE_ATTEMPTS: Final = 4
 
 
 class SocketServer:
@@ -734,10 +790,166 @@ class SocketServer:
         self._path = path if path is not None else paths.socket_path()
         self._service: object | None = None
         self._socket_identity: tuple[int, int] | None = None
+        self._lock_descriptor: int | None = None
+        self._lock_identity: tuple[int, int] | None = None
+        # A Deferred answer intentionally outlives the incoming callback. Keep
+        # ownership of every accepted connection through asynchronous reply
+        # delivery so application shutdown can close the client immediately
+        # rather than leave it waiting for work whose reply was invalidated.
+        self._connections: dict[int, object] = {}
+        # A client must frame its single request promptly.  Deferred work may
+        # legitimately run for minutes after that line arrives, so only the
+        # read/framing phase owns one of these GLib deadlines.
+        self._read_deadlines: dict[int, int] = {}
+        self._read_cancellables: dict[int, Gio.Cancellable] = {}
+        # A peer can also stop reading after it submits a valid request.  Keep
+        # reply delivery asynchronous and bounded so GTK never waits on its
+        # Unix-socket receive buffer.
+        self._write_deadlines: dict[int, int] = {}
+        self._write_cancellables: dict[int, Gio.Cancellable] = {}
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def lock_path(self) -> Path:
+        """The persistent inode which serialises owners of :attr:`path`."""
+        return self._path.with_name(f"{self._path.name}.lock")
+
+    @staticmethod
+    def _lock_status_is_private(status: os.stat_result) -> bool:
+        return (
+            stat.S_ISREG(status.st_mode) and status.st_uid == os.getuid() and status.st_nlink == 1
+        )
+
+    def _acquire_instance_lock(self) -> None:
+        """Take the persistent per-socket lock before inspecting the socket.
+
+        The file is deliberately never unlinked.  Unlinking an inode while a
+        process still holds its flock would let a second pathname inode carry
+        a second, independent lock.  A stable mode-0600 regular file avoids
+        that split-lock race across normal restarts.
+        """
+        if self._lock_descriptor is not None:
+            return
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.lock_path, flags, 0o600)
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot open control ownership lock {self.lock_path}: {error.strerror or error}"
+            ) from error
+        try:
+            opened = os.fstat(descriptor)
+            named = self.lock_path.lstat()
+            identity = (opened.st_dev, opened.st_ino)
+            if (
+                not self._lock_status_is_private(opened)
+                or not self._lock_status_is_private(named)
+                or (named.st_dev, named.st_ino) != identity
+            ):
+                raise RuntimeError(
+                    f"control ownership lock {self.lock_path} is not one private "
+                    "regular file owned by this user"
+                )
+            os.fchmod(descriptor, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError(
+                    f"another instance already owns control socket {self._path}"
+                ) from None
+
+            secured = os.fstat(descriptor)
+            renamed = self.lock_path.lstat()
+            if (
+                not self._lock_status_is_private(secured)
+                or not self._lock_status_is_private(renamed)
+                or stat.S_IMODE(secured.st_mode) != 0o600
+                or stat.S_IMODE(renamed.st_mode) != 0o600
+                or (secured.st_dev, secured.st_ino) != identity
+                or (renamed.st_dev, renamed.st_ino) != identity
+            ):
+                raise RuntimeError(
+                    f"control ownership lock {self.lock_path} changed while it was secured"
+                )
+        except Exception:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+            raise
+        self._lock_descriptor = descriptor
+        self._lock_identity = identity
+
+    def _release_instance_lock(self) -> None:
+        descriptor = self._lock_descriptor
+        self._lock_descriptor = None
+        self._lock_identity = None
+        if descriptor is None:
+            return
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+    def _quarantine_path(self) -> Path:
+        token = secrets.token_hex(16)
+        return self._path.with_name(f".{self._path.name}.quarantine-{token}")
+
+    def _remove_exact_socket(
+        self,
+        identity: tuple[int, int],
+        *,
+        strict: bool,
+    ) -> None:
+        """Move one proven socket out of the public name, then discard it.
+
+        `renameat2(RENAME_NOREPLACE)` is the destructive authority boundary.
+        If the public path changes after its last inspection, the helper moves
+        nothing and the replacement remains untouched.  The random private
+        name is verified once more before it is unlinked.
+        """
+        quarantine: Path | None = None
+        try:
+            for _attempt in range(_QUARANTINE_ATTEMPTS):
+                candidate = self._quarantine_path()
+                try:
+                    file_io.atomic_move_no_replace(
+                        self._path,
+                        candidate,
+                        expected_identity=identity,
+                        require_regular=False,
+                    )
+                except FileExistsError:
+                    continue
+                quarantine = candidate
+                break
+            if quarantine is None:
+                raise OSError("could not allocate an unused socket quarantine name")
+            moved = quarantine.lstat()
+            if (
+                not stat.S_ISSOCK(moved.st_mode)
+                or (
+                    moved.st_dev,
+                    moved.st_ino,
+                )
+                != identity
+            ):
+                raise file_io.PathChangedError(
+                    f"control socket {self._path} changed in quarantine",
+                    preserved_path=quarantine,
+                )
+            quarantine.unlink()
+        except FileNotFoundError:
+            # Another actor may remove an already-dead path, but no unknown
+            # replacement is ever inferred from absence.
+            return
+        except OSError as error:
+            if strict:
+                raise RuntimeError(
+                    f"cannot remove stale control socket {self._path}: {error.strerror or error}"
+                ) from error
 
     def _clear_stale_socket(self) -> None:
         """Remove a socket left behind by a crashed instance.
@@ -745,6 +957,8 @@ class SocketServer:
         Only when nothing answers on it -- a live socket means another instance
         is running and we must not steal its address.
         """
+        if self._lock_descriptor is None:
+            raise RuntimeError("control ownership lock must be held before stale cleanup")
         try:
             existing = self._path.lstat()
         except FileNotFoundError:
@@ -778,12 +992,7 @@ class SocketServer:
                 raise RuntimeError(
                     f"control path {self._path} changed while it was being checked"
                 ) from None
-            try:
-                self._path.unlink()
-            except OSError as error:
-                raise RuntimeError(
-                    f"cannot remove stale control socket {self._path}: {error.strerror or error}"
-                ) from error
+            self._remove_exact_socket(identity, strict=True)
             return
         except OSError as error:
             raise RuntimeError(
@@ -804,6 +1013,8 @@ class SocketServer:
         here instead is a wallpaper manager that will not start at all --
         which is exactly what an over-long runtime directory used to do.
         """
+        if self._service is not None:
+            return
         # Before anything is created, since past the ceiling nothing would be.
         if len(os.fsencode(self._path)) > MAX_SOCKET_PATH_BYTES:
             raise RuntimeError(
@@ -819,31 +1030,45 @@ class SocketServer:
             raise RuntimeError(
                 f"cannot create {self._path.parent}: {error.strerror or error}"
             ) from error
-        self._clear_stale_socket()
-
-        service = Gio.SocketService.new()
-        address = Gio.UnixSocketAddress.new(str(self._path))
         try:
-            service.add_address(
-                address,
-                Gio.SocketType.STREAM,
-                Gio.SocketProtocol.DEFAULT,
-                None,
-            )
-        except GLib.Error as error:
-            raise RuntimeError(f"cannot bind {self._path}: {error.message}") from error
+            self._acquire_instance_lock()
+            self._clear_stale_socket()
 
-        service.connect("incoming", self._on_incoming)
-        service.start()
-        self._service = service
-        try:
+            service = Gio.SocketService.new()
+            self._service = service
+            address = Gio.UnixSocketAddress.new(str(self._path))
+            try:
+                service.add_address(
+                    address,
+                    Gio.SocketType.STREAM,
+                    Gio.SocketProtocol.DEFAULT,
+                    None,
+                )
+            except GLib.Error as error:
+                raise RuntimeError(f"cannot bind {self._path}: {error.message}") from error
+
+            service.connect("incoming", self._on_incoming)
+            service.start()
             bound = self._path.lstat()
-            if not stat.S_ISSOCK(bound.st_mode):
+            if (
+                not stat.S_ISSOCK(bound.st_mode)
+                or bound.st_uid != os.getuid()
+                or bound.st_nlink != 1
+            ):
                 raise OSError(f"{self._path} is not the socket that was just bound")
             self._socket_identity = (bound.st_dev, bound.st_ino)
             # The socket carries control of the wallpaper; no reason for anyone
             # else on the system to reach it.
             os.chmod(self._path, 0o600)
+            secured = self._path.lstat()
+            if (
+                not stat.S_ISSOCK(secured.st_mode)
+                or secured.st_uid != os.getuid()
+                or secured.st_nlink != 1
+                or stat.S_IMODE(secured.st_mode) != 0o600
+                or (secured.st_dev, secured.st_ino) != self._socket_identity
+            ):
+                raise OSError(f"{self._path} changed while its permissions were secured")
         except OSError as error:
             # A service is already listening on a socket we could not secure.
             # Stop it and take the address back down: half-started is worse
@@ -851,70 +1076,247 @@ class SocketServer:
             # control socket while one sat there readable by the machine.
             self.stop()
             raise RuntimeError(f"cannot secure {self._path}: {error.strerror or error}") from error
+        except Exception:
+            self.stop()
+            raise
 
     def stop(self) -> None:
-        service = self._service
-        if service is not None:
-            service.stop()  # type: ignore[attr-defined]
-            self._service = None
-        identity = self._socket_identity
-        self._socket_identity = None
-        if identity is None:
-            return
         try:
-            current = self._path.lstat()
-        except FileNotFoundError:
-            return
-        except OSError:
-            # Failure to inspect is not permission to delete an unknown path.
-            return
-        if stat.S_ISSOCK(current.st_mode) and (current.st_dev, current.st_ino) == identity:
-            self._path.unlink(missing_ok=True)
+            service = self._service
+            if service is not None:
+                service.stop()  # type: ignore[attr-defined]
+                service.close()  # type: ignore[attr-defined]
+                self._service = None
+            connections = tuple(self._connections.values())
+            if connections or self._read_deadlines or self._write_deadlines:
+                from gi.repository import GLib
+
+                sources = (*self._read_deadlines.values(), *self._write_deadlines.values())
+                for source in sources:
+                    with contextlib.suppress(GLib.Error):
+                        GLib.source_remove(source)
+                self._read_deadlines.clear()
+                for cancellable in self._read_cancellables.values():
+                    cancellable.cancel()
+                self._read_cancellables.clear()
+                self._write_deadlines.clear()
+                for cancellable in self._write_cancellables.values():
+                    cancellable.cancel()
+                self._write_cancellables.clear()
+                self._connections.clear()
+                for connection in connections:
+                    with contextlib.suppress(GLib.Error):
+                        connection.close(None)  # type: ignore[attr-defined]
+            identity = self._socket_identity
+            self._socket_identity = None
+            if identity is not None:
+                self._remove_exact_socket(identity, strict=False)
+        finally:
+            self._release_instance_lock()
 
     def _on_incoming(self, _service: object, connection: object, _source: object) -> bool:
-        from gi.repository import Gio
+        from gi.repository import Gio, GLib
 
         assert isinstance(connection, Gio.SocketConnection)
-        stream = Gio.DataInputStream.new(connection.get_input_stream())
-        stream.set_close_base_stream(True)
-        stream.read_line_async(0, None, self._on_line, connection)
+        if len(self._connections) >= MAX_ACTIVE_CONNECTIONS:
+            # Tracking an async busy response would exceed the hard cap, while
+            # writing it synchronously would give a non-reader a GTK-blocking
+            # path.  An immediate close is the bounded rejection here.
+            with contextlib.suppress(GLib.Error):
+                connection.close(None)
+            return True
+        key = id(connection)
+        self._connections[key] = connection
+        self._read_cancellables[key] = Gio.Cancellable.new()
+        self._read_deadlines[key] = GLib.timeout_add(
+            READ_DEADLINE_MILLISECONDS,
+            self._on_read_deadline,
+            key,
+        )
+        self._read_request_chunk(connection.get_input_stream(), connection, bytearray())
         # True keeps the connection alive past this callback; the async read
         # owns it from here.
         return True
 
-    def _on_line(self, stream: object, result: object, connection: object) -> None:
+    def _cancel_read_deadline(self, connection: object) -> None:
+        from gi.repository import GLib
+
+        source = self._read_deadlines.pop(id(connection), None)
+        if source is not None:
+            with contextlib.suppress(GLib.Error):
+                GLib.source_remove(source)
+        cancellable = self._read_cancellables.pop(id(connection), None)
+        if cancellable is not None:
+            cancellable.cancel()
+
+    def _on_read_deadline(self, key: int) -> bool:
+        connection = self._connections.get(key)
+        # This callback is the source which is currently being dispatched; do
+        # not ask GLib to remove it a second time from `_answer`.
+        self._read_deadlines.pop(key, None)
+        if connection is not None:
+            cancellable = self._read_cancellables.pop(key, None)
+            if cancellable is not None:
+                cancellable.cancel()
+            self._answer(connection, Response.failure("request framing timed out"))
+        return False
+
+    def _finish_connection(self, connection: object, *, cancel_write: bool) -> None:
+        """Cancel its pending sources and close one still-owned connection."""
         from gi.repository import Gio, GLib
 
-        assert isinstance(stream, Gio.DataInputStream)
         assert isinstance(connection, Gio.SocketConnection)
-        try:
-            line, _length = stream.read_line_finish(result)  # type: ignore[arg-type]
-        except GLib.Error:
-            line = None
-
-        if line is None:
-            self._answer(connection, Response.failure("empty request"))
+        key = id(connection)
+        if self._connections.get(key) is not connection:
             return
+        self._cancel_read_deadline(connection)
+        source = self._write_deadlines.pop(key, None)
+        if source is not None:
+            with contextlib.suppress(GLib.Error):
+                GLib.source_remove(source)
+        cancellable = self._write_cancellables.pop(key, None)
+        if cancel_write and cancellable is not None:
+            cancellable.cancel()
+        self._connections.pop(key, None)
+        with contextlib.suppress(GLib.Error):
+            connection.close(None)
+
+    def _on_write_deadline(self, key: int) -> bool:
+        connection = self._connections.get(key)
+        # This is the source currently being dispatched; `_finish_connection`
+        # must not ask GLib to remove it a second time.
+        self._write_deadlines.pop(key, None)
+        if connection is not None:
+            self._finish_connection(connection, cancel_write=True)
+        return False
+
+    def _on_write_finished(self, stream: object, result: object, state: object) -> None:
+        from gi.repository import Gio, GLib
+
+        assert isinstance(stream, Gio.OutputStream)
+        assert isinstance(state, tuple) and len(state) == 3
+        connection, _cancellable, _payload = state
+        # A deadline, stop, or departing client all finish here as an
+        # ordinary failed delivery.
+        with contextlib.suppress(GLib.Error):
+            stream.write_all_finish(result)  # type: ignore[arg-type]
+        self._finish_connection(connection, cancel_write=False)
+
+    def _read_request_chunk(self, stream: object, connection: object, buffered: bytearray) -> None:
+        """Read one bounded request without letting GLib allocate the line.
+
+        ``DataInputStream.read_line_async`` buffers until a delimiter before
+        returning, so checking its result against the protocol ceiling is too
+        late. A local client could otherwise grow the GTK process without
+        bound by sending an unterminated line. Keep both each async allocation
+        and the retained aggregate explicitly bounded here.
+        """
+        from gi.repository import Gio
+
+        assert isinstance(stream, Gio.InputStream)
+        key = id(connection)
+        if self._connections.get(key) is not connection or key in self._write_cancellables:
+            return
+        cancellable = self._read_cancellables.get(key)
+        if cancellable is None:
+            return
+        remaining = MAX_MESSAGE_BYTES + 1 - len(buffered)
+        if remaining <= 0:
+            self._answer(connection, Response.failure("request exceeded the message size limit"))
+            return
+        stream.read_bytes_async(
+            min(READ_CHUNK_BYTES, remaining),
+            0,
+            cancellable,
+            self._on_request_chunk,
+            (connection, buffered),
+        )
+
+    def _on_request_chunk(self, stream: object, result: object, state: object) -> None:
+        from gi.repository import Gio, GLib
+
+        assert isinstance(stream, Gio.InputStream)
+        assert isinstance(state, tuple) and len(state) == 2
+        connection, buffered = state
+        assert isinstance(connection, Gio.SocketConnection)
+        assert isinstance(buffered, bytearray)
+        key = id(connection)
+        try:
+            block = stream.read_bytes_finish(result)  # type: ignore[arg-type]
+        except GLib.Error:
+            if self._connections.get(key) is connection and key not in self._write_cancellables:
+                self._answer(connection, Response.failure("could not read request"))
+            return
+
+        # A framing deadline may have begun its async failure reply before
+        # this already-queued read callback ran.  Cancellation wakes the I/O;
+        # this ownership check is the second boundary that prevents a late
+        # mutation from being dispatched in that callback-order window.
+        if self._connections.get(key) is not connection or key in self._write_cancellables:
+            return
+
+        data = block.get_data()
+        chunk = b"" if data is None else bytes(data)
+        if not chunk:
+            self._cancel_read_deadline(connection)
+            if not buffered:
+                self._answer(connection, Response.failure("empty request"))
+            else:
+                dispatch(
+                    self._verbs,
+                    bytes(buffered),
+                    lambda response: self._answer(connection, response),
+                )
+            return
+        newline = chunk.find(b"\n")
+        content = chunk if newline < 0 else chunk[:newline]
+        if len(buffered) + len(content) > MAX_MESSAGE_BYTES:
+            self._answer(connection, Response.failure("request exceeded the message size limit"))
+            return
+        buffered.extend(content)
+        if newline < 0:
+            self._read_request_chunk(stream, connection, buffered)
+            return
+
+        self._cancel_read_deadline(connection)
+
         # `dispatch` writes the reply itself, which for a search or a download
         # happens once the worker running it has come back to this thread. The
         # connection is held open in the meantime and closed by `_answer`.
-        dispatch(self._verbs, bytes(line), lambda response: self._answer(connection, response))
+        dispatch(self._verbs, bytes(buffered), lambda response: self._answer(connection, response))
 
     def _answer(self, connection: object, response: Response) -> None:
         from gi.repository import Gio, GLib
 
         assert isinstance(connection, Gio.SocketConnection)
+        key = id(connection)
+        if self._connections.get(key) is not connection:
+            return
+        self._cancel_read_deadline(connection)
+        if key in self._write_cancellables:
+            return
         try:
             payload = response.encode()
         except ProtocolError as error:
             # A reply too large for the frame: say so rather than send half of
             # it, which the client would read as a malformed message.
             payload = Response.failure(f"reply could not be sent: {error}").encode()
+        cancellable = Gio.Cancellable.new()
+        self._write_cancellables[key] = cancellable
+        self._write_deadlines[key] = GLib.timeout_add(
+            WRITE_DEADLINE_MILLISECONDS,
+            self._on_write_deadline,
+            key,
+        )
         try:
-            connection.get_output_stream().write_all(payload, None)
+            connection.get_output_stream().write_all_async(
+                payload,
+                GLib.PRIORITY_DEFAULT,
+                cancellable,
+                self._on_write_finished,
+                # PyGObject's async call borrows the buffer; callback state
+                # keeps both it and the cancellable alive through completion.
+                (connection, cancellable, payload),
+            )
         except GLib.Error:
-            # The client hung up before reading; nothing useful to do.
-            pass
-        finally:
-            with contextlib.suppress(GLib.Error):
-                connection.close(None)
+            self._finish_connection(connection, cancel_write=True)

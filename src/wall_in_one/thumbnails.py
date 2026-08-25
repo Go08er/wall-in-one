@@ -32,12 +32,13 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import paths
+from wall_in_one import paths, worker_processes
 from wall_in_one.library.model import Kind, MediaItem
 
 #: Tile geometry. 16:9 because that is what most wallpapers are, and a grid of
@@ -111,14 +112,14 @@ _MINIMUM_JPEG_BYTES: Final = len(_JPEG_MAGIC) + len(_JPEG_TAIL)
 #: The name shapes this module writes, and therefore the only ones it will ever
 #: delete. Everything else in the directory belongs to someone else.
 _ENTRY_NAME: Final = re.compile(r"\A[0-9a-f]{32}\.png\Z")
-_TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[0-9]+\.tmp\.png\Z")
+_TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[A-Za-z0-9_-]+\.tmp\.png\Z")
 
 #: Remote previews, cached beside the generated thumbnails so that one
 #: directory, one ceiling and one eviction pass cover both. No image extension:
 #: a preview is whatever the provider served, and calling a JPEG `.png` would
 #: be a lie that a decoder could trip over.
 _PREVIEW_NAME: Final = re.compile(r"\A[0-9a-f]{32}\.preview\Z")
-_PREVIEW_TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[0-9]+\.tmp\.preview\Z")
+_PREVIEW_TEMPORARY_NAME: Final = re.compile(r"\A\.[0-9a-f]{32}\.[A-Za-z0-9_-]+\.tmp\.preview\Z")
 
 
 class ThumbnailError(Exception):
@@ -246,7 +247,10 @@ def _touch(path: Path) -> None:
     try:
         if now - path.stat().st_mtime < TOUCH_INTERVAL_SECONDS:
             return
-        os.utime(path, (now, now))
+        # The cache entry was validated just before this call, but its name is
+        # user-writable and may be replaced in between. Never follow a late
+        # symlink merely to update cache recency.
+        os.utime(path, (now, now), follow_symlinks=False)
     except OSError:
         # A read-only cache, or the entry evicted underneath us. A lost LRU
         # update makes an entry look older than it is, which costs at worst one
@@ -337,22 +341,22 @@ def store_preview(url: str, data: bytes) -> None:
         # would mean paying for the transcode on every hit.
         return
     destination = preview_path(url)
-    temporary = destination.with_name(f".{preview_key(url)}.{os.getpid()}.tmp.preview")
+    temporary: Path | None = None
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(temporary), "wb", opener=_write_opener) as handle:
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{preview_key(url)}.",
+            suffix=".tmp.preview",
+            dir=destination.parent,
+        )
+        temporary = Path(name)
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
         os.replace(temporary, destination)
     except OSError:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
-
-
-def _write_opener(path: str, flags: int) -> int:
-    # O_EXCL as well as O_NOFOLLOW: the temporary name carries this process's
-    # pid, so anything already there is a leftover rather than a peer, and
-    # opening it would be writing through whatever it has become.
-    return os.open(path, flags | os.O_NOFOLLOW | os.O_EXCL, 0o600)
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
 
 
 def _command(item: MediaItem, destination: Path) -> list[str]:
@@ -394,7 +398,12 @@ def _thumbnail_source(item: MediaItem) -> Path:
     return item.path
 
 
-def generate(item: MediaItem, *, force: bool = False) -> Path:
+def generate(
+    item: MediaItem,
+    *,
+    force: bool = False,
+    processes: worker_processes.Cancellation | None = None,
+) -> Path:
     """Return a cached thumbnail for ``item``, generating it if needed."""
     if not is_available():
         raise ThumbnailError("ffmpeg is not installed")
@@ -412,14 +421,30 @@ def generate(item: MediaItem, *, force: bool = False) -> Path:
     paths.ensure_directory(destination.parent)
     # Write to a private name and rename: two workers racing on the same item,
     # or a crash mid-encode, must never leave a half-written PNG in the cache.
-    temporary = destination.with_name(f".{destination.stem}.{os.getpid()}.tmp.png")
     try:
-        completed = subprocess.run(
-            _command(item, temporary),
-            capture_output=True,
-            timeout=GENERATE_TIMEOUT,
-            check=False,
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{destination.stem}.",
+            suffix=".tmp.png",
+            dir=destination.parent,
         )
+        temporary = Path(name)
+        os.close(descriptor)
+    except OSError as error:
+        raise ThumbnailError(f"cannot create thumbnail temporary: {error}") from error
+    try:
+        completed = (
+            processes.run(_command(item, temporary), timeout=GENERATE_TIMEOUT)
+            if processes is not None
+            else subprocess.run(
+                _command(item, temporary),
+                capture_output=True,
+                timeout=GENERATE_TIMEOUT,
+                check=False,
+            )
+        )
+    except worker_processes.ProcessCancelledError as error:
+        temporary.unlink(missing_ok=True)
+        raise ThumbnailError(f"cancelled thumbnailing {item.path.name}") from error
     except subprocess.TimeoutExpired as error:
         temporary.unlink(missing_ok=True)
         raise ThumbnailError(f"timed out thumbnailing {item.path.name}") from error
@@ -455,7 +480,11 @@ def is_natively_decodable(data: bytes) -> bool:
     return data.startswith(_NATIVE_MAGIC)
 
 
-def to_displayable(data: bytes) -> bytes:
+def to_displayable(
+    data: bytes,
+    *,
+    processes: worker_processes.Cancellation | None = None,
+) -> bytes:
     """Bytes GTK can turn into a texture, transcoding through ffmpeg if needed.
 
     Remote thumbnails arrive as whatever the provider serves, and MotionBGS
@@ -469,29 +498,34 @@ def to_displayable(data: bytes) -> bytes:
     if not is_available():
         return b""
     try:
-        completed = subprocess.run(
+        command = [
             # `-` for both ends: nothing about a downloaded preview should
             # reach the filesystem on its way to being looked at.
-            [
-                "ffmpeg",
-                "-v",
-                "error",
-                "-i",
-                "pipe:0",
-                "-frames:v",
-                "1",
-                "-c:v",
-                "png",
-                "-f",
-                "image2",
-                "pipe:1",
-            ],
-            input=data,
-            capture_output=True,
-            timeout=DECODE_TIMEOUT,
-            check=False,
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            "-f",
+            "image2",
+            "pipe:1",
+        ]
+        completed = (
+            processes.run(command, input=data, timeout=DECODE_TIMEOUT)
+            if processes is not None
+            else subprocess.run(
+                command,
+                input=data,
+                capture_output=True,
+                timeout=DECODE_TIMEOUT,
+                check=False,
+            )
         )
-    except subprocess.TimeoutExpired, OSError:
+    except subprocess.TimeoutExpired, OSError, worker_processes.ProcessCancelledError:
         return b""
     if completed.returncode != 0:
         return b""

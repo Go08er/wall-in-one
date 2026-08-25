@@ -105,6 +105,19 @@ class FakeClient:
         )
 
 
+@dataclass
+class CancellableFakeClient(FakeClient):
+    """A routed client with the real transport's optional lifecycle seam."""
+
+    closed: bool = False
+
+    def cancelled(self) -> bool:
+        return self.closed
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FrozenClock:
     """A clock that only moves when a `sleep` asks it to."""
 

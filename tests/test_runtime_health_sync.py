@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one import cli, config, paths, runtime_config, runtime_health
+from wall_in_one import cli, config, legacy_migration, paths, runtime_config, runtime_health
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import pairings
@@ -115,6 +115,51 @@ def test_health_sync_returns_not_running_before_reading_authoring_state(
     assert "wall_in_one.ui.app" not in sys.modules
 
 
+@pytest.mark.parametrize(
+    ("argument", "reload_runtime"),
+    (("--sync-runtime-health", True), ("--sync-runtime-health-on-stop", False)),
+)
+def test_health_sync_holds_migration_exclusion_for_the_whole_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    argument: str,
+    reload_runtime: bool,
+) -> None:
+    """A resumable import cannot start between the guard and a Pairings write."""
+    owned = False
+    entered = False
+
+    class MigrationTransaction:
+        def __enter__(self) -> None:
+            nonlocal owned
+            assert not owned
+            owned = True
+
+        def __exit__(
+            self,
+            _kind: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: object,
+        ) -> None:
+            nonlocal owned
+            assert owned
+            owned = False
+
+    def sync(*, reload_runtime: bool = True) -> int:
+        nonlocal entered
+        assert owned, "health sync escaped the migration transaction"
+        assert reload_runtime is expected_reload
+        entered = True
+        return 0
+
+    expected_reload = reload_runtime
+    monkeypatch.setattr(legacy_migration, "unattended_transaction", MigrationTransaction)
+    monkeypatch.setattr(cli, "_sync_runtime_health", sync)
+
+    assert cli.main([argument]) == 0
+    assert entered
+    assert not owned
+
+
 def test_health_sync_requests_status_only_after_compiler_lock_acquisition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -145,6 +190,25 @@ def test_health_sync_requests_status_only_after_compiler_lock_acquisition(
     assert not entered
 
 
+def test_no_health_reports_return_before_any_authoring_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = _media(tmp_path)
+    _write_runtime_config()
+
+    def unexpected_authoring_read() -> config.Settings:
+        raise AssertionError("health no-op scanned authoring state")
+
+    monkeypatch.setattr(config, "load_strict", unexpected_authoring_read)
+    monkeypatch.setattr(
+        client,
+        "send_runtime",
+        lambda _verb: _snapshot(item, reports=False),
+    )
+
+    assert cli.main(["--sync-runtime-health"]) == 0
+
+
 def test_health_sync_persists_compiles_and_reloads_one_new_finding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -171,6 +235,25 @@ def test_health_sync_persists_compiles_and_reloads_one_new_finding(
         "source": "automatic-apply",
     }
     assert "wall_in_one.ui.app" not in sys.modules
+
+
+def test_shutdown_health_sync_persists_without_reloading_the_exiting_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = _media(tmp_path)
+    _write_runtime_config()
+    calls: list[str] = []
+
+    def send(verb: str) -> Response:
+        calls.append(verb)
+        assert verb == "status"
+        return _snapshot(item)
+
+    monkeypatch.setattr(client, "send_runtime", send)
+
+    assert cli.main(["--sync-runtime-health-on-stop"]) == 0
+    assert calls == ["status"]
+    assert pairings.Store.open().health(pairings.Identity.of(item)).is_borked
 
 
 def test_health_sync_recompiles_an_existing_marker_without_clearing_it(
@@ -259,6 +342,7 @@ def test_explicit_clear_waits_for_inflight_sync_and_wins_last(
     "message",
     (
         "not-json",
+        "[" * 1_100 + "0" + "]" * 1_100,
         "[]",
         json.dumps({"playlist": "All media", "source": "schedule", "taboo_entries": {}}),
         json.dumps(

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -28,6 +28,11 @@ MAX_ITEMS: Final = 4096
 MAX_ENTRIES_EXAMINED: Final = 65536
 MAX_DEPTH: Final = 8
 MAX_NOCTALIA_SETTINGS_BYTES: Final = 8 * 1024 * 1024
+
+
+class ScanCancelledError(Exception):
+    """A superseded background scan stopped at a cooperative boundary."""
+
 
 #: A directory carrying one of these was created by us, so files inside it may
 #: be deletable -- but only with a per-file sidecar to prove which download
@@ -163,7 +168,7 @@ def wallpaper_directory_from_noctalia() -> Path | None:
         if raw is None:
             return None
         document = tomllib.loads(raw.decode("utf-8"))
-    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
         return None
     section = document.get("wallpaper")
     if not isinstance(section, dict):
@@ -186,10 +191,17 @@ def default_roots() -> tuple[Path, ...]:
     return ()
 
 
-def _walk(root: Path, budget: list[int], skipped: list[str]) -> Iterable[Path]:
+def _walk(
+    root: Path,
+    budget: list[int],
+    skipped: list[str],
+    cancelled: Callable[[], bool] | None = None,
+) -> Iterable[Path]:
     """Yield candidate files under ``root``, depth-first and bounded."""
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
+        if cancelled is not None and cancelled():
+            raise ScanCancelledError
         directory, depth = stack.pop()
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
@@ -197,6 +209,8 @@ def _walk(root: Path, budget: list[int], skipped: list[str]) -> Iterable[Path]:
             skipped.append(f"{directory}: {error.strerror or error}")
             continue
         for entry in entries:
+            if cancelled is not None and cancelled():
+                raise ScanCancelledError
             budget[0] -= 1
             if budget[0] <= 0:
                 skipped.append(f"{root}: stopped after {MAX_ENTRIES_EXAMINED} entries")
@@ -278,6 +292,7 @@ def scan(
     *,
     include_workshop: bool = False,
     workshop_roots: Sequence[Path] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Library:
     """Build a `Library` from ``roots`` (or the default roots).
 
@@ -296,14 +311,22 @@ def scan(
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
 
     for root in resolved_roots:
+        if cancelled is not None and cancelled():
+            raise ScanCancelledError
         if root.is_symlink() or not root.is_dir():
             skipped.append(f"{root}: not a directory")
             continue
-        for path in _walk(root, budget, skipped):
+        for path in _walk(root, budget, skipped, cancelled):
             if len(items) >= MAX_ITEMS:
                 skipped.append(f"{root}: stopped at {MAX_ITEMS} wallpapers")
                 break
             if path in seen or _is_sidecar(path):
+                continue
+            # A migrated predecessor capture is metadata of its moving item,
+            # not a second user-owned library wallpaper.  Only the exact old
+            # ownership sidecar can hide it; an unmarked image in the same
+            # directory remains visible and independently manageable.
+            if pairing.legacy_automatic_identity(path) is not None:
                 continue
             kind = classify(path)
             if kind is None:
@@ -341,17 +364,25 @@ def scan(
                 )
             )
 
+    if cancelled is not None and cancelled():
+        raise ScanCancelledError
     if include_workshop:
         # After the roots, so a wallpaper somebody has copied into their own
         # library wins over the Steam copy of it -- `seen` keeps the first.
         for item in workshop_items(workshop_roots):
+            if cancelled is not None and cancelled():
+                raise ScanCancelledError
             if item.path not in seen:
                 seen.add(item.path)
                 items.append(item)
 
     items.sort(key=lambda item: (item.path.parent.as_posix(), item.name.lower()))
     still_inventory = tuple(item for item in items if item.kind is Kind.STILL)
+    if cancelled is not None and cancelled():
+        raise ScanCancelledError
     paired = pairings.apply(items, resolved_roots, records)
+    if cancelled is not None and cancelled():
+        raise ScanCancelledError
     return Library(
         roots=resolved_roots,
         items=paired,

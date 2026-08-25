@@ -37,11 +37,11 @@
     "noctalia-plugins": {
       "flake": false,
       "locked": {
-        "lastModified": 1786418273,
-        "narHash": "sha256-lrKFw5PoXsB0oCxdKbZaw1mBnVP6VsOYf0a6JlpANxQ=",
+        "lastModified": 1787637657,
+        "narHash": "sha256-Mm/z76KpgCyiDugBRkICJWffHhGfVtMON4pcuIv5I3U=",
         "owner": "Go08er",
         "repo": "goober-noctalia-plugins-v5",
-        "rev": "a5e23c9778d360faa47d67d7a45b4ed0c289c115",
+        "rev": "a17eb70f653afb4cf5c04afc912cdca8b14ac06e",
         "type": "github"
       },
       "original": {

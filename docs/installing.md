@@ -34,6 +34,19 @@ the same thing through the system or user profile.
 `bin/wall-in-one` without adding anything to a profile, so nothing is installed
 and no menu entry appears -- which is the right behaviour for trying it out.
 
+### Upgrading from the retired Noctalia plugin
+
+Do not copy the old plugin's `config.json` into the current config directory.
+The formats only look related. Install the package, stop using the retired full
+Luau service, and open the graphical app: its first question offers a bounded,
+no-overwrite import before any fresh library setup. Headless compilation
+refuses unresolved legacy data so login cannot silently publish empty defaults.
+
+Back up both profiles first and follow
+[`migrating.md`](migrating.md) for source paths, supported schemas, exact field
+mapping, intentional resets, service handover, companion-plugin limitations and
+rollback. Do not run the retired plugin and `wall-in-one.service` together.
+
 The icon is found the way any themed icon is: `hicolor` is the fallback theme
 every icon lookup ends at, so an SVG at `hicolor/scalable/apps/<id>.svg` under
 any `XDG_DATA_DIRS` entry is picked up with no cache to regenerate. SVG needs no

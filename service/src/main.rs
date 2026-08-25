@@ -135,6 +135,30 @@ fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) -> bool {
     was_reload
 }
 
+// One silent local client can consume the complete 250 ms request deadline.
+// Always return to config polling, renderer supervision and signal checks
+// after a bounded batch instead of letting a continuously-ready listener
+// monopolise the single service thread.
+const MAX_ACCEPTS_PER_ITERATION: usize = 4;
+
+fn accept_ready_batch(
+    listener: &UnixListener,
+    mut accepted: impl FnMut(UnixStream),
+) -> std::io::Result<usize> {
+    let mut count = 0;
+    while count < MAX_ACCEPTS_PER_ITERATION {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                accepted(stream);
+                count += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(count)
+}
+
 fn fingerprint(path: &Path) -> Option<(u64, u64, SystemTime)> {
     let metadata = fs::metadata(path).ok()?;
     Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
@@ -171,13 +195,7 @@ fn lock_path(socket: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn claim_socket(path: &Path) -> Result<SocketOwner, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("socket {} has no parent directory", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("cannot create socket directory: {error}"))?;
-    let lock_path = lock_path(path);
+fn claim_lock_with_hook(lock_path: &Path, after_open: impl FnOnce()) -> Result<File, String> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -185,57 +203,127 @@ fn claim_socket(path: &Path) -> Result<SocketOwner, String> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|error| {
             format!(
                 "cannot open singleton lock {}: {error}",
                 lock_path.display()
             )
         })?;
-    if !lock
+    let opened = lock
         .metadata()
-        .map_err(|error| format!("cannot inspect singleton lock: {error}"))?
-        .is_file()
-    {
+        .map_err(|error| format!("cannot inspect singleton lock: {error}"))?;
+    if !opened.is_file() || opened.nlink() != 1 || opened.uid() != unsafe { libc::geteuid() } {
         return Err(format!(
-            "refusing non-regular singleton lock {}",
+            "refusing singleton lock {} unless it is one regular, privately owned link",
             lock_path.display()
         ));
     }
-    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))
+    // Operate on the descriptor, never the pathname: replacing the name after
+    // open must not let this process chmod a symlink target or somebody else's
+    // new lock inode.
+    lock.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|error| format!("cannot secure singleton lock: {error}"))?;
     let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if locked != 0 {
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::WouldBlock {
-            return Err(format!("another service owns {}", path.display()));
+            return Err(format!(
+                "another service owns singleton lock {}",
+                lock_path.display()
+            ));
         }
         return Err(format!(
             "cannot lock singleton guard {}: {error}",
             lock_path.display()
         ));
     }
-
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if UnixStream::connect(path).is_ok() {
-                return Err(format!(
-                    "another service is listening on {}",
-                    path.display()
-                ));
-            }
-            if !metadata.file_type().is_socket() {
-                return Err(format!(
-                    "refusing to replace non-socket path {}",
-                    path.display()
-                ));
-            }
-            fs::remove_file(path)
-                .map_err(|error| format!("cannot remove stale socket: {error}"))?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("cannot inspect socket {}: {error}", path.display())),
+    after_open();
+    let current = fs::symlink_metadata(lock_path).map_err(|error| {
+        format!(
+            "cannot recheck singleton lock {}: {error}",
+            lock_path.display()
+        )
+    })?;
+    if !current.is_file()
+        || current.nlink() != 1
+        || current.uid() != unsafe { libc::geteuid() }
+        || (current.dev(), current.ino()) != (opened.dev(), opened.ino())
+    {
+        return Err(format!(
+            "singleton lock {} changed while it was being claimed",
+            lock_path.display()
+        ));
     }
+    Ok(lock)
+}
+
+fn clear_stale_socket_with_hook(path: &Path, before_recheck: impl FnOnce()) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect socket {}: {error}", path.display())),
+    };
+    if UnixStream::connect(path).is_ok() {
+        return Err(format!(
+            "another service is listening on {}",
+            path.display()
+        ));
+    }
+    if !metadata.file_type().is_socket() {
+        return Err(format!(
+            "refusing to replace non-socket path {}",
+            path.display()
+        ));
+    }
+
+    before_recheck();
+    let current = match fs::symlink_metadata(path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "cannot recheck stale socket {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if !current.file_type().is_socket()
+        || (current.dev(), current.ino()) != (metadata.dev(), metadata.ino())
+    {
+        return Err(format!(
+            "socket path {} changed while its stale owner was being checked",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| format!("cannot remove stale socket: {error}"))
+}
+
+fn claim_socket(path: &Path) -> Result<SocketOwner, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("socket {} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create socket directory: {error}"))?;
+    let parent_metadata = fs::metadata(parent).map_err(|error| {
+        format!(
+            "cannot inspect socket directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.uid() != unsafe { libc::geteuid() }
+        || parent_metadata.mode() & 0o022 != 0
+    {
+        return Err(format!(
+            "socket directory {} must be owned by this user and not group/world writable",
+            parent.display()
+        ));
+    }
+    let lock_path = lock_path(path);
+    let lock = claim_lock_with_hook(&lock_path, || {})?;
+
+    clear_stale_socket_with_hook(path, || {})?;
     let listener = UnixListener::bind(path)
         .map_err(|error| format!("cannot bind {}: {error}", path.display()))?;
     let metadata = fs::symlink_metadata(path)
@@ -366,7 +454,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let config = Config::load(&options.config).map_err(|error| error.to_string())?;
-    let driver = SystemDriver::new(config.renderer.clone());
+    let driver = SystemDriver::new_for_service_socket(config.renderer.clone(), &options.socket);
     let mut runtime = Runtime::new(
         options.config.clone(),
         config,
@@ -382,21 +470,17 @@ fn run() -> Result<(), String> {
     let mut known = fingerprint(&options.config);
     let mut next_config_check = Instant::now() + Duration::from_secs(1);
     while !runtime.should_quit() && !TERMINATE.load(Ordering::Relaxed) {
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    // Capture before loading. If an atomic rename races this
-                    // request, retaining the older fingerprint can cause one
-                    // harmless extra reload; capturing afterward could mark
-                    // unseen newer bytes as loaded and miss them entirely.
-                    let observed = fingerprint(&options.config);
-                    if serve(stream, &mut runtime) {
-                        known = observed;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => eprintln!("wall-in-one-service: accept: {error}"),
+        if let Err(error) = accept_ready_batch(listener, |stream| {
+            // Capture before loading. If an atomic rename races this request,
+            // retaining the older fingerprint can cause one harmless extra
+            // reload; capturing afterward could mark unseen newer bytes as
+            // loaded and miss them entirely.
+            let observed = fingerprint(&options.config);
+            if serve(stream, &mut runtime) {
+                known = observed;
             }
+        }) {
+            eprintln!("wall-in-one-service: accept: {error}");
         }
         if runtime.should_quit() || TERMINATE.load(Ordering::Relaxed) {
             break;
@@ -435,5 +519,102 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("wall-in-one-service: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        accept_ready_batch, claim_lock_with_hook, clear_stale_socket_with_hook,
+        MAX_ACCEPTS_PER_ITERATION,
+    };
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "wall-in-one-main-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_replacement_lock_is_not_chmodded_or_accepted() {
+        let root = directory("lock-replacement");
+        let lock = root.join("runtime.sock.lock");
+        let opened = root.join("opened.lock");
+        let result = claim_lock_with_hook(&lock, || {
+            fs::rename(&lock, &opened).unwrap();
+            fs::write(&lock, b"replacement").unwrap();
+            fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        });
+        assert!(result
+            .unwrap_err()
+            .contains("changed while it was being claimed"));
+        assert_eq!(fs::read(&lock).unwrap(), b"replacement");
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(&opened).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_never_unlinks_a_replacement_path() {
+        let root = directory("stale-replacement");
+        let socket = root.join("runtime.sock");
+        drop(UnixListener::bind(&socket).unwrap());
+        let result = clear_stale_socket_with_hook(&socket, || {
+            fs::remove_file(&socket).unwrap();
+            fs::write(&socket, b"replacement").unwrap();
+        });
+        assert!(result
+            .unwrap_err()
+            .contains("changed while its stale owner"));
+        assert_eq!(fs::read(&socket).unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_ready_client_flood_is_bounded_before_runtime_maintenance() {
+        let root = directory("bounded-accepts");
+        let socket = root.join("runtime.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let clients: Vec<_> = (0..=MAX_ACCEPTS_PER_ITERATION)
+            .map(|_| UnixStream::connect(&socket).unwrap())
+            .collect();
+        let mut accepted = Vec::new();
+
+        assert_eq!(
+            accept_ready_batch(&listener, |stream| accepted.push(stream)).unwrap(),
+            MAX_ACCEPTS_PER_ITERATION
+        );
+        assert_eq!(accepted.len(), MAX_ACCEPTS_PER_ITERATION);
+        // A connection is still immediately ready. The first call returned
+        // solely because of the cap, leaving the caller free to poll config,
+        // tick renderers and observe termination before the next batch.
+        assert_eq!(
+            accept_ready_batch(&listener, |stream| accepted.push(stream)).unwrap(),
+            1
+        );
+
+        drop(clients);
+        drop(accepted);
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
     }
 }

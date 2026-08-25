@@ -11,12 +11,13 @@ provenance names `library.scan` already looks for, and they are the same names
 the predecessor wrote, so an existing library keeps its ownership across the
 rewrite. Pairing metadata is separate and never grants deletion authority.
 
-Installation is `os.link` from staged temporaries in the same directory, not
-`os.replace`. Links fail rather than overwrite. Provenance is linked and synced
-first; media is the commit point, so process death leaves either a complete
-pair or an ignored sidecar that age-bounded recovery can remove. That ordering
-is as important as the ordinary exception rollback: `finally` never runs after
-`SIGKILL` or power loss.
+Installation atomically renames staged temporaries without replacement.
+Provenance is moved and synced first; media is the commit point, so process
+death leaves either a complete pair or an ignored sidecar that age-bounded
+recovery can remove. Each moved inode is verified after the rename, and a
+published pathname is never unlinked for rollback. That ordering and
+irreversibility matter because `finally` never runs after `SIGKILL` or power
+loss.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io, paths
-from wall_in_one.providers.base import ProviderError
+from wall_in_one.providers.base import CancellationProbe, ProviderError, refuse_cancellation
 
 #: Everything this app downloads lives under one directory in the user's
 #: wallpaper root, so a whole install is one directory to inspect or delete.
@@ -58,6 +59,8 @@ LEGACY_STAGING_PREFIXES: Final[tuple[str, ...]] = (
 #: A live transfer may legitimately take minutes. Recovery waits a day so it
 #: cannot race another process that is still validating a large download.
 STAGING_MAX_AGE_SECONDS: Final = 24 * 60 * 60
+TEMPORARY_SUFFIX_LENGTH: Final = 8
+TEMPORARY_SUFFIX_CHARACTERS: Final = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,10 +206,20 @@ def _require_real_directory(directory: Path, *, create: bool) -> None:
             ) from None
         try:
             directory.mkdir()
-            info = directory.lstat()
+        except FileExistsError:
+            # A concurrent first download may have created the exact component
+            # after our lstat. Reinspect it; only a real directory converges.
+            pass
         except OSError as error:
             raise ProviderError(
                 "local-io", f"could not create {directory}: {error.strerror or error}"
+            ) from error
+        try:
+            info = directory.lstat()
+        except OSError as error:
+            raise ProviderError(
+                "local-io",
+                f"could not inspect created directory {directory}: {error.strerror or error}",
             ) from error
     except OSError as error:
         raise ProviderError(
@@ -261,14 +274,76 @@ def recover_abandoned(
                     continue
                 if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
                     continue
-                staging = entry.name.startswith(prefixes)
+                staging = _is_owned_staging(entry.name, info, prefixes)
                 orphan_sidecar = _is_owned_orphan_sidecar(path, location, info.st_size)
                 if not staging and not orphan_sidecar:
                     continue
                 try:
-                    path.unlink()
+                    claim = file_io.claim_for_deletion(
+                        path,
+                        expected_identity=(info.st_dev, info.st_ino),
+                    )
+                except file_io.PathChangedError as error:
+                    if error.preserved_path is not None:
+                        raise ProviderError(
+                            "local-io",
+                            f"provider recovery preserved a changed entry at "
+                            f"{error.preserved_path}",
+                        ) from error
+                    continue
                 except OSError:
                     continue
+
+                try:
+                    claimed_info = claim.path.lstat()
+                except OSError as error:
+                    try:
+                        restored = claim.restore()
+                    except OSError:
+                        restored = False
+                    preserved = path if restored else claim.path
+                    raise ProviderError(
+                        "local-io",
+                        f"could not revalidate provider staging; entry remains at {preserved}",
+                    ) from error
+                valid = claimed_info.st_mtime <= cutoff
+                if staging:
+                    valid = valid and _is_owned_staging(path.name, claimed_info, prefixes)
+                if orphan_sidecar:
+                    media = Path(str(path)[: -len(location.sidecar_suffix)])
+                    valid = valid and _is_owned_orphan_sidecar(
+                        claim.path,
+                        location,
+                        claimed_info.st_size,
+                        media_path=media,
+                        logical_path=path,
+                    )
+                if not valid:
+                    try:
+                        restored = claim.restore()
+                    except OSError as error:
+                        raise ProviderError(
+                            "local-io",
+                            f"could not restore an unverified recovery entry at {claim.path}",
+                        ) from error
+                    if not restored:
+                        raise ProviderError(
+                            "local-io",
+                            f"provider recovery left an unverified entry preserved at {claim.path}",
+                        )
+                    continue
+                try:
+                    claim.discard()
+                except OSError as error:
+                    try:
+                        restored = claim.restore()
+                    except OSError:
+                        restored = False
+                    preserved = path if restored else claim.path
+                    raise ProviderError(
+                        "local-io",
+                        f"could not safely clean provider staging; entry remains at {preserved}",
+                    ) from error
                 removed.append(path)
     except OSError as error:
         raise ProviderError(
@@ -285,7 +360,36 @@ def recover_abandoned(
     return tuple(removed)
 
 
-def _is_owned_orphan_sidecar(path: Path, location: ManagedLocation, size: int) -> bool:
+def _is_owned_staging(
+    name: str,
+    info: os.stat_result,
+    prefixes: tuple[str, ...],
+) -> bool:
+    """Whether an entry has the exact private tempfile shape we generate."""
+    suffix: str | None = None
+    for prefix in prefixes:
+        if name.startswith(prefix):
+            suffix = name.removeprefix(prefix)
+            break
+    return (
+        suffix is not None
+        and len(suffix) == TEMPORARY_SUFFIX_LENGTH
+        and all(character in TEMPORARY_SUFFIX_CHARACTERS for character in suffix)
+        and stat.S_ISREG(info.st_mode)
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_uid == os.getuid()
+        and info.st_nlink == 1
+    )
+
+
+def _is_owned_orphan_sidecar(
+    path: Path,
+    location: ManagedLocation,
+    size: int,
+    *,
+    media_path: Path | None = None,
+    logical_path: Path | None = None,
+) -> bool:
     """Prove an orphan is our provider provenance before unlinking it.
 
     A suffix is only a naming convention, not deletion authority. Recovery
@@ -293,9 +397,12 @@ def _is_owned_orphan_sidecar(path: Path, location: ManagedLocation, size: int) -
     an exact path binding to the missing adjacent media. This keeps an old
     user-authored ``*.motionbgs.json`` file out of the cleanup sweep.
     """
-    if not path.name.endswith(location.sidecar_suffix) or size > MAX_SIDECAR_BYTES:
+    named_path = path if logical_path is None else logical_path
+    if not named_path.name.endswith(location.sidecar_suffix) or size > MAX_SIDECAR_BYTES:
         return False
-    media = Path(str(path)[: -len(location.sidecar_suffix)])
+    media = (
+        Path(str(named_path)[: -len(location.sidecar_suffix)]) if media_path is None else media_path
+    )
     if os.path.lexists(media):
         return False
     try:
@@ -327,14 +434,31 @@ def _write_marker(directory: Path, location: ManagedLocation) -> Path:
             if existing == payload:
                 return marker
             document: object = json.loads(existing)
-        except ValueError:
+        except ValueError, RecursionError:
             document = None
         if isinstance(document, dict) and _marker_matches_location(document, location):
             return marker
         raise ProviderError(
             "conflict", f"ownership marker is not one this provider recognises: {marker}"
         )
-    _atomic_write(marker, payload, prefix=MARKER_STAGING_PREFIX)
+    try:
+        _atomic_write(marker, payload, prefix=MARKER_STAGING_PREFIX)
+    except ProviderError as error:
+        if error.kind != "conflict":
+            raise
+        # Two first downloads may publish the same no-replace marker. The
+        # loser converges only after re-reading and validating the winner.
+        raced: bytes | None = None
+        try:
+            raced = file_io.read_regular_bytes(marker, MAX_SIDECAR_BYTES)
+            document = json.loads(raced) if raced is not None else None
+        except OSError, ValueError, RecursionError:
+            document = None
+        if raced == payload or (
+            isinstance(document, dict) and _marker_matches_location(document, location)
+        ):
+            return marker
+        raise
     return marker
 
 
@@ -357,7 +481,14 @@ def _marker_matches_location(document: Mapping[str, object], location: ManagedLo
     return False
 
 
-def unique_destination(directory: Path, stem: str, extension: str, sidecar_suffix: str) -> Path:
+def unique_destination(
+    directory: Path,
+    stem: str,
+    extension: str,
+    sidecar_suffix: str,
+    *,
+    cancelled: CancellationProbe | None = None,
+) -> Path:
     """First free ``<stem>.<ext>`` in ``directory``, counting up on collisions.
 
     A name is only free when the media file *and* its sidecar are both absent:
@@ -365,6 +496,7 @@ def unique_destination(directory: Path, stem: str, extension: str, sidecar_suffi
     that name would attach the wrong provenance to a new download.
     """
     for attempt in range(MAX_NAME_ATTEMPTS):
+        refuse_cancellation(cancelled)
         name = f"{stem}{extension}" if attempt == 0 else f"{stem}-{attempt}{extension}"
         candidate = safe_child(directory, name)
         if not os.path.lexists(candidate) and not os.path.lexists(str(candidate) + sidecar_suffix):
@@ -373,93 +505,140 @@ def unique_destination(directory: Path, stem: str, extension: str, sidecar_suffi
 
 
 def install(
-    staged: Path, destination: Path, sidecar_suffix: str, sidecar_payload: bytes
+    staged: Path,
+    destination: Path,
+    sidecar_suffix: str,
+    sidecar_payload: bytes,
+    *,
+    cancelled: CancellationProbe | None = None,
 ) -> tuple[Path, Path]:
     """Move ``staged`` into place next to a freshly written sidecar.
 
-    Both links are no-replace, and either one failing rolls the other back. The
-    sidecar is published and synced first; the media link is the commit point.
-    A hard kill can therefore leave an ignored orphan sidecar, never a visible
-    media file that has lost the provenance needed to manage it safely.
+    Both moves are no-replace. The sidecar is published and synced first; the
+    media move is the irreversible commit point. A hard kill or ordinary
+    pre-commit failure can therefore leave an ignored orphan sidecar, never a
+    visible media file that has lost the provenance needed to manage it safely.
+    Once either final pathname has been moved this function will not unlink it
+    for rollback: a concurrent local actor could have replaced the pathname,
+    and check-then-unlink cannot prove inode ownership atomically. A failure
+    after the media move is reported as a committed outcome with unknown final
+    durability rather than pretending the download did not land.
     ``staged`` must already be in ``destination``'s directory -- it is, because
     the transport streams downloads into the directory they are destined for,
-    which is also what makes `os.link` cheap and same-filesystem by
-    construction.
+    which is also what makes the atomic rename same-filesystem by construction.
     """
+    refuse_cancellation(cancelled)
     directory = destination.parent
     if staged.parent != directory:
         raise ProviderError("invalid-path", "staged download is not in its destination directory")
+    try:
+        staged_status = staged.lstat()
+    except OSError as error:
+        raise ProviderError(
+            "local-io", f"could not inspect staged download: {error.strerror or error}"
+        ) from error
+    if not stat.S_ISREG(staged_status.st_mode):
+        raise ProviderError("invalid-path", "staged download is not a regular file")
+    staged_identity = staged_status.st_dev, staged_status.st_ino
     sidecar_destination = Path(str(destination) + sidecar_suffix)
 
     descriptor, name = tempfile.mkstemp(prefix=SIDECAR_STAGING_PREFIX, dir=directory)
     sidecar_temporary = Path(name)
-    installed_media = False
-    installed_sidecar = False
+    sidecar_status = os.fstat(descriptor)
+    sidecar_identity = sidecar_status.st_dev, sidecar_status.st_ino
+    media_committed = False
     try:
         with os.fdopen(descriptor, "wb") as sink:
             sink.write(sidecar_payload)
             sink.flush()
             os.fsync(sink.fileno())
-        os.link(sidecar_temporary, sidecar_destination, follow_symlinks=False)
-        installed_sidecar = True
+        # Sidecar and media are both installed with no-replace moves. Observe
+        # shutdown immediately before each boundary. Once moved, a final path
+        # is deliberately irreversible: blindly unlinking it later could eat a
+        # concurrent replacement at the same pathname.
+        refuse_cancellation(cancelled)
+        file_io.atomic_move_no_replace(
+            sidecar_temporary,
+            sidecar_destination,
+            expected_identity=sidecar_identity,
+        )
         paths.fsync_directory(directory)
-        os.link(staged, destination, follow_symlinks=False)
-        installed_media = True
+        refuse_cancellation(cancelled)
+        file_io.atomic_move_no_replace(
+            staged,
+            destination,
+            expected_identity=staged_identity,
+        )
+        media_committed = True
         paths.fsync_directory(directory)
     except FileExistsError as error:
-        _roll_back(installed_media, installed_sidecar, destination, sidecar_destination)
-        _discard_owned(sidecar_temporary)
+        if media_committed:
+            raise ProviderError(
+                "local-io",
+                "download reached its irreversible media commit, but a later local error "
+                "left the committed outcome and final durability unknown; inspect the library "
+                f"before retrying: {error.strerror or error}",
+            ) from error
         raise ProviderError(
             "conflict", f"{error.filename} appeared before it could be installed"
         ) from error
     except OSError as error:
-        _roll_back(installed_media, installed_sidecar, destination, sidecar_destination)
-        _discard_owned(sidecar_temporary)
+        if media_committed:
+            raise ProviderError(
+                "local-io",
+                "download reached its irreversible media commit, but a later local error "
+                "left the committed outcome and final durability unknown; inspect the library "
+                f"before retrying: {error.strerror or error}",
+            ) from error
         raise ProviderError(
             "local-io", f"could not install download: {error.strerror or error}"
         ) from error
-    for temporary in (staged, sidecar_temporary):
-        _discard_owned(temporary)
+    finally:
+        _discard_owned(sidecar_temporary, sidecar_identity)
+    _discard_owned(staged, staged_identity)
     return destination, sidecar_destination
 
 
-def _roll_back(installed_media: bool, installed_sidecar: bool, media: Path, sidecar: Path) -> None:
-    # Media is the commit point. Remove and sync it before removing provenance,
-    # so a second hard kill during rollback can leave only the inert sidecar --
-    # never visible media with no ownership record.
-    if installed_media:
-        try:
-            media.unlink(missing_ok=True)
-            paths.fsync_directory(media.parent)
-        except OSError:
-            return
-    if installed_sidecar:
-        _discard_owned(sidecar)
-
-
-def _discard_owned(path: Path) -> None:
+def _discard_owned(path: Path, expected_identity: file_io.PathIdentity) -> None:
     """Best-effort removal of an unmistakably app-owned staging/sidecar path."""
-    try:
-        path.unlink(missing_ok=True)
-        paths.fsync_directory(path.parent)
-    except OSError:
-        # Recovery recognises the typed staging name or orphan sidecar later.
-        return
+    if file_io.discard_regular_if_same(path, expected_identity=expected_identity):
+        try:
+            paths.fsync_directory(path.parent)
+        except OSError:
+            # Recovery recognises the typed staging name or orphan sidecar later.
+            return
 
 
 def _atomic_write(destination: Path, payload: bytes, *, prefix: str) -> None:
     """Write ``payload`` to ``destination`` via a temporary in the same directory."""
     descriptor, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
     temporary = Path(name)
+    temporary_status = os.fstat(descriptor)
+    temporary_identity = temporary_status.st_dev, temporary_status.st_ino
     try:
         with os.fdopen(descriptor, "wb") as sink:
             sink.write(payload)
             sink.flush()
             os.fsync(sink.fileno())
-        os.replace(temporary, destination)
+        file_io.atomic_move_no_replace(
+            temporary,
+            destination,
+            expected_identity=temporary_identity,
+        )
         paths.fsync_directory(destination.parent)
+    except FileExistsError as error:
+        file_io.discard_regular_if_same(
+            temporary,
+            expected_identity=temporary_identity,
+        )
+        raise ProviderError(
+            "conflict", f"{destination} appeared before it could be published"
+        ) from error
     except OSError as error:
-        temporary.unlink(missing_ok=True)
+        file_io.discard_regular_if_same(
+            temporary,
+            expected_identity=temporary_identity,
+        )
         raise ProviderError(
             "local-io", f"could not write {destination}: {error.strerror or error}"
         ) from error

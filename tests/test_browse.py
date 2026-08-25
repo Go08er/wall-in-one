@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -165,6 +171,259 @@ def test_a_download_reports_where_to_rescan(
     assert done.root == tmp_path
     assert done.result.path.name == "wallhaven-ab1234.png"
     assert done.describe() == "downloaded wallhaven-ab1234.png (3.0 MB)"
+
+
+def _record_download(root: Path, wanted: WallpaperCandidate) -> DownloadResult:
+    provider_title = "MotionBGS" if wanted.provider == "motionbgs" else "Wallhaven"
+    suffix = ".motionbgs.json" if wanted.provider == "motionbgs" else ".wallhaven.json"
+    directory = root / "Wall-in-One" / provider_title
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"wallhaven-{wanted.identifier}.png"
+    path.write_bytes(b"png")
+    sidecar = Path(str(path) + suffix)
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "plugin": "goober/wall-in-one",
+                "provider": provider_title,
+                "id": wanted.identifier,
+                "path": str(path),
+                "source_page": wanted.page_url,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return DownloadResult(
+        provider=wanted.provider,
+        identifier=wanted.identifier,
+        path=path,
+        sidecar=sidecar,
+        marker=directory / ".marker",
+        kind=Kind.STILL,
+        size=path.stat().st_size,
+        source_url=wanted.page_url,
+        download_url="https://w.wallhaven.cc/full/ab/wallhaven-ab1234.png",
+        sha256="0" * 64,
+        downloaded_at="2026-01-01T00:00:00Z",
+    )
+
+
+def test_repeat_download_rechecks_provenance_under_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    engine = browser(root=root)
+    wanted = candidate(provider="motionbgs")
+    calls: list[str] = []
+
+    class Stub:
+        def download(
+            self, selected: WallpaperCandidate, destination: Path, *, variant: str = ""
+        ) -> DownloadResult:
+            calls.append(variant)
+            return _record_download(destination, selected)
+
+    monkeypatch.setattr(engine, "provider", lambda _name: Stub())
+
+    engine.download(wanted, variant="hd")
+    with pytest.raises(ProviderError) as caught:
+        # Variant is deliberately not part of ownership: the UI treats one
+        # provider/id as one library item, so 4K cannot silently duplicate HD.
+        engine.download(wanted, variant="4k")
+
+    assert caught.value.kind == "conflict"
+    assert calls == ["hd"]
+
+
+def test_download_provenance_snapshot_always_includes_its_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root switch cannot mix the new destination with the old inventory."""
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    wanted = candidate()
+    existing = _record_download(new_root, wanted)
+    # This deliberately models the inconsistent pair the old two-lock read
+    # could observe while Settings switched folders: destination B with roots
+    # from A.  Browser must still inspect the actual destination under B's
+    # provider/id claim before contacting the provider.
+    engine = browser(root=new_root, library_roots=(old_root,))
+    contacted = False
+
+    def provider(_name: str) -> object:
+        nonlocal contacted
+        contacted = True
+        raise AssertionError("duplicate destination reached the provider")
+
+    monkeypatch.setattr(engine, "provider", provider)
+
+    with pytest.raises(ProviderError) as caught:
+        engine.download(wanted)
+
+    assert caught.value.kind == "conflict"
+    assert str(existing.path) in str(caught.value)
+    assert not contacted
+
+
+def test_identifier_only_control_candidate_matches_a_legacy_motionbgs_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    wanted = WallpaperCandidate(
+        provider="motionbgs",
+        identifier="rainy-night",
+        title="",
+        kind=Kind.VIDEO,
+        page_url=browse.source_page_url("motionbgs", "rainy-night"),
+    )
+    result = _record_download(root, wanted)
+    document = json.loads(result.sidecar.read_text(encoding="utf-8"))
+    document.pop("id")
+    result.sidecar.write_text(json.dumps(document), encoding="utf-8")
+    engine = browser(root=root)
+    contacted = False
+
+    def provider(_name: str) -> object:
+        nonlocal contacted
+        contacted = True
+        raise AssertionError("legacy duplicate reached the provider")
+
+    monkeypatch.setattr(engine, "provider", provider)
+
+    with pytest.raises(ProviderError) as caught:
+        engine.download(wanted, variant="4k")
+
+    assert caught.value.kind == "conflict"
+    assert not contacted
+
+
+def test_concurrent_download_of_one_candidate_is_nonblocking_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    engine = browser(root=root)
+    wanted = candidate()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class Stub:
+        def download(
+            self, selected: WallpaperCandidate, destination: Path, *, variant: str = ""
+        ) -> DownloadResult:
+            nonlocal calls
+            del variant
+            calls += 1
+            entered.set()
+            assert release.wait(2)
+            return _record_download(destination, selected)
+
+    monkeypatch.setattr(engine, "provider", lambda _name: Stub())
+    pool = ThreadPoolExecutor(max_workers=2)
+    first = pool.submit(engine.download, wanted)
+    assert entered.wait(1)
+    second = pool.submit(engine.download, wanted)
+
+    with pytest.raises(ProviderError) as caught:
+        second.result(timeout=1)
+    release.set()
+    first.result(timeout=2)
+    pool.shutdown(wait=True, cancel_futures=True)
+
+    assert caught.value.kind == "busy"
+    assert calls == 1
+
+
+def test_root_switch_cannot_start_the_same_candidate_in_a_second_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    roots = (first_root, second_root)
+    first_browser = browser(root=first_root, library_roots=roots)
+    second_browser = browser(root=second_root, library_roots=roots)
+    wanted = candidate()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class Stub:
+        def download(
+            self, selected: WallpaperCandidate, destination: Path, *, variant: str = ""
+        ) -> DownloadResult:
+            nonlocal calls
+            del variant
+            calls += 1
+            entered.set()
+            assert release.wait(2)
+            return _record_download(destination, selected)
+
+    provider = Stub()
+    monkeypatch.setattr(first_browser, "provider", lambda _name: provider)
+    monkeypatch.setattr(second_browser, "provider", lambda _name: provider)
+    pool = ThreadPoolExecutor(max_workers=2)
+    first = pool.submit(first_browser.download, wanted)
+    assert entered.wait(1)
+    second = pool.submit(second_browser.download, wanted)
+
+    with pytest.raises(ProviderError) as caught:
+        second.result(timeout=1)
+    release.set()
+    result = first.result(timeout=2)
+    pool.shutdown(wait=True, cancel_futures=True)
+
+    assert caught.value.kind == "busy"
+    assert calls == 1
+    assert result.root == first_root
+    assert not any(second_root.iterdir())
+
+
+def test_download_claim_excludes_a_second_process(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    script = """
+import sys, time
+from pathlib import Path
+from wall_in_one.browse import _download_claim
+root, ready, release = map(Path, sys.argv[1:])
+with _download_claim(root, 'wallhaven', 'ab1234'):
+    ready.write_text('ready', encoding='utf-8')
+    while not release.exists():
+        time.sleep(0.01)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(root), str(ready), str(release)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), child.communicate(timeout=1)
+
+        with (
+            pytest.raises(ProviderError) as caught,
+            browse._download_claim(root, "wallhaven", "ab1234"),
+        ):
+            pytest.fail("a second process entered the same download claim")
+        assert caught.value.kind == "busy"
+    finally:
+        release.touch()
+        stdout, stderr = child.communicate(timeout=2)
+        assert child.returncode == 0, (stdout, stderr)
 
 
 # -- thumbnails ----------------------------------------------------------

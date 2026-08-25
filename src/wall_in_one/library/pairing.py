@@ -60,6 +60,15 @@ PREVIEW_STEM: Final = "preview"
 #: A sidecar is a few hundred bytes. Anything larger is not one of ours.
 MAX_SIDECAR_BYTES: Final = 64 * 1024
 
+# The retired Noctalia plugin used the same sidecar suffix but stored an
+# ownership record beside the generated still itself.  Migration keeps those
+# bytes in place for rollback, so scans and deletion need one narrow reader for
+# that exact predecessor record.  It does not grant ownership to an arbitrary
+# image: directory shape, plugin id, kind, exact path and dynamic identity all
+# have to agree.
+LEGACY_PLUGIN_ID: Final = "goober/wall-in-one"
+LEGACY_AUTOMATIC_KIND: Final = "automatic-still"
+
 #: Preference order when several stills could serve. Lossless first, since a
 #: still is usually a frame grab.
 _STILL_EXTENSION_ORDER: Final[tuple[str, ...]] = (".png", ".webp", ".avif", ".jpg", ".jpeg")
@@ -87,7 +96,7 @@ def read_sidecar(video: Path) -> Path | None:
         return None
     try:
         document = json.loads(raw)
-    except ValueError:
+    except ValueError, RecursionError:
         return None
     if not isinstance(document, dict):
         return None
@@ -98,6 +107,51 @@ def read_sidecar(video: Path) -> Path | None:
     if not candidate.is_absolute():
         candidate = video.parent / candidate
     return candidate if candidate.is_file() else None
+
+
+def legacy_automatic_identity(still: Path) -> str | None:
+    """Return a proven predecessor dynamic id for ``still``, or ``None``.
+
+    The v0.8 Luau plugin wrote
+    ``<still>.wall-in-one.json`` with ``kind=automatic-still``.  Merely living
+    in a directory called Automatic Stills is insufficient: a user file there
+    stays an ordinary first-class library item unless its exact adjacent
+    record proves the old application created it.
+    """
+    if (
+        still.parent.name != AUTOMATIC_STILLS_DIRECTORY
+        or still.parent.parent.name != MANAGED_PARENT
+        or not still.is_absolute()
+    ):
+        return None
+    sidecar = still.with_name(still.name + SIDECAR_SUFFIX)
+    try:
+        raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
+    except OSError:
+        return None
+    if raw is None:
+        return None
+    try:
+        document = json.loads(raw)
+    except ValueError, RecursionError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    dynamic_id = document.get("dynamic_id")
+    if (
+        document.get("schema") != 1
+        or document.get("plugin") != LEGACY_PLUGIN_ID
+        or document.get("kind") != LEGACY_AUTOMATIC_KIND
+        or document.get("path") != str(still)
+        or not isinstance(dynamic_id, str)
+        or not dynamic_id
+        or any(ord(character) < 32 for character in dynamic_id)
+    ):
+        return None
+    try:
+        return dynamic_id if not still.is_symlink() and still.is_file() else None
+    except OSError:
+        return None
 
 
 def still_directory(root: Path) -> Path:

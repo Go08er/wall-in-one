@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically persist Wall-in-One runtime wallpaper health
+PartOf=wall-in-one.service
+BindsTo=wall-in-one.service
+After=wall-in-one.service
+
+[Timer]
+OnActiveSec=30s
+# Schedule from completion rather than activation: a slow one-shot can never
+# overlap another Python authoring scan/write.
+OnUnitInactiveSec=30s
+AccuracySec=5s
+Persistent=false
+Unit=wall-in-one-health-sync.service

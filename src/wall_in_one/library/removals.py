@@ -362,6 +362,29 @@ class Store:
         records, fault = _read(target)
         return cls(records, target, fault=fault)
 
+    def worker_copy(self, *, rebase: bool = False) -> Store:
+        """Return an unleased Store for a background reconciliation owner.
+
+        Operation leases are process-local capabilities and are deliberately
+        never copied.  ``rebase`` reloads the durable journal and must only be
+        requested after this detached value has reached an I/O worker.
+        """
+        if rebase:
+            return type(self).open(self._path)
+        return type(self)(self._records, self._path, fault=self._fault)
+
+    @property
+    def operation_owned(self) -> bool:
+        """Whether this exact Store currently owns a live removal lease."""
+        return self._operation_descriptor is not None
+
+    def adopt_worker_repair(self, expected: str) -> bool:
+        """Clear only the same fault a detached worker proved repaired."""
+        if self._fault != expected:
+            return False
+        self._fault = None
+        return True
+
     @property
     def records(self) -> tuple[Intent, ...]:
         return tuple(self._records[key] for key in sorted(self._records))

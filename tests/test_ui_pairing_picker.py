@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -21,7 +22,9 @@ from wall_in_one import config  # noqa: E402
 from wall_in_one.library import pairings, scan  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
+from wall_in_one.theme import noctalia  # noqa: E402
 from wall_in_one.theme.palette import Palette, PalettePair  # noqa: E402
+from wall_in_one.ui.palette_catalog import PaletteCatalog  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -62,6 +65,78 @@ class PairingApp:
 
     def window_report(self, message: str) -> None:
         self.messages.append(message)
+
+    def authoring_action_async(
+        self,
+        work: Any,
+        finish: Any,
+        *,
+        prepare: Any = None,
+        failure: Any = None,
+        **_keywords: object,
+    ) -> bool:
+        """Run the editor's worker contract synchronously in this tiny fake."""
+        try:
+            result = (prepare() if prepare is not None else work)()
+        except Exception as error:
+            if failure is not None:
+                failure(str(error))
+            return False
+        finish(result)
+        return True
+
+    def prepare_pairing_mutation(self, item: MediaItem, mutation: Any) -> Any:
+        current = self.session.library.find(item.path)
+        assert current is not None
+        return lambda: mutation(self.session.pairings, current)
+
+    def prepare_still_pairing_mutation(
+        self,
+        item: MediaItem,
+        still: Path | None,
+        mutation: Any,
+    ) -> Any:
+        current = self.session.library.find(item.path)
+        assert current is not None
+
+        def run() -> SimpleNamespace:
+            effective = still
+            if effective is None:
+                effective = pairings.synthesize(current, self.session.library.roots).still
+            record = mutation(self.session.pairings, current, still)
+            return SimpleNamespace(item=current, record=record, effective_still=effective)
+
+        return run
+
+    def prepare_pairing_reset(self, item: MediaItem) -> Any:
+        current = self.session.library.find(item.path)
+        assert current is not None
+
+        def run() -> SimpleNamespace:
+            effective = pairings.synthesize(current, self.session.library.roots).still
+            changed = self.session.pairings.reset(current)
+            return SimpleNamespace(item=current, changed=changed, effective_still=effective)
+
+        return run
+
+    def adopt_pairing_still(self, item: MediaItem, effective: Path | None) -> MediaItem:
+        current = self.session.library.find(item.path)
+        assert current is not None
+        adopted = current.with_still(effective) if current.is_moving else current
+        library = self.session.library
+        self.session.adopt_library(
+            Library(
+                roots=library.roots,
+                items=tuple(
+                    adopted if candidate.path == current.path else candidate
+                    for candidate in library.items
+                ),
+                skipped=library.skipped,
+                still_inventory=library.still_inventory,
+            ),
+            reconcile_workshop=False,
+        )
+        return adopted
 
 
 def _item(path: Path, kind: Kind = Kind.STILL) -> MediaItem:
@@ -197,6 +272,11 @@ def test_still_picker_is_searchable_bounded_and_survives_refresh(
     saved = session.pairings.get(pairings.Identity.of(video))
     assert saved is not None and saved.still == chosen.path
     assert application.changes == 1
+    # The store changes before the asynchronous library rescan lands.  A
+    # refresh in that window must compare the same canonical item-plus-pairing
+    # fingerprint used after the scan lands, or one of those two phases tears
+    # down the editor even though the authored choice is unchanged.
+    page.refresh(session)
     assert page._editor.get_first_child() is editor
     assert page._still_search is search
     assert search.get_text() == "group-b"
@@ -249,14 +329,14 @@ def test_palette_swatches_follow_the_pairing_mode_in_place(
         path=None,
         colours=pair,
     )
-    monkeypatch.setattr(palettes, "discover", lambda: palettes.Discovery(entries=(entry,)))
     monkeypatch.setattr(
         pairings_page,
         "swatch_strip",
         lambda palette, **_arguments: Gtk.Label(label=palette.mode),
     )
 
-    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    catalog = PaletteCatalog(initial=palettes.Discovery(entries=(entry,)))
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None, palette_catalog=catalog)
     page.edit(session, media)
     box = page._adaptive_boxes["custom:Test palette"]
     first = cast(Gtk.Label, box.get_first_child())
@@ -270,6 +350,49 @@ def test_palette_swatches_follow_the_pairing_mode_in_place(
     assert second is not first
     saved = session.pairings.get(pairings.Identity.of(media))
     assert saved is not None and saved.palette.mode is pairings.Mode.LIGHT
+
+    page.shutdown()
+    catalog.shutdown()
+    session.shutdown()
+
+
+def test_failed_palette_write_restores_mode_and_policy_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    picture = tmp_path / "wall.png"
+    picture.write_bytes(b"image")
+    media = _item(picture)
+    session = _session(tmp_path, item=media, stills=(media,))
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    page.edit(session, media)
+
+    durable = session.pairings.resolve(media, session.library.roots).palette
+    original_name = durable.adaptive_scheme(application.settings.preview_scheme)
+    original = page._palette_buttons[f"adaptive:{original_name}"]
+    replacement_name = next(name for name in noctalia.ALL_SCHEMES if name != original_name)
+    replacement = page._palette_buttons[f"adaptive:{replacement_name}"]
+
+    def fail(_item: MediaItem, _policy: pairings.PalettePolicy) -> None:
+        raise pairings.PairingError("local-io", "disk full")
+
+    monkeypatch.setattr(session.pairings, "choose_palette", fail)
+    page._mode_row.set_selected(2)  # Light
+
+    assert page._mode_row.get_selected() == 0  # Keep current mode
+    assert original.get_active()
+    assert session.pairings.get(pairings.Identity.of(media)) is None
+
+    replacement.set_active(True)
+
+    assert original.get_active()
+    assert not replacement.get_active()
+    assert session.pairings.get(pairings.Identity.of(media)) is None
+    assert application.changes == 0
+    assert len(application.messages) == 2
+    assert all("not saved; nothing changed" in message for message in application.messages)
 
     page.shutdown()
     session.shutdown()

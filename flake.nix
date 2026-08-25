@@ -148,6 +148,10 @@
               $out/share/icons/hicolor/scalable/apps/${applicationId}.svg
             install -Dm644 src/wall_in_one/data/systemd/wall-in-one.service \
               $out/share/systemd/user/wall-in-one.service
+            install -Dm644 src/wall_in_one/data/systemd/wall-in-one-health-sync.service \
+              $out/share/systemd/user/wall-in-one-health-sync.service
+            install -Dm644 src/wall_in_one/data/systemd/wall-in-one-health-sync.timer \
+              $out/share/systemd/user/wall-in-one-health-sync.timer
             install -Dm755 ${wall-in-one-service}/bin/wall-in-one-service \
               $out/bin/wall-in-one-service
             substituteInPlace $out/share/applications/${applicationId}.desktop \
@@ -156,7 +160,15 @@
               --replace-fail "ExecStartPre=-wall-in-one" \
               "ExecStartPre=-$out/bin/wall-in-one" \
               --replace-fail "ExecStart=wall-in-one-service" \
-              "ExecStart=$out/bin/wall-in-one-service"
+              "ExecStart=$out/bin/wall-in-one-service" \
+              --replace-fail "ExecStop=-timeout" \
+              "ExecStop=-${pkgs.coreutils}/bin/timeout" \
+              --replace-fail " wall-in-one --sync-runtime-health-on-stop" \
+              " $out/bin/wall-in-one --sync-runtime-health-on-stop"
+            substituteInPlace \
+              $out/share/systemd/user/wall-in-one-health-sync.service \
+              --replace-fail "ExecStart=wall-in-one" \
+              "ExecStart=$out/bin/wall-in-one"
           '';
 
           # buildPythonApplication's wrapper and wrapGAppsHook4's wrapper both
@@ -200,6 +212,24 @@
 
         checks = {
           inherit wall-in-one wall-in-one-service;
+
+          # The companion is a separate repository, but this release pins it
+          # as part of one runtime contract.  Exercise the exact locked source
+          # with Luau available so a future lock update cannot silently skip
+          # compilation or ship a status/timeout/health-sync mismatch.
+          companion-plugin-contract =
+            pkgs.runCommand "wall-in-one-companion-plugin-contract"
+              {
+                nativeBuildInputs = [
+                  python
+                  pkgs.luau
+                ];
+              }
+              ''
+                cd ${noctalia-plugins}/wall-in-one
+                python3 tests/test_thin_client.py
+                touch $out
+              '';
 
           # Python and Rust intentionally have different authoring/runtime
           # sockets. This process-level check catches the seam a unit test
@@ -361,9 +391,36 @@
                     -o "rendered-$size.png"
                 done
                 unit=${wall-in-one}/share/systemd/user/wall-in-one.service
+                health=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.service
+                timer=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.timer
                 grep -F 'ExecStartPre=-${wall-in-one}/bin/wall-in-one --write-config' "$unit"
                 grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service --wait-for-config' "$unit"
+                grep -F 'ExecStop=-${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=0.1s 2s ${wall-in-one}/bin/wall-in-one --sync-runtime-health-on-stop' "$unit"
+                # Exercise the exact GNU timeout interval syntax used by the
+                # installed ExecStop. Coreutils accepts decimal seconds, not
+                # millisecond suffixes such as 750ms.
+                ${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=0.1s 2s ${pkgs.coreutils}/bin/true
+                grep -F 'Wants=wall-in-one-health-sync.timer' "$unit"
+                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one --sync-runtime-health' "$health"
+                grep -F 'StandardOutput=null' "$health"
+                grep -F 'OnUnitInactiveSec=30s' "$timer"
+                grep -F 'Persistent=false' "$timer"
+                grep -F 'BindsTo=wall-in-one.service' "$timer"
                 test -x ${wall-in-one}/bin/wall-in-one-service
+                # Exercise the installed Python wrapper as a program, not only
+                # its executable bit.  An interpreter/wrapper closure mistake
+                # must fail the fast package check rather than waiting for the
+                # weekly desktop VM.
+                export HOME="$TMPDIR/home"
+                export XDG_CONFIG_HOME="$TMPDIR/config"
+                export XDG_STATE_HOME="$TMPDIR/state"
+                export XDG_CACHE_HOME="$TMPDIR/cache"
+                export XDG_DATA_HOME="$TMPDIR/data"
+                export XDG_RUNTIME_DIR="$TMPDIR/runtime"
+                mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
+                  "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
+                ${wall-in-one}/bin/wall-in-one --help >/dev/null
+                ${wall-in-one}/bin/wall-in-one --version | grep -F 'wall-in-one'
                 touch $out
               '';
 

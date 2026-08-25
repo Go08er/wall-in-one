@@ -13,10 +13,14 @@ attempted set were not remembered.
 
 from __future__ import annotations
 
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from wall_in_one import worker_processes
+from wall_in_one.library import stills as still_backend
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.ui.stills import StillMaker
 
@@ -57,7 +61,13 @@ class Recording(StillMaker):
 def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
     """A generator that records what it was asked for and always gives up."""
 
-    def refuse(target: MediaItem, _root: Path) -> Path | None:
+    def refuse(
+        target: MediaItem,
+        _root: Path,
+        *,
+        processes: object | None = None,
+    ) -> Path | None:
+        del processes
         made.asked.append(target.path)
         return None
 
@@ -68,7 +78,13 @@ def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
 def maker(monkeypatch: pytest.MonkeyPatch) -> Recording:
     made = Recording()
 
-    def fake_ensure(target: MediaItem, root: Path) -> Path | None:
+    def fake_ensure(
+        target: MediaItem,
+        root: Path,
+        *,
+        processes: object | None = None,
+    ) -> Path | None:
+        del processes
         made.asked.append(target.path)
         return root / f"{target.path.stem}.png" if made._succeeds else None
 
@@ -216,3 +232,86 @@ def test_videos_are_captured_before_scenes(maker: Recording) -> None:
 
     kinds = [path.suffix == ".mp4" for path in maker.asked]
     assert kinds == [True, True, False, False]
+
+
+def test_unexpected_batch_failure_is_observed_and_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[str] = []
+    made = StillMaker(report=messages.append)
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments: callback(*arguments),
+    )
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.stills.ensure",
+        lambda _item, _root, **_keywords: (_ for _ in ()).throw(RuntimeError("decoder vanished")),
+    )
+
+    made.request((item("broken.mp4", Kind.VIDEO),), Path("/w"), lambda _count: None)
+    made._pool.shutdown(wait=True)
+
+    assert messages == ["Automatic still generation stopped unexpectedly: decoder vanished"]
+
+
+def test_explicit_scene_regeneration_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[str] = []
+    completed: list[int] = []
+    made = StillMaker(report=messages.append)
+    scene = item("1647046763", Kind.SCENE)
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments: callback(*arguments),
+    )
+
+    def fail(*_arguments: object, **_keywords: object) -> Path:
+        raise RuntimeError("scene helper exited")
+
+    monkeypatch.setattr("wall_in_one.ui.stills.stills.capture_scene", fail)
+
+    made.regenerate_scene(scene, Path("/w"), completed.append)
+    made._pool.shutdown(wait=True)
+
+    assert completed == []
+    assert messages == ["Could not regenerate the still for 1647046763: scene helper exited"]
+
+
+def test_shutdown_terminates_the_active_still_child_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made = StillMaker()
+
+    def block(
+        _item: MediaItem,
+        _root: Path,
+        *,
+        processes: worker_processes.Cancellation | None = None,
+    ) -> Path | None:
+        assert processes is not None
+        try:
+            processes.run(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                timeout=60.0,
+            )
+        except worker_processes.ProcessCancelledError as error:
+            raise still_backend.StillError("cancelled") from error
+        return None
+
+    monkeypatch.setattr("wall_in_one.ui.stills.stills.ensure", block)
+    made.request((item("slow.mp4", Kind.VIDEO),), Path("/w"), lambda _count: None)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with made._processes._lock:
+            if made._processes._active:
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("still child did not start")
+
+    started = time.monotonic()
+    made.shutdown()
+    made._pool.shutdown(wait=True, cancel_futures=True)
+
+    assert time.monotonic() - started < 1.5

@@ -45,6 +45,26 @@ MAX_SIDECAR_BYTES: Final = 64 * 1024
 #: directory should get a slow answer rather than no answer.
 MAX_SIDECARS: Final = 20_000
 
+_PAGE_PREFIXES: Final[tuple[str, ...]] = (
+    "https://motionbgs.com/",
+    "https://wallhaven.cc/w/",
+)
+
+
+def _page_key(value: str) -> str:
+    """Stable key for the two known provider page URL spellings.
+
+    The predecessor wrote MotionBGS source pages with a trailing slash while
+    identifier-only control requests once reconstructed them without one.
+    Query strings, fragments and unrelated URLs remain exact so normalization
+    cannot merge foreign pages.
+    """
+    if any(value.startswith(prefix) for prefix in _PAGE_PREFIXES) and not any(
+        marker in value for marker in ("?", "#")
+    ):
+        return value.rstrip("/")
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class Origin:
@@ -71,7 +91,9 @@ class Index:
         by_page: Mapping[str, Path] | None = None,
     ) -> None:
         self._by_origin: dict[Origin, Path] = dict(by_origin or {})
-        self._by_page: dict[str, Path] = dict(by_page or {})
+        self._by_page: dict[str, Path] = {
+            _page_key(page): path for page, path in (by_page or {}).items()
+        }
 
     def __len__(self) -> int:
         """How many downloads are indexed, counting each file once."""
@@ -84,7 +106,7 @@ class Index:
         if found is not None:
             return found
         if candidate.page_url:
-            return self._by_page.get(candidate.page_url)
+            return self._by_page.get(_page_key(candidate.page_url))
         return None
 
     def holds(self, candidate: WallpaperCandidate) -> bool:
@@ -99,7 +121,7 @@ class Index:
         origin = Origin(provider=candidate.provider.casefold(), identifier=candidate.identifier)
         self._by_origin[origin] = path
         if candidate.page_url:
-            self._by_page[candidate.page_url] = path
+            self._by_page[_page_key(candidate.page_url)] = path
 
 
 def _entry(sidecar: Path) -> tuple[Origin | None, str, Path] | None:
@@ -121,7 +143,7 @@ def _entry(sidecar: Path) -> tuple[Origin | None, str, Path] | None:
         return None
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError, RecursionError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -186,5 +208,5 @@ def read(roots: Sequence[Path]) -> Index:
         if origin is not None:
             by_origin[origin] = media
         if page:
-            by_page[page] = media
+            by_page[_page_key(page)] = media
     return Index(by_origin, by_page)

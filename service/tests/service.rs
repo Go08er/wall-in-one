@@ -574,6 +574,8 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
     }
     let document = config(&noctalia, Path::new("/bin/true"), true)
         .replace("scene_fps = 30", "scene_fps = 75")
+        .replace("scene_scaling = \"\"", "scene_scaling = \"fit\"")
+        .replace("scene_clamp = \"\"", "scene_clamp = \"repeat\"")
         .replace(
             "niri_program = \"/bin/true\"",
             &format!("niri_program = {niri:?}"),
@@ -590,9 +592,11 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
     thread::sleep(Duration::from_millis(100));
 
     let launched = fs::read_to_string(&events).unwrap();
-    assert!(launched.contains("--screen-root DP-1 --bg 12345"));
-    assert!(launched.contains("--screen-root eDP-1 --bg 12345"));
+    assert!(launched.contains("--screen-root DP-1 --scaling fit --clamp repeat --bg 12345"));
+    assert!(launched.contains("--screen-root eDP-1 --scaling fit --clamp repeat --bg 12345"));
     assert!(launched.contains("--fps 75"));
+    assert!(launched.contains("--scaling fit"));
+    assert!(launched.contains("--clamp repeat"));
     assert_eq!(launched.matches("--screen-root").count(), 2);
     assert_eq!(launched.matches("--bg 12345").count(), 2);
     let words: Vec<_> = launched.split_whitespace().collect();

@@ -9,13 +9,20 @@ without a network.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
+import os
 import secrets
+import stat
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
+from wall_in_one import paths
 from wall_in_one.library import owned
 from wall_in_one.providers import http, registry
 from wall_in_one.providers.base import (
@@ -64,6 +71,14 @@ SEEDED_SORTING: Final = "random"
 SEED_CHARACTERS: Final = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 SEED_LENGTH: Final = 6
 
+# Candidate claims live in the per-login runtime directory.  The files are
+# deliberately never unlinked: unlinking a flock file while another process
+# has opened its inode lets a third process lock a replacement beside it.  The
+# directory is normally session-cleaned; without XDG_RUNTIME_DIR, the paths
+# module safely falls back to persistent cache and these tiny files remain.
+# Names are fixed hashes rather than remote-controlled identifiers.
+DOWNLOAD_CLAIM_DIRECTORY: Final = f"{paths.APP_ID}-download-claims"
+
 
 def new_seed() -> str:
     """A fresh Wallhaven random-search seed.
@@ -73,6 +88,95 @@ def new_seed() -> str:
     disturb, or be disturbed by, anything else that draws from it.
     """
     return "".join(secrets.choice(SEED_CHARACTERS) for _ in range(SEED_LENGTH))
+
+
+def source_page_url(provider: str, identifier: str) -> str:
+    """Canonical provenance page for an identifier-only control request."""
+    if provider == WALLHAVEN:
+        return f"https://wallhaven.cc/w/{identifier}"
+    if provider == MOTIONBGS:
+        # The predecessor sidecar's exact spelling. ``owned`` also accepts the
+        # slashless form emitted by intermediate identifier-only callers.
+        return f"https://motionbgs.com/{identifier}/"
+    return ""
+
+
+def _claim_path(root: Path, provider: str, identifier: str) -> Path:
+    # Resolve the destination before a potentially minutes-long network call,
+    # but do not make it part of the lease identity. Provider/id is the
+    # library identity; the selected destination is merely where this attempt
+    # installs it. A root switch while one transfer is live must not let a
+    # second GUI/control Browser contact the provider for the same item.
+    try:
+        root.resolve(strict=True)
+    except OSError as error:
+        raise ProviderError("invalid-path", f"download root is unusable: {error}") from error
+    material = b"\0".join(
+        (
+            provider.casefold().encode("utf-8", "surrogatepass"),
+            identifier.encode("utf-8", "surrogatepass"),
+        )
+    )
+    identity = hashlib.sha256(material).hexdigest()
+    directory = paths.runtime_dir() / DOWNLOAD_CLAIM_DIRECTORY
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise OSError(f"download claim path is not a real directory: {directory}")
+        if info.st_uid != os.getuid():
+            raise OSError(f"download claim path is not owned by this user: {directory}")
+        os.chmod(directory, 0o700, follow_symlinks=False)
+    except OSError as error:
+        raise ProviderError("local-io", f"cannot prepare download claims: {error}") from error
+    return directory / f"{identity}.lock"
+
+
+@contextmanager
+def _download_claim(root: Path, provider: str, identifier: str) -> Iterator[None]:
+    """Take one nonblocking, user/provider/id-scoped cross-process lease."""
+    lock_path = _claim_path(root, provider, identifier)
+    descriptor: int | None = None
+    locked = False
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        opened = os.fstat(descriptor)
+        current = lock_path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+        ):
+            raise OSError(f"download claim {lock_path} is not a private regular file")
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError as error:
+            raise ProviderError(
+                "busy",
+                f"{provider} {identifier} is already downloading in another request",
+            ) from error
+        opened = os.fstat(descriptor)
+        current = lock_path.lstat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise OSError(f"download claim {lock_path} changed while it was being locked")
+        yield
+    except ProviderError:
+        raise
+    except OSError as error:
+        raise ProviderError("local-io", f"cannot safely claim this download: {error}") from error
+    finally:
+        if descriptor is not None:
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +318,10 @@ class Browser:
         # a test to replace.
         self._client = client if client is not None else http.UrllibClient()
         self._root = root
-        self._library_roots = tuple(library_roots)
+        # A caller which only supplies the download destination still expects
+        # repeat-download protection in that destination.  The GUI passes all
+        # configured roots explicitly so a copy in any one of them counts.
+        self._library_roots = tuple(library_roots) or ((root,) if root is not None else ())
         self._roots_generation = 0
         self._roots_lock = threading.RLock()
         self._providers: dict[str, Provider] = {}
@@ -267,7 +374,7 @@ class Browser:
         """
         with self._roots_lock:
             self._root = root
-            self._library_roots = tuple(library_roots)
+            self._library_roots = tuple(library_roots) or ((root,) if root is not None else ())
             self._roots_generation += 1
             self._owned = None
 
@@ -291,6 +398,17 @@ class Browser:
         for provider in self._providers.values():
             provider.clear_cache()
 
+    def shutdown(self) -> None:
+        """Cancel the real transport when this browser surface is finished.
+
+        Injected test clients intentionally need only the two-method ``Client``
+        protocol.  The production ``UrllibClient`` additionally owns active
+        sockets, so close it when present without widening that provider seam.
+        """
+        close = cast("Callable[[], None] | None", getattr(self._client, "close", None))
+        if close is not None:
+            close()
+
     # -- where downloads land ---------------------------------------------
 
     def download_root(self) -> Path:
@@ -309,6 +427,30 @@ class Browser:
             "no-root",
             "no library folder is configured; choose one in Settings before downloading",
         )
+
+    def _download_roots_snapshot(self) -> tuple[int, Path, tuple[Path, ...]]:
+        """Capture one coherent destination/provenance view for a transfer.
+
+        Settings can replace both the selected download destination and the
+        complete library-root inventory while a Browse worker is active.  The
+        destination, generation and roots must consequently come from the
+        same critical section: mixing an old roots tuple with a new destination
+        could miss an existing provider identity in the new folder and perform
+        a duplicate network transfer.
+        """
+        with self._roots_lock:
+            root = self._root
+            if root is None:
+                raise ProviderError(
+                    "no-root",
+                    "no library folder is configured; choose one in Settings before downloading",
+                )
+            roots = self._library_roots
+            # A malformed/injected caller must not make the actual destination
+            # invisible to the under-claim provenance check.
+            if root not in roots:
+                roots = (*roots, root)
+            return self._roots_generation, root, roots
 
     # -- verbs -------------------------------------------------------------
 
@@ -341,10 +483,28 @@ class Browser:
         which the scanner works out from the marker and sidecar the provider
         wrote, not from anything we tell it.
         """
-        with self._roots_lock:
-            generation = self._roots_generation
-        root = self.download_root()
-        result = self.provider(candidate.provider).download(candidate, root, variant=variant)
+        generation, root, roots = self._download_roots_snapshot()
+        # The claim excludes GUI/ctl and second-process races without holding
+        # the shared authoring-state mutation gate across a minutes-long
+        # transfer.  Re-read provenance *after* taking it: a cached Index is a
+        # display optimisation, never permission to download twice.
+        with _download_claim(root, candidate.provider, candidate.identifier):
+            current_owned = owned.read(roots)
+            if current_owned.holds(candidate):
+                with self._roots_lock:
+                    if generation == self._roots_generation:
+                        self._owned = current_owned
+                existing = current_owned.path_for(candidate)
+                raise ProviderError(
+                    "conflict",
+                    f"{candidate.title or candidate.identifier} is already in the library"
+                    + (f" at {existing}" if existing is not None else ""),
+                )
+            result = self.provider(candidate.provider).download(
+                candidate,
+                root,
+                variant=variant,
+            )
         # Record it rather than invalidating the index: this process knows both
         # the candidate and where it landed, so re-walking every root to learn
         # one fact it just created would be work for nothing. A download may

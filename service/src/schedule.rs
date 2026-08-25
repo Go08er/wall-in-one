@@ -1,5 +1,5 @@
 use crate::config::{parse_time, ConfigError, ScheduleRule};
-use chrono::{Datelike, NaiveDateTime, Timelike};
+use chrono::{Datelike, Days, NaiveDateTime, Timelike};
 
 pub trait Clock {
     fn now(&self) -> NaiveDateTime;
@@ -68,29 +68,41 @@ pub fn matches(rule: &ScheduleRule, at: NaiveDateTime) -> Result<bool, ConfigErr
     if !rule.enabled {
         return Ok(false);
     }
-    if !rule.months.is_empty() && !rule.months.contains(&(at.month() as u8)) {
-        return Ok(false);
-    }
-    let weekday = at.weekday().num_days_from_monday() as u8;
-    if !rule.weekdays.is_empty() && !rule.weekdays.contains(&weekday) {
-        return Ok(false);
-    }
     let minute = (at.hour() * 60 + at.minute()) as u16;
-    match (&rule.start, &rule.end) {
-        (None, None) => Ok(true),
+    let (within, wrapped_tail) = match (&rule.start, &rule.end) {
+        (None, None) => Ok((true, false)),
         (Some(start), Some(end)) => {
             let start = parse_time(start)?;
             let end = parse_time(end)?;
             if start == end {
-                Ok(true)
+                Ok((true, false))
             } else if start < end {
-                Ok(start <= minute && minute < end)
+                Ok((start <= minute && minute < end, false))
             } else {
-                Ok(minute >= start || minute < end)
+                Ok((minute >= start || minute < end, minute < end))
             }
         }
-        _ => Ok(false),
+        _ => Ok((false, false)),
+    }?;
+    if !within {
+        return Ok(false);
     }
+
+    // The after-midnight tail belongs to the day on which the wrapped window
+    // started. This preserves the predecessor's `Mon 22:00-06:00` meaning and
+    // its month boundary semantics instead of cutting it off at midnight.
+    let calendar_at = if wrapped_tail {
+        at.checked_sub_days(Days::new(1)).ok_or_else(|| {
+            ConfigError::Invalid("wrapped schedule starts before the supported calendar".into())
+        })?
+    } else {
+        at
+    };
+    if !rule.months.is_empty() && !rule.months.contains(&(calendar_at.month() as u8)) {
+        return Ok(false);
+    }
+    let weekday = calendar_at.weekday().num_days_from_monday() as u8;
+    Ok(rule.weekdays.is_empty() || rule.weekdays.contains(&weekday))
 }
 
 #[cfg(test)]
@@ -128,6 +140,23 @@ mod tests {
         let r = vec![rule("night", Some("22:00"), Some("06:00"))];
         assert_eq!(resolve(&r, "day", at(2026, 8, 3, 23, 0)).unwrap(), "night");
         assert_eq!(resolve(&r, "day", at(2026, 8, 4, 6, 0)).unwrap(), "day");
+    }
+
+    #[test]
+    fn wrapped_tail_uses_the_start_day_and_month() {
+        let mut r = rule("monday-night", Some("22:00"), Some("06:00"));
+        r.weekdays = vec![0];
+        r.months = vec![8];
+        assert!(matches(&r, at(2026, 8, 3, 23, 59)).unwrap());
+        assert!(matches(&r, at(2026, 8, 4, 0, 0)).unwrap());
+        assert!(matches(&r, at(2026, 8, 4, 5, 59)).unwrap());
+        assert!(!matches(&r, at(2026, 8, 4, 6, 0)).unwrap());
+        assert!(!matches(&r, at(2026, 8, 4, 23, 0)).unwrap());
+
+        let mut december = rule("new-year", Some("22:00"), Some("06:00"));
+        december.months = vec![12];
+        assert!(matches(&december, at(2027, 1, 1, 2, 0)).unwrap());
+        assert!(!matches(&december, at(2027, 1, 2, 2, 0)).unwrap());
     }
     #[test]
     fn last_wins() {

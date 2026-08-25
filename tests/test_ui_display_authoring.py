@@ -50,6 +50,27 @@ class _PreferencesApp:
         self.settings = replace(self.settings, **changes).validated()
         return self.settings
 
+    @property
+    def requested_settings(self) -> config.Settings:
+        return self.settings
+
+    def update_settings_async(
+        self,
+        *,
+        on_success: Any = None,
+        on_error: Any = None,
+        **changes: Any,
+    ) -> bool:
+        try:
+            saved = self.update_settings(**changes)
+        except config.ConfigError as error:
+            if on_error is not None:
+                on_error(str(error))
+            return False
+        if on_success is not None:
+            on_success(saved)
+        return True
+
     def window_report(self, message: str) -> None:
         self.reports.append(message)
 

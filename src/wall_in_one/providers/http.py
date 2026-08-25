@@ -25,7 +25,9 @@ process could read it. There is no `argv` now, so the key is a plain string.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -59,6 +61,13 @@ REDIRECT_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
 #: Staged downloads are dot-files so a library scan already ignores them if one
 #: is ever left behind by a hard kill.
 STAGING_PREFIX: Final = MEDIA_STAGING_PREFIX
+
+# Media transfers retain their published 120/300-second *stall* ceilings, but
+# establishing a socket is a separate operation.  A UI shutdown cannot close a
+# response stream which urllib has not returned yet, so the connect/TLS phase
+# needs its own honest bound rather than inheriting a five-minute download
+# timeout.
+CONNECT_TIMEOUT_SECONDS: Final = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,11 +206,41 @@ class UrllibClient:
             if opener is not None
             else urllib.request.build_opener(_NoRedirects, urllib.request.HTTPSHandler)
         )
+        self._lock = threading.Lock()
+        self._closed = False
+        self._active: dict[int, BinaryIO] = {}
+
+    def cancelled(self) -> bool:
+        """Whether this transport has been permanently closed by its owner."""
+        with self._lock:
+            return self._closed
+
+    def close(self) -> None:
+        """Refuse new requests and wake active response-body readers."""
+        with self._lock:
+            self._closed = True
+            active = tuple(self._active.values())
+            self._active.clear()
+        for stream in active:
+            _interrupt_stream(stream)
+
+    def _register(self, stream: BinaryIO) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            self._active[id(stream)] = stream
+            return True
+
+    def _unregister(self, stream: BinaryIO) -> None:
+        with self._lock:
+            self._active.pop(id(stream), None)
 
     # -- transport -------------------------------------------------------
 
     def _open(self, request: Request) -> _Opened:
         url = require_https(request.url)
+        if self.cancelled():
+            raise ProviderError("cancelled", "request cancelled during shutdown")
         headers = {
             "Accept": request.accept,
             "Accept-Language": "en-US,en;q=0.8",
@@ -210,7 +249,13 @@ class UrllibClient:
         }
         outgoing = urllib.request.Request(url, method="GET", headers=headers)
         try:
-            raw = cast("BinaryIO", self._opener.open(outgoing, timeout=request.timeout))
+            raw = cast(
+                "BinaryIO",
+                self._opener.open(
+                    outgoing,
+                    timeout=min(request.timeout, CONNECT_TIMEOUT_SECONDS),
+                ),
+            )
         except urllib.error.HTTPError as error:
             # An HTTPError *is* the response, and a 3xx arrives here precisely
             # because redirects are not followed.
@@ -221,7 +266,16 @@ class UrllibClient:
             raise ProviderError("transport", f"could not reach {url}: {error.reason}") from error
         except OSError as error:
             raise ProviderError("transport", f"could not reach {url}: {error}") from error
-        return _describe(raw, url)
+        opened = _describe(raw, url)
+        # urllib applies the open timeout to the resulting socket too. Restore
+        # the request's published body-stall deadline after the bounded
+        # connect/TLS phase, so cancellation does not weaken slow-download
+        # behaviour.
+        _set_stream_timeout(opened.stream, request.timeout)
+        if not self._register(opened.stream):
+            _interrupt_stream(opened.stream)
+            raise ProviderError("cancelled", "request cancelled during shutdown")
+        return opened
 
     def fetch(self, request: Request) -> Response:
         opened = self._open(request)
@@ -229,6 +283,7 @@ class UrllibClient:
             _refuse_declared_overflow(opened, request.max_bytes)
             body = read_bounded(opened.stream, request.max_bytes)
         finally:
+            self._unregister(opened.stream)
             opened.stream.close()
         return Response(
             url=opened.url,
@@ -240,49 +295,87 @@ class UrllibClient:
 
     def download(self, request: Request, directory: Path) -> Transfer:
         opened = self._open(request)
-        if opened.status in REDIRECT_STATUSES or not 200 <= opened.status < 300:
-            opened.stream.close()
+        try:
+            if opened.status in REDIRECT_STATUSES or not 200 <= opened.status < 300:
+                return Transfer(
+                    url=opened.url,
+                    status=opened.status,
+                    content_type=opened.content_type,
+                    size=0,
+                    location=opened.location,
+                )
+            descriptor, name = tempfile.mkstemp(prefix=STAGING_PREFIX, dir=directory)
+            staged = Path(name)
+            total = 0
+            try:
+                with os.fdopen(descriptor, "wb") as sink:
+                    _refuse_declared_overflow(opened, request.max_bytes)
+                    remaining = request.max_bytes
+                    while True:
+                        chunk = _read_chunk(opened.stream, remaining)
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        if remaining < 0:
+                            raise ProviderError(
+                                "size-limit",
+                                f"download exceeded its {request.max_bytes} byte ceiling",
+                            )
+                        sink.write(chunk)
+                        total += len(chunk)
+                    sink.flush()
+                    os.fsync(sink.fileno())
+            except BaseException:
+                staged.unlink(missing_ok=True)
+                raise
             return Transfer(
                 url=opened.url,
                 status=opened.status,
                 content_type=opened.content_type,
-                size=0,
+                size=total,
+                path=staged,
                 location=opened.location,
             )
-        descriptor, name = tempfile.mkstemp(prefix=STAGING_PREFIX, dir=directory)
-        staged = Path(name)
-        total = 0
-        try:
-            _refuse_declared_overflow(opened, request.max_bytes)
-            with os.fdopen(descriptor, "wb") as sink:
-                remaining = request.max_bytes
-                while True:
-                    chunk = _read_chunk(opened.stream, remaining)
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    if remaining < 0:
-                        raise ProviderError(
-                            "size-limit",
-                            f"download exceeded its {request.max_bytes} byte ceiling",
-                        )
-                    sink.write(chunk)
-                    total += len(chunk)
-                sink.flush()
-                os.fsync(sink.fileno())
-        except BaseException:
-            staged.unlink(missing_ok=True)
-            raise
         finally:
+            self._unregister(opened.stream)
             opened.stream.close()
-        return Transfer(
-            url=opened.url,
-            status=opened.status,
-            content_type=opened.content_type,
-            size=total,
-            path=staged,
-            location=opened.location,
-        )
+
+
+def _stream_socket(stream: BinaryIO) -> socket.socket | None:
+    """Find urllib/http.client's socket without depending on one exact layer."""
+    current: object | None = stream
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, socket.socket):
+            return current
+        owned = getattr(current, "_sock", None)
+        if isinstance(owned, socket.socket):
+            return owned
+        next_layer = getattr(current, "fp", None)
+        if next_layer is None:
+            next_layer = getattr(current, "raw", None)
+        current = next_layer
+    return None
+
+
+def _set_stream_timeout(stream: BinaryIO, timeout: float) -> None:
+    connection = _stream_socket(stream)
+    if connection is not None:
+        with contextlib.suppress(OSError):
+            connection.settimeout(timeout)
+
+
+def _interrupt_stream(stream: BinaryIO) -> None:
+    """Wake a blocked body read, then release urllib's response object."""
+    connection = _stream_socket(stream)
+    if connection is not None:
+        with contextlib.suppress(OSError):
+            connection.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(OSError):
+            connection.close()
+    with contextlib.suppress(OSError, ValueError):
+        stream.close()
 
 
 def _describe(raw: BinaryIO, requested: str) -> _Opened:

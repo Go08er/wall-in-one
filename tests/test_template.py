@@ -237,6 +237,13 @@ def test_install_reports_malformed_settings(fake_home: Path) -> None:
         template.install()
 
 
+def test_install_reports_pathologically_nested_settings(fake_home: Path) -> None:
+    _write_noctalia_settings("value = " + "[" * 1_100 + "0" + "]" * 1_100)
+
+    with pytest.raises(template.TemplateInstallError, match="not valid TOML"):
+        template.install()
+
+
 @pytest.mark.parametrize("kind", ("symlink", "fifo"))
 def test_installer_refuses_unsafe_noctalia_settings_without_outside_writes(
     fake_home: Path, kind: str

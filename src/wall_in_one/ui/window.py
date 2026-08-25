@@ -14,16 +14,17 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config
-from wall_in_one.library import favourites, manage, pairings, removals
 from wall_in_one.library import filter as library_filter
+from wall_in_one.library import manage, pairings
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem, RepresentativeStillError
-from wall_in_one.session import Session
+from wall_in_one.session import RemovalResult, Session
 from wall_in_one.theme import palettes, source
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.browse_dialog import BrowsePage
 from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.pairings_page import PairingsPage
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
+from wall_in_one.ui.palette_catalog import PaletteCatalog
 from wall_in_one.ui.playlists_page import PlaylistsPage
 from wall_in_one.ui.preferences import PreferencesPage
 from wall_in_one.ui.schedules_page import SchedulesPage
@@ -104,6 +105,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._app = application
         self._settings = settings
         self._loader = ThumbnailLoader()
+        self._palette_catalog = PaletteCatalog()
         self._palettes: PaletteBrowserDialog | None = None
         # How the library is being looked at. Deliberately not in
         # `config.Settings`: a search is about the next thirty seconds, and
@@ -137,6 +139,7 @@ class MainWindow(Adw.ApplicationWindow):
             application,
             self._close_pairing_editor,
             self._request_remove,
+            palette_catalog=self._palette_catalog,
         )
         self._browse_page = BrowsePage(application)
         self._playlists_page = PlaylistsPage(application)
@@ -158,6 +161,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.set_content(self._build_content())
         self.connect("destroy", self._on_destroy)
+        self._palette_catalog.ensure_loaded()
 
     # -- construction ----------------------------------------------------
 
@@ -247,8 +251,7 @@ class MainWindow(Adw.ApplicationWindow):
         toolbar.add_top_bar(header)
         media = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         media.append(self._build_library_bar())
-        self._toast.set_child(self._grid)
-        media.append(self._toast)
+        media.append(self._grid)
         self._stack.add_titled_with_icon(
             self._browse_page,
             "browse",
@@ -284,7 +287,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._content_stack = Gtk.Stack()
         self._content_stack.add_named(self._stack, "primary")
         self._content_stack.add_named(self._pairings_page, "pairing-editor")
-        toolbar.set_content(self._content_stack)
+        # ``window_report`` is shared by every workflow page.  Keeping its
+        # overlay around only the Media grid made Settings, Playlists,
+        # Schedules, pairing-editor and runtime failures arrive on a hidden
+        # widget whenever another page was visible.  One stable overlay around
+        # the complete workspace keeps those messages visible without
+        # reparenting page widgets (and therefore without disturbing focus).
+        self._toast.set_child(self._content_stack)
+        toolbar.set_content(self._toast)
         return toolbar
 
     def _build_runtime_controls(self) -> Gtk.MenuButton:
@@ -395,7 +405,11 @@ class MainWindow(Adw.ApplicationWindow):
         dialog puts its query and its filters on, so the two views of
         wallpapers -- yours and the internet's -- are driven the same way.
         """
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
+        bar.set_child_spacing(6)
+        bar.set_line_spacing(6)
+        bar.set_wrap_policy(Adw.WrapPolicy.NATURAL)
+        self._library_controls = bar
         bar.set_margin_top(6)
         bar.set_margin_bottom(6)
         bar.set_margin_start(12)
@@ -501,7 +515,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _quick_apply(self, item: MediaItem) -> None:
         """Right-click Media through the explicit one-entry Quick choice list."""
-        health = self._app.session.pairings.resolve(item, self._app.session.library.roots).health
+        health = self._app.session.pairings.health(pairings.Identity.of(item))
         if health.is_borked:
             self.report(f"{item.name} is marked Borked and cannot play; open it to remove the item")
             return
@@ -511,7 +525,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.show_page("settings")
 
     def open_palette_browser(self) -> None:
-        dialog = PaletteBrowserDialog(self._app)
+        dialog = PaletteBrowserDialog(self._app, palette_catalog=self._palette_catalog)
         self._palettes = dialog
         dialog.connect("closed", self._on_palette_browser_closed)
         dialog.present(self)
@@ -528,10 +542,13 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast.add_toast(Adw.Toast.new(message))
 
     def _on_destroy(self, _window: Gtk.Window) -> None:
+        if self._palettes is not None:
+            self._palettes.close()
         self._loader.shutdown()
         self._pairings_page.shutdown()
         self._playlists_page.shutdown()
         self._browse_page.shutdown()
+        self._palette_catalog.shutdown()
 
     @property
     def settings(self) -> config.Settings:
@@ -583,6 +600,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._apply_pairing_health(session)
         if self._content_stack.get_visible_child_name() == "pairing-editor":
             self._pairings_page.refresh(session)
+        elif self._stack.get_visible_child_name() == "playlists":
+            self._playlists_page.pairing_health_changed(session)
         self._show_media_playback(session)
 
     @staticmethod
@@ -929,20 +948,25 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_favourite(self, item: MediaItem, wanted: bool) -> None:
         """Star or unstar one wallpaper, and tell the user if it did not stick."""
-        try:
-            if wanted:
-                self._favourites.add(item.path)
-            else:
-                self._favourites.discard(item.path)
-        except favourites.FavouritesError:
-            # Store mutations are transactional: a failed write did not adopt
-            # the candidate state, so leave every view on the last durable
-            # value instead of claiming an in-memory-only success.
-            self.report(f"{item.name} could not be saved as a favourite; nothing changed")
-            return
-        self._grid.set_favourites(self._favourites.paths)
-        self._app.favourites_changed()
-        self._update_subtitle()
+
+        def prepare() -> Callable[[], bool]:
+            current = self._app.current_item_for_authoring(item)
+            store = self._app.session.favourites
+            return lambda: store.add(current.path) if wanted else store.discard(current.path)
+
+        def saved(_changed: bool) -> None:
+            self._grid.set_favourites(self._favourites.paths)
+            self._app.favourites_changed()
+            self._update_subtitle()
+
+        self._app.authoring_action_async(
+            lambda: False,
+            saved,
+            prepare=prepare,
+            failure=lambda _error: self.report(
+                f"{item.name} could not be saved as a favourite; nothing changed"
+            ),
+        )
 
     # -- the per-tile menu -----------------------------------------------
 
@@ -956,7 +980,10 @@ class MainWindow(Adw.ApplicationWindow):
         """
         menu = Gio.Menu()
         target = GLib.Variant.new_string(str(item.path))
-        bundle = self._app.session.pairings.resolve(item, self._app.session.library.roots)
+        bundle = self._app.session.pairings.resolve_accepted(
+            item,
+            self._app.session.library,
+        )
         independent = self._settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
         if bundle.health.is_borked:
             # No action on purpose: this renders as an insensitive explanation
@@ -1034,7 +1061,8 @@ class MainWindow(Adw.ApplicationWindow):
             fixed.append_item(fixed_item)
         menu.append_section(None, fixed)
 
-        found = palettes.discover()
+        state = self._palette_catalog.state
+        found = state.discovery
         for origin in (palettes.Origin.BUILTIN, palettes.Origin.COMMUNITY, palettes.Origin.CUSTOM):
             entries = [entry for entry in found.entries if entry.origin is origin]
             if not entries:
@@ -1049,6 +1077,10 @@ class MainWindow(Adw.ApplicationWindow):
                 )
                 section.append_item(chosen)
             menu.append_submenu(origin.label, section)
+        if state.loading:
+            menu.append("Loading installed palettes…", None)
+        elif state.phase == "error":
+            menu.append("Palette list unavailable · open Palettes to retry", None)
         return menu
 
     def _on_choose_still(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
@@ -1094,28 +1126,50 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             if still is not None:
                 still = self._app.session.library.require_representative_still(still).path
-            self._app.session.pairings.choose_still(item, still)
         except RepresentativeStillError as error:
             self.report(str(error))
             return
-        except pairings.PairingError:
-            self.report(f"The still for {item.name} could not be saved; nothing changed")
-            return
-        self._app.pairing_changed(item)
+        store = self._app.session.pairings
+
+        def saved(result: Any) -> None:
+            self._app.adopt_pairing_still(result.item, result.effective_still)
+            self._app.pairing_changed(result.item)
+
+        self._app.authoring_action_async(
+            lambda: store.choose_still(item, still),
+            saved,
+            prepare=lambda: self._app.prepare_still_pairing_mutation(
+                item,
+                still,
+                lambda current_store, current, current_still: current_store.choose_still(
+                    current, current_still
+                ),
+            ),
+            failure=lambda _error: self.report(
+                f"The still for {item.name} could not be saved; nothing changed"
+            ),
+        )
 
     def _on_reset_pairing(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Forget everything chosen for one wallpaper."""
         item = self._item_at(raw)
         if item is None:
             return
-        try:
-            if not self._app.session.pairings.reset(item):
+        store = self._app.session.pairings
+
+        def reset(result: Any) -> None:
+            current = self._app.adopt_pairing_still(result.item, result.effective_still)
+            if not result.changed:
                 return
-        except pairings.PairingError:
-            self.report(f"{item.name} could not be reset; nothing changed")
-            return
-        self.report(f"{item.name} is back to its defaults")
-        self._app.pairing_changed(item)
+            self.report(f"{current.name} is back to its defaults")
+            self._app.pairing_changed(current)
+
+        self._app.authoring_action_async(
+            lambda: store.reset(item),
+            reset,
+            prepare=lambda: self._app.prepare_pairing_reset(item),
+            failure=lambda _error: self.report(f"{item.name} could not be reset; nothing changed"),
+        )
 
     def _on_palette_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
         """Record which colours a wallpaper asks for, and show them now.
@@ -1130,13 +1184,18 @@ class MainWindow(Adw.ApplicationWindow):
         if item is None:
             return
         policy = pairings.PalettePolicy.decode(encoded)
-        try:
-            self._app.session.pairings.choose_palette(item, policy)
-        except pairings.PairingError:
-            self.report(f"The colours for {item.name} could not be saved; nothing changed")
-            return
-
-        self._app.pairing_changed(item)
+        store = self._app.session.pairings
+        self._app.authoring_action_async(
+            lambda: store.choose_palette(item, policy),
+            lambda _record: self._app.pairing_changed(item),
+            prepare=lambda: self._app.prepare_pairing_mutation(
+                item,
+                lambda current_store, current: current_store.choose_palette(current, policy),
+            ),
+            failure=lambda _error: self.report(
+                f"The colours for {item.name} could not be saved; nothing changed"
+            ),
+        )
 
     def _item_at(self, raw: GLib.Variant | None) -> MediaItem | None:
         if raw is None:
@@ -1194,6 +1253,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _request_remove(self, item: MediaItem) -> None:
         """Start the ownership-appropriate removal flow for one live item."""
+        if not self._app.require_authoring_ready():
+            return
         # Pairing-editor buttons are built from the same predicate, but the
         # path may have changed before the click.  Recheck rather than letting
         # a stale widget broaden deletion authority.
@@ -1221,84 +1282,49 @@ class MainWindow(Adw.ApplicationWindow):
     ) -> None:
         if response != "remove":
             return
-        try:
-            intent = self._app.prepare_item_removal(item)
-        except removals.RemovalJournalError as error:
-            self.report(f"Nothing was deleted; removal could not be recorded safely: {error}")
-            return
-        try:
-            result = manage.remove(
-                item,
-                self._app.session.library.roots,
-                expected_source=intent.source_identity,
-            )
-        except manage.ManageError as error:
-            if not error.committed:
-                cancellation = self._app.cancel_item_removal(intent)
-                detail = (
-                    "; the file is still present, but its prepared removal intent "
-                    f"could not be cleared: {'; '.join(cancellation)}"
-                    if cancellation
-                    else ""
-                )
-                self.report(str(error) + detail)
-                return
-            failures = self._forget(item, intent)
-            self.report(str(error) + manage.metadata_cleanup_note(failures))
-            return
-        failures = self._forget(item, intent)
-        self.report(
-            f"{result.describe()}{result.cleanup_note()}{manage.metadata_cleanup_note(failures)}"
+        self._app.remove_item_async(
+            item,
+            trash=False,
+            finish=self._finish_removal,
         )
 
     def _trash(self, item: MediaItem) -> None:
-        try:
-            intent = self._app.prepare_item_removal(item)
-        except removals.RemovalJournalError as error:
-            self.report(f"Nothing was moved; removal could not be recorded safely: {error}")
-            return
-        try:
-            result = manage.trash(
-                item,
-                self._app.session.library.roots,
-                expected_source=intent.source_identity,
-            )
-        except manage.ManageError as error:
-            if not error.committed:
-                cancellation = self._app.cancel_item_removal(intent)
-                detail = (
-                    "; the file is still present, but its prepared removal intent "
-                    f"could not be cleared: {'; '.join(cancellation)}"
-                    if cancellation
-                    else ""
-                )
-                self.report(str(error) + detail)
-                return
-            failures = self._forget(item, intent)
-            self.report(str(error) + manage.metadata_cleanup_note(failures))
-            return
-        failures = self._forget(item, intent)
-        self.report(
-            f"{item.name} moved to the trash{result.cleanup_note()}"
-            f"{manage.metadata_cleanup_note(failures)}"
+        self._app.remove_item_async(
+            item,
+            trash=True,
+            finish=self._finish_removal,
         )
 
-    def _forget(
-        self,
-        item: MediaItem,
-        intent: removals.Intent,
-    ) -> tuple[str, ...]:
-        """Drop a removed wallpaper from authoring stores, then rescan.
+    def _finish_removal(self, result: RemovalResult) -> None:
+        """Adopt the worker's visible result without touching the filesystem.
 
         Stars, pairing choices and playlist entries normally survive a missing
         file because it might come back. That is not true of one we explicitly
         deleted, so none may keep pointing at it.
         """
-        failures = self._app.forget_item(item, intent=intent)
+        if not result.committed:
+            action = "moved" if result.trash else "deleted"
+            detail = (
+                "; the file is still present, but its prepared removal intent "
+                f"could not be cleared: {'; '.join(result.cancellation_failures)}"
+                if result.cancellation_failures
+                else ""
+            )
+            self.report(f"Nothing was {action}: {result.error_message}{detail}")
+            return
+
         self._grid.set_favourites(self._favourites.paths)
         if self._content_stack.get_visible_child_name() == "pairing-editor":
             self._close_pairing_editor()
-        return failures
+        metadata = manage.metadata_cleanup_note(result.cleanup_failures)
+        if result.error_message:
+            self.report(result.error_message + metadata)
+            return
+        physical = result.physical
+        if isinstance(physical, manage.Removal):
+            self.report(f"{physical.describe()}{physical.cleanup_note()}{metadata}")
+        elif isinstance(physical, manage.Trashed):
+            self.report(f"{result.item.name} moved to the trash{physical.cleanup_note()}{metadata}")
 
     def show_current(self, session: Session) -> None:
         """Refresh playback truth without rebuilding the Media grid."""

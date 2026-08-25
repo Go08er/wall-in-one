@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one import config
+from wall_in_one import config, file_io
 from wall_in_one.library import displays, favourites, pairings, playlists, schedules, state_file
 
 
@@ -37,6 +37,34 @@ def test_an_unexpected_directory_is_not_moved_for_a_state_write(tmp_path: Path) 
         state_file.preserve_faulted(target)
 
     assert target.is_dir()
+    assert not (tmp_path / "state.json.broken").exists()
+
+
+def test_preserving_a_fault_never_moves_a_same_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text("expected broken state", encoding="utf-8")
+    original = tmp_path / "original-state"
+    real_rename = file_io._rename_noreplace
+    raced = False
+
+    def replace_then_rename(source: Path, destination: Path) -> None:
+        nonlocal raced
+        if source == target and not raced:
+            raced = True
+            source.rename(original)
+            source.write_text("late replacement", encoding="utf-8")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", replace_then_rename)
+
+    with pytest.raises(file_io.PathChangedError):
+        state_file.preserve_faulted(target)
+
+    assert target.read_text(encoding="utf-8") == "late replacement"
+    assert original.read_text(encoding="utf-8") == "expected broken state"
     assert not (tmp_path / "state.json.broken").exists()
 
 
@@ -150,3 +178,37 @@ def test_mutation_lock_refuses_a_predictable_symlink(tmp_path: Path) -> None:
         pytest.fail("a symlink must not grant the mutation lock")
 
     assert sentinel.read_text(encoding="utf-8") == "do not touch"
+
+
+def test_nested_different_target_mutation_locks_are_same_thread_reentrant(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "migration-marker.json"
+    second = tmp_path / "settings.json"
+
+    with (
+        state_file.mutation_lock(first, description="outer"),
+        state_file.mutation_lock(second, description="inner"),
+    ):
+        second.write_text("saved", encoding="utf-8")
+
+    assert second.read_text(encoding="utf-8") == "saved"
+
+
+def test_marker_lock_can_exclude_migration_without_owning_every_state_gate(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "migration-marker.json"
+    target = tmp_path / "playlists.json"
+
+    with (
+        state_file.mutation_lock(
+            marker,
+            description="migration",
+            process_gate=False,
+        ),
+        state_file.mutation_lock(target, description="playlists"),
+    ):
+        target.write_text("saved", encoding="utf-8")
+
+    assert target.read_text(encoding="utf-8") == "saved"

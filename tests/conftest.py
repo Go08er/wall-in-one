@@ -106,13 +106,17 @@ def no_live_noctalia(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
 
     real_message = noctalia.message
 
-    def guarded_message(command: str, *arguments: str) -> str:
+    def guarded_message(
+        command: str,
+        *arguments: str,
+        cancelled: noctalia.CancelCheck | None = None,
+    ) -> str:
         if command in MUTATING_MESSAGES:
             raise AssertionError(
                 f"a test called noctalia.message({command!r}), which changes the live desktop. "
                 "Patch it in the test if that is what you meant to exercise."
             )
-        return real_message(command, *arguments)
+        return real_message(command, *arguments, cancelled=cancelled)
 
     monkeypatch.setattr(noctalia, "message", guarded_message)
     yield

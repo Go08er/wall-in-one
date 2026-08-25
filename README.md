@@ -6,13 +6,14 @@
 > clicked by a human, and the bugs found so far were found by running it rather
 > than by its test suite — so assume running it longer will find more.
 >
-> Expect breakage, expect settings and on-disk formats to move without
-> migration, and do not point it at wallpapers you would mind losing.
+> Expect breakage. The retired Noctalia Luau plugin has an explicit,
+> no-overwrite importer, but arbitrary pre-alpha Python/Rust formats may still
+> move without migration. Do not point it at wallpapers you would mind losing.
 
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.
 
 It manages stills and video wallpapers, keeps its own colours in sync with
-[Noctalia](https://github.com/noctalia-dev/noctalia-shell)'s active palette, and
+[Noctalia](https://github.com/noctalia-dev/noctalia)'s active palette, and
 is driven either from its window or through `wall-in-one ctl`. That client
 routes commands across the two local control sockets and is how the companion
 Noctalia plugin talks to it.
@@ -20,20 +21,27 @@ Noctalia plugin talks to it.
 ## Status
 
 **Working, and in use.** The library, pairings, automatic stills, playlists,
-schedules, per-display assignment, the colour pipeline, and browsing two
-wallpaper sites are all built and exercised against a live system. The test
+schedules, the colour pipeline, and browsing two wallpaper sites are all built
+and exercised against a live one-output system. Independent multi-display
+behavior is implemented and covered separately by software tests. The test
 suite checks the logic, protocols, packaging and widget wiring; the limits
 below say what still has not been demonstrated by real use.
 
-Everything the Luau plugin it replaces could do, it now does. The one capability
-not carried across is **per-output renderer settings** -- mute, FPS and scaling
-are global rather than per screen.
+The core Luau workflows are present, but the authoring models are not identical.
+The software supports per-display wallpaper routing, schedules and transport;
+renderer tuning (mute, FPS, scaling/clamp) and cadence values remain global.
+Legacy gesture bindings and several provider/capture tuning fields have no
+app-owned equivalent. Scene scaling and clamp migrate from one designated
+display into typed global settings. The exact import and intentional-reset list is in
+[`docs/migrating.md`](docs/migrating.md).
 
 Three things are worth knowing before you rely on it:
 
-- **Two monitors showing two different playlists is unverified.** The machine
-  this was written on has one output. Screen discovery is checked against real
-  niri, and assignment is tested, but nobody has watched two screens disagree.
+- **Multi-display support is theoretical until physical validation.**
+  Independent routes, schedules, cursors, renderers and transport are supported
+  in software and covered by automated tests. The development machine and
+  desktop VM each expose one output; the behavior has not been validated with
+  two physical monitors showing different playlists.
 - **The GUI has still had limited human use.** Tests number in the thousands,
   cover the logic, and drive widgets programmatically, which proves wiring
   rather than whether anything *looks* right. The browse screen, playlist
@@ -52,6 +60,22 @@ the wallpaper logic lives there.
 
 The plugin is optional. This app is a complete wallpaper manager on its own;
 the plugin exists so the bar can drive it without opening the window.
+
+This app revision is intended only for a coordinated release with the reviewed
+companion update. Companion revisions through `a5e23c9` do not require status
+version 2 or expose the authoritative independent-route fields, their
+direct-runtime fallback does not persist a newly observed Borked item, and
+their eight-second callback deadline is shorter than Wall-in-One's legitimate
+45-second action bound. The matching companion requires status version 2,
+requests the health hand-off after a non-durable crash finding, and allows 55
+seconds for the bounded action. Before the app is released, `flake.lock` must
+pin the tested companion commit. To avoid exposing that strict client to the
+older public app, the coordinated release first pushes the companion candidate
+to a non-default release branch, publishes the app against that exact commit,
+and then immediately promotes the companion release. Users of an older companion
+should use the packaged service/health timer and the app's own status as the
+authority. The exact compatibility boundary is recorded in
+[`docs/migrating.md`](docs/migrating.md#companion-noctalia-plugin-compatibility).
 
 ## Why it exists
 
@@ -138,13 +162,16 @@ to reload. It never opens GTK, never clears a marker merely because a bounded
 snapshot omitted it, and leaves the last-known-good runtime document untouched
 if compilation fails. A shell or bar integration may invoke it after status
 reports a taboo entry; Rust never runs Python or writes authoring data itself.
+The packaged service also couples a non-persistent systemd timer to Rust and
+runs this bridge 30 seconds after startup and 30 seconds after each prior sync
+finishes. A no-report status returns before any authoring scan/write.
 
 The retained `wall-in-one --service` is a compatibility fallback during this
 transition, not the packaged unit's implementation. Stop the Rust runtime
 deliberately with `wall-in-one ctl quit`.
 
-The Nix package also installs `share/systemd/user/wall-in-one.service`. To start
-the service with the graphical session:
+The Nix package also installs `share/systemd/user/wall-in-one.service` plus its
+health-sync service/timer. To start the service with the graphical session:
 
 ```console
 $ systemctl --user enable --now wall-in-one.service
@@ -168,12 +195,23 @@ retries only desktop-readiness failures for a bounded eight seconds; Noctalia
 and niri helper calls themselves time out after three seconds and keep only a
 bounded stderr diagnostic. A deliberate `ctl quit` is a clean exit and is not
 restarted. Other failures use the unit's five-second retry, capped at five
-starts per minute rather than looping forever. The checked-in unit uses bare
-commands so it remains useful outside Nix; the Nix package rewrites both to
-wrapped store paths.
-If you copy the unit manually from `src/wall_in_one/data/systemd/`, make sure
-both `wall-in-one` and `wall-in-one-service` are on the user manager's `PATH`, then run
-`systemctl --user daemon-reload` before enabling it.
+starts per minute rather than looping forever. The checked-in units use bare
+commands so they remain useful outside Nix; the Nix package rewrites every
+executable to a store path.
+If you copy the three units manually from
+`src/wall_in_one/data/systemd/`, make sure
+`wall-in-one`, `wall-in-one-service` and GNU `timeout` are on the user manager's
+`PATH`, then run `systemctl --user daemon-reload` before enabling it.
+
+The health timer is `BindsTo=` the Rust unit, so an explicit stop, crash, or
+failed start cannot leave Python polling in the background. Runs cannot overlap
+and missed intervals are not replayed after login or suspend. Its normal
+no-change stdout is discarded while errors remain in the journal. Stop also
+makes one best-effort persistence attempt capped at two seconds; it cannot hold a
+wedged authoring store open during shutdown. Direct non-systemd daemon launches
+need a bar/shell caller for the hand-off; the matching companion revision adds
+that call. The companion lives in its separate repository and is a coordinated
+release requirement rather than something this repository silently modifies.
 
 If the resolved runtime document itself is missing or invalid and exhausts the
 unit's restart limit, repair the authoring source and explicitly recover with
@@ -217,13 +255,18 @@ five real pages:
   the searchable thumbnail pane by clicking or ordinary drag-and-drop. Within
   the playlist, drag a row's handle to reorder the live sortable list. The
   entry's stable id is not changed and the same pairing may appear more than
-  once.
+  once. Borked media stays visible for repair but cannot be added or dragged
+  into another playback route; retained Borked or missing entries are labelled
+  unavailable, skipped when safe media remains, and disable Play when the list
+  has no usable item. Large rotations load 72 stable order rows at a time while
+  the complete stored order remains available to playback.
 - **Schedules** switches the active playlist, resumes calendar control, chooses
   the default playlist, assigns playlists to connectors, and edits months,
   weekdays and local-time windows with visual selectors. Independent mode also
   exposes each live display's transport, Stop, Cycle and Shuffle controls with
   their saved-default/manual provenance. Rules lower in the list have higher
-  priority: the last matching rule wins.
+  priority: the last matching rule wins. The editor loads rules 48 at a time,
+  so the supported 512-rule ceiling remains usable rather than a widget burst.
 - **Settings** keeps library roots, playback, providers, colour and appearance
   controls visible as part of the main workflow rather than another window.
 
@@ -381,7 +424,14 @@ group for the pre-5.x `colorschemes/` layout. That fourth group is listed with
 Apply disabled and the reason stated -- Noctalia 5.0.0-beta.7 cannot apply one,
 so offering the button would be a lie. The built-ins are listed without
 swatches for a related reason: their names are strings in the binary and their
-colours are not.
+colours are not. Palette directories are discovered and parsed on one bounded
+filesystem worker rather than GTK's interface thread. The browser and each
+pairing's colour-policy picker search the complete catalogue but construct only
+24 rows at a time, with an explicit loader for the next page. An ordinary
+rescan keeps unchanged row, focus and scroll identity while showing
+"Refreshing"; a palette saved by this app invalidates the old snapshot until
+the post-write generation lands, so an edited entry cannot be resurrected by a
+late scan.
 
 ## Translucency and blur
 
@@ -400,16 +450,32 @@ The complete verb reference and the behaviour behind it are in
 ## Settings
 
 The Settings tab writes `~/.config/wall-in-one/settings.toml`; it is also safe
-to edit by hand, and bad values are clamped instead of preventing startup. The
+to edit by hand. The interactive loader clamps bad values so the repair screen
+can still open. The unattended `--write-config` compiler instead rejects an
+invalid typed value and preserves the last-known-good runtime document. The
 complete key, meaning and default table is in
 [`docs/settings.md`](docs/settings.md).
+
+## Migrating from the retired plugin
+
+The first graphical launch detects legacy `goober/wall-in-one` Noctalia data
+before it creates a fresh profile. Import is explicit, leaves every legacy byte
+untouched, refuses to merge with current authoring, and can resume an exact
+interrupted transaction. Start with
+[`docs/migrating.md`](docs/migrating.md); it covers the prompt, CLI status,
+schema 1-5 mapping, known losses, companion-plugin compatibility and rollback.
 
 ## Development
 
 Development uses CPython 3.14. Provider HTML parsing runs in one lazily shared
 `InterpreterPoolExecutor`, so CPU-heavy scraper work has an independent GIL
 instead of interrupting GTK's frame loop. Network waits, subprocess work and
-all PyGObject code deliberately stay out of that pool.
+all PyGObject code deliberately stay out of that pool. This is the ordinary
+GIL-enabled CPython build, not free-threaded Python: GTK and every widget stay
+on one main thread, bounded worker lanes do only I/O/subprocess or immutable
+data work, and the small Rust daemon owns the renderer processes. The goal is
+a responsive interface separated from rendering, not unconstrained shared
+state across threads.
 
 ```console
 $ nix develop

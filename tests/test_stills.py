@@ -10,6 +10,7 @@ Nothing here touches the user's library. Every path is under `tmp_path`.
 
 from __future__ import annotations
 
+import os
 import random
 import subprocess
 from dataclasses import replace
@@ -18,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import pairing, pairings, scan, stills
+from wall_in_one.library import pairing, pairings, scan, state_file, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia
@@ -169,6 +170,36 @@ def test_a_file_that_is_not_a_video_leaves_no_torn_still(root: Path, tmp_path: P
     assert not directory.exists() or list(directory.iterdir()) == []
 
 
+def test_a_video_mutated_in_place_during_capture_cannot_publish(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"original source")
+
+    def mutate_source(
+        _video: Path,
+        temporary: Path,
+        _seek: float,
+        *,
+        processes: object = None,
+    ) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+        video.write_bytes(b"different source bytes and size")
+        return ""
+
+    monkeypatch.setattr(stills, "_run", mutate_source)
+    target = stills.destination(video, root)
+
+    with pytest.raises(stills.StillError, match="changed while its still was being made"):
+        stills.generate(video, root)
+
+    assert not target.exists()
+    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
+
+
 # -- pairing the two -----------------------------------------------------
 
 
@@ -180,6 +211,38 @@ def test_generating_writes_a_sidecar_the_reader_understands(root: Path) -> None:
     video = make_video(root / "clip.mp4")
     still = stills.generate(video, root)
     assert pairing.read_sidecar(video) == still
+
+
+def test_existing_target_never_writes_a_sidecar_after_source_removal(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reusing a frame is still a publication because it creates a sidecar."""
+    video = make_video(root / "clip.mp4")
+    target = stills.destination(video, root)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\x89PNG\r\n\x1a\nexisting")
+    real_validate = stills._require_unchanged_source
+    removed = False
+
+    def remove_then_validate(
+        source: Path,
+        kind: Kind,
+        expected: stills._SourceSnapshot,
+    ) -> None:
+        nonlocal removed
+        if not removed:
+            removed = True
+            source.unlink()
+        real_validate(source, kind, expected)
+
+    monkeypatch.setattr(stills, "_require_unchanged_source", remove_then_validate)
+
+    with pytest.raises(stills.StillError, match="removed while its still was being made"):
+        stills.generate(video, root)
+
+    assert target.is_file()
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
 
 
 def test_the_still_is_found_by_the_managed_directory_alone(root: Path) -> None:
@@ -211,6 +274,62 @@ def test_the_sidecar_is_replaced_in_one_step(root: Path, tmp_path: Path) -> None
         if entry.name.startswith(".") and entry.name.endswith(".tmp")
     ]
     assert stray == []
+
+
+def test_legacy_predictable_sidecar_temporary_cannot_redirect_a_write(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"image")
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("keep", encoding="utf-8")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    legacy = sidecar.with_name(f".{sidecar.name}.{os.getpid()}.tmp")
+    legacy.symlink_to(sentinel)
+
+    stills.write_sidecar(video, chosen)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert legacy.is_symlink()
+    assert pairing.read_sidecar(video) == chosen
+
+
+def test_generated_still_publication_syncs_its_directory(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = make_video(tmp_path / "clip.mp4")
+    synced: list[Path] = []
+    original = state_file.fsync_parent
+
+    def record(path: Path) -> None:
+        synced.append(path)
+        original(path)
+
+    monkeypatch.setattr(state_file, "fsync_parent", record)
+
+    target = stills.generate(video, root)
+
+    assert target in synced
+
+
+def test_legacy_predictable_image_temporary_cannot_redirect_ffmpeg(
+    root: Path, tmp_path: Path
+) -> None:
+    video = make_video(tmp_path / "clip.mp4")
+    target = stills.destination(video, root)
+    target.parent.mkdir(parents=True)
+    sentinel = tmp_path / "sentinel.png"
+    sentinel.write_bytes(b"keep")
+    legacy = target.with_name(f".{target.stem}.{os.getpid()}.tmp{target.suffix}")
+    legacy.symlink_to(sentinel)
+
+    assert stills.generate(video, root) == target
+
+    assert sentinel.read_bytes() == b"keep"
+    assert legacy.is_symlink()
+    assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 # -- the forgiving entry point -------------------------------------------
@@ -258,9 +377,14 @@ def test_ensure_swallows_a_failure_rather_than_stopping_playback(
 # -- scene captures -------------------------------------------------------
 
 
-def _scene(workshop_id: str, paired: Path | None = None) -> MediaItem:
+def _scene(
+    workshop_id: str,
+    paired: Path | None = None,
+    *,
+    directory: Path | None = None,
+) -> MediaItem:
     return MediaItem(
-        path=Path("/steam/workshop/content/431960") / workshop_id,
+        path=directory or Path("/steam/workshop/content/431960") / workshop_id,
         kind=Kind.SCENE,
         size=1,
         mtime=0,
@@ -307,7 +431,9 @@ def test_scene_capture_replaces_the_managed_still_atomically(
 ) -> None:
     target = pairing.still_directory(root) / "1647046763.png"
     _png_header(target, 1270, 1537)
-    scene = _scene("1647046763", target)
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", target, directory=installation)
     monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
 
     def capture(_scene_id: str, destination: Path, *, size: tuple[int, int]) -> Path:

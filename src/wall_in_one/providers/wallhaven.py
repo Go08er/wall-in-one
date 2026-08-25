@@ -43,6 +43,7 @@ from wall_in_one.providers import download as download_module
 from wall_in_one.providers import http
 from wall_in_one.providers.base import (
     MAX_RESULTS,
+    CancellationProbe,
     CandidateDetail,
     DownloadResult,
     Fact,
@@ -51,6 +52,8 @@ from wall_in_one.providers.base import (
     SearchResult,
     WallpaperCandidate,
     human_bytes,
+    optional_cancellation_probe,
+    refuse_cancellation,
 )
 from wall_in_one.providers.cache import TtlCache
 
@@ -556,12 +559,13 @@ _PNG_DEPTHS: Final[Mapping[int, frozenset[int]]] = {
 }
 
 
-def jpeg_dimensions(path: Path) -> tuple[int, int]:
+def jpeg_dimensions(path: Path, *, cancelled: CancellationProbe | None = None) -> tuple[int, int]:
     """Width and height from the JPEG's own frame header.
 
     Walks the segment chain rather than trusting any single offset, and is
     bounded on segment count so a crafted file cannot spin here.
     """
+    refuse_cancellation(cancelled)
     size = path.stat().st_size
     with path.open("rb") as stream:
         if stream.read(2) != b"\xff\xd8":
@@ -573,6 +577,7 @@ def jpeg_dimensions(path: Path) -> tuple[int, int]:
         dimensions: tuple[int, int] | None = None
         segments = 0
         while position < size - 2:
+            refuse_cancellation(cancelled)
             segments += 1
             if segments > 4096:
                 raise ProviderError("content-type", "JPEG contains too many segments")
@@ -582,6 +587,7 @@ def jpeg_dimensions(path: Path) -> tuple[int, int]:
             marker_byte = stream.read(1)
             fills = 0
             while marker_byte == b"\xff":
+                refuse_cancellation(cancelled)
                 fills += 1
                 if fills > 64:
                     raise ProviderError("content-type", "JPEG marker fill is excessive")
@@ -621,13 +627,15 @@ def jpeg_dimensions(path: Path) -> tuple[int, int]:
                     raise ProviderError("content-type", "JPEG scan header is invalid")
                 if end >= size - 2:
                     raise ProviderError("content-type", "JPEG has no entropy-coded image data")
+                refuse_cancellation(cancelled)
                 return dimensions
             position = end
     raise ProviderError("content-type", "JPEG has no complete image scan")
 
 
-def png_dimensions(path: Path) -> tuple[int, int]:
+def png_dimensions(path: Path, *, cancelled: CancellationProbe | None = None) -> tuple[int, int]:
     """Width and height from IHDR, with every chunk's CRC verified."""
+    refuse_cancellation(cancelled)
     size = path.stat().st_size
     with path.open("rb") as stream:
         if stream.read(8) != b"\x89PNG\r\n\x1a\n":
@@ -638,6 +646,7 @@ def png_dimensions(path: Path) -> tuple[int, int]:
         saw_data = False
         saw_end = False
         while position < size:
+            refuse_cancellation(cancelled)
             chunks += 1
             if chunks > 4096:
                 raise ProviderError("content-type", "PNG contains too many chunks")
@@ -652,6 +661,7 @@ def png_dimensions(path: Path) -> tuple[int, int]:
             remaining = length
             prefix = b""
             while remaining:
+                refuse_cancellation(cancelled)
                 chunk = stream.read(min(64 * 1024, remaining))
                 if not chunk:
                     raise ProviderError("content-type", "PNG chunk is truncated")
@@ -691,11 +701,19 @@ def png_dimensions(path: Path) -> tuple[int, int]:
                 break
         if dimensions is None or not saw_end:
             raise ProviderError("content-type", "PNG image structure is incomplete")
+        refuse_cancellation(cancelled)
         return dimensions
 
 
-def validate_image(path: Path, content_type: str, wallpaper: WallhavenWallpaper) -> tuple[int, str]:
+def validate_image(
+    path: Path,
+    content_type: str,
+    wallpaper: WallhavenWallpaper,
+    *,
+    cancelled: CancellationProbe | None = None,
+) -> tuple[int, str]:
     """Check the file against the metadata that authorised downloading it."""
+    refuse_cancellation(cancelled)
     try:
         size = path.stat().st_size
     except OSError as error:
@@ -705,7 +723,9 @@ def validate_image(path: Path, content_type: str, wallpaper: WallhavenWallpaper)
     if content_type != wallpaper.file_type:
         raise ProviderError("content-type", "download MIME type does not match Wallhaven metadata")
     dimensions = (
-        jpeg_dimensions(path) if wallpaper.file_type == "image/jpeg" else png_dimensions(path)
+        jpeg_dimensions(path, cancelled=cancelled)
+        if wallpaper.file_type == "image/jpeg"
+        else png_dimensions(path, cancelled=cancelled)
     )
     if dimensions != (wallpaper.width, wallpaper.height):
         raise ProviderError(
@@ -714,10 +734,12 @@ def validate_image(path: Path, content_type: str, wallpaper: WallhavenWallpaper)
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while True:
+            refuse_cancellation(cancelled)
             chunk = stream.read(1024 * 1024)
             if not chunk:
                 break
             digest.update(chunk)
+    refuse_cancellation(cancelled)
     return size, digest.hexdigest()
 
 
@@ -787,7 +809,7 @@ class Wallhaven:
             )
         try:
             decoded: object = json.loads(response.body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as error:
+        except (UnicodeDecodeError, ValueError, RecursionError) as error:
             raise ProviderError("response", f"Wallhaven returned invalid JSON: {error}") from error
         return decoded
 
@@ -935,7 +957,14 @@ class Wallhaven:
                 raise ProviderError("transport", "download produced no body")
             if transfer.url != wallpaper.media_url:
                 raise ProviderError("redirects", "download resolved to a different Wallhaven URL")
-            size, digest = validate_image(transfer.path, transfer.content_type, wallpaper)
+            cancelled = optional_cancellation_probe(self._client)
+            size, digest = validate_image(
+                transfer.path,
+                transfer.content_type,
+                wallpaper,
+                cancelled=cancelled,
+            )
+            refuse_cancellation(cancelled)
             downloaded_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             payload = download_module.encode_sidecar(
                 {
@@ -954,7 +983,11 @@ class Wallhaven:
                 }
             )
             installed, sidecar = download_module.install(
-                transfer.path, destination, sidecar_suffix, payload
+                transfer.path,
+                destination,
+                sidecar_suffix,
+                payload,
+                cancelled=cancelled,
             )
         return DownloadResult(
             provider=self.name,

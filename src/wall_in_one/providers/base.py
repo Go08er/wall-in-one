@@ -13,15 +13,19 @@ and never handed onwards as a raw document.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Protocol, cast, runtime_checkable
 
 from wall_in_one.library.model import Kind
 
 #: Ceiling on results returned from one search, whatever the remote says.
 MAX_RESULTS: Final = 48
+
+#: A production transport can expose this narrow, optional capability without
+#: making every injected/offline ``Client`` implement lifecycle management.
+CancellationProbe = Callable[[], bool]
 
 
 class ProviderError(Exception):
@@ -31,7 +35,7 @@ class ProviderError(Exception):
     dialogue, `rate-limit` wants a retry, `site-markup` wants a bug report --
     while the message is for a human to read. The kinds in use:
 
-    ``challenge``, ``conflict``, ``content-type``, ``credential``,
+    ``cancelled``, ``challenge``, ``conflict``, ``content-type``, ``credential``,
     ``dimensions``, ``http``, ``invalid-path``, ``invalid-request``,
     ``invalid-url``, ``local-io``, ``no-root``, ``rate-limit``, ``redirects``,
     ``remote``, ``response``, ``site-markup``, ``size-limit``,
@@ -45,6 +49,25 @@ class ProviderError(Exception):
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
+
+
+def optional_cancellation_probe(owner: object) -> CancellationProbe | None:
+    """Return an owner's structural cancellation probe when it has one.
+
+    ``http.Client`` deliberately remains a two-method protocol so small test
+    and third-party clients do not acquire a lifecycle obligation.  The real
+    transport additionally offers ``cancelled()``; providers discover only
+    that optional capability and pass the resulting zero-argument probe into
+    post-transfer validation and installation.
+    """
+    probe = getattr(owner, "cancelled", None)
+    return cast("CancellationProbe", probe) if callable(probe) else None
+
+
+def refuse_cancellation(probe: CancellationProbe | None) -> None:
+    """Turn a cooperative shutdown observation into the provider error shape."""
+    if probe is not None and probe():
+        raise ProviderError("cancelled", "download cancelled during shutdown")
 
 
 @dataclass(frozen=True, slots=True)

@@ -172,7 +172,7 @@ def discover() -> tuple[Output, ...]:
         return ()
     try:
         document = json.loads(completed.stdout)
-    except ValueError, UnicodeDecodeError:
+    except ValueError, UnicodeDecodeError, RecursionError:
         return ()
     return parse(document)
 

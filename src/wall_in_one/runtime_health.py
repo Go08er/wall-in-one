@@ -62,7 +62,7 @@ def parse_status(message: str) -> dict[str, object]:
     """Decode one Rust snapshot strictly before any authoring write occurs."""
     try:
         decoded: object = json.loads(message)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise RuntimeHealthError("runtime status was not valid JSON") from error
     if not isinstance(decoded, dict):
         raise RuntimeHealthError("runtime status was not a JSON object")

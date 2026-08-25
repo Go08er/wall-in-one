@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import stat
 import subprocess
 import sys
+import time
 import types
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from wall_in_one import config
+from wall_in_one import config, file_io, paths
 from wall_in_one.control.protocol import (
     MAX_MESSAGE_BYTES,
     ProtocolError,
@@ -83,6 +87,24 @@ def test_request_rejects_malformed(line: bytes) -> None:
 def test_oversized_message_is_refused() -> None:
     with pytest.raises(ProtocolError):
         Request.decode(b"x" * (MAX_MESSAGE_BYTES + 1))
+
+
+def test_deeply_nested_bounded_request_is_a_protocol_error() -> None:
+    line = b'{"verb":"next","padding":' + (b"[" * 2_000) + b"0" + (b"]" * 2_000) + b"}"
+    assert len(line) < MAX_MESSAGE_BYTES
+    with pytest.raises(ProtocolError, match="nesting exceeds"):
+        Request.decode(line)
+
+
+def test_json_parser_recursion_is_wrapped_as_a_protocol_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def recurse(_line: str) -> object:
+        raise RecursionError("forced parser recursion")
+
+    monkeypatch.setattr(json, "loads", recurse)
+    with pytest.raises(ProtocolError, match="cannot decode message"):
+        Response.decode(b'{"ok":true}')
 
 
 @pytest.mark.parametrize(
@@ -280,6 +302,7 @@ def test_open_page_reaches_the_gui_application(monkeypatch: pytest.MonkeyPatch) 
 def test_open_launches_the_gui_when_only_the_runtime_exists(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     from wall_in_one.control import client
 
@@ -294,12 +317,37 @@ def test_open_launches_the_gui_when_only_the_runtime_exists(
 
     monkeypatch.setattr(client, "send", absent)
     monkeypatch.setattr(subprocess, "Popen", launch)
-    monkeypatch.setattr(sys, "argv", ["/nix/store/example/bin/wall-in-one"])
+    launcher = tmp_path / "wall-in-one"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", [str(launcher)])
 
     assert client.dispatch("open", "playlists") == 0
     assert capsys.readouterr().out == "launch requested for playlists\n"
-    assert launched[0][0] == ["/nix/store/example/bin/wall-in-one", "--open-page", "playlists"]
+    assert launched[0][0] == [str(launcher), "--open-page", "playlists"]
     assert launched[0][1]["start_new_session"] is True
+
+
+def test_open_from_a_module_launch_uses_the_current_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one.control import client
+
+    launched: list[list[str]] = []
+
+    def absent(*_args: object, **_kwargs: object) -> Response:
+        raise client.NotRunningError("authoring app is closed")
+
+    monkeypatch.setattr(client, "send", absent)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda arguments, **_kwargs: launched.append(arguments),
+    )
+    monkeypatch.setattr(sys, "argv", ["/source/wall_in_one/__main__.py"])
+
+    assert client.dispatch("open", "settings") == 0
+    assert launched == [[sys.executable, "-m", "wall_in_one", "--open-page", "settings"]]
 
 
 def test_open_refuses_an_unknown_page_before_launching(
@@ -660,12 +708,243 @@ def test_the_summary_reports_what_the_dialog_reports() -> None:
 
 
 def test_the_slow_verbs_are_given_longer_than_the_others() -> None:
-    """A five-second ceiling would time out every download and most searches."""
+    """Every authoring verb deliberately owns one audited deadline."""
     from wall_in_one.control import client
 
     assert client.TIMEOUTS["search"] > client.TIMEOUT
     assert client.TIMEOUTS["download"] > client.TIMEOUTS["search"]
-    assert set(client.TIMEOUTS) <= set(build_verb_table(_StubCommands()))
+    assert set(client.TIMEOUTS) == set(build_verb_table(_StubCommands()))
+
+
+def test_authoring_deadlines_cover_their_bounded_inner_work() -> None:
+    """The client must not expire at an inner lock/helper's own boundary."""
+    from wall_in_one.control import client
+    from wall_in_one.library import state_file
+    from wall_in_one.theme import noctalia
+    from wall_in_one.wallpaper import outputs
+
+    assert client.AUTHORING_TIMEOUT > state_file.MUTATION_LOCK_TIMEOUT_SECONDS
+    assert client.DISPLAY_DISCOVERY_TIMEOUT > outputs.QUERY_TIMEOUT
+    assert client.CASCADE_TIMEOUT > client.AUTHORING_TIMEOUT
+    assert client.REMOVAL_TIMEOUT > client.CASCADE_TIMEOUT
+    assert client.COMPOSED_RUNTIME_TIMEOUT >= (
+        state_file.MUTATION_LOCK_TIMEOUT_SECONDS
+        + 5  # runtime compiler lock
+        + (2 * client.RUNTIME_ACTION_TIMEOUT)
+    )
+    one_palette_resolution = (4 * noctalia.MESSAGE_TIMEOUT) + noctalia.GENERATE_TIMEOUT
+    assert (
+        (2 * one_palette_resolution) + (2 * noctalia.MESSAGE_TIMEOUT)
+    ) < client.PALETTE_RELOAD_TIMEOUT
+
+
+class _ClientSocket:
+    """Socket-shaped deadline probe; no wall-clock sleeps or real I/O."""
+
+    def __init__(self, answer: bytes | BaseException) -> None:
+        self.answer = answer
+        self.timeout: float | None = None
+        self.sent = b""
+        self.closed = False
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, _target: str) -> None:
+        return
+
+    def sendall(self, payload: bytes) -> None:
+        self.sent = payload
+
+    def recv(self, _size: int) -> bytes:
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        answer, self.answer = self.answer, b""
+        return answer
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("verb", "expected"),
+    [
+        ("list", 5.0),
+        # This is the old five-second false-failure boundary: a durable store
+        # may legally spend that whole interval waiting for its writer lock.
+        ("favourite", 15.0),
+        ("displays", 10.0),
+        ("playlist-delete", 45.0),
+        ("remove", 60.0),
+        ("reload-palette", 180.0),
+        ("select", 110.0),
+        ("playlist-use", 110.0),
+        ("search", 60.0),
+        ("download", 600.0),
+    ],
+)
+def test_authoring_socket_uses_the_per_verb_deadline_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    verb: str,
+    expected: float,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(Response.success().encode())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    assert client.send(Request(verb), path=tmp_path / "authoring.sock").ok
+    assert probe.timeout == expected
+    assert Request.decode(probe.sent) == Request(verb)
+    assert probe.closed
+
+
+@pytest.mark.parametrize(
+    ("verb", "expected"),
+    [
+        ("status", 5.0),
+        ("shuffle", 5.0),
+        ("playlist-use", 45.0),
+    ],
+)
+def test_runtime_deadlines_do_not_inherit_same_named_authoring_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    expected: float,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(Response.success().encode())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    assert client.send(Request(verb), path=paths.runtime_socket_path()).ok
+    assert probe.timeout == expected
+
+
+def test_a_durable_timeout_reports_unknown_outcome_and_requires_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(TimeoutError())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    with pytest.raises(client.ControlError) as caught:
+        client.send(Request("favourite", "/wallpapers/sky.png"), path=tmp_path / "app.sock")
+
+    message = str(caught.value)
+    assert "timed out after 15s" in message
+    assert "outcome is unknown" in message
+    assert "Verify the current state before retrying" in message
+
+
+@pytest.mark.parametrize(
+    "control_request",
+    [
+        Request("list"),
+        Request("search", "wallhaven mountains"),
+        # Argument-less cycle-interval only asks for the current value.
+        Request("cycle-interval"),
+    ],
+)
+def test_a_read_timeout_retains_the_plain_failure_wording(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    control_request: Request,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(TimeoutError())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    with pytest.raises(client.ControlError) as caught:
+        client.send(control_request, path=tmp_path / "app.sock")
+
+    assert str(caught.value) == f"timed out after {probe.timeout:g}s"
+
+
+def test_runtime_status_timeout_retains_plain_read_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(TimeoutError())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    with pytest.raises(client.ControlError) as caught:
+        client.send(Request("status"), path=paths.runtime_socket_path())
+
+    assert str(caught.value) == "timed out after 5s"
+
+
+def test_an_explicit_durable_deadline_keeps_the_unknown_outcome_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(TimeoutError())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    with pytest.raises(client.ControlError, match=r"timed out after 0\.25s;.*outcome is unknown"):
+        client.send(
+            Request("remove", "/wallpapers/sky.png"),
+            path=tmp_path / "app.sock",
+            timeout=0.25,
+        )
+
+
+@pytest.mark.parametrize(
+    "control_request",
+    (
+        Request("reload-palette"),
+        Request("playlist-use", "Evening"),
+        Request("quit"),
+    ),
+)
+def test_authoring_side_effect_timeout_reports_that_the_command_may_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    control_request: Request,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(TimeoutError())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    with pytest.raises(client.ControlError) as caught:
+        client.send(control_request, path=tmp_path / "app.sock")
+
+    message = str(caught.value)
+    assert "command may still complete" in message
+    assert "outcome is unknown" in message
+    assert "Verify the current state before retrying" in message
+
+
+@pytest.mark.parametrize(
+    "control_request",
+    (
+        Request("reload"),
+        Request("quit"),
+        Request("on", "DP-1 next"),
+    ),
+)
+def test_runtime_side_effect_timeout_reports_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    control_request: Request,
+) -> None:
+    from wall_in_one.control import client
+
+    probe = _ClientSocket(TimeoutError())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+
+    with pytest.raises(client.ControlError) as caught:
+        client.send(control_request, path=paths.runtime_socket_path())
+
+    assert "command may still complete" in str(caught.value)
+    assert "outcome is unknown" in str(caught.value)
 
 
 def test_runtime_actions_allow_a_bounded_multi_display_apply_to_finish() -> None:
@@ -971,12 +1250,16 @@ def _source_identity(path: Path) -> manage.SourceIdentity:
     return status.st_dev, status.st_ino
 
 
+REMOVAL_TOKEN = "0123456789abcdef0123456789abcdef"
+
+
 def test_a_downloaded_wallpaper_is_deleted_and_the_reply_says_which(sandbox: Path) -> None:
     path = _downloaded(sandbox)
     message = remove_wallpaper(
         _on_disk(path, Ownership.MANAGED),
         (sandbox,),
         expected_source=_source_identity(path),
+        operation_token=REMOVAL_TOKEN,
     )
 
     assert not path.exists()
@@ -1011,6 +1294,7 @@ def test_a_stale_claim_of_ownership_still_does_not_delete_anything(sandbox: Path
             _on_disk(path, Ownership.MANAGED),
             (sandbox,),
             expected_source=_source_identity(path),
+            operation_token=REMOVAL_TOKEN,
         )
 
     assert caught.value.kind == "not-ours"
@@ -1119,6 +1403,10 @@ class _FakeApp:
     def present_page(self, page: str) -> None:
         self.presented_pages.append(page)
 
+    def runtime_off_thread(self, work: Callable[[], Response]) -> Deferred:
+        """Deterministic stand-in for Application's ordered runtime worker."""
+        return Deferred(start=lambda reply: reply(work()))
+
 
 @pytest.fixture
 def applied(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
@@ -1153,6 +1441,12 @@ def _commands(sandbox: Path, items: Sequence[MediaItem]) -> tuple[_Commands, _Fa
     session.refresh()
     app = _FakeApp(session)
     return _Commands(cast("Application", app)), app
+
+
+def _immediate(outcome: Outcome) -> Response:
+    """The explicit legacy-service fixture never defers its compatibility I/O."""
+    assert isinstance(outcome, Response)
+    return outcome
 
 
 @pytest.mark.parametrize(
@@ -1204,6 +1498,19 @@ def test_plain_gui_status_refuses_to_masquerade_as_the_runtime(sandbox: Path) ->
     assert response.kind == "runtime-not-running"
 
 
+@pytest.mark.parametrize("verb", ("next_wallpaper", "previous_wallpaper", "random_wallpaper"))
+def test_plain_gui_legacy_navigation_never_owns_a_renderer(sandbox: Path, verb: str) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("first"), _wallpaper("second")])
+    app.legacy_service = False
+    before = app.session.cursor
+
+    response = getattr(commands, verb)()
+
+    assert not response.ok
+    assert response.kind == "runtime-not-running"
+    assert app.session.cursor is before
+
+
 def test_legacy_service_status_remains_available(sandbox: Path) -> None:
     commands, _app = _commands(sandbox, [])
 
@@ -1236,7 +1543,7 @@ def test_a_star_set_over_the_socket_is_the_sessions_own(sandbox: Path) -> None:
     item = _wallpaper("aurora")
     commands, app = _commands(sandbox, [item])
 
-    response = commands.add_favourite(str(item.path))
+    response = _immediate(commands.add_favourite(str(item.path)))
 
     assert response.message == "aurora.png starred"
     assert app.session.favourites.is_favourite(item.path)
@@ -1247,7 +1554,10 @@ def test_starring_one_twice_says_it_was_already_starred(sandbox: Path) -> None:
     item = _wallpaper("aurora")
     commands, _app = _commands(sandbox, [item])
     commands.add_favourite(str(item.path))
-    assert commands.add_favourite(str(item.path)).message == "aurora.png was already starred"
+    assert (
+        _immediate(commands.add_favourite(str(item.path))).message
+        == "aurora.png was already starred"
+    )
 
 
 def test_a_star_cannot_be_put_on_something_the_library_has_never_seen(
@@ -1271,7 +1581,7 @@ def test_a_star_can_always_be_taken_off_even_when_the_file_has_gone(sandbox: Pat
     commands, app = _commands(sandbox, [])
     app.session.favourites.add(gone)
 
-    response = commands.remove_favourite(str(gone))
+    response = _immediate(commands.remove_favourite(str(gone)))
 
     assert response.message == "unmounted.png unstarred"
     assert len(app.session.favourites) == 0
@@ -1280,7 +1590,10 @@ def test_a_star_can_always_be_taken_off_even_when_the_file_has_gone(sandbox: Pat
 
 def test_unstarring_something_that_was_never_starred_says_so(sandbox: Path) -> None:
     commands, _app = _commands(sandbox, [])
-    assert commands.remove_favourite("/w/aurora.png").message == "aurora.png was not starred"
+    assert (
+        _immediate(commands.remove_favourite("/w/aurora.png")).message
+        == "aurora.png was not starred"
+    )
 
 
 def test_a_star_that_could_not_be_saved_is_reported_and_rolled_back(
@@ -1294,7 +1607,7 @@ def test_a_star_that_could_not_be_saved_is_reported_and_rolled_back(
         raise favourites.FavouritesError("local-io", "no space left on device")
 
     monkeypatch.setattr("wall_in_one.library.favourites.save", refuse)
-    response = commands.add_favourite(str(item.path))
+    response = _immediate(commands.add_favourite(str(item.path)))
 
     assert (response.ok, response.kind) == (False, "local-io")
     assert not app.session.favourites.is_favourite(item.path)
@@ -1317,7 +1630,7 @@ def test_removing_a_wallpaper_deletes_it_and_tells_the_window(sandbox: Path) -> 
     item = _on_disk(path, Ownership.MANAGED)
     commands, app = _commands(sandbox, [item])
 
-    response = commands.remove_wallpaper(str(path))
+    response = _immediate(commands.remove_wallpaper(str(path)))
 
     assert response.ok
     assert "deleted, which cannot be undone" in response.message
@@ -1348,7 +1661,7 @@ def test_committed_removal_reports_incomplete_metadata_cleanup(
 
     monkeypatch.setattr(app, "forget_item", incomplete)
 
-    response = commands.remove_wallpaper(str(path))
+    response = _immediate(commands.remove_wallpaper(str(path)))
 
     assert not response.ok
     assert response.kind == "metadata-cleanup"
@@ -1371,7 +1684,7 @@ def test_removal_journal_failure_refuses_before_touching_media(
 
     monkeypatch.setattr(removals, "_save", refuse)
 
-    response = commands.remove_wallpaper(str(path))
+    response = _immediate(commands.remove_wallpaper(str(path)))
 
     assert not response.ok
     assert response.kind == "local-io"
@@ -1415,7 +1728,7 @@ def test_selecting_a_wallpaper_by_path_applies_that_wallpaper(
     first, second = _wallpaper("aurora"), _wallpaper("clip")
     commands, _app = _commands(sandbox, [first, second])
 
-    response = commands.select_wallpaper(str(second.path))
+    response = _immediate(commands.select_wallpaper(str(second.path)))
 
     assert response.message == "set clip.png"
     assert applied == [second.path]
@@ -1428,7 +1741,7 @@ def test_legacy_socket_select_refuses_a_borked_wallpaper(
     commands, app = _commands(sandbox, [crasher])
     app.session.pairings.mark_borked(crasher, "decoder crashed", "renderer-crash")
 
-    response = commands.select_wallpaper(str(crasher.path))
+    response = _immediate(commands.select_wallpaper(str(crasher.path)))
 
     assert not response.ok
     assert "marked Borked and cannot play" in response.message
@@ -1448,6 +1761,41 @@ def test_selecting_something_not_in_the_library_applies_nothing(
 
 
 # -- the socket itself ----------------------------------------------------
+
+
+def test_client_cancellation_wakes_an_active_runtime_deadline(tmp_path: Path) -> None:
+    """App shutdown must not inherit the runtime apply's 45-second wait."""
+    from wall_in_one.control import client
+
+    path = tmp_path / "hung-runtime.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    cancellation = client.Cancellation()
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        client.send,
+        Request("play"),
+        path=path,
+        timeout=client.RUNTIME_ACTION_TIMEOUT,
+        cancellation=cancellation,
+    )
+    connection, _address = listener.accept()
+    try:
+        connection.recv(MAX_MESSAGE_BYTES)
+        started = time.monotonic()
+        cancellation.cancel()
+        with pytest.raises(client.ControlError):
+            future.result(timeout=1)
+        elapsed = time.monotonic() - started
+        assert elapsed < 1
+        with pytest.raises(client.ControlError, match="cancelled"):
+            client.send(Request("play"), path=path, cancellation=cancellation)
+    finally:
+        cancellation.cancel()
+        connection.close()
+        listener.close()
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_a_socket_path_too_long_to_bind_is_refused_before_anything_is_created(
@@ -1492,6 +1840,29 @@ def test_start_never_deletes_a_non_socket_control_path(tmp_path: Path, kind: str
     assert sentinel.read_text(encoding="utf-8") == "keep me"
 
 
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_start_refuses_an_unsafe_ownership_lock(tmp_path: Path, kind: str) -> None:
+    from wall_in_one.control.server import SocketServer
+
+    server = SocketServer(_StubCommands(), tmp_path / "wall-in-one.sock")
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("keep me", encoding="utf-8")
+    if kind == "symlink":
+        server.lock_path.symlink_to(sentinel)
+    else:
+        os.link(sentinel, server.lock_path)
+
+    with pytest.raises(RuntimeError, match="ownership lock"):
+        server.start()
+
+    assert not server.path.exists()
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+    if kind == "symlink":
+        assert server.lock_path.is_symlink()
+    else:
+        assert server.lock_path.stat().st_nlink == 2
+
+
 def test_a_dead_unix_socket_is_the_only_path_start_removes(tmp_path: Path) -> None:
     from wall_in_one.control.server import SocketServer
 
@@ -1501,7 +1872,11 @@ def test_a_dead_unix_socket_is_the_only_path_start_removes(tmp_path: Path) -> No
     stale.close()
 
     server = SocketServer(_StubCommands(), path)
-    server._clear_stale_socket()
+    server._acquire_instance_lock()
+    try:
+        server._clear_stale_socket()
+    finally:
+        server.stop()
 
     assert not path.exists()
 
@@ -1515,12 +1890,62 @@ def test_a_live_unix_socket_is_never_stolen(tmp_path: Path) -> None:
     live.listen(1)
     try:
         server = SocketServer(_StubCommands(), path)
-        with pytest.raises(RuntimeError, match="another instance"):
-            server._clear_stale_socket()
+        server._acquire_instance_lock()
+        try:
+            with pytest.raises(RuntimeError, match="another instance"):
+                server._clear_stale_socket()
+        finally:
+            server.stop()
         assert path.is_socket()
     finally:
         live.close()
         path.unlink(missing_ok=True)
+
+
+def test_stale_cleanup_preserves_a_replacement_after_the_final_recheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The atomic claim, not the preceding lstat, authorises removal."""
+    from wall_in_one.control import server as server_module
+
+    path = tmp_path / "wall-in-one.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+    server = server_module.SocketServer(_StubCommands(), path)
+    move = file_io.atomic_move_no_replace
+    replaced = False
+
+    def replace_after_recheck(
+        source: Path,
+        destination: Path,
+        *,
+        expected_identity: tuple[int, int],
+        require_regular: bool = True,
+    ) -> None:
+        nonlocal replaced
+        if source == path and not replaced:
+            replaced = True
+            source.unlink()
+            source.write_text("replacement", encoding="utf-8")
+        move(
+            source,
+            destination,
+            expected_identity=expected_identity,
+            require_regular=require_regular,
+        )
+
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", replace_after_recheck)
+    server._acquire_instance_lock()
+    try:
+        with pytest.raises(RuntimeError, match="changed"):
+            server._clear_stale_socket()
+    finally:
+        server.stop()
+
+    assert replaced
+    assert path.read_text(encoding="utf-8") == "replacement"
 
 
 def test_stop_preserves_a_path_that_replaced_the_owned_socket(tmp_path: Path) -> None:
@@ -1535,6 +1960,49 @@ def test_stop_preserves_a_path_that_replaced_the_owned_socket(tmp_path: Path) ->
     server.stop()
 
     assert path.read_text(encoding="utf-8") == "replacement"
+
+
+def test_only_one_server_owns_a_reachable_control_path(tmp_path: Path) -> None:
+    from gi.repository import GLib
+
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "wall-in-one.sock"
+    owner = SocketServer(_StubCommands(), path)
+    loser = SocketServer(_StubCommands(), path)
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    owner.start()
+    try:
+        with pytest.raises(RuntimeError, match="already owns"):
+            loser.start()
+
+        assert path.is_socket()
+        peer.connect(str(path))
+        peer.sendall(Request("status").encode())
+        peer.setblocking(False)
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 2
+        payload = bytearray()
+        while b"\n" not in payload and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            try:
+                chunk = peer.recv(4096)
+            except BlockingIOError:
+                time.sleep(0.001)
+                continue
+            if not chunk:
+                break
+            payload.extend(chunk)
+        assert Response.decode(bytes(payload)) == Response.success("status")
+    finally:
+        peer.close()
+        loser.stop()
+        owner.stop()
+
+    lock = path.with_name(f"{path.name}.lock")
+    assert lock.is_file()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
 
 
 def test_a_socket_that_cannot_be_secured_leaves_nothing_listening(
@@ -1556,6 +2024,415 @@ def test_a_socket_that_cannot_be_secured_leaves_nothing_listening(
         server.start()
 
     assert not server.path.exists()
+
+
+def test_bound_socket_replacement_during_chmod_is_preserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Securing the pathname is followed by an exact identity recheck."""
+    from wall_in_one.control.server import SocketServer
+
+    path = tmp_path / "chmod-race.sock"
+    chmod = os.chmod
+    replaced = False
+
+    def replace_after_chmod(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes], mode: int
+    ) -> None:
+        nonlocal replaced
+        chmod(target, mode)
+        if Path(os.fsdecode(target)) == path and not replaced:
+            replaced = True
+            path.unlink()
+            path.write_text("replacement", encoding="utf-8")
+
+    monkeypatch.setattr(os, "chmod", replace_after_chmod)
+    server = SocketServer(_StubCommands(), path)
+
+    with pytest.raises(RuntimeError, match="changed while its permissions were secured"):
+        server.start()
+
+    assert replaced
+    assert path.read_text(encoding="utf-8") == "replacement"
+
+
+def test_an_oversized_unterminated_socket_request_is_bounded(tmp_path: Path) -> None:
+    """The server must reject before a line delimiter, not buffer forever."""
+    from gi.repository import GLib
+
+    from wall_in_one.control.server import SocketServer
+
+    server = SocketServer(_StubCommands(), tmp_path / "bounded.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        peer.sendall(b"x" * (MAX_MESSAGE_BYTES + 1))
+        peer.setblocking(False)
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 3
+        payload = bytearray()
+        while b"\n" not in payload and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            try:
+                chunk = peer.recv(4096)
+            except BlockingIOError:
+                time.sleep(0.001)
+                continue
+            if not chunk:
+                break
+            payload.extend(chunk)
+        response = Response.decode(bytes(payload))
+        assert not response.ok
+        assert "message size limit" in response.message
+    finally:
+        peer.close()
+        server.stop()
+
+
+def test_a_silent_client_is_closed_at_the_framing_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gi.repository import GLib
+
+    from wall_in_one.control import server as server_module
+
+    monkeypatch.setattr(server_module, "READ_DEADLINE_MILLISECONDS", 20)
+    server = server_module.SocketServer(_StubCommands(), tmp_path / "silent.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        peer.setblocking(False)
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 2
+        payload = bytearray()
+        while time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            try:
+                chunk = peer.recv(4096)
+            except BlockingIOError:
+                time.sleep(0.001)
+                continue
+            if not chunk:
+                break
+            payload.extend(chunk)
+        response = Response.decode(bytes(payload))
+        assert not response.ok
+        assert response.message == "request framing timed out"
+        assert server._connections == {}
+        assert server._read_deadlines == {}
+    finally:
+        peer.close()
+        server.stop()
+
+
+def test_a_request_delivered_after_the_framing_deadline_is_never_dispatched(
+    tmp_path: Path,
+) -> None:
+    from gi.repository import GLib
+
+    from wall_in_one.control.server import SocketServer
+
+    commands = _StubCommands()
+    server = SocketServer(commands, tmp_path / "late-frame.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    context = GLib.MainContext.default()
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        deadline = time.monotonic() + 1
+        while not server._connections and time.monotonic() < deadline:
+            context.iteration(False)
+        assert len(server._connections) == 1
+        key = next(iter(server._connections))
+
+        # Deterministically order the timeout before the pending async read,
+        # then make a valid side-effecting request available to that read.
+        GLib.source_remove(server._read_deadlines[key])
+        assert server._on_read_deadline(key) is False
+        peer.sendall(Request("next").encode())
+
+        deadline = time.monotonic() + 1
+        while server._connections and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.001)
+        peer.settimeout(0.5)
+        response = Response.decode(peer.recv(MAX_MESSAGE_BYTES))
+        assert response.message == "request framing timed out"
+        assert commands.calls == []
+        assert server._read_cancellables == {}
+    finally:
+        peer.close()
+        server.stop()
+
+
+def test_excess_silent_clients_are_closed_without_exceeding_the_cap(tmp_path: Path) -> None:
+    from gi.repository import GLib
+
+    from wall_in_one.control.server import MAX_ACTIVE_CONNECTIONS, SocketServer
+
+    server = SocketServer(_StubCommands(), tmp_path / "busy.sock")
+    peers: list[socket.socket] = []
+    context = GLib.MainContext.default()
+    server.start()
+    try:
+        for _ in range(MAX_ACTIVE_CONNECTIONS):
+            peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            peers.append(peer)
+            peer.connect(str(server.path))
+            deadline = time.monotonic() + 1
+            while len(server._connections) < len(peers) and time.monotonic() < deadline:
+                context.iteration(False)
+            assert len(server._connections) == len(peers)
+
+        excess = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        peers.append(excess)
+        excess.connect(str(server.path))
+        excess.setblocking(False)
+        deadline = time.monotonic() + 2
+        closed = False
+        while not closed and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            try:
+                chunk = excess.recv(4096)
+            except BlockingIOError:
+                time.sleep(0.001)
+                continue
+            closed = not chunk
+        assert closed
+        assert len(server._connections) == MAX_ACTIVE_CONNECTIONS
+    finally:
+        for peer in peers:
+            peer.close()
+        server.stop()
+
+
+def test_a_complete_deferred_request_outlives_the_read_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gi.repository import GLib
+
+    from wall_in_one.control import server as server_module
+
+    pending: list[Reply] = []
+
+    class Slow(_StubCommands):
+        def search(self, value: str | None) -> Outcome:
+            return Deferred(start=pending.append)
+
+    monkeypatch.setattr(server_module, "READ_DEADLINE_MILLISECONDS", 20)
+    server = server_module.SocketServer(Slow(), tmp_path / "slow-framed.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    context = GLib.MainContext.default()
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        peer.sendall(Request("search", "sky").encode())
+        deadline = time.monotonic() + 2
+        while not pending and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.001)
+        assert pending
+        assert server._read_deadlines == {}
+
+        # Keep dispatching the context for several expired read-deadline
+        # intervals. The complete request remains owned until its worker reply.
+        deadline = time.monotonic() + 0.1
+        while time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.001)
+        assert len(server._connections) == 1
+
+        pending[0](Response.success("late but valid"))
+        peer.settimeout(0.5)
+        assert Response.decode(peer.recv(MAX_MESSAGE_BYTES)) == Response.success("late but valid")
+        deadline = time.monotonic() + 0.5
+        while server._connections and time.monotonic() < deadline:
+            context.iteration(False)
+        assert server._connections == {}
+    finally:
+        peer.close()
+        server.stop()
+
+
+def test_a_nonreading_client_cannot_block_gtk_reply_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gi.repository import Gio, GLib
+
+    from wall_in_one.control import server as server_module
+
+    class Large(_StubCommands):
+        def list_library(self, value: str | None) -> Response:
+            return Response.success("x" * (MAX_MESSAGE_BYTES - 128))
+
+    monkeypatch.setattr(server_module, "WRITE_DEADLINE_MILLISECONDS", 80)
+    server = server_module.SocketServer(Large(), tmp_path / "nonreader.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    context = GLib.MainContext.default()
+    beats = 0
+
+    def heartbeat() -> bool:
+        nonlocal beats
+        beats += 1
+        return True
+
+    heartbeat_source = GLib.timeout_add(5, heartbeat)
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        deadline = time.monotonic() + 1
+        while not server._connections and time.monotonic() < deadline:
+            context.iteration(False)
+        assert len(server._connections) == 1
+        accepted = next(iter(server._connections.values()))
+        assert isinstance(accepted, Gio.SocketConnection)
+        # Force a protocol-valid 64 KiB reply above this accepted socket's
+        # send buffer, then deliberately never read it from `peer`.
+        assert accepted.get_socket().set_option(socket.SOL_SOCKET, socket.SO_SNDBUF, 1_024)
+        peer.sendall(Request("list").encode())
+
+        deadline = time.monotonic() + 1
+        while not server._write_deadlines and time.monotonic() < deadline:
+            context.iteration(False)
+        assert server._write_deadlines
+
+        deadline = time.monotonic() + 0.5
+        while server._connections and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.001)
+        assert beats >= 5, "the GTK context must keep dispatching while the write is blocked"
+        assert server._connections == {}
+        assert server._write_deadlines == {}
+        assert server._write_cancellables == {}
+    finally:
+        GLib.source_remove(heartbeat_source)
+        peer.close()
+        server.stop()
+
+
+def test_stop_cancels_an_inflight_async_reply(tmp_path: Path) -> None:
+    from gi.repository import Gio, GLib
+
+    from wall_in_one.control.server import SocketServer
+
+    server = SocketServer(_StubCommands(), tmp_path / "stalled-on-stop.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    context = GLib.MainContext.default()
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        deadline = time.monotonic() + 1
+        while not server._connections and time.monotonic() < deadline:
+            context.iteration(False)
+        accepted = next(iter(server._connections.values()))
+        assert isinstance(accepted, Gio.SocketConnection)
+        assert accepted.get_socket().set_option(socket.SOL_SOCKET, socket.SO_SNDBUF, 1_024)
+
+        server._answer(accepted, Response.success("x" * (MAX_MESSAGE_BYTES - 128)))
+        assert server._write_deadlines
+        server.stop()
+
+        assert server._connections == {}
+        assert server._read_cancellables == {}
+        assert server._write_deadlines == {}
+        assert server._write_cancellables == {}
+        # Let Gio deliver its cancellation callback; it must be harmless after
+        # ownership was cleared synchronously by stop().
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.001)
+        assert server._connections == {}
+    finally:
+        peer.close()
+        server.stop()
+
+
+def test_stop_closes_an_accepted_deferred_connection_immediately(tmp_path: Path) -> None:
+    """Suppressed late work must not leave its client waiting for a peer timeout."""
+    from gi.repository import GLib
+
+    from wall_in_one.control.server import SocketServer
+
+    pending: list[Reply] = []
+
+    class Slow(_StubCommands):
+        def search(self, value: str | None) -> Outcome:
+            return Deferred(start=pending.append)
+
+    server = SocketServer(Slow(), tmp_path / "deferred.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        peer.sendall(Request("search", "sky").encode())
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 2
+        while not pending and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            time.sleep(0.001)
+        assert pending
+        assert len(server._connections) == 1
+
+        server.stop()
+
+        peer.settimeout(0.5)
+        assert peer.recv(1) == b""
+        assert server._connections == {}
+        # A worker which notices shutdown later may still invoke its guarded
+        # callback. The already-closed connection remains harmless.
+        pending[0](Response.success("too late"))
+    finally:
+        peer.close()
+        server.stop()
+
+
+def test_a_normal_socket_answer_releases_the_accepted_connection(tmp_path: Path) -> None:
+    from gi.repository import GLib
+
+    from wall_in_one.control.server import SocketServer
+
+    server = SocketServer(_StubCommands(), tmp_path / "answered.sock")
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.start()
+    try:
+        peer.connect(str(server.path))
+        peer.sendall(Request("status").encode())
+        peer.setblocking(False)
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 2
+        payload = bytearray()
+        while b"\n" not in payload and time.monotonic() < deadline:
+            while context.pending():
+                context.iteration(False)
+            try:
+                chunk = peer.recv(4096)
+            except BlockingIOError:
+                time.sleep(0.001)
+                continue
+            if not chunk:
+                break
+            payload.extend(chunk)
+        assert Response.decode(bytes(payload)) == Response.success("status")
+        assert server._connections == {}
+    finally:
+        peer.close()
+        server.stop()
 
 
 # -- pairings over the socket ---------------------------------------------
@@ -1614,7 +2491,7 @@ def test_choosing_a_still_over_the_socket_sticks(sandbox: Path, applied: list[Pa
     chosen.write_bytes(b"\x89PNG\r\n\x1a\n")
     commands, app = _commands(sandbox, [clip, _on_disk(chosen, Ownership.USER)])
 
-    response = commands.set_still(f"{clip.path} {chosen}")
+    response = _immediate(commands.set_still(f"{clip.path} {chosen}"))
 
     assert response.ok
     assert app.session.pairings.resolve(clip, ()).still == chosen
@@ -1677,7 +2554,7 @@ def test_a_palette_policy_is_stored(sandbox: Path, applied: list[Path]) -> None:
     wallpaper = _wallpaper("aurora")
     commands, app = _commands(sandbox, [wallpaper])
 
-    assert commands.set_palette(f"{wallpaper.path} builtin:Nord").ok
+    assert _immediate(commands.set_palette(f"{wallpaper.path} builtin:Nord")).ok
 
     policy = app.session.pairings.resolve(wallpaper, ()).palette
     assert (policy.kind, policy.name) == ("builtin", "Nord")
@@ -1700,7 +2577,7 @@ def test_resetting_forgets_every_choice(sandbox: Path, applied: list[Path]) -> N
     commands, app = _commands(sandbox, [wallpaper])
     commands.set_palette(f"{wallpaper.path} builtin:Nord")
 
-    assert commands.reset_pairing(str(wallpaper.path)).ok
+    assert _immediate(commands.reset_pairing(str(wallpaper.path))).ok
 
     assert not app.session.pairings.resolve(wallpaper, ()).customized
 
@@ -1708,7 +2585,7 @@ def test_resetting_forgets_every_choice(sandbox: Path, applied: list[Path]) -> N
 def test_resetting_something_untouched_says_so(sandbox: Path, applied: list[Path]) -> None:
     wallpaper = _wallpaper("aurora")
     commands, _app = _commands(sandbox, [wallpaper])
-    assert "nothing customized" in commands.reset_pairing(str(wallpaper.path)).message
+    assert "nothing customized" in _immediate(commands.reset_pairing(str(wallpaper.path))).message
 
 
 def test_a_pairing_verb_refuses_a_path_outside_the_library(
@@ -1790,7 +2667,7 @@ def test_using_a_playlist_switches_playback_now(sandbox: Path, applied: list[Pat
     commands.make_playlist("Evening")
     app.session.playlists.add("Evening", wallpaper.path)
 
-    assert commands.use_playlist("Evening").ok
+    assert _immediate(commands.use_playlist("Evening")).ok
     assert app.session.manual_playlist == app.session.playlists.find("Evening").id
     assert applied[-1] == wallpaper.path
 
@@ -1799,7 +2676,7 @@ def test_using_none_resumes_schedule_control(sandbox: Path, applied: list[Path])
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     manual = app.session.playlists.set_singleton("manual", "Manual", Path("/w/aurora.png"))
     app.session.use_playlist(manual.id)
-    assert commands.use_playlist("none").ok
+    assert _immediate(commands.use_playlist("none")).ok
     assert app.session.manual_playlist is None
 
 
@@ -1821,7 +2698,11 @@ def test_display_listing_leads_with_the_reusable_connector(
         lambda: (Output("DP-2", make="Acme", model="Wide", width=2560, height=1440),),
     )
 
-    message = commands.list_displays().message
+    outcome = commands.list_displays()
+    assert isinstance(outcome, Deferred)
+    replies: list[Response] = []
+    outcome.start(replies.append)
+    message = replies[0].message
 
     assert "# fields: connector, playlist, description" in message
     assert "DP-2\t(default)\tDP-2 (Acme Wide, 2560x1440)" in message
@@ -1845,7 +2726,7 @@ def test_removing_an_entry_by_its_id(sandbox: Path, applied: list[Path]) -> None
     commands.add_to_playlist(f"Evening {wallpaper.path}")
     entry = app.session.playlists.find("Evening").entries[0]
 
-    assert commands.remove_from_playlist(f"Evening {entry.id}").ok
+    assert _immediate(commands.remove_from_playlist(f"Evening {entry.id}")).ok
 
     assert len(app.session.playlists.find("Evening")) == 0
 
@@ -1875,7 +2756,7 @@ def test_scheduling_a_playlist_stores_a_rule(sandbox: Path, applied: list[Path])
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
 
-    assert commands.add_schedule_rule("Evening days=sat,sun").ok
+    assert _immediate(commands.add_schedule_rule("Evening days=sat,sun")).ok
 
     rule = app.session.schedules.rules[0]
     assert rule.playlist == app.session.playlists.find("Evening").id
@@ -1906,7 +2787,7 @@ def test_a_rule_can_be_removed_by_its_id(sandbox: Path, applied: list[Path]) -> 
     commands.add_schedule_rule("Evening")
     rule = app.session.schedules.rules[0]
 
-    assert commands.drop_schedule_rule(rule.id).ok
+    assert _immediate(commands.drop_schedule_rule(rule.id)).ok
 
     assert app.session.schedules.rules == ()
 

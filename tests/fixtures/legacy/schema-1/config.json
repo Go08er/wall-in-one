@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "gestures": {
+    "left": "hub_open",
+    "middle": "playback_toggle",
+    "right": "native_next"
+  }
+}

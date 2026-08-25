@@ -1,4 +1,4 @@
-"""The grid's diffing, which is the difference between 15 ms and 620 ms.
+"""The grid's bounded, identity-preserving materialisation.
 
 These are the first tests in the suite that build real widgets, so they carry
 the `gui` marker the packaged build excludes with `-m "not gui"`: GTK needs a
@@ -6,17 +6,20 @@ display and the Nix check sandbox has none. Everything they touch is in
 process -- no window is ever presented, nothing is drawn, and nothing outside
 `tmp_path` is read or written.
 
-What is being pinned is `populate`. It used to tear down every tile and build
-them again, which was invisible at five wallpapers and about six hundred
-milliseconds of frozen window at six hundred. Rescans are not rare any more --
-one follows every download and every batch of generated stills -- so the diff
-has to be right as well as quick: a tile wrongly reused shows stale badges, and
-a tile wrongly rebuilt throws away a decoded texture for nothing.
+What is being pinned is `populate`. It must not tear down unchanged tiles, and
+it must not build one tile per item: a 4,096-item library is a small tuple but a
+huge GTK tree. Rescans are not rare -- one follows every download and every
+batch of generated stills -- so the bounded diff has to be right as well as
+quick: a tile wrongly reused shows stale badges, and a tile wrongly rebuilt
+throws away a decoded texture for nothing.
 """
 
 from __future__ import annotations
 
+import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,9 +31,9 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from wall_in_one.library.filter import Query  # noqa: E402
+from wall_in_one.library.filter import Query, Sort  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
-from wall_in_one.ui.grid import WallpaperGrid, WallpaperTile  # noqa: E402
+from wall_in_one.ui.grid import MEDIA_PAGE_SIZE, WallpaperGrid, WallpaperTile  # noqa: E402
 from wall_in_one.ui.thumbnails import Callback, ThumbnailLoader  # noqa: E402
 from wall_in_one.ui.window import ACCELERATORS  # noqa: E402
 
@@ -77,6 +80,7 @@ def item(
     kind: Kind = Kind.STILL,
     *,
     mtime: int = 0,
+    size: int = 1,
     still: Path | None = None,
     ownership: Ownership = Ownership.USER,
 ) -> MediaItem:
@@ -84,7 +88,7 @@ def item(
     return MediaItem(
         path=Path("/w") / f"{name}{suffix}",
         kind=kind,
-        size=1,
+        size=size,
         mtime=mtime,
         ownership=ownership,
         paired_still=still,
@@ -106,7 +110,7 @@ def tiles_in(grid: WallpaperGrid) -> list[str]:
 # -- the diff -------------------------------------------------------------
 
 
-def test_populating_an_empty_grid_builds_every_tile(
+def test_populating_a_small_grid_builds_every_tile(
     grid: WallpaperGrid, loader: CountingLoader
 ) -> None:
     grid.populate((item("a"), item("b")))
@@ -256,6 +260,165 @@ def test_the_query_survives_a_rescan(grid: WallpaperGrid) -> None:
     assert grid.visible_count == 1
     grid.populate((item("snowy-village"), item("cozy-campfire"), item("snowy-peak")))
     assert grid.visible_count == 2
+
+
+# -- bounded materialisation ----------------------------------------------
+
+
+@pytest.mark.parametrize("count", (600, 4096))
+def test_large_library_initial_work_is_bounded_and_fast(loader: CountingLoader, count: int) -> None:
+    """Library size affects pure matching, never GTK-card construction.
+
+    The time ceiling is deliberately generous for emulated and debug GTK
+    builds.  The card/request counts are the hard invariant; the ceiling also
+    catches an accidental expensive full-inventory pass beyond the intended
+    string matching and sort.
+    """
+    grid = WallpaperGrid(loader, lambda _item: None)
+    items = tuple(item(f"media-{index:04d}") for index in range(count))
+
+    started = time.perf_counter()
+    grid.populate(items)
+    elapsed = time.perf_counter() - started
+
+    assert grid.visible_count == count
+    assert len(grid._tiles) == MEDIA_PAGE_SIZE
+    assert len(tiles_in(grid)) == MEDIA_PAGE_SIZE
+    assert len(loader.requested) == MEDIA_PAGE_SIZE
+    assert grid._more.get_visible()
+    assert grid._more.get_label() == (
+        f"Load {MEDIA_PAGE_SIZE} more · {MEDIA_PAGE_SIZE} of {count} shown"
+    )
+    assert elapsed < 1.0, f"bounded initial grid took {elapsed:.3f}s for {count} items"
+
+
+def test_load_more_adds_one_page_without_replacing_existing_tiles(
+    grid: WallpaperGrid, loader: CountingLoader
+) -> None:
+    items = tuple(item(f"media-{index:04d}") for index in range(200))
+    grid.populate(items)
+    first = grid._tiles[items[0].path]
+
+    grid._show_more(grid._more)
+
+    assert len(grid._tiles) == MEDIA_PAGE_SIZE * 2
+    assert len(loader.requested) == MEDIA_PAGE_SIZE * 2
+    assert grid._tiles[items[0].path] is first
+    assert grid._more.get_label() == f"Load 56 more · {MEDIA_PAGE_SIZE * 2} of 200 shown"
+
+
+def test_search_matches_the_complete_inventory_without_loading_preceding_tiles(
+    grid: WallpaperGrid, loader: CountingLoader
+) -> None:
+    items = tuple(item(f"media-{index:04d}") for index in range(4096))
+    wanted = items[-1]
+    grid.populate(items)
+    loader.requested.clear()
+
+    grid.set_query(Query(text=wanted.name))
+
+    assert grid.visible_count == 1
+    assert tuple(grid._tiles) == (wanted.path,)
+    assert loader.requested == [wanted.path]
+    assert not grid._more.get_visible()
+
+
+def test_sort_uses_the_complete_inventory_before_materialising_a_page(
+    grid: WallpaperGrid,
+) -> None:
+    items = tuple(
+        item(f"media-{index:04d}", size=index + 1) for index in range(MEDIA_PAGE_SIZE * 3)
+    )
+    grid.populate(items)
+
+    grid.set_query(Query(sort=Sort.LARGEST))
+
+    expected = tuple(each.path for each in reversed(items[-MEDIA_PAGE_SIZE:]))
+    assert tuple(grid._tiles) == expected
+    assert grid.visible_count == len(items)
+
+
+def test_off_page_current_displays_are_materialised_and_keep_borked_badges(
+    grid: WallpaperGrid,
+) -> None:
+    items = tuple(item(f"media-{index:04d}") for index in range(600))
+    first_current, second_current = items[-2:]
+    grid.populate(items)
+    grid.set_borked({first_current.path: "renderer crashed"})
+
+    grid.set_current_many((first_current.path, second_current.path))
+
+    assert len(grid._tiles) == MEDIA_PAGE_SIZE + 2
+    for current in (first_current, second_current):
+        assert grid._tiles[current.path].has_css_class("wio-tile-current")
+    borked = grid._tiles[first_current.path]
+    assert borked.has_css_class("wio-tile-borked")
+    assert borked._health_badge.get_visible()
+    assert borked._health_badge.get_tooltip_text() == "renderer crashed"
+    assert grid._more.get_label() == (
+        f"Load {MEDIA_PAGE_SIZE} more · {MEDIA_PAGE_SIZE + 2} of 600 shown"
+    )
+
+    # MainWindow performs a model rescan and then refreshes runtime truth.
+    # The ordinary populate must not tear down off-page current pins in that
+    # interval or make their highlight visibly blink.
+    first_tile = grid._tiles[first_current.path]
+    second_tile = grid._tiles[second_current.path]
+    grid.populate(items)
+    assert grid._tiles[first_current.path] is first_tile
+    assert grid._tiles[second_current.path] is second_tile
+    assert first_tile.has_css_class("wio-tile-current")
+    assert second_tile.has_css_class("wio-tile-current")
+
+
+def test_rescan_preserves_loaded_pages_scroll_query_focus_and_tile_identity(
+    grid: WallpaperGrid,
+) -> None:
+    items = tuple(item(f"media-{index:04d}") for index in range(200))
+    grid.populate(items)
+    grid._show_more(grid._more)
+    grid.set_query(Query(text="media"))
+    focused_item = items[MEDIA_PAGE_SIZE - 1]
+    focused_tile = grid._tiles[focused_item.path]
+    root = Gtk.Window()
+    root.set_child(grid)
+    focus_taken = focused_tile._star.grab_focus()
+    focused = root.get_focus()
+    adjustment = grid.get_vadjustment()
+    adjustment.configure(17, 0, 1000, 1, 10, 10)
+
+    try:
+        # This new first result pushes the focused item just beyond the page.
+        # It remains as one bounded focus pin rather than being destroyed.
+        replacement = (item("media-!first"), *items)
+        grid.populate(replacement)
+
+        assert grid._query == Query(text="media")
+        assert grid.visible_count == len(items) + 1
+        assert grid._tiles[focused_item.path] is focused_tile
+        assert grid.get_vadjustment() is adjustment
+        assert adjustment.get_value() == 17
+        if focus_taken:
+            assert root.get_focus() is focused
+    finally:
+        root.set_child(None)
+        root.destroy()
+
+
+def test_late_thumbnail_from_replaced_item_cannot_overwrite_the_new_tile(
+    grid: WallpaperGrid,
+) -> None:
+    old = item("changing", mtime=1)
+    new = item("changing", mtime=2)
+    grid.populate((old,))
+    grid.populate((new,))
+    tile = grid._tiles[new.path]
+
+    grid._on_thumbnail(old, None)
+    assert tile._spinner.get_visible()
+
+    grid._on_thumbnail(new, None)
+    assert not tile._spinner.get_visible()
 
 
 # -- accelerators ---------------------------------------------------------
@@ -500,7 +663,7 @@ def test_one_thumbnail_request_delivers_to_every_visible_card(
     release = Event()
     texture = object()
 
-    def load(_item: MediaItem) -> object:
+    def load(_item: MediaItem, _processes: object | None = None) -> object:
         started.set()
         assert release.wait(2)
         return texture
@@ -524,6 +687,50 @@ def test_one_thumbnail_request_delivers_to_every_visible_card(
     assert complete.wait(2)
     loader.shutdown()
     assert delivered == [texture, texture]
+
+
+def test_thumbnail_shutdown_terminates_its_active_child_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one import thumbnails as cache
+    from wall_in_one import worker_processes
+    from wall_in_one.ui.thumbnails import ThumbnailLoader as Loader
+
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.prune", lambda: 0)
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.lookup", lambda _item: None)
+
+    def block(
+        _item: MediaItem,
+        *,
+        processes: worker_processes.Cancellation | None = None,
+    ) -> Path:
+        assert processes is not None
+        try:
+            processes.run(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                timeout=60.0,
+            )
+        except worker_processes.ProcessCancelledError as error:
+            raise cache.ThumbnailError("cancelled") from error
+        raise AssertionError("blocking thumbnail process returned normally")
+
+    monkeypatch.setattr("wall_in_one.ui.thumbnails.thumbnails.generate", block)
+    loader = Loader(max_workers=1)
+    loader.request(item("slow"), lambda _item, _texture: None)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with loader._processes._lock:
+            if loader._processes._active:
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("thumbnail child did not start")
+
+    started = time.monotonic()
+    loader.shutdown()
+    loader._pool.shutdown(wait=True, cancel_futures=True)
+
+    assert time.monotonic() - started < 1.5
 
 
 # -- the window and the store ---------------------------------------------
@@ -606,10 +813,10 @@ def test_failed_settings_save_is_not_adopted_by_application_or_session(
     application = Application()
     before = application.settings
 
-    def fail(_settings: config.Settings) -> None:
+    def fail(_changes: object, _path: Path | None = None) -> config.Settings:
         raise config.ConfigError("disk full")
 
-    monkeypatch.setattr(config, "save", fail)
+    monkeypatch.setattr(config, "update", fail)
     try:
         with pytest.raises(config.ConfigError, match="disk full"):
             application.update_settings(opacity=0.72)
@@ -709,6 +916,95 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
 
         def favourites_changed(self) -> None:
             self.favourite_updates += 1
+
+        def authoring_action_async(
+            self,
+            work: object,
+            finish: object,
+            *,
+            prepare: object = None,
+            failure: object = None,
+            **_keywords: object,
+        ) -> bool:
+            try:
+                worker = prepare() if callable(prepare) else work
+                assert callable(worker)
+                result = worker()
+            except Exception as error:
+                if callable(failure):
+                    failure(str(error))
+                return False
+            assert callable(finish)
+            finish(result)
+            return True
+
+        def current_item_for_authoring(self, media: MediaItem) -> MediaItem:
+            current = self.session.library.find(media.path)
+            assert current is not None
+            return current
+
+        def prepare_pairing_mutation(self, media: MediaItem, mutation: object) -> object:
+            current = self.current_item_for_authoring(media)
+            assert callable(mutation)
+            return lambda: mutation(self.session.pairings, current)
+
+        def prepare_still_pairing_mutation(
+            self,
+            media: MediaItem,
+            still: Path | None,
+            mutation: object,
+        ) -> object:
+            current = self.current_item_for_authoring(media)
+            assert callable(mutation)
+
+            def run() -> SimpleNamespace:
+                effective = still
+                if effective is None:
+                    effective = pairings.synthesize(current, self.session.library.roots).still
+                record = mutation(self.session.pairings, current, still)
+                return SimpleNamespace(
+                    item=current,
+                    record=record,
+                    effective_still=effective,
+                )
+
+            return run
+
+        def prepare_pairing_reset(self, media: MediaItem) -> object:
+            current = self.current_item_for_authoring(media)
+
+            def run() -> SimpleNamespace:
+                effective = pairings.synthesize(current, self.session.library.roots).still
+                changed = self.session.pairings.reset(current)
+                return SimpleNamespace(
+                    item=current,
+                    changed=changed,
+                    effective_still=effective,
+                )
+
+            return run
+
+        def adopt_pairing_still(
+            self,
+            media: MediaItem,
+            effective: Path | None,
+        ) -> MediaItem:
+            current = self.current_item_for_authoring(media)
+            adopted = current.with_still(effective) if current.is_moving else current
+            library = self.session.library
+            self.session.adopt_library(
+                type(library)(
+                    roots=library.roots,
+                    items=tuple(
+                        adopted if candidate.path == current.path else candidate
+                        for candidate in library.items
+                    ),
+                    skipped=library.skipped,
+                    still_inventory=library.still_inventory,
+                ),
+                reconcile_workshop=False,
+            )
+            return adopted
 
     application = FakeApp()
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
@@ -902,10 +1198,12 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
     application = FakeApp()
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
+    assert isinstance(window._library_controls, Adw.WrapBox)
 
     for page in ("browse", "media", "playlists", "schedules", "settings"):
         assert window._stack.get_child_by_name(page) is not None
         window.show_page(page)
+        assert window._toast.get_child() is window._content_stack
         assert (
             window.get_title()
             == {
@@ -918,6 +1216,8 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
         )
     assert window._stack.get_child_by_name("pairings") is None
     assert window._content_stack.get_child_by_name("pairing-editor") is window._pairings_page
+    window._content_stack.set_visible_child_name("pairing-editor")
+    assert window._toast.get_child() is window._content_stack
 
     window.destroy()
     application.session.shutdown()

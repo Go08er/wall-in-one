@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Self
 
+from wall_in_one import file_io
 from wall_in_one.theme.tokens import ALL_TOKENS
 
 Mode = Literal["dark", "light"]
@@ -125,7 +126,7 @@ class Palette:
         """
         try:
             decoded = json.loads(document)
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise PaletteError(f"palette is not valid JSON: {error}") from error
         if not isinstance(decoded, dict):
             raise PaletteError("palette document must be an object")
@@ -141,17 +142,12 @@ class Palette:
     @classmethod
     def load_template_output(cls, path: Path) -> Self:
         try:
-            size = path.stat().st_size
-        except OSError as error:
-            raise PaletteError(f"cannot stat palette {path}: {error}") from error
-        if size > MAX_PALETTE_BYTES:
-            raise PaletteError(
-                f"palette {path} is {size} bytes, over the {MAX_PALETTE_BYTES} limit"
-            )
-        try:
-            return cls.from_template_document(path.read_bytes())
+            document = file_io.read_regular_bytes(path, MAX_PALETTE_BYTES)
         except OSError as error:
             raise PaletteError(f"cannot read palette {path}: {error}") from error
+        if document is None:
+            raise PaletteError(f"cannot read palette {path}: file does not exist")
+        return cls.from_template_document(document)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +165,7 @@ class PalettePair:
         """Parse the ``--both`` form: ``{"dark": {...}, "light": {...}}``."""
         try:
             decoded = json.loads(document)
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise PaletteError(f"palette is not valid JSON: {error}") from error
         if not isinstance(decoded, dict):
             raise PaletteError("palette document must be an object")
@@ -185,14 +181,9 @@ class PalettePair:
     @classmethod
     def load(cls, path: Path) -> Self:
         try:
-            size = path.stat().st_size
-        except OSError as error:
-            raise PaletteError(f"cannot stat palette {path}: {error}") from error
-        if size > MAX_PALETTE_BYTES:
-            raise PaletteError(
-                f"palette {path} is {size} bytes, over the {MAX_PALETTE_BYTES} limit"
-            )
-        try:
-            return cls.from_json(path.read_bytes())
+            document = file_io.read_regular_bytes(path, MAX_PALETTE_BYTES)
         except OSError as error:
             raise PaletteError(f"cannot read palette {path}: {error}") from error
+        if document is None:
+            raise PaletteError(f"cannot read palette {path}: file does not exist")
+        return cls.from_json(document)

@@ -33,6 +33,7 @@ was given, so a library entry pointing somewhere unexpected costs nothing.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import tempfile
@@ -43,7 +44,7 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import quote
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.library import pairing, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 
@@ -161,7 +162,11 @@ def _is_managed_on_disk(path: Path) -> bool:
     return scan.is_managed_directory(path.parent) and scan.has_download_sidecar(path)
 
 
-def _companions(item: MediaItem, roots: tuple[Path, ...]) -> list[Path]:
+def _companions(
+    item: MediaItem,
+    roots: tuple[Path, ...],
+    legacy_selected_still: Path | None = None,
+) -> list[Path]:
     """Everything we wrote beside ``item`` and should take with it.
 
     Only files whose names we generate: the download sidecar, the pairing
@@ -184,7 +189,9 @@ def _companions(item: MediaItem, roots: tuple[Path, ...]) -> list[Path]:
         if candidate.is_file() and not candidate.is_symlink():
             found.append(candidate)
 
-    for candidate in pairing_artifact_paths(item, roots):
+    for candidate in pairing_artifact_paths(
+        item, roots, legacy_selected_still=legacy_selected_still
+    ):
         if candidate.is_file() and not candidate.is_symlink():
             found.append(candidate)
     # A path can be both a provider and pairing sidecar only if a future
@@ -194,7 +201,12 @@ def _companions(item: MediaItem, roots: tuple[Path, ...]) -> list[Path]:
     return list(dict.fromkeys(found))
 
 
-def pairing_artifact_paths(item: MediaItem, roots: Sequence[Path] = ()) -> tuple[Path, ...]:
+def pairing_artifact_paths(
+    item: MediaItem,
+    roots: Sequence[Path] = (),
+    *,
+    legacy_selected_still: Path | None = None,
+) -> tuple[Path, ...]:
     """Exact app-owned pairing paths derived from one media identity.
 
     Candidates are returned whether or not they currently exist.  Besides
@@ -213,11 +225,28 @@ def pairing_artifact_paths(item: MediaItem, roots: Sequence[Path] = ()) -> tuple
             break
         found.append(generated)
         found.append(generated.with_name(generated.name + pairing.SIDECAR_SUFFIX))
+
+    if legacy_selected_still is not None and _within(legacy_selected_still, bounded):
+        expected = (
+            f"video:{item.path}"
+            if item.kind is Kind.VIDEO
+            else item.scene
+            if item.kind is Kind.SCENE
+            else ""
+        )
+        if expected and pairing.legacy_automatic_identity(legacy_selected_still) == expected:
+            found.append(legacy_selected_still)
+            found.append(
+                legacy_selected_still.with_name(legacy_selected_still.name + pairing.SIDECAR_SUFFIX)
+            )
     return tuple(dict.fromkeys(found))
 
 
 def discard_pairing_artifacts(
-    item: MediaItem, roots: Sequence[Path] = ()
+    item: MediaItem,
+    roots: Sequence[Path] = (),
+    *,
+    legacy_selected_still: Path | None = None,
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """Best-effort removal of app-owned stills and pairing sidecars.
 
@@ -227,11 +256,64 @@ def discard_pairing_artifacts(
     return is ``(removed, kept)`` so callers and tests can account for an
     unlink which failed without ever widening deletion authority.
     """
+    bounded = tuple(roots)
+    try:
+        # This is the commit boundary shared with automatic-still
+        # publication. A capture already publishing finishes first and is
+        # then cleaned; a capture still rendering waits until this cleanup has
+        # won, revalidates its now-absent/replaced source, and discards its
+        # private temporary instead of resurrecting an orphan still.
+        with stills.source_lifecycle_lock(item):
+            return _discard_pairing_artifacts_locked(
+                item,
+                bounded,
+                legacy_selected_still=legacy_selected_still,
+            )
+    except OSError:
+        # Cleanup is best effort after the media operation has committed.
+        # Never bypass a lifecycle lock which could not be trusted. Include
+        # deterministic candidates even when they are not visible *yet*: the
+        # publisher holding the lock may be between source validation and its
+        # atomic replace. Reporting them as retained keeps the durable removal
+        # journal alive so a later retry cleans anything that publisher lands.
+        retained = list(
+            pairing_artifact_paths(
+                item,
+                bounded,
+                legacy_selected_still=legacy_selected_still,
+            )
+        )
+        with contextlib.suppress(OSError):
+            retained.extend(_companions(item, bounded, legacy_selected_still))
+        return (), tuple(dict.fromkeys(retained))
+
+
+def _discard_pairing_artifacts_locked(
+    item: MediaItem,
+    roots: tuple[Path, ...],
+    *,
+    legacy_selected_still: Path | None,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Remove pairing artifacts while the source lifecycle lock is held."""
     removed: list[Path] = []
     kept: list[Path] = []
-    for companion in _companions(item, tuple(roots)):
+    for companion in _companions(item, roots, legacy_selected_still):
         try:
-            companion.unlink()
+            expected = file_io.path_identity(companion)
+        except FileNotFoundError:
+            # Another cleanup already completed the same idempotent work.
+            continue
+        except OSError:
+            kept.append(companion)
+            continue
+        try:
+            if not file_io.discard_regular_if_same(
+                companion,
+                expected_identity=expected,
+            ):
+                if not os.path.lexists(companion):
+                    continue
+                raise OSError(f"could not safely discard {companion}")
             paths.fsync_directory(companion.parent)
         except OSError:
             kept.append(companion)
@@ -266,6 +348,7 @@ def remove(
     roots: tuple[Path, ...] = (),
     *,
     expected_source: SourceIdentity | None = None,
+    operation_token: str | None = None,
 ) -> Removal:
     """Delete a wallpaper we downloaded, and everything we wrote beside it.
 
@@ -275,6 +358,11 @@ def remove(
     is this check.
     """
     path = item.path
+    if operation_token is None:
+        raise ManageError(
+            "unrecorded",
+            "the removal has no persisted operation token; nothing was changed",
+        )
     if item.provider == scan.WORKSHOP_PROVIDER or item.kind is Kind.SCENE:
         raise ManageError("not-ours", f"{path.name} belongs to Steam, not this app")
     if not roots or not _within(path, roots):
@@ -294,7 +382,7 @@ def remove(
         )
     # Provenance reads several files. Recheck the prepared inode immediately
     # before granting the destructive operation filesystem authority.
-    _require_source_identity(path, expected_source)
+    source_identity = _require_source_identity(path, expected_source)
 
     removed: list[Path] = []
     kept: list[Path] = []
@@ -302,11 +390,53 @@ def remove(
     # behind is inert metadata rather than a wallpaper with no sidecar, which
     # would read as an unmanaged file the next time anything looked.
     try:
-        path.unlink()
-    except OSError as error:
-        raise ManageError("local-io", f"could not remove {path}: {error.strerror or error}") from (
-            error
+        claim = file_io.claim_for_deletion(
+            path,
+            expected_identity=source_identity,
+            operation_token=operation_token,
         )
+    except file_io.PathChangedError as error:
+        raise ManageError(
+            "changed",
+            f"{path} was replaced while removal claimed it; nothing was deleted",
+        ) from error
+    except FileNotFoundError as error:
+        raise ManageError("missing", f"{path} is no longer there") from error
+    except ValueError as error:
+        raise ManageError("unrecorded", f"invalid persisted removal token: {error}") from error
+    except OSError as error:
+        raise ManageError(
+            "local-io", f"could not claim {path} for removal: {error.strerror or error}"
+        ) from error
+    # Persist the replayable claim before destroying its contents. These
+    # intermediate syncs are best effort: the final parent sync below is the
+    # authoritative durability boundary for a completed deletion. If the
+    # process dies in between, the deterministic journal-token name remains
+    # available for replay.
+    with contextlib.suppress(OSError):
+        paths.fsync_directory(claim.path.parent)
+    with contextlib.suppress(OSError):
+        paths.fsync_directory(path.parent)
+    try:
+        claim.discard()
+    except OSError as error:
+        try:
+            restored = claim.restore()
+        except OSError:
+            restored = False
+        if restored:
+            with contextlib.suppress(OSError):
+                paths.fsync_directory(path.parent)
+            raise ManageError(
+                "local-io",
+                f"could not remove {path}; the original file was restored: "
+                f"{error.strerror or error}",
+            ) from error
+        raise ManageError(
+            "local-io",
+            f"could not finish removing {path}; its claimed entry was preserved at {claim.path}",
+            committed=True,
+        ) from error
     try:
         paths.fsync_directory(path.parent)
     except OSError as error:
@@ -321,6 +451,48 @@ def remove(
     removed.extend(discarded)
     kept.extend(retained)
     return Removal(item=item, removed=tuple(removed), kept=tuple(kept))
+
+
+def recover_removal_claim(
+    path: Path,
+    *,
+    expected_source: SourceIdentity | None,
+    operation_token: str,
+) -> bool:
+    """Finish an exact media deletion claimed before a process died.
+
+    This is called only while replaying the durable removal intent which owns
+    ``operation_token``. ``False`` means there was no claimed entry (death was
+    before the move or after its unlink); ``True`` means the exact journaled
+    inode was found and deleted. Unexpected entries remain preserved.
+    """
+    if expected_source is None:
+        raise ManageError(
+            "unrecorded",
+            "the removal claim has no persisted source identity; nothing was changed",
+        )
+    try:
+        claim = file_io.recover_deletion_claim(
+            path,
+            expected_identity=expected_source,
+            operation_token=operation_token,
+        )
+    except (OSError, ValueError) as error:
+        raise ManageError(
+            "local-io",
+            f"could not recover the pending removal claim for {path}: {error}",
+        ) from error
+    if claim is None:
+        return False
+    try:
+        claim.discard()
+        paths.fsync_directory(path.parent)
+    except OSError as error:
+        raise ManageError(
+            "local-io",
+            f"could not finish the pending removal claim for {path}: {error}",
+        ) from error
+    return True
 
 
 # -- the freedesktop trash -----------------------------------------------
@@ -351,21 +523,19 @@ def _identity(path: Path) -> tuple[int, int]:
 
 
 def _unlink_if_same(path: Path, identity: tuple[int, int]) -> None:
-    """Remove only the directory entry this operation installed."""
+    """Remove only the directory entry this operation installed.
+
+    The atomic claim is what makes "same" authoritative: a check followed by
+    ``path.unlink()`` could otherwise delete a replacement installed between
+    those two operations.
+    """
+    if not file_io.discard_regular_if_same(path, expected_identity=identity):
+        return
     try:
-        current = _identity(path)
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
-    if current != identity:
-        return
-    try:
-        path.unlink()
         paths.fsync_directory(path.parent)
     except OSError:
-        # Rollback is best effort. Leaving an extra hard link or inert record
-        # is safer than masking the original failure or unlinking a replacement.
+        # Rollback is best effort. Leaving an inert record or private claim is
+        # safer than masking the original failure or unlinking a replacement.
         return
 
 
@@ -431,18 +601,19 @@ def trash(
     payload = f"[Trash Info]\nPath={quote(str(original), safe='/')}\nDeletionDate={stamp}\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".wall-in-one-trashinfo-", dir=info)
     temporary = Path(temporary_name)
+    temporary_status = os.fstat(descriptor)
+    temporary_identity = temporary_status.st_dev, temporary_status.st_ino
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
             sink.write(payload)
             sink.flush()
             os.fsync(sink.fileno())
     except OSError as error:
-        temporary.unlink(missing_ok=True)
+        _unlink_if_same(temporary, temporary_identity)
         raise ManageError(
             "local-io", f"could not write the trash record: {error.strerror or error}"
         ) from error
 
-    temporary_identity = _identity(temporary)
     try:
         for name in _trash_names(original):
             record = info / f"{name}.trashinfo"
@@ -467,10 +638,30 @@ def trash(
 
             destination = files / name
             try:
-                os.link(original, destination, follow_symlinks=False)
+                file_io.atomic_move_no_replace(
+                    original,
+                    destination,
+                    expected_identity=original_identity,
+                    require_regular=True,
+                )
             except FileExistsError:
                 _unlink_if_same(record, record_identity)
                 continue
+            except file_io.PathChangedError as error:
+                # If restoration was blocked, the moved entry remains in the
+                # trash and its already-durable record must stay with it.
+                if error.preserved_path is not None:
+                    raise ManageError(
+                        "changed",
+                        f"{original} changed while it was being moved; the unverified "
+                        f"entry was preserved at {error.preserved_path}",
+                        committed=True,
+                    ) from error
+                _unlink_if_same(record, record_identity)
+                raise ManageError(
+                    "changed",
+                    f"{original} was replaced while it was being moved; nothing was deleted",
+                ) from error
             except OSError as error:
                 _unlink_if_same(record, record_identity)
                 if error.errno == errno.EXDEV:
@@ -485,31 +676,16 @@ def trash(
                     "local-io", f"could not move {original}: {error.strerror or error}"
                 ) from error
 
-            destination_identity = _identity(destination)
-            if destination_identity != original_identity:
-                _unlink_if_same(destination, destination_identity)
-                _unlink_if_same(record, record_identity)
-                raise ManageError("local-io", f"{original} changed while it was being moved")
             try:
                 paths.fsync_directory(files)
-                if _identity(original) != original_identity:
-                    raise ManageError("local-io", f"{original} changed while it was being moved")
-                original.unlink()
-            except (OSError, ManageError) as error:
-                _unlink_if_same(destination, destination_identity)
-                _unlink_if_same(record, record_identity)
-                if isinstance(error, ManageError):
-                    raise
-                kind = "missing" if error.errno == errno.ENOENT else "local-io"
-                raise ManageError(kind, f"could not finish moving {original}: {error}") from error
-            try:
                 paths.fsync_directory(original.parent)
             except OSError as error:
-                # The source is already gone, so rolling back the durable trash
-                # copy here would be data loss. Keep it and report uncertainty.
+                # The atomic move already removed the source. Rolling back the
+                # trash copy here would be data loss, so keep it and report the
+                # durability uncertainty explicitly.
                 raise ManageError(
                     "local-io",
-                    f"moved {original}, but could not persist its removal: {error}",
+                    f"moved {original}, but could not persist the move: {error}",
                     committed=True,
                 ) from error
             # The source move is the commit point.  From here, discard only

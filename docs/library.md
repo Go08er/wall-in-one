@@ -105,10 +105,19 @@ than silently overwriting each other.
 ## Finding one
 
 The row under the header bar is a search box, a kind filter, and a sort. All
-three work over what is already scanned -- nothing is re-read and no thumbnail
-is regenerated -- and none of them is remembered between launches. A search is
-about the next thirty seconds; reopening the app to yesterday's filter, with
-most of the library missing and no obvious reason why, is a bug report.
+three work over the complete scanned inventory without rescanning the
+filesystem, and none is remembered between launches. A search is about the
+next thirty seconds; reopening the app to yesterday's filter, with most of the
+library missing and no obvious reason why, is a bug report.
+
+The grid initially materialises 72 tiles and thumbnail requests, then offers a
+labelled **Load more** page. Matching and sorting still cover all 4096 supported
+items: an exact search for the last item loads that result immediately rather
+than requiring 56 page clicks. This bounds GTK widget and thumbnail work while
+keeping the complete library reachable. Loaded pages, surviving tile objects,
+the scroll adjustment and keyboard focus survive rescans. A thumbnail is
+requested when its tile is first materialised; the on-disk cache prevents a
+repeat decode unless the media changed.
 
 **Search** splits what you type on whitespace and requires every word to appear
 somewhere in the filename stem, in any order. `snow vil` finds
@@ -199,10 +208,12 @@ staging files and sidecars with no media are removed after 24 hours; recent
 ones, symlinks and unknown files are left alone in case another process is
 still working.
 
-Trash names are claimed with no-replace hard links rather than a check followed
-by an overwriting rename. Concurrent files with the same basename therefore
-receive distinct names, and both their bytes and `.trashinfo` records are
-synced before the original directory entry is removed.
+Trash metadata names are reserved with no-replace links, then the exact
+journaled media inode is moved to the matching Trash name with Linux's atomic
+no-replace rename. Concurrent files with the same basename therefore receive
+distinct names; neither a same-path replacement nor an existing Trash entry
+can be overwritten. Both the moved bytes and `.trashinfo` record are synced
+before the operation is reported durable.
 
 Removing a wallpaper also drops it from favourites, every playlist occurrence,
 and its complete Pairing record: palette policy, representative-still choice
@@ -236,8 +247,18 @@ refresh to finish the cleanup. The headless runtime-config compiler checks the
 journal for damage but does not mutate authoring state from its short-lived
 snapshot.
 
-An item marked **Borked** after repeated renderer failures is visibly labelled
-and has no Quick-choice playback action. Delete/Trash is its recovery boundary:
+Automatic-still rendering does not hold deletion hostage for the duration of
+ffmpeg or a scene capture. Rendering happens outside a per-item cross-process
+lease; only the short final publication and generated-artifact cleanup share
+it. Publication rechecks the opened source's device, inode, type and change
+metadata before making an image or sidecar visible. If cleanup cannot acquire
+that bounded lease, even deterministic paths which are not visible yet remain
+in the removal journal: a stalled publisher can finish, but the next refresh
+will then remove its output before the journal is cleared.
+
+An item marked **Borked** after three failed automatic hand-over attempts, or an
+attributable Wallpaper Engine scene crash, is visibly labelled and has no
+Quick-choice playback action. Delete/Trash is its recovery boundary:
 the health marker is part of the Pairing record removed with the item, so a
 later reinstall starts clean. Workshop items remain Steam-owned; Wall-in-One
 clears their metadata only after a scan sees the concrete item absent while
@@ -248,6 +269,21 @@ directory removal can still be recognized. Because Steam has already committed
 that external uninstall, an unwritable removal journal cannot stop it;
 Wall-in-One keeps an in-process retry and reports the state-directory failure
 until a refresh can record and finish the cleanup durably.
+
+Playlist authoring follows the same prohibition rather than creating a second
+way around it. A Borked library card remains visible with its diagnostic, but
+its Add button and drag source are disabled. An older playlist occurrence is
+retained and labelled unavailable so it can be removed deliberately; playback
+skips it when another usable occurrence exists and is disabled when every
+entry is Borked or missing.
+
+Large rotations remain honest without constructing all 10,000 permitted GTK
+row trees. The order pane materialises 72 stable entries at first and offers a
+labelled **Load more** page; loaded rows keep their identity for keyboard and
+drag reordering. Clicking Add for an item appended beyond the loaded range
+temporarily pins that new row so the action always has visible confirmation.
+The stored order is complete throughout—paging bounds interface work, not the
+runtime playlist or the entries written to disk.
 
 Workshop absence is intentionally not inferred from Pairings after a restart:
 scene Pairings do not retain the last content root, video Pairings do not carry

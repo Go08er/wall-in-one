@@ -79,8 +79,19 @@ route, cursor, shuffle bag, renderer and calendar winner. It requires a
 non-empty designated colour-source connector; mirrored mode may preserve that
 selection dormant.
 
+That is software support, not a claim of physical multi-monitor validation.
+Automated unit and process tests cover independent routing, schedules, cursors,
+renderer ownership, transport and synthetic connector changes. The development
+machine and desktop VM each expose one output, so different playlists on two
+physical monitors remain unverified.
+
 The renderer section carries `scene_fps`, which linux-wallpaperengine consumes
-through its native `--fps N` option. `video_hardware_decode` selects mpv's
+through its native `--fps N` option. `scene_scaling` is empty, `stretch`,
+`fit`, or `fill`; `scene_clamp` is empty, `clamp`, `border`, or `repeat`.
+Empty omits the corresponding launch flag and restores the packaged renderer's
+default. These are closed enums rather than raw command-line fragments and are
+global launch defaults; changing one performs a deliberate scene hand-over.
+`video_hardware_decode` selects mpv's
 `hwdec=auto` or `hwdec=no`. `video_interpolation` is `off`, `oversample`, or
 `linear`. A non-off mode is applied only as the complete display-synchronised
 set (`video-sync=display-resample`, `interpolation=yes`, a live niri-derived
@@ -180,6 +191,13 @@ lists without opening the Python authoring socket. Each assigned playlist owns
 an independent cursor and shuffle order; a baseline playlist with more entries
 than the global default is not truncated by the default's cursor.
 
+The companion revision paired with this application requires status version 2,
+performs the direct-launch health hand-off, and permits the runtime's bounded
+45-second action. Companion revisions through `a5e23c9` understand only the
+compatibility summary and must not be combined with this application release.
+The app's `flake.lock` must pin the reviewed, tested companion commit before
+publication.
+
 The same atomic snapshot carries `schedule` (whether the calendar is being
 followed, the playlist it currently selects, and the last matching rule), the
 complete read-only `schedules` array, and each display's configured assignment
@@ -239,6 +257,24 @@ status fails before an authoring read; a compiler failure preserves the prior
 runtime document. A bounded snapshot with an omitted count is never interpreted
 as permission to clear an existing marker. Rust neither spawns this command nor
 writes its result.
+
+The packaged `wall-in-one-health-sync.timer` runs the command 30 seconds after
+activation and then 30 seconds after the previous one-shot becomes inactive.
+That completion-based schedule prevents overlap. It has no persistent catch-up
+and is both `PartOf=` and `BindsTo=` the Rust service, so it stops on explicit
+stop, crash, and failed activation. Exit 3 (runtime disappeared) is an expected
+one-shot result; routine stdout is suppressed, but stderr stays journaled. The
+main service's final no-reload sync is bounded by GNU `timeout` to two seconds.
+
+On the 2026-08-24 x86_64 Nix test host, the packaged no-report path took 0.15 s
+elapsed cold (0.11 s user + 0.01 s system, 32,508 KiB peak RSS) and five warm
+runs each took 0.14 s (0.10–0.11 s user, 0.01–0.02 s system, 32,296–32,556 KiB
+peak RSS). This is a short-lived Python process, not resident daemon memory;
+at the minimum cadence its measured CPU time averages about 0.4% of one core.
+The no-report regression proves it returns before `config.load_strict()` or a
+library/session scan. The Rust RSS contract is measured separately and is not
+changed by this timer. A direct non-systemd launch has no in-repo lifetime
+manager and still requires its integration caller to invoke the bridge.
 
 The top-level snapshot reports `playback_state` as `playing`, `paused`, or
 `stopped`; the older `paused` boolean remains for compatibility and `stopped`

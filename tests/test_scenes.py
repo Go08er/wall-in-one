@@ -65,6 +65,12 @@ def test_scaling_and_clamp_follow_the_screen_they_apply_to() -> None:
     assert arguments.index("--scaling") < arguments.index("--bg")
 
 
+def test_unknown_scene_presentation_values_are_never_forwarded() -> None:
+    arguments = command(scaling="shell words", clamp="arbitrary")
+    assert "--scaling" not in arguments
+    assert "--clamp" not in arguments
+
+
 def test_a_scene_starts_silent() -> None:
     """A wallpaper that makes noise is a surprise, the same as for video."""
     assert "--silent" in command()

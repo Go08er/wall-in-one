@@ -24,6 +24,8 @@ DATA_DIR = Path(wall_in_one.__file__).resolve().parent / "data"
 DESKTOP_PATH = DATA_DIR / f"{paths.APPLICATION_ID}.desktop"
 ICON_PATH = DATA_DIR / f"{paths.APPLICATION_ID}.svg"
 SYSTEMD_PATH = DATA_DIR / "systemd" / "wall-in-one.service"
+HEALTH_SERVICE_PATH = DATA_DIR / "systemd" / "wall-in-one-health-sync.service"
+HEALTH_TIMER_PATH = DATA_DIR / "systemd" / "wall-in-one-health-sync.timer"
 PYPROJECT_PATH = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 SVG = "http://www.w3.org/2000/svg"
@@ -146,11 +148,42 @@ def test_the_systemd_unit_runs_the_windowless_service() -> None:
     assert service["Type"] == "simple"
     assert service["ExecStartPre"] == "-wall-in-one --write-config"
     assert service["ExecStart"] == "wall-in-one-service --wait-for-config"
+    assert service["ExecStop"] == (
+        "-timeout --signal=TERM --kill-after=0.1s 2s wall-in-one --sync-runtime-health-on-stop"
+    )
     assert service["Restart"] == "on-failure"
     assert service["RestartSec"] == "5"
     assert parser["Unit"]["StartLimitIntervalSec"] == "60"
     assert parser["Unit"]["StartLimitBurst"] == "5"
+    assert parser["Unit"]["Wants"] == "wall-in-one-health-sync.timer"
+    assert parser["Unit"]["Before"] == "wall-in-one-health-sync.timer"
     assert parser["Install"]["WantedBy"] == "graphical-session.target"
+
+
+def test_the_health_timer_is_coupled_bounded_and_non_overlapping() -> None:
+    service_parser = DesktopParser()
+    service_parser.read_string(HEALTH_SERVICE_PATH.read_text(encoding="utf-8"))
+    timer_parser = DesktopParser()
+    timer_parser.read_string(HEALTH_TIMER_PATH.read_text(encoding="utf-8"))
+
+    health = service_parser["Service"]
+    assert service_parser["Unit"]["PartOf"] == "wall-in-one.service"
+    assert service_parser["Unit"]["After"] == "wall-in-one.service"
+    assert health["Type"] == "oneshot"
+    assert health["ExecStart"] == "wall-in-one --sync-runtime-health"
+    assert health["SuccessExitStatus"] == "3"
+    assert health["StandardOutput"] == "null"
+
+    timer = timer_parser["Timer"]
+    assert timer_parser["Unit"]["PartOf"] == "wall-in-one.service"
+    assert timer_parser["Unit"]["BindsTo"] == "wall-in-one.service"
+    assert timer_parser["Unit"]["After"] == "wall-in-one.service"
+    assert timer["OnActiveSec"] == "30s"
+    assert timer["OnUnitInactiveSec"] == "30s"
+    assert timer["AccuracySec"] == "5s"
+    assert timer["Persistent"] == "false"
+    assert timer["Unit"] == "wall-in-one-health-sync.service"
+    assert "Install" not in timer_parser
 
 
 def test_the_icon_is_an_svg_that_parses_and_scales(icon: ElementTree.Element) -> None:
@@ -189,14 +222,20 @@ def test_the_icon_is_drawn_in_colour_rather_than_one_fixed_foreground(
 
 
 @pytest.mark.skipif(not PYPROJECT_PATH.is_file(), reason="not running from a source tree")
-def test_the_distribution_carries_both_files() -> None:
+def test_the_distribution_carries_all_desktop_assets() -> None:
     # The Nix package installs them from the source tree, but a wheel built
     # from here has to hold them too, or the tests above pass against files the
     # installed package does not have.
     metadata = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     patterns = metadata["tool"]["setuptools"]["package-data"]["wall_in_one"]
-    for path in (DESKTOP_PATH, ICON_PATH, SYSTEMD_PATH):
+    for path in (
+        DESKTOP_PATH,
+        ICON_PATH,
+        SYSTEMD_PATH,
+        HEALTH_SERVICE_PATH,
+        HEALTH_TIMER_PATH,
+    ):
         relative = f"data/{path.name}"
-        if path is SYSTEMD_PATH:
+        if path.parent.name == "systemd":
             relative = f"data/systemd/{path.name}"
         assert any(fnmatch(relative, pattern) for pattern in patterns), relative

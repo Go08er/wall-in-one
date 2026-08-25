@@ -160,7 +160,7 @@ def _read_settings_text(path: Path) -> str:
 def _read_settings(path: Path) -> dict[str, Any]:
     try:
         return tomllib.loads(_read_settings_text(path))
-    except tomllib.TOMLDecodeError as error:
+    except (tomllib.TOMLDecodeError, RecursionError) as error:
         raise TemplateInstallError(f"{path} is not valid TOML: {error}") from error
 
 
@@ -305,7 +305,7 @@ def install(*, reload_config: bool = True) -> InstallResult:
     snapshot = _read_settings_snapshot(settings_path)
     try:
         settings = tomllib.loads(snapshot.text)
-    except tomllib.TOMLDecodeError as error:
+    except (tomllib.TOMLDecodeError, RecursionError) as error:
         raise TemplateInstallError(f"{settings_path} is not valid TOML: {error}") from error
 
     source = bundled_template()

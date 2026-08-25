@@ -37,9 +37,11 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
+from wall_in_one import worker_processes
 from wall_in_one.wallpaper import outputs
 
 #: What `--layer` should be on niri. Its own help says so: pairing with the
@@ -61,12 +63,25 @@ SETTLE_SECONDS: Final = 0.4
 
 #: How long to wait for a polite shutdown before insisting.
 TERMINATE_TIMEOUT: Final = 5.0
+#: A cancelled capture has already received SIGKILL from its UI owner.  This
+#: short wait is only for reaping it; quitting must not inherit two ordinary
+#: five-second renderer shutdown windows.
+CANCEL_WAIT_TIMEOUT: Final = 0.5
 
 #: Native linux-wallpaperengine render-rate bounds. Unlike an mpv post-decode
 #: filter, ``--fps`` limits the scene engine's own rendering work.
 MIN_FPS: Final = 1
 MAX_FPS: Final = 240
 DEFAULT_FPS: Final = 30
+
+#: ``linux-wallpaperengine`` accepts these exact values.  Empty means do not
+#: pass the option and let the renderer use its own default.  Keeping that
+#: state explicit lets the Settings UI offer a safe reset without exposing an
+#: arbitrary command-line string.
+SCALING_CHOICES: Final[tuple[str, ...]] = ("", "stretch", "fit", "fill")
+DEFAULT_SCALING: Final = ""
+CLAMP_CHOICES: Final[tuple[str, ...]] = ("", "clamp", "border", "repeat")
+DEFAULT_CLAMP: Final = ""
 
 #: `linux-wallpaperengine`'s own default is 15; scenes with audio are a
 #: surprise on a wallpaper, so this app starts them silent like the video half.
@@ -152,8 +167,8 @@ class SceneRenderer:
         self.volume = volume
         self.silent = silent
         self.pause_when_covered = pause_when_covered
-        self.scaling = scaling
-        self.clamp = clamp
+        self.scaling = scaling if scaling in SCALING_CHOICES else DEFAULT_SCALING
+        self.clamp = clamp if clamp in CLAMP_CHOICES else DEFAULT_CLAMP
         self._process: subprocess.Popen[bytes] | None = None
         self._scene: str = ""
 
@@ -261,23 +276,25 @@ class SceneRenderer:
         _end(process)
 
 
-def _end(process: subprocess.Popen[bytes]) -> None:
+def _end(process: subprocess.Popen[bytes], *, immediate: bool = False) -> None:
     """Ask the process group to stop, then insist.
 
     The group rather than the process: `linux-wallpaperengine` is started in
     its own session precisely so that whatever it spawned goes with it.
     """
+    requested = signal.SIGKILL if immediate else signal.SIGTERM
+    wait_timeout = CANCEL_WAIT_TIMEOUT if immediate else TERMINATE_TIMEOUT
     with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process.pid, requested)
     try:
-        process.wait(timeout=TERMINATE_TIMEOUT)
+        process.wait(timeout=wait_timeout)
         return
     except subprocess.TimeoutExpired:
         pass
     with contextlib.suppress(OSError, ProcessLookupError):
         os.killpg(process.pid, signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=TERMINATE_TIMEOUT)
+        process.wait(timeout=wait_timeout)
 
 
 def screenshot(
@@ -287,6 +304,7 @@ def screenshot(
     timeout: float = SCREENSHOT_TIMEOUT,
     renderer: SceneRenderer | None = None,
     size: tuple[int, int] | None = None,
+    processes: worker_processes.Cancellation | None = None,
 ) -> Path:
     """Render ``scene`` until it has written one frame, then stop it.
 
@@ -325,10 +343,21 @@ def screenshot(
     except OSError as error:
         raise SceneError(f"cannot start linux-wallpaperengine: {error}") from error
 
+    if processes is not None and not processes.register(process):
+        _end(process, immediate=True)
+        raise SceneError(f"cancelled screenshot of the scene {scene}")
+
     try:
-        _wait_for(destination, process, timeout)
+        _wait_for(
+            destination,
+            process,
+            timeout,
+            cancelled=processes.cancelled if processes is not None else None,
+        )
     finally:
-        _end(process)
+        if processes is not None:
+            processes.unregister(process)
+        _end(process, immediate=bool(processes is not None and processes.cancelled()))
 
     if not destination.is_file() or destination.stat().st_size == 0:
         destination.unlink(missing_ok=True)
@@ -353,11 +382,19 @@ def capture_size(
     return DEFAULT_CAPTURE_SIZE
 
 
-def _wait_for(destination: Path, process: subprocess.Popen[bytes], timeout: float) -> None:
+def _wait_for(
+    destination: Path,
+    process: subprocess.Popen[bytes],
+    timeout: float,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     """Block until the screenshot has been written and has stopped growing."""
     deadline = time.monotonic() + timeout
     settled_at: int | None = None
     while time.monotonic() < deadline:
+        if cancelled is not None and cancelled():
+            raise SceneError("scene screenshot was cancelled")
         if process.poll() is not None and not destination.is_file():
             raise SceneError("linux-wallpaperengine stopped before writing a screenshot")
         try:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Final
 
 import gi
 
@@ -25,6 +26,21 @@ from wall_in_one.ui.thumbnails import ThumbnailLoader
 #: Tiles keep the thumbnail's aspect ratio so the grid lines up.
 TILE_WIDTH = thumbnail_cache.THUMBNAIL_WIDTH
 TILE_HEIGHT = thumbnail_cache.THUMBNAIL_HEIGHT
+
+#: A FlowBox child is a fairly deep GTK tree (picture, overlays, buttons,
+#: badges, spinner, caption), and every child also starts a thumbnail request.
+#: Keeping one widget per library item made opening a 4,096-item collection
+#: take seconds and retain thousands of invisible widgets.  Seventy-two is
+#: enough for several full 1100x760 viewports while keeping the initial work
+#: independent of library size.  More pages are an explicit user action.
+MEDIA_PAGE_SIZE: Final = 72
+
+
+class _PreserveCurrent:
+    """Sentinel distinguishing an ordinary rescan from an explicit clear."""
+
+
+_PRESERVE_CURRENT: Final = _PreserveCurrent()
 
 
 class WallpaperTile(Gtk.Box):
@@ -224,9 +240,13 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         self._borked: dict[Path, str] = {}
         self._tiles: dict[Path, WallpaperTile] = {}
         self._items: tuple[MediaItem, ...] = ()
+        self._matches: tuple[MediaItem, ...] = ()
         self._query = library_filter.Query()
+        self._materialized_limit = MEDIA_PAGE_SIZE
+        self._current: frozenset[Path] = frozenset()
         #: Where each visible item sits in the current order. Membership is the
-        #: filter and the value is the sort, both decided by `library.filter`.
+        #: complete-inventory filter and the value is the sort, both decided by
+        #: `library.filter`.  Only a bounded prefix owns GTK widgets.
         self._positions: dict[Path, int] = {}
 
         self._flow = Gtk.FlowBox()
@@ -240,11 +260,21 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         self._flow.set_margin_start(12)
         self._flow.set_margin_end(12)
         self._flow.connect("child-activated", self._on_child_activated)
-        # The FlowBox does the hiding and the reordering itself, from the two
-        # lookups below. Rebuilding the children instead would be a fresh set
-        # of tiles on every keystroke.
+        # The FlowBox does the hiding and reordering for the bounded widget
+        # set. Matching and sorting themselves still cover the full inventory.
         self._flow.set_filter_func(self._is_visible)
         self._flow.set_sort_func(self._compare)
+
+        self._more = Gtk.Button()
+        self._more.set_halign(Gtk.Align.CENTER)
+        self._more.set_margin_bottom(18)
+        self._more.set_tooltip_text("Materialize another page of wallpaper previews")
+        self._more.connect("clicked", self._show_more)
+
+        self._page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._page.set_valign(Gtk.Align.START)
+        self._page.append(self._flow)
+        self._page.append(self._more)
 
         self._empty = Adw.StatusPage(
             title="No wallpapers found",
@@ -258,7 +288,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         self._unmatched = Adw.StatusPage(icon_name="system-search-symbolic")
 
         self._stack = Gtk.Stack()
-        self._stack.add_named(self._flow, "grid")
+        self._stack.add_named(self._page, "grid")
         self._stack.add_named(self._empty, "empty")
         self._stack.add_named(self._unmatched, "unmatched")
 
@@ -271,14 +301,17 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         if isinstance(tile, WallpaperTile):
             self._on_activate(tile.item)
 
-    def populate(self, items: tuple[MediaItem, ...], current: Path | None = None) -> None:
+    def populate(
+        self,
+        items: tuple[MediaItem, ...],
+        current: Path | _PreserveCurrent | None = _PRESERVE_CURRENT,
+    ) -> None:
         """Bring the grid into line with ``items``, keeping search and sort.
 
-        A diff rather than a rebuild. Rescans are not rare any more -- one
-        follows every download and every batch of generated stills -- and
-        tearing down six hundred tiles to build six hundred identical ones
-        costs about six hundred milliseconds of frozen window each time, plus
-        a re-decode of every thumbnail texture that was already on screen.
+        The model is the complete library; the widget tree is only the loaded
+        prefix of the filtered/sorted result.  Rescans are not rare -- one
+        follows every download and every batch of generated stills -- so the
+        loaded-page limit and every unchanged tile survive them.
 
         A tile is reused when its `MediaItem` is unchanged. The comparison is
         the whole frozen dataclass on purpose: size and mtime are what the
@@ -286,59 +319,35 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         are what the badges say, so anything that moves is something the tile
         is drawing.
         """
-        incoming = {item.path: item for item in items}
-        for path, tile in list(self._tiles.items()):
-            replacement = incoming.get(path)
-            if replacement is None or replacement != tile.item:
-                self._flow.remove(tile)
-                del self._tiles[path]
-
         self._items = items
-        for item in items:
-            if item.path in self._tiles:
-                continue
-            tile = WallpaperTile(item)
-            if self._on_favourite is not None:
-                tile.connect_favourite(self._on_favourite)
-            if self._menu_for is not None:
-                tile.set_menu(self._menu_for)
-            if self._on_secondary is not None:
-                tile.connect_secondary(self._on_secondary)
-            tile.set_favourite(item.path in self._favourites)
-            tile.set_borked(self._borked.get(item.path))
-            self._tiles[item.path] = tile
-            self._flow.append(tile)
-            self._loader.request(item, self._on_thumbnail)
-
-        # After the diff, because a reused tile keeps whatever it was told last
-        # time and the highlight may have moved since.
-        self.set_current(current)
+        if not isinstance(current, _PreserveCurrent):
+            self._current = frozenset(() if current is None else (current,))
         self._apply_query()
 
     def _on_thumbnail(self, item: MediaItem, texture: Gdk.Texture | None) -> None:
         tile = self._tiles.get(item.path)
-        if tile is not None:
+        # A rescan may replace an item at the same path while its old decode is
+        # still in flight. Never paint that stale result onto the new tile.
+        if tile is not None and tile.item == item:
             tile.show_thumbnail(texture)
 
     # -- searching, filtering, sorting -------------------------------------
 
     def set_query(self, query: library_filter.Query) -> None:
-        """Narrow or reorder what is already on screen.
+        """Narrow or reorder the complete inventory.
 
-        Nothing is built and nothing is fetched: the tiles all exist from
-        `populate`, and this only settles which of them the FlowBox shows and
-        in what order. That matters more than it looks -- `ThumbnailLoader`
-        answers a cache hit straight away, but an item whose thumbnail could
-        not be generated has no cache entry, so rebuilding tiles per keystroke
-        would put the same failing ffmpeg call back on the pool for every
-        letter typed.
+        A changed query starts a fresh bounded page.  Matching and ordering
+        still inspect every `MediaItem`, so a result at position 4,095 appears
+        immediately without constructing the preceding 4,095 tiles.
         """
+        if query != self._query:
+            self._materialized_limit = MEDIA_PAGE_SIZE
         self._query = query
         self._apply_query()
 
     @property
     def visible_count(self) -> int:
-        """How many tiles the current query leaves showing."""
+        """How many full-inventory items match the current query."""
         return len(self._positions)
 
     def set_favourites(self, favourites: frozenset[Path]) -> None:
@@ -374,14 +383,13 @@ class WallpaperGrid(Gtk.ScrolledWindow):
                 tile.set_borked(self._borked.get(path))
 
     def _apply_query(self) -> None:
-        visible = library_filter.apply(self._items, self._query, self._favourites)
-        self._positions = {item.path: index for index, item in enumerate(visible)}
-        self._flow.invalidate_filter()
-        self._flow.invalidate_sort()
+        self._matches = library_filter.apply(self._items, self._query, self._favourites)
+        self._positions = {item.path: index for index, item in enumerate(self._matches)}
+        self._reconcile_tiles()
 
         if not self._items:
             self._stack.set_visible_child_name("empty")
-        elif not visible:
+        elif not self._matches:
             self._unmatched.set_title(f"No {library_filter.describe(self._query)}")
             self._unmatched.set_description(
                 "Nothing in your library matches. Clear the search, or widen the filter."
@@ -389,6 +397,79 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             self._stack.set_visible_child_name("unmatched")
         else:
             self._stack.set_visible_child_name("grid")
+
+    def _reconcile_tiles(self) -> None:
+        """Diff the bounded materialized page against the full result model."""
+        wanted_paths = {item.path for item in self._matches[: self._materialized_limit]}
+
+        # Current wallpapers are the grid's most important status.  Keep the
+        # (normally one to three) current paths visible even when the chosen
+        # sort puts them beyond the first page.  Likewise, if a rescan lands
+        # while focus is inside a tile that still matches, do not destroy the
+        # widget from under the keyboard merely because its rank crossed the
+        # page boundary.
+        wanted_paths.update(path for path in self._current if path in self._positions)
+        focused = self._focused_tile_path()
+        if focused is not None and focused in self._positions:
+            wanted_paths.add(focused)
+
+        wanted = {item.path: item for item in self._matches if item.path in wanted_paths}
+        for path, tile in list(self._tiles.items()):
+            replacement = wanted.get(path)
+            if replacement is None or replacement != tile.item:
+                self._flow.remove(tile)
+                del self._tiles[path]
+
+        for item in self._matches:
+            if item.path not in wanted or item.path in self._tiles:
+                continue
+            tile = WallpaperTile(item)
+            if self._on_favourite is not None:
+                tile.connect_favourite(self._on_favourite)
+            if self._menu_for is not None:
+                tile.set_menu(self._menu_for)
+            if self._on_secondary is not None:
+                tile.connect_secondary(self._on_secondary)
+            tile.set_favourite(item.path in self._favourites)
+            tile.set_borked(self._borked.get(item.path))
+            tile.set_current(item.path in self._current)
+            self._tiles[item.path] = tile
+            self._flow.append(tile)
+            self._loader.request(item, self._on_thumbnail)
+
+        # Reused tiles retain their current marker; update it after every diff
+        # because runtime truth can change without the media model changing.
+        for path, tile in self._tiles.items():
+            tile.set_current(path in self._current)
+        self._flow.invalidate_filter()
+        self._flow.invalidate_sort()
+        self._update_more()
+
+    def _focused_tile_path(self) -> Path | None:
+        """Return the tile containing keyboard focus, if this grid has it."""
+        root = self.get_root()
+        if not isinstance(root, Gtk.Window):
+            return None
+        focused = root.get_focus()
+        while focused is not None:
+            if isinstance(focused, WallpaperTile):
+                return focused.item.path
+            focused = focused.get_parent()
+        return None
+
+    def _update_more(self) -> None:
+        shown = len(self._tiles)
+        remaining = max(0, len(self._matches) - shown)
+        next_limit = min(len(self._matches), self._materialized_limit + MEDIA_PAGE_SIZE)
+        materialized = self._tiles.keys()
+        amount = sum(item.path not in materialized for item in self._matches[:next_limit])
+        self._more.set_visible(remaining > 0)
+        self._more.set_label(f"Load {amount} more · {shown} of {len(self._matches)} shown")
+
+    def _show_more(self, _button: Gtk.Button) -> None:
+        """Materialize one more page without replacing the existing page."""
+        self._materialized_limit += MEDIA_PAGE_SIZE
+        self._reconcile_tiles()
 
     def _is_visible(self, child: Gtk.FlowBoxChild) -> bool:
         return self._position(child) is not None
@@ -416,5 +497,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
     def set_current_many(self, current: Iterable[Path]) -> None:
         """Highlight every wallpaper currently shown across the displays."""
         selected = frozenset(current)
-        for path, tile in self._tiles.items():
-            tile.set_current(path in selected)
+        if selected == self._current:
+            return
+        self._current = selected
+        self._reconcile_tiles()

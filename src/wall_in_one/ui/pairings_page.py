@@ -30,6 +30,7 @@ from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Mode as PaletteMode
 from wall_in_one.theme.palette import Palette, PalettePair
 from wall_in_one.ui.palette_browser import SchemePreview, SchemePreviewLoader, swatch_strip
+from wall_in_one.ui.palette_catalog import CatalogState, PaletteCatalog
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 if TYPE_CHECKING:
@@ -49,6 +50,11 @@ _MODES: tuple[tuple[str, pairings.Mode], ...] = (
 #: still considers the complete inventory; the graphical results expand in
 #: deliberately small pages.
 STILL_PICKER_PAGE_SIZE: Final = 48
+
+#: Installed palette rows are substantially heavier than strings: every
+#: visible swatch owns CSS and colour widgets.  Search still covers the whole
+#: catalogue, while explicit paging keeps an editor opening bounded.
+PALETTE_PAGE_SIZE: Final = 24
 
 
 class _StillCard(Gtk.ToggleButton):
@@ -85,6 +91,8 @@ class PairingsPage(Gtk.Box):
         application: Application,
         on_back: Callable[[], None],
         on_remove: Callable[[MediaItem], None] | None = None,
+        *,
+        palette_catalog: PaletteCatalog | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._app = application
@@ -98,6 +106,19 @@ class PairingsPage(Gtk.Box):
         self._adaptive_boxes: dict[str, Gtk.Box] = {}
         self._adaptive_previews: dict[str, SchemePreview] = {}
         self._palette_sources: dict[str, Palette | PalettePair | None] = {}
+        self._palette_buttons: dict[str, Gtk.CheckButton] = {}
+        self._policy_rows: dict[str, Gtk.ListBoxRow] = {}
+        self._policy_models: dict[
+            str,
+            tuple[str, pairings.PalettePolicy, Palette | PalettePair | None, Path],
+        ] = {}
+        self._policy_render_key: object = None
+        self._reflecting_policy = False
+        self._palette_catalog = palette_catalog or PaletteCatalog()
+        self._owns_palette_catalog = palette_catalog is None
+        self._catalog_state = self._palette_catalog.state
+        self._catalog_listener = self._palette_catalog.subscribe(self._catalog_changed)
+        self._palette_limit = PALETTE_PAGE_SIZE
 
         self._still_cards: dict[_StillCard, MediaItem] = {}
         self._still_cards_by_path: dict[Path, _StillCard] = {}
@@ -117,8 +138,12 @@ class PairingsPage(Gtk.Box):
 
         self.append(self._editor_scroll)
         self._show_empty()
+        self._palette_catalog.ensure_loaded()
 
     def shutdown(self) -> None:
+        self._palette_catalog.unsubscribe(self._catalog_listener)
+        if self._owns_palette_catalog:
+            self._palette_catalog.shutdown()
         self._preview_loader.shutdown()
         self._thumbnail_loader.shutdown()
 
@@ -133,8 +158,8 @@ class PairingsPage(Gtk.Box):
             self._show_empty()
         else:
             self._selected = current
-            bundle = session.pairings.resolve(current, session.library.roots)
-            if self._rendered != (current, bundle):
+            bundle = session.pairings.resolve_accepted(current, session.library)
+            if self._rendered != self._editor_key(current, bundle):
                 self._show_editor(current, bundle=bundle)
             else:
                 # A rescan can add a reusable picture without changing the
@@ -146,9 +171,25 @@ class PairingsPage(Gtk.Box):
         """Open ``item`` as the one implicit pairing it already represents."""
         self._session = session
         self._selected = item
-        bundle = session.pairings.resolve(item, session.library.roots)
-        if self._rendered != (item, bundle):
+        bundle = session.pairings.resolve_accepted(item, session.library)
+        if self._rendered != self._editor_key(item, bundle):
             self._show_editor(item, bundle=bundle)
+
+    @staticmethod
+    def _editor_key(
+        item: MediaItem,
+        bundle: pairings.Pairing,
+    ) -> tuple[MediaItem, pairings.Pairing]:
+        """Canonical inputs, across the short scan-after-write window.
+
+        The pairing store learns a manual still synchronously.  The library's
+        moving item learns the same derived ``paired_still`` on its following
+        asynchronous rescan.  Normalising both sides prevents either phase
+        from looking like a new editor while still letting every other item
+        field and pairing choice invalidate the surface.
+        """
+        resolved_item = item.with_still(bundle.still) if item.is_moving else item
+        return resolved_item, bundle
 
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:
@@ -156,6 +197,10 @@ class PairingsPage(Gtk.Box):
         self._adaptive_boxes.clear()
         self._adaptive_previews.clear()
         self._palette_sources.clear()
+        self._palette_buttons.clear()
+        self._policy_rows.clear()
+        self._policy_models.clear()
+        self._policy_render_key = None
         self._still_cards.clear()
         self._still_cards_by_path.clear()
         self._still_positions.clear()
@@ -183,9 +228,8 @@ class PairingsPage(Gtk.Box):
             return
         scroll = self._editor_scroll.get_vadjustment().get_value()
         self._clear_editor()
-        bundle = bundle or session.pairings.resolve(item, session.library.roots)
-        rendered_item = item.with_still(bundle.still) if item.is_moving else item
-        self._rendered = (rendered_item, bundle)
+        bundle = bundle or session.pairings.resolve_accepted(item, session.library)
+        self._rendered = self._editor_key(item, bundle)
 
         back = Gtk.Button(label="Back to Media/Pairings", icon_name="go-previous-symbolic")
         back.set_halign(Gtk.Align.START)
@@ -270,40 +314,27 @@ class PairingsPage(Gtk.Box):
         self._mode_row.connect("notify::selected", self._make_mode_changed(item))
         colour_group.add(self._mode_row)
 
-        policy_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        policy_list.add_css_class("boxed-list")
-        first: Gtk.CheckButton | None = None
-        for label, policy, palette in self._policies(bundle):
-            row = Gtk.ListBoxRow(activatable=False)
-            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            content.set_margin_top(9)
-            content.set_margin_bottom(9)
-            content.set_margin_start(10)
-            content.set_margin_end(10)
-            radio = Gtk.CheckButton()
-            if first is None:
-                first = radio
-            else:
-                radio.set_group(first)
-            selected_name = bundle.palette.name
-            if bundle.palette.is_adaptive and not selected_name:
-                selected_name = self._app.settings.preview_scheme
-            radio.set_active(policy.kind == bundle.palette.kind and policy.name == selected_name)
-            radio.connect("toggled", self._make_policy_changed(item, policy))
-            content.append(radio)
-            words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
-            name = Gtk.Label(label=label, xalign=0.0)
-            name.add_css_class("heading")
-            words.append(name)
-            preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-            words.append(preview_box)
-            key = policy.encode()
-            self._adaptive_boxes[key] = preview_box
-            self._palette_sources[key] = palette
-            content.append(words)
-            row.set_child(content)
-            policy_list.append(row)
-        colour_group.add(policy_list)
+        self._palette_search = Gtk.SearchEntry(
+            placeholder_text="Search installed palettes",
+        )
+        self._palette_search.connect("search-changed", self._palette_search_changed)
+        colour_group.add(self._palette_search)
+
+        self._policy_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self._policy_list.add_css_class("boxed-list")
+        colour_group.add(self._policy_list)
+
+        self._palette_status = Gtk.Label(xalign=0.0, wrap=True)
+        self._palette_status.add_css_class("caption")
+        self._palette_status.add_css_class("dim-label")
+        colour_group.add(self._palette_status)
+
+        self._palette_more = Gtk.Button()
+        self._palette_more.set_halign(Gtk.Align.CENTER)
+        self._palette_more.connect("clicked", self._show_more_palettes)
+        colour_group.add(self._palette_more)
+        self._palette_limit = PALETTE_PAGE_SIZE
+        self._populate_policy_list(item, bundle)
         self._editor.append(colour_group)
         self._refresh_palette_swatches(bundle.palette.mode)
 
@@ -316,6 +347,153 @@ class PairingsPage(Gtk.Box):
 
         self._request_adaptive_previews(bundle)
         GLib.idle_add(self._restore_interaction, scroll, restore_focus)
+
+    def _populate_policy_list(self, item: MediaItem, bundle: pairings.Pairing) -> None:
+        """Rebuild only the bounded policy rows; keep search and page identity."""
+        render_key = (
+            item.path,
+            bundle.palette,
+            self._catalog_state.discovery,
+            self._palette_search.get_text(),
+            self._palette_limit,
+        )
+        if render_key == self._policy_render_key:
+            self._update_palette_navigation()
+            return
+        self._policy_render_key = render_key
+        old_rows = dict(self._policy_rows)
+        old_models = dict(self._policy_models)
+        old_buttons = dict(self._palette_buttons)
+        old_boxes = dict(self._adaptive_boxes)
+        while (child := self._policy_list.get_first_child()) is not None:
+            self._policy_list.remove(child)
+        self._adaptive_boxes.clear()
+        self._palette_sources.clear()
+        self._palette_buttons.clear()
+        self._policy_rows.clear()
+        self._policy_models.clear()
+        policies = self._policies(bundle)
+        wanted_keys = {policy.encode() for _label, policy, _palette in policies}
+        for key, button in old_buttons.items():
+            if key not in wanted_keys:
+                button.set_group(None)
+        first: Gtk.CheckButton | None = None
+        self._reflecting_policy = True
+        try:
+            for label, policy, palette in policies:
+                key = policy.encode()
+                model = (label, policy, palette, item.path)
+                row = old_rows.get(key) if old_models.get(key) == model else None
+                radio = old_buttons.get(key) if row is not None else None
+                preview_box = old_boxes.get(key) if row is not None else None
+                if radio is None or preview_box is None:
+                    row = Gtk.ListBoxRow(activatable=False)
+                    content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+                    content.set_margin_top(9)
+                    content.set_margin_bottom(9)
+                    content.set_margin_start(10)
+                    content.set_margin_end(10)
+                    radio = Gtk.CheckButton()
+                    radio.connect("toggled", self._make_policy_changed(item, policy))
+                    content.append(radio)
+                    words = Gtk.Box(
+                        orientation=Gtk.Orientation.VERTICAL,
+                        spacing=3,
+                        hexpand=True,
+                    )
+                    name = Gtk.Label(label=label, xalign=0.0)
+                    name.add_css_class("heading")
+                    words.append(name)
+                    preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+                    words.append(preview_box)
+                    content.append(words)
+                    row.set_child(content)
+                assert row is not None
+                if first is None:
+                    first = radio
+                else:
+                    radio.set_group(first)
+                selected_name = bundle.palette.name
+                if bundle.palette.is_adaptive and not selected_name:
+                    selected_name = self._app.settings.preview_scheme
+                radio.set_active(
+                    policy.kind == bundle.palette.kind and policy.name == selected_name
+                )
+                self._palette_buttons[key] = radio
+                self._adaptive_boxes[key] = preview_box
+                self._palette_sources[key] = palette
+                self._policy_rows[key] = row
+                self._policy_models[key] = model
+                self._policy_list.append(row)
+        finally:
+            self._reflecting_policy = False
+        self._update_palette_navigation()
+
+    def _palette_entries(self) -> tuple[palettes.PaletteEntry, ...]:
+        query = self._palette_search.get_text().strip().casefold()
+        return tuple(
+            entry
+            for entry in self._catalog_state.discovery.entries
+            if entry.origin.is_applicable
+            and (
+                not query
+                or query in entry.name.casefold()
+                or query in entry.origin.label.casefold()
+            )
+        )
+
+    def _update_palette_navigation(self) -> None:
+        entries = self._palette_entries()
+        remaining = max(0, len(entries) - self._palette_limit)
+        self._palette_more.set_visible(remaining > 0)
+        self._palette_more.set_label(
+            f"Show {min(PALETTE_PAGE_SIZE, remaining)} more installed palettes"
+        )
+        state = self._catalog_state
+        if state.loading:
+            message = (
+                "Loading installed palettes…"
+                if not state.discovery.entries
+                else "Refreshing installed palettes…"
+            )
+        elif state.phase == "error":
+            message = f"Installed palettes could not be loaded: {state.error}"
+        elif not entries and self._palette_search.get_text().strip():
+            message = "No installed palettes match this search."
+        else:
+            message = ""
+        self._palette_status.set_label(message)
+        self._palette_status.set_visible(bool(message))
+
+    def _palette_search_changed(self, _entry: Gtk.SearchEntry) -> None:
+        self._palette_limit = PALETTE_PAGE_SIZE
+        item = self._selected
+        session = self._session
+        if item is None or session is None:
+            return
+        bundle = session.pairings.resolve_accepted(item, session.library)
+        self._populate_policy_list(item, bundle)
+        self._refresh_palette_swatches(bundle.palette.mode)
+
+    def _show_more_palettes(self, _button: Gtk.Button) -> None:
+        self._palette_limit += PALETTE_PAGE_SIZE
+        item = self._selected
+        session = self._session
+        if item is None or session is None:
+            return
+        bundle = session.pairings.resolve_accepted(item, session.library)
+        self._populate_policy_list(item, bundle)
+        self._refresh_palette_swatches(bundle.palette.mode)
+
+    def _catalog_changed(self, state: CatalogState) -> None:
+        self._catalog_state = state
+        item = self._selected
+        session = self._session
+        if item is None or session is None or not hasattr(self, "_policy_list"):
+            return
+        bundle = session.pairings.resolve_accepted(item, session.library)
+        self._populate_policy_list(item, bundle)
+        self._refresh_palette_swatches(bundle.palette.mode)
 
     def _build_still_picker(
         self, item: MediaItem, bundle: pairings.Pairing
@@ -510,18 +688,40 @@ class PairingsPage(Gtk.Box):
         try:
             if still is not None:
                 still = self._app.session.library.require_representative_still(still).path
-            self._app.session.pairings.choose_still(item, still)
-        except (RepresentativeStillError, pairings.PairingError) as error:
+        except RepresentativeStillError as error:
             self._app.window_report(str(error))
             self._reflect_still_selection()
             return
-        bundle = self._app.session.pairings.resolve(item, self._app.session.library.roots)
-        rendered_item = item.with_still(bundle.still) if item.is_moving else item
-        self._rendered = (rendered_item, bundle)
-        self._still_selected = still
-        self._reflect_still_selection()
-        self._request_adaptive_previews(bundle)
-        self._app.pairing_changed(item)
+        store = self._app.session.pairings
+
+        def saved(result: Any) -> None:
+            current = self._app.adopt_pairing_still(result.item, result.effective_still)
+            bundle = self._app.session.pairings.resolve_accepted(
+                current,
+                self._app.session.library,
+            )
+            self._rendered = self._editor_key(current, bundle)
+            self._still_selected = still
+            self._reflect_still_selection()
+            self._request_adaptive_previews(bundle)
+            self._app.pairing_changed(current)
+
+        def failed(error: str) -> None:
+            self._app.window_report(str(error))
+            self._reflect_still_selection()
+
+        self._app.authoring_action_async(
+            lambda: store.choose_still(item, still),
+            saved,
+            prepare=lambda: self._app.prepare_still_pairing_mutation(
+                item,
+                still,
+                lambda current_store, current, current_still: current_store.choose_still(
+                    current, current_still
+                ),
+            ),
+            failure=failed,
+        )
 
     def _restore_interaction(self, scroll: float, focus: str) -> bool:
         self._editor_scroll.get_vadjustment().set_value(scroll)
@@ -550,9 +750,21 @@ class PairingsPage(Gtk.Box):
                 resolved.palette if resolved is not None else None,
             ),
         ]
-        for entry in palettes.discover().entries:
-            if not entry.origin.is_applicable:
-                continue
+        entries = self._palette_entries()
+        visible = list(entries[: self._palette_limit])
+        selected = next(
+            (
+                entry
+                for entry in self._catalog_state.discovery.entries
+                if entry.origin.value == bundle.palette.kind and entry.name == bundle.palette.name
+            ),
+            None,
+        )
+        if selected is not None and selected not in visible:
+            # The durable choice stays visible even beyond the current page or
+            # outside the query, instead of making another radio look selected.
+            visible.append(selected)
+        for entry in visible:
             policy = pairings.PalettePolicy(entry.origin.value, entry.name)
             choices.append((f"{entry.origin.label} · {entry.name}", policy, entry.colours))
         # Preserve a policy whose source is temporarily unavailable, rather
@@ -621,7 +833,7 @@ class PairingsPage(Gtk.Box):
     def _request_adaptive_previews(self, bundle: pairings.Pairing) -> None:
         self._adaptive_previews.clear()
         self._refresh_palette_swatches(bundle.palette.mode)
-        if bundle.still is None or not bundle.still.is_file():
+        if bundle.still is None:
             return
         for scheme in noctalia.ALL_SCHEMES:
             self._preview_loader.request(bundle.still, scheme, self._on_adaptive_preview)
@@ -632,7 +844,7 @@ class PairingsPage(Gtk.Box):
         session = self._session
         if box is None or item is None or session is None:
             return
-        bundle = session.pairings.resolve(item, session.library.roots)
+        bundle = session.pairings.resolve_accepted(item, session.library)
         if bundle.still != preview.image:
             return
         self._adaptive_previews[preview.scheme] = preview
@@ -640,41 +852,83 @@ class PairingsPage(Gtk.Box):
 
     def _make_mode_changed(self, item: MediaItem) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
+            if self._reflecting_policy:
+                return
             index = row.get_selected()
             if index >= len(_MODES):
                 return
             session = self._app.session
-            current = session.pairings.resolve(item, session.library.roots).palette
-            stored = self._store_policy(
-                item,
-                pairings.PalettePolicy(current.kind, current.name, _MODES[index][1]),
-            )
-            self._refresh_palette_swatches(_MODES[index][1] if stored else current.mode)
+            current = session.pairings.resolve_accepted(item, session.library).palette
+            wanted = pairings.PalettePolicy(current.kind, current.name, _MODES[index][1])
+            if wanted == current:
+                return
+            if self._store_policy(item, wanted):
+                self._refresh_palette_swatches(wanted.mode)
+            else:
+                self._reflect_palette_policy(current)
 
         return changed
 
     def _make_policy_changed(self, item: MediaItem, policy: pairings.PalettePolicy) -> Any:
         def changed(button: Gtk.CheckButton) -> None:
-            if not button.get_active():
+            if self._reflecting_policy or not button.get_active():
                 return
             session = self._app.session
-            mode = session.pairings.resolve(item, session.library.roots).palette.mode
-            self._store_policy(item, pairings.PalettePolicy(policy.kind, policy.name, mode))
+            current = session.pairings.resolve_accepted(item, session.library).palette
+            wanted = pairings.PalettePolicy(policy.kind, policy.name, current.mode)
+            if wanted == current:
+                return
+            if not self._store_policy(item, wanted):
+                self._reflect_palette_policy(current)
 
         return changed
 
-    def _store_policy(self, item: MediaItem, policy: pairings.PalettePolicy) -> bool:
+    def _reflect_palette_policy(self, policy: pairings.PalettePolicy) -> None:
+        """Restore colour controls to the last durable pairing after a failed write."""
+        selected_name = policy.name
+        if policy.is_adaptive and not selected_name:
+            selected_name = self._app.settings.preview_scheme
+        key = pairings.PalettePolicy(policy.kind, selected_name).encode()
+        mode = next(
+            (index for index, (_label, choice) in enumerate(_MODES) if choice is policy.mode),
+            0,
+        )
+        self._reflecting_policy = True
         try:
-            self._app.session.pairings.choose_palette(item, policy)
-        except pairings.PairingError as error:
-            self._app.window_report(str(error))
-            return False
-        session = self._app.session
-        bundle = session.pairings.resolve(item, session.library.roots)
-        rendered_item = item.with_still(bundle.still) if item.is_moving else item
-        self._rendered = (rendered_item, bundle)
-        self._app.pairing_changed(item)
-        return True
+            self._mode_row.set_selected(mode)
+            button = self._palette_buttons.get(key)
+            if button is not None:
+                button.set_active(True)
+        finally:
+            self._reflecting_policy = False
+        self._refresh_palette_swatches(policy.mode)
+
+    def _store_policy(self, item: MediaItem, policy: pairings.PalettePolicy) -> bool:
+        store = self._app.session.pairings
+
+        def saved(_record: pairings.Pairing) -> None:
+            session = self._app.session
+            bundle = session.pairings.resolve_accepted(item, session.library)
+            self._rendered = self._editor_key(item, bundle)
+            self._app.pairing_changed(item)
+
+        def failed(error: str) -> None:
+            self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
+            current = self._app.session.pairings.resolve_accepted(
+                item,
+                self._app.session.library,
+            ).palette
+            self._reflect_palette_policy(current)
+
+        return self._app.authoring_action_async(
+            lambda: store.choose_palette(item, policy),
+            saved,
+            prepare=lambda: self._app.prepare_pairing_mutation(
+                item,
+                lambda current_store, current: current_store.choose_palette(current, policy),
+            ),
+            failure=failed,
+        )
 
     def _choose_manual_still(self, item: MediaItem) -> None:
         dialog = Gtk.FileDialog(title=f"Choose a still for {item.name}", modal=True)
@@ -706,13 +960,19 @@ class PairingsPage(Gtk.Box):
         return chosen
 
     def _reset(self, item: MediaItem) -> None:
-        try:
-            self._app.session.pairings.reset(item)
-        except pairings.PairingError as error:
-            self._app.window_report(str(error))
-            return
-        self._app.pairing_changed(item)
-        self._show_editor(item, restore_focus="reset")
+        store = self._app.session.pairings
+
+        def saved(result: Any) -> None:
+            current = self._app.adopt_pairing_still(result.item, result.effective_still)
+            self._app.pairing_changed(current)
+            self._show_editor(current, restore_focus="reset")
+
+        self._app.authoring_action_async(
+            lambda: store.reset(item),
+            saved,
+            prepare=lambda: self._app.prepare_pairing_reset(item),
+            failure=self._app.window_report,
+        )
 
     def _regenerate_scene(self, item: MediaItem) -> None:
         if self._app.regenerate_scene_still(item):

@@ -28,7 +28,7 @@ from wall_in_one import config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
-from wall_in_one.ui import playlists_page  # noqa: E402
+from wall_in_one.ui import playlists_page, schedules_page  # noqa: E402
 from wall_in_one.ui.pairings_page import PairingsPage  # noqa: E402
 from wall_in_one.ui.schedules_page import SchedulesPage  # noqa: E402
 
@@ -77,6 +77,29 @@ class PlaylistApp:
 
     def window_report(self, _message: str) -> None: ...
 
+    def current_item_for_authoring(self, item: MediaItem) -> MediaItem:
+        current = self.session.library.find(item.path)
+        if current is None:
+            raise ValueError(f"{item.name} was removed before the authoring change could save")
+        return current
+
+    def authoring_action_async(
+        self,
+        work: Any,
+        finish: Any,
+        *,
+        prepare: Any = None,
+        failure: Any = None,
+    ) -> bool:
+        try:
+            selected = prepare() if prepare is not None else work
+            finish(selected())
+        except Exception as error:
+            if failure is not None:
+                failure(str(error))
+            return False
+        return True
+
 
 def _item(name: str) -> MediaItem:
     return MediaItem(
@@ -103,6 +126,47 @@ def _session(tmp_path: Path) -> tuple[Session, playlists.Playlist, tuple[MediaIt
     return session, store.find(chosen.id), items
 
 
+def _delete_playlist_now(
+    application: Any,
+    session: Session,
+    reference: str,
+    on_complete: Any,
+    *,
+    on_error: Any = None,
+) -> bool:
+    """Synchronous actor-shaped fake for widget-only permanence tests."""
+    playlist = session.playlists.find(reference)
+    try:
+        session.playlists.delete(playlist.id)
+    except Exception as error:
+        if on_error is not None:
+            on_error(str(error))
+        return False
+    failures: list[str] = []
+    try:
+        session.schedules.forget_playlist(playlist.id)
+    except Exception as error:
+        failures.append(f"schedule rules: {error}")
+    try:
+        session.displays.forget_playlist(playlist.id)
+    except Exception as error:
+        failures.append(f"display assignments: {error}")
+    if session.settings.active_playlist == playlist.id:
+        try:
+            application.update_settings(active_playlist="")
+        except Exception as error:
+            failures.append(f"saved default: {error}")
+    manual = session.manual_playlist == playlist.id
+    application.playlists_changed()
+    if manual:
+        try:
+            application.resume_schedule_async()
+        except Exception as error:
+            failures.append(f"current manual override: {error}")
+    on_complete(SimpleNamespace(name=playlist.name), tuple(failures))
+    return True
+
+
 def _large_session(tmp_path: Path, count: int) -> tuple[Session, playlists.Playlist]:
     items = tuple(
         MediaItem(
@@ -125,6 +189,38 @@ def _large_session(tmp_path: Path, count: int) -> tuple[Session, playlists.Playl
     )
     session.refresh()
     return session, store.find(chosen.id)
+
+
+def _large_order_session(
+    tmp_path: Path, count: int
+) -> tuple[Session, playlists.Playlist, tuple[MediaItem, ...]]:
+    items = tuple(
+        MediaItem(
+            path=Path("/test-media") / f"ordered-{index:04d}.png",
+            kind=Kind.STILL,
+            size=1,
+            mtime=1,
+        )
+        for index in range(count)
+    )
+    chosen = playlists.Playlist(
+        id="large-order",
+        name="Large order",
+        entries=tuple(
+            playlists.Entry(id=f"entry-{index:04d}", source=str(item.path))
+            for index, item in enumerate(items)
+        ),
+    )
+    store = playlists.Store({chosen.id: chosen}, tmp_path / "large-order-playlists.json")
+    session = Session(
+        config.Settings(active_playlist=chosen.id),
+        scanner=lambda _roots: Library(roots=(Path("/test-media"),), items=items),
+        playlist_store=store,
+        schedule_store=schedules.Store(path=tmp_path / "large-order-schedules.json"),
+        display_store=displays.Store(path=tmp_path / "large-order-displays.json"),
+    )
+    session.refresh()
+    return session, chosen, items
 
 
 def test_playlist_deletion_confirmation_names_every_cascade(tmp_path: Path) -> None:
@@ -178,6 +274,21 @@ def test_confirmed_playlist_deletion_cascades_every_authored_reference(tmp_path:
         def playlists_changed(self) -> None:
             self.published += 1
 
+        def delete_playlist_async(
+            self,
+            reference: str,
+            on_complete: Any,
+            *,
+            on_error: Any = None,
+        ) -> bool:
+            return _delete_playlist_now(
+                self,
+                session,
+                reference,
+                on_complete,
+                on_error=on_error,
+            )
+
     application = DeleteApp()
     page = cast(
         playlists_page.PlaylistsPage,
@@ -196,6 +307,110 @@ def test_confirmed_playlist_deletion_cascades_every_authored_reference(tmp_path:
     session.shutdown()
 
 
+def test_playlist_delete_write_failure_keeps_every_reference_and_reports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, playlist, _items = _session(tmp_path)
+    session.schedules.add(playlist.id, weekdays=["sat"], rule_id="weekend")
+    session.displays.assign("DP-1", playlist.id)
+    reports: list[str] = []
+
+    def fail(_identifier: str) -> bool:
+        raise playlists.PlaylistError("local-io", "disk full")
+
+    monkeypatch.setattr(session.playlists, "delete", fail)
+    application = SimpleNamespace(window_report=reports.append)
+    application.delete_playlist_async = lambda reference, on_complete, on_error=None: (
+        _delete_playlist_now(
+            application,
+            session,
+            reference,
+            on_complete,
+            on_error=on_error,
+        )
+    )
+    page = cast(
+        playlists_page.PlaylistsPage,
+        SimpleNamespace(_session=session, _app=application, _selected=playlist.id),
+    )
+
+    playlists_page.PlaylistsPage._delete_confirmed(page, playlist.id)
+
+    assert session.playlists.get(playlist.id) is not None
+    assert any(rule.playlist == playlist.id for rule in session.schedules.rules)
+    assert session.displays.playlist_for("DP-1") == playlist.id
+    assert reports == [f"{playlist.name} was not deleted; nothing changed: local-io: disk full"]
+    session.shutdown()
+
+
+def test_playlist_delete_reports_a_committed_partial_cascade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, playlist, _items = _session(tmp_path)
+    session.schedules.add(playlist.id, weekdays=["sat"], rule_id="weekend")
+    session.displays.assign("DP-1", playlist.id)
+    session.use_playlist(playlist.id)
+    reports: list[str] = []
+
+    def fail(_identifier: str) -> bool:
+        raise schedules.ScheduleError("local-io", "schedule disk is full")
+
+    monkeypatch.setattr(session.schedules, "forget_playlist", fail)
+
+    class DeleteApp:
+        def __init__(self) -> None:
+            self.published = 0
+
+        def update_settings(self, **changes: Any) -> None:
+            session.update_settings(replace(session.settings, **changes))
+
+        def resume_schedule_async(self) -> bool:
+            session.resume_schedule()
+            return True
+
+        def playlists_changed(self) -> None:
+            self.published += 1
+
+        def window_report(self, message: str) -> None:
+            reports.append(message)
+
+        def delete_playlist_async(
+            self,
+            reference: str,
+            on_complete: Any,
+            *,
+            on_error: Any = None,
+        ) -> bool:
+            return _delete_playlist_now(
+                self,
+                session,
+                reference,
+                on_complete,
+                on_error=on_error,
+            )
+
+    application = DeleteApp()
+    page = cast(
+        playlists_page.PlaylistsPage,
+        SimpleNamespace(_session=session, _app=application, _selected=playlist.id),
+    )
+
+    playlists_page.PlaylistsPage._delete_confirmed(page, playlist.id)
+
+    assert session.playlists.get(playlist.id) is None
+    assert any(rule.playlist == playlist.id for rule in session.schedules.rules)
+    assert session.displays.playlist_for("DP-1") == ""
+    assert session.settings.active_playlist == ""
+    assert session.manual_playlist is None
+    assert application.published == 1
+    assert len(reports) == 1
+    assert "was deleted, but cleanup needs attention" in reports[0]
+    assert "schedule rules" in reports[0]
+    session.shutdown()
+
+
 class ScheduleApp:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -205,6 +420,143 @@ class ScheduleApp:
         self.published += 1
 
     def window_report(self, _message: str) -> None: ...
+
+    def authoring_action_async(
+        self,
+        work: Any,
+        finish: Any,
+        *,
+        prepare: Any = None,
+        failure: Any = None,
+    ) -> bool:
+        try:
+            selected = prepare() if prepare is not None else work
+            finish(selected())
+        except Exception as error:
+            if failure is not None:
+                failure(str(error))
+            return False
+        return True
+
+
+def test_schedule_write_failures_restore_optimistic_controls_and_do_not_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, playlist, _items = _session(tmp_path)
+    rule = session.schedules.add(playlist.id, rule_id="work-hours")
+    reports: list[str] = []
+
+    class FailingApp(ScheduleApp):
+        def window_report(self, message: str) -> None:
+            reports.append(message)
+
+        def runtime_config_changed(self) -> None: ...
+
+    application = FailingApp(session)
+    page = SchedulesPage(application)  # type: ignore[arg-type]
+    page._session = session
+    choices = session.playlists.all()
+
+    assignment = Adw.ComboRow(
+        title="DP-1",
+        model=Gtk.StringList.new(["Follow default", *(one.name for one in choices)]),
+    )
+    assignment.set_selected(1)
+
+    def fail_assign(_connector: str, _playlist: str) -> None:
+        raise displays.DisplayError("local-io", "display disk is full")
+
+    monkeypatch.setattr(session.displays, "assign", fail_assign)
+    page._make_display_changed("DP-1", choices)(assignment, None)
+    assert assignment.get_selected() == 0
+    assert session.displays.playlist_for("DP-1") == ""
+
+    enabled = Adw.SwitchRow(active=False)
+
+    def fail_enabled(_rule_id: str, _enabled: bool) -> schedules.Rule:
+        raise schedules.ScheduleError("local-io", "schedule disk is full")
+
+    monkeypatch.setattr(session.schedules, "set_enabled", fail_enabled)
+    page._make_enabled(rule.id)(enabled, None)
+    assert enabled.get_active(), "the switch must return to the durable enabled rule"
+    assert session.schedules.rules[0].enabled
+
+    def fail_remove(_rule_id: str) -> bool:
+        raise schedules.ScheduleError("local-io", "schedule disk is still full")
+
+    monkeypatch.setattr(session.schedules, "remove", fail_remove)
+    page._make_remove(rule.id)(Gtk.Button())
+    assert session.schedules.rules[0].id == rule.id
+    assert application.published == 0
+    assert len(reports) == 3
+    session.shutdown()
+
+
+def test_schedule_dense_controls_wrap_and_time_pickers_are_unambiguous(tmp_path: Path) -> None:
+    session, _playlist, _items = _session(tmp_path)
+    application = ScheduleApp(session)
+    page = SchedulesPage(application)  # type: ignore[arg-type]
+    page.refresh(session)
+
+    assert isinstance(page._weekday_box, Adw.WrapBox)
+    assert isinstance(page._time_box, Adw.WrapBox)
+    assert isinstance(page._rule_buttons, Adw.WrapBox)
+    assert page._start_hour.get_tooltip_text() == "Start hour"
+    assert page._start_minute.get_tooltip_text() == "Start minute"
+    assert page._end_hour.get_tooltip_text() == "End hour"
+    assert page._end_minute.get_tooltip_text() == "End minute"
+
+    controls = page._new_display_controls("DP-1", session.playlists.all())
+    assert isinstance(controls.play.get_parent(), Adw.WrapBox)
+    assert isinstance(controls.stop.get_parent(), Adw.WrapBox)
+    assert isinstance(controls.shuffle.get_parent(), Adw.WrapBox)
+    assert isinstance(controls.mode_defaults.get_parent(), Adw.WrapBox)
+    session.shutdown()
+
+
+def test_schedule_rules_materialise_in_bounded_reachable_pages(tmp_path: Path) -> None:
+    initial, playlist, _items = _session(tmp_path)
+    authored = tuple(
+        schedules.Rule(
+            id=f"rule-{index:04d}",
+            playlist=playlist.id,
+            months=frozenset((index % 12 + 1,)),
+        )
+        for index in range(schedules.MAX_RULES)
+    )
+    session = Session(
+        config.Settings(active_playlist=playlist.id),
+        scanner=lambda _roots: initial.library,
+        playlist_store=initial.playlists,
+        schedule_store=schedules.Store(authored, tmp_path / "many-schedules.json"),
+    )
+    initial.shutdown()
+    session.refresh()
+    page = SchedulesPage(ScheduleApp(session))  # type: ignore[arg-type]
+    page.refresh(session)
+
+    assert len(page._rule_rows) == schedules_page.RULE_PAGE_SIZE + 1
+    more = page._rule_more
+    assert more is not None
+    assert more.get_label() == f"Load {schedules_page.RULE_PAGE_SIZE} more"
+
+    page._show_more_rules(Gtk.Button())
+    assert len(page._rule_rows) == schedules_page.RULE_PAGE_SIZE * 2 + 1
+
+    page._rule_pin = authored[-1].id
+    page._refresh_rules()
+    assert any(
+        isinstance(row, Adw.SwitchRow) and "priority 512" in (row.get_subtitle() or "")
+        for row in page._rule_rows
+    )
+
+    for _page in range(schedules.MAX_RULES // schedules_page.RULE_PAGE_SIZE + 1):
+        if page._rule_more is None:
+            break
+        page._show_more_rules(Gtk.Button())
+    assert len(page._rule_rows) == schedules.MAX_RULES
+    session.shutdown()
 
 
 def _put_scroll_at(scroller: Gtk.ScrolledWindow, value: float) -> None:
@@ -512,6 +864,58 @@ def test_playlist_source_search_and_rescan_never_mix_stale_cards(
     session.shutdown()
 
 
+def test_large_playlist_order_materialises_bounded_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loader = CountingLoader()
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", lambda: loader)
+    session, playlist, _items = _large_order_session(tmp_path, 600)
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+
+    first = page._entry_rows[playlist.entries[0].id]
+    assert len(page._entry_rows) == playlists_page.ENTRY_PAGE_SIZE
+    assert len(loader.requests) == playlists_page.SOURCE_PAGE_SIZE + playlists_page.ENTRY_PAGE_SIZE
+    assert page._entry_more.get_visible()
+    assert "72 of 600 shown" in (page._entry_more.get_label() or "")
+
+    page._show_more_entries(Gtk.Button())
+    assert len(page._entry_rows) == playlists_page.ENTRY_PAGE_SIZE * 2
+    assert page._entry_rows[playlist.entries[0].id] is first
+    assert len(loader.requests) == (
+        playlists_page.SOURCE_PAGE_SIZE + playlists_page.ENTRY_PAGE_SIZE * 2
+    )
+
+    while page._entry_more.get_visible():
+        page._show_more_entries(Gtk.Button())
+    assert len(page._entry_rows) == len(playlist.entries)
+    assert len(loader.requests) == playlists_page.SOURCE_PAGE_SIZE + len(playlist.entries)
+    page.shutdown()
+    session.shutdown()
+
+
+def test_adding_to_a_partly_loaded_playlist_pins_visible_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _large_order_session(tmp_path, 200)
+    application = PlaylistApp(session)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+
+    page._make_add(items[-1])(Gtk.Button())
+    updated = session.playlists.get(playlist.id)
+    assert updated is not None
+    appended = updated.entries[-1]
+    assert appended.id in page._entry_rows
+    assert page._entry_items[appended.id] == items[-1]
+    assert len(page._entry_rows) <= playlists_page.ENTRY_PAGE_SIZE + 1
+    assert page._entry_more.get_visible()
+    page.shutdown()
+    session.shutdown()
+
+
 def test_playlist_and_schedule_pages_follow_one_runtime_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -573,6 +977,46 @@ def test_playlist_and_schedule_pages_follow_one_runtime_snapshot(
     assert playback_row.get_subtitle() == ("Following schedule · rule work-hours selects Evening.")
 
     playlist_page.shutdown()
+    session.shutdown()
+
+
+def test_borked_media_stays_inspectable_but_has_no_playlist_play_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _session(tmp_path)
+    application = PlaylistApp(session)
+    reports: list[str] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+
+    media = items[0]
+    session.pairings.mark_borked(media, "renderer crashed repeatedly", "runtime")
+    page.pairing_health_changed(session)
+
+    source = page._source_cards_by_path[media.path]
+    entry = page._entry_rows["first"]
+    detail = page._playlist_rows_by_id[playlist.id][2]
+    assert source._health.get_visible()
+    assert not source._add.get_sensitive()
+    assert source._drag.get_actions() == Gdk.DragAction(0)
+    assert entry.title.get_label().startswith("Borked ·")
+    assert "renderer crashed repeatedly" in (entry.get_tooltip_text() or "")
+    assert "1 unavailable" in detail.get_label()
+    assert page._play_button.get_label() == "Cannot play · no usable items"
+    assert not page._play_button.get_sensitive()
+
+    before = len(session.playlists.find(playlist.id).entries)
+    page._make_add(media)(Gtk.Button())
+    page._play_now()
+    assert len(session.playlists.find(playlist.id).entries) == before
+    assert len(reports) == 2
+    assert all("Borked" in message or "no usable" in message for message in reports)
+
+    page.shutdown()
     session.shutdown()
 
 
@@ -709,6 +1153,51 @@ def test_source_drop_defers_new_row_until_the_drag_has_ended(
     assert application.published == 1
     assert not _is_dragging(page)
     assert len(_children(page._order_list)) == len(original_children) + 1
+    session.shutdown()
+
+
+def test_source_drop_rolls_back_a_failed_position_or_publishes_partial_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _session(tmp_path)
+    application = PlaylistApp(session)
+    reports: list[str] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    page = playlists_page.PlaylistsPage(application)  # type: ignore[arg-type]
+    application.page = page
+    page.refresh(session)
+
+    def fail_move(_playlist_id: str, _entry_id: str, _position: int) -> Any:
+        raise playlists.PlaylistError("local-io", "position write failed")
+
+    monkeypatch.setattr(session.playlists, "move_entry", fail_move)
+    payload = f"{playlists_page.SOURCE_PREFIX}{items[1].path}"
+
+    # The drag was accepted into the asynchronous authoring lane even though
+    # its durable placement later failed and was rolled back honestly.
+    assert page._accept_drop(payload, None)
+    assert tuple(entry.source for entry in session.playlists.find(playlist.id).entries) == (
+        str(items[0].path),
+    )
+    assert application.published == 0
+    assert "was rolled back" in reports[-1]
+
+    def fail_remove(_playlist_id: str, _entry_id: str) -> Any:
+        raise playlists.PlaylistError("local-io", "rollback write failed")
+
+    monkeypatch.setattr(session.playlists, "remove_entry", fail_remove)
+
+    assert page._accept_drop(payload, None)
+    assert tuple(entry.source for entry in session.playlists.find(playlist.id).entries) == (
+        str(items[0].path),
+        str(items[1].path),
+    )
+    assert application.published == 1
+    assert "was added at the end" in reports[-1]
+    assert "rollback also failed" in reports[-1]
+
+    page.shutdown()
     session.shutdown()
 
 

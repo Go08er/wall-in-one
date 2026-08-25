@@ -58,6 +58,27 @@ It can also be built on its own:
 $ nix build -L .#checks.x86_64-linux.vm-test
 ```
 
+The final 2026-08-24 release-tree run used the explicit working-tree form,
+because the migration sources were intentionally still untracked:
+
+```console
+$ nix build -L 'path:.#checks.x86_64-linux.vm-test'
+```
+
+It passed. The package check embedded in that build reported 1,745 passed,
+1 intentional skip and 271 GUI tests deselected; the booted-desktop script
+completed in 88.07 seconds. The duration records that run, not a timing gate.
+The separate packaged GUI check reported 271 passed and 1,746 non-GUI tests
+deselected; the cross-binary runtime-socket fallback check passed both tests.
+The `path:.` source included the required untracked migration sources, but it
+also copied ignored local artifacts into its temporary source snapshot,
+including `.claude`, tool caches and `service/target` (about 651 MiB total,
+roughly 601 MiB of it the Rust target tree). Package-specific filesets and the
+installed 8.5 MiB output excluded those artifacts, so the functional result is
+valid; it was not a clean publication-source proof. Before any later
+publication, stage the intended sources and rerun the normal Git-backed flake.
+This release run did not stage or publish them.
+
 The default checks also include a process-level memory contract for the Rust
 runtime:
 
@@ -91,17 +112,17 @@ smaller shapes do not replace the 600-item gate. The Python app and GUI are
 never started; a small isolated Python client only speaks the public socket and
 validates the returned JSON, including all four playlist entry counts.
 
-The 2026-08-22 release-package measurement with that 600-item fixture produced
-one-display peaks of `4896, 4896, 4896 KiB` (4.781 MiB) and three-display peaks
-of `4824, 4824, 4824 KiB` (4.711 MiB). The maximum includes observations
-before any client connects, after the first atomic status response, after the
-routed control warm-up, and after the idle window; the contract therefore does
-not depend on the plugin running. Ten-second idle windows used at most 0.199%
-of one CPU for one display and 0.299% for three. Optimizing the always-resident
+The 2026-08-24 release-package run with that 600-item fixture produced
+one-display peaks of `4900, 4900, 4900 KiB` (4.785 MiB) and three-display peaks
+of `4824, 4824, 4824 KiB` (4.711 MiB). The maximum includes observations before
+any client connects, after the first atomic status response, after the routed
+control warm-up, and after the idle window; the contract therefore does not
+depend on the plugin running. Ten-second idle windows used at most 0.199% of
+one CPU for one display and 0.299% for three. Optimizing the always-resident
 release for size reduced the stripped service binary from `1,612,184` to
-`1,386,160` bytes (14.0%) without an observed idle-CPU regression. These
-numbers document that build rather than replacing the gates; CI repeats the
-measurement because libc, allocator, and toolchain updates can change RSS.
+`1,396,504` bytes (13.4%) without an observed idle-CPU regression. These
+numbers document that exact build rather than replacing the gates; CI repeats
+the measurement because libc, allocator, and toolchain updates can change RSS.
 
 The result contains PNG screenshots named `wall-in-one-browse.png`,
 `wall-in-one-media.png`, `wall-in-one-playlists.png`,
@@ -127,7 +148,24 @@ verifies that:
   hardware-decode and interpolation options; Pause freezes it, Stop releases
   it, and Play creates exactly one new child before handing back to a still;
 - a schedule timer observes an injected local-time boundary and applies its
-  playlist.
+  playlist;
+- an automatic video transition which cannot start its renderer is attempted
+  three times, appears first as an exact non-durable `automatic-apply` health
+  finding, and is not written to Pairings by either a GUI poll or the periodic
+  health timer;
+- the packaged unit's bounded, best-effort two-second `ExecStop` bridge then
+  persists that finding as Borked metadata and recompiles the clean runtime
+  document. The fixture deliberately leaves its injected renderer failure in
+  place until stop: rewriting the runtime document immediately beforehand
+  would wake Rust's file watcher and test a reload race instead of the stop
+  persistence boundary. The final run logged `saved 1 new wallpaper health
+  marker`, completed the stop in about 0.75 seconds and found Pairings durable
+  immediately afterward;
+- the health timer becomes inactive on an explicit daemon stop and immediately
+  after `SIGKILL`, restarts with the daemon under `Restart=on-failure`, and its
+  oneshot treats an absent runtime as a successful no-op; and
+- the completed desktop session has no matching coredump, GTK/GLib critical,
+  Python traceback or Rust thread panic.
 
 The guest clock is changed only inside the disposable VM. All guest config,
 state, cache, media, and runtime sockets live under the guest's own home or
@@ -144,7 +182,22 @@ rotation, video discovery in the library, Noctalia/plugin integration,
 schedule control, the five GTK tabs, and mpvpaper's process/argument lifecycle
 through an instrumented renderer substitute. It does **not** prove actual video
 decoding or GPU rendering, Wallpaper Engine scene playback, Steam integration,
-or multi-monitor behavior.
+or physical multi-monitor behavior. Independent routing, schedules, cursors,
+renderer ownership and transport are supported in software and covered by
+automated unit/process tests, including synthetic connector stress. Neither the
+development machine nor this VM exposes two outputs, so different playlists on
+two physical monitors remain unverified.
+
+The final recorded VM run deliberately used the locked preceding companion
+revision, `a5e23c9`. It proves that revision loads and can drive the basic
+integration; it does not prove the coordinated release pair. Before the app is
+published, the matching companion candidate must be pushed to a non-default
+release branch, `flake.lock` must pin that exact commit, and the normal
+Git-backed checks must pass again. The app is then published before immediate
+promotion and tagging of companion `0.1.1`, so the strict status-v2
+client is never served to users of the older app. The contract and old-revision
+limits are documented in
+[`migrating.md`](migrating.md#companion-noctalia-plugin-compatibility).
 
 The RSS check's 64-connector stress exercises bounded per-connector runtime state,
 targeted socket routing, status serialization, and compositor hotplug input.

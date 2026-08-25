@@ -96,6 +96,13 @@ def test_write_config_refuses_a_malformed_settings_file(
     assert target.read_text(encoding="utf-8") == previous
 
 
+def test_generation_reader_turns_pathological_toml_nesting_into_a_config_error() -> None:
+    document = "nested = " + "[" * 1_100 + "0" + "]" * 1_100
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="cannot parse"):
+        runtime_config.document_generation(document)
+
+
 @pytest.mark.parametrize(
     ("settings_text", "message"),
     (
@@ -104,6 +111,8 @@ def test_write_config_refuses_a_malformed_settings_file(
         ("cycle_interval = 2\n", "cycle_interval must be between"),
         ("opacity = nan\n", "opacity must be a finite number"),
         ('video_interpolation = "magic"\n', "video_interpolation must be one of"),
+        ('scene_scaling = "zoom"\n', "scene_scaling must be one of"),
+        ('scene_clamp = "mirror"\n', "scene_clamp must be one of"),
         ('roots = ["/valid", 7]\n', "roots must be an array"),
         ("future_setting = true\n", "unknown setting"),
     ),
@@ -397,6 +406,8 @@ def _session(
         video_hardware_decode=False,
         video_interpolation="oversample",
         scene_fps=75,
+        scene_scaling="fit",
+        scene_clamp="repeat",
     )
     authored_playlists = {named.id: named}
     authored_playlists.update((playlist.id, playlist) for playlist in extra_playlists)
@@ -684,6 +695,8 @@ def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     assert document["settings"]["theme_source_connector"] == ""
     assert Path(document["renderer"]["niri_program"]).is_absolute()
     assert document["renderer"]["scene_fps"] == 75
+    assert document["renderer"]["scene_scaling"] == "fit"
+    assert document["renderer"]["scene_clamp"] == "repeat"
     assert document["renderer"]["video_hardware_decode"] is False
     assert document["renderer"]["video_interpolation"] == "oversample"
     assert document["renderer"]["scene_muted"] is True

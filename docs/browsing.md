@@ -55,6 +55,12 @@ machine-readable half of a `ProviderError` — `credential`, `rate-limit`,
 `challenge`, `site-markup`, `redirects`, `size-limit` and so on. The kind is
 what the code branches on; the message is for you.
 
+Submitting a fresh search also ends the previous result selection immediately.
+If the new request fails, its error page therefore cannot leave a batch
+Download action pointing at checked cards which are no longer visible. Loading
+the next page is different: a failure there keeps the results already on
+screen and simply stops offering the failed next page.
+
 Previews come from the sites' own CDNs, fetched by up to four workers, bounded
 at 4 MB each with a ten-second timeout, and cached by URL for the life of the
 tab. MotionBGS serves WebP, which this closure's GdkPixbuf cannot decode, so
@@ -63,10 +69,14 @@ installed those cards keep a blank frame; the download button still works.
 
 The Browse tab is a single instance. Pressing the search button again while it is
 open re-presents the one that exists, keeping its results and its preview cache
-instead of throwing away a page of downloads. Closing it does not cancel a
-download in flight: the provider stages bytes under a temporary name and links
-them into place at the end, so an interrupted one leaves nothing behind and a
-finished one is already in the library.
+instead of throwing away a page of downloads. Switching to another tab does not
+cancel its work. Shutting the application down does: queued search, detail,
+preview and download work is cancelled, active HTTP response sockets and preview
+transcodes are interrupted, and late replies are suppressed. A request still
+inside system DNS is the OS-defined residual; connect/TLS has a separate
+five-second bound. Providers stage bytes under hidden temporary names and link a
+complete media/sidecar pair into place only at the end, so an interrupted
+transfer never becomes a visible, falsely finished library item.
 
 ## Browsing without the window
 
@@ -333,12 +343,13 @@ option is taken: 4K first, then HD — a video wallpaper is worth the bytes.
 
 ## Where downloads land
 
-Everything goes under one `Wall-in-One` directory in the first library root, so
-a whole install is one directory to inspect or delete. That root is Noctalia's
-`[wallpaper] directory` when Noctalia's settings name a real directory,
-otherwise `~/Pictures/Wallpapers` or `~/Pictures`, whichever exists first. With
-none of those present a download fails with a `no-root` error rather than
-inventing a location.
+Everything goes under one `Wall-in-One` directory in the first explicitly
+configured library root, so a whole install is one directory to inspect or
+delete. On first graphical launch Wall-in-One may suggest Noctalia's wallpaper
+directory, `~/Pictures/Wallpapers`, or `~/Pictures`, but that suggestion does
+not become a writable root until the user chooses **Use default** or selects a
+folder. With no configured root a download fails with a `no-root` error rather
+than inventing a location.
 
 | | Wallhaven | MotionBGS |
 |---|---|---|
@@ -355,15 +366,26 @@ the URL the bytes actually arrived from, the byte count, a SHA-256 of the file,
 and a UTC timestamp. The **directory marker** records only that this app created
 the directory.
 
-Installation never overwrites. The staged download is hard-linked into place
-alongside a freshly written sidecar, and `os.link` fails rather than replacing an
-existing name; if either link fails the other is rolled back, so the library
-never sees a media file without its provenance or the reverse. Wallhaven refuses
-with a `conflict` error when the file is already there, since one id means one
-file. MotionBGS counts up instead — `<slug>.4k-1.mp4` — and treats a name as
-free only when both the media file and its sidecar are absent, because a sidecar
-with no media means an interrupted install and reusing that name would attach
-the wrong provenance to new bytes.
+Installation never overwrites or installs one provider identity twice. Before
+network I/O, Browse takes a nonblocking per-login cross-process claim keyed by
+provider and identifier (independent of the currently selected destination),
+validates that destination, then re-reads provenance across every
+configured library root. A simultaneous GUI, `ctl`, or second-process request
+for that identity gets `busy`; a sequential repeat gets `conflict`, and choosing
+HD after 4K (or the reverse) does not create a second copy.
+
+For a new identity, the staged download is hard-linked into place alongside a
+freshly written sidecar, and `os.link` fails rather than replacing an existing
+name. The sidecar lands and is synced first; the media link is the irreversible
+commit point. A pre-commit interruption may leave only an inert, age-recoverable
+sidecar. Once a final pathname has been published it is never blindly unlinked
+for rollback, because a concurrent local writer could have replaced that name;
+a later sync failure is reported as committed with final durability unknown.
+Wallhaven's id-derived name must be unique. Distinct MotionBGS ids can share a
+slug, so only that filename
+collision counts up — `<slug>.4k-1.mp4` — and a name is free only when both the
+media file and its sidecar are absent. A sidecar with no media means an
+interrupted install and is never attached to new bytes.
 
 ## What makes a file ours
 

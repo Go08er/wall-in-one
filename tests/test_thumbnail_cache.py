@@ -141,6 +141,19 @@ def test_an_entry_that_is_a_symlink_is_never_read_through(cache: Path, tmp_path:
     assert thumbnails.lookup(item) is None
 
 
+def test_recency_touch_never_follows_a_replacement_symlink(tmp_path: Path) -> None:
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"untouched")
+    old = 1_000_000_000
+    os.utime(secret, (old, old))
+    replacement = tmp_path / "cache-entry"
+    replacement.symlink_to(secret)
+
+    thumbnails._touch(replacement)
+
+    assert int(secret.stat().st_mtime) == old
+
+
 def test_a_hit_marks_the_entry_used(cache: Path) -> None:
     """Eviction order is only meaningful if reading counts as using."""
     item = _item(Path("/w/a.png"))
@@ -410,6 +423,21 @@ def test_a_preview_symlink_is_not_followed(cache: Path, tmp_path: Path) -> None:
     thumbnails.preview_path(URL).symlink_to(secret)
 
     assert thumbnails.lookup_preview(URL) == b""
+
+
+def test_a_legacy_predictable_preview_temporary_cannot_redirect_a_write(
+    cache: Path, tmp_path: Path
+) -> None:
+    sentinel = tmp_path / "sentinel.jpg"
+    sentinel.write_bytes(b"keep")
+    leftover = cache / f".{thumbnails.preview_key(URL)}.{os.getpid()}.tmp.preview"
+    leftover.symlink_to(sentinel)
+
+    thumbnails.store_preview(URL, _jpeg())
+
+    assert sentinel.read_bytes() == b"keep"
+    assert leftover.is_symlink()
+    assert thumbnails.lookup_preview(URL) == _jpeg()
 
 
 def test_previews_are_counted_and_evicted_with_the_thumbnails(cache: Path) -> None:

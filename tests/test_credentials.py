@@ -68,6 +68,15 @@ def test_saving_over_an_existing_key_replaces_it() -> None:
     assert registry.wallhaven_api_key() == OTHER_KEY
 
 
+def test_saving_syncs_the_published_directory(
+    config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[Path] = []
+    monkeypatch.setattr("wall_in_one.providers.credentials.paths.fsync_directory", synced.append)
+    credentials.save_key(KEY)
+    assert synced == [config_home]
+
+
 def test_the_replacement_is_a_single_step(
     config_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -141,6 +150,16 @@ def test_clearing_removes_the_stored_key() -> None:
     assert credentials.clear_key() is True
     assert not credentials.key_path().exists()
     assert registry.wallhaven_api_key() == ""
+
+
+def test_clearing_syncs_the_removed_directory(
+    config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credentials.save_key(KEY)
+    synced: list[Path] = []
+    monkeypatch.setattr("wall_in_one.providers.credentials.paths.fsync_directory", synced.append)
+    assert credentials.clear_key() is True
+    assert synced == [config_home]
 
 
 def test_clearing_nothing_is_not_an_error() -> None:

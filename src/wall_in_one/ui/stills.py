@@ -21,9 +21,11 @@ not start forty of them.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from typing import Final
 
 import gi
@@ -32,6 +34,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import GLib
 
+from wall_in_one import worker_processes
 from wall_in_one.library import stills
 from wall_in_one.library.model import Kind, MediaItem
 
@@ -42,14 +45,25 @@ MAX_WORKERS: Final = 1
 #: The argument is how many were made, so a caller can decide whether a rescan
 #: is worth doing.
 Callback = Callable[[int], None]
+FailureCallback = Callable[[str], None]
+LOGGER = logging.getLogger(__name__)
 
 
 class StillMaker:
     """Fills in the missing stills for a library, off the main thread."""
 
-    def __init__(self, max_workers: int = MAX_WORKERS) -> None:
+    def __init__(
+        self,
+        max_workers: int = MAX_WORKERS,
+        *,
+        report: FailureCallback | None = None,
+    ) -> None:
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="still")
         self._closed = False
+        self._report = report
+        self._pending: set[Future[None]] = set()
+        self._lock = Lock()
+        self._processes = worker_processes.Cancellation()
         # Videos already attempted, whether or not it worked. Without this a
         # rescan after a successful batch would queue the failures again, and
         # since a finished batch *causes* a rescan, a video ffmpeg cannot read
@@ -90,23 +104,74 @@ class StillMaker:
         # wide, so leaving the two interleaved would let a handful of scenes
         # hold up every video behind them.
         wanted.sort(key=lambda item: item.kind is Kind.SCENE)
-        self._pool.submit(self._run, tuple(wanted), root, callback)
+        self._submit(
+            self._run,
+            tuple(wanted),
+            root,
+            callback,
+            context="Automatic still generation stopped unexpectedly",
+        )
+
+    def _submit(
+        self,
+        work: Callable[..., None],
+        *arguments: object,
+        context: str,
+    ) -> None:
+        """Submit and observe every worker result, including cancellations."""
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                future = self._pool.submit(work, *arguments)
+            except RuntimeError:
+                # ``shutdown`` won the executor race after the caller's
+                # initial closed check.  That is a normal rejected late job.
+                return
+            self._pending.add(future)
+        future.add_done_callback(lambda done: self._finished(done, context))
+
+    def _finished(self, future: Future[None], context: str) -> None:
+        with self._lock:
+            self._pending.discard(future)
+            closed = self._closed
+        if future.cancelled():
+            return
+        try:
+            future.result()
+        except Exception as error:  # defensive boundary around ffmpeg/scene helpers
+            if closed:
+                # Retrieving the exception is still important; cancellation
+                # failures are expected once the owner has gone away and have
+                # nowhere useful to be delivered.
+                return
+            message = f"{context}: {error}"
+
+            def deliver() -> bool:
+                if not self._closed:
+                    if self._report is not None:
+                        self._report(message)
+                    else:
+                        LOGGER.warning("%s", message)
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(deliver)
 
     def _run(self, items: tuple[MediaItem, ...], root: Path, callback: Callback) -> None:
         made = 0
         for item in items:
-            if self._closed:
+            if self._processes.cancelled():
                 return
             # `ensure` swallows its own failures: a still that cannot be made
             # is not a reason to stop making the others, and the video still
             # plays either way.
-            if stills.ensure(item, root) is not None:
+            if stills.ensure(item, root, processes=self._processes) is not None:
                 made += 1
-        if made == 0 or self._closed:
+        if made == 0 or self._processes.cancelled():
             return
 
         def deliver() -> bool:
-            if not self._closed:
+            if not self._processes.cancelled():
                 callback(made)
             return GLib.SOURCE_REMOVE
 
@@ -119,21 +184,19 @@ class StillMaker:
         self._attempted.add(item.path)
 
         def run() -> None:
-            try:
-                stills.capture_scene(item, root, force=True)
-            except stills.StillError:
-                made = 0
-            else:
-                made = 1
-            if made and not self._closed:
+            stills.capture_scene(item, root, force=True, processes=self._processes)
+            if not self._processes.cancelled():
 
                 def deliver() -> bool:
-                    callback(made)
+                    callback(1)
                     return GLib.SOURCE_REMOVE
 
                 GLib.idle_add(deliver)
 
-        self._pool.submit(run)
+        self._submit(
+            run,
+            context=f"Could not regenerate the still for {item.name}",
+        )
 
     def forget(self, path: Path) -> None:
         """Allow ``path`` to be attempted again.
@@ -144,7 +207,13 @@ class StillMaker:
         self._attempted.discard(path)
 
     def shutdown(self) -> None:
-        self._closed = True
+        with self._lock:
+            self._closed = True
+            pending = tuple(self._pending)
+            self._pending.clear()
+        self._processes.cancel()
+        for future in pending:
+            future.cancel()
         # Not waiting: a 4K frame grab takes about a second and quitting should
         # be immediate. `library.stills` writes to a temporary name and renames,
         # so a still interrupted here leaves nothing half-written to be found.

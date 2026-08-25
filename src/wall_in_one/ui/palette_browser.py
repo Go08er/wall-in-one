@@ -32,9 +32,9 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
-from wall_in_one import config
 from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Colour, Mode, Palette, PaletteError, PalettePair
+from wall_in_one.ui.palette_catalog import CatalogState, PaletteCatalog
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -64,6 +64,12 @@ MAX_CACHED_PREVIEWS: Final = 200
 #: template's post-hook is the real signal, but that arrives over the control
 #: socket which is not wired up yet.
 _SETTLE_MS: Final = 600
+
+#: Palette rows contain seven swatches and their CSS providers.  Searching is
+#: over the complete immutable snapshot, but GTK materialises only one page at
+#: a time so a maximum-size catalogue cannot freeze the dialog.
+BROWSE_PAGE_SIZE: Final = 24
+MAX_SKIPPED_ROWS: Final = 24
 
 
 def swatch(
@@ -304,13 +310,32 @@ class _SchemeCard(Gtk.Box):
 class PaletteBrowserDialog(Adw.Dialog):
     """Browse, preview, apply, and duplicate palettes."""
 
-    def __init__(self, application: Application) -> None:
+    def __init__(
+        self,
+        application: Application,
+        *,
+        palette_catalog: PaletteCatalog | None = None,
+    ) -> None:
         super().__init__()
         self._app = application
         self._loader = SchemePreviewLoader()
-        self._discovery = palettes.discover()
+        self._palette_catalog = palette_catalog or PaletteCatalog()
+        self._owns_palette_catalog = palette_catalog is None
+        self._catalog_state = self._palette_catalog.state
+        self._discovery = self._catalog_state.discovery
         self._cards: dict[str, _SchemeCard] = {}
         self._groups: list[Adw.PreferencesGroup] = []
+        self._entry_rows: dict[tuple[palettes.Origin, str, str], Adw.ActionRow] = {}
+        self._entry_groups: dict[tuple[palettes.Origin, str, str], Adw.PreferencesGroup] = {}
+        self._row_models: dict[
+            tuple[palettes.Origin, str, str], tuple[palettes.PaletteEntry, Mode]
+        ] = {}
+        self._reuse_rows: dict[tuple[palettes.Origin, str, str], Adw.ActionRow] = {}
+        self._reuse_models: dict[
+            tuple[palettes.Origin, str, str], tuple[palettes.PaletteEntry, Mode]
+        ] = {}
+        self._render_key: object = None
+        self._browse_limit = BROWSE_PAGE_SIZE
         self._image: Path | None = None
         self._images: tuple[Path, ...] = ()
         self._mode: Mode = "dark"
@@ -321,7 +346,7 @@ class PaletteBrowserDialog(Adw.Dialog):
         self.set_content_height(720)
         self.connect("closed", self._on_closed)
 
-        self._browse = Adw.PreferencesPage()
+        self._browse = self._build_browse_page()
         self._toast = Adw.ToastOverlay()
         self._stack = Adw.ViewStack()
         self._stack.add_titled_with_icon(self._browse, "browse", "Installed", "view-list-symbolic")
@@ -331,7 +356,8 @@ class PaletteBrowserDialog(Adw.Dialog):
 
         self.set_child(self._build_content())
         self._reload_images()
-        self.refresh()
+        self._catalog_listener = self._palette_catalog.subscribe(self._catalog_changed)
+        self._palette_catalog.ensure_loaded()
 
     # -- construction ----------------------------------------------------
 
@@ -349,6 +375,38 @@ class PaletteBrowserDialog(Adw.Dialog):
         self._toast.set_child(self._stack)
         toolbar.set_content(self._toast)
         return toolbar
+
+    def _build_browse_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        search_group = Adw.PreferencesGroup(
+            title="Installed palettes",
+            description="Search every source; results are shown in small, responsive pages.",
+        )
+        self._palette_search = Gtk.SearchEntry(placeholder_text="Search palettes")
+        self._palette_search.connect("search-changed", self._on_palette_search_changed)
+        search_group.add(self._palette_search)
+        page.add(search_group)
+
+        self._catalog_status = Adw.PreferencesGroup()
+        self._catalog_status_row = Adw.ActionRow()
+        self._catalog_spinner = Adw.Spinner()
+        self._catalog_spinner.set_size_request(22, 22)
+        self._catalog_retry = Gtk.Button(label="Retry")
+        self._catalog_retry.set_valign(Gtk.Align.CENTER)
+        self._catalog_retry.connect("clicked", lambda _button: self.refresh())
+        self._catalog_status_row.add_prefix(self._catalog_spinner)
+        self._catalog_status_row.add_suffix(self._catalog_retry)
+        self._catalog_status.add(self._catalog_status_row)
+        page.add(self._catalog_status)
+
+        self._more_group = Adw.PreferencesGroup()
+        self._more_row = Adw.ActionRow()
+        self._more_button = Gtk.Button()
+        self._more_button.set_valign(Gtk.Align.CENTER)
+        self._more_button.connect("clicked", self._show_more_palettes)
+        self._more_row.add_suffix(self._more_button)
+        self._more_group.add(self._more_row)
+        return page
 
     def _build_schemes_page(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
@@ -397,35 +455,166 @@ class PaletteBrowserDialog(Adw.Dialog):
     # -- browse view -----------------------------------------------------
 
     def refresh(self) -> None:
-        """Rediscover every palette and rebuild the list."""
-        self._discovery = palettes.discover()
+        """Request a fresh filesystem snapshot without blocking GTK."""
+        self._palette_catalog.refresh()
+
+    def _catalog_changed(self, state: CatalogState) -> None:
+        if self._closed:
+            return
+        self._catalog_state = state
+        self._discovery = state.discovery
+        if state.loading:
+            self._catalog_status_row.set_title(
+                "Loading installed palettes…"
+                if not state.discovery.entries
+                else "Refreshing installed palettes…"
+            )
+            self._catalog_status_row.set_subtitle(
+                "The current page stays usable while files are checked."
+                if state.discovery.entries
+                else "Palette files are being checked outside the interface thread."
+            )
+            self._catalog_status.set_visible(True)
+            self._catalog_spinner.set_visible(True)
+            self._catalog_retry.set_visible(False)
+        elif state.phase == "error":
+            self._catalog_status_row.set_title("Installed palettes could not be loaded")
+            self._catalog_status_row.set_subtitle(state.error)
+            self._catalog_status.set_visible(True)
+            self._catalog_spinner.set_visible(False)
+            self._catalog_retry.set_visible(True)
+        elif state.phase == "idle":
+            self._catalog_status_row.set_title("Palette catalogue has not loaded yet")
+            self._catalog_status_row.set_subtitle("Choose Retry to scan the installed sources.")
+            self._catalog_status.set_visible(True)
+            self._catalog_spinner.set_visible(False)
+            self._catalog_retry.set_visible(True)
+        else:
+            self._catalog_status.set_visible(False)
         self._rebuild_browse()
 
-    def _rebuild_browse(self) -> None:
+    def _matching_entries(self) -> tuple[palettes.PaletteEntry, ...]:
+        query = self._palette_search.get_text().strip().casefold()
+        if not query:
+            return self._discovery.entries
+        return tuple(
+            entry
+            for entry in self._discovery.entries
+            if query in entry.name.casefold()
+            or query in entry.origin.label.casefold()
+            or (entry.path is not None and query in str(entry.path).casefold())
+        )
+
+    def _visible_entries(self) -> tuple[palettes.PaletteEntry, ...]:
+        """Fairly page across origins so a large community cache hides none."""
+        buckets = {
+            origin: list(entry for entry in self._matching_entries() if entry.origin is origin)
+            for origin in palettes.Origin
+        }
+        visible: list[palettes.PaletteEntry] = []
+        index = 0
+        while len(visible) < self._browse_limit:
+            added = False
+            for origin in palettes.Origin:
+                entries = buckets[origin]
+                if index < len(entries):
+                    visible.append(entries[index])
+                    added = True
+                    if len(visible) >= self._browse_limit:
+                        break
+            if not added:
+                break
+            index += 1
+        return tuple(visible)
+
+    def _on_palette_search_changed(self, _entry: Gtk.SearchEntry) -> None:
+        self._browse_limit = BROWSE_PAGE_SIZE
+        self._rebuild_browse()
+
+    def _show_more_palettes(self, _button: Gtk.Button) -> None:
+        self._browse_limit += BROWSE_PAGE_SIZE
+        self._rebuild_browse()
+
+    def _rebuild_browse(self, *, force: bool = False) -> None:
+        matches = self._matching_entries()
+        visible = self._visible_entries()
+        render_key = (
+            self._discovery,
+            self._palette_search.get_text(),
+            self._browse_limit,
+            self._mode,
+        )
+        if not force and render_key == self._render_key:
+            return
+        self._render_key = render_key
         # Adw.PreferencesPage has no "remove everything", and walking its
         # internal tree to find the groups again would be guessing at private
         # structure. Keeping the list is shorter and does not break.
         for group in self._groups:
             self._browse.remove(group)
-        self._groups = [self._build_origin_group(origin) for origin in palettes.Origin]
+        self._reuse_rows = dict(self._entry_rows)
+        self._reuse_models = dict(self._row_models)
+        for key, row in self._reuse_rows.items():
+            old_group = self._entry_groups.get(key)
+            if old_group is not None:
+                old_group.remove(row)
+        self._entry_rows.clear()
+        self._entry_groups.clear()
+        self._row_models.clear()
+        self._groups = [
+            self._build_origin_group(origin, visible, matches) for origin in palettes.Origin
+        ]
         if self._discovery.skipped:
             self._groups.append(self._build_skipped_group())
+        remaining = len(matches) - len(visible)
+        if remaining > 0:
+            self._more_row.set_title(f"{len(visible)} of {len(matches)} matching palettes shown")
+            self._more_row.set_subtitle("The complete catalogue remains searchable.")
+            self._more_button.set_label(f"Load {min(BROWSE_PAGE_SIZE, remaining)} more")
+            self._groups.append(self._more_group)
         for group in self._groups:
             self._browse.add(group)
+        self._reuse_rows.clear()
+        self._reuse_models.clear()
 
-    def _build_origin_group(self, origin: palettes.Origin) -> Adw.PreferencesGroup:
-        entries = self._discovery.of_origin(origin)
+    def _build_origin_group(
+        self,
+        origin: palettes.Origin,
+        visible: tuple[palettes.PaletteEntry, ...],
+        matches: tuple[palettes.PaletteEntry, ...],
+    ) -> Adw.PreferencesGroup:
+        entries = tuple(entry for entry in visible if entry.origin is origin)
+        total = sum(entry.origin is origin for entry in matches)
+        description = _ORIGIN_DESCRIPTIONS[origin]
+        if total > len(entries):
+            description += f" Showing {len(entries)} of {total} matches."
         group = Adw.PreferencesGroup(
             title=origin.label,
-            description=_ORIGIN_DESCRIPTIONS[origin],
+            description=description,
         )
         if not entries:
-            empty = Adw.ActionRow(title="Nothing here yet", subtitle=_ORIGIN_EMPTY[origin])
+            searching = bool(self._palette_search.get_text().strip())
+            empty = Adw.ActionRow(
+                title="No matches" if searching else "Nothing here yet",
+                subtitle=(
+                    "Try a different palette name or source."
+                    if searching
+                    else _ORIGIN_EMPTY[origin]
+                ),
+            )
             empty.set_activatable(False)
             group.add(empty)
             return group
         for entry in entries:
-            group.add(self._build_entry_row(entry))
+            key = (entry.origin, entry.name, str(entry.path) if entry.path is not None else "")
+            model = (entry, self._mode)
+            row = self._reuse_rows.pop(key, None)
+            if row is None or self._reuse_models.get(key) != model:
+                row = self._build_entry_row(entry)
+            self._entry_rows[key] = row
+            self._entry_groups[key] = group
+            self._row_models[key] = model
+            group.add(row)
         return group
 
     def _build_entry_row(self, entry: palettes.PaletteEntry) -> Adw.ActionRow:
@@ -472,8 +661,17 @@ class PaletteBrowserDialog(Adw.Dialog):
             title="Skipped",
             description="Files in a palette directory that could not be read.",
         )
-        for note in self._discovery.skipped:
+        for note in self._discovery.skipped[:MAX_SKIPPED_ROWS]:
             row = Adw.ActionRow(title=note)
+            row.set_activatable(False)
+            row.add_css_class("dim-label")
+            group.add(row)
+        remaining = len(self._discovery.skipped) - MAX_SKIPPED_ROWS
+        if remaining > 0:
+            row = Adw.ActionRow(
+                title=f"{remaining} more skipped files",
+                subtitle="Fix the listed source errors, then rescan to see the next group.",
+            )
             row.set_activatable(False)
             row.add_css_class("dim-label")
             group.add(row)
@@ -493,13 +691,20 @@ class PaletteBrowserDialog(Adw.Dialog):
             # caller forgets. Better a sentence than a Noctalia error.
             self.report(f"{entry.name} lives in a layout Noctalia no longer reads")
             return
-        try:
-            noctalia.message("color-scheme-set", entry.origin.value, entry.name)
-        except noctalia.NoctaliaError as error:
-            self.report(str(error))
+        self.report(f"Applying {entry.name}…")
+        self._app.apply_noctalia_palette_async(
+            entry.origin.value,
+            entry.name,
+            on_complete=lambda error: self._on_entry_applied(entry, error),
+        )
+
+    def _on_entry_applied(self, entry: palettes.PaletteEntry, error: str) -> None:
+        if self._closed:
+            return
+        if error:
+            self.report(f"{entry.name} was not applied: {error}")
             return
         self.report(f"{entry.name} applied")
-        self._app.reload_palette()
         GLib.timeout_add(_SETTLE_MS, self._settle)
 
     def _settle(self) -> bool:
@@ -509,19 +714,24 @@ class PaletteBrowserDialog(Adw.Dialog):
         return GLib.SOURCE_REMOVE
 
     def _on_use_scheme(self, scheme: str) -> None:
-        try:
-            self._app.update_settings(preview_scheme=scheme)
-        except config.ConfigError as error:
-            self.report(f"Scheme preference was not saved; nothing changed: {error}")
+        sync_noctalia = self._sync.get_active()
+        self._app.use_preview_scheme(
+            scheme,
+            sync_noctalia=sync_noctalia,
+            on_complete=lambda error: self._on_scheme_synced(scheme, error),
+        )
+
+    def _on_scheme_synced(self, scheme: str, error: str) -> None:
+        if self._closed:
             return
-        if self._sync.get_active():
-            try:
-                noctalia.message("color-scheme-set", "wallpaper", scheme)
-            except noctalia.NoctaliaError as error:
-                self.report(str(error))
-                return
-            GLib.timeout_add(_SETTLE_MS, self._settle)
+        if error:
+            # The app preference was durably saved before the external shell
+            # request. Calling the whole gesture a failure would hide a real
+            # partial success and make the next opening look spontaneous.
+            self.report(f"App scheme changed to {scheme}, but Noctalia was not updated: {error}")
+            return
         self.report(f"scheme {scheme}")
+        GLib.timeout_add(_SETTLE_MS, self._settle)
 
     def _on_save_scheme(self, scheme: str) -> None:
         card = self._cards.get(scheme)
@@ -561,6 +771,7 @@ class PaletteBrowserDialog(Adw.Dialog):
         in_place: palettes.PaletteEntry | None,
     ) -> None:
         editor = _PaletteEditor(
+            application=self._app,
             title=title,
             name=name,
             document=document,
@@ -571,7 +782,10 @@ class PaletteBrowserDialog(Adw.Dialog):
         editor.present(self)
 
     def _on_saved(self, entry: palettes.PaletteEntry) -> None:
-        self.refresh()
+        # The old snapshot may contain the just-edited payload (or omit this
+        # new entry), so clear it immediately rather than leave a stale choice
+        # actionable while the post-write discovery runs.
+        self._palette_catalog.invalidate()
         self.report(f"saved {entry.name}")
 
     # -- scheme preview --------------------------------------------------
@@ -645,6 +859,9 @@ class PaletteBrowserDialog(Adw.Dialog):
 
     def _on_closed(self, _dialog: Adw.Dialog) -> None:
         self._closed = True
+        self._palette_catalog.unsubscribe(self._catalog_listener)
+        if self._owns_palette_catalog:
+            self._palette_catalog.shutdown()
         self._loader.shutdown()
 
 
@@ -704,6 +921,7 @@ class _PaletteEditor(Adw.Dialog):
     def __init__(
         self,
         *,
+        application: Application,
         title: str,
         name: str,
         document: dict[str, object],
@@ -712,6 +930,7 @@ class _PaletteEditor(Adw.Dialog):
         on_error: Callable[[str], None],
     ) -> None:
         super().__init__()
+        self._app = application
         self._document = document
         self._in_place = in_place
         self._on_saved = on_saved
@@ -739,10 +958,10 @@ class _PaletteEditor(Adw.Dialog):
         cancel.connect("clicked", lambda _button: self.close())
         header.pack_start(cancel)
 
-        save = Gtk.Button(label="Save")
-        save.add_css_class("suggested-action")
-        save.connect("clicked", self._on_save)
-        header.pack_end(save)
+        self._save = Gtk.Button(label="Save")
+        self._save.add_css_class("suggested-action")
+        self._save.connect("clicked", self._on_save)
+        header.pack_end(self._save)
         toolbar.add_top_bar(header)
 
         page = Adw.PreferencesPage()
@@ -795,12 +1014,27 @@ class _PaletteEditor(Adw.Dialog):
             overrides[mode][key] = _hex_of(button.get_rgba())
         try:
             document = palettes.with_overrides(self._document, overrides)
-            if self._in_place is not None:
-                entry = palettes.save_edits(self._in_place, document)
-            else:
-                entry = palettes.write_custom(self._name.get_text(), document)
         except PaletteError as error:
             self._on_error(str(error))
             return
-        self._on_saved(entry)
-        self.close()
+        name = self._name.get_text()
+        in_place = self._in_place
+        self._save.set_sensitive(False)
+
+        def work() -> palettes.PaletteEntry:
+            return (
+                palettes.save_edits(in_place, document)
+                if in_place is not None
+                else palettes.write_custom(name, document)
+            )
+
+        def saved(entry: palettes.PaletteEntry) -> None:
+            self._save.set_sensitive(True)
+            self._on_saved(entry)
+            self.close()
+
+        def failed(message: str) -> None:
+            self._save.set_sensitive(True)
+            self._on_error(message)
+
+        self._app.authoring_action_async(work, saved, failure=failed)

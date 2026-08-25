@@ -6,13 +6,16 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_OUTPUTS: usize = 64;
 pub const MAX_OUTPUT_NAME_BYTES: usize = 256;
@@ -22,6 +25,8 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(3);
 const HELPER_STOP_GRACE: Duration = Duration::from_millis(250);
 const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(100);
+const MAX_SOCKET_PATH_BYTES: usize = 100;
+static DRIVER_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
 struct CaptureState {
@@ -285,6 +290,7 @@ pub struct Mpvpaper {
     socket: Option<PathBuf>,
     diagnostics: Option<BoundedCapture>,
     pause_transport: PauseTransport,
+    socket_namespace: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -297,11 +303,16 @@ enum PauseTransport {
 
 impl Mpvpaper {
     pub fn new() -> Self {
+        Self::new_in_namespace(socket_hash(b"default"))
+    }
+
+    fn new_in_namespace(socket_namespace: u64) -> Self {
         Self {
             child: None,
             socket: None,
             diagnostics: None,
             pause_transport: PauseTransport::None,
+            socket_namespace,
         }
     }
 
@@ -360,7 +371,7 @@ impl Mpvpaper {
                 self.child.take();
                 self.pause_transport = PauseTransport::None;
                 if let Some(socket) = self.socket.take() {
-                    let _ = fs::remove_file(socket);
+                    remove_mpv_socket(&socket);
                 }
                 let diagnostics = self
                     .diagnostics
@@ -403,12 +414,12 @@ impl VideoRenderer for Mpvpaper {
             .as_ref()
             .ok_or("video entry has no motion path")?;
         self.stop();
-        let safe_output = output_socket_token(output);
         let socket = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join(format!("wall-in-one-mpv-{safe_output}.sock"));
-        let _ = fs::remove_file(&socket);
+            .join(mpv_socket_name(self.socket_namespace, output));
+        let socket =
+            (socket.as_os_str().as_bytes().len() <= MAX_SOCKET_PATH_BYTES).then_some(socket);
         let mut options = vec![
             "loop-file=inf".to_string(),
             "panscan=1.0".to_string(),
@@ -423,8 +434,10 @@ impl VideoRenderer for Mpvpaper {
                     "no"
                 }
             ),
-            format!("input-ipc-server={}", socket.display()),
         ];
+        if let Some(socket) = &socket {
+            options.push(format!("input-ipc-server={}", socket.display()));
+        }
         options.extend(interpolation_options(
             settings.video_interpolation,
             refresh_millihz,
@@ -458,7 +471,7 @@ impl VideoRenderer for Mpvpaper {
             .take()
             .map(|stderr| BoundedCapture::start(stderr, MAX_DIAGNOSTIC_BYTES));
         self.child = Some(child);
-        self.socket = Some(socket);
+        self.socket = socket;
         self.pause_transport = PauseTransport::None;
         options.clear();
         Ok(())
@@ -478,7 +491,7 @@ impl VideoRenderer for Mpvpaper {
             let _ = diagnostics.finish();
         }
         if let Some(socket) = self.socket.take() {
-            let _ = fs::remove_file(socket);
+            remove_mpv_socket(&socket);
         }
     }
 
@@ -535,6 +548,7 @@ pub struct SystemDriver {
     scenes: HashMap<String, ActiveScene>,
     applying_batch: bool,
     output_snapshot: Option<Result<Vec<LiveOutput>, String>>,
+    socket_namespace: u64,
 }
 
 struct ActiveVideo {
@@ -643,32 +657,76 @@ fn usable_output_name(candidate: &str) -> bool {
         && !candidate.chars().any(char::is_control)
 }
 
-fn output_socket_token(output: &str) -> String {
-    // Connector punctuation is not unique after sanitising (`DP-1` and
-    // `DP_1` both become `DP_1`). Keep a readable bounded prefix, then add a
-    // deterministic hash so two live outputs can never share mpv's IPC path.
-    let label: String = if output.is_empty() {
-        "ALL".into()
-    } else {
-        output
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .take(32)
-            .collect()
+fn socket_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn service_socket_namespace(path: &Path) -> u64 {
+    let mut bytes = unsafe { libc::geteuid() }.to_ne_bytes().to_vec();
+    bytes.extend_from_slice(path.as_os_str().as_bytes());
+    socket_hash(&bytes)
+}
+
+fn renderer_socket_namespace(path: &Path) -> u64 {
+    // The service socket separates supported custom daemon instances. A
+    // process/session nonce additionally means a crashed old renderer can
+    // never make the next daemon unlink a predictable stale endpoint before
+    // mpvpaper starts. PID and an in-process sequence cover clock failures;
+    // wall-clock nanoseconds keep PID reuse from recreating the same name.
+    let mut bytes = service_socket_namespace(path).to_ne_bytes().to_vec();
+    bytes.extend_from_slice(&std::process::id().to_ne_bytes());
+    bytes.extend_from_slice(&DRIVER_NONCE.fetch_add(1, Ordering::Relaxed).to_ne_bytes());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    bytes.extend_from_slice(&timestamp.to_ne_bytes());
+    socket_hash(&bytes)
+}
+
+fn remove_mpv_socket_with_hook(path: &Path, before_recheck: impl FnOnce()) -> Result<(), String> {
+    let opened = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect mpv IPC socket: {error}")),
     };
-    let hash = output
-        .as_bytes()
-        .iter()
-        .fold(0xcbf29ce484222325_u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        });
-    format!("{label}-{hash:016x}")
+    if !opened.file_type().is_socket() {
+        return Err(format!(
+            "refusing to remove non-socket mpv IPC path {}",
+            path.display()
+        ));
+    }
+    before_recheck();
+    let current = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot recheck mpv IPC socket: {error}")),
+    };
+    if !current.file_type().is_socket()
+        || (opened.dev(), opened.ino()) != (current.dev(), current.ino())
+    {
+        return Err(format!(
+            "mpv IPC path {} changed while it was being cleaned up",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| format!("cannot remove mpv IPC socket: {error}"))
+}
+
+fn remove_mpv_socket(path: &Path) {
+    if let Err(error) = remove_mpv_socket_with_hook(path, || {}) {
+        eprintln!("wall-in-one-service: {error}");
+    }
+}
+
+fn mpv_socket_name(namespace: u64, output: &str) -> String {
+    format!(
+        "wio-{:x}-{namespace:016x}-{:016x}.sock",
+        unsafe { libc::geteuid() },
+        socket_hash(output.as_bytes())
+    )
 }
 
 fn unambiguous_refresh_millihz(outputs: &[LiveOutput], output: &str) -> Option<u64> {
@@ -698,12 +756,17 @@ struct ActiveScene {
 
 impl SystemDriver {
     pub fn new(settings: RendererSettings) -> Self {
+        Self::new_for_service_socket(settings, Path::new("/wall-in-one-runtime.sock"))
+    }
+
+    pub fn new_for_service_socket(settings: RendererSettings, socket: &Path) -> Self {
         Self {
             settings,
             videos: HashMap::new(),
             scenes: HashMap::new(),
             applying_batch: false,
             output_snapshot: None,
+            socket_namespace: renderer_socket_namespace(socket),
         }
     }
 
@@ -815,11 +878,11 @@ impl SystemDriver {
 
     fn add_scene_target(&self, command: &mut Command, output: &str, scene: &str) {
         command.arg("--screen-root").arg(output);
-        if !self.settings.scene_scaling.is_empty() {
-            command.arg("--scaling").arg(&self.settings.scene_scaling);
+        if let Some(scaling) = self.settings.scene_scaling.option() {
+            command.arg("--scaling").arg(scaling);
         }
-        if !self.settings.scene_clamp.is_empty() {
-            command.arg("--clamp").arg(&self.settings.scene_clamp);
+        if let Some(clamp) = self.settings.scene_clamp.option() {
+            command.arg("--clamp").arg(clamp);
         }
         command.arg("--bg").arg(scene);
     }
@@ -893,7 +956,7 @@ impl SystemDriver {
         match entry.kind {
             EntryKind::Still => Ok(()),
             EntryKind::Video => {
-                let mut video = Mpvpaper::new();
+                let mut video = Mpvpaper::new_in_namespace(self.socket_namespace);
                 let refresh = self.interpolation_refresh(output);
                 video.start(entry, output, &self.settings, refresh)?;
                 self.videos.insert(
@@ -1320,10 +1383,50 @@ mod tests {
     }
 
     #[test]
-    fn connector_punctuation_cannot_collide_in_mpv_socket_names() {
-        assert_ne!(output_socket_token("DP-1"), output_socket_token("DP_1"));
-        assert_ne!(output_socket_token(""), output_socket_token("ALL"));
-        assert!(output_socket_token(&"x".repeat(MAX_OUTPUT_NAME_BYTES)).len() <= 49);
+    fn renderer_instance_and_connector_namespaces_do_not_share_mpv_sockets() {
+        let first = service_socket_namespace(Path::new("/run/user/1000/first.sock"));
+        let second = service_socket_namespace(Path::new("/run/user/1000/second.sock"));
+        assert_ne!(first, second);
+        assert_ne!(
+            mpv_socket_name(first, "DP-1"),
+            mpv_socket_name(first, "DP_1")
+        );
+        assert_ne!(mpv_socket_name(first, ""), mpv_socket_name(first, "ALL"));
+        assert_ne!(
+            mpv_socket_name(first, "DP-1"),
+            mpv_socket_name(second, "DP-1")
+        );
+        assert!(mpv_socket_name(first, &"x".repeat(MAX_OUTPUT_NAME_BYTES)).len() <= 58);
+    }
+
+    #[test]
+    fn mpv_socket_cleanup_never_deletes_a_replacement_or_sentinel() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wall-in-one-mpv-cleanup-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let socket = root.join("renderer.sock");
+        fs::write(&socket, b"sentinel").unwrap();
+        assert!(remove_mpv_socket_with_hook(&socket, || {})
+            .unwrap_err()
+            .contains("non-socket"));
+        assert_eq!(fs::read(&socket).unwrap(), b"sentinel");
+
+        fs::remove_file(&socket).unwrap();
+        drop(UnixListener::bind(&socket).unwrap());
+        let error = remove_mpv_socket_with_hook(&socket, || {
+            fs::remove_file(&socket).unwrap();
+            fs::write(&socket, b"replacement").unwrap();
+        })
+        .unwrap_err();
+        assert!(error.contains("changed while it was being cleaned up"));
+        assert_eq!(fs::read(&socket).unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

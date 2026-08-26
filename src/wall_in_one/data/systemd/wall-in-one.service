@@ -10,14 +10,21 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# Compilation is fail-closed and preserves the previous resolved document.
-# Let Rust decide whether that last-known-good document is still usable.
-ExecStartPre=-wall-in-one --write-config
+# Migration/legacy boundaries remain fatal. An ordinary compiler failure keeps
+# the prior document as a candidate for the exact Rust validation below.
+ExecStartPre=wall-in-one --service-startup-prepare
+# Use the daemon's production parser without claiming its socket or touching a
+# renderer. This admits only a Rust-consumable schema-4 last-known-good file.
+ExecStartPre=wall-in-one-service --check-config
 ExecStart=wall-in-one-service
 # A regular timer owns durable quarantine persistence. This final attempt is
 # deliberately capped so a wedged authoring store cannot delay service stop.
 ExecStop=-timeout --signal=TERM --kill-after=0.1s 2s wall-in-one --sync-runtime-health-on-stop
-Restart=on-failure
+Restart=on-abnormal
+# RestartPreventExitStatus only applies to the main process, not ExecStartPre.
+# Restrict the base policy to abnormal exits so a clean preflight failure stops
+# once, then explicitly retain recovery for Rust's ordinary runtime failures.
+RestartForceExitStatus=1
 # A present incompatible or malformed runtime document is an administrative
 # migration/configuration boundary, not a transient daemon crash. Rust reports
 # that startup-only class with sysexits.h EX_CONFIG so it stops once rather

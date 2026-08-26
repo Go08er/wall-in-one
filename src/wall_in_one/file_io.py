@@ -1519,6 +1519,7 @@ def recover_deletion_claim(
     operation_token: str,
     expected_fingerprint: FileFingerprint | None = None,
     logical_path: Path | None = None,
+    read_only: bool = False,
 ) -> ClaimedPath | None:
     """Recover an exact inode left claimed by process death during deletion.
 
@@ -1530,6 +1531,10 @@ def recover_deletion_claim(
     ever consumed or moved.
     A journal-marked zero tombstone proves descriptor truncation committed;
     unexpected contents are preserved and fail closed.
+
+    ``read_only`` still pins and validates the bounded claim namespace, but it
+    leaves a proven consumed tombstone at its exact pathname. This is the mode
+    for status commands, whose observations must never perform recovery.
     """
     public_path = path if logical_path is None else logical_path
     access_directory = deletion_claim_directory(path, operation_token)
@@ -1596,17 +1601,18 @@ def recover_deletion_claim(
                 # best effort: failure leaves the exact zero inode (or an
                 # unproven private replacement) preserved, but must not make a
                 # durable journal retry an irreversible truncation forever.
-                with contextlib.suppress(OSError, ValueError):
-                    _retain_exact_entry(
-                        directory_pin.entry,
-                        expected_identity=expected_identity,
-                        expected_file_type=stat.S_IFREG,
-                        expected_fingerprint=recovered,
-                        pinned_source=pin,
-                        retained_parent=path.parent,
-                        logical_parent=public_path.parent,
-                        logical_path=claimed,
-                    )
+                if not read_only:
+                    with contextlib.suppress(OSError, ValueError):
+                        _retain_exact_entry(
+                            directory_pin.entry,
+                            expected_identity=expected_identity,
+                            expected_file_type=stat.S_IFREG,
+                            expected_fingerprint=recovered,
+                            pinned_source=pin,
+                            retained_parent=path.parent,
+                            logical_parent=public_path.parent,
+                            logical_path=claimed,
+                        )
             finally:
                 pin.close()
                 directory_pin.close()

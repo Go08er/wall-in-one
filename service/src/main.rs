@@ -91,6 +91,7 @@ struct Options {
     config: PathBuf,
     socket: PathBuf,
     wait_for_config: bool,
+    check_config: bool,
 }
 
 fn xdg(variable: &str, fallback: PathBuf) -> PathBuf {
@@ -110,6 +111,7 @@ fn defaults() -> Options {
         config: state.join("wall-in-one/runtime.toml"),
         socket: runtime.join("wall-in-one-runtime.sock"),
         wait_for_config: false,
+        check_config: false,
     }
 }
 
@@ -131,13 +133,15 @@ fn parse() -> Result<Options, String> {
                     .ok_or("--socket needs a path")?
             }
             Some("--wait-for-config") => options.wait_for_config = true,
+            Some("--check-config") => options.check_config = true,
             Some("--version") => {
                 println!("wall-in-one-service {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             Some("--help") => {
                 println!(
-                    "usage: wall-in-one-service [--config PATH] [--socket PATH] [--wait-for-config]"
+                    "usage: wall-in-one-service [--config PATH] [--socket PATH] \
+                     [--wait-for-config] [--check-config]"
                 );
                 std::process::exit(0);
             }
@@ -490,6 +494,9 @@ fn run() -> Result<(), ServiceError> {
         return Ok(());
     }
     let config = Config::load(&options.config).map_err(ServiceError::Config)?;
+    if options.check_config {
+        return Ok(());
+    }
     let driver = SystemDriver::new_for_service_socket(config.renderer.clone(), &options.socket);
     let mut runtime = Runtime::new(
         options.config.clone(),

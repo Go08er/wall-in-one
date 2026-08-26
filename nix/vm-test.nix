@@ -180,6 +180,110 @@ pkgs.testers.runNixOSTest {
         machine.succeed(as_user("${app} --write-config"))
         machine.succeed(as_user("${app} ctl reload"))
 
+    with subtest("schema-2 last-known-good state stops once before Rust starts"):
+        playlist_store = "${home}/.local/state/wall-in-one/playlists.json"
+        runtime_document = "${home}/.local/state/wall-in-one/runtime.toml"
+        playlist_backup = "/tmp/wall-in-one-vm-playlists-schema2.json"
+        runtime_backup = "/tmp/wall-in-one-vm-runtime-schema4.toml"
+
+        # Stop the successful schema-4 service, then reproduce the dangerous
+        # boundary: ordinary authoring compilation cannot replace a surviving
+        # public schema-2 document. The Python preflight deliberately leaves a
+        # last-known-good candidate for Rust's exact parser, whose failure must
+        # prevent ExecStart rather than enter the unit's five-second retry path.
+        machine.succeed(as_user("systemctl --user stop wall-in-one.service"))
+        machine.wait_until_succeeds(
+            as_user(
+                "systemctl --user show -p ActiveState --value wall-in-one.service "
+                "| grep -Fx inactive"
+            ),
+            timeout=10,
+        )
+        machine.wait_until_succeeds(
+            "test ! -S ${runtimeDir}/wall-in-one-runtime.sock", timeout=10
+        )
+        machine.succeed(as_user(f"cp {playlist_store} {playlist_backup}"))
+        machine.succeed(as_user(f"cp {runtime_document} {runtime_backup}"))
+        machine.succeed(
+            as_user(
+                f"sed -i '0,/^schema_version = 4$/s//schema_version = 2/' "
+                f"{runtime_document}"
+            )
+        )
+        machine.succeed(as_user(f"printf '{{ broken' > {playlist_store}"))
+        machine.succeed(f"grep -Fx 'schema_version = 2' {runtime_document}")
+        schema2_hash = machine.succeed(f"sha256sum {runtime_document}").split()[0]
+        machine.succeed("rm -f ${driverLog}")
+
+        machine.fail(as_user("systemctl --user start wall-in-one.service"))
+        machine.wait_until_succeeds(
+            as_user("systemctl --user is-failed wall-in-one.service"), timeout=10
+        )
+        machine.succeed(
+            as_user(
+                "systemctl --user show -p Result --value wall-in-one.service "
+                "| grep -Fx exit-code"
+            )
+        )
+        machine.succeed(
+            as_user(
+                "systemctl --user show -p MainPID --value wall-in-one.service "
+                "| grep -Fx 0"
+            )
+        )
+        machine.fail("test -S ${runtimeDir}/wall-in-one-runtime.sock")
+        machine.fail("test -e ${driverLog}")
+        machine.fail(
+            as_user(
+                "pgrep -f '^${wallInOnePackage}/bin/wall-in-one-service( |$)'"
+            )
+        )
+        machine.succeed(
+            "journalctl -b _SYSTEMD_USER_UNIT=wall-in-one.service --no-pager "
+            "| grep -F 'schema_version 2 is unsupported; expected 4'"
+        )
+
+        invocation = machine.succeed(
+            as_user(
+                "systemctl --user show -p InvocationID --value wall-in-one.service"
+            )
+        ).strip()
+        restarts = machine.succeed(
+            as_user("systemctl --user show -p NRestarts --value wall-in-one.service")
+        ).strip()
+        assert invocation, "failed service invocation did not retain an InvocationID"
+        assert restarts.isdigit(), restarts
+
+        # Two complete RestartSec windows prove this clean preflight failure is
+        # not being mistaken for a transient main-process crash.
+        machine.sleep(12)
+        assert machine.succeed(
+            as_user(
+                "systemctl --user show -p InvocationID --value wall-in-one.service"
+            )
+        ).strip() == invocation
+        assert machine.succeed(
+            as_user("systemctl --user show -p NRestarts --value wall-in-one.service")
+        ).strip() == restarts
+        machine.succeed(as_user("systemctl --user is-failed wall-in-one.service"))
+        machine.fail("test -S ${runtimeDir}/wall-in-one-runtime.sock")
+        assert machine.succeed(f"sha256sum {runtime_document}").split()[0] == schema2_hash
+
+        # Restore the exact valid state and prove the same packaged unit remains
+        # recoverable for the rest of the desktop integration scenarios.
+        machine.succeed(as_user(f"mv {playlist_backup} {playlist_store}"))
+        machine.succeed(as_user(f"mv {runtime_backup} {runtime_document}"))
+        machine.succeed(as_user("systemctl --user reset-failed wall-in-one.service"))
+        machine.succeed(as_user("systemctl --user start wall-in-one.service"))
+        machine.wait_until_succeeds(
+            as_user("systemctl --user is-active wall-in-one.service"), timeout=30
+        )
+        machine.wait_for_file("${runtimeDir}/wall-in-one-runtime.sock")
+        machine.wait_until_succeeds(
+            status_matches('.playlist_id == "day" and .last_error == ""'),
+            timeout=20,
+        )
+
     with subtest("companion plugin loads from an isolated path source"):
         # Deliberately not asserting the entry count. It used to insist on
         # "(4 entries)", which broke the moment the plugin dropped its Control

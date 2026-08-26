@@ -14,6 +14,7 @@ picklable data and must always observe ``Future.result()``.
 from __future__ import annotations
 
 import os
+import site
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future, InterpreterPoolExecutor
@@ -22,6 +23,14 @@ from concurrent.futures import Future, InterpreterPoolExecutor
 # multiplying the roughly 12.7 MiB interpreter cost without bound. A smaller
 # machine should not create more workers than CPUs it can actually schedule.
 MAX_WORKERS = max(1, min(4, os.process_cpu_count() or 1))
+
+# Nix's Python application wrapper adds this directory to ``sys.path`` after
+# interpreter startup.  A new subinterpreter starts from Python's original path
+# configuration instead of that mutated list, so teach every worker where this
+# package lives before it tries to unpickle an importable worker function.  The
+# initializer must itself come from the stdlib: a package-local initializer
+# would be unimportable until after it had done this work.
+_PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _lock = threading.Lock()
 _executor: InterpreterPoolExecutor | None = None
@@ -35,6 +44,8 @@ def executor() -> InterpreterPoolExecutor:
             _executor = InterpreterPoolExecutor(
                 max_workers=MAX_WORKERS,
                 thread_name_prefix="wall-in-one-backend",
+                initializer=site.addsitedir,
+                initargs=(_PACKAGE_PARENT,),
             )
         return _executor
 

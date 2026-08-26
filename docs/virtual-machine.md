@@ -58,26 +58,14 @@ It can also be built on its own:
 $ nix build -L .#checks.x86_64-linux.vm-test
 ```
 
-The final 2026-08-24 release-tree run used the explicit working-tree form,
-because the migration sources were intentionally still untracked:
-
-```console
-$ nix build -L 'path:.#checks.x86_64-linux.vm-test'
-```
-
-It passed. The package check embedded in that build reported 1,745 passed,
-1 intentional skip and 271 GUI tests deselected; the booted-desktop script
-completed in 88.07 seconds. The duration records that run, not a timing gate.
-The separate packaged GUI check reported 271 passed and 1,746 non-GUI tests
-deselected; the cross-binary runtime-socket fallback check passed both tests.
-The `path:.` source included the required untracked migration sources, but it
-also copied ignored local artifacts into its temporary source snapshot,
-including `.claude`, tool caches and `service/target` (about 651 MiB total,
-roughly 601 MiB of it the Rust target tree). Package-specific filesets and the
-installed 8.5 MiB output excluded those artifacts, so the functional result is
-valid; it was not a clean publication-source proof. Before any later
-publication, stage the intended sources and rerun the normal Git-backed flake.
-This release run did not stage or publish them.
+Release evidence uses the normal Git-backed commands above from a clean commit
+whose complete intended path set is tracked. An explicit `path:.` input is
+useful while developing untracked sources, but it can also copy ignored local
+artifacts and is not publication proof. The release handoff records the exact
+v0.1.2 proof tree and results; CI repeats them from the real candidate commit.
+The VM duration is diagnostic rather than a timing gate, and its embedded
+package tests complement the separate packaged GUI and cross-binary socket
+checks in the default flake suite.
 
 The default checks also include a process-level memory contract for the Rust
 runtime:
@@ -133,6 +121,11 @@ verifies that:
 - the packaged headless Python compiler upgrades seeded authoring state and an
   obsolete schema-1 runtime document before `wall-in-one-service` starts; the
   Rust service then owns a responsive runtime socket;
+- corrupt authoring preserves a valid schema-4 last-known-good runtime, while
+  the same state with a public schema-2 document fails once in the exact Rust
+  preflight without starting the Rust main process, socket, or renderer; the
+  test holds its invocation/restart counters stable across two retry windows
+  and then proves recovery after restoring schema 4;
 - Browse, Media/Pairings, Playlists, Schedules, and Settings open in the
   running app; each capture first verifies the page-specific compositor title,
   and its comparison image excludes Noctalia's clock-bearing panel so a stuck
@@ -162,8 +155,9 @@ verifies that:
   marker`, completed the stop in about 0.75 seconds and found Pairings durable
   immediately afterward;
 - the health timer becomes inactive on an explicit daemon stop and immediately
-  after `SIGKILL`, restarts with the daemon under `Restart=on-failure`, and its
-  oneshot treats an absent runtime as a successful no-op; and
+  after `SIGKILL`, then returns with the daemon under the unit's selective
+  abnormal/runtime-failure restart policy; its oneshot treats an absent runtime
+  as a successful no-op; and
 - the completed desktop session has no matching coredump, GTK/GLib critical,
   Python traceback or Rust thread panic.
 
@@ -188,15 +182,13 @@ automated unit/process tests, including synthetic connector stress. Neither the
 development machine nor this VM exposes two outputs, so different playlists on
 two physical monitors remain unverified.
 
-That dated VM run deliberately used the then-locked preceding companion
-revision, `a5e23c9`. It proves that revision loaded and drove the basic
-integration; it is not evidence for the coordinated release pair. The current
-tree instead pins reviewed companion candidate
-`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. Its final normal Git-backed VM and
-flake results must be recorded here after the release tree is clean. At
-publication the app is promoted before immediate promotion and tagging of
-companion `0.1.1`, so the strict status-v2 client is never served to users of
-the older app. The contract and old-revision limits are documented in
+An older dated VM run used preceding companion revision `a5e23c9`; it proved
+only that revision's basic integration. The current tree and VM instead pin
+reviewed companion revision
+`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. The v0.1.2 app follow-up retains
+that exact source and protocol. Machines moving from an older companion still
+complete the compatible app's schema-4 cutover before loading the strict
+status-v2 client. The contract and old-revision limits are documented in
 [`migrating.md`](migrating.md#companion-noctalia-plugin-compatibility).
 
 The RSS check's 64-connector stress exercises bounded per-connector runtime state,

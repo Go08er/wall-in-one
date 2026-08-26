@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
+import sys
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -94,7 +97,7 @@ def _runtime(
         'default_playlist = "frog-day"',
         "",
         "[settings]",
-        "cycle_interval_seconds = 300",
+        "cycle_interval_seconds = 900",
         "cycle_enabled = false",
         "shuffle = false",
         "dynamics_enabled = true",
@@ -314,23 +317,32 @@ def _incident_profile(
             )
     logical_entries = tuple(entries)
 
-    specifications = (
-        ("frog-day", "frog day", 16),
-        ("evening-moss", "evening moss", 10),
-        ("rain-windows", "rain windows", 9),
-        ("weekend", "weekend", 8),
-        ("winter", "winter", 7),
-    )
     customized_entry = next(entry for entry in logical_entries if entry.source == customized_source)
-    playlist_entries = (
-        customized_entry,
-        *(entry for entry in logical_entries if entry is not customized_entry),
+    workshop_entries = tuple(
+        entry
+        for entry in logical_entries
+        if entry.kind is Kind.VIDEO and entry.source.is_relative_to(workshop_content)
     )
-    cursor = 0
+    frog_day_entries = workshop_entries[:16]
+    assert len(frog_day_entries) == 16
+    frog_day_sources = {entry.source for entry in frog_day_entries}
+    remaining_entries = (
+        customized_entry,
+        *(
+            entry
+            for entry in logical_entries
+            if entry is not customized_entry and entry.source not in frog_day_sources
+        ),
+    )
+    specifications = (
+        ("mc-night", "mc night", remaining_entries[:12]),
+        ("frog-night", "frog night", remaining_entries[12:19]),
+        ("mc-day", "mc day", remaining_entries[19:33]),
+        ("frog-day", "frog day", frog_day_entries),
+        ("quick-choice", "Quick choice", remaining_entries[33:34]),
+    )
     authored_by_id: dict[str, playlists.Playlist] = {}
-    for identifier, name, count in specifications:
-        selected = playlist_entries[cursor : cursor + count]
-        cursor += count
+    for identifier, name, selected in specifications:
         authored_by_id[identifier] = playlists.Playlist(
             id=identifier,
             name=name,
@@ -342,7 +354,7 @@ def _incident_profile(
                 for ordinal, entry in enumerate(selected)
             ),
         )
-    assert cursor == 50
+    assert [len(selected) for _identifier, _name, selected in specifications] == [12, 7, 14, 16, 1]
     playlists.save(authored_by_id)
     authored_playlists = playlists.Store.open().all()
 
@@ -356,7 +368,7 @@ def _incident_profile(
         ),
         schedules.Rule(
             id="summer-weekend-evening",
-            playlist="rain-windows",
+            playlist="frog-night",
             months=frozenset({6, 7, 8}),
             weekdays=frozenset({5, 6}),
             start=18 * 60,
@@ -364,7 +376,7 @@ def _incident_profile(
         ),
         schedules.Rule(
             id="winter-disabled",
-            playlist="winter",
+            playlist="mc-night",
             months=frozenset({1, 2, 12}),
             enabled=False,
         ),
@@ -373,7 +385,10 @@ def _incident_profile(
 
     paths.settings_path().parent.mkdir(parents=True, exist_ok=True)
     paths.settings_path().write_text(
-        _old_settings(active_playlist="frog-day"),
+        _old_settings(active_playlist="frog-day").replace(
+            "cycle_interval = 300\n",
+            "cycle_interval = 900\n",
+        ),
         encoding="utf-8",
     )
     paths.noctalia_settings_path().parent.mkdir(parents=True, exist_ok=True)
@@ -499,8 +514,10 @@ def test_automatic_upgrade_preserves_sanitized_deployed_profile_in_place(
     assert first.changed and first.status == "complete"
     assert first.counts == ready.counts
     assert deployed_upgrade.probe().status == "complete"
-    assert config.load_strict().roots == (profile.root,)
-    assert config.load_strict().active_playlist == "frog-day"
+    migrated_settings = config.load_strict()
+    assert migrated_settings.roots == (profile.root,)
+    assert migrated_settings.active_playlist == "frog-day"
+    assert migrated_settings.cycle_interval == 900
 
     adoption = adopted.load(strict=True)
     assert adoption is not None
@@ -514,6 +531,7 @@ def test_automatic_upgrade_preserves_sanitized_deployed_profile_in_place(
     runtime = tomllib.loads(paths.runtime_config_path().read_text(encoding="utf-8"))
     assert runtime["schema_version"] == 4
     assert runtime["default_playlist"] == "frog-day"
+    assert runtime["settings"]["cycle_interval_seconds"] == 900
     compiled_playlists = runtime["playlists"]
     assert len(compiled_playlists) == 6
     all_media = compiled_playlists[0]
@@ -539,9 +557,20 @@ def test_automatic_upgrade_preserves_sanitized_deployed_profile_in_place(
     named = compiled_playlists[1:]
     assert len(named) == 5
     assert sum(len(playlist["entries"]) for playlist in named) == 50
+    assert {playlist["name"]: len(playlist["entries"]) for playlist in named} == {
+        "mc night": 12,
+        "frog night": 7,
+        "mc day": 14,
+        "frog day": 16,
+        "Quick choice": 1,
+    }
     frog_day = next(playlist for playlist in named if playlist["name"] == "frog day")
     assert frog_day["id"] == "frog-day"
     assert len(frog_day["entries"]) == 16
+    assert all(
+        entry["kind"] == "video" and Path(entry["motion"]).is_relative_to(profile.workshop_content)
+        for entry in frog_day["entries"]
+    )
     assert len(runtime["schedules"]) == 3
 
     customized = next(
@@ -558,7 +587,8 @@ def test_automatic_upgrade_preserves_sanitized_deployed_profile_in_place(
     assert any(
         entry.get("motion") == str(profile.customized_source)
         and entry["palette"] == customized["palette"]
-        for entry in frog_day["entries"]
+        for playlist in named
+        for entry in playlist["entries"]
     )
 
     current_library = scan.scan(
@@ -590,3 +620,90 @@ def test_automatic_upgrade_preserves_sanitized_deployed_profile_in_place(
     assert _file_snapshot((*capture_paths, *scene_capture_paths)) == capture_before
     assert _tree_snapshot(profile.motionbgs) == motionbgs_before
     assert _tree_snapshot(profile.workshop_content) == workshop_before
+
+
+def test_prepared_field_incident_accepts_same_root_noctalia_cycle_and_resumes_after_reboot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce the 900-second field cycle at its state-transition boundary.
+
+    Waiting 900 wall-clock seconds adds no coverage: the old timer's only
+    durable effect was Noctalia's atomic ``settings.toml`` replacement. Model
+    that exact publication after a v0.1.1-style prepared transaction, then use
+    fresh Python processes for the reboot status and startup resume.
+    """
+    profile = _incident_profile(tmp_path, monkeypatch)
+    old_runtime = paths.runtime_config_path().read_bytes()
+
+    prepared = deployed_upgrade_transaction.ensure(cutover=False)
+    assert prepared.status == "prepared"
+    assert paths.runtime_config_path().read_bytes() == old_runtime
+    assert (
+        tomllib.loads(deployed_upgrade.staged_runtime_path().read_text(encoding="utf-8"))[
+            "schema_version"
+        ]
+        == 4
+    )
+
+    chosen = profile.video_captures[1][1]
+    replacement = (
+        "[theme]\n"
+        'source = "wallpaper"\n'
+        'wallpaper_scheme = "m3-fruit-salad"\n\n'
+        "[wallpaper]\n"
+        f"directory = {_quote(profile.root)}\n"
+        "enabled = true\n"
+        'fill_mode = "crop"\n\n'
+        "[wallpaper.default]\n"
+        f"path = {_quote(chosen)}\n\n"
+        "[wallpaper.last]\n"
+        f"path = {_quote(chosen)}\n\n"
+        "[wallpaper.monitors.eDP-1]\n"
+        f"path = {_quote(chosen)}\n"
+    ).encode()
+    noctalia = paths.noctalia_settings_path()
+    next_generation = noctalia.with_name(".settings.toml.cycle-next")
+    next_generation.write_bytes(replacement)
+    os.replace(next_generation, noctalia)
+
+    before_status = _idempotency_snapshot(profile)
+    environment = os.environ.copy()
+    status = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "wall_in_one",
+            "--deployed-upgrade-status",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert status.stdout.startswith("prepared: ")
+    assert "videos/captures: 48" in status.stdout
+    assert _idempotency_snapshot(profile) == before_status
+
+    resumed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "wall_in_one",
+            "--write-config",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert resumed.returncode == 0, (resumed.stdout, resumed.stderr)
+    assert "migrated the deployed profile in place using original root" in resumed.stdout
+    assert paths.noctalia_settings_path().read_bytes() == replacement
+    assert config.load_strict().roots == (profile.root,)
+    assert (
+        tomllib.loads(paths.runtime_config_path().read_text(encoding="utf-8"))["schema_version"]
+        == 4
+    )
+    assert deployed_upgrade_transaction.probe().status == "complete"

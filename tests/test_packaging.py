@@ -10,6 +10,7 @@ file is named for the id as well. Those agreements are what is checked here.
 from __future__ import annotations
 
 import configparser
+import re
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
@@ -19,14 +20,20 @@ import pytest
 
 import wall_in_one
 from wall_in_one import paths
+from wall_in_one.providers import http
 
+ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(wall_in_one.__file__).resolve().parent / "data"
 DESKTOP_PATH = DATA_DIR / f"{paths.APPLICATION_ID}.desktop"
 ICON_PATH = DATA_DIR / f"{paths.APPLICATION_ID}.svg"
 SYSTEMD_PATH = DATA_DIR / "systemd" / "wall-in-one.service"
 HEALTH_SERVICE_PATH = DATA_DIR / "systemd" / "wall-in-one-health-sync.service"
 HEALTH_TIMER_PATH = DATA_DIR / "systemd" / "wall-in-one-health-sync.timer"
-PYPROJECT_PATH = Path(__file__).resolve().parents[1] / "pyproject.toml"
+PYPROJECT_PATH = ROOT / "pyproject.toml"
+CARGO_TOML_PATH = ROOT / "service" / "Cargo.toml"
+CARGO_LOCK_PATH = ROOT / "service" / "Cargo.lock"
+FLAKE_PATH = ROOT / "flake.nix"
+INSTALLING_DOC_PATH = ROOT / "docs" / "installing.md"
 
 SVG = "http://www.w3.org/2000/svg"
 
@@ -61,6 +68,18 @@ class DesktopParser(configparser.RawConfigParser):
 
     def optionxform(self, optionstr: str) -> str:
         return optionstr
+
+
+def _flake_package_version(raw: str, *, binding: str, builder: str) -> str:
+    pattern = re.compile(
+        rf"^\s*{re.escape(binding)} = {re.escape(builder)} \{{\n"
+        rf'\s*pname = "{re.escape(binding)}";\n'
+        r'\s*version = "([^"]+)";$',
+        re.MULTILINE,
+    )
+    found = pattern.findall(raw)
+    assert len(found) == 1, f"expected one {binding} package version in flake.nix"
+    return str(found[0])
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +127,49 @@ def test_the_command_the_entry_runs_is_a_script_pyproject_installs() -> None:
     assert paths.APP_ID in metadata["project"]["scripts"]
 
 
+@pytest.mark.skipif(not PYPROJECT_PATH.is_file(), reason="not running from a source tree")
+def test_release_version_is_0_1_2_across_source_packages_and_installing_docs() -> None:
+    project = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    release = project["project"]["version"]
+    assert release == "0.1.2"
+    assert wall_in_one.__version__ == release
+
+    cargo = tomllib.loads(CARGO_TOML_PATH.read_text(encoding="utf-8"))
+    assert cargo["package"]["version"] == release
+
+    cargo_lock = tomllib.loads(CARGO_LOCK_PATH.read_text(encoding="utf-8"))
+    locked = [
+        package["version"]
+        for package in cargo_lock["package"]
+        if package.get("name") == "wall-in-one-service"
+    ]
+    assert locked == [release]
+
+    flake = FLAKE_PATH.read_text(encoding="utf-8")
+    assert (
+        _flake_package_version(
+            flake,
+            binding="wall-in-one-service",
+            builder="pkgs.rustPlatform.buildRustPackage",
+        )
+        == release
+    )
+    assert (
+        _flake_package_version(
+            flake,
+            binding="wall-in-one",
+            builder="python.pkgs.buildPythonApplication",
+        )
+        == release
+    )
+
+    user_agent_product = http.USER_AGENT.partition(" ")[0]
+    assert user_agent_product == f"wall-in-one/{release}"
+
+    installing = INSTALLING_DOC_PATH.read_text(encoding="utf-8")
+    assert f"Exec=/nix/store/...-wall-in-one-{release}/bin/wall-in-one" in installing
+
+
 def test_the_icon_key_names_the_icon_that_ships_beside_the_entry(
     entry: configparser.SectionProxy,
 ) -> None:
@@ -142,16 +204,25 @@ def test_the_entry_claims_no_dbus_activation_it_cannot_service(
 
 
 def test_the_systemd_unit_runs_the_windowless_service() -> None:
-    parser = DesktopParser()
-    parser.read_string(SYSTEMD_PATH.read_text(encoding="utf-8"))
+    unit_text = SYSTEMD_PATH.read_text(encoding="utf-8")
+    parser = DesktopParser(strict=False)
+    parser.read_string(unit_text)
     service = parser["Service"]
     assert service["Type"] == "simple"
-    assert service["ExecStartPre"] == "-wall-in-one --write-config"
+    assert [
+        line.removeprefix("ExecStartPre=")
+        for line in unit_text.splitlines()
+        if line.startswith("ExecStartPre=")
+    ] == [
+        "wall-in-one --service-startup-prepare",
+        "wall-in-one-service --check-config",
+    ]
     assert service["ExecStart"] == "wall-in-one-service"
     assert service["ExecStop"] == (
         "-timeout --signal=TERM --kill-after=0.1s 2s wall-in-one --sync-runtime-health-on-stop"
     )
-    assert service["Restart"] == "on-failure"
+    assert service["Restart"] == "on-abnormal"
+    assert service["RestartForceExitStatus"] == "1"
     assert service["RestartPreventExitStatus"] == "78"
     assert service["RestartSec"] == "5"
     assert parser["Unit"]["StartLimitIntervalSec"] == "60"

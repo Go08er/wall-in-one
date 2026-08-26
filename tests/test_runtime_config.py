@@ -11,6 +11,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -75,6 +76,75 @@ def test_write_config_takes_the_compiler_lock_before_reading_authoring_state(
     assert cli.main(["--write-config"]) == 1
     assert "authoring fixture stops here" in capsys.readouterr().err
     assert not entered
+
+
+def test_service_startup_prepare_retains_a_valid_lkg_after_compiler_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one import cli, paths
+
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "wallpaper.png").write_bytes(b"fixture")
+    config.save(config.Settings(roots=(media,), scan_workshop=False))
+    assert cli.main(["--write-config"]) == 0
+    capsys.readouterr()
+
+    runtime = paths.runtime_config_path()
+    previous = runtime.read_bytes()
+    authoring = playlists.state_path()
+    authoring.parent.mkdir(parents=True, exist_ok=True)
+    authoring.write_text("{ broken", encoding="utf-8")
+
+    assert cli.main(["--service-startup-prepare"]) == 0
+    error = capsys.readouterr().err
+    assert "left untouched" in error
+    assert "validating the last-known-good runtime" in error
+    assert runtime.read_bytes() == previous
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    (("retry", 75), ("conflict", 78)),
+)
+def test_service_startup_prepare_never_softens_a_deployed_upgrade_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    status: Literal["retry", "conflict"],
+    expected: int,
+) -> None:
+    from wall_in_one import cli, deployed_upgrade_transaction
+
+    def refuse_upgrade(*, cutover: bool = True) -> deployed_upgrade_transaction.Outcome:
+        del cutover
+        raise deployed_upgrade_transaction.TransactionError("fixture boundary", status=status)
+
+    monkeypatch.setattr(deployed_upgrade_transaction, "ensure", refuse_upgrade)
+
+    assert cli.main(["--service-startup-prepare"]) == expected
+
+
+def test_explicit_deployed_upgrade_command_requests_the_bounded_cutover(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one import cli, deployed_upgrade_transaction
+
+    cutovers: list[bool] = []
+
+    def ensure(*, cutover: bool = True) -> deployed_upgrade_transaction.Outcome:
+        cutovers.append(cutover)
+        return deployed_upgrade_transaction.Outcome(
+            changed=True,
+            status="complete",
+            detail="fixture cutover complete",
+        )
+
+    monkeypatch.setattr(deployed_upgrade_transaction, "ensure", ensure)
+
+    assert cli.main(["--prepare-deployed-upgrade"]) == 0
+    assert cutovers == [True]
+    assert "fixture cutover complete" in capsys.readouterr().out
 
 
 def test_write_config_refuses_a_malformed_settings_file(

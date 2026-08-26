@@ -33,9 +33,9 @@ The detector then has only these outcomes:
 |---|---|
 | `absent` | No settings or orphaned app state exists. This is a fresh install. |
 | `current` | Settings already use the explicit-root contract; no deployed upgrade is needed. |
-| `ready` | One exact schema-2 predecessor is eligible for automatic preparation and cutover. |
-| `in-progress` | An exact transaction journal exists and can be resumed. |
-| `prepared` | Schema 4 and capture authority are staged; resume verifies whether schema 2 or an interrupted schema-4 cutover is public. |
+| `ready` | One exact schema-2 predecessor is eligible for automatic bounded cutover and no known writer is active. |
+| `in-progress` | An exact transaction needs resume/recovery, or an eligible predecessor is temporarily blocked by a known writer. |
+| `prepared` | A transaction created by v0.1.1 has schema 4 and capture authority staged; current startup can validate and finish it. |
 | `complete` | The schema-4 cutover and completion record agree. |
 | `conflict` or `corrupt` | Evidence is ambiguous, inconsistent, unsafe, or malformed; nothing is guessed. |
 
@@ -51,37 +51,70 @@ source/capture claims, a missing or altered marker, a basename that does not
 match its video, a pre-existing adoption sidecar without the journal that
 created it, a current hashed capture beside the predecessor capture, an active
 removal intent, mismatched runtime/authoring data, a hard link, a symlinked
-ancestor, or a path that cannot be pinned beneath its expected root. Re-running
-the command does not turn any of those cases into authority.
+ancestor, a pre-journal reserved claim path, or a path that cannot be pinned
+beneath its expected root. Re-running the command does not turn any of those
+cases into authority.
 
-### Inspect, prepare, and cut over
+Before reporting a journal-free profile as `ready`, status derives the exact
+future settings/runtime operation tokens and read-only checks every bounded
+claim slot. Any occupied path is a conflict: without the journal, the app has
+no authority to recover, delete, reuse, or interpret even an empty directory.
 
-The status command is read-only. Preparation is intentionally distinct from
-the final service cutover:
+For a journaled transaction, status revalidates the same static root/marker,
+Noctalia authority, authoring generations, video/capture generations,
+sidecars, manifest, stage, public settings/runtime, and durable claim state
+which resume needs. It also checks the current singleton locks, both public
+sockets, the bounded same-user process inventory, and the kernel Unix-socket
+table. A changed or missing prerequisite is reported as `conflict`/`corrupt`,
+or as temporarily blocked, rather than as a false-green `prepared` state. The
+command remains read-only, including when it inspects a consumed recovery
+tombstone.
+
+### Inspect and perform the bounded cutover
+
+The status command is read-only. The legacy-named preparation command now
+prepares and cuts over in one bounded invocation:
 
 ```console
 $ wall-in-one --deployed-upgrade-status
+```
+
+Stop the old service before invoking this command manually, and do not start
+an old binary while it runs:
+
+```console
+$ systemctl --user stop wall-in-one.service
 $ wall-in-one --prepare-deployed-upgrade
 ```
 
-`--prepare-deployed-upgrade` refuses to run while a Python authoring process is
-listening on the app socket. After taking the profile/compiler/authoring locks,
-it writes the durable journal first, publishes exact capture-adoption
-sidecars, replaces the old empty-root setting with the proven original root,
-publishes the central capture-authority manifest, and compiles and validates a
-private schema-4 stage. The public `runtime.toml` remains the byte-exact
-schema-2 generation, so preparation leaves an already-running old Rust
-daemon's public input untouched. If a crash already committed the schema-4
-runtime, preparation resumes forward and records completion instead of
-pretending it can return to an earlier boundary.
+The command refuses a live Python authoring process or Rust wallpaper runtime.
+It retains the singleton guards understood by current Python/Rust builds,
+checks the exact lock-unaware deployed Rust process before its socket is bound,
+and repeats process/socket checks immediately before runtime publication and
+completion. After taking the profile/compiler/authoring locks, it writes the
+durable journal first, publishes exact capture-adoption sidecars, replaces the
+old empty-root setting with the proven original root, publishes the central
+capture-authority manifest, compiles and validates a private schema-4 stage,
+then atomically cuts over the exact public schema-2 runtime and records
+completion. It no longer returns with an old daemon able to mutate a prepared
+schema-2 transaction across a reboot.
 
-Normal graphical startup and `wall-in-one --write-config` run the same
-transaction with cutover enabled. Immediately before cutover, the app
+The packaged automatic path has the stronger lifecycle boundary: systemd
+stops the prior `wall-in-one.service` main process before it runs the new
+unit's startup preflight, and it cannot launch the new Rust main process until
+that preflight finishes. A manual unsupervised old binary does not understand
+the new singleton guards, so socket/process scans cannot prevent somebody from
+launching it after a negative check; keeping the old service stopped is part
+of the supported manual contract.
+
+Normal graphical startup and `wall-in-one --write-config` run the same bounded
+transaction. Existing v0.1.1 journals which stopped at the private prepared
+boundary remain supported. Immediately before cutover, the app
 revalidates the journal, settings, authoring stores, capture authority, and a
 deterministic re-render of the stage. It then atomically claims only the exact
 schema-2 runtime generation, installs the validated schema-4 bytes, verifies
-them again, and writes the completion marker last. Repeated preparation,
-startup, or compilation resumes the same journal and is idempotent; it never
+them again, and writes the completion marker last. Repeated startup, explicit
+cutover, or compilation resumes the same journal and is idempotent; it never
 starts a second migration from newly discovered pathnames.
 
 The reserved state records are
@@ -95,18 +128,23 @@ accepted as progress or completion.
 The deployed-upgrade commands use sysexits-style failure codes:
 
 - exit `75` (`EX_TEMPFAIL`) means retryable exclusion failure, such as a live
-  Python writer, an uncertain authoring socket, or a busy migration lock. Stop
-  the old process or let the other transaction finish, then retry.
+  Python/Rust writer, a held singleton, an uncertain process/socket probe, or
+  a busy migration lock. Stop the old process or let the other transaction
+  finish, then retry.
 - exit `78` (`EX_CONFIG`) means the persisted evidence is conflicting,
   corrupt, or otherwise unsafe to migrate automatically. Preserve the files
   and inspect the reported path; repeated retries without resolving the
   evidence will not help. `--deployed-upgrade-status` returns 78 for
   `conflict`/`corrupt` and zero for its other read-only classifications.
 
-The packaged service treats an incompatible/malformed runtime as a
-non-restartable exit-78 configuration boundary. A failed cross-schema startup
-therefore stops with a diagnostic instead of exhausting the restart burst
-against a surviving schema-2 document.
+The packaged service first runs a migration-aware Python preflight. Migration
+and legacy-boundary failures remain fatal; an ordinary same-schema authoring
+compile failure may retain the last-known-good document. A second preflight
+then loads that exact document through Rust's production parser without
+claiming a socket or renderer. Missing, malformed, or schema-2 runtime state
+exits 78 and stops once, so Rust never launches against the predecessor schema;
+a valid schema-4 last-known-good runtime can still keep wallpaper service
+available while the authoring fault is repaired.
 
 ### Root and capture preservation
 
@@ -141,6 +179,33 @@ or runtime file is moved out of its public name, the exact predecessor remains
 in a private durable claim and the next run recovers or advances only that
 journaled generation.
 
+Noctalia normally replaces its own `settings.toml` whenever the wallpaper or
+theme evolves. Resume first accepts the original exact generation, then safely
+re-reads a replacement and considers only the authority this migration
+consumes: `[wallpaper].directory`. A replacement with the same exact original
+root is accepted without modifying any of Noctalia's new theme, default,
+last-wallpaper, or monitor paths. A missing/malformed file or a different root
+fails closed with guidance to restore the journaled root before retrying.
+
+If status reports that Noctalia's wallpaper directory changed, its diagnostic
+names both the journal-authorized original root and the current Noctalia root.
+This is a recoverable user decision, not permission to discard transaction
+files. Stop `wall-in-one.service`, use Noctalia to select the named original
+root again, confirm that `--deployed-upgrade-status` returns `prepared` or
+`in-progress`, and rerun `--prepare-deployed-upgrade`. Theme and per-monitor
+wallpaper fields may keep their newer values; only `[wallpaper].directory`
+must again name the journal-authorized root.
+
+There is deliberately no deployed-upgrade abort command in this release. A
+crash-safe abort would need a second durable rollback transaction: settings
+may already be in a journal-authorized claim, capture sidecars may live on a
+different filesystem, and an empty private claim directory is not deletion
+authority. If the original root should not be restored, leave the journal,
+claims, stage, manifest, and sidecars intact for diagnosis. With a pre-upgrade
+backup, the supported alternative is to stop and disable the service and
+restore the config directory, state directory, Automatic Stills directory,
+Noctalia settings, app revision, and companion revision together as one unit.
+
 Empty or unrelated claim directories are never deleted, trusted, or reused.
 After a replacement is durable, predecessor claims deliberately remain inert:
 they are crash evidence, not user-facing backups, and should not be renamed or
@@ -160,13 +225,15 @@ app and companion revisions. Do not combine individual files from before and
 after cutover, delete a resumable journal, or treat a private claim as the
 rollback interface. There is no automatic schema-4-to-schema-2 conversion.
 
-Release order is app first, companion second. Publish and make the compatible
-app available, then immediately publish/promote the reviewed companion. For a
-live machine, install the app, inspect or prepare the deployed upgrade, let GUI
-startup or `--write-config` complete schema-4 cutover, and only then
-refresh/materialize the strict companion and restart the service. Publishing
-or loading the strict companion first can strand users whose public app still
-emits the older status contract.
+The app and companion remain separate release artifacts. This v0.1.2
+follow-up keeps the exact v0.1.1 companion contract and contains no companion
+source change. If a machine still needs that companion update, make the
+compatible app available first. On the live machine, install the app, inspect
+the deployed upgrade, let the packaged startup preflight, GUI startup,
+`--write-config`, or the stopped-service explicit command complete schema-4
+cutover, and only then refresh/materialize the strict companion and restart
+the service. Loading that companion first can strand users whose public app
+still emits the older status contract.
 
 ## Importing the retired Noctalia Luau plugin
 
@@ -209,9 +276,11 @@ which one should win.
 
 Headless startup fails closed while any of those decisions is unresolved. This
 prevents a login-time `--write-config` from publishing empty defaults before a
-person has seen the prompt. The packaged user unit prefixes that compilation
-with `-`, so an already valid last-known-good `runtime.toml` can still start;
-the guard does not erase it.
+person has seen the prompt. The packaged migration-aware Python preflight
+propagates that boundary and prevents Rust startup. Only an ordinary
+current-profile compiler failure may retain a last-known-good candidate, and
+the following exact Rust preflight admits it only when it is a consumable
+schema-4 document.
 
 The same boundary is available without GTK:
 
@@ -389,9 +458,10 @@ stores to legacy `config.json`.
 The current application is self-contained: the GUI works without the
 companion, and the packaged `wall-in-one-health-sync.timer` persists Rust crash
 quarantines 30 seconds after activation and then 30 seconds after each prior
-one-shot finishes. When the plugin is used, this app revision is intended only
-for a coordinated release with the reviewed companion update. Thin companion
-revisions through `a5e23c9` predate parts of the present runtime contract:
+one-shot finishes. When the plugin is used, the present runtime contract
+requires the reviewed companion revision pinned below. The v0.1.2
+migration-resume and search fixes do not change its source or protocol. Thin
+companion revisions through `a5e23c9` predate parts of the contract:
 
 - they publish the top-level compatibility state but do not require status
   schema 2 or expose the authoritative independent-display route fields;
@@ -408,11 +478,11 @@ The matching companion revision requires status version 2, enqueues one health
 sync for a visible non-durable taboo record, and raises the callback deadline
 to 55 seconds (below Noctalia's 60-second clamp and above the app's 45-second
 bound). Do not combine this application release with a companion revision
-through `a5e23c9`. This tree's `flake.lock` already pins the reviewed candidate
-`a17eb70f653afb4cf5c04afc912cdca8b14ac06e` on its non-default release branch.
-Users of an older companion should prefer the packaged user service/timer and
-treat the app's status UI as authoritative. The compatible app is published
-first, followed immediately by promotion and tagging of companion `0.1.1`;
-publishing the strict companion first would temporarily break users whose app
+through `a5e23c9`. This tree's `flake.lock` already pins the reviewed revision
+`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. Users of an older companion
+should prefer the packaged user service/timer and treat the app's status UI as
+authoritative. When that exact companion still needs an update, publish the
+compatible app first and refresh the companion only after schema-4 cutover;
+loading the strict companion first would temporarily break users whose app
 still emits the older status contract. This repository neither publishes nor
 silently modifies the companion.

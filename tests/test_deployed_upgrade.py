@@ -502,14 +502,47 @@ def test_video_source_with_symlink_ancestor_is_rejected(
     assert "pin" in found.detail or "symbolic" in found.detail
 
 
-def test_faulted_current_store_blocks_ready(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("kind", "label"),
+    (("pairings", "Pairings"), ("playlists", "Playlists"), ("schedules", "Schedules")),
+)
+def test_faulted_current_authoring_store_blocks_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    label: str,
 ) -> None:
     _profile(tmp_path, monkeypatch)
-    playlists.state_path().write_text("not json", encoding="utf-8")
+    targets = {
+        "pairings": pairings.state_path(),
+        "playlists": playlists.state_path(),
+        "schedules": schedules.state_path(),
+    }
+    target = targets[kind]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("not json", encoding="utf-8")
     found = deployed_upgrade.probe()
     assert found.status == "corrupt"
-    assert "Playlists" in found.detail
+    assert label in found.detail
+    assert not deployed_upgrade.journal_path().exists()
+
+
+def test_malformed_predecessor_source_sidecar_blocks_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _profile(tmp_path, monkeypatch)
+    source, _capture = profile.entries[0]
+    sidecar = source.with_name(source.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text("not json", encoding="utf-8")
+    before = paths.runtime_config_path().read_bytes()
+
+    found = deployed_upgrade.probe()
+
+    assert found.status == "corrupt"
+    assert sidecar.name in found.detail
+    assert sidecar.read_text(encoding="utf-8") == "not json"
+    assert paths.runtime_config_path().read_bytes() == before
+    assert not deployed_upgrade.journal_path().exists()
 
 
 @pytest.mark.parametrize(

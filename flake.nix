@@ -56,7 +56,7 @@
 
         wall-in-one-service = pkgs.rustPlatform.buildRustPackage {
           pname = "wall-in-one-service";
-          version = "0.1.1";
+          version = "0.1.2";
           src = pkgs.lib.fileset.toSource {
             root = ./service;
             fileset = pkgs.lib.fileset.unions [
@@ -94,7 +94,7 @@
 
         wall-in-one = python.pkgs.buildPythonApplication {
           pname = "wall-in-one";
-          version = "0.1.1";
+          version = "0.1.2";
           pyproject = true;
           src = ./.;
 
@@ -157,8 +157,10 @@
             substituteInPlace $out/share/applications/${applicationId}.desktop \
               --replace-fail "Exec=wall-in-one" "Exec=$out/bin/wall-in-one"
             substituteInPlace $out/share/systemd/user/wall-in-one.service \
-              --replace-fail "ExecStartPre=-wall-in-one" \
-              "ExecStartPre=-$out/bin/wall-in-one" \
+              --replace-fail "ExecStartPre=wall-in-one --service-startup-prepare" \
+              "ExecStartPre=$out/bin/wall-in-one --service-startup-prepare" \
+              --replace-fail "ExecStartPre=wall-in-one-service --check-config" \
+              "ExecStartPre=$out/bin/wall-in-one-service --check-config" \
               --replace-fail "ExecStart=wall-in-one-service" \
               "ExecStart=$out/bin/wall-in-one-service" \
               --replace-fail "ExecStop=-timeout" \
@@ -393,8 +395,11 @@
                 unit=${wall-in-one}/share/systemd/user/wall-in-one.service
                 health=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.service
                 timer=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.timer
-                grep -F 'ExecStartPre=-${wall-in-one}/bin/wall-in-one --write-config' "$unit"
+                grep -F 'ExecStartPre=${wall-in-one}/bin/wall-in-one --service-startup-prepare' "$unit"
+                grep -F 'ExecStartPre=${wall-in-one}/bin/wall-in-one-service --check-config' "$unit"
                 grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service' "$unit"
+                grep -F 'Restart=on-abnormal' "$unit"
+                grep -F 'RestartForceExitStatus=1' "$unit"
                 grep -F 'RestartPreventExitStatus=78' "$unit"
                 grep -F 'ExecStop=-${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=0.1s 2s ${wall-in-one}/bin/wall-in-one --sync-runtime-health-on-stop' "$unit"
                 # Exercise the exact GNU timeout interval syntax used by the
@@ -421,7 +426,117 @@
                 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
                   "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
                 ${wall-in-one}/bin/wall-in-one --help >/dev/null
-                ${wall-in-one}/bin/wall-in-one --version | grep -F 'wall-in-one'
+                ${wall-in-one}/bin/wall-in-one --version \
+                  | grep -Fx 'wall-in-one ${wall-in-one.version}'
+                ${wall-in-one}/bin/wall-in-one-service --version \
+                  | grep -Fx 'wall-in-one-service ${wall-in-one-service.version}'
+                # The package wrapper adds site-packages after interpreter
+                # startup. Subinterpreters begin from the original path
+                # configuration, so exercise every isolated MotionBGS worker
+                # (and every listing mode) from the installed artifact under
+                # that exact late-path condition.
+                ${python.interpreter} -I -S - \
+                  ${wall-in-one}/${python.sitePackages} <<'PY'
+                import ast
+                import site
+                import sys
+                from pathlib import Path
+
+                site_packages = Path(sys.argv[1]).resolve()
+                site.addsitedir(str(site_packages))
+
+                from wall_in_one import backend
+                from wall_in_one.providers import backend_workers
+
+                package_file = Path(backend.__file__).resolve()
+                assert package_file.is_relative_to(site_packages), package_file
+
+                # Keep this inventory coupled to the installed smoke. A new
+                # backend.run/submit target in application code must be added
+                # to the smoke in the same change instead of silently losing
+                # late-site coverage.
+                isolated_workers = set()
+                package_root = site_packages / "wall_in_one"
+                for source in package_root.rglob("*.py"):
+                    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+                    for node in ast.walk(tree):
+                        if not isinstance(node, ast.Call) or not node.args:
+                            continue
+                        call = node.func
+                        if not (
+                            isinstance(call, ast.Attribute)
+                            and call.attr in {"run", "submit"}
+                            and isinstance(call.value, ast.Name)
+                            and call.value.id == "backend"
+                        ):
+                            continue
+                        target = node.args[0]
+                        assert (
+                            isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == "backend_workers"
+                        ), (source, node.lineno)
+                        isolated_workers.add(target.attr)
+
+                covered_workers = {"motionbgs_listing", "motionbgs_detail"}
+                assert isolated_workers == covered_workers, isolated_workers
+
+                markup = """
+                <!doctype html><html><head><title>1+ Live Wallpapers</title></head><body>
+                  <a href="/frog/" title="Frog Live Wallpaper 4K">
+                    <img src="https://motionbgs.com/media/preview/frog.jpg">
+                    <span class="ttl">Frog</span>
+                    <span class="frm">4K</span>
+                  </a>
+                </body></html>
+                """
+                routes = (
+                    ("latest", "", "", "https://motionbgs.com/"),
+                    ("4k", "", "", "https://motionbgs.com/4k/"),
+                    ("hd", "", "", "https://motionbgs.com/hd/"),
+                    ("genre", "", "nature", "https://motionbgs.com/tag:nature/"),
+                    ("search", "frog", "", "https://motionbgs.com/search?q=frog"),
+                )
+                detail_markup = """
+                <!doctype html><html><head>
+                  <title>Frog Live Wallpaper</title>
+                  <meta property="og:title" content="Frog Live Wallpaper">
+                  <meta property="og:image" content="https://motionbgs.com/media/42/frog.jpg">
+                  <meta property="og:video" content="https://motionbgs.com/media/42/frog.mp4">
+                </head><body>
+                  <a href="/dl/hd/42/">HD 1920x1080 (12.5 MB)</a>
+                  <a href="/dl/4k/42/">4K 3840x2160 (48.0 MB)</a>
+                  <script type="application/ld+json">{"duration":"PT10S"}</script>
+                </body></html>
+                """
+                try:
+                    for mode, query, genre, source_url in routes:
+                        result = backend_workers.value(
+                            backend.run(
+                                backend_workers.motionbgs_listing,
+                                markup,
+                                mode,
+                                query,
+                                genre,
+                                1,
+                                source_url,
+                                48,
+                            )
+                        )
+                        assert result.items[0].identifier == "frog"
+                    detail = backend_workers.value(
+                        backend.run(
+                            backend_workers.motionbgs_detail,
+                            detail_markup,
+                            "frog",
+                        )
+                    )
+                    assert detail.slug == "frog"
+                    assert detail.media_id == "42"
+                    assert [option.quality for option in detail.downloads] == ["4k", "hd"]
+                finally:
+                    backend.shutdown()
+                PY
                 touch $out
               '';
 

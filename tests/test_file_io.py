@@ -867,6 +867,41 @@ def test_recovery_finalizes_a_crash_after_exact_truncate_and_sync(
     assert not any(path.is_dir() for path in residues)
 
 
+def test_read_only_claim_inspection_never_centralises_a_consumed_tombstone(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"journaled generation")
+    expected = file_io.regular_file_fingerprint(source)
+    token = "1234567890abcdef1234567890abcdef"
+
+    assert _crash_during_discard(source, token, "after-truncate") == 72
+    directory = file_io.deletion_claim_directory(source, token)
+    claimed = directory / "entry"
+    before = claimed.stat()
+
+    assert (
+        file_io.recover_deletion_claim(
+            source,
+            expected_identity=expected[:2],
+            expected_fingerprint=expected,
+            operation_token=token,
+            read_only=True,
+        )
+        is None
+    )
+
+    after = claimed.stat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_atime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_atime_ns,
+    )
+    assert tuple(directory.iterdir()) == (claimed,)
+    assert not (tmp_path / file_io.RETAINED_ENTRY_DIRECTORY).exists()
+
+
 def test_atomic_move_rejects_directory_relocation_even_with_a_pin(tmp_path: Path) -> None:
     directory = tmp_path / "private"
     destination = tmp_path / "destination"

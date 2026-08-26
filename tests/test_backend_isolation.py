@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import operator
+import subprocess
+import sys
 from collections.abc import Iterator
 from concurrent import interpreters
+from pathlib import Path
 
 import pytest
 
@@ -90,3 +93,83 @@ def test_the_measured_listing_parser_really_completes_in_the_pool() -> None:
 
     assert len(parsed.items) == 36
     assert parsed.items[0].identifier == "frog-0"
+
+
+def test_a_late_added_package_path_is_reestablished_in_workers(tmp_path: Path) -> None:
+    """Match wrappers which add the application site directory after startup."""
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    script = """
+import site
+import sys
+
+site.addsitedir(sys.argv[1])
+
+from wall_in_one import backend
+from wall_in_one.providers import backend_workers
+
+markup = '''
+<!doctype html><html><head><title>1+ Live Wallpapers</title></head><body>
+  <a href="/frog/" title="Frog Live Wallpaper 4K">
+    <img src="https://motionbgs.com/media/preview/frog.jpg">
+    <span class="ttl">Frog</span>
+    <span class="frm">4K</span>
+  </a>
+</body></html>
+'''
+detail_markup = '''
+<!doctype html><html><head>
+  <title>Frog Live Wallpaper</title>
+  <meta property="og:title" content="Frog Live Wallpaper">
+  <meta property="og:image" content="https://motionbgs.com/media/42/frog.jpg">
+  <meta property="og:video" content="https://motionbgs.com/media/42/frog.mp4">
+</head><body>
+  <a href="/dl/hd/42/">HD 1920x1080 (12.5 MB)</a>
+  <a href="/dl/4k/42/">4K 3840x2160 (48.0 MB)</a>
+  <script type="application/ld+json">{"duration":"PT10S"}</script>
+</body></html>
+'''
+routes = (
+    ("latest", "", "", "https://motionbgs.com/"),
+    ("4k", "", "", "https://motionbgs.com/4k/"),
+    ("hd", "", "", "https://motionbgs.com/hd/"),
+    ("genre", "", "nature", "https://motionbgs.com/tag:nature/"),
+    ("search", "frog", "", "https://motionbgs.com/search?q=frog"),
+)
+try:
+    for mode, query, genre, source_url in routes:
+        result = backend_workers.value(
+            backend.run(
+                backend_workers.motionbgs_listing,
+                markup,
+                mode,
+                query,
+                genre,
+                1,
+                source_url,
+                48,
+            )
+        )
+        assert result.items[0].identifier == "frog"
+    detail = backend_workers.value(
+        backend.run(backend_workers.motionbgs_detail, detail_markup, "frog")
+    )
+    assert detail.slug == "frog"
+    assert detail.media_id == "42"
+    assert [option.quality for option in detail.downloads] == ["4k", "hd"]
+finally:
+    backend.shutdown()
+
+print("late package path reached every isolated MotionBGS worker")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", script, str(source_root)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "late package path reached every isolated MotionBGS worker"

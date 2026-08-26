@@ -18,6 +18,7 @@ overwriting a concurrent repair.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -36,6 +37,7 @@ from wall_in_one import (
     file_io,
     legacy_migration,
     paths,
+    predecessor_process,
     runtime_config,
 )
 from wall_in_one.library import (
@@ -969,6 +971,95 @@ def _completion_matches_journal(completion: _Completion, journal: _Journal) -> N
         )
 
 
+def _replacement_publication_state(
+    path: Path,
+    *,
+    old_fingerprint: file_io.FileFingerprint,
+    old_sha256: str,
+    target: bytes,
+    maximum: int,
+    token: str,
+    label: str,
+) -> Literal["old", "target", "claimed"]:
+    """Classify one replacement exactly as the mutating CAS would.
+
+    The status path must never restore a claim or publish a target, but it must
+    prove that the next mutating call has one of those safe moves available.
+    This mirrors :func:`_install_exact_replacement` without changing a name.
+    """
+    with _parent_access(path, label=label, missing_ok=False) as retained:
+        assert retained is not None
+        _context, access = retained
+        current = _read_private_access(path, access, maximum, label=label)
+        if current == target:
+            return "target"
+
+        claim, available_token = _recover_claim_slots(
+            access,
+            path,
+            old_fingerprint=old_fingerprint,
+            base_token=token,
+            label=label,
+            read_only=True,
+        )
+        try:
+            if claim is not None and current is not None:
+                raise TransactionError(
+                    f"old {label} is retained in its durable claim but another public file exists",
+                    status="conflict",
+                )
+            if current is None:
+                if claim is None:
+                    raise TransactionError(
+                        f"{label} {path} is missing without its journaled old claim",
+                        status="conflict",
+                    )
+                return "claimed"
+            if available_token is None:
+                raise TransactionError(
+                    f"all {MAX_CLAIM_TOKEN_ATTEMPTS} durable claim slots for {label} are occupied",
+                    status="conflict",
+                )
+            pin, _fingerprint = _pin_replacement_source(
+                path,
+                access,
+                old_fingerprint=old_fingerprint,
+                old_sha256=old_sha256,
+                maximum=maximum,
+                label=label,
+            )
+            pin.close()
+            return "old"
+        finally:
+            if claim is not None:
+                claim.close()
+
+
+def _publication_states(
+    journal: _Journal,
+) -> tuple[Literal["old", "target", "claimed"], Literal["old", "target", "claimed"]]:
+    """Validate both public CAS destinations for every journal phase."""
+    settings = _replacement_publication_state(
+        journal.settings_path,
+        old_fingerprint=journal.settings_old_fingerprint,
+        old_sha256=journal.settings_old_sha256,
+        target=journal.settings_target,
+        maximum=config.MAX_SETTINGS_BYTES,
+        token=journal.settings_token,
+        label="settings",
+    )
+    runtime = _replacement_publication_state(
+        journal.runtime_path,
+        old_fingerprint=journal.runtime_old_fingerprint,
+        old_sha256=journal.runtime_old_sha256,
+        target=journal.runtime_target,
+        maximum=runtime_config.MAX_RUNTIME_CONFIG_BYTES,
+        token=journal.runtime_token,
+        label="runtime configuration",
+    )
+    return settings, runtime
+
+
 def probe_future() -> deployed_upgrade.Probe | None:
     """Strictly classify reserved transaction artifacts without writing."""
     try:
@@ -1063,7 +1154,15 @@ def probe_future() -> deployed_upgrade.Probe | None:
             return None
 
         journal, _journal_raw = journal_record
+        # A prepared status is a promise that ensure() can still make forward
+        # progress, not merely that a journal and stage have familiar bytes.
+        # Revalidate the same bounded evidence resume consumes so a reboot
+        # cannot turn an externally changed predecessor profile into a false
+        # green "prepared" result.
+        _validate_static_evidence(journal)
         _validate_authoring_evidence(journal)
+        _validate_capture_sidecars(journal)
+        settings_state, runtime_state = _publication_states(journal)
         if authority_raw is not None:
             if authority_raw != journal.authority_bytes:
                 raise TransactionError(
@@ -1082,14 +1181,48 @@ def probe_future() -> deployed_upgrade.Probe | None:
                     "staged runtime does not match the dry-rendered journal target"
                 )
             _validate_staged_document(stage_raw, journal)
+            try:
+                _observe_live_predecessor_writers()
+            except TransactionError as error:
+                if error.status != "retry":
+                    raise
+                return deployed_upgrade.Probe(
+                    "in-progress",
+                    f"the deployed profile upgrade is prepared but blocked: {error}",
+                    journal.counts,
+                )
+            if runtime_state == "target":
+                return deployed_upgrade.Probe(
+                    "in-progress",
+                    "the schema-4 runtime cutover committed and its completion marker is "
+                    "still pending",
+                    journal.counts,
+                )
+            if settings_state != "target" or runtime_state == "claimed":
+                return deployed_upgrade.Probe(
+                    "in-progress",
+                    "the deployed profile upgrade has an exact predecessor claim which "
+                    "ensure() must recover before cutover",
+                    journal.counts,
+                )
             return deployed_upgrade.Probe(
                 "prepared",
                 f"the deployed profile upgrade is prepared for root {journal.root}",
                 journal.counts,
             )
+        try:
+            _observe_live_predecessor_writers()
+        except TransactionError as error:
+            if error.status != "retry":
+                raise
+            return deployed_upgrade.Probe(
+                "in-progress",
+                f"the deployed profile upgrade journal is blocked: {error}",
+                journal.counts,
+            )
         return deployed_upgrade.Probe(
             "in-progress",
-            f"the deployed profile upgrade journal for {journal.root} is resumable",
+            f"the deployed profile upgrade journal for {journal.root} awaits resume validation",
             journal.counts,
         )
     except adopted.AdoptionError as error:
@@ -1105,7 +1238,41 @@ def probe_future() -> deployed_upgrade.Probe | None:
 
 def probe() -> deployed_upgrade.Probe:
     """Read-only exact status for fresh, predecessor, current, and future state."""
-    return deployed_upgrade.probe()
+    found = deployed_upgrade.probe()
+    if found.status != "ready":
+        return found
+    try:
+        # ``deployed_upgrade.probe`` proves the predecessor snapshot but does
+        # not expose its in-memory plan. Rebuild that bounded, read-only plan so
+        # status can derive the exact durable-claim tokens which _begin_locked
+        # will consume. A pre-existing slot is a persisted conflict, not a
+        # writer-dependent reason to report a false-green ``ready``.
+        journal = _journal_from_plan(deployed_upgrade.build_plan())
+        _unjournaled_claim_slots_must_be_clear(journal)
+    except deployed_upgrade.UpgradeError as error:
+        return deployed_upgrade.Probe(error.status, str(error))
+    except TransactionError as error:
+        status: deployed_upgrade.FailureStatus = (
+            "conflict" if error.status == "conflict" else "corrupt"
+        )
+        return deployed_upgrade.Probe(status, str(error), found.counts)
+    except (OSError, ValueError) as error:
+        return deployed_upgrade.Probe(
+            "corrupt",
+            f"cannot safely inspect deployed-upgrade claim slots: {error}",
+            found.counts,
+        )
+    try:
+        _observe_live_predecessor_writers()
+    except TransactionError as error:
+        if error.status != "retry":
+            raise
+        return deployed_upgrade.Probe(
+            "in-progress",
+            f"the exact predecessor profile is eligible but blocked: {error}",
+            found.counts,
+        )
+    return found
 
 
 def _authoring_paths() -> tuple[Path, ...]:
@@ -1125,10 +1292,98 @@ def _authoring_paths() -> tuple[Path, ...]:
     )
 
 
+def _writer_lock_path(socket_path: Path) -> Path:
+    return socket_path.with_name(f"{socket_path.name}.lock")
+
+
+@contextmanager
+def _writer_singleton_lock(socket_path: Path, *, owner: str) -> Iterator[None]:
+    """Retain the singleton guard understood by current Python/Rust writers."""
+    lock_path = _writer_lock_path(socket_path)
+    descriptor: int | None = None
+    locked = False
+    try:
+        paths.ensure_directory(lock_path.parent)
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        opened = os.fstat(descriptor)
+        named = lock_path.lstat()
+        identity = (opened.st_dev, opened.st_ino)
+        if not (
+            stat.S_ISREG(opened.st_mode)
+            and stat.S_ISREG(named.st_mode)
+            and opened.st_uid == os.getuid()
+            and named.st_uid == os.getuid()
+            and opened.st_nlink == 1
+            and named.st_nlink == 1
+            and (named.st_dev, named.st_ino) == identity
+        ):
+            raise TransactionError(
+                f"cannot trust the {owner} singleton guard {lock_path}", status="retry"
+            )
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError:
+            raise TransactionError(
+                f"a Wall-in-One {owner} process still owns {lock_path}; stop it and retry",
+                status="retry",
+            ) from None
+        secured = os.fstat(descriptor)
+        renamed = lock_path.lstat()
+        if not (
+            stat.S_ISREG(secured.st_mode)
+            and stat.S_ISREG(renamed.st_mode)
+            and secured.st_uid == os.getuid()
+            and renamed.st_uid == os.getuid()
+            and secured.st_nlink == 1
+            and renamed.st_nlink == 1
+            and stat.S_IMODE(secured.st_mode) == 0o600
+            and stat.S_IMODE(renamed.st_mode) == 0o600
+            and (secured.st_dev, secured.st_ino) == identity
+            and (renamed.st_dev, renamed.st_ino) == identity
+        ):
+            raise TransactionError(
+                f"the {owner} singleton guard {lock_path} changed while being claimed",
+                status="retry",
+            )
+        yield
+    except TransactionError:
+        raise
+    except OSError as error:
+        raise TransactionError(
+            f"cannot acquire the {owner} singleton guard {lock_path}: {error}",
+            status="retry",
+        ) from error
+    finally:
+        if descriptor is not None:
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
 @contextmanager
 def _transaction_locks() -> Iterator[None]:
     stack = ExitStack()
     try:
+        # Current Python and Rust processes take these before binding their
+        # sockets and retain them for life. Claim both before the compiler and
+        # Store locks so a writer cannot appear between a socket probe and
+        # cutover. The exact deployed predecessor predates these locks, so its
+        # process/socket checks remain a separate compatibility boundary.
+        stack.enter_context(_writer_singleton_lock(paths.socket_path(), owner="authoring"))
+        stack.enter_context(
+            _writer_singleton_lock(
+                paths.runtime_socket_path(),
+                owner="wallpaper runtime",
+            )
+        )
         # Every normal authoring writer uses profile -> compiler -> Store.
         # Keep the same global order so startup migration cannot deadlock a
         # concurrent health/config writer while waiting for its Store lock.
@@ -1149,6 +1404,9 @@ def _transaction_locks() -> Iterator[None]:
                     process_gate=False,
                 )
             )
+    except TransactionError:
+        stack.close()
+        raise
     except (OSError, runtime_config.RuntimeConfigError) as error:
         stack.close()
         raise TransactionError(
@@ -1158,8 +1416,8 @@ def _transaction_locks() -> Iterator[None]:
         yield
 
 
-def _refuse_live_authoring_writer() -> None:
-    target = paths.socket_path()
+def _refuse_live_socket(target: Path, *, owner: str) -> None:
+    """Refuse a socket which proves a predecessor writer is still running."""
     status = _inspect(target)
     if status is None:
         return
@@ -1176,20 +1434,55 @@ def _refuse_live_authoring_writer() -> None:
             return
         except TimeoutError as error:
             raise TransactionError(
-                f"cannot prove whether the authoring socket {target} has a live writer; retry",
+                f"cannot prove whether the {owner} socket {target} has a live writer; retry",
                 status="retry",
             ) from error
         except OSError as error:
             raise TransactionError(
-                f"cannot safely probe authoring socket {target}: {error}", status="retry"
+                f"cannot safely probe {owner} socket {target}: {error}", status="retry"
             ) from error
         raise TransactionError(
-            "a Wall-in-One Python authoring process is still running; close its window or "
-            "compatibility service before preparing the deployed-profile upgrade",
+            f"a Wall-in-One {owner} process is still running; stop it before preparing or "
+            "resuming the deployed-profile upgrade",
             status="retry",
         )
     finally:
         probe_socket.close()
+
+
+def _refuse_live_predecessor_sockets() -> None:
+    _refuse_live_socket(paths.socket_path(), owner="authoring")
+    _refuse_live_socket(paths.runtime_socket_path(), owner="wallpaper runtime")
+
+
+def _refuse_live_predecessor_process() -> None:
+    """Detect the lock-unaware deployed Rust process before it binds."""
+    try:
+        predecessor_process.refuse_live_predecessor_runtime()
+    except predecessor_process.PredecessorProcessError as error:
+        raise TransactionError(str(error), status="retry") from error
+
+
+def _observe_live_predecessor_writers() -> None:
+    """Classify writer activity without connecting or attempting a lock.
+
+    Status is observational: even a transient successful ``flock`` could make
+    a concurrently starting writer fail its own nonblocking singleton claim,
+    while connecting to a listening authoring socket can enqueue real work.
+    Procfs exposes the held-lock and bound-socket facts without either side
+    effect. The separate process walk retains coverage for the deployed Rust
+    predecessor before it binds its endpoint.
+    """
+    try:
+        predecessor_process.refuse_live_writer_status()
+        predecessor_process.refuse_live_predecessor_runtime()
+    except predecessor_process.PredecessorProcessError as error:
+        raise TransactionError(str(error), status="retry") from error
+
+
+def _refuse_lock_unaware_predecessor() -> None:
+    _refuse_live_predecessor_sockets()
+    _refuse_live_predecessor_process()
 
 
 def _read_expected(
@@ -1263,14 +1556,63 @@ def _read_expected_access(
         pin.close()
 
 
+def _validate_noctalia_authority(journal: _Journal) -> None:
+    """Accept ordinary Noctalia evolution only when its root stays identical.
+
+    Noctalia replaces ``settings.toml`` when a wallpaper or theme changes, so
+    an inode/hash pin is intentionally too strong for a transaction that may
+    cross a reboot.  The deployed upgrade consumes one semantic fact from that
+    document: the predecessor's effective wallpaper directory.  Preserve the
+    exact fast path, then permit a safely re-read replacement only when that
+    directory is still the journaled root.  Nothing is rewritten or rebased on
+    disk, and a changed/malformed root remains a fail-closed user decision.
+    """
+    try:
+        _read_expected(
+            journal.noctalia_path,
+            journal.noctalia_fingerprint,
+            journal.noctalia_sha256,
+            deployed_upgrade.MAX_NOCTALIA_BYTES,
+            label="Noctalia settings",
+        )
+        return
+    except TransactionError as exact_error:
+        try:
+            current = _read_private(
+                journal.noctalia_path,
+                deployed_upgrade.MAX_NOCTALIA_BYTES,
+                label="current Noctalia settings after journal drift",
+            )
+        except TransactionError as error:
+            raise TransactionError(
+                "journaled Noctalia settings changed and the replacement cannot be safely "
+                f"validated: {error}"
+            ) from exact_error
+        if current is None:
+            raise TransactionError(
+                "journaled Noctalia settings disappeared; restore a private settings.toml "
+                f"whose [wallpaper].directory is {journal.root} and retry",
+                status="conflict",
+            ) from exact_error
+        try:
+            current_root = deployed_upgrade._noctalia_root(current, journal.noctalia_path)
+        except deployed_upgrade.UpgradeError as error:
+            raise TransactionError(
+                "journaled Noctalia settings changed and the replacement no longer proves its "
+                f"wallpaper directory: {error}; restore [wallpaper].directory to "
+                f"{journal.root} and retry"
+            ) from exact_error
+        if current_root != journal.root:
+            raise TransactionError(
+                "Noctalia's wallpaper directory changed during the deployed-profile upgrade "
+                f"from {journal.root} to {current_root}; restore it to {journal.root} and retry, "
+                "or keep the preserved transaction for explicit recovery",
+                status="conflict",
+            ) from exact_error
+
+
 def _validate_static_evidence(journal: _Journal) -> None:
-    _read_expected(
-        journal.noctalia_path,
-        journal.noctalia_fingerprint,
-        journal.noctalia_sha256,
-        deployed_upgrade.MAX_NOCTALIA_BYTES,
-        label="Noctalia settings",
-    )
+    _validate_noctalia_authority(journal)
     _read_expected(
         journal.marker_path,
         journal.marker_fingerprint,
@@ -1339,7 +1681,8 @@ def _validate_authoring_evidence(journal: _Journal) -> None:
         )
 
 
-def _publish_capture_sidecars(journal: _Journal) -> bool:
+def _capture_sidecars(journal: _Journal, *, publish: bool) -> bool:
+    """Validate every captured generation and optionally publish its sidecar."""
     changed = False
     try:
         with (
@@ -1400,16 +1743,30 @@ def _publish_capture_sidecars(journal: _Journal) -> bool:
 
             for authority in journal.authorities:
                 sidecar = authority.sidecar_path
-                changed = (
-                    _write_no_replace(
+                expected = adopted.render_sidecar(authority, journal.adoption_id)
+                if publish:
+                    changed = (
+                        _write_no_replace(
+                            sidecar,
+                            expected,
+                            adopted.MAX_SIDECAR_BYTES,
+                            label=f"capture authority sidecar {sidecar.name}",
+                            create_parent=False,
+                        )
+                        or changed
+                    )
+                else:
+                    current = _read_private_access(
                         sidecar,
-                        adopted.render_sidecar(authority, journal.adoption_id),
+                        directory.child(sidecar.name),
                         adopted.MAX_SIDECAR_BYTES,
                         label=f"capture authority sidecar {sidecar.name}",
-                        create_parent=False,
                     )
-                    or changed
-                )
+                    if current is not None and current != expected:
+                        raise TransactionError(
+                            f"capture authority sidecar {sidecar} does not match the journal",
+                            status="conflict",
+                        )
             directory.verify_public()
             for pin, fingerprint, label in retained:
                 if pin.fingerprint != fingerprint:
@@ -1422,6 +1779,15 @@ def _publish_capture_sidecars(journal: _Journal) -> bool:
         raise TransactionError(f"cannot publish capture authority safely: {error}") from error
 
     return changed
+
+
+def _validate_capture_sidecars(journal: _Journal) -> None:
+    """Read-only half of sidecar publication used by status/resume parity."""
+    _capture_sidecars(journal, publish=False)
+
+
+def _publish_capture_sidecars(journal: _Journal) -> bool:
+    return _capture_sidecars(journal, publish=True)
 
 
 def _publish_authority_manifest(journal: _Journal) -> bool:
@@ -1473,6 +1839,7 @@ def _recover_claim_slots(
     old_fingerprint: file_io.FileFingerprint,
     base_token: str,
     label: str,
+    read_only: bool = False,
 ) -> tuple[file_io.ClaimedPath | None, str | None]:
     """Recover one exact claim and find the first never-allocated slot.
 
@@ -1498,6 +1865,7 @@ def _recover_claim_slots(
                     expected_identity=old_fingerprint[:2],
                     expected_fingerprint=old_fingerprint,
                     operation_token=token,
+                    read_only=read_only,
                 )
             except (OSError, ValueError) as error:
                 raise TransactionError(f"cannot recover old {label} claim: {error}") from error
@@ -1731,6 +2099,7 @@ def _validate_staged_document(raw: bytes, journal: _Journal) -> None:
 
 
 def _claim_directory_must_be_clear(path: Path, token: str, *, label: str) -> None:
+    """Observe every bounded replay slot without recovering or changing it."""
     with _parent_access(path, label=label, missing_ok=False) as retained:
         assert retained is not None
         _context, access = retained
@@ -1739,22 +2108,39 @@ def _claim_directory_must_be_clear(path: Path, token: str, *, label: str) -> Non
             access_claim = _claim_path(access, candidate)
             if _inspect(access_claim) is not None:
                 raise TransactionError(
-                    f"reserved {label} claim directory already exists before migration: "
-                    f"{logical_claim}",
+                    f"reserved {label} claim path already exists before migration: {logical_claim}",
                     status="conflict",
                 )
 
 
+def _unjournaled_claim_slots_must_be_clear(journal: _Journal) -> None:
+    """Reject persisted CAS residue before a journal grants it authority.
+
+    This inspector is strictly read-only: it retains each public parent and
+    uses ``lstat``-style observations for all bounded token-derived names. It
+    never calls claim recovery, creates a slot, or centralises a tombstone.
+    """
+    _claim_directory_must_be_clear(
+        journal.settings_path,
+        journal.settings_token,
+        label="settings",
+    )
+    _claim_directory_must_be_clear(
+        journal.runtime_path,
+        journal.runtime_token,
+        label="runtime",
+    )
+
+
 def _begin_locked() -> tuple[_Journal, bytes, bool]:
-    _refuse_live_authoring_writer()
+    _refuse_lock_unaware_predecessor()
     plan = deployed_upgrade.build_plan()
     journal = _journal_from_plan(plan)
     _validate_staged_document(journal.runtime_target, journal)
     raw = _journal_bytes(journal)
     if len(raw) > MAX_JOURNAL_BYTES:
         raise TransactionError("deployed-upgrade journal exceeds its byte bound")
-    _claim_directory_must_be_clear(journal.settings_path, journal.settings_token, label="settings")
-    _claim_directory_must_be_clear(journal.runtime_path, journal.runtime_token, label="runtime")
+    _unjournaled_claim_slots_must_be_clear(journal)
     changed = _write_no_replace(
         deployed_upgrade.journal_path(),
         raw,
@@ -1765,7 +2151,7 @@ def _begin_locked() -> tuple[_Journal, bytes, bool]:
 
 
 def _prepare_locked(journal: _Journal, journal_raw: bytes) -> tuple[bytes, bool]:
-    _refuse_live_authoring_writer()
+    _refuse_lock_unaware_predecessor()
     _validate_static_evidence(journal)
     _validate_authoring_evidence(journal)
     changed = _publish_capture_sidecars(journal)
@@ -1921,6 +2307,8 @@ def _discard_exact_artifact(path: Path, contents: bytes, maximum: int, *, label:
 
 def _validate_cutover_snapshot(journal: _Journal, journal_raw: bytes, stage: bytes) -> None:
     """Re-prove every publication input immediately before completion."""
+    _refuse_lock_unaware_predecessor()
+    _validate_static_evidence(journal)
     if stage != journal.runtime_target or _sha256(stage) != journal.runtime_target_sha256:
         raise TransactionError("cutover runtime differs from the dry-rendered journal target")
     current_journal = _read_private(
@@ -1949,7 +2337,7 @@ def _validate_cutover_snapshot(journal: _Journal, journal_raw: bytes, stage: byt
         raise TransactionError("migrated settings changed before cutover")
     _require_exact_authority(journal)
     _validate_authoring_evidence(journal)
-    _validate_authoring_evidence(journal)
+    _validate_capture_sidecars(journal)
 
 
 def _validate_published_completion(
@@ -2130,9 +2518,14 @@ def _ensure_locked(*, cutover: bool) -> Outcome:
     journal_record = _read_journal()
     changed = False
     if journal_record is None:
-        if found.status != "ready":
+        # Public status may classify an otherwise-ready predecessor as blocked
+        # by a live lock-unaware daemon. Once the transaction locks are held,
+        # re-read the persisted profile shape and let _begin_locked perform the
+        # immediate process/socket proof which either advances or raises retry.
+        baseline = deployed_upgrade.probe()
+        if baseline.status != "ready":
             raise TransactionError(
-                f"deployed-upgrade status {found.status} has no resumable journal"
+                f"deployed-upgrade status {baseline.status} has no resumable journal"
             )
         journal, journal_raw, changed = _begin_locked()
     else:
@@ -2168,12 +2561,12 @@ def _ensure_locked(*, cutover: bool) -> Outcome:
 def ensure(*, cutover: bool = True) -> Outcome:
     """Automatically migrate/resume exact predecessor state, or do nothing.
 
-    ``cutover=False`` is the release-stage operation: settings and capture
-    authority are ready and schema 4 is privately validated while the public
-    schema-2 runtime remains byte-exact.  ``cutover=True`` additionally claims
-    that exact old runtime, installs the prepared bytes, and records completion.
-    Fresh and ordinary current profiles are intentionally unchanged, including
-    their XDG trees: the first probe occurs before any persistent lock exists.
+    ``cutover=False`` remains only as an internal compatibility/test seam for
+    the v0.1.1 private-prepared boundary. Supported public and startup callers
+    use the default: claim the exact old runtime, install the validated schema
+    4 bytes, and record completion in one bounded invocation. Fresh and
+    ordinary current profiles are intentionally unchanged, including their XDG
+    trees: the first probe occurs before any persistent lock exists.
     """
     initial = probe()
     if initial.status == "absent":

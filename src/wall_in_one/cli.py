@@ -10,6 +10,8 @@ Six modes:
 * ``--write-config`` -- automatically complete a proven deployed-app upgrade,
   then compile authoring state for Rust without importing GTK or opening a
   window
+* ``--service-startup-prepare`` -- the packaged service's migration-aware
+  compiler preflight, with last-known-good fallback left to Rust validation
 * ``--sync-runtime-health`` -- persist Rust's bounded failure inventory through
   the app-owned authoring/config path, also without GTK
 * maintenance flags such as ``--install-theme-template`` and the explicit
@@ -121,6 +123,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="compile the resolved runtime config without opening the GUI",
     )
     parser.add_argument(
+        "--service-startup-prepare",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--sync-runtime-health",
         action="store_true",
         help="persist newly reported runtime wallpaper failures without opening the GUI",
@@ -152,7 +159,7 @@ def _build_parser() -> argparse.ArgumentParser:
     deployed.add_argument(
         "--prepare-deployed-upgrade",
         action="store_true",
-        help="stage and validate schema 4 while leaving the public schema-2 runtime intact",
+        help="complete and cut over an exact deployed profile to schema 4",
     )
 
     maintenance = parser.add_argument_group("Noctalia integration")
@@ -295,7 +302,7 @@ def _deployed_upgrade_error(error: Exception) -> int:
 
 
 def _run_deployed_upgrade(options: argparse.Namespace) -> int | None:
-    """Handle the read-only status and release-stage migration commands."""
+    """Handle read-only status and the explicit bounded migration command."""
     from wall_in_one import deployed_upgrade_transaction, legacy_migration
 
     if options.deployed_upgrade_status:
@@ -313,7 +320,7 @@ def _run_deployed_upgrade(options: argparse.Namespace) -> int | None:
     if options.prepare_deployed_upgrade:
         try:
             with legacy_migration.profile_transaction():
-                outcome = deployed_upgrade_transaction.ensure(cutover=False)
+                outcome = deployed_upgrade_transaction.ensure()
         except deployed_upgrade_transaction.TransactionError as error:
             return _deployed_upgrade_error(error)
         except legacy_migration.MigrationError as error:
@@ -390,6 +397,29 @@ def _write_runtime_config() -> int:
     state = "wrote" if changed else "already current"
     print(f"{state}: {paths.runtime_config_path()}")
     return 0
+
+
+def _prepare_service_start() -> int:
+    """Cross migration boundaries, then publish or retain a runtime candidate.
+
+    Migration and legacy-boundary errors keep their actionable non-zero exit.
+    Only an ordinary authoring/compiler failure is softened: the next systemd
+    preflight asks Rust itself whether the untouched last-known-good document
+    is safe to consume.
+    """
+
+    def publish_or_retain() -> int:
+        result = _write_runtime_config()
+        if result != 1:
+            return result
+        print(
+            "warning: current authoring could not be compiled; validating the "
+            "last-known-good runtime before service start",
+            file=sys.stderr,
+        )
+        return 0
+
+    return _run_unattended_writer(publish_or_retain)
 
 
 def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
@@ -620,6 +650,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if options.write_config:
         return _run_unattended_writer(_write_runtime_config)
+
+    if options.service_startup_prepare:
+        return _prepare_service_start()
 
     if options.sync_runtime_health:
         return _run_unattended_writer(_sync_runtime_health)

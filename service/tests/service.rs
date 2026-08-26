@@ -325,6 +325,56 @@ fn startup_config_load_failures_use_ex_config_without_claiming_the_socket() {
 }
 
 #[test]
+fn config_check_uses_the_production_loader_without_claiming_runtime() {
+    let root = directory("config-check");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    fs::write(
+        &config_path,
+        config(Path::new("/bin/false"), Path::new("/bin/false"), false),
+    )
+    .unwrap();
+
+    let valid = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    assert!(!socket.exists(), "config check claimed the runtime socket");
+
+    let old_schema = fs::read_to_string(&config_path).unwrap().replacen(
+        "schema_version = 4",
+        "schema_version = 2",
+        1,
+    );
+    fs::write(&config_path, old_schema).unwrap();
+    let invalid = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(78));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("expected 4"));
+    assert!(
+        !socket.exists(),
+        "failed config check claimed the runtime socket"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn explicit_reload_is_not_repeated_by_the_file_watcher() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("single-reload");

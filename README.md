@@ -62,20 +62,19 @@ the wallpaper logic lives there.
 The plugin is optional. This app is a complete wallpaper manager on its own;
 the plugin exists so the bar can drive it without opening the window.
 
-This app revision is intended only for a coordinated release with the reviewed
-companion update. Companion revisions through `a5e23c9` do not require status
+Companion revisions through `a5e23c9` do not require status
 version 2 or expose the authoritative independent-route fields, their
 direct-runtime fallback does not persist a newly observed Borked item, and
 their eight-second callback deadline is shorter than Wall-in-One's legitimate
 45-second action bound. The matching companion requires status version 2,
 requests the health hand-off after a non-durable crash finding, and allows 55
 seconds for the bounded action. This tree's `flake.lock` pins the reviewed
-companion candidate `a17eb70f653afb4cf5c04afc912cdca8b14ac06e` from its
-non-default release branch. To avoid exposing that strict client to the older
-public app, the coordinated publication promotes the app against that exact
-commit first and then immediately promotes the companion release. Users of an
-older companion should use the packaged service/health timer and the app's own
-status as the authority. The exact compatibility boundary is recorded in
+companion revision `a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. This v0.1.2
+app follow-up does not change that source or protocol. A machine moving from an
+older companion must complete the compatible app's schema-4 cutover before
+loading the strict client; until then, use the packaged service/health timer
+and the app's own status as the authority. The exact compatibility boundary is
+recorded in
 [`docs/migrating.md`](docs/migrating.md#companion-noctalia-plugin-compatibility).
 
 ## Why it exists
@@ -143,18 +142,24 @@ The Python window is a configuration surface. It resolves the library,
 pairings, playlists and schedules into
 `$XDG_STATE_HOME/wall-in-one/runtime.toml`; the small Rust service reads only
 that file and owns the playlist timer, schedule timer, renderer children and
-runtime socket. Start the packaged service with:
+runtime socket. Start it through the packaged user unit so migration and schema
+preflights run before Rust:
 
 ```console
-$ wall-in-one-service
+$ systemctl --user enable --now wall-in-one.service
 ```
 
+Running `wall-in-one-service` directly is a schema-4-only diagnostic path; it
+bypasses those Python migration preflights.
+
 `wall-in-one --write-config` performs the same compilation without importing
-GTK or opening a window. The packaged user unit runs it before every service
-start, so an upgrade regenerates an older schema without waiting for somebody
-to open the GUI. The service itself still refuses a missing or unknown schema
-rather than guessing or becoming a second writer. Opening and closing
-`wall-in-one` later has no effect on rotation.
+GTK or opening a window. Before every systemd-managed service start, the
+packaged unit runs a migration-aware form of that compiler and then asks
+Rust's production parser to validate the exact surviving document without
+claiming a socket or renderer. An upgrade can therefore regenerate an older
+schema without waiting for somebody to open the GUI, while a missing,
+malformed, or still-obsolete document stops before the Rust main process.
+Opening and closing `wall-in-one` later has no effect on rotation.
 
 `wall-in-one --sync-runtime-health` is the matching headless persistence bridge.
 It reads one atomic Rust status snapshot, maps newly reported borked entries
@@ -178,27 +183,28 @@ health-sync service/timer. To start the service with the graphical session:
 $ systemctl --user enable --now wall-in-one.service
 ```
 
-The unit first runs `wall-in-one --write-config`, then starts the runtime with
-`--wait-for-config`. An outdated document is therefore atomically replaced by
-the only component allowed to write it. The compiler is fail-closed: malformed
-settings or authoring data is reported and leaves the previous resolved
-document byte-for-byte intact. The unit deliberately continues to Rust after
-that preflight failure so a valid last-known-good document keeps unattended
-rotation alive; Rust still refuses a missing, invalid, or obsolete document.
-The wait flag remains useful if the document disappears between those two
-steps. The headless compiler validates both TOML syntax and every known setting
-type/range, and likewise refuses unreadable pairings, playlists, schedules,
-display assignments, or favourites until the named file is repaired.
+The unit first runs `wall-in-one --service-startup-prepare`. Deployed-upgrade
+and unresolved legacy-migration failures remain fatal; only an ordinary
+current-profile compilation error may leave the previous resolved document
+byte-for-byte intact as a candidate. A second `wall-in-one-service
+--check-config` preflight loads that exact candidate through Rust's production
+parser without claiming a socket or renderer. Only a consumable schema-4
+document reaches the Rust main process, so a valid last-known-good document can
+keep unattended rotation alive while schema 2, malformed TOML, and missing
+state stop once. The compiler validates every known setting type/range and
+likewise refuses unreadable pairings, playlists, schedules, display
+assignments, or favourites until the named file is repaired.
 
 The runtime claims its mode-0600 socket before applying anything, so a second
 instance loses without changing the wallpaper. At graphical-session startup it
 retries only desktop-readiness failures for a bounded eight seconds; Noctalia
 and niri helper calls themselves time out after three seconds and keep only a
 bounded stderr diagnostic. A deliberate `ctl quit` is a clean exit and is not
-restarted. Other failures use the unit's five-second retry, capped at five
-starts per minute rather than looping forever. The checked-in units use bare
-commands so they remain useful outside Nix; the Nix package rewrites every
-executable to a store path.
+restarted. Abnormal Rust exits and its ordinary runtime-failure status use the
+unit's five-second retry, capped at five starts per minute; configuration
+preflight failures stop once. The checked-in units use bare commands so they
+remain useful outside Nix; the Nix package rewrites every executable to a store
+path.
 If you copy the three units manually from
 `src/wall_in_one/data/systemd/`, make sure
 `wall-in-one`, `wall-in-one-service` and GNU `timeout` are on the user manager's
@@ -211,15 +217,15 @@ no-change stdout is discarded while errors remain in the journal. Stop also
 makes one best-effort persistence attempt capped at two seconds; it cannot hold a
 wedged authoring store open during shutdown. Direct non-systemd daemon launches
 need a bar/shell caller for the hand-off; the matching companion revision adds
-that call. The companion lives in its separate repository and is a coordinated
-release requirement rather than something this repository silently modifies.
+that call. The companion lives in its separate repository; this v0.1.2 app
+follow-up neither changes nor silently republishes it.
 
-If the resolved runtime document itself is missing or invalid and exhausts the
-unit's restart limit, repair the authoring source and explicitly recover with
+If the resolved runtime document itself is missing, invalid, or still uses an
+obsolete schema, the exact Rust preflight leaves the unit failed after one
+attempt. Repair the authoring source and explicitly recover with
 `systemctl --user reset-failed wall-in-one.service` followed by
-`systemctl --user restart wall-in-one.service`. The limit is intentional: an
-invalid runtime document must not spam the journal forever. A damaged authoring
-file alone does not stop an otherwise-valid last-known-good runtime.
+`systemctl --user restart wall-in-one.service`. A damaged authoring file alone
+does not stop an otherwise-valid schema-4 last-known-good runtime.
 
 ### Test it away from your desktop
 
@@ -461,11 +467,12 @@ complete key, meaning and default table is in
 
 ## Upgrades and migration
 
-Startup first checks for the exact shipped schema-2 Python/Rust profile. When
-its independent settings, runtime, authoring, Noctalia-root, managed-marker,
-and capture evidence all agree, Wall-in-One automatically keeps the original
-root and basename captures, compiles schema 4, and resumes the active playlist.
-A genuinely fresh install writes no migration state and continues to the
+The GUI, headless compiler, and packaged unit's Python preflight first check
+for the exact shipped schema-2 Python/Rust profile. When its independent
+settings, runtime, authoring, Noctalia-root, managed-marker, and capture
+evidence all agree, Wall-in-One automatically keeps the original root and
+basename captures, compiles schema 4, and resumes the active playlist. A
+genuinely fresh install writes no migration state and continues to the
 library-root prompt; ambiguous or malformed evidence fails closed.
 
 Separately, the first graphical launch can detect retired

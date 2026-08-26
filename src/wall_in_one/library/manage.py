@@ -41,14 +41,14 @@ import stat
 import sys
 import tempfile
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 from urllib.parse import quote
 
 from wall_in_one import file_io, paths
-from wall_in_one.library import pairing, scan, stills
+from wall_in_one.library import adopted, pairing, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 
 #: Where the freedesktop home trash lives, relative to the data home.
@@ -196,6 +196,17 @@ class _PinnedArtifact:
     identity: SourceIdentity
     fingerprint: SourceFingerprint
     deletion_authority: scan.DownloadAuthority | None = None
+    adopted_role: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _ArtifactCandidate:
+    """One logical companion and the retained path used to inspect it."""
+
+    logical: Path
+    access: Path
+    expected_fingerprint: SourceFingerprint | None = None
+    adopted_role: str = ""
 
 
 def _cleanup_note(kept: Sequence[Path]) -> str:
@@ -412,12 +423,13 @@ def _companions(
     roots: tuple[Path, ...],
     legacy_selected_still: Path | None = None,
     *,
+    adopted_authority: adopted.Authority | None = None,
     source_root: Path | None = None,
     lookup_root: Path | None = None,
     lookup_parent: Path | None = None,
     source_context: file_io.PinnedDirectoryContext | None = None,
     access_stack: contextlib.ExitStack,
-) -> tuple[list[tuple[Path, Path]], list[Path]]:
+) -> tuple[list[_ArtifactCandidate], list[Path]]:
     """Everything we wrote beside ``item`` and should take with it.
 
     Only files whose names we generate: the download sidecar, the pairing
@@ -425,13 +437,23 @@ def _companions(
     directory. A still the user made themselves and named by convention is
     theirs and stays, even though it is about to have nothing to pair with.
     """
-    found: list[tuple[Path, Path]] = []
+    found: list[_ArtifactCandidate] = []
     kept: list[Path] = []
     source_parent_accesses: dict[Path, Path | None] = {}
     independent_parent_contexts: dict[Path, file_io.PinnedDirectoryContext | None] = {}
     independent_root_pins: dict[Path, file_io.PinnedPath | None] = {}
 
-    def retain_candidate(candidate: Path) -> None:
+    def retain_candidate(
+        candidate: Path,
+        *,
+        expected_fingerprint: SourceFingerprint | None = None,
+        adopted_role: str = "",
+    ) -> None:
+        if adopted_role and expected_fingerprint is None:
+            # A deletion-capable adoption must come from ``authority_for``.
+            # Merely knowing the old basename must never authorize a lookup.
+            kept.append(candidate)
+            return
         try:
             access = _retained_artifact_access_path(
                 candidate,
@@ -485,7 +507,14 @@ def _companions(
             kept.append(candidate)
             return
         if stat.S_ISREG(status.st_mode):
-            found.append((candidate, access))
+            found.append(
+                _ArtifactCandidate(
+                    candidate,
+                    access,
+                    expected_fingerprint,
+                    adopted_role,
+                )
+            )
         else:
             kept.append(candidate)
 
@@ -500,11 +529,43 @@ def _companions(
         item, roots, legacy_selected_still=legacy_selected_still
     ):
         retain_candidate(candidate)
+    if adopted_authority is not None:
+        # The carried adoption relationship owns collision policy even when
+        # its deletion capability has just been revoked. Remove any ordinary
+        # deterministic candidate at either logical path before deciding
+        # whether the stronger proof is usable.
+        adopted_paths = {
+            adopted_authority.capture_path,
+            adopted_authority.sidecar_path,
+        }
+        found = [candidate for candidate in found if candidate.logical not in adopted_paths]
+        deletion_capable = bool(
+            adopted_authority.adoption_id and adopted_authority.sidecar_fingerprint is not None
+        )
+        retain_candidate(
+            adopted_authority.sidecar_path,
+            expected_fingerprint=(
+                adopted_authority.sidecar_fingerprint if deletion_capable else None
+            ),
+            adopted_role="sidecar",
+        )
+        retain_candidate(
+            adopted_authority.capture_path,
+            expected_fingerprint=(
+                adopted_authority.capture_fingerprint if deletion_capable else None
+            ),
+            adopted_role="capture",
+        )
     # A path can be both a provider and pairing sidecar only if a future
     # provider accidentally adopts our reserved suffix.  Keep deletion
     # idempotent anyway rather than reporting a harmless second unlink as a
     # failure.
-    return list(dict.fromkeys(found)), list(dict.fromkeys(kept))
+    # An adopted candidate is appended last and therefore replaces any
+    # accidental deterministic-name collision.  The stronger generation
+    # proof must govern that logical path; it must never also survive as an
+    # ordinary best-effort companion.
+    by_logical = {candidate.logical: candidate for candidate in found}
+    return list(by_logical.values()), list(dict.fromkeys(kept))
 
 
 def _logical_preserved_artifact(
@@ -528,6 +589,7 @@ def pairing_artifact_paths(
     roots: Sequence[Path] = (),
     *,
     legacy_selected_still: Path | None = None,
+    adopted_authority: adopted.Authority | None = None,
 ) -> tuple[Path, ...]:
     """Exact app-owned pairing paths derived from one media identity.
 
@@ -548,19 +610,19 @@ def pairing_artifact_paths(
         found.append(generated)
         found.append(generated.with_name(generated.name + pairing.SIDECAR_SUFFIX))
 
-    if legacy_selected_still is not None and _within(legacy_selected_still, bounded):
-        expected = (
-            f"video:{item.path}"
-            if item.kind is Kind.VIDEO
-            else item.scene
-            if item.kind is Kind.SCENE
-            else ""
-        )
-        if expected and pairing.legacy_automatic_identity(legacy_selected_still) == expected:
-            found.append(legacy_selected_still)
-            found.append(
-                legacy_selected_still.with_name(legacy_selected_still.name + pairing.SIDECAR_SUFFIX)
-            )
+    # A schema-1 pairing sidecar records an association, not a file
+    # generation. Keep that predecessor choice usable, but never turn its
+    # pathname into deletion authority: unrelated user bytes can later occupy
+    # the same name. Deployed captures gain physical cleanup authority only
+    # through the generation-bound ``adopted_authority`` branch below.
+    if adopted_authority is not None:
+        # This is an exact path carried from accepted scan truth.  It is
+        # useful for metadata scrubbing even when later filesystem validation
+        # revokes physical deletion authority.
+        if _within(adopted_authority.capture_path, bounded):
+            found.append(adopted_authority.capture_path)
+        if _within(adopted_authority.sidecar_path, bounded):
+            found.append(adopted_authority.sidecar_path)
     return tuple(dict.fromkeys(found))
 
 
@@ -569,6 +631,7 @@ def discard_pairing_artifacts(
     roots: Sequence[Path] = (),
     *,
     legacy_selected_still: Path | None = None,
+    adopted_authority: adopted.Authority | None = None,
     source_root: Path | None = None,
     lookup_root: Path | None = None,
     lookup_parent: Path | None = None,
@@ -599,6 +662,7 @@ def discard_pairing_artifacts(
                 item,
                 bounded,
                 legacy_selected_still=legacy_selected_still,
+                adopted_authority=adopted_authority,
                 source_root=source_root,
                 lookup_root=lookup_root,
                 lookup_parent=lookup_parent,
@@ -617,6 +681,7 @@ def discard_pairing_artifacts(
                 item,
                 bounded,
                 legacy_selected_still=legacy_selected_still,
+                adopted_authority=adopted_authority,
             )
         )
         with contextlib.ExitStack() as fallback_stack, contextlib.suppress(OSError):
@@ -624,13 +689,14 @@ def discard_pairing_artifacts(
                 item,
                 bounded,
                 legacy_selected_still,
+                adopted_authority=adopted_authority,
                 source_root=source_root,
                 lookup_root=lookup_root,
                 lookup_parent=lookup_parent,
                 source_context=source_context,
                 access_stack=fallback_stack,
             )
-            retained.extend(logical for logical, _access in visible)
+            retained.extend(candidate.logical for candidate in visible)
             retained.extend(inaccessible)
         return (), tuple(dict.fromkeys(retained))
 
@@ -640,6 +706,7 @@ def _discard_pairing_artifacts_locked(
     roots: tuple[Path, ...],
     *,
     legacy_selected_still: Path | None,
+    adopted_authority: adopted.Authority | None,
     source_root: Path | None,
     lookup_root: Path | None,
     lookup_parent: Path | None,
@@ -651,6 +718,7 @@ def _discard_pairing_artifacts_locked(
         item,
         roots,
         legacy_selected_still=legacy_selected_still,
+        adopted_authority=adopted_authority,
         source_root=source_root,
         lookup_root=lookup_root,
         lookup_parent=lookup_parent,
@@ -665,6 +733,8 @@ def _pin_pairing_artifacts_locked(
     roots: tuple[Path, ...],
     *,
     legacy_selected_still: Path | None,
+    adopted_authority: adopted.Authority | None,
+    expected_source_fingerprint: SourceFingerprint | None = None,
     source_root: Path | None,
     lookup_root: Path | None,
     lookup_parent: Path | None,
@@ -677,6 +747,7 @@ def _pin_pairing_artifacts_locked(
             item,
             roots,
             legacy_selected_still,
+            adopted_authority=adopted_authority,
             source_root=source_root,
             lookup_root=lookup_root,
             lookup_parent=lookup_parent,
@@ -691,13 +762,19 @@ def _pin_pairing_artifacts_locked(
             item,
             roots,
             legacy_selected_still=legacy_selected_still,
+            adopted_authority=adopted_authority,
         )
 
     pinned: list[_PinnedArtifact] = []
     kept: list[Path] = list(inaccessible)
-    for companion, access in companions:
+    for candidate in companions:
+        companion = candidate.logical
+        access = candidate.access
         try:
-            pin = file_io.pin_regular_path(access)
+            pin = file_io.pin_regular_path(
+                access,
+                expected_fingerprint=candidate.expected_fingerprint,
+            )
         except FileNotFoundError:
             # It disappeared before the commit, so a later same-name entry is
             # a different lifecycle and must not be discovered after commit.
@@ -740,6 +817,64 @@ def _pin_pairing_artifacts_locked(
                 )
             except OSError, ValueError:
                 deletion_authority = None
+        adopted_valid = True
+        if candidate.adopted_role:
+            authority = adopted_authority
+            if (
+                authority is None
+                or not authority.adoption_id
+                or authority.sidecar_fingerprint is None
+                or authority.source_path != item.path
+                or authority.source_fingerprint != expected_source_fingerprint
+            ):
+                adopted_valid = False
+            else:
+                try:
+                    status = pin.status()
+                    if (
+                        not stat.S_ISREG(status.st_mode)
+                        or status.st_uid != os.getuid()
+                        or status.st_nlink != 1
+                    ):
+                        raise file_io.PathChangedError(
+                            f"{companion} is not an owned single-link regular file"
+                        )
+                    if candidate.adopted_role == "capture":
+                        size, digest = file_io.hash_pinned_regular(
+                            pin,
+                            expected_fingerprint=authority.capture_fingerprint,
+                            maximum_bytes=authority.capture_size,
+                        )
+                        if (size, digest) != (
+                            authority.capture_size,
+                            authority.capture_sha256,
+                        ):
+                            raise file_io.PathChangedError(
+                                f"{companion} no longer has its adopted contents"
+                            )
+                    elif candidate.adopted_role == "sidecar":
+                        raw = file_io.read_pinned_regular_bytes(
+                            pin,
+                            adopted.MAX_SIDECAR_BYTES,
+                            expected_fingerprint=authority.sidecar_fingerprint,
+                        )
+                        if raw != adopted.render_sidecar(authority, authority.adoption_id):
+                            raise file_io.PathChangedError(
+                                f"{companion} is no longer the canonical adoption sidecar"
+                            )
+                    else:  # pragma: no cover - candidates are internal and closed
+                        raise AssertionError("unknown adopted artifact role")
+                    verification = file_io.pin_regular_path(
+                        access,
+                        expected_identity=pinned_identity,
+                        expected_fingerprint=pinned_fingerprint,
+                    )
+                    verification.close()
+                except OSError, ValueError:
+                    adopted_valid = False
+        if not adopted_valid:
+            kept.append(companion)
+            continue
         pinned.append(
             _PinnedArtifact(
                 companion,
@@ -748,9 +883,55 @@ def _pin_pairing_artifacts_locked(
                 pinned_identity,
                 pinned_fingerprint,
                 deletion_authority,
+                candidate.adopted_role,
             )
         )
+    if adopted_authority is not None:
+        adopted_pins = tuple(artifact for artifact in pinned if artifact.adopted_role)
+        roles = {artifact.adopted_role for artifact in adopted_pins}
+        if roles != {"capture", "sidecar"}:
+            # Capture and canonical sidecar are one authority unit. Never
+            # delete whichever half happened to remain inspectable.
+            pinned = [artifact for artifact in pinned if not artifact.adopted_role]
+            kept.extend(artifact.logical for artifact in adopted_pins)
     return tuple(pinned), tuple(kept)
+
+
+def _revalidate_adopted_authority(
+    authority: adopted.Authority | None,
+) -> adopted.Authority | None:
+    """Refresh global adoption proof inside the physical lifecycle boundary.
+
+    A missing validation-only field is deliberately not repaired here: only
+    the worker's earlier ``authority_for`` result may enter deletion as a
+    capability.  A filesystem revocation strips those fields so the exact
+    carried paths are reported as retained without ever becoming basename
+    lookup authority.  Malformed central state aborts the source operation.
+    """
+    if authority is None:
+        return None
+    if not authority.adoption_id or authority.sidecar_fingerprint is None:
+        return authority
+    try:
+        current = adopted.authority_for(
+            authority.source_path,
+            capture=authority.capture_path,
+            verify_contents=True,
+        )
+    except adopted.AdoptionError as error:
+        raise ManageError(
+            "invalid-state",
+            f"could not revalidate adopted capture authority: {error}",
+        ) from error
+    exact = (
+        current is not None
+        and adopted.binding_document(current) == adopted.binding_document(authority)
+        and current.adoption_id == authority.adoption_id
+        and current.sidecar_fingerprint == authority.sidecar_fingerprint
+    )
+    if exact:
+        return current
+    return replace(authority, adoption_id="", sidecar_fingerprint=None)
 
 
 def _withdraw_download_authority(
@@ -779,6 +960,7 @@ def _withdraw_download_authority(
             media_size, media_digest = file_io.hash_pinned_regular(
                 source_pin,
                 expected_fingerprint=expected_fingerprint,
+                maximum_bytes=expected_fingerprint[2],
             )
         except OSError as error:
             raise ManageError(
@@ -851,6 +1033,39 @@ def _withdraw_download_authority(
     return tuple(removed), remaining
 
 
+def _discard_committed_adopted_artifacts(
+    pinned: Sequence[_PinnedArtifact],
+) -> tuple[tuple[Path, ...], tuple[_PinnedArtifact, ...], tuple[Path, ...]]:
+    """Consume an exact adopted sidecar/capture pair after media commit.
+
+    Pins and all content/generation checks were acquired before commit.  The
+    source must cross its delete/trash boundary before either companion is
+    unlinked, so any rollback leaves the old installation fully resumable.
+    Once committed, source absence itself revokes the adoption during the
+    narrow crash window.  The sidecar is then withdrawn before its capture;
+    a replacement encountered by either no-replace discard is retained and
+    never rediscovered.
+    """
+    adopted_pins = {artifact.adopted_role: artifact for artifact in pinned if artifact.adopted_role}
+    remaining = tuple(artifact for artifact in pinned if not artifact.adopted_role)
+    if not adopted_pins:
+        return (), remaining, ()
+    if set(adopted_pins) != {"capture", "sidecar"}:  # pragma: no cover - pin helper closes this
+        return (), remaining, tuple(artifact.logical for artifact in adopted_pins.values())
+
+    ordered = (adopted_pins["sidecar"], adopted_pins["capture"])
+    removed: list[Path] = []
+    kept: list[Path] = []
+    for index, artifact in enumerate(ordered):
+        discarded, retained = _discard_pinned_artifacts((artifact,))
+        removed.extend(discarded)
+        if retained:
+            kept.extend(retained)
+            kept.extend(candidate.logical for candidate in ordered[index + 1 :])
+            break
+    return tuple(removed), remaining, tuple(kept)
+
+
 def _discard_pinned_artifacts(
     pinned: Sequence[_PinnedArtifact],
     *,
@@ -896,13 +1111,16 @@ def _completed_removal_outcome(
     artifact_kept: Sequence[Path],
 ) -> Removal:
     """Assemble one committed delete after consuming every pre-pinned companion."""
+    adopted_removed, remaining_artifacts, adopted_kept = _discard_committed_adopted_artifacts(
+        remaining_artifacts
+    )
     discarded, retained = _discard_pinned_artifacts(
         remaining_artifacts,
-        kept=artifact_kept,
+        kept=(*artifact_kept, *adopted_kept),
     )
     return Removal(
         item=item,
-        removed=(item.path, *authority_removed, *discarded),
+        removed=(item.path, *authority_removed, *adopted_removed, *discarded),
         kept=retained,
     )
 
@@ -915,14 +1133,17 @@ def _completed_trash_outcome(
     artifact_kept: Sequence[Path],
 ) -> Trashed:
     """Assemble one committed trash move after consuming pre-pinned companions."""
+    adopted_removed, remaining_artifacts, adopted_kept = _discard_committed_adopted_artifacts(
+        remaining_artifacts
+    )
     discarded, retained = _discard_pinned_artifacts(
         remaining_artifacts,
-        kept=artifact_kept,
+        kept=(*artifact_kept, *adopted_kept),
     )
     return Trashed(
         item,
         destination,
-        tuple((*authority_removed, *discarded)),
+        tuple((*authority_removed, *adopted_removed, *discarded)),
         retained,
     )
 
@@ -1063,6 +1284,7 @@ def remove(
     expected_fingerprint: SourceFingerprint | None = None,
     prepared_pin: file_io.PinnedPath | None = None,
     operation_token: str | None = None,
+    adopted_authority: adopted.Authority | None = None,
     lookup_path: Path | None = None,
     source_root: Path | None = None,
     lookup_root: Path | None = None,
@@ -1146,10 +1368,13 @@ def remove(
                         "not-ours",
                         f"{path.name} is your own file, not one this app downloaded",
                     )
+                current_adoption = _revalidate_adopted_authority(adopted_authority)
                 artifact_pins, artifact_kept = _pin_pairing_artifacts_locked(
                     item,
                     roots,
                     legacy_selected_still=None,
+                    adopted_authority=current_adoption,
+                    expected_source_fingerprint=expected_fingerprint,
                     source_root=source_root,
                     lookup_root=lookup_root,
                     lookup_parent=lookup_parent,
@@ -1477,6 +1702,7 @@ def trash(
     expected_source: SourceIdentity | None = None,
     expected_fingerprint: SourceFingerprint | None = None,
     prepared_pin: file_io.PinnedPath | None = None,
+    adopted_authority: adopted.Authority | None = None,
     lookup_path: Path | None = None,
     source_root: Path | None = None,
     lookup_root: Path | None = None,
@@ -1542,10 +1768,13 @@ def trash(
                 stills.source_lifecycle_lock(item),
                 contextlib.ExitStack() as access_stack,
             ):
+                current_adoption = _revalidate_adopted_authority(adopted_authority)
                 artifact_pins, artifact_kept = _pin_pairing_artifacts_locked(
                     item,
                     tuple(roots),
                     legacy_selected_still=None,
+                    adopted_authority=current_adoption,
+                    expected_source_fingerprint=expected_fingerprint,
                     source_root=source_root,
                     lookup_root=lookup_root,
                     lookup_parent=lookup_parent,

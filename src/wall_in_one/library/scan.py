@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io, paths
-from wall_in_one.library import pairing, pairings, workshop
+from wall_in_one.library import adopted, pairing, pairings, workshop
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
 
 #: What a Wallpaper Engine wallpaper is labelled as in the grid.
@@ -330,7 +330,11 @@ def _walk(
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
-def workshop_items(steam_roots: Sequence[Path] | None = None) -> tuple[MediaItem, ...]:
+def workshop_items(
+    steam_roots: Sequence[Path] | None = None,
+    *,
+    content_directories: Sequence[Path] | None = None,
+) -> tuple[MediaItem, ...]:
     """Installed Wallpaper Engine wallpapers, videos and scenes alike.
 
     `Ownership.USER` without exception: these are Steam's files, in Steam's
@@ -338,11 +342,14 @@ def workshop_items(steam_roots: Sequence[Path] | None = None) -> tuple[MediaItem
     the surrounding tree looks.
     """
     found: list[MediaItem] = []
-    installed = (
-        workshop.scan()
-        if steam_roots is None
-        else workshop.scan(steam_roots, include_defaults=False)
-    )
+    if steam_roots is not None and content_directories is not None:
+        raise ValueError("Workshop scan cannot mix Steam roots and exact content directories")
+    if content_directories is not None:
+        installed = workshop.scan_content_directories(content_directories)
+    elif steam_roots is None:
+        installed = workshop.scan()
+    else:
+        installed = workshop.scan(steam_roots, include_defaults=False)
     for item in installed:
         entry = item.entry
         if item.is_video and entry is not None:
@@ -393,6 +400,8 @@ def scan(
     *,
     include_workshop: bool = False,
     workshop_roots: Sequence[Path] | None = None,
+    workshop_content_directories: Sequence[Path] | None = None,
+    adoption_candidates: Sequence[adopted.Authority] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Library:
     """Build a `Library` from ``roots`` (or the default roots).
@@ -404,11 +413,28 @@ def scan(
     overwrite whatever this pass decided.
     """
     resolved_roots = tuple(roots) if roots is not None else default_roots()
+    if adoption_candidates is None:
+        capture_adoption = adopted.load(strict=False)
+        if capture_adoption is not None and capture_adoption.root in resolved_roots:
+            candidate_authorities = capture_adoption.authorities
+        else:
+            candidate_authorities = ()
+    else:
+        # The deployed-profile detector uses its still-open generation proof
+        # to dry-render schema 4 before publishing the adoption manifest.  An
+        # injected candidate is not trusted on identity alone: the same
+        # source/capture generation, owner, and single-link constraints below
+        # are required exactly as they are for a persisted manifest.
+        candidate_authorities = tuple(adoption_candidates)
 
     budget = [MAX_ENTRIES_EXAMINED]
     skipped: list[str] = []
     items: list[MediaItem] = []
     seen: set[Path] = set()
+    observed_generations: dict[
+        Path,
+        tuple[file_io.FileFingerprint, int, int],
+    ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
 
     for root in resolved_roots:
@@ -423,20 +449,16 @@ def scan(
                 break
             if path in seen or _is_sidecar(path):
                 continue
-            # A migrated predecessor capture is metadata of its moving item,
-            # not a second user-owned library wallpaper.  Only the exact old
-            # ownership sidecar can hide it; an unmarked image in the same
-            # directory remains visible and independently manageable.
-            if pairing.legacy_automatic_identity(path) is not None:
-                continue
             kind = classify(path)
             if kind is None:
                 continue
             try:
                 info = path.stat()
-            except OSError:
+                generation = file_io.file_fingerprint(info)
+            except OSError, ValueError:
                 continue
             seen.add(path)
+            observed_generations[path] = (generation, info.st_uid, info.st_nlink)
 
             directory = path.parent
             if directory not in marker_cache:
@@ -470,18 +492,52 @@ def scan(
     if include_workshop:
         # After the roots, so a wallpaper somebody has copied into their own
         # library wins over the Steam copy of it -- `seen` keeps the first.
-        for item in workshop_items(workshop_roots):
+        for item in workshop_items(
+            workshop_roots,
+            content_directories=workshop_content_directories,
+        ):
             if cancelled is not None and cancelled():
                 raise ScanCancelledError
             if item.path not in seen:
                 seen.add(item.path)
                 items.append(item)
+                if item.kind is Kind.VIDEO:
+                    try:
+                        info = item.path.stat()
+                        generation = file_io.file_fingerprint(info)
+                    except OSError, ValueError:
+                        pass
+                    else:
+                        observed_generations[item.path] = (
+                            generation,
+                            info.st_uid,
+                            info.st_nlink,
+                        )
 
     items.sort(key=lambda item: (item.path.parent.as_posix(), item.name.lower()))
     still_inventory = tuple(item for item in items if item.kind is Kind.STILL)
+    exact_authorities = tuple(
+        authority
+        for authority in candidate_authorities
+        if observed_generations.get(authority.source_path)
+        == (authority.source_fingerprint, os.getuid(), 1)
+        and observed_generations.get(authority.capture_path)
+        == (authority.capture_fingerprint, os.getuid(), 1)
+    )
+    adopted_mapping = {
+        authority.source_path: authority.capture_path for authority in exact_authorities
+    }
+    adopted_pairs = tuple(
+        (authority.source_path, authority.capture_path) for authority in exact_authorities
+    )
     if cancelled is not None and cancelled():
         raise ScanCancelledError
-    paired = pairings.apply(items, resolved_roots, records)
+    paired = pairings.apply(
+        items,
+        resolved_roots,
+        records,
+        adopted_stills=adopted_mapping,
+    )
     if cancelled is not None and cancelled():
         raise ScanCancelledError
     return Library(
@@ -489,4 +545,5 @@ def scan(
         items=paired,
         skipped=tuple(skipped),
         still_inventory=still_inventory,
+        adopted_stills=adopted_pairs,
     )

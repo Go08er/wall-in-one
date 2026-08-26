@@ -56,7 +56,7 @@
 
         wall-in-one-service = pkgs.rustPlatform.buildRustPackage {
           pname = "wall-in-one-service";
-          version = "0.1.0";
+          version = "0.1.1";
           src = pkgs.lib.fileset.toSource {
             root = ./service;
             fileset = pkgs.lib.fileset.unions [
@@ -94,7 +94,7 @@
 
         wall-in-one = python.pkgs.buildPythonApplication {
           pname = "wall-in-one";
-          version = "0.1.0";
+          version = "0.1.1";
           pyproject = true;
           src = ./.;
 
@@ -394,7 +394,8 @@
                 health=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.service
                 timer=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.timer
                 grep -F 'ExecStartPre=-${wall-in-one}/bin/wall-in-one --write-config' "$unit"
-                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service --wait-for-config' "$unit"
+                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service' "$unit"
+                grep -F 'RestartPreventExitStatus=78' "$unit"
                 grep -F 'ExecStop=-${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=0.1s 2s ${wall-in-one}/bin/wall-in-one --sync-runtime-health-on-stop' "$unit"
                 # Exercise the exact GNU timeout interval syntax used by the
                 # installed ExecStop. Coreutils accepts decimal seconds, not

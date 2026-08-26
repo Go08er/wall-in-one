@@ -152,7 +152,7 @@ def test_health_sync_holds_migration_exclusion_for_the_whole_transaction(
         return 0
 
     expected_reload = reload_runtime
-    monkeypatch.setattr(legacy_migration, "unattended_transaction", MigrationTransaction)
+    monkeypatch.setattr(legacy_migration, "profile_transaction", MigrationTransaction)
     monkeypatch.setattr(cli, "_sync_runtime_health", sync)
 
     assert cli.main([argument]) == 0

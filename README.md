@@ -7,7 +7,8 @@
 > than by its test suite — so assume running it longer will find more.
 >
 > Expect breakage. The retired Noctalia Luau plugin has an explicit,
-> no-overwrite importer, but arbitrary pre-alpha Python/Rust formats may still
+> no-overwrite importer, and the one shipped schema-2 Python/Rust profile has a
+> narrowly evidence-gated automatic upgrade. Other pre-alpha formats may still
 > move without migration. Do not point it at wallpapers you would mind losing.
 
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.
@@ -458,14 +459,21 @@ invalid typed value and preserves the last-known-good runtime document. The
 complete key, meaning and default table is in
 [`docs/settings.md`](docs/settings.md).
 
-## Migrating from the retired plugin
+## Upgrades and migration
 
-The first graphical launch detects legacy `goober/wall-in-one` Noctalia data
-before it creates a fresh profile. Import is explicit, leaves every legacy byte
-untouched, refuses to merge with current authoring, and can resume an exact
-interrupted transaction. Start with
-[`docs/migrating.md`](docs/migrating.md); it covers the prompt, CLI status,
-schema 1-5 mapping, known losses, companion-plugin compatibility and rollback.
+Startup first checks for the exact shipped schema-2 Python/Rust profile. When
+its independent settings, runtime, authoring, Noctalia-root, managed-marker,
+and capture evidence all agree, Wall-in-One automatically keeps the original
+root and basename captures, compiles schema 4, and resumes the active playlist.
+A genuinely fresh install writes no migration state and continues to the
+library-root prompt; ambiguous or malformed evidence fails closed.
+
+Separately, the first graphical launch can detect retired
+`goober/wall-in-one` Noctalia data before creating a fresh profile. That import
+is an explicit user choice, leaves every legacy byte untouched, refuses to
+merge with current authoring, and can resume an exact interrupted transaction.
+Start with [`docs/migrating.md`](docs/migrating.md); it covers both boundaries,
+CLI status, schema mapping, known losses, companion compatibility, and rollback.
 
 ## Development
 

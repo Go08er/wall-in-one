@@ -223,8 +223,22 @@ def scan(
     is not there, and an item somebody has been editing all produce fewer
     results rather than an error.
     """
+    return scan_content_directories(
+        content_directories(extra_roots, include_defaults=include_defaults)
+    )
+
+
+def scan_content_directories(
+    directories: Sequence[Path],
+) -> tuple[WorkshopItem, ...]:
+    """Scan exact Wallpaper Engine content directories without rediscovery.
+
+    Normal application scans start from Steam roots. Evidence-gated migration
+    instead retains already-validated ``.../content/431960`` directories and
+    must not reinterpret them as Steam roots or silently add defaults.
+    """
     found: dict[str, WorkshopItem] = {}
-    for content in content_directories(extra_roots, include_defaults=include_defaults):
+    for content in directories:
         try:
             entries = sorted(content.iterdir())
         except OSError:

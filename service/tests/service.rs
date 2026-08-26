@@ -265,6 +265,66 @@ fn systemd_mode_waits_quietly_for_the_first_config() {
 }
 
 #[test]
+fn startup_config_load_failures_use_ex_config_without_claiming_the_socket() {
+    let root = directory("startup-config-exit");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let old_schema = config(Path::new("/bin/true"), Path::new("/bin/true"), false).replacen(
+        "schema_version = 4",
+        "schema_version = 2",
+        1,
+    );
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(78));
+    assert!(
+        !socket.exists(),
+        "missing config claimed the runtime socket"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("cannot read config"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
+    for (label, document, expected) in [
+        (
+            "old-schema",
+            old_schema.as_str(),
+            "schema_version 2 is unsupported; expected 4",
+        ),
+        (
+            "malformed",
+            "schema_version = [\n",
+            "config is not valid TOML",
+        ),
+    ] {
+        fs::write(&config_path, document).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--wait-for-config")
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(78), "{label}");
+        assert!(!socket.exists(), "{label} claimed the runtime socket");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{label}: {stderr}");
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn explicit_reload_is_not_repeated_by_the_file_watcher() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("single-reload");
@@ -5912,7 +5972,11 @@ fn exhausted_startup_readiness_is_fatal_for_systemd_recovery() {
         );
         thread::sleep(Duration::from_millis(25));
     };
-    assert!(!status.success());
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a post-load runtime failure must remain restartable"
+    );
     let stderr = fs::read_to_string(&stderr_path).unwrap();
     assert!(stderr.contains("readiness deadline expired after 8 seconds"));
     assert!(stderr.contains("desktop stayed unavailable"));

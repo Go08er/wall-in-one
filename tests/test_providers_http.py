@@ -627,7 +627,7 @@ def test_transfer_discard_reports_a_replacement_preserved_in_a_private_claim(
     def replace_both_names_after_claim(source: Path, destination: Path) -> None:
         nonlocal claimed
         real_rename(source, destination)
-        if source == staged and claimed is None:
+        if source.name == staged.name and destination.name == "entry" and claimed is None:
             claimed = destination
             destination.rename(preserved_original)
             destination.write_bytes(claimed_replacement)
@@ -668,6 +668,7 @@ def test_download_failure_preserves_same_type_reuse_with_spoofed_identity(
     expected_identity: file_io.PathIdentity | None = None
     created_pin: file_io.PinnedPath | None = None
     real_pin_created_temporary = download._pin_created_temporary
+    real_sync = os.fsync
 
     def spoofed_lstat(path: Path) -> os.stat_result:
         status = real_lstat(path)
@@ -675,8 +676,11 @@ def test_download_failure_preserves_same_type_reuse_with_spoofed_identity(
             return _spoof_identity(status, expected_identity)
         return status
 
-    def replace_then_fail(_descriptor: int) -> None:
+    def replace_then_fail(descriptor: int) -> None:
         nonlocal expected_identity, raced_path
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            real_sync(descriptor)
+            return
         candidates = tuple(
             path for path in tmp_path.iterdir() if path.name.startswith(http.STAGING_PREFIX)
         )

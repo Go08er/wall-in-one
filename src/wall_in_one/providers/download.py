@@ -675,6 +675,7 @@ def _bind_provider_sidecar(
         actual_size, actual_digest = file_io.hash_pinned_regular(
             staged.pin,
             expected_fingerprint=fingerprint,
+            maximum_bytes=recorded_size,
         )
     except OSError as error:
         raise ProviderError(

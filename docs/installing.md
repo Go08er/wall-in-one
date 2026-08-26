@@ -59,7 +59,7 @@ checkout, a wheel and the store. The package rewrites it during `postInstall` to
 the absolute path of the wrapped binary:
 
 ```
-Exec=/nix/store/...-wall-in-one-0.1.0/bin/wall-in-one
+Exec=/nix/store/...-wall-in-one-0.1.1/bin/wall-in-one
 ```
 
 That rewrite is the difference between a menu entry that works and one that

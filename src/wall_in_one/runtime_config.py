@@ -457,7 +457,7 @@ def _resolved_entry(
     entry_id: str,
 ) -> tuple[str, ...] | None:
     _bounded_text(entry_id, label="playlist entry id", maximum_bytes=MAX_IDENTIFIER_BYTES)
-    bundle = session.pairings.resolve(item, session.library.roots)
+    bundle = session.pairings.resolve_accepted(item, session.library)
     if bundle.still is None or not bundle.still.is_absolute():
         return None
     _absolute_path(bundle.still, label="playlist entry still")

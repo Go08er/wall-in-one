@@ -204,22 +204,23 @@ def test_remove_restores_a_replacement_that_arrives_during_the_atomic_claim(
     expected = _expected(item.path)
     expected_fingerprint = _fingerprint(item.path)
     original = root / "prepared-original.jpg"
-    claimed = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN) / "entry"
     real_rename = file_io._rename_noreplace
     real_lstat = Path.lstat
     raced = False
+    claimed_access: Path | None = None
 
     def replace_then_rename(source: Path, destination: Path) -> None:
-        nonlocal raced
-        if source == item.path and not raced:
+        nonlocal claimed_access, raced
+        if source.name == item.path.name and destination.name == "entry" and not raced:
             raced = True
+            claimed_access = destination
             source.rename(original)
             source.write_bytes(b"late replacement")
         real_rename(source, destination)
 
     def spoof_reused_identity(candidate: Path) -> os.stat_result:
         status = real_lstat(candidate)
-        if candidate == claimed and raced:
+        if claimed_access is not None and candidate == claimed_access and raced:
             fields = list(status)
             fields[stat.ST_DEV] = expected[0]
             fields[stat.ST_INO] = expected[1]
@@ -257,7 +258,7 @@ def test_remove_retains_its_journal_when_restore_conflict_preserves_a_replacemen
 
     def move_replacement_then_reoccupy(source: Path, destination: Path) -> None:
         nonlocal raced
-        if source == item.path and not raced:
+        if source.name == item.path.name and destination.name == "entry" and not raced:
             raced = True
             source.rename(original)
             source.write_bytes(b"replacement B")
@@ -2128,11 +2129,11 @@ def test_trash_reports_a_temporary_record_replacement_preserved_after_commit(
         nonlocal preserved, raced, temporary
         if (
             not raced
-            and source.parent == info
+            and source.parent.resolve() == info.resolve()
             and source.name.startswith(".wall-in-one-trashinfo-")
         ):
             raced = True
-            temporary = source
+            temporary = info / source.name
             source.unlink()
             source.write_bytes(b"replacement B")
             real_rename(source, destination)
@@ -2182,11 +2183,11 @@ def test_trash_keeps_a_precommit_error_when_temporary_record_recovery_conflicts(
             raise OSError(errno.EXDEV, "Invalid cross-device link")
         if (
             not raced
-            and source.parent == info
+            and source.parent.resolve() == info.resolve()
             and source.name.startswith(".wall-in-one-trashinfo-")
         ):
             raced = True
-            temporary = source
+            temporary = info / source.name
             source.unlink()
             source.write_bytes(b"replacement B")
             real_rename(source, destination)

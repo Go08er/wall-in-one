@@ -480,6 +480,74 @@ def pin_directory_path(
     return pinned
 
 
+def _pin_directory_for_durability(directory: Path) -> PinnedPath:
+    """Retain a directory capability which can anchor a later fsync.
+
+    Destructive callers sometimes already address a directory through one of
+    our ``/proc/self/fd/<n>`` capabilities. Reopening that spelling with
+    ``O_NOFOLLOW`` would reject the procfs link, so duplicate the descriptor
+    itself in that narrow case. Ordinary paths keep the existing final-name
+    no-follow check from :func:`pin_directory_path`.
+    """
+    parts = directory.parts
+    if len(parts) == 5 and parts[:4] == ("/", "proc", "self", "fd") and parts[4].isdecimal():
+        descriptor = os.dup(int(parts[4]))
+        pinned = PinnedPath(directory, descriptor, stat.S_IFDIR)
+        try:
+            opened = pinned.status()
+            named = directory.stat()
+            if not _same_pinned_entry(opened, named, stat.S_IFDIR):
+                raise PathChangedError(f"the retained directory capability {directory} changed")
+        except BaseException:
+            pinned.close()
+            raise
+        return pinned
+    return pin_directory_path(directory)
+
+
+def _fsync_directory_capability(
+    descriptor: int,
+    *,
+    expected_identity: PathIdentity,
+    logical_path: Path,
+) -> None:
+    """Persist directory entries through one retained directory capability."""
+    sync_descriptor: int | None = None
+    try:
+        retained = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(retained.st_mode)
+            or (retained.st_dev, retained.st_ino) != expected_identity
+        ):
+            raise PathChangedError(f"the retained durability directory {logical_path} changed")
+        sync_descriptor = os.open(
+            ".",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=descriptor,
+        )
+        opened = os.fstat(sync_descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev, opened.st_ino) != expected_identity:
+            raise PathChangedError(f"the retained durability directory {logical_path} changed")
+        os.fsync(sync_descriptor)
+        after = os.fstat(sync_descriptor)
+        retained_after = os.fstat(descriptor)
+        if not (
+            stat.S_ISDIR(after.st_mode)
+            and stat.S_ISDIR(retained_after.st_mode)
+            and (after.st_dev, after.st_ino) == expected_identity
+            and (retained_after.st_dev, retained_after.st_ino) == expected_identity
+        ):
+            raise PathChangedError(
+                f"the retained durability directory {logical_path} changed during fsync"
+            )
+    finally:
+        if sync_descriptor is not None:
+            _close_descriptor_preserving_error(
+                sync_descriptor,
+                f"the durability descriptor for {logical_path}",
+            )
+
+
 def _open_directory_without_symlinks(path: Path) -> int:
     """Open an absolute directory by walking every component without links."""
     if not path.is_absolute():
@@ -1030,10 +1098,16 @@ class ClaimedPath:
         return not self._consumed and os.path.lexists(self._directory_pin.entry)
 
     def restore(self) -> bool:
-        """Restore the claim without replacement; leave it preserved on conflict."""
+        """Durably restore without replacement; leave it preserved on conflict."""
         # A writer which already had the inode open may have changed its
         # contents after the claim. Restoring that same pinned inode is safe
         # and discoverable; discarding it is not.
+        destination_parent_pin = _pin_directory_for_durability(self._original_access.parent)
+        destination_access = (
+            Path("/proc/self/fd")
+            / str(destination_parent_pin.descriptor)
+            / self._original_access.name
+        )
         restore_pin = PinnedPath(
             self._directory_pin.entry,
             os.dup(self._pin.descriptor),
@@ -1043,7 +1117,7 @@ class ClaimedPath:
             try:
                 atomic_move_no_replace(
                     self._directory_pin.entry,
-                    self._original_access,
+                    destination_access,
                     expected_identity=self.identity,
                     expected_fingerprint=self._pin.fingerprint,
                     pinned_source=restore_pin,
@@ -1051,20 +1125,46 @@ class ClaimedPath:
             finally:
                 restore_pin.close()
         except FileExistsError:
+            destination_parent_pin.close()
             return False
         except PathChangedError as error:
+            destination_parent_pin.close()
             raise PathChangedError(
                 str(error)
                 .replace(str(self._directory_pin.entry), str(self.path))
-                .replace(str(self._original_access), str(self.original)),
-                preserved_path=self.path if error.preserved_path is not None else None,
+                .replace(str(destination_access), str(self.original)),
+                preserved_path=self.original if error.preserved_path is not None else None,
             ) from error
         except OSError as error:
+            destination_parent_pin.close()
             raise OSError(
                 error.errno,
                 f"could not restore the private claim at {self.path} to {self.original}: "
                 f"{error.strerror or error}",
             ) from error
+        try:
+            # Persist the new public link before the private-link withdrawal.
+            # If the second barrier fails, a replay may retain both hard links,
+            # but it can never lose the only durable link or truncate through
+            # the multiply-linked claim.
+            _fsync_directory_capability(
+                destination_parent_pin.descriptor,
+                expected_identity=destination_parent_pin.identity,
+                logical_path=self.original.parent,
+            )
+            _fsync_directory_capability(
+                self._directory_pin.descriptor,
+                expected_identity=self._directory_pin.identity,
+                logical_path=self._directory,
+            )
+        except OSError as error:
+            self._finish()
+            raise PathChangedError(
+                f"the restoration of {self.original} could not be made durable: {error}",
+                preserved_path=self.original,
+            ) from error
+        finally:
+            destination_parent_pin.close()
         self._finish()
         return True
 
@@ -1113,6 +1213,17 @@ def claim_for_deletion(
             retained_access_directory.mkdir(mode=0o700)
         retained_directory_pin = _pin_private_claim_directory(retained_access_directory)
         try:
+            retained_parent_pin = _pin_directory_for_durability(retained_access_parent)
+            try:
+                # Persist the shared retained namespace before a transient
+                # claim relies on a newly-created child of it.
+                _fsync_directory_capability(
+                    retained_parent_pin.descriptor,
+                    expected_identity=retained_parent_pin.identity,
+                    logical_path=retained_public_parent,
+                )
+            finally:
+                retained_parent_pin.close()
             access_directory = Path(
                 tempfile.mkdtemp(
                     prefix=RETAINED_ENTRY_PREFIX,
@@ -1121,6 +1232,17 @@ def claim_for_deletion(
             )
             directory = retained_public_directory / access_directory.name
             directory_pin = _pin_private_claim_directory(access_directory)
+            try:
+                # Persist the random claim-directory name before moving the
+                # only public link to the file beneath it.
+                _fsync_directory_capability(
+                    retained_directory_pin.descriptor,
+                    expected_identity=retained_directory_pin.identity,
+                    logical_path=retained_public_directory,
+                )
+            except BaseException:
+                directory_pin.close()
+                raise
         finally:
             retained_directory_pin.close()
     else:
@@ -1131,20 +1253,63 @@ def claim_for_deletion(
     claimed = directory / "entry"
     owns_pin = pinned_source is None
     try:
-        if pinned_source is None:
-            pinned_source = pin_regular_path(
-                path,
-                expected_identity=expected_identity,
-                expected_fingerprint=expected_fingerprint,
+        source_parent_pin = _pin_directory_for_durability(path.parent)
+        try:
+            if pinned_source is None:
+                pinned_source = pin_regular_path(
+                    path,
+                    expected_identity=expected_identity,
+                    expected_fingerprint=expected_fingerprint,
+                )
+            claim_fingerprint = expected_fingerprint or pinned_source.fingerprint
+            source_access = Path("/proc/self/fd") / str(source_parent_pin.descriptor) / path.name
+            move_pin = PinnedPath(
+                source_access,
+                os.dup(pinned_source.descriptor),
+                stat.S_IFREG,
             )
-        claim_fingerprint = expected_fingerprint or pinned_source.fingerprint
-        atomic_move_no_replace(
-            path,
-            directory_pin.entry,
-            expected_identity=expected_identity,
-            expected_fingerprint=claim_fingerprint,
-            pinned_source=pinned_source,
-        )
+            try:
+                # Use the same parent capability which will be synced below,
+                # so an ancestor rebind cannot redirect the rename into a
+                # different, unsynced directory.
+                atomic_move_no_replace(
+                    source_access,
+                    directory_pin.entry,
+                    expected_identity=expected_identity,
+                    expected_fingerprint=claim_fingerprint,
+                    pinned_source=move_pin,
+                )
+            finally:
+                # This duplicate is access-only. Its close cannot undo the
+                # rename and must not skip the durability barriers below.
+                with contextlib.suppress(OSError):
+                    move_pin.close()
+            try:
+                # A successful rename is not yet a power-loss-safe deletion
+                # claim. Persist the new private link first, then the
+                # withdrawal of the original link, before any caller may
+                # truncate the inode.
+                _fsync_directory_capability(
+                    directory_pin.descriptor,
+                    expected_identity=directory_pin.identity,
+                    logical_path=directory,
+                )
+                _fsync_directory_capability(
+                    source_parent_pin.descriptor,
+                    expected_identity=source_parent_pin.identity,
+                    logical_path=public_path.parent,
+                )
+            except OSError as error:
+                raise PathChangedError(
+                    f"the atomic claim for {public_path} could not be made durable: {error}",
+                    preserved_path=directory_pin.entry,
+                ) from error
+        finally:
+            # Closing an already-synced directory capability cannot make its
+            # committed rename less durable. Mark-and-close is non-retrying;
+            # do not turn a close anomaly into a false failed claim.
+            with contextlib.suppress(OSError):
+                source_parent_pin.close()
     except PathChangedError as error:
         directory_anchor = directory_pin.anchor
         try:
@@ -1634,6 +1799,7 @@ def hash_pinned_regular(
     pinned: PinnedPath,
     *,
     expected_fingerprint: FileFingerprint | None = None,
+    maximum_bytes: int | None = None,
 ) -> tuple[int, str]:
     """Hash the exact regular inode retained by an ``O_PATH`` capability.
 
@@ -1650,6 +1816,11 @@ def hash_pinned_regular(
         raise FileReadError(f"{pinned.path} is not a regular file") from error
     if expected_fingerprint is not None and fingerprint != expected_fingerprint:
         raise FileReadError(f"{pinned.path} changed before its retained hash")
+    if maximum_bytes is not None:
+        if maximum_bytes < 0:
+            raise ValueError("a retained hash byte ceiling cannot be negative")
+        if before.st_size > maximum_bytes:
+            raise FileReadError(f"{pinned.path} exceeds its {maximum_bytes}-byte hash limit")
 
     access = Path("/proc/self/fd") / str(pinned.descriptor)
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
@@ -1663,9 +1834,21 @@ def hash_pinned_regular(
             raise FileReadError(f"{pinned.path} changed while its retained inode was opened")
         digest = hashlib.sha256()
         size = 0
-        while chunk := os.read(descriptor, 1024 * 1024):
+        while True:
+            read_size = 1024 * 1024
+            if maximum_bytes is not None:
+                # Read at most one byte beyond the ceiling. That proves growth
+                # without allowing an in-place appender to stream forever.
+                read_size = min(read_size, maximum_bytes - size + 1)
+            chunk = os.read(descriptor, read_size)
+            if not chunk:
+                break
             digest.update(chunk)
             size += len(chunk)
+            if maximum_bytes is not None and size > maximum_bytes:
+                raise FileReadError(
+                    f"{pinned.path} grew beyond its {maximum_bytes}-byte hash limit"
+                )
         if (
             file_fingerprint(os.fstat(descriptor)) != fingerprint
             or pinned.fingerprint != fingerprint

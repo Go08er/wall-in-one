@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Callable
@@ -11,6 +12,86 @@ import pytest
 
 from wall_in_one import config, file_io
 from wall_in_one.library import displays, favourites, pairings, playlists, schedules, state_file
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        b'{"value":"\\ud800"}',
+        b'{"\\udfff":"value"}',
+    ),
+)
+def test_read_object_rejects_nonfinite_and_non_utf8_json_values(
+    tmp_path: Path,
+    document: bytes,
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_bytes(document)
+
+    parsed, fault = state_file.read_object(
+        target,
+        maximum_bytes=1024,
+        description="test state",
+    )
+
+    assert parsed is None
+    assert fault == "state.json is not readable JSON"
+
+
+def test_read_object_converts_canonicalization_value_error_to_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text('{"value":1}', encoding="utf-8")
+
+    def fail_canonicalization(*_args: object, **_kwargs: object) -> str:
+        raise ValueError("injected canonicalization failure")
+
+    monkeypatch.setattr(json, "dumps", fail_canonicalization)
+
+    parsed, fault = state_file.read_object(
+        target,
+        maximum_bytes=1024,
+        description="test state",
+    )
+
+    assert parsed is None
+    assert fault == "state.json is not readable JSON"
+
+
+def test_read_snapshots_bind_nested_store_reads_to_exact_bytes_and_absence(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text('{"generation":"public"}', encoding="utf-8")
+
+    with state_file.read_snapshots({target: b'{"generation":"retained"}'}):
+        retained, retained_fault = state_file.read_object(
+            target,
+            maximum_bytes=1024,
+            description="test state",
+        )
+    with state_file.read_snapshots({target: None}):
+        absent, absent_fault = state_file.read_object(
+            target,
+            maximum_bytes=1024,
+            description="test state",
+        )
+    public, public_fault = state_file.read_object(
+        target,
+        maximum_bytes=1024,
+        description="test state",
+    )
+
+    assert retained == {"generation": "retained"}
+    assert retained_fault is None
+    assert absent is None and absent_fault is None
+    assert public == {"generation": "public"}
+    assert public_fault is None
 
 
 def test_preserving_a_fault_never_replaces_an_older_recovery_copy(tmp_path: Path) -> None:
@@ -441,9 +522,13 @@ def test_failed_atomic_write_never_discards_a_same_type_temporary_replacement(
     temporary: Path | None = None
     expected_identity: file_io.PathIdentity | None = None
     raced = False
+    real_sync = os.fsync
 
-    def replace_then_fail_sync(_descriptor: int) -> None:
+    def replace_then_fail_sync(descriptor: int) -> None:
         nonlocal expected_identity, raced, temporary
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            real_sync(descriptor)
+            return
         temporary = next(tmp_path.glob(".*.tmp"))
         status = real_lstat(temporary)
         expected_identity = status.st_dev, status.st_ino
@@ -480,13 +565,16 @@ def test_failed_atomic_write_never_double_closes_a_reused_descriptor(
 ) -> None:
     target = tmp_path / "state.json"
     real_discard = file_io.discard_regular_if_same
+    real_sync = os.fsync
     failed_descriptor: int | None = None
     reused_descriptor: int | None = None
 
     def fail_sync(descriptor: int) -> None:
         nonlocal failed_descriptor
-        failed_descriptor = descriptor
-        raise OSError("injected sync failure")
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            failed_descriptor = descriptor
+            raise OSError("injected sync failure")
+        real_sync(descriptor)
 
     def retain_reused_descriptor(
         path: Path,

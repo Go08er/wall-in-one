@@ -1,5 +1,6 @@
 use chrono::Local;
 use std::env;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::BufReader;
 use std::os::fd::AsRawFd;
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use wall_in_one_service::config::Config;
+use wall_in_one_service::config::{Config, ConfigError};
 use wall_in_one_service::protocol::{read_request, write_response, Request, Response};
 use wall_in_one_service::renderer::SystemDriver;
 use wall_in_one_service::runtime::Runtime;
@@ -17,6 +18,41 @@ use wall_in_one_service::runtime::Runtime;
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 const STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(8);
 const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+// sysexits.h's EX_CONFIG.  The packaged unit names this in
+// RestartPreventExitStatus so a present incompatible or malformed runtime
+// document stops once instead of consuming its restart burst.  Failures after
+// configuration has loaded remain ordinary status 1 failures and retain
+// systemd recovery.
+const EX_CONFIG: i32 = 78;
+
+enum ServiceError {
+    Config(ConfigError),
+    Runtime(String),
+}
+
+impl ServiceError {
+    fn exit_status(&self) -> i32 {
+        match self {
+            Self::Config(_) => EX_CONFIG,
+            Self::Runtime(_) => 1,
+        }
+    }
+}
+
+impl fmt::Display for ServiceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config(error) => error.fmt(formatter),
+            Self::Runtime(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for ServiceError {
+    fn from(error: String) -> Self {
+        Self::Runtime(error)
+    }
+}
 
 struct SocketOwner {
     listener: UnixListener,
@@ -447,13 +483,13 @@ fn retry_initial_apply(
     Ok(())
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<(), ServiceError> {
     let options = parse()?;
     install_signal_handlers();
     if options.wait_for_config && !wait_for_config(&options.config)? {
         return Ok(());
     }
-    let config = Config::load(&options.config).map_err(|error| error.to_string())?;
+    let config = Config::load(&options.config).map_err(ServiceError::Config)?;
     let driver = SystemDriver::new_for_service_socket(config.renderer.clone(), &options.socket);
     let mut runtime = Runtime::new(
         options.config.clone(),
@@ -517,8 +553,9 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(error) = run() {
+        let exit_status = error.exit_status();
         eprintln!("wall-in-one-service: {error}");
-        std::process::exit(1);
+        std::process::exit(exit_status);
     }
 }
 

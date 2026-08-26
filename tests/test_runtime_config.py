@@ -91,8 +91,8 @@ def test_write_config_refuses_a_malformed_settings_file(
     previous = 'schema_version = 1\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
-    assert cli.main(["--write-config"]) == 1
-    assert "cannot parse" in capsys.readouterr().err
+    assert cli.main(["--write-config"]) == cli.EXIT_CONFIG
+    assert "not valid TOML" in capsys.readouterr().err
     assert target.read_text(encoding="utf-8") == previous
 
 
@@ -134,7 +134,7 @@ def test_write_config_refuses_semantically_invalid_settings_without_replacing_ru
     previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
-    assert cli.main(["--write-config"]) == 1
+    assert cli.main(["--write-config"]) == cli.EXIT_CONFIG
     assert message in capsys.readouterr().err
     assert target.read_text(encoding="utf-8") == previous
 
@@ -179,7 +179,7 @@ def test_headless_settings_obey_rust_wire_bounds_without_replacing_runtime(
     previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
     target.write_text(previous, encoding="utf-8")
 
-    assert cli.main(["--write-config"]) == 1
+    assert cli.main(["--write-config"]) == cli.EXIT_CONFIG
     assert message in capsys.readouterr().err
     assert target.read_text(encoding="utf-8") == previous
 

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from wall_in_one import config, file_io
 from wall_in_one.library import (
+    adopted,
     displays,
     favourites,
     manage,
@@ -153,6 +154,31 @@ class RemovalResult:
     repaired_faults: tuple[tuple[str, str], ...] = ()
 
 
+def _physically_removed_adoption(
+    authority: adopted.Authority | None,
+    physical: manage.Removal | manage.Trashed | None,
+) -> adopted.Authority | None:
+    """Retain metadata cleanup authority only when both exact children left."""
+    if authority is None or physical is None:
+        return None
+    removed = (
+        physical.removed if isinstance(physical, manage.Removal) else physical.removed_artifacts
+    )
+    if authority.capture_path in removed and authority.sidecar_path in removed:
+        return authority
+    return None
+
+
+def _retained_adoption_paths(
+    authority: adopted.Authority | None,
+    physical: manage.Removal | manage.Trashed | None,
+) -> tuple[Path, ...]:
+    """Paths a committed operation explicitly preserved as another lifecycle."""
+    if authority is None or _physically_removed_adoption(authority, physical) is not None:
+        return ()
+    return authority.capture_path, authority.sidecar_path
+
+
 @dataclass(frozen=True, slots=True)
 class RemovalPlan:
     """Value-only removal inputs whose lease and I/O live on one worker.
@@ -171,9 +197,29 @@ class RemovalPlan:
     pairing_store: pairings.Store
     playlist_store: playlists.Store
     removal_store: removals.Store
+    #: Exact candidate carried from accepted scan truth. The worker converts
+    #: it to a deletion-capable generation proof with ``authority_for``;
+    #: neither this path nor the old basename is authority on its own.
+    adopted_capture: Path | None = None
 
     def run(self) -> RemovalResult:
         """Perform prepare, physical commit and cleanup on this worker."""
+        adopted_authority: adopted.Authority | None = None
+        if self.adopted_capture is not None:
+            try:
+                adopted_authority = adopted.authority_for(
+                    self.item.path,
+                    capture=self.adopted_capture,
+                    verify_contents=True,
+                )
+            except adopted.AdoptionError as error:
+                return RemovalResult(
+                    item=self.item,
+                    trash=self.trash,
+                    committed=False,
+                    error_kind="invalid-state",
+                    error_message=f"could not validate adopted capture authority: {error}",
+                )
         favourite_store = self.favourite_store.worker_copy(rebase=True)
         pairing_store = self.pairing_store.worker_copy(rebase=True)
         playlist_store = self.playlist_store.worker_copy(rebase=True)
@@ -264,6 +310,7 @@ class RemovalPlan:
                         expected_source=intent.source_identity,
                         expected_fingerprint=intent.source_fingerprint,
                         prepared_pin=source_pin,
+                        adopted_authority=adopted_authority,
                         lookup_path=anchored_source,
                         source_root=intent.source_root,
                         lookup_root=source_context.root_anchor,
@@ -278,6 +325,7 @@ class RemovalPlan:
                         expected_fingerprint=intent.source_fingerprint,
                         prepared_pin=source_pin,
                         operation_token=intent.token,
+                        adopted_authority=adopted_authority,
                         lookup_path=anchored_source,
                         source_root=intent.source_root,
                         lookup_root=source_context.root_anchor,
@@ -317,6 +365,14 @@ class RemovalPlan:
                     artifact_lookup_root=source_context.root_anchor,
                     artifact_lookup_parent=source_context.directory_anchor,
                     artifact_source_context=source_context,
+                    adopted_authority=_physically_removed_adoption(
+                        adopted_authority,
+                        error.physical,
+                    ),
+                    retained_pairing_artifacts=_retained_adoption_paths(
+                        adopted_authority,
+                        error.physical,
+                    ),
                 )
                 return RemovalResult(
                     item=self.item,
@@ -340,6 +396,14 @@ class RemovalPlan:
                 artifact_lookup_root=source_context.root_anchor,
                 artifact_lookup_parent=source_context.directory_anchor,
                 artifact_source_context=source_context,
+                adopted_authority=_physically_removed_adoption(
+                    adopted_authority,
+                    physical,
+                ),
+                retained_pairing_artifacts=_retained_adoption_paths(
+                    adopted_authority,
+                    physical,
+                ),
             )
             return RemovalResult(
                 item=self.item,
@@ -774,6 +838,10 @@ class Session:
     def prepare_removal_plan(self, item: MediaItem, *, trash: bool) -> RemovalPlan:
         """Snapshot a detached removal without doing filesystem I/O on GTK."""
         roots = tuple(self._library.roots)
+        adopted_matches = tuple(
+            capture for source, capture in self._library.adopted_stills if source == item.path
+        )
+        adopted_capture = adopted_matches[0] if len(adopted_matches) == 1 else None
         return RemovalPlan(
             settings=self._settings,
             item=item,
@@ -783,6 +851,7 @@ class Session:
             pairing_store=self._pairings.worker_copy(),
             playlist_store=self._playlists.worker_copy(),
             removal_store=self._removals.worker_copy(),
+            adopted_capture=adopted_capture,
         )
 
     def cancel_removal(self, intent: removals.Intent) -> None:
@@ -804,6 +873,8 @@ class Session:
         intent: removals.Intent,
         *,
         artifacts_already_clean: bool = False,
+        adopted_authority: adopted.Authority | None = None,
+        retained_pairing_artifacts: Sequence[Path] = (),
         artifact_cleanup_deferred: bool = False,
         artifact_source_root: Path | None = None,
         artifact_lookup_root: Path | None = None,
@@ -838,6 +909,8 @@ class Session:
                     intent.item,
                     intent.roots,
                     artifacts_already_clean=artifacts_already_clean,
+                    adopted_authority=adopted_authority,
+                    retained_pairing_artifacts=retained_pairing_artifacts,
                     artifact_cleanup_deferred=artifact_cleanup_deferred,
                     artifact_source_root=artifact_source_root,
                     artifact_lookup_root=artifact_lookup_root,
@@ -973,6 +1046,8 @@ class Session:
         roots: Sequence[Path],
         *,
         artifacts_already_clean: bool = False,
+        adopted_authority: adopted.Authority | None = None,
+        retained_pairing_artifacts: Sequence[Path] = (),
         artifact_cleanup_deferred: bool = False,
         artifact_source_root: Path | None = None,
         artifact_lookup_root: Path | None = None,
@@ -994,10 +1069,16 @@ class Session:
                 failures.append(f"favourites: {self._favourites.fault}")
         saved_pairing = self._pairings.get(pairings.Identity.of(item))
         legacy_selected = saved_pairing.still if saved_pairing is not None else None
-        artifacts = manage.pairing_artifact_paths(
-            item,
-            roots,
-            legacy_selected_still=legacy_selected,
+        retained_pairing = frozenset(retained_pairing_artifacts)
+        artifacts = tuple(
+            path
+            for path in manage.pairing_artifact_paths(
+                item,
+                roots,
+                legacy_selected_still=legacy_selected,
+                adopted_authority=adopted_authority,
+            )
+            if path not in retained_pairing
         )
         try:
             self._pairings.forget_item(item, removed_stills=artifacts)
@@ -1025,6 +1106,7 @@ class Session:
                 item,
                 roots,
                 legacy_selected_still=legacy_selected,
+                adopted_authority=adopted_authority,
                 source_root=artifact_source_root,
                 lookup_root=artifact_lookup_root,
                 lookup_parent=artifact_lookup_parent,
@@ -1370,7 +1452,7 @@ class Session:
             )
         # The pairing is resolved here rather than in the applier, because the
         # store is the session's and the applier has no business reading files.
-        bundle = self._pairings.resolve(item, self._library.roots)
+        bundle = self._pairings.resolve_accepted(item, self._library)
         return self._applier.apply(
             item,
             dynamics_enabled=self._settings.dynamics_enabled,

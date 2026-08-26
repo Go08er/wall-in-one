@@ -18,7 +18,8 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -31,6 +32,37 @@ MUTATION_LOCK_POLL_SECONDS: Final = 0.025
 # the same worker while retaining process-wide exclusion. Reentrancy is only
 # same-thread; other workers remain serialized exactly as before.
 _MUTATION_GATE = threading.RLock()
+_READ_SNAPSHOTS: ContextVar[Mapping[Path, bytes | None] | None] = ContextVar(
+    "wall_in_one_state_file_read_snapshots",
+    default=None,
+)
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON keys instead of silently accepting last-win state."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON constant {value!r}")
+
+
+def _validate_json_canonicalization(document: object) -> None:
+    (
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +78,30 @@ class StateFileObservation:
     @property
     def present(self) -> bool:
         return self.identity is not None
+
+
+@contextlib.contextmanager
+def read_snapshots(snapshots: Mapping[Path, bytes | None]) -> Iterator[None]:
+    """Make exact observed bytes authoritative for nested Store reads.
+
+    The deployed-profile detector pins authoring files before asking each
+    Store to parse them. A context-local snapshot lets those ordinary Store
+    readers consume the retained bytes (or retained absence) rather than a
+    pathname generation swapped between observation and parsing.
+    """
+    canonical: dict[Path, bytes | None] = {}
+    for path, contents in snapshots.items():
+        key = path.absolute()
+        if key in canonical:
+            raise ValueError(f"duplicate state-file read snapshot for {key}")
+        if contents is not None and not isinstance(contents, bytes):
+            raise TypeError(f"state-file read snapshot for {key} is not bytes")
+        canonical[key] = contents
+    token = _READ_SNAPSHOTS.set(canonical)
+    try:
+        yield
+    finally:
+        _READ_SNAPSHOTS.reset(token)
 
 
 @contextlib.contextmanager
@@ -103,6 +159,29 @@ def observe(path: Path) -> Iterator[StateFileObservation]:
         pinned.close()
 
 
+def _decode_object(
+    encoded: bytes,
+    path: Path,
+    *,
+    maximum_bytes: int,
+    description: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if len(encoded) > maximum_bytes:
+        return None, f"{path.name} is too large to be a {description} file"
+    try:
+        document = json.loads(
+            encoded,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
+        _validate_json_canonicalization(document)
+    except UnicodeError, TypeError, ValueError, RecursionError:
+        return None, f"{path.name} is not readable JSON"
+    if not isinstance(document, dict):
+        return None, f"{path.name} is not a {description} file"
+    return document, None
+
+
 def read_object(
     path: Path, *, maximum_bytes: int, description: str
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -112,6 +191,19 @@ def read_object(
     but is not a readable regular JSON file produces a fault, including a
     replacement race between ``lstat`` and ``open``.
     """
+    snapshots = _READ_SNAPSHOTS.get()
+    if snapshots is not None:
+        key = path.absolute()
+        if key in snapshots:
+            encoded = snapshots[key]
+            if encoded is None:
+                return None, None
+            return _decode_object(
+                encoded,
+                path,
+                maximum_bytes=maximum_bytes,
+                description=description,
+            )
     try:
         before = path.lstat()
     except FileNotFoundError:
@@ -145,15 +237,12 @@ def read_object(
     finally:
         os.close(descriptor)
 
-    if len(encoded) > maximum_bytes:
-        return None, f"{path.name} is too large to be a {description} file"
-    try:
-        document = json.loads(encoded)
-    except UnicodeDecodeError, ValueError, RecursionError:
-        return None, f"{path.name} is not readable JSON"
-    if not isinstance(document, dict):
-        return None, f"{path.name} is not a {description} file"
-    return document, None
+    return _decode_object(
+        encoded,
+        path,
+        maximum_bytes=maximum_bytes,
+        description=description,
+    )
 
 
 def version_fault(path: Path, document: dict[str, Any], expected: int) -> str | None:

@@ -24,6 +24,7 @@ import json
 import os
 import stat
 import string
+import threading
 import tomllib
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -68,6 +69,8 @@ MAX_LEGACY_OUTPUTS: Final = 64
 MAX_LEGACY_PLAYLISTS: Final = playlists.MAX_AUTHORED_PLAYLISTS
 MAX_LEGACY_ENTRIES: Final = playlists.MAX_ENTRIES
 MIGRATION_LOCK_TIMEOUT_SECONDS: Final = 60.0
+_PROFILE_GATE = threading.RLock()
+_PROFILE_DEPTH = threading.local()
 LEGACY_SCALING_MAP: Final[dict[str, str]] = {
     "default": "",
     "stretch": "stretch",
@@ -526,7 +529,7 @@ def probe(*, source_dir: Path | None = None, noctalia_settings: Path | None = No
     )
 
 
-def _require_unattended_safe_locked() -> None:
+def require_unattended_safe_locked() -> None:
     """Validate headless authoring while the migration lock is owned."""
     found = probe()
     if found.needs_decision:
@@ -534,6 +537,47 @@ def _require_unattended_safe_locked() -> None:
             f"{found.detail}. Open Wall-in-One to choose, or run "
             "`wall-in-one --migrate-legacy` before starting the service"
         )
+
+
+@contextmanager
+def profile_transaction(*, timeout: float = MIGRATION_LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """Hold the profile-wide legacy-import exclusion without deciding it.
+
+    The deployed-application upgrade is a separate, automatic compatibility
+    boundary.  It must run before the retired-plugin decision guard, while
+    still excluding that importer's writes.  Callers which are not performing
+    that newer boundary should continue to use :func:`unattended_transaction`.
+    """
+    with _PROFILE_GATE:
+        depth = int(getattr(_PROFILE_DEPTH, "value", 0))
+        if depth:
+            _PROFILE_DEPTH.value = depth + 1
+            try:
+                yield
+            finally:
+                _PROFILE_DEPTH.value = depth
+            return
+        stack = ExitStack()
+        try:
+            stack.enter_context(
+                state_file.mutation_lock(
+                    marker_path(),
+                    description="legacy migration",
+                    timeout=timeout,
+                    process_gate=False,
+                )
+            )
+        except OSError as error:
+            stack.close()
+            raise MigrationError(
+                f"cannot lock the legacy migration transaction: {error}"
+            ) from error
+        with stack:
+            _PROFILE_DEPTH.value = 1
+            try:
+                yield
+            finally:
+                _PROFILE_DEPTH.value = 0
 
 
 @contextmanager
@@ -546,20 +590,8 @@ def unattended_transaction(*, timeout: float = MIGRATION_LOCK_TIMEOUT_SECONDS) -
     Headless config and health writers hold the same lock as import from the
     guard through their final durable publication.
     """
-    stack = ExitStack()
-    try:
-        stack.enter_context(
-            state_file.mutation_lock(
-                marker_path(),
-                description="legacy migration",
-                timeout=timeout,
-                process_gate=False,
-            )
-        )
-    except OSError as error:
-        raise MigrationError(f"cannot lock the legacy migration transaction: {error}") from error
-    with stack:
-        _require_unattended_safe_locked()
+    with profile_transaction(timeout=timeout):
+        require_unattended_safe_locked()
         # Errors from the writer are intentionally outside the acquisition
         # wrapper.  A local I/O failure must retain its own actionable context,
         # not be mislabeled as a migration-lock failure merely because it

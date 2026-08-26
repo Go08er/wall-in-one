@@ -13,11 +13,16 @@ Type=simple
 # Compilation is fail-closed and preserves the previous resolved document.
 # Let Rust decide whether that last-known-good document is still usable.
 ExecStartPre=-wall-in-one --write-config
-ExecStart=wall-in-one-service --wait-for-config
+ExecStart=wall-in-one-service
 # A regular timer owns durable quarantine persistence. This final attempt is
 # deliberately capped so a wedged authoring store cannot delay service stop.
 ExecStop=-timeout --signal=TERM --kill-after=0.1s 2s wall-in-one --sync-runtime-health-on-stop
 Restart=on-failure
+# A present incompatible or malformed runtime document is an administrative
+# migration/configuration boundary, not a transient daemon crash. Rust reports
+# that startup-only class with sysexits.h EX_CONFIG so it stops once rather
+# than exhausting this unit's restart burst. Runtime failures remain status 1.
+RestartPreventExitStatus=78
 RestartSec=5
 
 [Install]

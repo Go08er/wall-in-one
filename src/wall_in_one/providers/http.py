@@ -47,7 +47,7 @@ from wall_in_one.providers.base import ProviderError
 
 #: Sent on every request. Identifying the client honestly is the price of using
 #: someone else's public API.
-USER_AGENT: Final = "wall-in-one/0.1.0 (+https://github.com/goober/wall-in-one)"
+USER_AGENT: Final = "wall-in-one/0.1.1 (+https://github.com/goober/wall-in-one)"
 
 #: Read granularity. Large enough that a 64 MiB image is not a million calls,
 #: small enough that the ceiling is enforced promptly.

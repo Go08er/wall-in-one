@@ -597,12 +597,18 @@ def save(
     return target
 
 
-def synthesize(item: MediaItem, roots: Sequence[Path] = ()) -> Pairing:
+def synthesize(
+    item: MediaItem,
+    roots: Sequence[Path] = (),
+    *,
+    adopted_still: Path | None = None,
+) -> Pairing:
     """The bundle an item has when nobody has chosen anything for it.
 
     A still is its own representative. A video's default comes from
-    `library.pairing`'s three conventions -- our sidecar, the managed
-    `Automatic Stills` directory, or a sibling named by the user's own habit.
+    `library.pairing`'s ordered conventions: our video sidecar, the current
+    hashed capture, an adopted generation, then a sibling named by the user's
+    own habit.
     """
     identity = Identity.of(item)
     if not item.is_moving:
@@ -615,7 +621,7 @@ def synthesize(item: MediaItem, roots: Sequence[Path] = ()) -> Pairing:
         )
     return Pairing(
         identity=identity,
-        still=pairing.find_still(item.path, roots=roots),
+        still=pairing.find_still(item.path, roots=roots, adopted=adopted_still),
         motion=item.path,
     )
 
@@ -624,6 +630,8 @@ def resolve(
     item: MediaItem,
     roots: Sequence[Path] = (),
     records: Mapping[str, Pairing] | None = None,
+    *,
+    adopted_still: Path | None = None,
 ) -> Pairing:
     """The bundle to actually use for ``item``.
 
@@ -632,7 +640,7 @@ def resolve(
     `override_missing`. The choice itself is untouched: a drive that is not
     mounted this morning is not somebody changing their mind.
     """
-    default = synthesize(item, roots)
+    default = synthesize(item, roots, adopted_still=adopted_still)
     saved = (records or {}).get(default.identity.key)
     if saved is None:
         return default
@@ -653,6 +661,8 @@ def apply(
     items: Iterable[MediaItem],
     roots: Sequence[Path] = (),
     records: Mapping[str, Pairing] | None = None,
+    *,
+    adopted_stills: Mapping[Path, Path] | None = None,
 ) -> tuple[MediaItem, ...]:
     """Attach representative stills and hide only app-generated children.
 
@@ -666,7 +676,16 @@ def apply(
     default. The difference is the ``records`` argument.
     """
     materialised = list(items)
-    resolved = {item.path: resolve(item, roots, records) for item in materialised}
+    adopted = adopted_stills or {}
+    resolved = {
+        item.path: resolve(
+            item,
+            roots,
+            records,
+            adopted_still=adopted.get(item.path),
+        )
+        for item in materialised
+    }
 
     generated = {
         destination
@@ -675,6 +694,7 @@ def apply(
         for root in roots
         if (destination := stills.automatic_destination(item, root)) is not None
     }
+    generated.update(adopted.values())
     kept: list[MediaItem] = []
     for item in materialised:
         bundle = resolved[item.path]
@@ -761,8 +781,19 @@ class Store:
         record = self._records.get(identity.key)
         return record.health if record is not None else Health()
 
-    def resolve(self, item: MediaItem, roots: Sequence[Path] = ()) -> Pairing:
-        return resolve(item, roots, self._records)
+    def resolve(
+        self,
+        item: MediaItem,
+        roots: Sequence[Path] = (),
+        *,
+        adopted_still: Path | None = None,
+    ) -> Pairing:
+        return resolve(
+            item,
+            roots,
+            self._records,
+            adopted_still=adopted_still,
+        )
 
     def resolve_accepted(self, item: MediaItem, library: Library) -> Pairing:
         """Resolve only from the latest immutable scan and in-memory record.
@@ -803,9 +834,18 @@ class Store:
         )
 
     def apply(
-        self, items: Iterable[MediaItem], roots: Sequence[Path] = ()
+        self,
+        items: Iterable[MediaItem],
+        roots: Sequence[Path] = (),
+        *,
+        adopted_stills: Mapping[Path, Path] | None = None,
     ) -> tuple[MediaItem, ...]:
-        return apply(items, roots, self._records)
+        return apply(
+            items,
+            roots,
+            self._records,
+            adopted_stills=adopted_stills,
+        )
 
     def choose_still(self, item: MediaItem, still: Path | None) -> Pairing:
         """Record a chosen representative for ``item``, or clear the choice.

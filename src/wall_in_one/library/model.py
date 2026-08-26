@@ -162,6 +162,10 @@ class Library:
     #: diagnostics without turning automatic captures into authoring choices;
     #: explicit choices come from the first-class ``items`` above.
     still_inventory: tuple[MediaItem, ...] = ()
+    #: Generation-bound basename captures adopted from the previously
+    #: deployed application.  These pairs are accepted scan truth: consumers
+    #: must not rediscover them later from a filename convention.
+    adopted_stills: tuple[tuple[Path, Path], ...] = ()
 
     def __len__(self) -> int:
         return len(self.items)

@@ -21,6 +21,7 @@ from wall_in_one.library import (
     displays,
     favourites,
     manage,
+    model,
     pairing,
     pairings,
     playlists,
@@ -1185,7 +1186,7 @@ def test_deeply_nested_noctalia_toml_recursion_is_bounded_and_left_byte_exact(
     assert not legacy_migration.marker_path().exists()
 
 
-def test_migrated_automatic_still_is_hidden_and_cleanup_is_identity_bounded(
+def test_migrated_schema1_still_remains_user_owned_without_deletion_authority(
     isolated_xdg: Path,
 ) -> None:
     _legacy, _watched, video, _manual, automatic = _legacy_fixture(isolated_xdg)
@@ -1194,15 +1195,16 @@ def test_migrated_automatic_still_is_hidden_and_cleanup_is_identity_bounded(
 
     library = scan.scan((root, video_root))
 
-    assert automatic not in {item.path for item in library.items}
+    automatic_item = next(item for item in library.items if item.path == automatic)
+    assert automatic_item.ownership is model.Ownership.USER
     video_item = next(item for item in library.items if item.path == video)
     artifacts = manage.pairing_artifact_paths(
         video_item,
         (root, video_root),
         legacy_selected_still=automatic,
     )
-    assert automatic in artifacts
-    assert automatic.with_name(automatic.name + pairing.SIDECAR_SUFFIX) in artifacts
+    assert automatic not in artifacts
+    assert automatic.with_name(automatic.name + pairing.SIDECAR_SUFFIX) not in artifacts
 
     forged = automatic.with_name("other.png")
     forged.write_bytes(b"user still")

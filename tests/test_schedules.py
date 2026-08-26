@@ -531,7 +531,7 @@ def test_one_bad_rule_costs_only_itself(tmp_path: Path) -> None:
     assert Store.open(target).fault is not None
 
 
-def test_surrogate_rule_text_is_dropped_and_refused_without_crashing(tmp_path: Path) -> None:
+def test_surrogate_json_document_is_rejected_without_crashing(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     target.write_text(
         '{"version": 2, "rules": ['
@@ -542,7 +542,7 @@ def test_surrogate_rule_text_is_dropped_and_refused_without_crashing(tmp_path: P
 
     opened = Store.open(target)
 
-    assert [rule.id for rule in opened.rules] == ["good"]
+    assert opened.rules == ()
     assert opened.fault is not None
     with pytest.raises(ScheduleError) as caught:
         opened.add("\ud800")

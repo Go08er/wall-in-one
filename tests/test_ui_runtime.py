@@ -1500,9 +1500,14 @@ def test_clear_still_resolves_default_off_gtk_and_immediate_read_is_pure(
     probe_threads: list[int] = []
     original_find = pairing.find_still
 
-    def observed_find(video: Path, roots: object = ()) -> Path | None:
+    def observed_find(
+        video: Path,
+        roots: object = (),
+        *,
+        adopted: Path | None = None,
+    ) -> Path | None:
         probe_threads.append(threading.get_ident())
-        return original_find(video, roots)  # type: ignore[arg-type]
+        return original_find(video, roots, adopted=adopted)  # type: ignore[arg-type]
 
     monkeypatch.setattr(pairing, "find_still", observed_find)
     monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)

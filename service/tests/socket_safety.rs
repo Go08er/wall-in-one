@@ -138,7 +138,11 @@ fn a_regular_file_at_the_socket_path_is_never_replaced() {
         .arg(&socket)
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "post-config socket failures must remain restartable"
+    );
     assert_eq!(fs::read(&socket).unwrap(), b"sentinel");
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to replace non-socket"));
     fs::remove_dir_all(root).unwrap();

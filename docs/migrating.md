@@ -1,4 +1,174 @@
-# Migrating from the Noctalia Luau plugin
+# Migration and upgrade guide
+
+Wall-in-One has two separate compatibility boundaries. The deployed
+Python/Rust application upgrade below is automatic only for one exact shipped
+schema-2 profile. The retired Noctalia Luau plugin import is an explicit user
+decision for a different format. Their commands, journals, and authority
+records are not interchangeable.
+
+## Upgrading the deployed Python/Rust app
+
+One deployed Python/Rust release used `roots = []` to mean “follow Noctalia's
+wallpaper directory” and compiled a schema-2 `runtime.toml`. The current app
+requires an explicit library root and the Rust service requires runtime schema
+4. The deployed-upgrade boundary recognizes that one transition; it is not a
+promise to migrate arbitrary pre-release application state.
+
+### Detection and fail-closed behavior
+
+Graphical startup and unattended writers such as `--write-config` first run
+the deployed-profile detector. It proceeds automatically only when all of the
+old profile's independent evidence agrees: the exact predecessor-shaped
+`settings.toml` with `roots = []`, a valid schema-2 runtime, the current
+authoring stores, Noctalia's absolute wallpaper directory, the exact owned
+Automatic Stills marker, and the runtime's source/capture relationships. Files,
+directories, source generations, captures, and any relevant sidecars are
+bounded and revalidated without following symbolic links. Playlist, schedule,
+display, All Media, and authoring-store contents must describe the same
+snapshot.
+
+The detector then has only these outcomes:
+
+| Status | Meaning |
+|---|---|
+| `absent` | No settings or orphaned app state exists. This is a fresh install. |
+| `current` | Settings already use the explicit-root contract; no deployed upgrade is needed. |
+| `ready` | One exact schema-2 predecessor is eligible for automatic preparation and cutover. |
+| `in-progress` | An exact transaction journal exists and can be resumed. |
+| `prepared` | Schema 4 and capture authority are staged; resume verifies whether schema 2 or an interrupted schema-4 cutover is public. |
+| `complete` | The schema-4 cutover and completion record agree. |
+| `conflict` or `corrupt` | Evidence is ambiguous, inconsistent, unsafe, or malformed; nothing is guessed. |
+
+A genuinely fresh install remains outside this migration. The initial probe
+runs before creating a persistent transaction lock, so it does not create or
+modify the app's XDG config/state trees; the GUI continues to ask the user for
+a library directory. State files without settings are not treated as fresh:
+they are reported as corrupt so defaults cannot overwrite an incomplete
+profile.
+
+Examples which fail closed include a changed source or capture, duplicate
+source/capture claims, a missing or altered marker, a basename that does not
+match its video, a pre-existing adoption sidecar without the journal that
+created it, a current hashed capture beside the predecessor capture, an active
+removal intent, mismatched runtime/authoring data, a hard link, a symlinked
+ancestor, or a path that cannot be pinned beneath its expected root. Re-running
+the command does not turn any of those cases into authority.
+
+### Inspect, prepare, and cut over
+
+The status command is read-only. Preparation is intentionally distinct from
+the final service cutover:
+
+```console
+$ wall-in-one --deployed-upgrade-status
+$ wall-in-one --prepare-deployed-upgrade
+```
+
+`--prepare-deployed-upgrade` refuses to run while a Python authoring process is
+listening on the app socket. After taking the profile/compiler/authoring locks,
+it writes the durable journal first, publishes exact capture-adoption
+sidecars, replaces the old empty-root setting with the proven original root,
+publishes the central capture-authority manifest, and compiles and validates a
+private schema-4 stage. The public `runtime.toml` remains the byte-exact
+schema-2 generation, so preparation leaves an already-running old Rust
+daemon's public input untouched. If a crash already committed the schema-4
+runtime, preparation resumes forward and records completion instead of
+pretending it can return to an earlier boundary.
+
+Normal graphical startup and `wall-in-one --write-config` run the same
+transaction with cutover enabled. Immediately before cutover, the app
+revalidates the journal, settings, authoring stores, capture authority, and a
+deterministic re-render of the stage. It then atomically claims only the exact
+schema-2 runtime generation, installs the validated schema-4 bytes, verifies
+them again, and writes the completion marker last. Repeated preparation,
+startup, or compilation resumes the same journal and is idempotent; it never
+starts a second migration from newly discovered pathnames.
+
+The reserved state records are
+`.deployed-upgrade-v1.journal.json`,
+`.runtime.toml.deployed-upgrade-v1.stage`,
+`deployed-capture-adoption-v1.json`, and the final
+`deployed-upgrade-v1.json`, all below the app state directory. Their presence
+is parsed and cross-checked; a file merely occupying one of those names is not
+accepted as progress or completion.
+
+The deployed-upgrade commands use sysexits-style failure codes:
+
+- exit `75` (`EX_TEMPFAIL`) means retryable exclusion failure, such as a live
+  Python writer, an uncertain authoring socket, or a busy migration lock. Stop
+  the old process or let the other transaction finish, then retry.
+- exit `78` (`EX_CONFIG`) means the persisted evidence is conflicting,
+  corrupt, or otherwise unsafe to migrate automatically. Preserve the files
+  and inspect the reported path; repeated retries without resolving the
+  evidence will not help. `--deployed-upgrade-status` returns 78 for
+  `conflict`/`corrupt` and zero for its other read-only classifications.
+
+The packaged service treats an incompatible/malformed runtime as a
+non-restartable exit-78 configuration boundary. A failed cross-schema startup
+therefore stops with a diagnostic instead of exhausting the restart burst
+against a surviving schema-2 document.
+
+### Root and capture preservation
+
+The transaction makes the exact Noctalia directory already used by the
+deployed app the explicit current root. It does not select a replacement root.
+Existing full-resolution video captures remain at their original direct-child
+paths under `Wall-in-One/Automatic Stills/<video-basename>.png`; they are not
+renamed to the new hashed convention. Canonical `schema: 2` authority sidecars
+and a central manifest bind each exact source generation to its exact capture
+generation, content hash, root identity, marker, and publication. The current
+scanner can therefore keep that exact capture attached to its video and hidden
+as a generated child, while a replacement generation loses authority and is
+shown as a user-owned file.
+
+Migration reads and hashes each bounded capture but does not decode any video
+or regenerate a frame. It never writes into a Steam Workshop source directory
+or changes a Workshop media file; the new sidecars are installed beside the
+captures in the proven Automatic Stills directory. Existing pairings,
+playlists, schedules, displays, favourites, provider sidecars, palettes, scene
+stills, and the original basename captures remain in place. Later explicit
+Remove/Move to Trash cleanup may consume an adopted capture only through its
+exact live generation authority; an observed Workshop uninstall remains
+metadata-only.
+
+### Crash recovery, backups, and rollback
+
+Together, the journal, authority document, deterministic stage, and completion
+record bind the original and target settings/runtime evidence, root and
+directory identities, authoring snapshot, marker, captures, and operation
+tokens. Publication is no-overwrite. If power is lost after an old settings
+or runtime file is moved out of its public name, the exact predecessor remains
+in a private durable claim and the next run recovers or advances only that
+journaled generation.
+
+Empty or unrelated claim directories are never deleted, trusted, or reused.
+After a replacement is durable, predecessor claims deliberately remain inert:
+they are crash evidence, not user-facing backups, and should not be renamed or
+cleaned by hand. Exact journal/stage files are retired only after the completion
+marker is durable; harmless exact residue is cross-checked on later starts.
+
+Before installing the new package, stop Wall-in-One and back up:
+
+- `~/.config/wall-in-one` and `~/.local/state/wall-in-one`;
+- the selected root's `Wall-in-One/Automatic Stills` directory, including its
+  ownership marker and captures; and
+- the Noctalia settings and companion revision used by the old installation.
+
+For rollback, stop and disable the new service first, preserve the failed/new
+state for diagnosis, restore those backups as a unit, and restore the prior
+app and companion revisions. Do not combine individual files from before and
+after cutover, delete a resumable journal, or treat a private claim as the
+rollback interface. There is no automatic schema-4-to-schema-2 conversion.
+
+Release order is app first, companion second. Publish and make the compatible
+app available, then immediately publish/promote the reviewed companion. For a
+live machine, install the app, inspect or prepare the deployed upgrade, let GUI
+startup or `--write-config` complete schema-4 cutover, and only then
+refresh/materialize the strict companion and restart the service. Publishing
+or loading the strict companion first can strand users whose public app still
+emits the older status contract.
+
+## Importing the retired Noctalia Luau plugin
 
 Wall-in-One can import the retired full application from
 `Go08er/goober-noctalia-plugins-v5`, plugin id `goober/wall-in-one`. This is a
@@ -6,10 +176,9 @@ one-way, explicit import into an otherwise empty current profile. It is not a
 merge and it never edits, moves, or deletes the predecessor's files.
 
 This importer is for legacy `config.json` schemas 1 through 5. It does not
-promise automatic migration between arbitrary pre-alpha versions of this
-Python/Rust application.
+implement the deployed Python/Rust schema-2 upgrade described above.
 
-## What the first launch asks
+### What the first launch asks
 
 The graphical app checks for legacy authoring before it asks for a new library
 folder. When it finds data, it shows the source path, schema, playlist count,
@@ -55,7 +224,7 @@ $ wall-in-one --migrate-legacy
 or future legacy schema, changed interrupted source, unsafe path, size/count
 limit, or any conversion it cannot express without guessing.
 
-## Paths and lineage
+### Paths and lineage
 
 With the normal XDG defaults, the predecessor stored:
 
@@ -108,7 +277,7 @@ across a read so one import cannot combine documents from two directory
 generations. An old migration report already occupying the new report path is
 also an initial no-overwrite conflict.
 
-## What is preserved
+### What is preserved
 
 The importer preserves, subject to current typed limits:
 
@@ -153,7 +322,7 @@ own library item; deleting the association never deletes that still. An
 externally observed Steam Workshop uninstall clears authored metadata only; it
 does not rediscover or delete unpinned generated files.
 
-## Intentional non-equivalences
+### Intentional non-equivalences
 
 The current authoring model is not a byte-for-byte continuation of the Luau
 model. The import report records the choices which apply to the detected
@@ -191,7 +360,7 @@ profile:
 Malformed types and unknown scene scaling/clamp values stop the whole import;
 they do not silently select a current default.
 
-## Upgrade and rollback procedure
+### Upgrade and rollback procedure
 
 1. Back up the three legacy paths above. If a current profile exists, back up
    `~/.config/wall-in-one` and `~/.local/state/wall-in-one` too.

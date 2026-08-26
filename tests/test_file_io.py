@@ -130,6 +130,34 @@ def test_retained_read_rejects_in_place_mutation(tmp_path: Path) -> None:
             )
 
 
+def test_retained_hash_stops_at_ceiling_when_inode_grows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "capture.png"
+    path.write_bytes(b"four")
+    real_read = os.read
+    appended = False
+
+    def append_before_read(descriptor: int, count: int) -> bytes:
+        nonlocal appended
+        if not appended:
+            appended = True
+            with path.open("ab") as handle:
+                handle.write(b"!")
+        return real_read(descriptor, count)
+
+    with file_io.pin_regular_path(path) as pin:
+        fingerprint = pin.fingerprint
+        monkeypatch.setattr(os, "read", append_before_read)
+        with pytest.raises(file_io.FileReadError, match="grew beyond its 4-byte hash limit"):
+            file_io.hash_pinned_regular(
+                pin,
+                expected_fingerprint=fingerprint,
+                maximum_bytes=4,
+            )
+
+
 @pytest.mark.parametrize("reader", [file_io.read_regular_bytes, file_io.read_regular_prefix])
 @pytest.mark.parametrize("kind", ["symlink", "fifo"])
 def test_readers_refuse_links_and_fifos_without_opening_them(
@@ -442,6 +470,240 @@ def test_claim_refuses_to_discard_an_inode_mutated_after_the_atomic_move(
         assert claim.path.read_bytes() == b"changed through the original open handle"
         assert claim.restore()
         assert source.read_bytes() == b"changed through the original open handle"
+    finally:
+        claim.close()
+
+
+def test_claim_syncs_both_rename_directories_before_discard_can_truncate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"durable generation")
+    fingerprint = file_io.regular_file_fingerprint(source)
+    token = "0123456789abcdef0123456789abcdef"
+    claim_directory = file_io.deletion_claim_directory(source, token)
+    events: list[tuple[str, file_io.PathIdentity | None]] = []
+    real_rename = file_io._rename_noreplace
+    real_sync = file_io._fsync_directory_capability
+    real_truncate = os.ftruncate
+
+    def observe_rename(current: Path, target: Path) -> None:
+        events.append(("rename", None))
+        real_rename(current, target)
+
+    def observe_sync(
+        descriptor: int,
+        *,
+        expected_identity: file_io.PathIdentity,
+        logical_path: Path,
+    ) -> None:
+        events.append(("sync", expected_identity))
+        real_sync(
+            descriptor,
+            expected_identity=expected_identity,
+            logical_path=logical_path,
+        )
+
+    def observe_truncate(descriptor: int, length: int) -> None:
+        events.append(("truncate", None))
+        real_truncate(descriptor, length)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", observe_rename)
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", observe_sync)
+    monkeypatch.setattr(os, "ftruncate", observe_truncate)
+
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=fingerprint[:2],
+        expected_fingerprint=fingerprint,
+        operation_token=token,
+    )
+    claim_identity = file_io.path_identity(claim_directory)
+    source_parent_identity = file_io.path_identity(tmp_path)
+    expected_prefix = [
+        ("rename", None),
+        ("sync", claim_identity),
+        ("sync", source_parent_identity),
+    ]
+    assert events == expected_prefix
+
+    try:
+        claim.discard()
+    finally:
+        claim.close()
+
+    truncate_index = events.index(("truncate", None))
+    assert events[:truncate_index] == expected_prefix
+
+
+@pytest.mark.parametrize("failed_barrier", ("claim", "source"))
+def test_failed_claim_directory_barrier_preserves_bytes_before_discard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_barrier: str,
+) -> None:
+    source = tmp_path / "source"
+    contents = b"must not be truncated"
+    source.write_bytes(contents)
+    fingerprint = file_io.regular_file_fingerprint(source)
+    real_sync = file_io._fsync_directory_capability
+    real_rename = file_io._rename_noreplace
+    renamed = False
+    truncated = False
+
+    def observe_rename(current: Path, target: Path) -> None:
+        nonlocal renamed
+        real_rename(current, target)
+        if current.name == source.name and target.name == "entry":
+            renamed = True
+
+    def fail_selected_barrier(
+        descriptor: int,
+        *,
+        expected_identity: file_io.PathIdentity,
+        logical_path: Path,
+    ) -> None:
+        is_claim = logical_path.name.startswith(file_io.RETAINED_ENTRY_PREFIX)
+        is_source = logical_path == tmp_path
+        if renamed and (
+            (failed_barrier == "claim" and is_claim) or (failed_barrier == "source" and is_source)
+        ):
+            raise OSError(errno.EIO, f"injected {failed_barrier} directory fsync failure")
+        real_sync(
+            descriptor,
+            expected_identity=expected_identity,
+            logical_path=logical_path,
+        )
+
+    def forbid_truncate(_descriptor: int, _length: int) -> None:
+        nonlocal truncated
+        truncated = True
+        raise AssertionError("claim bytes were truncated before directory durability")
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", observe_rename)
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", fail_selected_barrier)
+    monkeypatch.setattr(os, "ftruncate", forbid_truncate)
+
+    with pytest.raises(
+        file_io.PathChangedError,
+        match=rf"injected {failed_barrier} directory fsync failure",
+    ) as caught:
+        file_io.discard_regular_if_same(
+            source,
+            expected_identity=fingerprint[:2],
+            expected_fingerprint=fingerprint,
+        )
+
+    assert renamed
+    assert not truncated
+    assert caught.value.preserved_path is not None
+    assert caught.value.preserved_path.read_bytes() == contents
+    assert not source.exists()
+
+
+def test_restore_syncs_public_parent_before_withdrawing_private_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"restored generation")
+    fingerprint = file_io.regular_file_fingerprint(source)
+    token = "fedcba9876543210fedcba9876543210"
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=fingerprint[:2],
+        expected_fingerprint=fingerprint,
+        operation_token=token,
+    )
+    claim_directory = file_io.deletion_claim_directory(source, token)
+    claim_identity = file_io.path_identity(claim_directory)
+    public_parent_identity = file_io.path_identity(tmp_path)
+    events: list[tuple[str, file_io.PathIdentity | None]] = []
+    real_rename = file_io._rename_noreplace
+    real_sync = file_io._fsync_directory_capability
+
+    def observe_rename(current: Path, target: Path) -> None:
+        events.append(("rename", None))
+        real_rename(current, target)
+
+    def observe_sync(
+        descriptor: int,
+        *,
+        expected_identity: file_io.PathIdentity,
+        logical_path: Path,
+    ) -> None:
+        events.append(("sync", expected_identity))
+        real_sync(
+            descriptor,
+            expected_identity=expected_identity,
+            logical_path=logical_path,
+        )
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", observe_rename)
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", observe_sync)
+
+    try:
+        assert claim.restore()
+    finally:
+        claim.close()
+
+    assert events == [
+        ("rename", None),
+        ("sync", public_parent_identity),
+        ("sync", claim_identity),
+    ]
+    assert source.read_bytes() == b"restored generation"
+
+
+@pytest.mark.parametrize("failed_barrier", ("destination", "claim"))
+def test_failed_restore_barrier_preserves_the_full_public_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_barrier: str,
+) -> None:
+    source = tmp_path / "source"
+    contents = b"restoration must stay discoverable"
+    source.write_bytes(contents)
+    fingerprint = file_io.regular_file_fingerprint(source)
+    token = "00112233445566778899aabbccddeeff"
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=fingerprint[:2],
+        expected_fingerprint=fingerprint,
+        operation_token=token,
+    )
+    claim_directory = file_io.deletion_claim_directory(source, token)
+    real_sync = file_io._fsync_directory_capability
+
+    def fail_selected_barrier(
+        descriptor: int,
+        *,
+        expected_identity: file_io.PathIdentity,
+        logical_path: Path,
+    ) -> None:
+        if (failed_barrier == "destination" and logical_path == tmp_path) or (
+            failed_barrier == "claim" and logical_path == claim_directory
+        ):
+            raise OSError(errno.EIO, f"injected restore {failed_barrier} fsync failure")
+        real_sync(
+            descriptor,
+            expected_identity=expected_identity,
+            logical_path=logical_path,
+        )
+
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", fail_selected_barrier)
+
+    try:
+        with pytest.raises(
+            file_io.PathChangedError,
+            match=rf"injected restore {failed_barrier} fsync failure",
+        ) as caught:
+            claim.restore()
+
+        assert caught.value.preserved_path == source
+        assert source.read_bytes() == contents
+        assert tuple(claim_directory.iterdir()) == ()
     finally:
         claim.close()
 

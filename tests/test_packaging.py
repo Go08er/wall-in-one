@@ -147,11 +147,12 @@ def test_the_systemd_unit_runs_the_windowless_service() -> None:
     service = parser["Service"]
     assert service["Type"] == "simple"
     assert service["ExecStartPre"] == "-wall-in-one --write-config"
-    assert service["ExecStart"] == "wall-in-one-service --wait-for-config"
+    assert service["ExecStart"] == "wall-in-one-service"
     assert service["ExecStop"] == (
         "-timeout --signal=TERM --kill-after=0.1s 2s wall-in-one --sync-runtime-health-on-stop"
     )
     assert service["Restart"] == "on-failure"
+    assert service["RestartPreventExitStatus"] == "78"
     assert service["RestartSec"] == "5"
     assert parser["Unit"]["StartLimitIntervalSec"] == "60"
     assert parser["Unit"]["StartLimitBurst"] == "5"

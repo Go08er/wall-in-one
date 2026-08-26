@@ -5,16 +5,18 @@ represents it. `library.pairings` (plural) owns the record, the choice and the
 file, and calls in here for the default. `library.stills` is the write half.
 
 When dynamics are paused the app shows a still instead of the video, so every
-video wants a still standing behind it. There are three ways one gets there,
+video wants a still standing behind it. There are four ways one gets there,
 tried in this order:
 
 1. a sidecar we wrote, `<video>.wall-in-one.json`, naming the still outright;
 2. a path-keyed file in the managed `Automatic Stills` directory, which is
    where generated stills land without same-stem videos colliding;
-3. a sibling named by convention -- `foo.mp4` pairs with `foo-still.png` or
+3. an exact generation-bound relationship adopted during a deployed-profile
+   upgrade;
+4. a sibling named by convention -- `foo.mp4` pairs with `foo-still.png` or
    plain `foo.png`.
 
-Rule 3 is what the user's own library already does (`snowy-village-still.png`),
+Rule 4 is what the user's own library already does (`snowy-village-still.png`),
 so it is not a fallback so much as the common case.
 """
 
@@ -221,7 +223,12 @@ def scene_still(scene: str, roots: Iterable[Path] = ()) -> Path | None:
     return None
 
 
-def find_still(video: Path, roots: Iterable[Path] = ()) -> Path | None:
+def find_still(
+    video: Path,
+    roots: Iterable[Path] = (),
+    *,
+    adopted: Path | None = None,
+) -> Path | None:
     """Best still for ``video``, or ``None`` if it has none."""
     roots = tuple(roots)
     from_sidecar = read_sidecar(video)
@@ -230,4 +237,9 @@ def find_still(video: Path, roots: Iterable[Path] = ()) -> Path | None:
     generated = _automatic_still(video, roots)
     if generated is not None:
         return generated
+    if adopted is not None:
+        # The adoption loader already pinned and generation-checked this
+        # exact relationship.  Never recreate the retired basename lookup
+        # here: an accepted mapping is authority, a matching name is not.
+        return adopted
     return _sibling_still(video)

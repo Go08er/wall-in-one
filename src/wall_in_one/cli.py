@@ -7,8 +7,9 @@ Six modes:
   predate ``wall-in-one-service``
 * ``ctl <verb>`` -- talk to a running instance (this is what the Noctalia
   plugin uses; every plugin control is one ``runAsync`` of a verb)
-* ``--write-config`` -- compile authoring state for the Rust service without
-  importing GTK or opening a window
+* ``--write-config`` -- automatically complete a proven deployed-app upgrade,
+  then compile authoring state for Rust without importing GTK or opening a
+  window
 * ``--sync-runtime-health`` -- persist Rust's bounded failure inventory through
   the app-owned authoring/config path, also without GTK
 * maintenance flags such as ``--install-theme-template`` and the explicit
@@ -27,6 +28,9 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import __version__, paths
+
+EXIT_TEMPFAIL: Final = 75
+EXIT_CONFIG: Final = 78
 
 RUNTIME_ONLY_VERBS: Final[tuple[str, ...]] = (
     "on",
@@ -137,6 +141,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--legacy-migration-status",
         action="store_true",
         help="report whether legacy plugin authoring needs an import decision",
+    )
+
+    deployed = parser.add_argument_group("Deployed application upgrade")
+    deployed.add_argument(
+        "--deployed-upgrade-status",
+        action="store_true",
+        help="inspect the schema-2 deployed-app upgrade boundary without writing",
+    )
+    deployed.add_argument(
+        "--prepare-deployed-upgrade",
+        action="store_true",
+        help="stage and validate schema 4 while leaving the public schema-2 runtime intact",
     )
 
     maintenance = parser.add_argument_group("Noctalia integration")
@@ -270,35 +286,79 @@ def _run_legacy_migration(options: argparse.Namespace) -> int | None:
     return None
 
 
-def _guard_unattended_migration() -> int | None:
-    """Refuse a headless writer while predecessor import needs a decision.
+def _deployed_upgrade_error(error: Exception) -> int:
+    from wall_in_one import deployed_upgrade_transaction
 
-    Runtime compilation and health persistence both mutate the current
-    profile.  A resumable import may already have linked some target files, so
-    even an otherwise valid health update could change those bytes and make
-    the journal impossible to resume.  Every unattended writer crosses this
-    boundary before status, authoring, or runtime configuration is read.
-    """
-    from wall_in_one import legacy_migration
+    assert isinstance(error, deployed_upgrade_transaction.TransactionError)
+    print(f"error: {error}", file=sys.stderr)
+    return EXIT_TEMPFAIL if error.status == "retry" else EXIT_CONFIG
 
-    try:
-        legacy_migration.unattended_guard()
-    except legacy_migration.MigrationError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
+
+def _run_deployed_upgrade(options: argparse.Namespace) -> int | None:
+    """Handle the read-only status and release-stage migration commands."""
+    from wall_in_one import deployed_upgrade_transaction, legacy_migration
+
+    if options.deployed_upgrade_status:
+        found = deployed_upgrade_transaction.probe()
+        print(f"{found.status}: {found.detail}")
+        if found.counts.videos:
+            print(
+                f"videos/captures: {found.counts.videos}; "
+                f"All Media: {found.counts.all_media_entries}; "
+                f"playlists/entries: {found.counts.playlists}/"
+                f"{found.counts.playlist_entries}; schedules: {found.counts.schedules}"
+            )
+        return EXIT_CONFIG if found.status in ("conflict", "corrupt") else 0
+
+    if options.prepare_deployed_upgrade:
+        try:
+            with legacy_migration.profile_transaction():
+                outcome = deployed_upgrade_transaction.ensure(cutover=False)
+        except deployed_upgrade_transaction.TransactionError as error:
+            return _deployed_upgrade_error(error)
+        except legacy_migration.MigrationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return EXIT_TEMPFAIL
+        print(outcome.detail)
+        return 0
     return None
 
 
 def _run_unattended_writer(write: Callable[[], int]) -> int:
-    """Hold migration exclusion across one complete headless publication."""
-    from wall_in_one import legacy_migration
+    """Cross both migration boundaries before one headless publication."""
+    from wall_in_one import deployed_upgrade_transaction, legacy_migration
 
     try:
-        with legacy_migration.unattended_transaction():
+        with legacy_migration.profile_transaction():
+            outcome = deployed_upgrade_transaction.ensure()
+            legacy_migration.require_unattended_safe_locked()
+            if outcome.changed:
+                print(outcome.detail)
             return write()
+    except deployed_upgrade_transaction.TransactionError as error:
+        return _deployed_upgrade_error(error)
     except legacy_migration.MigrationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+
+
+def _run_graphical_startup_upgrade(*, require_legacy_safe: bool) -> int | None:
+    """Finish an exact deployed upgrade before GTK reads configuration."""
+    from wall_in_one import deployed_upgrade_transaction, legacy_migration
+
+    try:
+        with legacy_migration.profile_transaction():
+            outcome = deployed_upgrade_transaction.ensure()
+            if require_legacy_safe:
+                legacy_migration.require_unattended_safe_locked()
+    except deployed_upgrade_transaction.TransactionError as error:
+        return _deployed_upgrade_error(error)
+    except legacy_migration.MigrationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if outcome.changed:
+        print(outcome.detail)
+    return None
 
 
 def _write_runtime_config() -> int:
@@ -554,6 +614,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if migration is not None:
         return migration
 
+    deployed = _run_deployed_upgrade(options)
+    if deployed is not None:
+        return deployed
+
     if options.write_config:
         return _run_unattended_writer(_write_runtime_config)
 
@@ -570,10 +634,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if maintenance is not None:
         return maintenance
 
-    if options.service:
-        blocked = _guard_unattended_migration()
-        if blocked is not None:
-            return blocked
+    blocked = _run_graphical_startup_upgrade(require_legacy_safe=options.service)
+    if blocked is not None:
+        return blocked
 
     from wall_in_one.ui.app import run
 

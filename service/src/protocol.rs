@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::os::unix::net::UnixStream;
+use std::time::Instant;
 
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 // A status snapshot can legitimately contain the configured maximum of 512
@@ -41,8 +43,32 @@ impl Response {
 }
 
 pub fn read_request(reader: &mut impl BufRead) -> Result<Request, String> {
+    read_request_budgeted(reader, || Ok(()))
+}
+
+pub fn read_request_until(
+    reader: &mut impl BufRead,
+    stream: &UnixStream,
+    deadline: Instant,
+) -> Result<Request, String> {
+    read_request_budgeted(reader, || {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("request deadline expired".into());
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|error| format!("cannot configure request deadline: {error}"))
+    })
+}
+
+fn read_request_budgeted(
+    reader: &mut impl BufRead,
+    mut before_read: impl FnMut() -> Result<(), String>,
+) -> Result<Request, String> {
     let mut bytes = Vec::new();
     loop {
+        before_read()?;
         let available = reader
             .fill_buf()
             .map_err(|error| format!("cannot read request: {error}"))?;
@@ -77,4 +103,35 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<()
     writer
         .write_all(&encoded)
         .map_err(|error| format!("cannot write response: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::BufReader;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn trickled_request_cannot_renew_the_absolute_deadline() {
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            for _ in 0..12 {
+                if sender.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(30));
+            }
+        });
+        let started = Instant::now();
+        let error = read_request_until(
+            &mut BufReader::new(&receiver),
+            &receiver,
+            started + Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(300), "{error}");
+        drop(receiver);
+        worker.join().unwrap();
+    }
 }

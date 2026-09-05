@@ -66,8 +66,9 @@ def test_write_config_takes_the_compiler_lock_before_reading_authoring_state(
             nonlocal entered
             entered = False
 
-    def load_under_lock() -> config.Settings:
+    def load_under_lock(*, require_present: bool = False) -> config.Settings:
         assert entered
+        assert require_present
         raise config.ConfigError("authoring fixture stops here")
 
     monkeypatch.setattr(runtime_config, "compiler_lock", ObservedLock)
@@ -76,6 +77,57 @@ def test_write_config_takes_the_compiler_lock_before_reading_authoring_state(
     assert cli.main(["--write-config"]) == 1
     assert "authoring fixture stops here" in capsys.readouterr().err
     assert not entered
+
+
+@pytest.mark.parametrize("argument", ["--write-config", "--service-startup-prepare"])
+def test_fresh_preflight_leaves_the_profile_ready_for_graphical_setup(
+    argument: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from wall_in_one import cli, deployed_upgrade, legacy_migration, paths
+
+    assert deployed_upgrade.probe().status == "absent"
+    assert config.load().roots == ()
+    assert config.load_strict().roots == ()
+
+    # Repeated startup attempts must not create a runtime without its owning
+    # settings or turn the next GUI launch into an orphan-profile error.
+    for _attempt in range(2):
+        assert cli.main([argument]) == cli.EXIT_CONFIG
+        assert "Open Wall-in-One and choose a library folder" in capsys.readouterr().err
+        assert not paths.settings_path().exists()
+        assert not paths.runtime_config_path().exists()
+        assert deployed_upgrade.probe().status == "absent"
+        assert not legacy_migration.probe().needs_decision
+        assert cli._run_graphical_startup_upgrade(require_legacy_safe=False) is None
+
+
+def test_strict_settings_can_require_a_saved_profile_without_changing_gui_defaults() -> None:
+    from wall_in_one import paths
+
+    with pytest.raises(config.MissingSettingsError, match="Open Wall-in-One"):
+        config.load_strict(require_present=True)
+    assert config.load_strict() == config.Settings()
+    assert config.load() == config.Settings()
+    assert not paths.settings_path().exists()
+
+
+@pytest.mark.parametrize("empty_document", [False, True])
+def test_saved_empty_settings_remain_valid_for_service_preparation(
+    empty_document: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from wall_in_one import cli, deployed_upgrade, paths
+
+    config.save(config.Settings())
+    if empty_document:
+        paths.settings_path().write_text("", encoding="utf-8")
+    saved = paths.settings_path().read_bytes()
+
+    assert cli.main(["--service-startup-prepare"]) == 0
+    assert not capsys.readouterr().err
+    assert paths.settings_path().read_bytes() == saved
+    assert paths.runtime_config_path().exists()
+    assert deployed_upgrade.probe().status == "current"
 
 
 def test_service_startup_prepare_retains_a_valid_lkg_after_compiler_failure(
@@ -180,10 +232,16 @@ def test_generation_reader_turns_pathological_toml_nesting_into_a_config_error()
         ("cycle_interval = 2.5\n", "cycle_interval must be an integer"),
         ("cycle_interval = 2\n", "cycle_interval must be between"),
         ("opacity = nan\n", "opacity must be a finite number"),
+        ("opacity = " + "1" + "0" * 400 + "\n", "opacity must be between"),
         ('video_interpolation = "magic"\n', "video_interpolation must be one of"),
         ('scene_scaling = "zoom"\n', "scene_scaling must be one of"),
         ('scene_clamp = "mirror"\n', "scene_clamp must be one of"),
         ('roots = ["/valid", 7]\n', "roots must be an array"),
+        (
+            'roots = ["~wio_nonexistent_user_20260905/Pictures"]\n',
+            "roots[0] cannot expand its path",
+        ),
+        ('roots = ["~bad\\u0000/Pictures"]\n', "roots[0] cannot expand its path"),
         ("future_setting = true\n", "unknown setting"),
     ),
 )

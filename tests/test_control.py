@@ -745,10 +745,13 @@ class _ClientSocket:
     def __init__(self, answer: bytes | BaseException) -> None:
         self.answer = answer
         self.timeout: float | None = None
+        self.initial_timeout: float | None = None
         self.sent = b""
         self.closed = False
 
     def settimeout(self, timeout: float) -> None:
+        if self.initial_timeout is None:
+            self.initial_timeout = timeout
         self.timeout = timeout
 
     def connect(self, _target: str) -> None:
@@ -796,7 +799,8 @@ def test_authoring_socket_uses_the_per_verb_deadline_without_waiting(
     monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
 
     assert client.send(Request(verb), path=tmp_path / "authoring.sock").ok
-    assert probe.timeout == expected
+    assert probe.initial_timeout == expected
+    assert probe.timeout is not None and 0 < probe.timeout <= expected
     assert Request.decode(probe.sent) == Request(verb)
     assert probe.closed
 
@@ -820,7 +824,8 @@ def test_runtime_deadlines_do_not_inherit_same_named_authoring_budgets(
     monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
 
     assert client.send(Request(verb), path=paths.runtime_socket_path()).ok
-    assert probe.timeout == expected
+    assert probe.initial_timeout == expected
+    assert probe.timeout is not None and 0 < probe.timeout <= expected
 
 
 def test_a_durable_timeout_reports_unknown_outcome_and_requires_verification(
@@ -863,7 +868,7 @@ def test_a_read_timeout_retains_the_plain_failure_wording(
     with pytest.raises(client.ControlError) as caught:
         client.send(control_request, path=tmp_path / "app.sock")
 
-    assert str(caught.value) == f"timed out after {probe.timeout:g}s"
+    assert str(caught.value) == f"timed out after {probe.initial_timeout:g}s"
 
 
 def test_runtime_status_timeout_retains_plain_read_wording(
@@ -878,6 +883,52 @@ def test_runtime_status_timeout_retains_plain_read_wording(
         client.send(Request("status"), path=paths.runtime_socket_path())
 
     assert str(caught.value) == "timed out after 5s"
+
+
+def test_slow_dripping_reply_cannot_extend_the_exchange_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one.control import client
+
+    clock = [100.0]
+
+    class DrippingSocket(_ClientSocket):
+        reads = 0
+
+        def recv(self, _size: int) -> bytes:
+            self.reads += 1
+            assert self.reads <= 4, "client reset its deadline for each fragment"
+            clock[0] += 0.04
+            return b" "
+
+    probe = DrippingSocket(b"")
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    with pytest.raises(client.ControlError, match=r"timed out after 0\.1s"):
+        client.send(Request("status"), path=paths.runtime_socket_path(), timeout=0.1)
+    assert probe.reads == 3
+    assert probe.closed
+    assert probe.timeout is not None and probe.timeout < 0.03
+
+
+def test_connection_time_is_not_added_to_the_response_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one.control import client
+
+    clock = [100.0]
+
+    class SlowConnectSocket(_ClientSocket):
+        def connect(self, _target: str) -> None:
+            clock[0] += 0.2
+
+    probe = SlowConnectSocket(Response.success().encode())
+    monkeypatch.setattr(socket, "socket", lambda *_arguments: probe)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    with pytest.raises(client.ControlError, match=r"timed out after 0\.1s"):
+        client.send(Request("status"), path=paths.runtime_socket_path(), timeout=0.1)
+    assert probe.sent == b""
+    assert probe.closed
 
 
 def test_an_explicit_durable_deadline_keeps_the_unknown_outcome_contract(
@@ -1880,7 +1931,7 @@ def test_legacy_socket_select_refuses_a_borked_wallpaper(
     response = _immediate(commands.select_wallpaper(str(crasher.path)))
 
     assert not response.ok
-    assert "marked Borked and cannot play" in response.message
+    assert "Playback unavailable" in response.message
     assert applied == []
 
 

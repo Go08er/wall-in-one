@@ -20,6 +20,21 @@ fn temp_file(name: &str) -> PathBuf {
     ))
 }
 
+#[test]
+fn battery_policy_requires_schema_five_and_legacy_defaults_off() {
+    let legacy: Config = toml::from_str(&document(4)).unwrap();
+    legacy.validate().unwrap();
+    assert!(!legacy.settings.stop_animations_on_battery);
+    for schema in [4, 5] {
+        let enabled = document(schema).replace(
+            "dynamics_enabled = true",
+            "dynamics_enabled = true\nstop_animations_on_battery = true",
+        );
+        let config: Config = toml::from_str(&enabled).unwrap();
+        assert_eq!(config.validate().is_ok(), schema == 5);
+    }
+}
+
 fn document(schema: u32) -> String {
     format!(
         r#"schema_version = {schema}
@@ -99,6 +114,80 @@ fn handwritten_config_loads_without_python_or_app_state() {
         loaded.playlists[0].entries[0].palette,
         Palette::Adaptive { .. }
     ));
+}
+
+#[test]
+fn loaded_config_digest_binds_exact_bytes_not_only_its_generation() {
+    use sha2::{Digest, Sha256};
+    let original = document(4);
+    let changed = format!("{original}\n# same model, different accepted bytes\n");
+    let first = Config::from_bytes(original.as_bytes().to_vec()).unwrap();
+    let mut second = Config::from_bytes(changed.as_bytes().to_vec()).unwrap();
+    assert_eq!(
+        first.source_sha256.as_deref(),
+        Some(format!("{:x}", Sha256::digest(original.as_bytes())).as_str())
+    );
+    assert_ne!(first.source_sha256, second.source_sha256);
+    second.source_sha256.clone_from(&first.source_sha256);
+    assert_eq!(first, second);
+    // In-memory parsing cannot claim that bytes were accepted from disk, and
+    // an input document cannot supply this internal provenance field itself.
+    assert!(toml::from_str::<Config>(&original)
+        .unwrap()
+        .source_sha256
+        .is_none());
+    let forged = format!("source_sha256 = \"{}\"\n{original}", "0".repeat(64));
+    assert!(Config::from_bytes(forged.into_bytes()).is_err());
+}
+
+#[test]
+fn loaded_configuration_keeps_exact_values_without_unused_vector_capacity() {
+    for schema in [4, 5] {
+        let original = document(schema);
+        let (header, rest) = original.split_once("[[playlists]]").unwrap();
+        let (_, tail) = rest.split_once("[[schedules]]").unwrap();
+        let mut source = header.to_string();
+        for (index, count) in [600, 100, 100, 100].into_iter().enumerate() {
+            let id = if index == 0 {
+                "day".into()
+            } else {
+                format!("p{index}")
+            };
+            source.push_str(&format!("\n[[playlists]]\nid = {id:?}\nname = {id:?}\n"));
+            for entry in 0..count {
+                source.push_str(&format!(
+                    "[[playlists.entries]]\nid = \"e{entry}\"\nkind = \"still\"\n\
+                     still = \"/wallpapers/{entry}.jpg\"\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+                ));
+            }
+        }
+        source.push_str("[[schedules]]");
+        source.push_str(tail);
+        let mut expected: Config = toml::from_str(&source).unwrap();
+        use sha2::{Digest, Sha256};
+        expected.source_sha256 = Some(format!("{:x}", Sha256::digest(source.as_bytes())));
+        let path = temp_file("compact-config");
+        fs::write(&path, source).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        assert_eq!(loaded, expected);
+        for playlist in &loaded.playlists {
+            assert_eq!(playlist.entries.capacity(), playlist.entries.len());
+            assert_eq!(playlist.id.capacity(), playlist.id.len());
+            assert_eq!(playlist.name.capacity(), playlist.name.len());
+            for entry in &playlist.entries {
+                assert_eq!(entry.id.capacity(), entry.id.len());
+                assert_eq!(entry.still.capacity(), entry.still.as_os_str().len());
+            }
+        }
+        assert_eq!(loaded.playlists.capacity(), loaded.playlists.len());
+        assert_eq!(loaded.schedules.capacity(), loaded.schedules.len());
+        assert_eq!(loaded.displays.capacity(), loaded.displays.len());
+        for rule in &loaded.schedules {
+            assert_eq!(rule.months.capacity(), rule.months.len());
+            assert_eq!(rule.weekdays.capacity(), rule.weekdays.len());
+        }
+    }
 }
 
 #[test]

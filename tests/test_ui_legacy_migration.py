@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from wall_in_one import config, legacy_migration  # noqa: E402
+from wall_in_one import cli, config, deployed_upgrade, legacy_migration, paths  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
     Application,
@@ -73,6 +73,32 @@ def _spin_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError("GLib callback did not arrive before the test deadline")
         time.sleep(0.002)
+
+
+def test_fresh_service_preparation_does_not_block_the_library_folder_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert cli.main(["--service-startup-prepare"]) == cli.EXIT_CONFIG
+    assert cli._run_graphical_startup_upgrade(require_legacy_safe=False) is None
+    assert not legacy_migration.probe().needs_decision
+    application, parent = _application()
+    shown = _capture_dialog(monkeypatch)
+    monkeypatch.setattr(application, "reload_palette", lambda: None)
+    # The absent-data probe and authoring gate have dedicated worker tests.
+    # Exercise the actual first-run folder dialog after that gate is open.
+    application._authoring_migration_ready = True
+    try:
+        application._continue_first_activation()
+
+        assert len(shown) == 1
+        assert shown[0].get_heading() == "Choose a library folder"
+        assert shown[0].get_response_label("manual") == "Choose folder manually"
+        assert not paths.settings_path().exists()
+        assert not paths.runtime_config_path().exists()
+        assert deployed_upgrade.probe().status == "absent"
+        shown[0].emit("response", "later")
+    finally:
+        _close(application, parent)
 
 
 def test_import_safely_is_offered_first_and_reopens_every_imported_store(

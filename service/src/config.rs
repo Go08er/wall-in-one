@@ -1,5 +1,6 @@
 use crate::protocol::MAX_RESPONSE_BYTES;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::OpenOptions;
@@ -7,7 +8,8 @@ use std::io::{Error, ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[4, SCHEMA_VERSION];
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 // These mirror the authoring-store ceilings.  The generated all-media
@@ -62,6 +64,9 @@ impl std::error::Error for ConfigError {}
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Identity of the exact successfully parsed bytes, never an authored key.
+    #[serde(skip)]
+    pub source_sha256: Option<String>,
     pub schema_version: u32,
     pub config_generation: String,
     pub default_playlist: String,
@@ -81,11 +86,13 @@ pub struct Settings {
     pub cycle_enabled: bool,
     pub shuffle: bool,
     pub dynamics_enabled: bool,
+    #[serde(default)]
+    pub stop_animations_on_battery: bool,
     pub display_mode: DisplayMode,
     pub theme_source_connector: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DisplayMode {
     Mirrored,
@@ -301,6 +308,11 @@ fn default_true() -> bool {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::from_bytes(Self::read_bytes(path)?)
+    }
+
+    /// Read one bounded generation; parsing and status hash the same bytes.
+    pub fn read_bytes(path: &Path) -> Result<Vec<u8>, ConfigError> {
         // Open once, without following a final symlink or waiting on a FIFO,
         // then inspect and read that exact descriptor. A metadata(path) followed
         // by read_to_string(path) lets an attacker replace the path between the
@@ -325,23 +337,52 @@ impl Config {
         if bytes.len() as u64 > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge(bytes.len() as u64));
         }
+        Ok(bytes)
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ConfigError> {
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(ConfigError::TooLarge(bytes.len() as u64));
+        }
+        let digest = format!("{:x}", Sha256::digest(&bytes));
         let text = String::from_utf8(bytes).map_err(|error| {
             ConfigError::Io(Error::new(
                 ErrorKind::InvalidData,
                 format!("config is not UTF-8: {error}"),
             ))
         })?;
-        let config: Self = toml::from_str(&text).map_err(ConfigError::Decode)?;
+        let mut config: Self = toml::from_str(&text).map_err(ConfigError::Decode)?;
+        config.source_sha256 = Some(digest);
         config.validate()?;
-        Ok(config)
+        // Deserialization interleaves retained strings/vectors with temporary
+        // parser allocations. Shrinking vectors alone leaves small live
+        // objects pinning most of those otherwise-free heap pages. Compact the
+        // validated model once while those objects are still allocated, then
+        // release the fragmented original and the input before publishing it.
+        // Clone also gives every immutable Vec/String exactly its used length.
+        // This costs one bounded copy at load/reload, never on status or tick.
+        let compact = config.clone();
+        drop(config);
+        drop(text);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        // SAFETY: malloc_trim only releases completely free allocator pages.
+        // Do it before initial renderer helpers can block, and on reload too;
+        // retaining parser slack for the session has no runtime benefit.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+        Ok(compact)
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.schema_version != SCHEMA_VERSION {
+        if !SUPPORTED_SCHEMA_VERSIONS.contains(&self.schema_version) {
             return invalid(format!(
-                "schema_version {} is unsupported; expected {SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
+                "schema_version {} is unsupported; expected 4 or {SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
                 self.schema_version
             ));
+        }
+        if self.schema_version == 4 && self.settings.stop_animations_on_battery {
+            return invalid("stop_animations_on_battery requires schema_version 5");
         }
         if self.config_generation.len() != CONFIG_GENERATION_HEX_BYTES
             || !self

@@ -1,10 +1,29 @@
 # Runtime configuration contract
 
 `wall-in-one-service` reads one input: a fully resolved TOML document written
-by the Python application. Schema version `4` is intentionally strict. An
+by the Python application. Schemas `4` and `5` are intentionally strict. An
 unknown version, unknown field, relative path, dangling playlist reference, or
 kind-specific entry missing its motion source makes the service refuse to
 start. It never falls back to the application's database or library files.
+
+The compiler retains schema 4, byte for byte for unchanged inputs, while
+`stop_animations_on_battery` is false. Enabling that option emits schema 5 with
+`settings.stop_animations_on_battery = true`. The new service accepts both
+versions; a schema-4 document cannot enable the new policy. This preserves
+older upgrade journals and prevents an older service from silently ignoring
+an enabled battery preference.
+
+The service advertises `supported_config_schemas = [4, 5]` in status version 2.
+It also reports `runtime_version` and `runtime_executable` so update inspection
+can distinguish the responding executable from the package selected on disk.
+Executable identity does not by itself acknowledge the intended configuration;
+check `config_generation` and `config_path` too.
+The app checks that capability before saving an enabled battery preference or
+publishing schema 5 to its normal runtime path. An incompatible or unconfirmed
+live service leaves the attempted write uncommitted. Offline preparation also
+checks for a starting service or an unlinked live socket; detached exports do
+not consult the session. This is not a lifecycle lock: finish the
+[update procedure](updating.md) before allowing another old runtime to start.
 
 The default path is `$XDG_STATE_HOME/wall-in-one/runtime.toml` (normally
 `~/.local/state/wall-in-one/runtime.toml`). `--config PATH` overrides it. The
@@ -22,7 +41,7 @@ as a candidate for the next preflight.
 
 That second preflight is `wall-in-one-service --check-config`. It uses Rust's
 production loader without claiming a socket or renderer; only a consumable
-schema-4 document reaches the service main process. A valid same-schema
+supported document reaches the service main process. A valid supported
 last-known-good document may therefore continue, while a missing, malformed,
 or schema-2 candidate stops the unit once instead of entering a restart loop.
 
@@ -36,10 +55,11 @@ the file but could not reach the socket.
 Every Python publisher shares a private advisory compiler lock beside the
 runtime document. The headless `--write-config` path acquires it before reading
 settings, authoring stores, or the library and holds it through the atomic
-rename; the GUI takes the same lock around rendering and installation. An older
-systemd preflight can therefore land only before a newer GUI edit, never after
-it. Lock acquisition is bounded and fail-closed: an unsafe lock path or timeout
-leaves the last-known-good runtime document untouched.
+rename; the GUI takes the same lock around rendering and installation. A
+preflight holding an earlier snapshot publishes before a later GUI publication;
+the lock serializes writers, not package versions. Lock acquisition is bounded
+and fail-closed: an unsafe lock path or timeout leaves the last-known-good
+runtime document untouched.
 
 Loading changed bytes is also not synonymous with restarting the current
 wallpaper. The service compares the fully resolved effective output/entry set,
@@ -55,7 +75,7 @@ failed generation is never exposed through `status`. A rollback failure is
 reported explicitly because the service can preserve the old configuration but
 cannot truthfully promise that an external renderer or desktop helper recovered.
 
-Schema 4 contains `schema_version`, `config_generation`, `default_playlist`, `[settings]`,
+Both schemas contain `schema_version`, `config_generation`, `default_playlist`, `[settings]`,
 `[renderer]`, `[[playlists]]`, `[[schedules]]`, and `[[displays]]`. Executable
 paths—including niri for live connector discovery—and media paths are
 absolute. Every playlist entry has a stable `id`, `kind`,
@@ -199,11 +219,15 @@ The companion revision paired with this application requires status version 2,
 performs the direct-launch health hand-off, and permits the runtime's bounded
 45-second action. Companion revisions through `a5e23c9` understand only the
 compatibility summary and must not be combined with this application release.
-This tree's `flake.lock` pins the reviewed revision
-`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. The v0.1.2 migration-resume and
-search fixes retain that exact companion source and protocol. A machine still
-upgrading from an older companion must complete the app's schema-4 cutover
-before loading the strict client.
+Application v0.1.3 pins companion v0.1.2 at
+`c154c162fd650567ef8eda5d0e6d875b2b635a21` in `flake.lock`, including
+direct-start migration preflight and battery-status display. The earlier
+`a17eb70` companion provides only the base contract, not those newer safeguards.
+See [companion compatibility](migrating.md#companion-noctalia-plugin-compatibility)
+for the new requirements and [updating an existing installation](updating.md)
+for loaded/running service checks. A machine still upgrading from an older
+companion must complete the app's schema-4 cutover before loading the strict
+client.
 
 The same atomic snapshot carries `schedule` (whether the calendar is being
 followed, the playlist it currently selects, and the last matching rule), the
@@ -288,3 +312,32 @@ The top-level snapshot reports `playback_state` as `playing`, `paused`, or
 is also explicit. It reports effective `cycle_enabled`, authored
 `cycle_default`, and `cycle_source` (`config` or `manual`) so clients never have
 to infer which switch is actually in force.
+
+## Battery policy status
+
+Status version 2 keeps manual `playback_state` unchanged and adds these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `power_source` | `ac`, `battery`, or `unknown`; unknown is not treated as AC. |
+| `power_available` | Whether the current power observation is usable. |
+| `stop_animations_on_battery` | The runtime's currently applied saved option. |
+| `animations_inhibited` | Automatic battery policy is currently suppressing motion. |
+| `animation_inhibition_reason` | Empty, `battery`, or `power-unavailable` for a retained restriction. |
+
+`motion_active` and per-display rows describe actual renderer activity.
+Clients should show battery inhibition separately from manual Pause/Stop and
+renderer errors. An older version-2 runtime may omit all power fields; that
+does not prove automatic battery handling is available.
+
+The runtime observes UPower without the GUI or companion. Known battery at
+startup prevents initial motion. Unplugging releases owned video/scene
+renderers and preserves route intent, selections, schedules, and cycle timers.
+Plugging in recomputes eligible motion from the latest choices. Manually paused
+routes whose renderer was released remain static until Play. Intentional
+inhibition never records a media failure.
+
+On unavailable initial power information, playback retains its ordinary
+behavior. If an observation is lost after confirmed battery, the runtime
+retains inhibition until confirmed AC or the option is disabled. See
+[the user-facing settings guide](settings.md#battery-animation-control).

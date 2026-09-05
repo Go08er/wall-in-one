@@ -5,6 +5,7 @@
 //! versioned TOML document.
 
 pub mod config;
+pub mod power;
 pub mod protocol;
 pub mod renderer;
 pub mod runtime;

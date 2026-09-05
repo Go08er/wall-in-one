@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
@@ -44,8 +45,8 @@ AUTHORING_TIMEOUT: Final = 15.0
 # apply can legitimately outlive the authoring socket's five-second budget.
 # Companion clients need a callback ceiling above this 45-second wire budget;
 # otherwise the UI can report failure while the confirmed handover completes.
-# The pinned plugin revision still uses eight seconds, tracked as an external
-# release blocker with its reviewable patch in .claude/COMPANION_PLUGIN_*.patch.
+# Verify the bundled companion against this boundary when changing its pin;
+# an older client deadline can otherwise turn a confirmed apply into an error.
 RUNTIME_ACTION_TIMEOUT: Final = 45.0
 
 #: ``ctl displays`` runs compositor discovery on the ordered runtime worker.
@@ -344,6 +345,7 @@ def send(
         wait = RUNTIME_ACTION_TIMEOUT if request.verb in RUNTIME_APPLY_VERBS else TIMEOUT
     else:
         wait = TIMEOUTS.get(request.verb, TIMEOUT)
+    deadline = time.monotonic() + wait
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(wait)
     if cancellation is not None and not cancellation.register(connection):
@@ -358,8 +360,9 @@ def send(
             raise ControlError(f"cannot connect to {target}: {error}") from error
 
         try:
+            _set_remaining_timeout(connection, deadline)
             connection.sendall(request.encode())
-            line = _read_line(connection, max_bytes=max_reply)
+            line = _read_line(connection, max_bytes=max_reply, deadline=deadline)
         except TimeoutError as error:
             raise ControlError(_timeout_message(request, target=target, wait=wait)) from error
         except OSError as error:
@@ -412,10 +415,27 @@ def _has_side_effect(request: Request, *, target: Path) -> bool:
     return request.verb in AUTHORING_SIDE_EFFECT_VERBS
 
 
-def _read_line(connection: socket.socket, *, max_bytes: int = MAX_MESSAGE_BYTES) -> bytes:
+def _set_remaining_timeout(connection: socket.socket, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("control exchange deadline expired")
+    connection.settimeout(remaining)
+
+
+def _read_line(
+    connection: socket.socket,
+    *,
+    max_bytes: int = MAX_MESSAGE_BYTES,
+    deadline: float | None = None,
+) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
+        # socket.settimeout alone is per recv: a peer sending one byte just
+        # before each timeout could retain a settings/update worker forever.
+        # Connect, send and every response fragment share one exchange budget.
+        if deadline is not None:
+            _set_remaining_timeout(connection, deadline)
         chunk = connection.recv(4096)
         if not chunk:
             break

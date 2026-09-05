@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Self
 
-from wall_in_one import file_io, paths
+from wall_in_one import file_io, paths, runtime_compatibility
 from wall_in_one.library import state_file
 from wall_in_one.theme.noctalia import ALL_SCHEMES, DEFAULT_SCHEME
 from wall_in_one.wallpaper import renderer, scenes
@@ -45,6 +45,10 @@ DISPLAY_MODES: Final[tuple[str, ...]] = (
 
 class ConfigError(Exception):
     """The settings file could not be read or was malformed."""
+
+
+class MissingSettingsError(ConfigError):
+    """Unattended publication was requested before a profile was saved."""
 
 
 def _tidy_roots(roots: Sequence[Path]) -> tuple[Path, ...]:
@@ -108,10 +112,11 @@ class Settings:
     cycle_enabled: bool = False
     shuffle: bool = False
 
-    #: When off, video wallpapers are paused and their paired stills shown
-    #: instead. Blur is materially more expensive over an animated wallpaper,
-    #: so this is a performance control as much as a battery one.
+    #: When off, video and scene renderers are stopped and paired stills shown.
     dynamics_enabled: bool = True
+
+    #: Temporarily suppress motion on battery without changing playback intent.
+    stop_animations_on_battery: bool = False
 
     #: A wallpaper that makes noise is a surprise, so silence is the default.
     #: The audio track is still loaded rather than disabled, which is what lets
@@ -279,6 +284,7 @@ class Settings:
             cycle_enabled=boolean("cycle_enabled", False),
             shuffle=boolean("shuffle", False),
             dynamics_enabled=boolean("dynamics_enabled", True),
+            stop_animations_on_battery=boolean("stop_animations_on_battery", False),
             video_muted=boolean("video_muted", True),
             video_volume=int(number("video_volume", 100)),
             video_when_hidden=text("video_when_hidden", renderer.DEFAULT_WHEN_HIDDEN),
@@ -298,7 +304,7 @@ class Settings:
         ).validated()
 
     def to_toml(self) -> str:
-        lines = (
+        lines: tuple[str, ...] = (
             "# wall-in-one settings",
             "",
             _roots_line(self.roots),
@@ -325,6 +331,10 @@ class Settings:
             f"own_scene_renderer = {str(self.own_scene_renderer).lower()}",
             f'output = "{self.output}"',
         )
+        # The omitted false default preserves byte-exact settings targets in
+        # crash-resumable journals created before this option existed.
+        if self.stop_animations_on_battery:
+            lines += ("stop_animations_on_battery = true",)
         return "\n".join(lines) + "\n"
 
 
@@ -358,24 +368,39 @@ def load(path: Path | None = None) -> Settings:
     return Settings.from_mapping(raw)
 
 
-def load_strict(path: Path | None = None) -> Settings:
+def load_strict(path: Path | None = None, *, require_present: bool = False) -> Settings:
     """Read settings for unattended compilation, rejecting unreadable bytes.
 
     The interactive application deliberately recovers from a damaged file so
     somebody can still reach Settings and repair it. The systemd
     ``ExecStartPre`` path is different: silently compiling defaults from a
     typo would replace the user's intended library and renderer configuration
-    just before starting automation. Missing remains a valid first-run state;
-    a present document must parse.
+    just before starting automation. Missing remains a valid first-run state
+    unless the caller is about to publish derived runtime state: that requires
+    saved settings so the next startup cannot mistake an orphan runtime for a
+    damaged existing profile. A present document must always parse.
     """
     target = path if path is not None else paths.settings_path()
     try:
         document = file_io.read_regular_bytes(target, MAX_SETTINGS_BYTES)
         if document is None:
+            if require_present:
+                raise MissingSettingsError(
+                    "No Wall-in-One settings have been saved. Open Wall-in-One and "
+                    "choose a library folder before starting the wallpaper service."
+                )
             return Settings()
-        raw = tomllib.loads(document.decode("utf-8"))
     except OSError as error:
         raise ConfigError(f"cannot read {target}: {error}") from error
+    return parse_strict_bytes(document, target)
+
+
+def parse_strict_bytes(document: bytes, target: Path) -> Settings:
+    """Parse a retained settings snapshot without reopening its public path."""
+    if len(document) > MAX_SETTINGS_BYTES:
+        raise ConfigError(f"cannot parse {target}: settings exceed their byte limit")
+    try:
+        raw = tomllib.loads(document.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as error:
         raise ConfigError(f"cannot parse {target}: {error}") from error
     _validate_strict_mapping(raw, target)
@@ -403,6 +428,7 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "cycle_enabled",
         "shuffle",
         "dynamics_enabled",
+        "stop_animations_on_battery",
         "video_muted",
         "video_hardware_decode",
         "cycle_favourites_only",
@@ -432,7 +458,7 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         if (
             not isinstance(opacity, (int, float))
             or isinstance(opacity, bool)
-            or not math.isfinite(opacity)
+            or (isinstance(opacity, float) and not math.isfinite(opacity))
         ):
             raise ConfigError(f"cannot use {target}: opacity must be a finite number")
         if not MIN_OPACITY <= opacity <= 1.0:
@@ -504,7 +530,12 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         assert isinstance(roots, list)
         for index, root in enumerate(roots):
             assert isinstance(root, str)
-            expanded = str(Path(root).expanduser().absolute())
+            try:
+                expanded = str(Path(root).expanduser().absolute())
+            except (RuntimeError, ValueError) as error:
+                raise ConfigError(
+                    f"cannot use {target}: roots[{index}] cannot expand its path: {error}"
+                ) from error
             _validate_runtime_text(
                 expanded,
                 MAX_RUNTIME_PATH_BYTES,
@@ -537,11 +568,26 @@ def _validate_runtime_text(
 def save(settings: Settings, path: Path | None = None) -> Path:
     target = path if path is not None else paths.settings_path()
     try:
-        paths.ensure_directory(target.parent)
-        state_file.write_atomic_text(target, settings.validated().to_toml())
+        with state_file.mutation_lock(target, description="settings"):
+            _check_runtime_compatibility(settings, target)
+            paths.ensure_directory(target.parent)
+            state_file.write_atomic_text(target, settings.validated().to_toml())
     except OSError as error:
         raise ConfigError(f"cannot write {target}: {error}") from error
     return target
+
+
+def _check_runtime_compatibility(settings: Settings, target: Path) -> None:
+    # Saving a detached export must not consult another profile's runtime.
+    # All interactive edits, including explicit default-path callers, pass here.
+    if (
+        settings.stop_animations_on_battery
+        and target.absolute() == paths.settings_path().absolute()
+    ):
+        try:
+            runtime_compatibility.require_schema(5)
+        except runtime_compatibility.RuntimeCompatibilityError as error:
+            raise ConfigError(str(error)) from error
 
 
 def update(
@@ -578,6 +624,7 @@ def mutate(
             current = load_strict(target)
             candidate = change(current).validated()
             _validate_strict_mapping(tomllib.loads(candidate.to_toml()), target)
+            _check_runtime_compatibility(candidate, target)
             paths.ensure_directory(target.parent)
             state_file.write_atomic_text(target, candidate.to_toml())
             return candidate

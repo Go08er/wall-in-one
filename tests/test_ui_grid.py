@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,13 +30,13 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from wall_in_one.library.filter import Query, Sort  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE, WallpaperGrid, WallpaperTile  # noqa: E402
 from wall_in_one.ui.thumbnails import Callback, ThumbnailLoader  # noqa: E402
-from wall_in_one.ui.window import ACCELERATORS  # noqa: E402
+from wall_in_one.ui.window import ACCELERATORS, MainWindow  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -153,13 +154,182 @@ def test_borked_health_updates_the_existing_tile_in_place(grid: WallpaperGrid) -
     assert tile._health_badge.get_tooltip_text() == "renderer crashed on this wallpaper"
     assert tile.has_css_class("wio-tile-borked")
     assert tile._menu.get_menu_model() is None
-    assert "playback disabled" in (tile._frame.get_tooltip_text() or "")
+    assert "Playback disabled" in (tile._frame.get_tooltip_text() or "")
 
     tile._menu.set_menu_model(Gio.Menu())
     grid.set_borked({})
     assert grid._tiles[media.path] is tile
     assert not tile._health_badge.get_visible()
     assert tile._menu.get_menu_model() is None
+
+
+def _settle_widgets() -> None:
+    """Allow native button activation animations and allocation to finish."""
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + 0.3
+    while time.monotonic() < deadline:
+        while context.pending():
+            context.iteration(False)
+        time.sleep(0.002)
+
+
+@pytest.mark.parametrize("independent", [False, True])
+def test_visible_tile_actions_fit_compact_layout_and_keyboard_activation_dispatches_once(
+    loader: CountingLoader, independent: bool
+) -> None:
+    edited: list[MediaItem] = []
+    applied: list[MediaItem] = []
+    starred: list[bool] = []
+    built: list[str] = []
+
+    def menu(_item: MediaItem) -> Gio.MenuModel:
+        built.append("context")
+        return Gio.Menu()
+
+    def targets(_item: MediaItem) -> Gio.MenuModel:
+        built.append("targets")
+        return Gio.Menu()
+
+    grid = WallpaperGrid(
+        loader,
+        edited.append,
+        lambda _item, active: starred.append(active),
+        menu,
+        applied.append,
+        targets,
+    )
+    grid.set_apply_targeting(independent)
+    media = item("a-long-wallpaper-name-that-must-not-hide-actions")
+    grid.populate((media,))
+    tile = grid._tiles[media.path]
+    window = Gtk.Window()
+    window.set_default_size(360, 400)
+    window.set_child(grid)
+    window.present()
+    _settle_widgets()
+    try:
+        apply = tile._apply_targets if independent else tile._apply
+        assert apply.get_label() == ("Apply to…" if independent else "Apply")
+        assert tile._edit.get_label() == "Edit"
+        assert apply.get_visible() and tile._edit.get_visible()
+        assert not apply.has_css_class("wio-tile-action")
+        assert not tile._edit.has_css_class("wio-tile-action")
+        assert tile.get_width() <= window.get_width()
+        assert apply.get_width() > 0 and tile._edit.get_width() > 0
+        assert tile._edit.grab_focus()
+        assert tile._edit.activate()
+        _settle_widgets()
+        assert edited == [media]
+        edited.clear()
+
+        assert apply.grab_focus()
+        if independent:
+            tile._apply_targets.popup()
+            assert built == ["targets"]
+            tile._apply_targets.popdown()
+        else:
+            assert apply.activate()
+            _settle_widgets()
+            assert applied == [media]
+            applied.clear()
+        assert edited == []
+        assert applied == []
+
+        tile._star.activate()
+        _settle_widgets()
+        assert starred == [True]
+        tile._menu.popup()
+        assert built[-1] == "context"
+        tile._menu.popdown()
+        assert edited == [] and applied == []
+
+        # Exercise the registered secondary-press and keyboard-menu handlers;
+        # both open the same context menu, never the Apply path.
+        tile._secondary_click.emit("pressed", 1, 20.0, 20.0)
+        assert tile._menu.get_active()
+        tile._menu.popdown()
+        assert tile._menu_keys.emit("key-pressed", Gdk.KEY_F10, 0, Gdk.ModifierType.SHIFT_MASK)
+        assert tile._menu.get_active()
+        tile._menu.popdown()
+        assert tile._menu_keys.emit("key-pressed", Gdk.KEY_Menu, 0, Gdk.ModifierType(0))
+        tile._menu.popdown()
+        assert not tile._menu_keys.emit("key-pressed", Gdk.KEY_F10, 0, Gdk.ModifierType(0))
+        assert edited == [] and applied == []
+
+        child = tile.get_parent()
+        assert isinstance(child, Gtk.FlowBoxChild)
+        grid._flow.emit("child-activated", child)
+        assert edited == [media]
+    finally:
+        window.destroy()
+
+
+def test_context_shortcuts_cover_default_tile_and_nested_button_focus_once(
+    loader: CountingLoader,
+) -> None:
+    built: list[MediaItem] = []
+    edited: list[MediaItem] = []
+
+    def menu(media: MediaItem) -> Gio.MenuModel:
+        built.append(media)
+        return Gio.Menu()
+
+    grid = WallpaperGrid(loader, edited.append, menu_for=menu)
+    media = item("keyboard-context")
+    grid.populate((media,))
+    tile = grid._tiles[media.path]
+    child = tile.get_parent()
+    assert isinstance(child, Gtk.FlowBoxChild)
+    window = Gtk.Window()
+    window.set_child(grid)
+    window.present()
+    _settle_widgets()
+    try:
+        # A controller on tile cannot see events targeting its FlowBoxChild
+        # ancestor. Pin the real event-routing owner, not only the handler.
+        assert tile._menu_keys.get_widget() is child
+        assert not any(
+            isinstance(controller, Gtk.EventControllerKey)
+            for controller in tile.observe_controllers()
+        )
+        for focused in (child, tile._edit):
+            assert focused.grab_focus()
+            assert window.get_focus() is focused
+            for keyval, modifiers in (
+                (Gdk.KEY_Menu, Gdk.ModifierType(0)),
+                (Gdk.KEY_F10, Gdk.ModifierType.SHIFT_MASK),
+            ):
+                before = len(built)
+                assert tile._menu_keys.emit("key-pressed", keyval, 0, modifiers)
+                assert tile._menu.get_active()
+                assert len(built) == before + 1
+                tile._menu.popdown()
+        assert edited == []
+    finally:
+        window.destroy()
+
+
+def test_blocked_tile_disables_apply_but_keeps_edit_and_recovers_in_place(
+    loader: CountingLoader,
+) -> None:
+    edited: list[MediaItem] = []
+    applied: list[MediaItem] = []
+    grid = WallpaperGrid(loader, edited.append, on_apply=applied.append)
+    media = item("blocked")
+    grid.populate((media,))
+    tile = grid._tiles[media.path]
+    grid.set_borked({media.path: "renderer crashed"})
+    assert not tile._apply.get_sensitive()
+    assert not tile._apply_targets.get_sensitive()
+    assert "renderer crashed" in (tile._apply.get_tooltip_text() or "")
+    tile._apply.emit("clicked")
+    tile._edit.emit("clicked")
+    assert applied == [] and edited == [media]
+    grid.set_borked({})
+    assert grid._tiles[media.path] is tile
+    assert tile._apply.get_sensitive()
+    tile._apply.emit("clicked")
+    assert applied == [media]
 
 
 def test_a_removed_wallpaper_loses_its_tile(grid: WallpaperGrid) -> None:
@@ -1055,6 +1225,176 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
     application.session.shutdown()
 
 
+@pytest.fixture
+def apply_window(tmp_path: Path) -> Iterator[tuple[MainWindow, list[Path], list[tuple[Path, str]]]]:
+    """Real window and stores; applying records dispatches without a runtime."""
+    from wall_in_one import config
+    from wall_in_one.library import scan
+    from wall_in_one.session import Session
+
+    root = tmp_path / "library"
+    root.mkdir()
+    _png(root / "one.png")
+    played: list[Path] = []
+    targeted: list[tuple[Path, str]] = []
+
+    class FakeApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="dev.goober.TileApplyTargetsTest")
+            self.settings = config.Settings(
+                roots=(root,), display_mode=config.DISPLAY_MODE_INDEPENDENT
+            )
+            self.resolved_palette = None
+            self.session = Session(self.settings, scanner=lambda _roots: scan.scan((root,)))
+            self.session.refresh()
+
+        def refresh_library(self) -> None: ...
+
+        def play_item_async(self, chosen: MediaItem) -> bool:
+            played.append(chosen.path)
+            return True
+
+        def play_item_on_async(self, chosen: MediaItem, connector: str) -> bool:
+            targeted.append((chosen.path, connector))
+            return True
+
+    application = FakeApp()
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type]
+    window.show_library(application.session)
+    window._runtime_media_status = {
+        "status_version": 2,
+        "displays": [
+            {"connector": "DP-1", "connected": True},
+            {"connector": "DP-2", "connected": True},
+            {"connector": "DP-offline", "connected": False},
+        ],
+    }
+    try:
+        yield window, played, targeted
+    finally:
+        window.destroy()
+        application.session.shutdown()
+
+
+def _menu_labels(menu: Gio.MenuModel) -> list[str]:
+    return [
+        value.get_string()
+        for index in range(menu.get_n_items())
+        if (value := menu.get_item_attribute_value(index, Gio.MENU_ATTRIBUTE_LABEL, None))
+        is not None
+    ]
+
+
+def test_independent_apply_requires_explicit_target_and_dispatches_each_action_once(
+    apply_window: tuple[MainWindow, list[Path], list[tuple[Path, str]]],
+) -> None:
+    window, played, targeted = apply_window
+    media = window._app.session.library.items[0]
+    tile = window._grid._tiles[media.path]
+    assert tile._apply_targets.get_visible()
+    assert not tile._apply.get_visible()
+    tile._apply.emit("clicked")
+    assert played == [] and targeted == []
+    menu = window._apply_menu_for(media)
+    assert _menu_labels(menu) == [
+        "Apply to DP-1",
+        "Apply to DP-2",
+        "Apply to all displays (Quick choice)",
+    ]
+    assert played == [] and targeted == []
+    for index in (0, 2):
+        action_name = menu.get_item_attribute_value(index, Gio.MENU_ATTRIBUTE_ACTION, None)
+        assert action_name is not None
+        action = window.lookup_action(action_name.get_string().removeprefix("win."))
+        assert action is not None
+        action.activate(menu.get_item_attribute_value(index, Gio.MENU_ATTRIBUTE_TARGET, None))
+    assert targeted == [(media.path, "DP-1")]
+    assert played == [media.path]
+    assert window._content_stack.get_visible_child_name() == "primary"
+
+
+def test_open_target_menu_refreshes_connector_snapshot_without_applying(
+    apply_window: tuple[MainWindow, list[Path], list[tuple[Path, str]]],
+) -> None:
+    window, played, targeted = apply_window
+    tile = next(iter(window._grid._tiles.values()))
+    window.present()
+    _settle_widgets()
+    tile._apply_targets.popup()
+    menu = tile._apply_targets.get_menu_model()
+    assert menu is not None and "Apply to DP-1" in _menu_labels(menu)
+    tile._apply_targets.popdown()
+    window._runtime_media_status = {
+        "status_version": 2,
+        "displays": [{"connector": "HDMI-A-3", "connected": True}],
+    }
+    tile._apply_targets.popup()
+    menu = tile._apply_targets.get_menu_model()
+    assert menu is not None
+    assert _menu_labels(menu) == ["Apply to HDMI-A-3", "Apply to all displays (Quick choice)"]
+    tile._apply_targets.popdown()
+    assert played == [] and targeted == []
+
+
+def test_unknown_or_disconnected_target_does_not_fall_back_to_all_displays(
+    apply_window: tuple[MainWindow, list[Path], list[tuple[Path, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, played, targeted = apply_window
+    media = window._app.session.library.items[0]
+    window._runtime_media_status = None
+    menu = window._apply_menu_for(media)
+    assert _menu_labels(menu) == [
+        "No connected displays reported",
+        "Apply to all displays (Quick choice)",
+    ]
+    reports: list[str] = []
+    monkeypatch.setattr(window, "report", reports.append)
+    action = window.lookup_action("apply-wallpaper-on")
+    assert action is not None
+    action.activate(GLib.Variant("(ss)", (str(media.path), "DP-1")))
+    assert played == [] and targeted == []
+    assert reports and "no longer available" in reports[-1]
+
+
+def test_stale_target_action_cannot_apply_a_newly_blocked_item(
+    apply_window: tuple[MainWindow, list[Path], list[tuple[Path, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, played, targeted = apply_window
+    media = window._app.session.library.items[0]
+    window._app.session.pairings.mark_borked(media, "renderer crashed", "automatic-apply")
+    reports: list[str] = []
+    monkeypatch.setattr(window, "report", reports.append)
+    for name, target in (
+        ("apply-wallpaper", GLib.Variant.new_string(str(media.path))),
+        ("apply-wallpaper-on", GLib.Variant("(ss)", (str(media.path), "DP-1"))),
+    ):
+        action = window.lookup_action(name)
+        assert action is not None
+        action.activate(target)
+    assert played == [] and targeted == []
+    assert len(reports) == 2 and all("Playback unavailable" in report for report in reports)
+    assert _menu_labels(window._apply_menu_for(media)) == ["Playback unavailable"]
+
+
+def test_apply_control_tracks_display_mode_without_rebuilding_the_tile(
+    apply_window: tuple[MainWindow, list[Path], list[tuple[Path, str]]],
+) -> None:
+    from dataclasses import replace
+
+    from wall_in_one import config
+
+    window, played, targeted = apply_window
+    media = window._app.session.library.items[0]
+    tile = window._grid._tiles[media.path]
+    window.apply_settings(replace(window.settings, display_mode=config.DISPLAY_MODE_MIRRORED))
+    assert window._grid._tiles[media.path] is tile
+    assert tile._apply.get_visible() and not tile._apply_targets.get_visible()
+    tile._apply.emit("clicked")
+    assert played == [media.path] and targeted == []
+
+
 def test_quick_choice_menu_action_really_plays_instead_of_opening_the_editor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1145,7 +1485,7 @@ def test_borked_media_has_a_warning_and_no_global_or_targeted_play_action(
 
     tile = window._grid._tiles[wallpaper]
     assert tile.has_css_class("wio-tile-borked")
-    assert "playback disabled" in (tile._frame.get_tooltip_text() or "")
+    assert "Playback disabled" in (tile._frame.get_tooltip_text() or "")
     menu = window._menu_for(item)
     labels = [
         value.get_string()
@@ -1157,13 +1497,15 @@ def test_borked_media_has_a_warning_and_no_global_or_targeted_play_action(
         )
         is not None
     ]
-    assert "Borked · playback disabled" in labels
-    assert not any(label.startswith("Play") for label in labels)
+    assert "Playback unavailable" in labels
+    assert not any(label == "Play" or label.startswith("Play ") for label in labels)
+    warning_index = labels.index("Playback unavailable")
+    assert menu.get_item_attribute_value(warning_index, Gio.MENU_ATTRIBUTE_ACTION, None) is None
 
     window._quick_apply(item)
 
     assert application.played == []
-    assert reports and "cannot play" in reports[-1]
+    assert reports and "Playback unavailable" in reports[-1]
     window.destroy()
     application.session.shutdown()
 
@@ -1207,8 +1549,8 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
         assert (
             window.get_title()
             == {
-                "browse": "Wall-in-One - Browse",
-                "media": "Wall-in-One - Media/Pairings",
+                "browse": "Wall-in-One - Store",
+                "media": "Wall-in-One - Library",
                 "playlists": "Wall-in-One - Playlists",
                 "schedules": "Wall-in-One - Schedules",
                 "settings": "Wall-in-One - Settings",
@@ -1406,14 +1748,36 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
             "taboo_entries_omitted": 1,
         }
     )
-    assert "Borked" in window._runtime_control_status.get_text()
-    assert "Media/Pairings" in (window._runtime_play.get_tooltip_text() or "")
+    assert "Playback unavailable" in window._runtime_control_status.get_text()
+    assert "Library" in (window._runtime_play.get_tooltip_text() or "")
     assert window._runtime_play.get_icon_name() == "dialog-warning-symbolic"
 
     window._runtime_play.emit("clicked")
 
     assert len(calls) == before_taboo, "taboo entries cannot be retried by Play"
     assert window._stack.get_visible_child_name() == "media"
+    for playback in ("playing", "paused", "stopped"):
+        window.show_runtime_status(
+            {
+                "playlist": "Evening",
+                "source": "manual",
+                "playback_state": playback,
+                "cycle_enabled": True,
+                "shuffle": False,
+                "last_error": "",
+                "power_source": "battery",
+                "power_available": True,
+                "stop_animations_on_battery": True,
+                "animations_inhibited": True,
+                "animation_inhibition_reason": "battery",
+            }
+        )
+        assert window._playback_state == playback
+        assert "Animations stopped on battery" in window._runtime_control_status.get_text()
+        assert "Animations stopped on battery" in window._subtitle.get_subtitle()
+        assert "stopped on battery" in (window._runtime_play.get_tooltip_text() or "")
+        assert window._runtime_controls.get_sensitive()
+        assert len(calls) == before_taboo, "power status must not send transport commands"
     window.show_runtime_unavailable()
     assert not window._runtime_controls.get_sensitive()
 

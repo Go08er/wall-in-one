@@ -1,17 +1,21 @@
 # Migration and upgrade guide
 
-Wall-in-One has two separate compatibility boundaries. The deployed
-Python/Rust application upgrade below is automatic only for one exact shipped
-schema-2 profile. The retired Noctalia Luau plugin import is an explicit user
-decision for a different format. Their commands, journals, and authority
-records are not interchangeable.
+For an existing app with explicit library folders, start with
+[Updating an existing installation](updating.md). Package replacement, loaded
+service definitions and running processes must be checked separately.
+
+The migrations below cover two older formats. The deployed Python/Rust upgrade
+is automatic only for one exact shipped schema-2 profile. The retired Noctalia
+Luau plugin import is an explicit user decision for a different format. Their
+commands, journals and authority records are not interchangeable.
 
 ## Upgrading the deployed Python/Rust app
 
 One deployed Python/Rust release used `roots = []` to mean “follow Noctalia's
 wallpaper directory” and compiled a schema-2 `runtime.toml`. The current app
-requires an explicit library root and the Rust service requires runtime schema
-4. The deployed-upgrade boundary recognizes that one transition; it is not a
+requires an explicit library root and this migration produces runtime schema
+4 (schema 5 is used later if battery control is enabled). The deployed-upgrade
+boundary recognizes that one transition; it is not a
 promise to migrate arbitrary pre-release application state.
 
 ### Detection and fail-closed behavior
@@ -143,7 +147,7 @@ compile failure may retain the last-known-good document. A second preflight
 then loads that exact document through Rust's production parser without
 claiming a socket or renderer. Missing, malformed, or schema-2 runtime state
 exits 78 and stops once, so Rust never launches against the predecessor schema;
-a valid schema-4 last-known-good runtime can still keep wallpaper service
+a valid supported last-known-good runtime can still keep wallpaper service
 available while the authoring fault is repaired.
 
 ### Root and capture preservation
@@ -205,6 +209,9 @@ claims, stage, manifest, and sidecars intact for diagnosis. With a pre-upgrade
 backup, the supported alternative is to stop and disable the service and
 restore the config directory, state directory, Automatic Stills directory,
 Noctalia settings, app revision, and companion revision together as one unit.
+This restores the whole saved snapshot, including unrelated Noctalia settings.
+Preserve the current files separately first; if changes were made after the
+backup, reconcile them before restoring rather than silently discarding them.
 
 Empty or unrelated claim directories are never deleted, trusted, or reused.
 After a replacement is durable, predecessor claims deliberately remain inert:
@@ -223,17 +230,23 @@ For rollback, stop and disable the new service first, preserve the failed/new
 state for diagnosis, restore those backups as a unit, and restore the prior
 app and companion revisions. Do not combine individual files from before and
 after cutover, delete a resumable journal, or treat a private claim as the
-rollback interface. There is no automatic schema-4-to-schema-2 conversion.
+rollback interface. Restoring the snapshot also rolls back later wallpaper,
+theme and other settings changes; preserve and reconcile those newer files
+first. There is no automatic schema-4-to-schema-2 conversion, nor a converter
+for schema-5 settings/runtime state back to an older app.
 
-The app and companion remain separate release artifacts. This v0.1.2
-follow-up keeps the exact v0.1.1 companion contract and contains no companion
-source change. If a machine still needs that companion update, make the
-compatible app available first. On the live machine, install the app, inspect
+The app and companion remain separate release artifacts. Install the compatible
+app before updating the companion. On the live machine, inspect
 the deployed upgrade, let the packaged startup preflight, GUI startup,
 `--write-config`, or the stopped-service explicit command complete schema-4
 cutover, and only then refresh/materialize the strict companion and restart
 the service. Loading that companion first can strand users whose public app
 still emits the older status contract.
+
+Battery animation control is opt-in after the upgrade. It uses runtime schema 5
+and requires the updated Rust service; leaving it off retains schema 4 and does
+not change the upgrade journal's target format. See
+[battery animation control](settings.md#battery-animation-control).
 
 ## Importing the retired Noctalia Luau plugin
 
@@ -280,7 +293,7 @@ person has seen the prompt. The packaged migration-aware Python preflight
 propagates that boundary and prevents Rust startup. Only an ordinary
 current-profile compiler failure may retain a last-known-good candidate, and
 the following exact Rust preflight admits it only when it is a consumable
-schema-4 document.
+supported document.
 
 The same boundary is available without GTK:
 
@@ -423,8 +436,8 @@ profile:
   binary override, and custom Workshop discovery directory are not persisted.
   A custom Workshop directory is consulted during import only; and
 - `sync_colors=false` has no one-to-one current field. Imported per-wallpaper
-  palette policies remain active and should be reviewed in Pairings before
-  first playback.
+  palette policies remain active and should be reviewed by opening the item in
+  Library before first playback.
 
 Malformed types and unknown scene scaling/clamp values stop the whole import;
 they do not silently select a current default.
@@ -458,10 +471,9 @@ stores to legacy `config.json`.
 The current application is self-contained: the GUI works without the
 companion, and the packaged `wall-in-one-health-sync.timer` persists Rust crash
 quarantines 30 seconds after activation and then 30 seconds after each prior
-one-shot finishes. When the plugin is used, the present runtime contract
-requires the reviewed companion revision pinned below. The v0.1.2
-migration-resume and search fixes do not change its source or protocol. Thin
-companion revisions through `a5e23c9` predate parts of the contract:
+one-shot finishes. When the plugin is used, it must support the runtime contract
+described below. Thin companion revisions through `a5e23c9` predate parts of
+that contract:
 
 - they publish the top-level compatibility state but do not require status
   schema 2 or expose the authoritative independent-display route fields;
@@ -474,15 +486,25 @@ companion revisions through `a5e23c9` predate parts of the contract:
   can report failure while the daemon later commits success, splitting the bar
   from actual playback state.
 
-The matching companion revision requires status version 2, enqueues one health
-sync for a visible non-durable taboo record, and raises the callback deadline
-to 55 seconds (below Noctalia's 60-second clamp and above the app's 45-second
-bound). Do not combine this application release with a companion revision
-through `a5e23c9`. This tree's `flake.lock` already pins the reviewed revision
-`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. Users of an older companion
-should prefer the packaged user service/timer and treat the app's status UI as
-authoritative. When that exact companion still needs an update, publish the
-compatible app first and refresh the companion only after schema-4 cutover;
-loading the strict companion first would temporarily break users whose app
-still emits the older status contract. This repository neither publishes nor
-silently modifies the companion.
+A compatible companion requires status version 2, enqueues one health sync for
+a visible non-durable playback-failure record, and uses a 55-second callback
+deadline (below Noctalia's 60-second clamp and above the app's 45-second bound).
+Do not combine this application with companion revisions through `a5e23c9`.
+Users of an older companion should prefer the packaged user service/timer and
+treat the app's status UI as authoritative.
+
+The updated companion additionally runs migration preparation and Rust
+validation before a direct launch, preserves failures from an installed user
+unit instead of bypassing them, and displays automatic battery restrictions.
+It requires matching `wall-in-one` and `wall-in-one-service` executables with
+`--service-startup-prepare` and `--check-config` support. Update the app first;
+complete the older installation's cutover before loading the companion.
+Battery handling itself belongs to Rust and works without a companion.
+
+Application v0.1.3 is paired with companion v0.1.2, pinned at
+`c154c162fd650567ef8eda5d0e6d875b2b635a21` in `flake.lock`. That revision
+includes the startup and battery-display changes above. The earlier `a17eb70`
+companion provides only the older base contract. Updating the app does not
+automatically change a separately configured Noctalia plugin source; select the
+matching companion through that source's owner and follow the
+[ordinary update checks](updating.md) before enabling new features.

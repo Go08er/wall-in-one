@@ -39,7 +39,7 @@ from wall_in_one.library import (  # noqa: E402
     state_file,
 )
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
-from wall_in_one.session import LibraryRefreshResult  # noqa: E402
+from wall_in_one.session import LibraryRefreshResult, RemovalPlan, RemovalResult  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
     Application,
     _Commands,
@@ -137,9 +137,37 @@ def _spin_until(predicate: Any, *, timeout: float = 2.0) -> None:
         time.sleep(0.002)
 
 
+def _observe_removal_worker(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Separate real storage completion from the two-second GTK delivery bound.
+
+    Directory fsync can wait for unrelated filesystem writeback, even in a
+    serial test run. Keep every real write/sync, but do not misreport its time
+    as time spent delivering an already-completed result on the main loop.
+    The held-fsync regression below independently checks responsiveness and
+    the publication/quit barriers while this worker is unfinished.
+    """
+    finished = threading.Event()
+    original = RemovalPlan.run
+
+    def observed(plan: RemovalPlan) -> RemovalResult:
+        try:
+            return original(plan)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(RemovalPlan, "run", observed)
+    return finished
+
+
 def _close(application: Application) -> None:
     application._runtime_shutdown = True
+    application._shutdown_library_scan_jobs(wait=True)
+    # Every test owns its workers, including failure teardown. A late actor
+    # completion must not inherit the next test's HOME/XDG and socket mocks.
+    authoring_jobs = application._authoring_jobs
     application._shutdown_authoring_jobs()
+    if authoring_jobs is not None:
+        authoring_jobs.shutdown(wait=True, cancel_futures=True)
     if application._runtime_jobs is not None:
         application._runtime_jobs.shutdown(wait=True, cancel_futures=True)
         application._runtime_jobs = None
@@ -286,7 +314,7 @@ def test_every_global_and_targeted_quick_choice_path_refuses_borked_media(
     monkeypatch.setattr(client, "send_runtime_on", send)
     try:
         response = application.play_item(item)
-        assert not response.ok and "Borked" in response.message
+        assert not response.ok and "Playback unavailable" in response.message
         assert not application.play_item_async(item)
         assert not application.play_item_on_async(item, "DP-1")
 
@@ -695,6 +723,7 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
     reloads: list[str] = []
     refreshes: list[bool] = []
     original_update = runtime_config.update
+    storage_finished = _observe_removal_worker(monkeypatch)
 
     def held_update(
         current: config.Settings,
@@ -725,7 +754,16 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
         assert not application._runtime_library_ready.is_set()
 
         release_compile.set()
-        _spin_until(lambda: removed == [True] and refreshes == [True])
+        assert storage_finished.wait(30), "real removal storage worker did not finish"
+        try:
+            _spin_until(lambda: removed == [True] and refreshes == [True])
+        except AssertionError as error:
+            raise AssertionError(
+                f"removal did not converge: removed={removed}, refreshes={refreshes}, "
+                f"runtime_calls={reloads}, reports={window.reports}, "
+                f"scan_pending={application._runtime_library_scan_pending}, "
+                f"actor_active={application._authoring_active}"
+            ) from error
         assert "reload" not in reloads
         assert not source.exists()
         assert not application._runtime_library_ready.is_set()
@@ -764,8 +802,11 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
     removed: list[bool] = []
     refreshes: list[bool] = []
     source_seen_during_reload: list[bool] = []
+    storage_finished = _observe_removal_worker(monkeypatch)
 
     def held_runtime(verb: str, *_args: object, **_kwargs: object) -> Response:
+        if verb == "status":
+            return Response.failure("no status snapshot in this deletion fixture")
         assert verb == "reload"
         source_seen_during_reload.append(source.exists())
         reload_started.set()
@@ -788,11 +829,121 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
         assert source.exists()
 
         release_reload.set()
+        assert storage_finished.wait(30), "real removal storage worker did not finish"
         _spin_until(lambda: removed == [True] and refreshes == [True])
         assert source_seen_during_reload == [True]
         assert not source.exists()
     finally:
         release_reload.set()
+        _close(application)
+
+
+def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "personal.png"
+    source.write_bytes(b"image")
+    item = MediaItem(source, Kind.STILL, 5, 1)
+    settings = replace(application.settings, roots=(root,)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.adopt_library(Library((root,), (item,)))
+    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    storage_finished = _observe_removal_worker(monkeypatch)
+    flush_entered = threading.Event()
+    release_flush = threading.Event()
+    original_sync = paths.fsync_directory
+    main_thread = threading.get_ident()
+    removed: list[bool] = []
+    quit_calls: list[bool] = []
+    refreshes: list[bool] = []
+    reloads: list[str] = []
+
+    def held_source_sync(path: Path) -> None:
+        # The removal worker deliberately uses its pinned /proc/self/fd
+        # directory, not a re-resolved pathname. Compare the inode it owns.
+        if path.samefile(root):
+            assert threading.get_ident() != main_thread
+            flush_entered.set()
+            assert release_flush.wait(30), "test did not release the source-directory flush"
+        original_sync(path)
+
+    def runtime(verb: str, *_args: object, **_kwargs: object) -> Response:
+        reloads.append(verb)
+        return Response.failure("no runtime in this fixture")
+
+    monkeypatch.setattr(paths, "fsync_directory", held_source_sync)
+    monkeypatch.setattr(client, "send_runtime", runtime)
+    monkeypatch.setattr(application, "quit", lambda: quit_calls.append(True))
+    monkeypatch.setattr(application, "refresh_library", lambda: refreshes.append(True))
+    try:
+        assert application.remove_item_async(
+            item, trash=True, finish=lambda result: removed.append(result.committed)
+        )
+        _spin_until(lambda: application._removal_runtime_invalidated)
+        assert flush_entered.wait(30), "real removal did not reach the source-directory flush"
+        heartbeat: list[bool] = []
+
+        def beat() -> bool:
+            heartbeat.append(True)
+            return GLib.SOURCE_REMOVE
+
+        GLib.timeout_add(10, beat)
+        _spin_until(lambda: heartbeat)
+        application.request_quit()
+        assert not storage_finished.is_set()
+        assert removed == []
+        assert refreshes == []
+        assert quit_calls == []
+        assert application._removal_runtime_invalidated
+        assert application._authoring_lifetime_holds > 0
+        assert not application._runtime_library_ready.is_set()
+        assert "reload" not in reloads
+
+        release_flush.set()
+        assert storage_finished.wait(30), "real removal storage worker did not finish"
+        _spin_until(lambda: removed == [True] and refreshes == [True])
+        assert not source.exists()
+        # The fake refresh has not completed the post-delete convergence tail;
+        # graceful quit must still retain it after the physical worker ends.
+        assert application._removal_convergence_held
+        assert quit_calls == []
+    finally:
+        release_flush.set()
+        _close(application)
+
+
+def test_late_refresh_and_removal_cleanup_do_not_publish_after_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = _application(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    def publish() -> bool:
+        calls.append("publish")
+        return True
+
+    monkeypatch.setattr(application.session, "refresh", lambda: calls.append("scan"))
+    monkeypatch.setattr(application, "_publish_runtime", publish)
+    try:
+        application._runtime_shutdown = True
+        application._library_scan_shutdown = True
+        application._removal_runtime_invalidated = True
+        # These callbacks can already be queued when shutdown closes the last
+        # window. They must not mistake that for explicit headless service mode.
+        application._release_removal_lane()
+        application.refresh_library()
+        assert calls == []
+    finally:
         _close(application)
 
 

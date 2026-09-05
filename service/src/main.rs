@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use wall_in_one_service::config::{Config, ConfigError};
-use wall_in_one_service::protocol::{read_request, write_response, Request, Response};
+use wall_in_one_service::power::PowerObserver;
+use wall_in_one_service::protocol::{read_request_until, write_response, Request, Response};
 use wall_in_one_service::renderer::SystemDriver;
 use wall_in_one_service::runtime::Runtime;
 
@@ -154,15 +155,21 @@ fn parse() -> Result<Options, String> {
     Ok(options)
 }
 
-fn serve(stream: UnixStream, runtime: &mut Runtime<SystemDriver>) -> bool {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+fn serve(
+    stream: UnixStream,
+    runtime: &mut Runtime<SystemDriver>,
+    power: &mut PowerObserver,
+) -> bool {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
     let mut reader = BufReader::new(&stream);
-    let (response, was_reload) = match read_request(&mut reader) {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let (response, was_reload) = match read_request_until(&mut reader, &stream, deadline) {
         Ok(request) => {
             let was_reload = request.verb == "reload";
             (
-                runtime.handle(request, Local::now().naive_local()),
+                runtime.handle_with_power(request, Local::now().naive_local(), |enabled| {
+                    power.prepare(enabled)
+                }),
                 was_reload,
             )
         }
@@ -428,10 +435,10 @@ fn initial_apply(runtime: &mut Runtime<SystemDriver>, now: Instant) -> Option<St
 fn release_startup_allocator_slack() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        // Config decoding, route construction, and the first staged apply use
-        // short-lived buffers that are much larger than the steady-state event
-        // loop. glibc otherwise keeps those free arenas resident indefinitely.
-        // This is deliberately one-shot: trimming on status/tick would trade a
+        // Config::load has already released parser slack. Route construction
+        // and the first staged apply can leave their own short-lived buffers;
+        // glibc otherwise keeps those free arenas resident indefinitely.
+        // This startup cleanup is one-shot: trimming on status/tick would trade a
         // small RSS win for ongoing allocator and CPU overhead.
         // SAFETY: malloc_trim accepts any `pad` value and only asks glibc to
         // release completely free allocator pages owned by this process.
@@ -508,6 +515,8 @@ fn run() -> Result<(), ServiceError> {
     // process must have exactly zero wallpaper or renderer side effects.
     let socket = claim_socket(&options.socket)?;
     let listener = &socket.listener;
+    let mut power = PowerObserver::default();
+    runtime.observe_power(power.synchronize(runtime.battery_policy_enabled()));
     let mut startup_retry = initial_apply(&mut runtime, Instant::now());
     release_startup_allocator_slack();
     let mut known = fingerprint(&options.config);
@@ -519,7 +528,7 @@ fn run() -> Result<(), ServiceError> {
             // reload; capturing afterward could mark unseen newer bytes as
             // loaded and miss them entirely.
             let observed = fingerprint(&options.config);
-            if serve(stream, &mut runtime) {
+            if serve(stream, &mut runtime, &mut power) {
                 known = observed;
             }
         }) {
@@ -532,12 +541,13 @@ fn run() -> Result<(), ServiceError> {
         if now >= next_config_check {
             let current = fingerprint(&options.config);
             if current.is_some() && current != known {
-                let response = runtime.handle(
+                let response = runtime.handle_with_power(
                     Request {
                         verb: "reload".into(),
                         argument: None,
                     },
                     Local::now().naive_local(),
+                    |enabled| power.prepare(enabled),
                 );
                 if !response.ok {
                     eprintln!("wall-in-one-service: reload: {}", response.message);
@@ -549,6 +559,7 @@ fn run() -> Result<(), ServiceError> {
             }
             next_config_check = now + Duration::from_secs(1);
         }
+        runtime.observe_power(power.synchronize(runtime.battery_policy_enabled()));
         runtime.tick(Local::now().naive_local(), now);
         retry_initial_apply(&mut startup_retry, &mut runtime, now)?;
         thread::sleep(Duration::from_millis(25));

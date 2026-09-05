@@ -210,7 +210,7 @@ class PairingsPage(Gtk.Box):
         self._rendered = None
         status = Adw.StatusPage(
             title="Choose media first",
-            description="Return to Media/Pairings and choose an item to configure.",
+            description="Return to Library and choose a pairing to edit.",
             icon_name="image-x-generic-symbolic",
         )
         status.set_vexpand(True)
@@ -231,7 +231,7 @@ class PairingsPage(Gtk.Box):
         bundle = bundle or session.pairings.resolve_accepted(item, session.library)
         self._rendered = self._editor_key(item, bundle)
 
-        back = Gtk.Button(label="Back to Media/Pairings", icon_name="go-previous-symbolic")
+        back = Gtk.Button(label="Back to Library", icon_name="go-previous-symbolic")
         back.set_halign(Gtk.Align.START)
         back.connect("clicked", lambda _button: self._on_back())
         self._editor.append(back)
@@ -248,7 +248,7 @@ class PairingsPage(Gtk.Box):
         self._health_action: Gtk.Button | None = None
         if bundle.health.is_borked:
             self._health_group = Adw.PreferencesGroup(
-                title="Borked wallpaper · known renderer crasher",
+                title="Playback unavailable · renderer failed",
                 description=(
                     f"{bundle.health.reason}\n\n"
                     "Playback, Quick choice, and transport retry are disabled. If this "
@@ -265,7 +265,7 @@ class PairingsPage(Gtk.Box):
             if removable and self._on_remove is not None:
                 health_row.set_subtitle(
                     f"Reported by {bundle.health.source or 'the runtime'} · "
-                    "removing it also clears its saved pairing and Borked marker"
+                    "removing it also clears its saved pairing and playback warning"
                 )
                 self._health_action = Gtk.Button(
                     label="Delete wallpaper…" if item.deletable else "Move to Trash"

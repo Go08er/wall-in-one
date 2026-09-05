@@ -1,6 +1,8 @@
 use crate::config::{
     Config, DisplayMode, Entry, EntryKind, Playlist, ScheduleRule, MAX_PATH_BYTES,
+    SUPPORTED_SCHEMA_VERSIONS,
 };
+use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response};
 use crate::renderer::{RendererFailure, WallpaperDriver, MAX_OUTPUT_NAME_BYTES};
 use crate::schedule;
@@ -82,6 +84,15 @@ fn bounded_failure_summary(failures: &[String]) -> String {
 
 #[derive(Debug, Serialize)]
 pub struct Status<'a> {
+    pub loaded_config_sha256: Option<&'a str>,
+    pub supported_config_schemas: &'static [u32],
+    pub runtime_version: &'static str,
+    pub runtime_executable: Option<&'a str>,
+    pub power_source: &'static str,
+    pub power_available: bool,
+    pub stop_animations_on_battery: bool,
+    pub animations_inhibited: bool,
+    pub animation_inhibition_reason: &'static str,
     pub status_version: u8,
     pub runtime_instance: &'a str,
     pub config_epoch: u64,
@@ -372,6 +383,7 @@ struct PendingRouteAutomatic {
 #[derive(Clone)]
 struct IndependentSelectionSnapshot {
     routes: HashMap<String, DisplayRoute>,
+    power_released_outputs: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -397,6 +409,7 @@ enum PlaybackState {
 
 struct ReloadSnapshot {
     config: Config,
+    power_released_outputs: HashSet<String>,
     manual_playlist: Option<String>,
     active_playlist: String,
     schedule_overrode_default: bool,
@@ -425,6 +438,10 @@ pub struct Runtime<D: WallpaperDriver> {
     config_path: PathBuf,
     config: Config,
     driver: D,
+    power: PowerPolicy,
+    applied_power_inhibition: bool,
+    // Paused routes released by battery policy remain static on AC until Play.
+    power_released_outputs: HashSet<String>,
     manual_playlist: Option<String>,
     active_playlist: String,
     schedule_overrode_default: bool,
@@ -455,6 +472,7 @@ pub struct Runtime<D: WallpaperDriver> {
     route_generation: u64,
     current_time: NaiveDateTime,
     runtime_instance: String,
+    runtime_executable: Option<String>,
     config_epoch: u64,
     quit: bool,
 }
@@ -511,6 +529,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             config_path,
             config,
             driver,
+            power: PowerPolicy::default(),
+            applied_power_inhibition: false,
+            power_released_outputs: HashSet::new(),
             manual_playlist: None,
             active_playlist: active,
             schedule_overrode_default,
@@ -536,6 +557,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             route_generation: 0,
             current_time: at,
             runtime_instance: new_runtime_instance(),
+            runtime_executable: std::env::current_exe()
+                .ok()
+                .and_then(|path| path.to_str().map(str::to_owned)),
             config_epoch,
             quit: false,
         };
@@ -557,6 +581,108 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.quit
     }
 
+    pub fn battery_policy_enabled(&self) -> bool {
+        self.config.settings.stop_animations_on_battery
+    }
+
+    fn animations_inhibited(&self) -> bool {
+        self.power.inhibited(self.battery_policy_enabled())
+    }
+
+    fn effective_motion_settings(
+        &mut self,
+        output: &str,
+        playback: PlaybackState,
+    ) -> crate::config::Settings {
+        let inhibited = self.animations_inhibited();
+        self.driver.set_animation_inhibited(inhibited);
+        if inhibited {
+            self.power_released_outputs.insert(output.to_string());
+        } else if playback == PlaybackState::Playing {
+            self.power_released_outputs.remove(output);
+        }
+        let held_pause = playback == PlaybackState::Paused
+            && (self.power_released_outputs.contains(output)
+                || (!self.is_independent() && self.power_released_outputs.contains("")));
+        let mut settings = self.config.settings.clone();
+        settings.dynamics_enabled &=
+            !inhibited && playback != PlaybackState::Stopped && !held_pause;
+        settings
+    }
+
+    /// Consume the observer's coalesced snapshot on the runtime thread. Power
+    /// transitions never change manual transport, selection, clocks or colors.
+    pub fn observe_power(&mut self, observation: PowerObservation) {
+        self.power.observation = observation;
+        let inhibited = self.animations_inhibited();
+        self.driver.set_animation_inhibited(inhibited);
+        let mirrored = !self.is_independent();
+        self.power_released_outputs.retain(|output| {
+            (mirrored && output.is_empty())
+                || self.target_outputs.contains(output)
+                || self.routes.contains_key(output)
+        });
+        if inhibited == self.applied_power_inhibition {
+            return;
+        }
+        self.applied_power_inhibition = inhibited;
+        if inhibited {
+            self.power_released_outputs
+                .extend(self.target_outputs.iter().cloned());
+            self.driver.stop();
+            return;
+        }
+        let targets = self.current_targets(&self.target_outputs);
+        let mut errors = Vec::new();
+        let mut resumed = false;
+        self.driver.begin_apply();
+        for target in targets {
+            let playback = if self.is_independent() {
+                self.routes[&target.output].playback_state
+            } else {
+                self.playback_state
+            };
+            if playback != PlaybackState::Playing
+                || !self.config.settings.dynamics_enabled
+                || target.entry.kind == EntryKind::Still
+                || self.is_taboo(&target.playlist_id, &target.entry.id)
+                || self.driver.motion_active(&target.output)
+            {
+                continue;
+            }
+            let result =
+                self.driver
+                    .start_motion_only(&target.entry, &target.output, &self.config.settings);
+            if let Err(error) = result {
+                let message =
+                    format!("could not resume animation after battery restriction: {error}");
+                if let Some(route) = self.routes.get_mut(&target.output) {
+                    route.renderer_failed = true;
+                    route.last_error = truncate_middle(&message, MAX_LAST_ERROR_BYTES);
+                }
+                errors.push(message);
+            } else {
+                resumed = true;
+                self.power_released_outputs.remove(&target.output);
+                if let Some(route) = self.routes.get_mut(&target.output) {
+                    route.renderer_failed = false;
+                    route.last_error.clear();
+                }
+            }
+        }
+        self.driver.end_apply();
+        if !errors.is_empty() {
+            self.last_error = bounded_failure_summary(&errors);
+            self.renderer_failed = true;
+        } else if resumed && !self.is_independent() {
+            self.renderer_failed = false;
+            self.last_error.clear();
+        }
+        if self.is_independent() {
+            self.refresh_independent_last_error();
+        }
+    }
+
     /// Changes when a successful apply or terminal command supersedes a
     /// pending automatic startup apply. Pause and stop deliberately do not:
     /// they shape that eventual apply into paused motion or a still-only one.
@@ -570,6 +696,7 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn restore_reload_snapshot(&mut self, snapshot: ReloadSnapshot) {
         self.config = snapshot.config;
+        self.power_released_outputs = snapshot.power_released_outputs;
         self.manual_playlist = snapshot.manual_playlist;
         self.active_playlist = snapshot.active_playlist;
         self.schedule_overrode_default = snapshot.schedule_overrode_default;
@@ -689,6 +816,16 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn handle(&mut self, request: Request, at: NaiveDateTime) -> Response {
+        let observation = self.power.observation;
+        self.handle_with_power(request, at, |_| observation)
+    }
+
+    pub fn handle_with_power(
+        &mut self,
+        request: Request,
+        at: NaiveDateTime,
+        mut prepare_power: impl FnMut(bool) -> PowerObservation,
+    ) -> Response {
         self.current_time = at;
         let no_argument = |usage: &str| {
             if request.argument.is_some() {
@@ -757,7 +894,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     Err(error) => Response::failure(error),
                 };
             }
-            "reload" => no_argument("reload").and_then(|()| self.reload(at)),
+            "reload" => no_argument("reload").and_then(|()| self.reload(at, &mut prepare_power)),
             "quit" => no_argument("quit").map(|()| {
                 self.supersede_startup_apply();
                 self.quit = true;
@@ -1796,36 +1933,31 @@ impl<D: WallpaperDriver> Runtime<D> {
             .config
             .playlist(playlist_id)
             .ok_or_else(|| format!("display route playlist {playlist_id:?} is missing"))?;
-        let entry_ids: Vec<String> = playlist
-            .entries
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect();
-        if entry_ids.is_empty() {
+        let entries = playlist.entries.len();
+        if entries == 0 {
             return Err(format!("display route playlist {playlist_id:?} is empty"));
         }
         let current = current_entry
-            .and_then(|wanted| entry_ids.iter().position(|entry| entry == wanted))
+            .and_then(|wanted| playlist.entries.iter().position(|entry| entry.id == wanted))
             .or_else(|| {
                 automatic.then(|| {
-                    entry_ids
+                    playlist
+                        .entries
                         .iter()
-                        .position(|entry| !self.is_taboo(playlist_id, entry))
+                        .position(|entry| !self.is_taboo(playlist_id, &entry.id))
                         .unwrap_or(0)
                 })
             })
             .unwrap_or(0);
         let (order, position) = if shuffle {
-            let mut rest: Vec<usize> = (0..entry_ids.len())
-                .filter(|index| *index != current)
-                .collect();
+            let mut rest: Vec<usize> = (0..entries).filter(|index| *index != current).collect();
             self.rng.shuffle(&mut rest);
-            let mut order = Vec::with_capacity(entry_ids.len());
+            let mut order = Vec::with_capacity(entries);
             order.push(current);
             order.extend(rest);
             (order, 0)
         } else {
-            ((0..entry_ids.len()).collect(), current)
+            ((0..entries).collect(), current)
         };
         Ok(PlaylistCursor {
             order,
@@ -2011,6 +2143,11 @@ impl<D: WallpaperDriver> Runtime<D> {
         connectors: &[String],
     ) -> IndependentSelectionSnapshot {
         IndependentSelectionSnapshot {
+            power_released_outputs: connectors
+                .iter()
+                .filter(|connector| self.power_released_outputs.contains(*connector))
+                .cloned()
+                .collect(),
             routes: connectors
                 .iter()
                 .filter_map(|connector| {
@@ -2026,6 +2163,14 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn restore_independent_selection(&mut self, snapshot: &IndependentSelectionSnapshot) {
         for (connector, route) in &snapshot.routes {
             self.routes.insert(connector.clone(), route.clone());
+            // A failed Play may have cleared the battery-released marker
+            // before motion failed. Restore the selected route's residency
+            // along with its transport, without touching unselected outputs.
+            if snapshot.power_released_outputs.contains(connector) {
+                self.power_released_outputs.insert(connector.clone());
+            } else {
+                self.power_released_outputs.remove(connector);
+            }
         }
     }
 
@@ -2157,12 +2302,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         let played = targets[0].entry.id.clone();
         let mut errors = Vec::new();
         let mut static_fallbacks = Vec::new();
-        let mut base_settings = self.config.settings.clone();
-        if self.playback_state == PlaybackState::Stopped {
-            base_settings.dynamics_enabled = false;
-        }
         for target in targets {
-            let mut settings = base_settings.clone();
+            let mut settings = self.effective_motion_settings(&target.output, self.playback_state);
             if let Some(diagnostic) =
                 self.taboo_fallback_diagnostic(&target.playlist_id, &target.entry.id)
             {
@@ -2189,7 +2330,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 });
             }
         }
-        if self.playback_state == PlaybackState::Paused {
+        if self.playback_state == PlaybackState::Paused && !self.animations_inhibited() {
             if let Err(error) = self.driver.set_paused(true) {
                 // The newly started renderer is not paused. Do not leave status
                 // claiming otherwise. Undo any partial multi-output pause on a
@@ -2367,13 +2508,14 @@ impl<D: WallpaperDriver> Runtime<D> {
             if blocked.contains(&target.output) {
                 continue;
             }
-            let Some(route) = self.routes.get(&target.output) else {
+            let Some(playback) = self
+                .routes
+                .get(&target.output)
+                .map(|route| route.playback_state)
+            else {
                 continue;
             };
-            let mut settings = self.config.settings.clone();
-            if route.playback_state == PlaybackState::Stopped {
-                settings.dynamics_enabled = false;
-            }
+            let mut settings = self.effective_motion_settings(&target.output, playback);
             if let Some(diagnostic) =
                 self.taboo_fallback_diagnostic(&target.playlist_id, &target.entry.id)
             {
@@ -2395,7 +2537,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 errors.push(format!("{} renderer: {error}", target.output));
                 continue;
             }
-            if route.playback_state == PlaybackState::Paused
+            if playback == PlaybackState::Paused
                 && settings.dynamics_enabled
                 && target.entry.kind != crate::config::EntryKind::Still
             {
@@ -2922,7 +3064,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             let route = &self.routes[connector];
             match (route.playback_state, route.renderer_failed) {
                 (PlaybackState::Playing, false) => {}
-                (PlaybackState::Paused, false) => resume.push(connector.clone()),
+                (PlaybackState::Paused, false)
+                    if !self.power_released_outputs.contains(connector) =>
+                {
+                    resume.push(connector.clone())
+                }
                 _ => restart_connectors.push(connector.clone()),
             }
         }
@@ -2938,6 +3084,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let route = self.routes.get_mut(connector).expect("route exists");
                 route.playback_state = PlaybackState::Playing;
                 route.last_error.clear();
+                route.last_cycle = Instant::now();
             }
         }
         if !restart.is_empty() {
@@ -2953,17 +3100,25 @@ impl<D: WallpaperDriver> Runtime<D> {
                 errors.push(error);
             } else {
                 let now = Instant::now();
-                for connector in connectors {
+                for connector in &restart_connectors {
                     self.routes
                         .get_mut(connector)
                         .expect("route exists")
                         .last_cycle = now;
+                    if !self.animations_inhibited() {
+                        self.power_released_outputs.remove(connector);
+                    }
                 }
             }
         }
         self.refresh_independent_last_error();
         if errors.is_empty() {
-            Ok("playing selected display routes".into())
+            Ok(if self.animations_inhibited() {
+                "play requested; animations stopped on battery"
+            } else {
+                "playing selected display routes"
+            }
+            .into())
         } else {
             Err(errors.join("; "))
         }
@@ -2975,7 +3130,12 @@ impl<D: WallpaperDriver> Runtime<D> {
             if self.routes[connector].playback_state != PlaybackState::Playing {
                 continue;
             }
-            if let Err(error) = self.driver.set_output_paused(connector, true) {
+            let result = if self.animations_inhibited() {
+                Ok(())
+            } else {
+                self.driver.set_output_paused(connector, true)
+            };
+            if let Err(error) = result {
                 self.routes
                     .get_mut(connector)
                     .expect("route exists")
@@ -3364,7 +3524,24 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
             PlaybackState::Paused => {
-                if let Err(error) = self.driver.set_paused(false) {
+                if self.renderer_failed || !self.power_released_outputs.is_empty() {
+                    let released_outputs = self.power_released_outputs.clone();
+                    self.playback_state = PlaybackState::Playing;
+                    if let Err(error) = self.apply_current() {
+                        // One output can fail after another resumed. The
+                        // baseline was already still-only, so release every
+                        // surviving child before restoring Paused intent.
+                        self.driver.stop();
+                        self.playback_state = PlaybackState::Paused;
+                        self.power_released_outputs = released_outputs;
+                        self.power_released_outputs
+                            .extend(self.target_outputs.iter().cloned());
+                        return Err(error);
+                    }
+                    if !self.animations_inhibited() {
+                        self.power_released_outputs.clear();
+                    }
+                } else if let Err(error) = self.driver.set_paused(false) {
                     // A multi-output driver can fail after resuming an earlier
                     // child. Restore the prior state as far as possible so the
                     // unchanged Paused status remains truthful.
@@ -3390,14 +3567,24 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.last_cycle = Instant::now();
             }
         }
-        Ok("playing".into())
+        Ok(if self.animations_inhibited() {
+            "play requested; animations stopped on battery"
+        } else {
+            "playing"
+        }
+        .into())
     }
 
     fn pause(&mut self) -> Result<String, String> {
         if self.playback_state == PlaybackState::Stopped {
             return Ok("stopped; use play to resume motion".into());
         }
-        if let Err(error) = self.driver.set_paused(true) {
+        let result = if self.animations_inhibited() {
+            Ok(())
+        } else {
+            self.driver.set_paused(true)
+        };
+        if let Err(error) = result {
             // Restore any children already paused before one target failed.
             let rollback = self
                 .driver
@@ -3472,8 +3659,15 @@ impl<D: WallpaperDriver> Runtime<D> {
         result
     }
 
-    fn reload(&mut self, at: NaiveDateTime) -> Result<String, String> {
+    fn reload(
+        &mut self,
+        at: NaiveDateTime,
+        prepare_power: &mut impl FnMut(bool) -> PowerObservation,
+    ) -> Result<String, String> {
         let next = Config::load(&self.config_path).map_err(|error| error.to_string())?;
+        // Sample against this exact decoded candidate before any renderer
+        // changes. Sampling a separate pre-read file could race atomic rename.
+        self.power.observation = prepare_power(next.settings.stop_animations_on_battery);
         let mode_changed = next.settings.display_mode != self.config.settings.display_mode;
         let old_targets = self.current_targets(&self.target_outputs);
         let old_theme_source = self.effective_theme_source().map(str::to_owned);
@@ -3543,6 +3737,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         );
         let old_cursors = std::mem::take(&mut self.cursors);
         let snapshot = ReloadSnapshot {
+            power_released_outputs: self.power_released_outputs.clone(),
             config: old_config,
             manual_playlist: old_manual_playlist,
             active_playlist: old_active_playlist,
@@ -3823,23 +4018,20 @@ impl<D: WallpaperDriver> Runtime<D> {
             .playlists
             .iter()
             .map(|playlist| {
-                (
-                    playlist.id.clone(),
-                    playlist.entries.len(),
-                    playlist
-                        .entries
-                        .iter()
-                        .map(|entry| entry.id.clone())
-                        .collect::<Vec<_>>(),
-                )
+                let current = keep_entries
+                    .get(&playlist.id)
+                    .and_then(|wanted| {
+                        playlist
+                            .entries
+                            .iter()
+                            .position(|entry| &entry.id == wanted)
+                    })
+                    .unwrap_or(0);
+                (playlist.id.clone(), playlist.entries.len(), current)
             })
             .collect();
         let mut cursors = HashMap::new();
-        for (id, entries, entry_ids) in specifications {
-            let current = keep_entries
-                .get(&id)
-                .and_then(|wanted| entry_ids.iter().position(|entry| entry == wanted))
-                .unwrap_or(0);
+        for (id, entries, current) in specifications {
             let (order, position) = if self.shuffle_enabled() && entries > 0 {
                 let mut rest: Vec<usize> = (0..entries).filter(|index| *index != current).collect();
                 self.rng.shuffle(&mut rest);
@@ -4359,6 +4551,15 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
         serde_json::to_string(&Status {
+            loaded_config_sha256: self.config.source_sha256.as_deref(),
+            supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
+            runtime_version: env!("CARGO_PKG_VERSION"),
+            runtime_executable: self.runtime_executable.as_deref(),
+            power_source: self.power.observation.source.name(),
+            power_available: self.power.observation.source != PowerSource::Unknown,
+            stop_animations_on_battery: self.battery_policy_enabled(),
+            animations_inhibited: self.animations_inhibited(),
+            animation_inhibition_reason: self.power.reason(self.battery_policy_enabled()),
             status_version: 2,
             runtime_instance: &self.runtime_instance,
             config_epoch: self.config_epoch,
@@ -4690,6 +4891,15 @@ impl<D: WallpaperDriver> Runtime<D> {
             .iter()
             .find_map(|connector| self.pending_routes.get(connector));
         serde_json::to_string(&Status {
+            loaded_config_sha256: self.config.source_sha256.as_deref(),
+            supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
+            runtime_version: env!("CARGO_PKG_VERSION"),
+            runtime_executable: self.runtime_executable.as_deref(),
+            power_source: self.power.observation.source.name(),
+            power_available: self.power.observation.source != PowerSource::Unknown,
+            stop_animations_on_battery: self.battery_policy_enabled(),
+            animations_inhibited: self.animations_inhibited(),
+            animation_inhibition_reason: self.power.reason(self.battery_policy_enabled()),
             status_version: 2,
             runtime_instance: &self.runtime_instance,
             config_epoch: self.config_epoch,

@@ -36,8 +36,20 @@ let
   fakeNoctalia = pkgs.writeShellScript "wall-in-one-rss-noctalia" ''
     exit 0
   '';
+  privateBusConfig = pkgs.writeText "wall-in-one-rss-private-bus.conf" ''
+    <busconfig>
+      <type>session</type>
+      <listen>unix:tmpdir=/tmp</listen>
+      <auth>EXTERNAL</auth>
+      <policy context="default">
+        <allow send_destination="*"/>
+        <allow receive_sender="*"/>
+        <allow own="*"/>
+      </policy>
+    </busconfig>
+  '';
 
-  mkRuntimeConfig = outputCount: libraryCount: authoredCount:
+  mkRuntimeConfigWithBattery = batteryEnabled: outputCount: libraryCount: authoredCount:
     let
       libraryEntries = builtins.genList (index: index) libraryCount;
       authoredEntries = builtins.genList (index: index) authoredCount;
@@ -46,7 +58,7 @@ let
     pkgs.writeText
       "wall-in-one-rss-${toString outputCount}-${toString libraryCount}-runtime.toml"
       (''
-      schema_version = 4
+      schema_version = ${if batteryEnabled then "5" else "4"}
       config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       default_playlist = "p0"
 
@@ -55,6 +67,7 @@ let
       cycle_enabled = false
       shuffle = false
       dynamics_enabled = false
+      ${lib.optionalString batteryEnabled "stop_animations_on_battery = true"}
       display_mode = "independent"
       theme_source_connector = "OUT-0"
 
@@ -99,6 +112,8 @@ let
     '') (mkOutputs outputCount)
   );
 
+  mkRuntimeConfig = mkRuntimeConfigWithBattery false;
+
   warmClient = pkgs.writeText "wall-in-one-rss-client.py" ''
     import json
     import os
@@ -132,7 +147,19 @@ let
         return envelope["message"]
 
     outputs = [f"OUT-{index}" for index in range(output_count)]
+    def check_power(status: dict) -> None:
+        enabled = os.environ.get("WALL_IN_ONE_RSS_BATTERY") == "1"
+        source = os.environ.get("WALL_IN_ONE_RSS_POWER_SOURCE", "unknown")
+        assert status["stop_animations_on_battery"] is enabled, status
+        assert status["power_source"] == source, status
+        assert status["power_available"] is (source != "unknown"), status
+        assert status["animations_inhibited"] is (source == "battery"), status
+        assert status["animation_inhibition_reason"] == (
+            "battery" if source == "battery" else ""
+        ), status
+
     initial = json.loads(call("status"))
+    check_power(initial)
     assert initial["status_version"] == 2, initial
     assert initial["display_mode"] == "independent", initial
     assert len(initial["displays"]) == output_count, len(initial["displays"])
@@ -153,6 +180,7 @@ let
         call("on", f"{connector} previous")
 
     status = json.loads(call("status"))
+    check_power(status)
     assert status["status_version"] == 2, status
     assert status["display_mode"] == "independent", status
     assert len(status["displays"]) == output_count, len(status["displays"])
@@ -167,7 +195,12 @@ pkgs.runCommand "wall-in-one-service-rss"
   }
   ''
     mkdir -p "$out" "$TMPDIR/state" "$TMPDIR/runtime"
+    # Even feature-enabled measurements must never inspect the builder's real
+    # system bus. Exercise quiet bounded retries against a missing private path.
+    export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$TMPDIR/no-power-bus"
     service_pid=""
+    power_provider_pid=""
+    power_bus_pid=""
     cleanup() {
       if [ -n "$service_pid" ]; then
         kill -TERM "$service_pid" 2>/dev/null || true
@@ -183,7 +216,70 @@ pkgs.runCommand "wall-in-one-service-rss"
         service_pid=""
       fi
     }
-    trap cleanup EXIT
+    cleanup_power_fixture() {
+      for fixture_pid in "$power_provider_pid" "$power_bus_pid"; do
+        [ -n "$fixture_pid" ] || continue
+        kill -TERM "$fixture_pid" 2>/dev/null || true
+        for attempt in $(${pkgs.coreutils}/bin/seq 1 100); do
+          ! kill -0 "$fixture_pid" 2>/dev/null && break
+          ${pkgs.coreutils}/bin/sleep 0.02
+        done
+        if kill -0 "$fixture_pid" 2>/dev/null; then
+          kill -KILL "$fixture_pid" 2>/dev/null || true
+        fi
+        wait "$fixture_pid" 2>/dev/null || true
+      done
+      power_provider_pid=""
+      power_bus_pid=""
+      export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$TMPDIR/no-power-bus"
+      unset WALL_IN_ONE_RSS_POWER_SOURCE
+    }
+    trap 'cleanup; cleanup_power_fixture' EXIT
+
+    start_power_fixture() {
+      power_source="$1"
+      bus_address_file="$TMPDIR/power-$power_source.address"
+      provider_ready_file="$TMPDIR/power-$power_source.ready"
+      # No host configuration or service-activation directories are loaded.
+      ${pkgs.dbus}/bin/dbus-daemon --config-file ${privateBusConfig} \
+        --nofork --nopidfile --print-address=1 \
+        > "$bus_address_file" 2> "$out/power-$power_source-bus.stderr" &
+      power_bus_pid=$!
+      for attempt in $(${pkgs.coreutils}/bin/seq 1 200); do
+        [ -s "$bus_address_file" ] && break
+        if ! kill -0 "$power_bus_pid" 2>/dev/null; then
+          cat "$out/power-$power_source-bus.stderr" >&2
+          echo "disposable power bus exited before readiness" >&2
+          exit 1
+        fi
+        ${pkgs.coreutils}/bin/sleep 0.05
+      done
+      DBUS_SYSTEM_BUS_ADDRESS=$(${pkgs.coreutils}/bin/head -n 1 "$bus_address_file")
+      case "$DBUS_SYSTEM_BUS_ADDRESS" in
+        unix:*) ;;
+        *) echo "disposable power bus did not publish a private address" >&2; exit 1 ;;
+      esac
+      export DBUS_SYSTEM_BUS_ADDRESS
+      ${pkgs.python314}/bin/python ${./fake-upower.py} \
+        ${lib.getLib pkgs.dbus}/lib/libdbus-1.so.3 \
+        "$DBUS_SYSTEM_BUS_ADDRESS" "$power_source" \
+        > "$provider_ready_file" 2> "$out/power-$power_source-provider.stderr" &
+      power_provider_pid=$!
+      for attempt in $(${pkgs.coreutils}/bin/seq 1 200); do
+        [ -s "$provider_ready_file" ] && break
+        if ! kill -0 "$power_provider_pid" 2>/dev/null; then
+          cat "$out/power-$power_source-provider.stderr" >&2
+          echo "disposable UPower provider exited before readiness" >&2
+          exit 1
+        fi
+        ${pkgs.coreutils}/bin/sleep 0.05
+      done
+      if [ "$(${pkgs.coreutils}/bin/head -n 1 "$provider_ready_file")" != READY ]; then
+        echo "disposable UPower provider did not become ready" >&2
+        exit 1
+      fi
+      export WALL_IN_ONE_RSS_POWER_SOURCE="$power_source"
+    }
 
     printf 'shape\trun\tsample\trss_kib\n' > "$out/samples-kib.tsv"
     printf 'shape\trun\toutputs\telapsed_ms\tclock_ticks_per_second\tcpu_ticks\tcpu_millipercent\n' \
@@ -192,6 +288,7 @@ pkgs.runCommand "wall-in-one-service-rss"
       > "$out/library-slope.tsv"
     printf 'shape\trun\trss_before_request_kib\trss_after_status_kib\trss_after_controls_kib\n' \
       > "$out/warmup-rss.tsv"
+    printf 'shape\trun\tthreads\tfile_descriptors\n' > "$out/process-counts.tsv"
     clock_ticks=$(${pkgs.glibc.bin}/bin/getconf CLK_TCK)
     if [ -z "$clock_ticks" ] || [ "$clock_ticks" -le 0 ]; then
       echo "could not read a positive CLK_TCK" >&2
@@ -199,6 +296,25 @@ pkgs.runCommand "wall-in-one-service-rss"
     fi
     service_binary_bytes=$(wc -c < ${wallInOneService}/bin/wall-in-one-service)
     failed=0
+
+    capture_run_peak() {
+      observed_rss="$1"
+      if [ -z "$observed_rss" ]; then
+        echo "could not read peak VmRSS in $label run $run" >&2
+        exit 1
+      fi
+      if [ "$observed_rss" -gt "$run_peak" ]; then
+        run_peak="$observed_rss"
+        printf '%s\n' "$observed_rss" > "$out/peak-rss-$label-run-$run-kib.txt"
+        # procfs sources are read-only, so their copied artifacts are too.
+        # Replace only these gate-owned snapshots when a later peak wins.
+        cp --remove-destination "/proc/$service_pid/status" "$out/peak-proc-status-$label-run-$run.txt"
+        cp --remove-destination "/proc/$service_pid/maps" "$out/peak-maps-$label-run-$run.txt"
+        if [ -r "/proc/$service_pid/smaps" ]; then
+          cp --remove-destination "/proc/$service_pid/smaps" "$out/peak-smaps-$label-run-$run.txt"
+        fi
+      fi
+    }
 
     measure_shape() {
       label="$1"
@@ -247,6 +363,7 @@ pkgs.runCommand "wall-in-one-service-rss"
         # observation without adding another measurement run.
         ${pkgs.coreutils}/bin/sleep 0.1
         rss_before_request=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$service_pid/status")
+        capture_run_peak "$rss_before_request"
         export WALL_IN_ONE_RSS_STATUS_ONLY=1
         if ! ${pkgs.python314}/bin/python ${warmClient} \
           > "$out/status-$label-run-$run-before-controls.json"; then
@@ -256,6 +373,7 @@ pkgs.runCommand "wall-in-one-service-rss"
           exit 1
         fi
         rss_after_status=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$service_pid/status")
+        capture_run_peak "$rss_after_status"
         unset WALL_IN_ONE_RSS_STATUS_ONLY
         if ! ${pkgs.python314}/bin/python ${warmClient} \
           > "$out/status-$label-run-$run.json"; then
@@ -272,6 +390,7 @@ pkgs.runCommand "wall-in-one-service-rss"
           exit 1
         fi
         rss_after_controls=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$service_pid/status")
+        capture_run_peak "$rss_after_controls"
         printf '%s\t%s\t%s\t%s\t%s\n' \
           "$label" "$run" "$rss_before_request" "$rss_after_status" \
           "$rss_after_controls" \
@@ -297,6 +416,43 @@ pkgs.runCommand "wall-in-one-service-rss"
         ${pkgs.coreutils}/bin/sleep 10
         time_after=$(${pkgs.coreutils}/bin/date +%s%N)
         cpu_after=$(awk '{ print $14 + $15 }' "/proc/$service_pid/stat")
+        expected_threads=1
+        [ "''${WALL_IN_ONE_RSS_BATTERY:-0}" = 1 ] && expected_threads=2
+        # The ten-second boundary can coincide with a five-second compositor
+        # probe. Allow its owned capture threads to finish before judging
+        # resident worker/FD counts; an accumulating leak never settles.
+        for attempt in $(${pkgs.coreutils}/bin/seq 1 20); do
+          threads=$(awk '$1 == "Threads:" { print $2 }' "/proc/$service_pid/status")
+          service_fds=( "/proc/$service_pid/fd/"* )
+          descriptors=''${#service_fds[@]}
+          if [ "$threads" -eq "$expected_threads" ] && [ "$descriptors" -le 9 ]; then
+            break
+          fi
+          ${pkgs.coreutils}/bin/sleep 0.05
+        done
+        printf '%s\t%s\t%s\t%s\n' "$label" "$run" "$threads" "$descriptors" \
+          >> "$out/process-counts.tsv"
+        if [ "$threads" -ne "$expected_threads" ]; then
+          echo "$label run $run retained $threads threads; expected $expected_threads" >&2
+          failed=1
+        fi
+        # stdio, listener and singleton lock; connected power adds one socket.
+        # Leave room for one short-lived helper's captured output descriptors,
+        # while refusing an accumulating connection/pipe leak.
+        if [ "$descriptors" -lt 5 ] || [ "$descriptors" -gt 9 ]; then
+          echo "$label run $run retained an unexpected $descriptors file descriptors" >&2
+          failed=1
+        fi
+        if [ -n "$power_provider_pid" ]; then
+          if ! kill -0 "$power_provider_pid" || ! kill -0 "$power_bus_pid"; then
+            echo "$label run $run lost its disposable power fixture" >&2
+            exit 1
+          fi
+          export WALL_IN_ONE_RSS_STATUS_ONLY=1
+          ${pkgs.python314}/bin/python ${warmClient} \
+            > "$out/status-$label-run-$run-after-idle.json"
+          unset WALL_IN_ONE_RSS_STATUS_ONLY
+        fi
         elapsed_ms=$(( (time_after - time_before) / 1000000 ))
         cpu_ticks=$(( cpu_after - cpu_before ))
         if [ "$elapsed_ms" -le 0 ] || [ "$cpu_ticks" -lt 0 ]; then
@@ -333,7 +489,7 @@ pkgs.runCommand "wall-in-one-service-rss"
           fi
           [ "$rss" -gt "$shape_maximum" ] && shape_maximum="$rss"
           [ "$rss" -lt "$shape_minimum" ] && shape_minimum="$rss"
-          [ "$rss" -gt "$run_peak" ] && run_peak="$rss"
+          capture_run_peak "$rss"
           printf '%s\t%s\t%s\t%s\n' "$label" "$run" "$sample" "$rss" \
             >> "$out/samples-kib.tsv"
           ${pkgs.coreutils}/bin/sleep 0.05
@@ -356,15 +512,47 @@ pkgs.runCommand "wall-in-one-service-rss"
           three_peak_1="$1"; three_peak_2="$2"; three_peak_3="$3"
           three_cpu_maximum="$shape_cpu_maximum"
           ;;
+        one-battery)
+          battery_one_maximum="$shape_maximum"
+          battery_one_cpu_maximum="$shape_cpu_maximum"
+          ;;
+        three-battery)
+          battery_three_maximum="$shape_maximum"
+          battery_three_cpu_maximum="$shape_cpu_maximum"
+          ;;
       esac
       if [ "$shape_maximum" -gt "$hard_limit" ]; then
-        echo "$label-display runtime exceeded its $hard_limit KiB RSS contract" >&2
+        echo "$label-display runtime exceeded its $hard_limit KiB RSS contract: min=$shape_minimum KiB, max=$shape_maximum KiB, run peaks=$shape_peaks KiB" >&2
         failed=1
       fi
     }
 
     measure_shape one ${mkRuntimeConfig 1 600 100} 1 5120
     measure_shape three ${mkRuntimeConfig 3 600 100} 3 10240
+
+    export WALL_IN_ONE_RSS_BATTERY=1
+    measure_shape one-battery ${mkRuntimeConfigWithBattery true 1 600 100} 1 5120
+    measure_shape three-battery ${mkRuntimeConfigWithBattery true 3 600 100} 3 10240
+    unset WALL_IN_ONE_RSS_BATTERY
+    printf '{"power_source":"unknown","bus":"missing-private","one_display":{"maximum_kib":%s,"hard_limit_kib":5120,"idle_cpu_max_millipercent":%s},"three_display":{"maximum_kib":%s,"hard_limit_kib":10240,"idle_cpu_max_millipercent":%s}}\n' \
+      "$battery_one_maximum" "$battery_one_cpu_maximum" \
+      "$battery_three_maximum" "$battery_three_cpu_maximum" > "$out/battery-summary.json"
+
+    # Measure the actual authenticated/subscribed worker, including its bus
+    # buffers, on both authoritative power states. The fixture's own process
+    # memory/CPU is intentionally outside the service-process contract.
+    export WALL_IN_ONE_RSS_BATTERY=1
+    for power_source in ac battery; do
+      start_power_fixture "$power_source"
+      measure_shape "one-power-$power_source" ${mkRuntimeConfigWithBattery true 1 600 100} 1 5120
+      printf '{"power_source":"%s","outputs":1,"maximum_kib":%s,"hard_limit_kib":5120,"idle_cpu_max_millipercent":%s}\n' \
+        "$power_source" "$shape_maximum" "$shape_cpu_maximum" > "$out/power-$power_source-one-summary.json"
+      measure_shape "three-power-$power_source" ${mkRuntimeConfigWithBattery true 3 600 100} 3 10240
+      printf '{"power_source":"%s","outputs":3,"maximum_kib":%s,"hard_limit_kib":10240,"idle_cpu_max_millipercent":%s}\n' \
+        "$power_source" "$shape_maximum" "$shape_cpu_maximum" > "$out/power-$power_source-three-summary.json"
+      cleanup_power_fixture
+    done
+    unset WALL_IN_ONE_RSS_BATTERY
 
     # One fresh sample at smaller library sizes makes allocator regressions
     # diagnosable without weakening the representative 600-item contract.

@@ -2,13 +2,12 @@
 
 Wall-in-One can pull wallpapers from two sites: **Wallhaven** for stills and
 **MotionBGS** for video wallpapers. The search button in the window header, and
-**Browse** in the bottom navigation and **Find wallpapers** in the menu both
+**Store** in the bottom navigation and **Store** in the menu both
 open the same main-window tab.
 
-The two sites are not alike, and the difference shows up everywhere below.
-Wallhaven has a documented JSON API, so the work is in refusing to believe the
-JSON it returns. MotionBGS has no API at all, so its provider reads public HTML,
-which is why most of the code behind it is defence rather than parsing.
+Wallhaven provides a JSON API; MotionBGS listings are read from public HTML.
+Both providers validate responses before displaying results or downloading
+files. Changes to a site's API or markup can temporarily affect browsing.
 
 | | Wallhaven | MotionBGS |
 |---|---|---|
@@ -27,7 +26,7 @@ the next search, and two searches at once would only fight over the cache.
 Each answer is capped at 48 results per page whatever the site returns, and each
 provider keeps a small in-process cache of recent pages with a fifteen-minute
 expiry. Paging back to somewhere you have already been is answered from that
-cache rather than re-fetched, and the summary line at the bottom of the Browse tab
+cache rather than re-fetched, and the summary line at the bottom of the Store tab
 says `cached` when it was.
 
 The GTK result surface is separately paged at no more than 40 live photo cards.
@@ -67,7 +66,7 @@ tab. MotionBGS serves WebP, which this closure's GdkPixbuf cannot decode, so
 previews are transcoded through ffmpeg before they reach GTK. Without ffmpeg
 installed those cards keep a blank frame; the download button still works.
 
-The Browse tab is a single instance. Pressing the search button again while it is
+The Store tab is a single instance. Pressing the search button again while it is
 open re-presents the one that exists, keeping its results and its preview cache
 instead of throwing away a page of downloads. Switching to another tab does not
 cancel its work. Shutting the application down does: queued search, detail,
@@ -94,7 +93,7 @@ wall-in-one ctl download <provider> <identifier> [hd|4k]
 The query is everything after the provider name, spaces and all, so quoting it
 is optional: `ctl search wallhaven aurora over the fjord` is one query, not four
 arguments. The variant on `download` is MotionBGS's quality; left off, the
-provider takes the best it is offered, which is what the Browse tab's download
+provider takes the best it is offered, which is what the Store tab's download
 button does too.
 
 Output is **one row per line with tab-separated fields**, and everything that is
@@ -118,7 +117,7 @@ $ wall-in-one ctl download wallhaven o5jvv1
 downloaded wallhaven-o5jvv1.jpg (2.4 MB) -> /home/you/Pictures/Wallpapers/Wall-in-One/Wallhaven/wallhaven-o5jvv1.jpg
 ```
 
-The summary comment is word-for-word the one under the Browse grid, including
+The summary comment is word-for-word the one under the Store grid, including
 `unreadable` and `cached`. An empty field prints as `-`, and a result with no
 title prints its identifier instead, exactly as the cards do. `ctl providers`
 prints `name, media, usable, limitations` the same way, which is how a script
@@ -127,30 +126,32 @@ finds out that NSFW results are unreachable before asking for them.
 Only the first page is reachable: the protocol carries one argument per request,
 and spending it on a page number would cost the query its spaces. There is no
 filter surface either — categories, purity, sorting and MotionBGS's browse modes
-are the Browse tab's, not the socket's.
+are the Store tab's, not the socket's.
 
-**Nothing blocks the window.** The control server answers from the GTK main
+The control server accepts requests on the GTK main
 loop, so a handler that waited for a website would freeze every frame the app
 draws for as long as the site took. `search` and `download` therefore answer
 *later*: the verb hands its work to a single-worker pool, returns without a
 response, and the reply is written when the worker comes back through
-`GLib.idle_add` — the same arrangement the Browse tab uses, for the same two calls.
+`GLib.idle_add` — the same arrangement the Store tab uses, for the same two calls.
 The client's connection simply stays open until then, which costs one file
 descriptor and keeps `ctl search` an ordinary blocking command that prints its
-results. `ctl` allows a minute for a search and ten for a download, against five
-seconds for every other verb.
+results. `ctl` allows a minute for a search and ten for a download. Other
+deadlines depend on the command; see the [deadline table](control-socket.md#deadlines-and-an-unknown-outcome).
+A timed-out mutation may already have completed, so verify its result before
+retrying.
 
 A failure comes back on stderr with a non-zero exit, reading `kind: message` —
-the same sentence the Browse tab toasts. The kind also travels as its own field in
+the same sentence the Store tab toasts. The kind also travels as its own field in
 the reply, so a client can branch on `rate-limit` without parsing the English
 next to it. An unreachable network is a failed response, never a traceback and
 never a dead app: whatever the transport raises is caught on the worker and
 turned into one.
 
-Downloads from here are indistinguishable from downloads from the Browse tab. They
+Downloads from here are indistinguishable from downloads from the Store tab. They
 run the provider's own install path, so the directory marker and the per-file
 sidecar come out identical, and they land in the first configured root for the
-same reason the Browse tab's do. A finished one rescans the library, so the file is
+same reason the Store tab's do. A finished one rescans the library, so the file is
 in the grid of an open window without being asked for.
 
 ## Driving the library from the socket
@@ -299,7 +300,7 @@ A comma-separated list must round-trip unchanged after normalisation, so
 `1920x1080,` and `01920x1080` are errors rather than filters that quietly become
 something else.
 
-The Browse tab exposes four of these: sort, categories, rating, and a minimum size
+The Store tab exposes four of these: sort, categories, rating, and a minimum size
 box that fills in `atleast`. The rest are reachable from `SearchQuery.options`
 in code; there is no settings key or command-line flag for them.
 
@@ -329,7 +330,7 @@ someone else's page.
   slug. Passing `genre` in any other mode is an error, as is passing query text
   in any mode other than `search`.
 
-The Browse tab's mode dropdown offers Latest, 4K, HD and Genre — `search` is not
+The Store tab's mode dropdown offers Latest, 4K, HD and Genre — `search` is not
 listed, because typing into the box is what selects it. Whenever the box is
 non-empty the request goes out as a search regardless of the dropdown, since
 MotionBGS rejects a query and a browse mode together. The genre field only
@@ -373,7 +374,7 @@ a UTC timestamp, and the final media device/inode/size/mtime/ctime generation.
 The **directory marker** records only that this app created the directory.
 
 Installation never overwrites or installs one provider identity twice. Before
-network I/O, Browse takes a nonblocking per-login cross-process claim keyed by
+network I/O, Store takes a nonblocking per-login cross-process claim keyed by
 provider and identifier (independent of the currently selected destination),
 validates that destination, then re-reads provenance across every
 configured library root. A simultaneous GUI, `ctl`, or second-process request

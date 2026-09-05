@@ -33,7 +33,7 @@ under `noctalia_5/`, override just that input:
 ```console
 $ nix run \
     --override-input noctalia-plugins \
-    path:/home/goober/Documents/goober-noctalia-plugins-v5/noctalia_5 \
+    path:/absolute/path/to/goober-noctalia-plugins-v5/noctalia_5 \
     .#vm
 ```
 
@@ -61,8 +61,9 @@ $ nix build -L .#checks.x86_64-linux.vm-test
 Release evidence uses the normal Git-backed commands above from a clean commit
 whose complete intended path set is tracked. An explicit `path:.` input is
 useful while developing untracked sources, but it can also copy ignored local
-artifacts and is not publication proof. The release handoff records the exact
-v0.1.2 proof tree and results; CI repeats them from the real candidate commit.
+artifacts and is not publication proof. Record the tested commit and results
+alongside a release. CI runs the VM for release branches, manual dispatches,
+and its scheduled check; the ordinary PR job runs the separate fast checks.
 The VM duration is diagnostic rather than a timing gate, and its embedded
 package tests complement the separate packaged GUI and cross-binary socket
 checks in the default flake suite.
@@ -75,8 +76,8 @@ $ nix build -L .#checks.x86_64-linux.service-rss
 $ cat result/summary.txt
 ```
 
-That check starts three fresh one-display services and three fresh
-three-display services from handwritten resolved configs representing a
+That check starts three fresh services for each one-/three-display shape and
+power-policy case, from handwritten resolved configs representing a
 600-item library (900 resolved occurrences across All media and three authored
 playlists), warms every connector through the public runtime socket, and
 samples each service's own `VmRSS` 20 times. A one-display run must stay at or
@@ -89,12 +90,23 @@ rounded down to milliseconds, which conservatively overstates CPU use, and the
 hard comparison uses the unrounded numerator and denominator so quotient
 truncation cannot hide a value just over the limit.
 
+The matrix covers the default disabled policy, an enabled policy with a missing
+private bus, and enabled policies connected to a disposable UPower provider
+reporting AC or battery. It validates the corresponding status fields before
+and after idle measurement. The provider and bus run outside the measured
+service; neither accesses the host's power service or desktop. Every run checks
+resident thread counts (one disabled, two enabled) and bounded open descriptors.
+`battery-summary.json` records missing-provider cases, and
+`power-*-summary.json` records connected-provider cases.
+
 A separate launch discovers the supported ceiling of 64 synthetic connectors,
 routes commands to all of them, and validates the resulting atomic status
 snapshot. That is a correctness stress, not a memory promise for a normal
 desktop. `samples-kib.tsv`, `idle-cpu.tsv`, `summary.json`, the status snapshots,
 per-process `status`/`smaps_rollup` snapshots, and service logs are retained in
-the result for review. `library-slope.tsv` records one-display observations at
+the result for review. Peak observations also retain maps and available full
+`smaps` alongside `process-counts.tsv`. `library-slope.tsv` records one-display
+observations at
 64, 300, and 600 library items to make allocator growth diagnosable; those
 smaller shapes do not replace the 600-item gate. The Python app and GUI are
 never started; a small isolated Python client only speaks the public socket and
@@ -126,7 +138,7 @@ verifies that:
   preflight without starting the Rust main process, socket, or renderer; the
   test holds its invocation/restart counters stable across two retry windows
   and then proves recovery after restoring schema 4;
-- Browse, Media/Pairings, Playlists, Schedules, and Settings open in the
+- Store, Library, Playlists, Schedules, and Settings open in the
   running app; each capture first verifies the page-specific compositor title,
   and its comparison image excludes Noctalia's clock-bearing panel so a stuck
   app cannot pass merely because the clock changed;
@@ -147,7 +159,7 @@ verifies that:
   finding, and is not written to Pairings by either a GUI poll or the periodic
   health timer;
 - the packaged unit's bounded, best-effort two-second `ExecStop` bridge then
-  persists that finding as Borked metadata and recompiles the clean runtime
+  persists that finding as playback-failure metadata and recompiles the clean runtime
   document. The fixture deliberately leaves its injected renderer failure in
   place until stop: rewriting the runtime document immediately beforehand
   would wake Rust's file watcher and test a reload race instead of the stop
@@ -157,7 +169,14 @@ verifies that:
 - the health timer becomes inactive on an explicit daemon stop and immediately
   after `SIGKILL`, then returns with the daemon under the unit's selective
   abnormal/runtime-failure restart policy; its oneshot treats an absent runtime
-  as a successful no-op; and
+  as a successful no-op;
+- installed executable links, loaded unit commands (including both preflights
+  and the stop-time health writer), and `/proc/PID/exe` identify the current
+  package. Reloading unit definitions alone leaves the running instance intact;
+  an explicit stop, validation and start produces a new instance while
+  preserving settings, authored stores and source-media bytes. This checks
+  the current package's manual lifecycle, not compatibility between releases
+  or draining pending GUI work; and
 - the completed desktop session has no matching coredump, GTK/GLib critical,
   Python traceback or Rust thread panic.
 
@@ -182,11 +201,11 @@ automated unit/process tests, including synthetic connector stress. Neither the
 development machine nor this VM exposes two outputs, so different playlists on
 two physical monitors remain unverified.
 
-An older dated VM run used preceding companion revision `a5e23c9`; it proved
-only that revision's basic integration. The current tree and VM instead pin
-reviewed companion revision
-`a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. The v0.1.2 app follow-up retains
-that exact source and protocol. Machines moving from an older companion still
+Older dated VM runs used companion revisions `a5e23c9` and `a17eb70`; those
+results do not establish the newer startup or battery-display behavior.
+Application v0.1.3 and its VM pin companion v0.1.2 at
+`c154c162fd650567ef8eda5d0e6d875b2b635a21`, including those changes.
+Machines moving from an older companion still
 complete the compatible app's schema-4 cutover before loading the strict
 status-v2 client. The contract and old-revision limits are documented in
 [`migrating.md`](migrating.md#companion-noctalia-plugin-compatibility).

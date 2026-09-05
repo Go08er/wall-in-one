@@ -26,7 +26,12 @@ pkgs.testers.runNixOSTest {
   globalTimeout = 1200;
 
   node.specialArgs = {
-    inherit wallInOnePackage pluginSource sampleMedia noctaliaProbe;
+    inherit
+      wallInOnePackage
+      pluginSource
+      sampleMedia
+      noctaliaProbe
+      ;
   };
 
   nodes.machine =
@@ -42,6 +47,8 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
+    import json
+    import re
     import shlex
     import time
 
@@ -269,6 +276,24 @@ pkgs.testers.runNixOSTest {
         machine.fail("test -S ${runtimeDir}/wall-in-one-runtime.sock")
         assert machine.succeed(f"sha256sum {runtime_document}").split()[0] == schema2_hash
 
+        # Failed runtime validation must not prevent the real app from opening
+        # Settings. Corrupt authoring stays preserved while the user repairs it.
+        machine.succeed(as_user(
+            "nohup ${app} --open-page settings > /tmp/unsupported-runtime-settings.log 2>&1 < /dev/null &"
+        ))
+        machine.wait_until_succeeds(as_user(
+            "NIRI_SOCKET=$(ls ${runtimeDir}/niri*.sock | head -n1) "
+            "${lib.getExe pkgs.niri} msg windows | grep -F 'Wall-in-One - Settings'"
+        ), timeout=30)
+        settings_windows = [window for window in json.loads(niri("--json windows"))
+            if window.get("app_id") == "dev.goober.WallInOne"]
+        assert len(settings_windows) == 1, settings_windows
+        assert machine.succeed(f"sha256sum {runtime_document}").split()[0] == schema2_hash
+        machine.screenshot("unsupported-runtime-settings")
+        niri("action close-window --id " + str(settings_windows[0]["id"]))
+        machine.wait_until_succeeds("test ! -e /proc/" + str(settings_windows[0]["pid"]), timeout=30)
+        machine.copy_from_machine("/tmp/unsupported-runtime-settings.log")
+
         # Restore the exact valid state and prove the same packaged unit remains
         # recoverable for the rest of the desktop integration scenarios.
         machine.succeed(as_user(f"mv {playlist_backup} {playlist_store}"))
@@ -425,8 +450,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm -f ${driverLog}")
         page_hashes = {}
         page_titles = {
-            "browse": "Browse",
-            "media": "Media/Pairings",
+            "browse": "Store",
+            "media": "Library",
             "playlists": "Playlists",
             "schedules": "Schedules",
             "settings": "Settings",
@@ -726,6 +751,152 @@ pkgs.testers.runNixOSTest {
         service_pid = machine.succeed(
             as_user("systemctl --user show -p MainPID --value wall-in-one.service")
         ).strip()
+
+    with subtest("manual current-package service handover preserves authored state"):
+        # This verifies the manual current-package lifecycle, not compatibility
+        # with an older runtime, an old/new release matrix, or pending-writer
+        # draining. The GUI is already closed and the existing quarantine from
+        # the health test remains authoritative; do not reset it for this check.
+        runtime_document = "${home}/.local/state/wall-in-one/runtime.toml"
+        runtime_binary = "${wallInOnePackage}/bin/wall-in-one-service"
+        settings_document = "${home}/.config/wall-in-one/settings.toml"
+
+        def unit_property(unit: str, name: str) -> str:
+            return machine.succeed(
+                as_user(f"systemctl --user show --property={name} --value {unit}")
+            ).strip()
+
+        def assert_loaded_package() -> None:
+            for unit in (
+                "wall-in-one.service",
+                "wall-in-one-health-sync.service",
+                "wall-in-one-health-sync.timer",
+            ):
+                fragment = unit_property(unit, "FragmentPath")
+                assert fragment, (unit, fragment)
+                resolved = machine.succeed("readlink -e " + shlex.quote(fragment)).strip()
+                assert resolved == "${wallInOnePackage}/share/systemd/user/" + unit, resolved
+            start = unit_property("wall-in-one.service", "ExecStart")
+            prepare = unit_property("wall-in-one.service", "ExecStartPre")
+            health = unit_property("wall-in-one-health-sync.service", "ExecStart")
+            assert re.findall(r"path=([^ ;]+)", start) == [runtime_binary], start
+            assert re.findall(r"path=([^ ;]+)", prepare) == ["${app}", runtime_binary], prepare
+            assert "${app} --service-startup-prepare" in prepare, prepare
+            assert runtime_binary + " --check-config" in prepare, prepare
+            assert re.findall(r"path=([^ ;]+)", health) == ["${app}"], health
+            assert "${app} --sync-runtime-health" in health, health
+            stopping = unit_property("wall-in-one.service", "ExecStop")
+            assert "${app} --sync-runtime-health-on-stop" in stopping, stopping
+
+        def assert_running_package(pid: str) -> None:
+            assert pid.isdigit() and int(pid) > 1, pid
+            executable = machine.succeed(f"readlink -e /proc/{pid}/exe").strip()
+            assert executable == runtime_binary, (pid, executable, runtime_binary)
+            machine.succeed(f"cmp {runtime_binary} /proc/{pid}/exe")
+
+        def authored_snapshot() -> dict[str, str | None]:
+            # Runtime/palette output, Noctalia's live settings, lock files and
+            # transient health replies are outside this authoring comparison.
+            # Preserve durable Pairings (including its existing health records),
+            # and record absent stores so replacement cannot escape the check.
+            snapshot: dict[str, str | None] = {}
+            documents = [settings_document] + [
+                "${home}/.local/state/wall-in-one/" + filename
+                for filename in (
+                    "playlists.json", "schedules.json", "pairings.json",
+                    "displays.json", "favourites.json", "pending-removals.json",
+                )
+            ]
+            for document in documents:
+                present, _output = machine.execute(as_user("test -e " + shlex.quote(document)))
+                assert present in (0, 1), (document, present)
+                snapshot[document] = (
+                    machine.succeed(as_user("sha256sum " + shlex.quote(document))).split()[0]
+                    if present == 0 else None
+                )
+            assert snapshot[settings_document] is not None, snapshot
+            media = machine.succeed(
+                as_user(
+                    "${lib.getExe pkgs.bash} -euo pipefail -c "
+                    + shlex.quote(
+                        "find ${mediaDir} -type f -exec sha256sum {} + | LC_ALL=C sort"
+                    )
+                )
+            ).strip()
+            assert media and "moving-grid.mp4" in media, media
+            snapshot["source-media inventory"] = media
+            return snapshot
+
+        machine.fail("test -e ${runtimeDir}/wall-in-one.sock")
+        assert "dev.goober.WallInOne" not in niri("windows")
+        machine.succeed(
+            "grep -Fx " + shlex.quote('roots = ["${mediaDir}"]') + " " + settings_document
+        )
+        for name in ("wall-in-one", "wall-in-one-service"):
+            installed_binary = "/run/current-system/sw/bin/" + name
+            expected_binary = "${wallInOnePackage}/bin/" + name
+            assert machine.succeed("readlink -e " + installed_binary).strip() == expected_binary
+            machine.succeed(f"cmp {installed_binary} {expected_binary}")
+        assert_loaded_package()
+        machine.wait_until_succeeds(
+            status_matches('.config_path == "${home}/.local/state/wall-in-one/runtime.toml"'),
+            timeout=20,
+        )
+        old_pid = unit_property("wall-in-one.service", "MainPID")
+        old_instance = status_text(".runtime_instance")
+        assert_running_package(old_pid)
+
+        # Reloading unit definitions alone must not be mistaken for replacing
+        # the running executable or acknowledging newly installed features.
+        machine.succeed(as_user("systemctl --user daemon-reload"))
+        assert unit_property("wall-in-one.service", "MainPID") == old_pid
+        assert status_text(".runtime_instance") == old_instance
+        assert_running_package(old_pid)
+
+        machine.succeed(as_user("systemctl --user stop wall-in-one.service"))
+        machine.wait_until_succeeds("test ! -e /proc/" + old_pid, timeout=20)
+        machine.wait_until_succeeds(
+            "test ! -e ${runtimeDir}/wall-in-one-runtime.sock", timeout=20
+        )
+        for unit in (
+            "wall-in-one.service", "wall-in-one-health-sync.timer", "wall-in-one-health-sync.service"
+        ):
+            machine.wait_until_succeeds(
+                as_user(f"systemctl --user show --property=ActiveState --value {unit} | grep -Fx inactive"),
+                timeout=20,
+            )
+        machine.fail("test -e ${runtimeDir}/wall-in-one.sock")
+        before_handover = authored_snapshot()
+
+        machine.succeed(as_user("systemctl --user daemon-reload"))
+        assert_loaded_package()
+        machine.succeed(as_user(runtime_binary + " --check-config --config " + runtime_document))
+        machine.fail("test -e ${runtimeDir}/wall-in-one-runtime.sock")
+        assert unit_property("wall-in-one.service", "MainPID") == "0"
+        after_validation = authored_snapshot()
+        assert after_validation == before_handover, (before_handover, after_validation)
+
+        machine.succeed(as_user("systemctl --user start wall-in-one.service"))
+        machine.wait_until_succeeds(
+            as_user("systemctl --user is-active wall-in-one.service"), timeout=30
+        )
+        machine.wait_until_succeeds(
+            status_matches(
+                '.config_path == "${home}/.local/state/wall-in-one/runtime.toml" '
+                'and (.runtime_instance | type == "string" and length > 0)'
+            ),
+            timeout=20,
+        )
+        service_pid = unit_property("wall-in-one.service", "MainPID")
+        assert service_pid != old_pid, (service_pid, old_pid)
+        assert_running_package(service_pid)
+        assert status_text(".runtime_instance") != old_instance
+        machine.wait_until_succeeds(
+            as_user("systemctl --user is-active wall-in-one-health-sync.timer"), timeout=30
+        )
+        after_handover = authored_snapshot()
+        assert after_handover == before_handover, (before_handover, after_handover)
+        machine.fail("test -e ${runtimeDir}/wall-in-one.sock")
 
     with subtest("the desktop session stayed healthy"):
         machine.succeed("kill -0 " + service_pid)

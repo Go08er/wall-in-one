@@ -58,7 +58,7 @@ class WallpaperTile(Gtk.Box):
 
         self._frame = Gtk.Overlay()
         self._frame.set_child(self._picture)
-        self._frame.set_tooltip_text("Left-click to edit · right-click to play as Quick choice")
+        self._frame.set_tooltip_text("Click to edit · right-click for actions")
 
         # Until the thumbnail arrives, show something with the right footprint
         # so tiles do not jump around as they load in.
@@ -116,7 +116,7 @@ class WallpaperTile(Gtk.Box):
             badges.append(_badge(what if item.paired_still else f"{what} (no still)"))
         if item.ownership is Ownership.MANAGED:
             badges.append(_badge(item.provider))
-        self._health_badge = _badge("Borked · won't play")
+        self._health_badge = _badge("Playback unavailable")
         self._health_badge.add_css_class("error")
         self._health_badge.set_visible(False)
         self._borked_reason: str | None = None
@@ -130,6 +130,36 @@ class WallpaperTile(Gtk.Box):
 
         self.append(self._frame)
         self.append(caption)
+
+        # Keep the two primary verbs visible without covering the preview.
+        # These intentionally do not use wio-tile-action: that class fades
+        # secondary overlay controls until hover/focus.
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._apply = Gtk.Button(label="Apply")
+        self._apply.set_hexpand(True)
+        self._apply.set_sensitive(False)
+        self._apply.set_tooltip_text("Apply to all displays as Quick choice")
+        self._apply_targets = Gtk.MenuButton(label="Apply to…")
+        self._apply_targets.set_hexpand(True)
+        self._apply_targets.set_visible(False)
+        self._apply_targets.set_tooltip_text("Choose a display, or explicitly choose all displays")
+        self._edit = Gtk.Button(label="Edit")
+        self._edit.set_hexpand(True)
+        self._edit.set_tooltip_text(f"Edit {item.name}: motion, still and colours")
+        actions.append(self._apply)
+        actions.append(self._apply_targets)
+        actions.append(self._edit)
+        self.append(actions)
+        self._can_apply = False
+
+        # Claim secondary presses before FlowBox sees them. Neither this
+        # gesture nor the keyboard menu shortcut is a playback route.
+        self._secondary_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        self._secondary_click.connect("pressed", self._on_secondary_pressed)
+        self.add_controller(self._secondary_click)
+        self._menu_keys = Gtk.EventControllerKey()
+        self._menu_keys.connect("key-pressed", self._on_menu_key)
+        self.add_controller(self._menu_keys)
 
     def show_thumbnail(self, texture: Gdk.Texture | None) -> None:
         """Take the decoded thumbnail. Already decoded, on a worker thread."""
@@ -150,20 +180,30 @@ class WallpaperTile(Gtk.Box):
     def set_borked(self, reason: str | None) -> None:
         """Expose a durable runtime incompatibility on the media itself."""
         if (self._borked_reason is None) != (reason is None):
-            # Menus are built lazily and then cached.  A healthy menu contains
-            # global/targeted Quick choice actions; a borked one deliberately
-            # does not, so crossing that boundary must invalidate the cache.
+            # An already-open healthy menu contains Quick choice actions;
+            # discard it immediately when health crosses that boundary.
             self._menu.set_menu_model(None)
+            self._apply_targets.set_menu_model(None)
         self._borked_reason = reason
+        self._apply.set_sensitive(reason is None and self._can_apply)
+        self._apply_targets.set_sensitive(reason is None and self._can_apply)
+        self._apply.set_tooltip_text(
+            f"Playback unavailable: {reason}" if reason else "Apply to all displays as Quick choice"
+        )
+        self._apply_targets.set_tooltip_text(
+            f"Playback unavailable: {reason}"
+            if reason
+            else "Choose a display, or explicitly choose all displays"
+        )
         self._health_badge.set_visible(reason is not None)
         self._health_badge.set_tooltip_text(reason)
         if reason is None:
             self.remove_css_class("wio-tile-borked")
-            self._frame.set_tooltip_text("Left-click to edit · right-click to play as Quick choice")
+            self._frame.set_tooltip_text("Click to edit · right-click for actions")
         else:
             self.add_css_class("wio-tile-borked")
             self._frame.set_tooltip_text(
-                "Borked wallpaper · left-click for details and removal options · playback disabled"
+                "Playback disabled · left-click for details and removal options"
             )
 
     def set_favourite(self, favourite: bool) -> None:
@@ -177,25 +217,67 @@ class WallpaperTile(Gtk.Box):
         self._star.set_tooltip_text("Remove from favourites" if favourite else "Add to favourites")
 
     def set_menu(self, build: Callable[[MediaItem], Gio.MenuModel]) -> None:
-        """Give the tile an action menu, built the first time it is opened.
+        """Build the action menu lazily, using current state on each opening.
 
         `set_menu_model` builds the popover there and then, which is 160 ms
         across six hundred tiles for menus almost none of which are ever
         opened -- more than half the cost of building the grid. Deferring it
-        costs one comparison per click.
+        keeps that work off the grid population path. Rebuilding on opening
+        also avoids stale favourite, pairing and display-target actions.
         """
 
         def create(button: Gtk.MenuButton) -> None:
-            if button.get_menu_model() is None:
-                button.set_menu_model(build(self.item))
+            button.set_menu_model(build(self.item))
 
         self._menu.set_create_popup_func(create)
 
-    def connect_secondary(self, on_activate: Callable[[MediaItem], None]) -> None:
-        """Make a secondary click the quick-play gesture for this item."""
-        gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
-        gesture.connect("released", lambda *_arguments: on_activate(self.item))
-        self.add_controller(gesture)
+    def connect_actions(
+        self,
+        on_edit: Callable[[MediaItem], None],
+        on_apply: Callable[[MediaItem], None] | None,
+        apply_menu_for: Callable[[MediaItem], Gio.MenuModel] | None,
+    ) -> None:
+        """Native buttons consume their activation without activating FlowBox."""
+        self._edit.connect("clicked", lambda _button: on_edit(self.item))
+        if on_apply is not None:
+            self._apply.connect("clicked", lambda _button: self._apply_if_healthy(on_apply))
+        if apply_menu_for is not None:
+            self._apply_targets.set_create_popup_func(
+                lambda button: button.set_menu_model(apply_menu_for(self.item))
+            )
+        self._can_apply = on_apply is not None
+        self.set_borked(self._borked_reason)
+
+    def _apply_if_healthy(self, on_apply: Callable[[MediaItem], None]) -> None:
+        # A display-mode change can hide the direct button while an activation
+        # is pending. Never let that stale activation imply all displays.
+        if self._borked_reason is None and self._apply.get_visible():
+            on_apply(self.item)
+
+    def set_apply_targeting(self, independent: bool) -> None:
+        """Independent displays require a target; mirrored playback does not."""
+        self._apply.set_visible(not independent)
+        self._apply_targets.set_visible(independent)
+
+    def _on_secondary_pressed(
+        self, gesture: Gtk.GestureClick, _presses: int, _x: float, _y: float
+    ) -> None:
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        self._menu.popup()
+
+    def _on_menu_key(
+        self,
+        _controller: Gtk.EventControllerKey,
+        keyval: int,
+        _keycode: int,
+        state: Gdk.ModifierType,
+    ) -> bool:
+        if keyval == Gdk.KEY_Menu or (
+            keyval == Gdk.KEY_F10 and state & Gdk.ModifierType.SHIFT_MASK
+        ):
+            self._menu.popup()
+            return True
+        return False
 
     def connect_favourite(self, on_toggle: Callable[[MediaItem, bool], None]) -> None:
         """Say who to tell when the star is clicked."""
@@ -216,7 +298,7 @@ def _badge(text: str) -> Gtk.Widget:
 
 
 class WallpaperGrid(Gtk.ScrolledWindow):
-    """A scrolling grid: activate to edit, secondary-click to quick-play."""
+    """A scrolling grid with separate editing, applying and context actions."""
 
     def __init__(
         self,
@@ -224,12 +306,15 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         on_activate: Callable[[MediaItem], None],
         on_favourite: Callable[[MediaItem, bool], None] | None = None,
         menu_for: Callable[[MediaItem], Gio.MenuModel] | None = None,
-        on_secondary: Callable[[MediaItem], None] | None = None,
+        on_apply: Callable[[MediaItem], None] | None = None,
+        apply_menu_for: Callable[[MediaItem], Gio.MenuModel] | None = None,
     ) -> None:
         super().__init__()
         self._loader = loader
         self._on_activate = on_activate
-        self._on_secondary = on_secondary
+        self._on_apply = on_apply
+        self._apply_menu_for = apply_menu_for
+        self._independent = False
         self._on_favourite = on_favourite
         # The window builds the menus, because the window owns the actions they
         # point at. The grid only knows where to hang one.
@@ -382,6 +467,11 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             if tile is not None:
                 tile.set_borked(self._borked.get(path))
 
+    def set_apply_targeting(self, independent: bool) -> None:
+        self._independent = independent
+        for tile in self._tiles.values():
+            tile.set_apply_targeting(independent)
+
     def _apply_query(self) -> None:
         self._matches = library_filter.apply(self._items, self._query, self._favourites)
         self._positions = {item.path: index for index, item in enumerate(self._matches)}
@@ -428,13 +518,20 @@ class WallpaperGrid(Gtk.ScrolledWindow):
                 tile.connect_favourite(self._on_favourite)
             if self._menu_for is not None:
                 tile.set_menu(self._menu_for)
-            if self._on_secondary is not None:
-                tile.connect_secondary(self._on_secondary)
+            tile.connect_actions(self._on_activate, self._on_apply, self._apply_menu_for)
+            tile.set_apply_targeting(self._independent)
             tile.set_favourite(item.path in self._favourites)
             tile.set_borked(self._borked.get(item.path))
             tile.set_current(item.path in self._current)
             self._tiles[item.path] = tile
             self._flow.append(tile)
+            # Keyboard navigation initially focuses FlowBoxChild itself, not
+            # its inner tile. Listen on that common ancestor so Menu/Shift+F10
+            # also work there, and bubble from Apply/Edit exactly once.
+            child = tile.get_parent()
+            if isinstance(child, Gtk.FlowBoxChild):
+                tile.remove_controller(tile._menu_keys)
+                child.add_controller(tile._menu_keys)
             self._loader.request(item, self._on_thumbnail)
 
         # Reused tiles retain their current marker; update it after every diff

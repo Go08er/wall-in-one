@@ -53,7 +53,7 @@ ACCELERATORS: Final[tuple[tuple[str, str, str, str], ...]] = (
     ("Wallpaper", "<Control><Shift>R", "win.random", "Random wallpaper"),
     ("Library", "<Control>F", "win.search", "Search the library"),
     ("Library", "F5", "win.refresh", "Rescan the library"),
-    ("Library", "<Control>B", "win.browse", "Find wallpapers online"),
+    ("Library", "<Control>B", "win.browse", "Open Store"),
     ("Application", "<Control>comma", "win.preferences", "Settings"),
     ("Application", "<Control>P", "win.palettes", "Palettes"),
     ("Application", "<Control>question", "win.shortcuts", "Keyboard shortcuts"),
@@ -132,7 +132,9 @@ class MainWindow(Adw.ApplicationWindow):
             self._on_favourite,
             self._menu_for,
             self._quick_apply,
+            self._apply_menu_for,
         )
+        self._grid.set_apply_targeting(settings.display_mode == config.DISPLAY_MODE_INDEPENDENT)
         self._grid.set_favourites(self._favourites.paths)
         self._toast = Adw.ToastOverlay()
         self._pairings_page = PairingsPage(
@@ -194,13 +196,13 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_start(refresh)
 
         browse = Gtk.Button(
-            icon_name="system-search-symbolic", tooltip_text="Find wallpapers online"
+            icon_name="system-search-symbolic", tooltip_text="Open Store to find wallpapers"
         )
         browse.connect("clicked", lambda _button: self.open_browse())
         header.pack_end(browse)
 
         menu = Gio.Menu()
-        menu.append("Find wallpapers", "win.browse")
+        menu.append("Store", "win.browse")
         menu.append("Palettes", "win.palettes")
         menu.append("Settings", "win.preferences")
         menu.append("Keyboard Shortcuts", "win.shortcuts")
@@ -255,12 +257,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._stack.add_titled_with_icon(
             self._browse_page,
             "browse",
-            "Browse",
+            "Store",
             "system-search-symbolic",
         )
-        self._stack.add_titled_with_icon(
-            media, "media", "Media/Pairings", "image-x-generic-symbolic"
-        )
+        self._stack.add_titled_with_icon(media, "media", "Library", "image-x-generic-symbolic")
         self._stack.add_titled_with_icon(
             self._playlists_page,
             "playlists",
@@ -375,7 +375,7 @@ class MainWindow(Adw.ApplicationWindow):
             # the user to the existing health action instead of sending a
             # command which can only leave the wallpaper static.
             self.show_page("media")
-            self.report("Open the Borked wallpaper to see its safe removal options")
+            self.report("Open the wallpaper with playback disabled to see its removal options")
             return
         verb = (
             "play"
@@ -514,10 +514,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._switcher.set_reveal(True)
 
     def _quick_apply(self, item: MediaItem) -> None:
-        """Right-click Media through the explicit one-entry Quick choice list."""
+        """Apply globally through the existing paired one-entry Quick choice list."""
         health = self._app.session.pairings.health(pairings.Identity.of(item))
         if health.is_borked:
-            self.report(f"{item.name} is marked Borked and cannot play; open it to remove the item")
+            self.report(f"Playback unavailable for {item.name}; open it to see removal options")
             return
         self._app.play_item_async(item)
 
@@ -557,6 +557,7 @@ class MainWindow(Adw.ApplicationWindow):
     def apply_settings(self, settings: config.Settings) -> None:
         previous = self._settings
         self._settings = settings
+        self._grid.set_apply_targeting(settings.display_mode == config.DISPLAY_MODE_INDEPENDENT)
         self._settings_page.apply_settings(settings)
         if settings.roots != previous.roots:
             self._browse_page.update_library_roots(settings.roots)
@@ -633,7 +634,7 @@ class MainWindow(Adw.ApplicationWindow):
         if library.skipped:
             summary += f" - {len(library.skipped)} skipped"
         if self._borked_count:
-            summary += f" · {self._borked_count} Borked (won't play)"
+            summary += f" · {self._borked_count} with playback disabled"
         self._summary = summary
         self._update_subtitle()
 
@@ -691,8 +692,8 @@ class MainWindow(Adw.ApplicationWindow):
         """
         page = self._stack.get_visible_child_name()
         titles = {
-            "browse": "Browse",
-            "media": "Media/Pairings",
+            "browse": "Store",
+            "media": "Library",
             "playlists": "Playlists",
             "schedules": "Schedules",
             "settings": "Settings",
@@ -784,6 +785,7 @@ class MainWindow(Adw.ApplicationWindow):
         if not isinstance(playlist, str) or not isinstance(source, str):
             return
         self._runtime_media_status = status
+        power = runtime_truth.power_from_status(status)
         reported_state = status.get("playback_state")
         state = (
             reported_state
@@ -825,7 +827,7 @@ class MainWindow(Adw.ApplicationWindow):
         if self._renderer_taboo:
             self._runtime_play.set_icon_name("dialog-warning-symbolic")
             self._runtime_play.set_tooltip_text(
-                "Borked wallpaper: playback is disabled; open it in Media/Pairings"
+                "Playback unavailable: open the wallpaper in Library"
             )
             self._runtime_menu.set_icon_name("dialog-warning-symbolic")
         elif self._renderer_failed:
@@ -838,12 +840,18 @@ class MainWindow(Adw.ApplicationWindow):
             self._runtime_menu.set_icon_name("media-playback-start-symbolic")
         elif state == "playing":
             self._runtime_play.set_icon_name("media-playback-pause-symbolic")
-            self._runtime_play.set_tooltip_text("Pause motion")
+            self._runtime_play.set_tooltip_text(
+                f"Pause playback · {power.message}"
+                if power is not None and power.inhibited
+                else "Pause motion"
+            )
             self._runtime_menu.set_icon_name("media-playback-start-symbolic")
         else:
             self._runtime_play.set_icon_name("media-playback-start-symbolic")
             self._runtime_play.set_tooltip_text(
-                "Resume motion"
+                f"Resume playback · {power.message}"
+                if power is not None and power.inhibited and state != "mixed"
+                else "Resume motion"
                 if state == "stopped"
                 else "Synchronize displays: pause all if any is playing, otherwise play all"
                 if state == "mixed"
@@ -859,12 +867,14 @@ class MainWindow(Adw.ApplicationWindow):
         cycle_text = "mixed" if cycle_mixed else "on" if cycle is True else "off"
         shuffle_text = "mixed" if shuffle_mixed else "on" if shuffle is True else "off"
         state_text = (
-            "Borked · playback disabled"
+            "Playback unavailable"
             if self._renderer_taboo
             else "Renderer stopped · Retry available"
             if self._renderer_failed
             else state.capitalize()
         )
+        if power is not None and power.message:
+            state_text += f" · {power.message}"
         self._runtime_status_text = f"{state_text} · cycle {cycle_text} · shuffle {shuffle_text}"
         if not self._runtime_busy:
             self._runtime_control_status.set_text(self._runtime_status_text)
@@ -891,6 +901,8 @@ class MainWindow(Adw.ApplicationWindow):
             self._runtime_error = ""
             self._runtime_summary = f"{state} {playlist} ({source})"
             self._subtitle.set_tooltip_text(None)
+        if power is not None and power.message:
+            self._runtime_summary += f" · {power.message}"
         if self._management_session is not None:
             self._show_media_playback(self._management_session)
         else:
@@ -984,30 +996,13 @@ class MainWindow(Adw.ApplicationWindow):
             item,
             self._app.session.library,
         )
-        independent = self._settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
         if bundle.health.is_borked:
             # No action on purpose: this renders as an insensitive explanation
             # rather than leaving a stale playback route beside the warning
             # badge.  Editing and safe deletion remain available below.
-            menu.append("Borked · playback disabled", None)
+            menu.append("Playback unavailable", None)
         else:
-            apply_item = Gio.MenuItem.new(
-                "Play on all displays as Quick choice" if independent else "Play as Quick choice",
-                None,
-            )
-            apply_item.set_action_and_target_value("win.apply-wallpaper", target)
-            menu.append_item(apply_item)
-            connectors = self._quick_choice_connectors() if independent else ()
-            if connectors:
-                per_display = Gio.Menu()
-                for connector in connectors:
-                    chosen = Gio.MenuItem.new(connector, None)
-                    chosen.set_action_and_target_value(
-                        "win.apply-wallpaper-on",
-                        GLib.Variant("(ss)", (str(item.path), connector)),
-                    )
-                    per_display.append_item(chosen)
-                menu.append_submenu("Play on one display", per_display)
+            menu.append_submenu("Apply to…", self._apply_menu_for(item))
 
         # Also in the menu, not only on the star. The star is hidden until the
         # tile is hovered or focused, which keeps the grid readable but leaves
@@ -1036,6 +1031,30 @@ class MainWindow(Adw.ApplicationWindow):
             remove_item = Gio.MenuItem.new("Remove" if item.deletable else "Move to Trash", None)
             remove_item.set_action_and_target_value("win.remove-wallpaper", target)
             menu.append_item(remove_item)
+        return menu
+
+    def _apply_menu_for(self, item: MediaItem) -> Gio.MenuModel:
+        """Opening a target picker never plays, and never implies all displays."""
+        menu = Gio.Menu()
+        if self._app.session.pairings.health(pairings.Identity.of(item)).is_borked:
+            menu.append("Playback unavailable", None)
+            return menu
+        if self._settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
+            connectors = self._quick_choice_connectors()
+            for connector in connectors:
+                chosen = Gio.MenuItem.new(f"Apply to {connector}", None)
+                chosen.set_action_and_target_value(
+                    "win.apply-wallpaper-on",
+                    GLib.Variant("(ss)", (str(item.path), connector)),
+                )
+                menu.append_item(chosen)
+            if not connectors:
+                menu.append("No connected displays reported", None)
+        apply_all = Gio.MenuItem.new("Apply to all displays (Quick choice)", None)
+        apply_all.set_action_and_target_value(
+            "win.apply-wallpaper", GLib.Variant.new_string(str(item.path))
+        )
+        menu.append_item(apply_all)
         return menu
 
     def _palette_menu(self, item: MediaItem) -> Gio.MenuModel:
@@ -1213,6 +1232,15 @@ class MainWindow(Adw.ApplicationWindow):
         source, connector = raw.unpack()
         item = self._app.session.library.find(Path(source))
         if item is not None:
+            if self._app.session.pairings.health(pairings.Identity.of(item)).is_borked:
+                self.report(f"Playback unavailable for {item.name}; open it to see removal options")
+                return
+            if (
+                self._settings.display_mode != config.DISPLAY_MODE_INDEPENDENT
+                or connector not in self._quick_choice_connectors()
+            ):
+                self.report("That display is no longer available; choose an Apply to… target again")
+                return
             self._app.play_item_on_async(item, connector)
 
     def _quick_choice_connectors(self) -> tuple[str, ...]:

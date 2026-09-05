@@ -1,11 +1,8 @@
 # The library
 
-The library is every wallpaper the app can see, and everything it knows about
-them beyond the pixels: which still stands behind which video, which files are
-ours to delete, and which ones you starred.
-
-This page is the detail behind the README's summary: what the app does, the
-limits it enforces, and the behaviour its tests and live use actually check.
+The Library shows your wallpapers, their representative stills and colour
+choices, and your favourites. This page covers finding, editing and removing
+items, followed by the storage and recovery guarantees behind those actions.
 
 ## What counts as a wallpaper
 
@@ -38,7 +35,7 @@ Three properties of the list are worth knowing:
 
 - **Order is kept, and the first one is special.** Downloads and generated
   stills land under the first root. It is marked in the Settings tab with
-  a download icon.
+  a download icon and **Downloads & generated stills**.
 - **Duplicates are dropped.** Paths are expanded and made absolute first, so
   `~/Pictures` and `/home/you/Pictures` count as one entry rather than putting
   every wallpaper in it into the rotation twice.
@@ -52,8 +49,8 @@ through symbolic-link directory components. Configure the real absolute root
 when you want those actions available. This keeps a link swapped between scan
 and removal from redirecting an operation outside the selected library.
 
-Changing the list rescans immediately; nothing else notices otherwise, and a
-folder you just added would stay invisible until the next launch.
+Changing the list rescans immediately. Removing a folder from this list stops
+scanning it; it does not delete the wallpapers in it.
 
 ## Videos and the stills behind them
 
@@ -89,21 +86,25 @@ remain internal defaults rather than separate choices in the picker.
 
 ### Stills the app makes for itself
 
-For a long time only the third route could actually happen: nothing wrote a
-sidecar and nothing ever put a file in `Automatic Stills`, so a downloaded
-video had nothing to show when dynamics were switched off, and pausing it
-jumped to an unrelated wallpaper instead.
-
-Now every video without a still gets one. The frame is taken three seconds in
--- videos routinely open on black or on a fade, and a black still looks like a
-bug and generates a grey palette -- at full resolution, as PNG, and a sidecar
-records the pairing when the video itself is inside the target library root.
+The app tries to capture a still for each video that lacks one. It takes a
+full-resolution PNG three seconds in to avoid opening fades, and records the
+pairing in a sidecar when the video itself is inside the target library root.
 Videos from another configured root still use the deterministic managed still;
 the app does not write a pairing file beside a source outside that target root.
 
 Generated filenames include a digest of the video's absolute path. Two files
 named `intro.mp4` in different folders therefore get different stills rather
 than silently overwriting each other.
+
+- Captures run after each rescan on a single background worker.
+- Each video is attempted once per session, so a failed capture does not keep
+  retrying on every rescan.
+- It needs `ffmpeg`. The Nix package puts it on the app's `PATH`; without it
+  the video still plays and simply keeps its "Video (no still)" badge.
+- Switching dynamics off takes a still from the video playing at that moment
+  first, so the wallpaper you were watching is not swapped out from under you.
+
+### Capture publication guarantees
 
 Those deterministic names form an app-reserved namespace. Rendering reads the
 retained source and writes one pre-created hidden output inode through
@@ -115,23 +116,12 @@ original inode changed in place, wins and is preserved. A hard kill may leave
 only the inert hidden output; it cannot redirect the renderer into an unrelated
 public file.
 
-- It happens after each rescan, on a single background worker. One, not four:
-  each job is ffmpeg decoding a large video, so the disk is the limit rather
-  than the cores.
-- A video is attempted once per session. A finished batch causes a rescan and a
-  rescan asks again, so a file ffmpeg cannot read would otherwise loop forever.
-- It needs `ffmpeg`. The Nix package puts it on the app's `PATH`; without it
-  the video still plays and simply keeps its "Video (no still)" badge.
-- Switching dynamics off takes a still from the video playing at that moment
-  first, so the wallpaper you were watching is not swapped out from under you.
-
 ## Finding one
 
 The row under the header bar is a search box, a kind filter, and a sort. All
 three work over the complete scanned inventory without rescanning the
-filesystem, and none is remembered between launches. A search is about the
-next thirty seconds; reopening the app to yesterday's filter, with most of the
-library missing and no obvious reason why, is a bug report.
+filesystem. Search, kind and sort reset between launches, so the next launch
+starts with the full library visible.
 
 The grid initially materialises 72 tiles and thumbnail requests, then offers a
 labelled **Load more** page. Matching and sorting still cover all 4096 supported
@@ -144,14 +134,10 @@ repeat decode unless the media changed.
 
 **Search** splits what you type on whitespace and requires every word to appear
 somewhere in the filename stem, in any order. `snow vil` finds
-`snowy-village-still`, which plain substring matching does not. Matching folds
-accents and case, so `cafe` finds `Café`. Only the stem is matched: searching
-the whole path would mean any word that happens to name a directory matches
-everything underneath it. Escape clears the box.
+`snowy-village-still`. Matching folds accents and case, so `cafe` finds `Café`.
+Folder names and extensions are not searched. Escape clears the box.
 
 **Kind** offers Everything, Stills only, Videos only, and Favourites only.
-Favourites is in this control rather than beside it because "which of these am
-I being shown" has one answer at a time.
 
 **Sort** offers Name, Newest first (modification time), and Largest first.
 Ties fall back to name and then path, so the grid does not reshuffle equal-sized
@@ -159,64 +145,64 @@ files on every rescan.
 
 While anything is being hidden the window's subtitle says both numbers, as
 `Showing 3 of 41` in front of the usual counts -- 41 being how many wallpapers
-are playable, not how many are on screen. Replacing the count instead would be
-indistinguishable from a scan that had just lost most of the collection.
-Sorting alone is not narrowing and does not trigger it.
+are playable, not how many are on screen. Sorting alone does not narrow the
+results or trigger that count.
 
 ## Favourites
 
-The star in the corner of each tile. They live in
-`~/.local/state/wall-in-one/favourites.json`, not in the settings file: three
-hundred absolute paths would bury the dozen lines of a settings file that are
-worth reading, and every star toggled from a tile would rewrite a file somebody
-might be editing.
+Use the star in the corner of a tile to mark a favourite. Favourites are saved
+separately from settings in `~/.local/state/wall-in-one/favourites.json`.
 
 Each change is written through immediately, in the order you starred things.
 If the write fails the star stays where you put it and a toast says it will not
 outlive the session.
 
-**A favourite whose file is not in the library is kept, not pruned.** A root
-temporarily removed, a drive not mounted at startup, a scan that hit its
-ceiling -- pruning on load would quietly forget a list you built by hand,
-precisely when the app is least able to tell that anything is wrong. Only two
-things drop an entry: you saying so, and the app itself destroying the file.
+**A favourite whose file is not in the library is kept.** Removing a root from
+the scan, disconnecting a drive or reaching the scan limit does not clear its
+star. Unstarring the item or explicitly removing its wallpaper clears it.
 
 **Settings -> Playback -> Cycle favourites only** narrows the rotation to them.
-It is ignored whenever that would leave nothing to rotate through: a manager
-that stops changing the wallpaper is a worse answer to "you have no favourites
-right now" than one that falls back to the whole library and keeps working.
+If no favourites are available to play, rotation falls back to the whole
+library.
 
 ## Using or taking away an item
 
-Each media tile has three deliberately different entry points:
+Each Library tile separates editing from applying:
 
-- **Left-click** opens that item's full pairing editor: representative still,
+- **Left-click** or **Edit** opens that item's full pairing editor: representative still,
   moving source and palette policy.
-- **Right-click** plays it immediately through the visible one-entry **Quick
-  choice** playlist. It does not open a second copy of the actions menu.
-- The **actions button** in the tile's corner opens the keyboard-reachable menu
+- **Apply** plays the pairing through the one-entry **Quick choice** playlist.
+  Independent-display mode offers explicit display targets before applying.
+- **Right-click** or the **actions button** opens the keyboard-reachable menu
   for Quick choice, favourites, representative still, colours, reset and
-  removal. Entries which do not apply to that item are omitted.
+  removal. Opening the menu does not apply the wallpaper. Entries which do not
+  apply to that item are omitted.
+
+The editor's adaptive colour choices offer all ten Noctalia generators with
+previews. Community and custom palettes show their stored colours. Built-ins
+have no colour preview because Noctalia does not expose their colours without
+applying them.
 
 The last menu entry is **Remove** or **Move to Trash**.
 
-Which of the two you get is named for what it does to *that* file, because one
-of them cannot be undone:
-
-- **Remove** appears for a generation-bound file we downloaded. It permanently
-  removes that public media entry and the exact app-owned companions pinned
-  before the commit -- its provider sidecar and every generated still/pairing
-  sidecar pair found for it under the configured roots. It asks for
-  confirmation.
+- **Remove** appears for a downloaded file whose app ownership can be verified.
+  It permanently deletes the wallpaper and its verified app-owned sidecars and
+  generated stills. It asks for confirmation and cannot be undone through Trash.
 - **Move to Trash** appears for your own files inside a configured library
-  root. It moves them to the
-  freedesktop home trash under `~/.local/share/Trash`, where a file manager can
-  restore them. It does not ask, because confirming everything trains people to
-  confirm everything and this one is recoverable.
+  root. It moves them to the freedesktop home trash under
+  `~/.local/share/Trash`, where a file manager can restore the media. It does not
+  ask for confirmation. Restoring the file does not restore the app metadata
+  cleared by removal, such as favourites and playlist occurrences.
 
 Only the home trash is implemented. A wallpaper on another filesystem cannot be
-renamed into it and is refused with a reason, rather than being silently
-unlinked when you expected to get it back.
+renamed into it: the action reports the problem and leaves the file in place.
+
+### Ownership and removal guarantees
+
+Permanent removal pins the downloaded media and its provider sidecar before
+the commit, together with every generated still/pairing sidecar pair found for
+it under the configured roots. Only those exact app-owned companions can be
+physically removed by that operation.
 
 A file is only ours when two things agree: a marker file says we made the
 directory, and a bounded regular provider sidecar names the exact provider,
@@ -251,7 +237,7 @@ before the operation is reported durable.
 
 Removing a wallpaper also drops it from favourites, every playlist occurrence,
 and its complete Pairing record: palette policy, representative-still choice
-and any recorded Borked/crasher health. It removes only automatic stills and
+and any recorded playback-failure information. It removes only automatic stills and
 sidecars whose exact generated paths prove they belong to that wallpaper.
 Those records normally outlive a missing file because the file might come
 back; that is not true of one the app just destroyed.
@@ -320,7 +306,7 @@ them. Publication rechecks the exact opened source before a no-replace move. If
 removal wins first, the publisher observes the missing or changed source and
 discards its private capture rather than resurrecting a deterministic still.
 
-An item marked **Borked** after three failed automatic hand-over attempts, or an
+An item marked **Playback unavailable** after three failed automatic hand-over attempts, or an
 attributable Wallpaper Engine scene crash, is visibly labelled and has no
 Quick-choice playback action. Delete/Trash is its recovery boundary:
 the health marker is part of the Pairing record removed with the item, so a
@@ -336,27 +322,33 @@ stills and sidecars for an external uninstall. If the removal journal is
 unwritable, an in-process retry remains and the state-directory failure is
 reported until a refresh can record the metadata boundary durably.
 
-Playlist authoring follows the same prohibition rather than creating a second
-way around it. A Borked library card remains visible with its diagnostic, but
-its Add button and drag source are disabled. An older playlist occurrence is
-retained and labelled unavailable so it can be removed deliberately; playback
-skips it when another usable occurrence exists and is disabled when every
-entry is Borked or missing.
-
-Large rotations remain honest without constructing all 10,000 permitted GTK
-row trees. The order pane materialises 72 stable entries at first and offers a
-labelled **Load more** page; loaded rows keep their identity for keyboard and
-drag reordering. Clicking Add for an item appended beyond the loaded range
-temporarily pins that new row so the action always has visible confirmation.
-The stored order is complete throughout—paging bounds interface work, not the
-runtime playlist or the entries written to disk.
-
 Workshop absence is intentionally not inferred from Pairings after a restart:
 scene Pairings do not retain the last content root, video Pairings do not carry
 trusted Workshop provenance, and uncustomized installs may have no Pairing at
 all. An uninstall that happens entirely while Wall-in-One is stopped therefore
 cannot yet be distinguished safely from an unavailable Steam library. Once an
 observed uninstall reaches the removal journal, its cleanup is restart-safe.
+
+## Playlist behavior and limits
+
+The Playlists tab adds pairings from the searchable Library list with **+**,
+double-click, Enter or drag-and-drop. Drag a playlist row's handle to reorder
+it, or focus the row and press `Ctrl+Up` / `Ctrl+Down`. Reordering preserves
+each occurrence's stable entry ID, so the same pairing can appear more than
+once without those occurrences becoming interchangeable.
+
+A Library row with playback disabled remains visible with its diagnostic, but
+its Add button and drag source are disabled. An older playlist occurrence is
+retained and labelled unavailable so it can be removed deliberately; playback
+skips it when another usable occurrence exists and is disabled when every
+entry has playback disabled or is missing.
+
+Playlists can contain up to 10,000 entries. The order pane initially builds
+72 rows and offers a labelled **Load more** page; loaded rows keep their
+identity for keyboard and drag reordering. Clicking Add for an item appended
+beyond the loaded range temporarily keeps that new row visible to confirm the
+addition. The stored order is complete throughout: paging limits interface
+work, not the runtime playlist or the entries written to disk.
 
 ## Thumbnails
 

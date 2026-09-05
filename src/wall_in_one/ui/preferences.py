@@ -103,8 +103,8 @@ class PreferencesPage(Adw.PreferencesPage):
         group = Adw.PreferencesGroup(
             title="Library",
             description=(
-                "Folders scanned for wallpapers. Downloads and generated stills "
-                "go into the first one; Wall-in-One never chooses it silently."
+                "Folders scanned for wallpapers. The marked folder receives "
+                "downloads and generated stills."
             ),
         )
         add = Gtk.Button(icon_name="folder-new-symbolic", tooltip_text="Add a folder")
@@ -142,8 +142,9 @@ class PreferencesPage(Adw.PreferencesPage):
             return
 
         for index, root in enumerate(roots):
-            row = Adw.ActionRow(title=root.name or str(root), subtitle=str(root))
+            row = Adw.ActionRow(title=root.name or str(root), subtitle=str(root), use_markup=False)
             if index == 0:
+                row.set_title(f"{root.name or str(root)} · Downloads & generated stills")
                 row.add_prefix(Gtk.Image(icon_name="folder-download-symbolic"))
                 row.set_tooltip_text("Downloads and generated stills go here")
             else:
@@ -160,7 +161,9 @@ class PreferencesPage(Adw.PreferencesPage):
                 # not mounted should come back when it is, not disappear.
                 row.set_subtitle(f"{root} -- not there right now")
                 row.add_css_class("warning")
-            remove = Gtk.Button(icon_name="list-remove-symbolic", tooltip_text="Remove")
+            remove = Gtk.Button(
+                icon_name="list-remove-symbolic", tooltip_text="Remove from Library"
+            )
             remove.set_valign(Gtk.Align.CENTER)
             remove.add_css_class("flat")
             remove.connect("clicked", self._make_root_remover(root))
@@ -259,11 +262,23 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._interval)
 
         self._dynamics = Adw.SwitchRow(
-            title="Dynamics",
-            subtitle="Play video wallpapers. Off shows their paired stills instead",
+            title="Animate wallpapers",
+            subtitle="Play videos and Wallpaper Engine scenes. Off shows paired stills",
         )
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
+
+        self._battery_animations = Adw.SwitchRow(
+            title="Stop animations on battery",
+            subtitle=(
+                "Show still wallpapers on battery. Resume when plugged in, "
+                "according to your playback settings"
+            ),
+        )
+        self._battery_animations.connect("notify::active", self._on_changed)
+        group.add(self._battery_animations)
+        self._power_status = Adw.ActionRow(title="Battery animation control")
+        group.add(self._power_status)
 
         self._own_scenes = Adw.SwitchRow(
             title="Play Wallpaper Engine scenes",
@@ -497,8 +512,29 @@ class PreferencesPage(Adw.PreferencesPage):
         independent = settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
         self._theme_source.set_visible(independent)
 
+    def _refresh_power_status(self, settings: config.Settings) -> None:
+        status = getattr(self._app, "runtime_status", None)
+        power = runtime_truth.power_from_status(status)
+        self._power_status.set_visible(
+            settings.stop_animations_on_battery or (power is not None and power.enabled)
+        )
+        if power is None:
+            detail = (
+                "Restart the updated wallpaper service to enable battery control"
+                if status is not None
+                else "Waiting for the wallpaper service"
+            )
+        elif power.message:
+            detail = power.message
+        elif not power.enabled:
+            detail = "Waiting for the service to apply this setting"
+        else:
+            detail = "Plugged in · animations follow your playback settings"
+        self._power_status.set_subtitle(detail)
+
     def runtime_status_changed(self, settings: config.Settings) -> None:
         """Adopt niri connector/palette truth without rebuilding other settings."""
+        self._refresh_power_status(settings)
         connectors = self._known_theme_connectors(settings)
         attached = frozenset(self._live_theme_connectors())
         if connectors == self._theme_connectors and attached == self._theme_attached:
@@ -570,12 +606,12 @@ class PreferencesPage(Adw.PreferencesPage):
     def _build_colour_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(
             title="Colour",
-            description="Use Noctalia's active palette or a fixed app palette.",
+            description="App appearance is separate from each pairing's desktop colours.",
         )
 
         self._follow_palette = Adw.SwitchRow(
-            title="Follow Noctalia colours",
-            subtitle="Update this app's chrome when Noctalia's active palette changes",
+            title="Follow Noctalia for app colours",
+            subtitle="Update this app's appearance only; pairing colour choices stay unchanged",
         )
         self._follow_palette.connect("notify::active", self._on_changed)
         group.add(self._follow_palette)
@@ -584,8 +620,11 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._palette_source)
 
         self._scheme = Adw.ComboRow(
-            title="Scheme",
-            subtitle="Generator used when a palette is derived from the wallpaper",
+            title="Default adaptive colour scheme",
+            subtitle=(
+                "For previews and adaptive pairings without a chosen scheme. "
+                "Explicit pairing colours stay unchanged"
+            ),
             model=Gtk.StringList.new(list(ALL_SCHEMES)),
         )
         self._scheme.connect("notify::selected", self._on_changed)
@@ -667,6 +706,8 @@ class PreferencesPage(Adw.PreferencesPage):
             self._cycle.set_active(settings.cycle_enabled)
             self._interval.set_value(settings.cycle_interval)
             self._dynamics.set_active(settings.dynamics_enabled)
+            self._battery_animations.set_active(settings.stop_animations_on_battery)
+            self._refresh_power_status(settings)
             self._own_scenes.set_active(settings.own_scene_renderer)
             self._workshop.set_active(settings.scan_workshop)
             self._favourites_only.set_active(settings.cycle_favourites_only)
@@ -739,6 +780,7 @@ class PreferencesPage(Adw.PreferencesPage):
             "cycle_enabled": self._cycle.get_active(),
             "cycle_interval": int(self._interval.get_value()),
             "dynamics_enabled": self._dynamics.get_active(),
+            "stop_animations_on_battery": self._battery_animations.get_active(),
             "own_scene_renderer": self._own_scenes.get_active(),
             "scan_workshop": self._workshop.get_active(),
             "cycle_favourites_only": self._favourites_only.get_active(),

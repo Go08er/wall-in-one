@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -17,17 +18,19 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from wall_in_one import paths  # noqa: E402
 from wall_in_one.control import server  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.theme import noctalia, source  # noqa: E402
+from wall_in_one.theme.palette import Palette  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
     APPLICATION_STYLE_PRIORITY,
     PALETTE_RELOAD_DEBOUNCE_MS,
     Application,
     _Commands,
+    _PaletteResult,
 )
 
 
@@ -128,6 +131,120 @@ def test_rapid_atomic_palette_replacements_are_debounced(
     assert _spin_until(lambda: len(calls) == 1)
     _spin_for(PALETTE_RELOAD_DEBOUNCE_MS / 1000 * 3)
     assert len(calls) == 1
+
+
+def test_noctalia_settings_changes_reload_when_no_palette_output_exists(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = paths.noctalia_settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    calls: list[None] = []
+    monkeypatch.setattr(application, "reload_palette", lambda: calls.append(None))
+    application._start_palette_monitor()
+    _replace(settings, '[theme]\nmode = "light"\n')
+    assert _spin_until(lambda: len(calls) == 1)
+
+
+def test_noctalia_settings_directory_created_after_start_is_observed(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = paths.noctalia_settings_path()
+    assert not settings.parent.exists()
+    calls: list[None] = []
+    monkeypatch.setattr(application, "reload_palette", lambda: calls.append(None))
+    application._start_palette_monitor()
+
+    settings.parent.mkdir(parents=True)
+    _replace(settings, '[theme]\nmode = "light"\n')
+    assert _spin_until(lambda: len(calls) == 1)
+
+    _replace(settings, '[theme]\nmode = "dark"\n')
+    assert _spin_until(lambda: len(calls) == 2)
+
+
+def test_real_palette_replacement_changes_css_and_adwaita_mode(
+    application: Application,
+) -> None:
+    from tests.test_theme_source import _registration
+
+    _registration()
+    target = paths.palette_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    def rendered(mode: str, surface: str) -> str:
+        palette = source.fallback_palette("light" if mode == "light" else "dark")
+        colors = {key: value.hex for key, value in palette.colours.items()}
+        colors["surface"] = surface
+        return json.dumps({"mode": mode, "colors": colors})
+
+    display = Gdk.Display.get_default()
+    assert display is not None
+    Gtk.StyleContext.add_provider_for_display(
+        display, application._provider, APPLICATION_STYLE_PRIORITY
+    )
+    existing = Gtk.Window()
+    try:
+        application._start_palette_monitor()
+        for mode, surface_hex, adw_mode in (
+            ("dark", "#131318", Adw.ColorScheme.FORCE_DARK),
+            ("dark", "#182927", Adw.ColorScheme.FORCE_DARK),
+            ("light", "#f9f9ff", Adw.ColorScheme.FORCE_LIGHT),
+            ("dark", "#131318", Adw.ColorScheme.FORCE_DARK),
+        ):
+            _replace(target, rendered(mode, surface_hex))
+
+            def applied(wanted: str = mode, wanted_surface: str = surface_hex) -> bool:
+                return (
+                    application.resolved_palette is not None
+                    and application.resolved_palette.origin is source.Origin.TEMPLATE
+                    and application.resolved_palette.palette.mode == wanted
+                    and application.resolved_palette.palette["surface"].hex == wanted_surface
+                )
+
+            assert _spin_until(applied)
+            assert Adw.StyleManager.get_default().get_color_scheme() == adw_mode
+            palette = application.resolved_palette
+            assert palette is not None
+            surface = palette.palette["surface"]
+            reopened = Gtk.Window()
+            try:
+                for window in (existing, reopened):
+                    found, color = window.get_style_context().lookup_color("window_bg_color")
+                    assert found
+                    assert color.red == pytest.approx(surface.red / 255, abs=0.001)
+                    assert color.green == pytest.approx(surface.green / 255, abs=0.001)
+                    assert color.blue == pytest.approx(surface.blue / 255, abs=0.001)
+            finally:
+                reopened.destroy()
+    finally:
+        existing.destroy()
+        Gtk.StyleContext.remove_provider_for_display(display, application._provider)
+
+
+def test_unrenderable_palette_preserves_last_good_state_and_answers_callbacks(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previous = source.fixed()
+    application._resolved = previous
+    application._apply_stylesheet(previous)
+    previous_css = application._provider.to_string()
+    reports: list[str] = []
+    replies: list[tuple[object, str]] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    application._theme_reload_callbacks.append(
+        lambda palette, error: replies.append((palette, error))
+    )
+    partial = source.ResolvedPalette(
+        Palette.from_template_document('{"mode":"light","colors":{"primary":"#fff"}}'),
+        source.Origin.TEMPLATE,
+        "incomplete",
+    )
+    application._finish_palette_resolution(_PaletteResult(application._theme_generation, partial))
+    assert application.resolved_palette is previous
+    assert application._provider.to_string() == previous_css
+    assert len(replies) == 1 and replies[0][0] is None
+    assert "token" in replies[0][1]
+    assert reports and "keeping current colours" in reports[0]
 
 
 def test_a_blocked_noctalia_resolution_does_not_stop_the_gtk_heartbeat(

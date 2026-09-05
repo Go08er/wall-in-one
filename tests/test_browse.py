@@ -16,6 +16,7 @@ import pytest
 from tests.test_providers_fakes import FakeClient, Reply, png_bytes
 from wall_in_one import browse, file_io
 from wall_in_one.browse import Browser, Downloaded
+from wall_in_one.library import owned
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import base, wallhaven
 from wall_in_one.providers.base import (
@@ -95,6 +96,61 @@ def test_reconfiguring_roots_retargets_downloads_and_owned_index(tmp_path: Path)
 
     assert engine.download_root() == second
     assert engine.owned is not old_index
+
+
+def test_cached_ownership_never_rebuilds_on_the_callers_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = browser()
+    snapshot = owned.Index()
+    reads: list[object] = []
+
+    def read(roots: object) -> owned.Index:
+        reads.append(roots)
+        return snapshot
+
+    monkeypatch.setattr(owned, "read", read)
+    before = engine.cached_owned
+    assert before is None
+    assert reads == []
+    assert engine.owned is snapshot
+    ready = engine.cached_owned
+    assert ready is snapshot
+    engine.forget_owned()
+    invalidated = engine.cached_owned
+    assert invalidated is None
+    assert len(reads) == 1
+
+
+def test_library_invalidation_cannot_publish_an_older_ownership_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = browser()
+    started = threading.Event()
+    release = threading.Event()
+    old, current = owned.Index(), owned.Index()
+    calls = 0
+
+    def read(_roots: object) -> owned.Index:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(2)
+            return old
+        return current
+
+    monkeypatch.setattr(owned, "read", read)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(lambda: engine.owned)
+        try:
+            assert started.wait(2)
+            engine.forget_owned()
+        finally:
+            release.set()
+        assert future.result(timeout=2) is current
+    assert engine.cached_owned is current
+    assert calls == 2
 
 
 def test_a_download_finishing_after_a_root_change_does_not_pollute_the_new_index(

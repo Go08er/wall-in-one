@@ -1007,6 +1007,7 @@ struct RuntimeDriverState {
     fail_stage_output: Option<String>,
     fail_stage_attempts_remaining: usize,
     fail_palette_attempts_remaining: usize,
+    fail_motion_attempts_remaining: usize,
     fail_pause: bool,
     failures: Vec<String>,
     renderer_failures: Vec<RendererFailure>,
@@ -1122,6 +1123,13 @@ impl WallpaperDriver for RuntimeDriver {
             .push(format!("motion {output} {}", entry.id));
         if settings.dynamics_enabled && entry.kind != wall_in_one_service::config::EntryKind::Still
         {
+            {
+                let mut state = self.0.lock().unwrap();
+                if state.fail_motion_attempts_remaining > 0 {
+                    state.fail_motion_attempts_remaining -= 1;
+                    return Err("renderer refused motion launch".into());
+                }
+            }
             self.apply(entry, output, settings)?;
         }
         Ok(())
@@ -1242,6 +1250,444 @@ fn runtime_command<D: WallpaperDriver>(
         },
         at,
     )
+}
+
+fn power_observation(
+    source: wall_in_one_service::power::PowerSource,
+) -> wall_in_one_service::power::PowerObservation {
+    wall_in_one_service::power::PowerObservation {
+        source,
+        last_known: source,
+    }
+}
+
+fn battery_runtime(
+    independent: bool,
+) -> (
+    Runtime<RuntimeDriver>,
+    Arc<Mutex<RuntimeDriverState>>,
+    chrono::NaiveDateTime,
+) {
+    let document = if independent {
+        independent_config()
+    } else {
+        config(Path::new("/bin/true"), Path::new("/bin/true"), true)
+    };
+    battery_runtime_document(&document)
+}
+
+fn battery_runtime_document(
+    document: &str,
+) -> (
+    Runtime<RuntimeDriver>,
+    Arc<Mutex<RuntimeDriverState>>,
+    chrono::NaiveDateTime,
+) {
+    let mut parsed: Config = toml::from_str(document).unwrap();
+    parsed.schema_version = 5;
+    parsed.settings.stop_animations_on_battery = true;
+    parsed.renderer.own_scene_renderer = true;
+    parsed.schedules.clear();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    (runtime, state, at)
+}
+
+#[test]
+fn battery_startup_and_manual_commands_never_launch_motion() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    for independent in [false, true] {
+        let (mut runtime, state, at) = battery_runtime(independent);
+        runtime.observe_power(power_observation(Battery));
+        runtime.apply_current().unwrap();
+        assert!(runtime_command(&mut runtime, at, "next", None).ok);
+        assert!(runtime_command(&mut runtime, at, "play", None)
+            .message
+            .contains("battery"));
+        assert!(runtime_command(&mut runtime, at, "playlist-use", Some("night")).ok);
+        assert!(state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .all(|(_, motion)| !motion));
+        let before = status(&mut runtime, at);
+        assert_eq!(before["animations_inhibited"], true);
+        assert_eq!(before["motion_active"], false);
+        assert_eq!(before["playback_state"], "playing");
+        state.lock().unwrap().stage_events.clear();
+        runtime.observe_power(power_observation(Ac));
+        let after = status(&mut runtime, at);
+        assert_eq!(after["motion_active"], true);
+        assert_eq!(after["entry_id"], before["entry_id"]);
+        assert_eq!(after["playlist_id"], before["playlist_id"]);
+        assert!(state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .all(|event| event.starts_with("motion ")));
+        let applies = state.lock().unwrap().applies.len();
+        runtime.observe_power(power_observation(Ac));
+        assert_eq!(state.lock().unwrap().applies.len(), applies);
+    }
+}
+
+#[test]
+fn battery_preserves_paused_and_stopped_intent_until_explicit_play() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery, Unknown};
+    let (mut runtime, state, at) = battery_runtime(true);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 pause")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 stop")).ok);
+    runtime.observe_power(power_observation(Battery));
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    runtime.observe_power(wall_in_one_service::power::PowerObservation {
+        source: Unknown,
+        last_known: Battery,
+    });
+    assert_eq!(
+        status(&mut runtime, at)["animation_inhibition_reason"],
+        "power-unavailable"
+    );
+    runtime.observe_power(power_observation(Ac));
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    assert_eq!(
+        display_status(&mut runtime, at, "DP-1")["playback_state"],
+        "paused"
+    );
+    assert_eq!(
+        display_status(&mut runtime, at, "HDMI-A-1")["playback_state"],
+        "stopped"
+    );
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["DP-1".into()])
+    );
+}
+
+#[test]
+fn battery_release_of_mirrored_pause_can_be_played_after_ac_returns() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let (mut runtime, state, at) = battery_runtime(false);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+    runtime.observe_power(power_observation(Battery));
+    runtime.observe_power(power_observation(Ac));
+    assert!(!state.lock().unwrap().motion_active);
+    assert_eq!(status(&mut runtime, at)["playback_state"], "paused");
+    assert!(runtime_command(&mut runtime, at, "play", None).ok);
+    assert!(state.lock().unwrap().motion_active);
+}
+
+#[test]
+fn failed_mirrored_battery_pause_resume_releases_successful_outputs() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let document = independent_config()
+        .replace(
+            "display_mode = \"independent\"",
+            "display_mode = \"mirrored\"",
+        )
+        .replace(
+            "theme_source_connector = \"DP-1\"",
+            "theme_source_connector = \"\"",
+        );
+    let (mut runtime, state, at) = battery_runtime_document(&document);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+    runtime.observe_power(power_observation(Battery));
+    runtime.observe_power(power_observation(Ac));
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    state.lock().unwrap().fail_applies_remaining = 1;
+
+    let response = runtime_command(&mut runtime, at, "play", None);
+    assert!(!response.ok, "the first output must fail");
+    assert_eq!(status(&mut runtime, at)["playback_state"], "paused");
+    assert!(
+        state.lock().unwrap().active_outputs.is_empty(),
+        "the successful second output must not animate under Paused status"
+    );
+    assert!(runtime_command(&mut runtime, at, "play", None).ok);
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["DP-1".into(), "HDMI-A-1".into()])
+    );
+}
+
+#[test]
+fn failed_independent_battery_pause_resume_restores_selected_still_residency() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let (mut runtime, state, at) = battery_runtime(true);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+    runtime.observe_power(power_observation(Battery));
+    runtime.observe_power(power_observation(Ac));
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    {
+        let mut driver = state.lock().unwrap();
+        driver.fail_motion_attempts_remaining = 1;
+        driver.stage_events.clear();
+    }
+
+    let response = runtime_command(&mut runtime, at, "on", Some("DP-1 play"));
+    assert!(!response.ok, "the motion stage must fail");
+    assert!(response.message.contains("previous wallpaper restored"));
+    assert_eq!(
+        display_status(&mut runtime, at, "DP-1")["playback_state"],
+        "paused"
+    );
+    assert!(
+        state.lock().unwrap().active_outputs.is_empty(),
+        "rollback must preserve the released still-only renderer state"
+    );
+    assert!(state
+        .lock()
+        .unwrap()
+        .stage_events
+        .iter()
+        .all(|event| !event.contains("HDMI-A-1")));
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["DP-1".into()])
+    );
+    // The failed targeted command must also retain the other paused route's
+    // released marker, so its later Play performs a real launch.
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 play")).ok);
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["DP-1".into(), "HDMI-A-1".into()])
+    );
+}
+
+#[test]
+fn independent_resume_starts_a_fresh_cycle_interval() {
+    let (mut runtime, _state, at) = battery_runtime(true);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "cycle", Some("on")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 pause")).ok);
+    let before = display_status(&mut runtime, at, "DP-1")["entry_id"].clone();
+    // Make the old and resumed deadlines observably different without waiting
+    // a whole five-minute cycle. The synthetic tick falls between them.
+    thread::sleep(Duration::from_millis(40));
+    let resumed = Instant::now();
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
+    runtime.tick(
+        at,
+        resumed + Duration::from_secs(300) - Duration::from_millis(20),
+    );
+    assert_eq!(display_status(&mut runtime, at, "DP-1")["entry_id"], before);
+    runtime.tick(at, resumed + Duration::from_secs(301));
+    assert_ne!(display_status(&mut runtime, at, "DP-1")["entry_id"], before);
+}
+
+#[test]
+fn battery_still_cycling_and_hotplug_keep_all_motion_released() {
+    use wall_in_one_service::power::PowerSource::Battery;
+    let (mut runtime, state, at) = battery_runtime(true);
+    runtime.observe_power(power_observation(Battery));
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "cycle", Some("on")).ok);
+    let before = display_status(&mut runtime, at, "DP-1")["entry_id"].clone();
+    let now = Instant::now();
+    runtime.tick(at, now + Duration::from_secs(301));
+    assert_ne!(display_status(&mut runtime, at, "DP-1")["entry_id"], before);
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    state
+        .lock()
+        .unwrap()
+        .connected_outputs
+        .as_mut()
+        .unwrap()
+        .push("DP-2".into());
+    runtime.tick(at, now + Duration::from_secs(307));
+    assert_eq!(display_status(&mut runtime, at, "DP-2")["connected"], true);
+    assert!(state
+        .lock()
+        .unwrap()
+        .applies
+        .iter()
+        .all(|(_, motion)| !motion));
+    assert_eq!(status(&mut runtime, at)["renderer_failed"], false);
+}
+
+#[test]
+fn battery_replug_respects_reloaded_dynamics_and_option_changes() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let root = directory("battery-reload");
+    let path = root.join("runtime.toml");
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), true)
+        .replace("schema_version = 4", "schema_version = 5")
+        .replace(
+            "dynamics_enabled = true",
+            "dynamics_enabled = true\nstop_animations_on_battery = true",
+        );
+    fs::write(&path, &document).unwrap();
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(path.clone(), parsed, RuntimeDriver(state.clone()), at).unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    runtime.observe_power(power_observation(Battery));
+    fs::write(
+        &path,
+        document.replace("dynamics_enabled = true", "dynamics_enabled = false"),
+    )
+    .unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    runtime.observe_power(power_observation(Ac));
+    assert!(!state.lock().unwrap().motion_active);
+    runtime.observe_power(power_observation(Battery));
+    // Re-enable animations while disabling just the battery option: ordinary
+    // intent resumes without an AC event, and no saved transport was rewritten.
+    fs::write(
+        &path,
+        document.replace(
+            "stop_animations_on_battery = true",
+            "stop_animations_on_battery = false",
+        ),
+    )
+    .unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    runtime.observe_power(power_observation(Battery));
+    assert!(state.lock().unwrap().motion_active);
+    assert_eq!(status(&mut runtime, at)["animations_inhibited"], false);
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn battery_ac_resume_failure_remains_retryable_without_quarantining() {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    for independent in [false, true] {
+        let (mut runtime, state, at) = battery_runtime(independent);
+        runtime.apply_current().unwrap();
+        assert!(runtime_command(&mut runtime, at, "next", None).ok);
+        runtime.observe_power(power_observation(Battery));
+        state.lock().unwrap().fail_apply = true;
+        runtime.observe_power(power_observation(Ac));
+        let failed = status(&mut runtime, at);
+        assert_eq!(failed["renderer_failed"], true);
+        assert!(failed["taboo_entries"].as_array().unwrap().is_empty());
+        state.lock().unwrap().fail_apply = false;
+        assert!(runtime_command(&mut runtime, at, "play", None).ok);
+        assert!(state.lock().unwrap().motion_active);
+    }
+}
+
+#[test]
+fn battery_reload_samples_the_exact_candidate_before_enabling_motion() {
+    use wall_in_one_service::power::PowerSource::Battery;
+    let root = directory("battery-enable-preflight");
+    let path = root.join("runtime.toml");
+    let initial = config(Path::new("/bin/true"), Path::new("/bin/true"), true)
+        .replace("dynamics_enabled = true", "dynamics_enabled = false");
+    let parsed: Config = toml::from_str(&initial).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(path.clone(), parsed, RuntimeDriver(state.clone()), at).unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    let enabled = initial
+        .replace("schema_version = 4", "schema_version = 5")
+        .replace(
+            "dynamics_enabled = false",
+            "dynamics_enabled = true\nstop_animations_on_battery = true",
+        );
+    fs::write(&path, enabled).unwrap();
+    let mut sampled = false;
+    let response = runtime.handle_with_power(
+        wall_in_one_service::protocol::Request {
+            verb: "reload".into(),
+            argument: None,
+        },
+        at,
+        |enabled| {
+            assert!(enabled);
+            sampled = true;
+            power_observation(Battery)
+        },
+    );
+    assert!(response.ok, "{}", response.message);
+    assert!(sampled);
+    assert!(state
+        .lock()
+        .unwrap()
+        .applies
+        .iter()
+        .all(|(_, motion)| !motion));
+    assert_eq!(status(&mut runtime, at)["animations_inhibited"], true);
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_battery_enable_restores_paused_renderer_residency() {
+    use wall_in_one_service::power::PowerSource::Battery;
+    let root = directory("battery-rollback");
+    let path = root.join("runtime.toml");
+    let initial = config(Path::new("/bin/true"), Path::new("/bin/true"), true);
+    let parsed: Config = toml::from_str(&initial).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(path.clone(), parsed, RuntimeDriver(state.clone()), at).unwrap();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+    assert!(state.lock().unwrap().motion_active);
+    let candidate = initial
+        .replace("schema_version = 4", "schema_version = 5")
+        .replace(
+            "dynamics_enabled = true",
+            "dynamics_enabled = true\nstop_animations_on_battery = true",
+        )
+        .replace("layer = \"background\"", "layer = \"bottom\"");
+    fs::write(&path, candidate).unwrap();
+    state.lock().unwrap().fail_applies_remaining = 1;
+    let response = runtime.handle_with_power(
+        wall_in_one_service::protocol::Request {
+            verb: "reload".into(),
+            argument: None,
+        },
+        at,
+        |_| power_observation(Battery),
+    );
+    assert!(!response.ok, "candidate must fail: {}", response.message);
+    assert_eq!(status(&mut runtime, at)["playback_state"], "paused");
+    assert!(
+        state.lock().unwrap().motion_active,
+        "rejected battery enable must restore the resident paused renderer"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1421,6 +1867,15 @@ fn independent_apply_stages_stills_theme_palette_then_renderers() {
     assert!(still_dp < palette && palette < first_motion, "{events:?}");
     let snapshot = status(&mut runtime, at);
     assert_eq!(snapshot["status_version"], 2);
+    assert_eq!(
+        snapshot["supported_config_schemas"],
+        serde_json::json!([4, 5])
+    );
+    assert_eq!(snapshot["runtime_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        snapshot["runtime_executable"],
+        std::env::current_exe().unwrap().to_str().unwrap()
+    );
     assert_eq!(snapshot["display_mode"], "independent");
     assert_eq!(snapshot["theme_source"]["configured"], "DP-1");
     assert_eq!(snapshot["theme_source"]["effective"], "DP-1");

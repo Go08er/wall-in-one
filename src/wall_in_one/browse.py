@@ -24,6 +24,7 @@ from typing import Final, cast
 
 from wall_in_one import paths
 from wall_in_one.library import owned
+from wall_in_one.library.owned import Index as OwnedIndex
 from wall_in_one.providers import http, registry
 from wall_in_one.providers.base import (
     CandidateDetail,
@@ -323,6 +324,7 @@ class Browser:
         # configured roots explicitly so a copy in any one of them counts.
         self._library_roots = tuple(library_roots) or ((root,) if root is not None else ())
         self._roots_generation = 0
+        self._owned_generation = 0
         self._roots_lock = threading.RLock()
         self._providers: dict[str, Provider] = {}
         self._owned: owned.Index | None = None
@@ -340,18 +342,24 @@ class Browser:
             with self._roots_lock:
                 if self._owned is not None:
                     return self._owned
-                generation = self._roots_generation
+                generation = self._owned_generation
                 roots = self._library_roots
             # Walking a large library can take long enough for somebody to
             # change the configured roots. Do that work outside the lock, then
             # publish it only if it still describes the current settings.
             built = owned.read(roots)
             with self._roots_lock:
-                if generation != self._roots_generation:
+                if generation != self._owned_generation:
                     continue
                 if self._owned is None:
                     self._owned = built
                 return self._owned
+
+    @property
+    def cached_owned(self) -> OwnedIndex | None:
+        """Return only a ready snapshot; never walk the filesystem for a widget."""
+        with self._roots_lock:
+            return self._owned
 
     def forget_owned(self) -> None:
         """Drop the index, so the next question re-reads the disk.
@@ -360,6 +368,7 @@ class Browser:
         library window, or the roots being reconfigured underneath it.
         """
         with self._roots_lock:
+            self._owned_generation += 1
             self._owned = None
 
     def configure_roots(self, *, root: Path | None, library_roots: Sequence[Path] = ()) -> None:
@@ -376,6 +385,7 @@ class Browser:
             self._root = root
             self._library_roots = tuple(library_roots) or ((root,) if root is not None else ())
             self._roots_generation += 1
+            self._owned_generation += 1
             self._owned = None
 
     # -- providers -------------------------------------------------------

@@ -128,10 +128,10 @@ def test_the_command_the_entry_runs_is_a_script_pyproject_installs() -> None:
 
 
 @pytest.mark.skipif(not PYPROJECT_PATH.is_file(), reason="not running from a source tree")
-def test_release_version_is_0_1_2_across_source_packages_and_installing_docs() -> None:
+def test_release_version_matches_source_packages_and_installing_docs() -> None:
     project = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     release = project["project"]["version"]
-    assert release == "0.1.2"
+    assert release == "0.1.3"
     assert wall_in_one.__version__ == release
 
     cargo = tomllib.loads(CARGO_TOML_PATH.read_text(encoding="utf-8"))

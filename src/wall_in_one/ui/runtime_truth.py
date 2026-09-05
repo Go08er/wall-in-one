@@ -70,6 +70,64 @@ class RuntimeScheduleTruth:
 
 
 @dataclass(frozen=True)
+class PowerRuntimeTruth:
+    """Automatic animation policy, separate from manual playback intent."""
+
+    source: str
+    available: bool
+    enabled: bool
+    inhibited: bool
+    reason: str
+
+    @property
+    def message(self) -> str:
+        if self.inhibited:
+            if self.reason == "power-unavailable":
+                return "Power information unavailable · battery restriction retained"
+            return "Animations stopped on battery"
+        if self.enabled and not self.available:
+            return "Power information unavailable"
+        return ""
+
+
+_POWER_FIELDS = (
+    "power_source",
+    "power_available",
+    "stop_animations_on_battery",
+    "animations_inhibited",
+    "animation_inhibition_reason",
+)
+
+
+def power_from_status(status: Mapping[str, object] | None) -> PowerRuntimeTruth | None:
+    """Read additive power fields; older runtimes have no power-policy view."""
+    if status is None or not all(key in status for key in _POWER_FIELDS):
+        return None
+    source = status["power_source"]
+    available = status["power_available"]
+    enabled = status["stop_animations_on_battery"]
+    inhibited = status["animations_inhibited"]
+    reason = status["animation_inhibition_reason"]
+    if (
+        not isinstance(source, str)
+        or source not in ("ac", "battery", "unknown")
+        or type(available) is not bool
+        or type(enabled) is not bool
+        or type(inhibited) is not bool
+        or not isinstance(reason, str)
+        or reason not in ("", "battery", "power-unavailable")
+        or available != (source != "unknown")
+        or (enabled and source == "battery" and not inhibited)
+        or (inhibited and (not enabled or source == "ac" or not reason))
+        or (not inhibited and reason != "")
+        or (reason == "battery" and source != "battery")
+        or (reason == "power-unavailable" and available)
+    ):
+        return None
+    return PowerRuntimeTruth(source, available, enabled, inhibited, reason)
+
+
+@dataclass(frozen=True)
 class RuntimeTruth:
     """The playback fields authoring pages need from one status response."""
 
@@ -85,6 +143,7 @@ class RuntimeTruth:
     displays: tuple[DisplayRuntimeTruth, ...] = ()
     theme_source: ThemeSourceTruth | None = None
     schedules: tuple[RuntimeScheduleTruth, ...] = ()
+    power: PowerRuntimeTruth | None = None
 
     @property
     def follows_schedule(self) -> bool:
@@ -135,6 +194,9 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     if type(raw_version) is not int or raw_version not in (1, 2):
         return None
     status_version = raw_version
+    power = power_from_status(status)
+    if any(key in status for key in _POWER_FIELDS) and power is None:
+        return None
     playlist_id = status.get("playlist_id")
     playlist = status.get("playlist")
     source = status.get("source")
@@ -238,6 +300,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         displays=parsed_displays,
         theme_source=theme_source,
         schedules=parsed_schedules,
+        power=power,
     )
 
 

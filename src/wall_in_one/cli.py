@@ -152,6 +152,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     deployed = parser.add_argument_group("Deployed application upgrade")
     deployed.add_argument(
+        "--update-status",
+        action="store_true",
+        help="report installed, running and loaded service generations as read-only JSON",
+    )
+    deployed.add_argument(
         "--deployed-upgrade-status",
         action="store_true",
         help="inspect the schema-2 deployed-app upgrade boundary without writing",
@@ -349,20 +354,29 @@ def _run_unattended_writer(write: Callable[[], int]) -> int:
         return 1
 
 
-def _run_graphical_startup_upgrade(*, require_legacy_safe: bool) -> int | None:
+def _run_graphical_startup_upgrade(
+    *, require_legacy_safe: bool, retry: Callable[[str], bool] | None = None
+) -> int | None:
     """Finish an exact deployed upgrade before GTK reads configuration."""
     from wall_in_one import deployed_upgrade_transaction, legacy_migration
 
-    try:
-        with legacy_migration.profile_transaction():
-            outcome = deployed_upgrade_transaction.ensure()
-            if require_legacy_safe:
-                legacy_migration.require_unattended_safe_locked()
-    except deployed_upgrade_transaction.TransactionError as error:
-        return _deployed_upgrade_error(error)
-    except legacy_migration.MigrationError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
+    while True:
+        try:
+            with legacy_migration.profile_transaction():
+                outcome = deployed_upgrade_transaction.ensure()
+                if require_legacy_safe:
+                    legacy_migration.require_unattended_safe_locked()
+            break
+        except deployed_upgrade_transaction.TransactionError as error:
+            result, detail = _deployed_upgrade_error(error), str(error)
+        except legacy_migration.MigrationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            result, detail = 1, str(error)
+        # The recovery window owns no authoring worker, service or migration
+        # lock. A retry occurs only after an explicit user gesture; unsafe
+        # evidence is never bypassed just to get the main window open.
+        if require_legacy_safe or retry is None or not retry(detail):
+            return result
     if outcome.changed:
         print(outcome.detail)
     return None
@@ -378,7 +392,10 @@ def _write_runtime_config() -> int:
         # while systemd's preflight is scanning, that newer GUI generation must
         # land after this older snapshot rather than be rolled back by it.
         with runtime_config.compiler_lock():
-            settings = config.load_strict()
+            # First-run defaults are suitable for the GUI, not for publishing
+            # a runtime without its owning settings. Such an orphan makes the
+            # next migration probe correctly refuse to assume a fresh install.
+            settings = config.load_strict(require_present=True)
             session = Session(settings)
             try:
                 # Runtime publication is a read-only authoring snapshot. The
@@ -391,6 +408,9 @@ def _write_runtime_config() -> int:
                 changed = runtime_config.update(settings, session)
             finally:
                 session.shutdown()
+    except config.MissingSettingsError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_CONFIG
     except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -640,6 +660,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return client.dispatch(options.verb, " ".join(words) if words else None)
 
+    if options.update_status:
+        import json
+
+        from wall_in_one import update_status
+
+        print(json.dumps(update_status.report(), indent=2))
+        return 0
+
     migration = _run_legacy_migration(options)
     if migration is not None:
         return migration
@@ -667,7 +695,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if maintenance is not None:
         return maintenance
 
-    blocked = _run_graphical_startup_upgrade(require_legacy_safe=options.service)
+    def retry_startup(message: str) -> bool:
+        from wall_in_one.ui.recovery import run
+
+        return run(message)
+
+    blocked = _run_graphical_startup_upgrade(
+        require_legacy_safe=options.service, retry=retry_startup
+    )
     if blocked is not None:
         return blocked
 

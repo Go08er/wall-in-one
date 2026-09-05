@@ -31,6 +31,11 @@
         # alias to happen to resolve to 3.14.
         python = pkgs.python314;
 
+        # This client only talks to an existing system bus. It needs neither
+        # daemon activation integration nor libsystemd mapped into the small
+        # resident runtime, including when the battery policy is disabled.
+        powerDbus = pkgs.dbus.override { enableSystemd = false; };
+
         # The GApplication id, and so the Wayland app-id, the desktop entry's
         # filename and the icon's. It is `wall_in_one.paths.APPLICATION_ID`;
         # spelled once here so the three names cannot drift apart.
@@ -56,7 +61,7 @@
 
         wall-in-one-service = pkgs.rustPlatform.buildRustPackage {
           pname = "wall-in-one-service";
-          version = "0.1.2";
+          version = "0.1.3";
           src = pkgs.lib.fileset.toSource {
             root = ./service;
             fileset = pkgs.lib.fileset.unions [
@@ -67,6 +72,8 @@
             ];
           };
           cargoLock.lockFile = ./service/Cargo.lock;
+          buildInputs = [ powerDbus ];
+          nativeCheckInputs = [ pkgs.dbus ];
           doCheck = true;
 
           # The integration tests write small shell scripts and then have the
@@ -79,10 +86,11 @@
           # near the one that caused it, and only under the right scheduling --
           # it survived 37 consecutive runs here and still broke a real rebuild.
           #
-          # One thread means no concurrent fork, which removes the race rather
-          # than narrowing it. The binary is fourteen tests and under two
-          # seconds; running them at once buys nothing worth this.
-          RUST_TEST_THREADS = "1";
+          # Keep process-spawning integration tests serial to avoid inheriting
+          # a sibling test's open executable while it is still being written.
+          # The cargo check hook sets RUST_TEST_THREADS itself; this flag keeps
+          # it from replacing our serial intent with NIX_BUILD_CORES.
+          dontUseCargoParallelTests = true;
 
           meta = with pkgs.lib; {
             description = "Small session runtime for Wall-in-One";
@@ -94,7 +102,7 @@
 
         wall-in-one = python.pkgs.buildPythonApplication {
           pname = "wall-in-one";
-          version = "0.1.2";
+          version = "0.1.3";
           pyproject = true;
           src = ./.;
 
@@ -397,7 +405,7 @@
                 timer=${wall-in-one}/share/systemd/user/wall-in-one-health-sync.timer
                 grep -F 'ExecStartPre=${wall-in-one}/bin/wall-in-one --service-startup-prepare' "$unit"
                 grep -F 'ExecStartPre=${wall-in-one}/bin/wall-in-one-service --check-config' "$unit"
-                grep -F 'ExecStart=${wall-in-one}/bin/wall-in-one-service' "$unit"
+                grep -Fx 'ExecStart=${wall-in-one}/bin/wall-in-one-service' "$unit"
                 grep -F 'Restart=on-abnormal' "$unit"
                 grep -F 'RestartForceExitStatus=1' "$unit"
                 grep -F 'RestartPreventExitStatus=78' "$unit"
@@ -565,6 +573,7 @@
         };
 
         devShells.default = pkgs.mkShell {
+          buildInputs = [ powerDbus ];
           packages = [
             (python.withPackages (ps: [
               ps.pygobject3
@@ -582,6 +591,11 @@
             pkgs.clippy
             pkgs.rustc
             pkgs.rustfmt
+            pkgs.pkg-config
+            pkgs.xvfb-run
+            pkgs.xauth
+            pkgs.luau
+            pkgs.shellcheck
           ] ++ runtimeTools;
 
           shellHook = ''

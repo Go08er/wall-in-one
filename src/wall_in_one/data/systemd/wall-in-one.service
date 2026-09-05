@@ -14,7 +14,7 @@ Type=simple
 # the prior document as a candidate for the exact Rust validation below.
 ExecStartPre=wall-in-one --service-startup-prepare
 # Use the daemon's production parser without claiming its socket or touching a
-# renderer. This admits only a Rust-consumable schema-4 last-known-good file.
+# renderer. A malformed or unsupported document stops here with a clear error.
 ExecStartPre=wall-in-one-service --check-config
 ExecStart=wall-in-one-service
 # A regular timer owns durable quarantine persistence. This final attempt is

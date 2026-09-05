@@ -184,7 +184,7 @@ def test_borked_pairing_is_obvious_and_offers_removal_not_retry(
 
     assert page._health_group is not None
     assert page._health_action is not None
-    assert "Borked" in page._health_group.get_title()
+    assert "Playback unavailable" in page._health_group.get_title()
     assert "Playback, Quick choice, and transport retry are disabled" in (
         page._health_group.get_description() or ""
     )

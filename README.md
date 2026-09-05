@@ -1,15 +1,11 @@
 # Wall-in-One
 
 > [!WARNING]
-> **Pre-alpha — in testing.** This is not ready to be relied on. It has never
-> been run for more than a short stretch, much of its interface has had little
-> clicked by a human, and the bugs found so far were found by running it rather
-> than by its test suite — so assume running it longer will find more.
->
-> Expect breakage. The retired Noctalia Luau plugin has an explicit,
-> no-overwrite importer, and the one shipped schema-2 Python/Rust profile has a
-> narrowly evidence-gated automatic upgrade. Other pre-alpha formats may still
-> move without migration. Do not point it at wallpapers you would mind losing.
+> **Pre-alpha — in testing.** The app has limited human testing and has not
+> completed a long-running soak or physical multi-monitor validation. Back up
+> your wallpaper library and settings before trying it. Supported upgrade paths
+> are described in the [migration guide](docs/migrating.md); other early formats
+> may not migrate automatically.
 
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.
 
@@ -21,12 +17,9 @@ Noctalia plugin talks to it.
 
 ## Status
 
-**Working, and in use.** The library, pairings, automatic stills, playlists,
-schedules, the colour pipeline, and browsing two wallpaper sites are all built
-and exercised against a live one-output system. Independent multi-display
-behavior is implemented and covered separately by software tests. The test
-suite checks the logic, protocols, packaging and widget wiring; the limits
-below say what still has not been demonstrated by real use.
+The app manages a local library, video/still pairings, playlists, schedules,
+Wallpaper Engine scenes, colour sync, and downloads from two wallpaper sites.
+The core workflows have been exercised on a single-display desktop.
 
 The core Luau workflows are present, but the authoring models are not identical.
 The software supports per-display wallpaper routing, schedules and transport;
@@ -36,20 +29,10 @@ app-owned equivalent. Scene scaling and clamp migrate from one designated
 display into typed global settings. The exact import and intentional-reset list is in
 [`docs/migrating.md`](docs/migrating.md).
 
-Three things are worth knowing before you rely on it:
-
-- **Multi-display support is theoretical until physical validation.**
-  Independent routes, schedules, cursors, renderers and transport are supported
-  in software and covered by automated tests. The development machine and
-  desktop VM each expose one output; the behavior has not been validated with
-  two physical monitors showing different playlists.
-- **The GUI has still had limited human use.** Tests number in the thousands,
-  cover the logic, and drive widgets programmatically, which proves wiring
-  rather than whether anything *looks* right. The browse screen, playlist
-  reordering and colour sync have now had real use and real bug reports; much
-  of the rest has not.
-- **It has not been through a long soak.** Bugs found so far were found by
-  running it, not by reading it -- so assume running it longer will find more.
+Independent display routing, schedules, and playback controls have automated
+coverage, but have not been validated with different playlists on two physical
+monitors. Automated GUI checks also do not replace human visual and usability
+testing.
 
 ## The Noctalia plugin
 
@@ -62,32 +45,15 @@ the wallpaper logic lives there.
 The plugin is optional. This app is a complete wallpaper manager on its own;
 the plugin exists so the bar can drive it without opening the window.
 
-Companion revisions through `a5e23c9` do not require status
-version 2 or expose the authoritative independent-route fields, their
-direct-runtime fallback does not persist a newly observed Borked item, and
-their eight-second callback deadline is shorter than Wall-in-One's legitimate
-45-second action bound. The matching companion requires status version 2,
-requests the health hand-off after a non-durable crash finding, and allows 55
-seconds for the bounded action. This tree's `flake.lock` pins the reviewed
-companion revision `a17eb70f653afb4cf5c04afc912cdca8b14ac06e`. This v0.1.2
-app follow-up does not change that source or protocol. A machine moving from an
-older companion must complete the compatible app's schema-4 cutover before
-loading the strict client; until then, use the packaged service/health timer
-and the app's own status as the authority. The exact compatibility boundary is
-recorded in
+Upgrade the app before enabling an updated companion. Compatibility details and
+the older-plugin handover are in
 [`docs/migrating.md`](docs/migrating.md#companion-noctalia-plugin-compatibility).
 
 ## Why it exists
 
-This started as a Noctalia Luau plugin and outgrew it. Luau caps a function at
-200 locals -- and a plugin entry file *is* one function, so the whole plugin
-shares that budget -- and meters each callback against a CPU deadline (12 ms for
-updates, 25 ms for callbacks). Those two limits trade against each other:
-factoring code out to save locals adds call overhead against the deadline. A
-wallpaper manager with providers, a library, and a palette browser does not fit.
-
-So the manager became an application, and the plugin shrinks to what a plugin is
-good at: a widget and a few shortcuts that poke the app.
+This started as a Noctalia plugin. A separate application gives library editing,
+downloads, and previews their own window and worker processes, while a small
+runtime keeps wallpaper playback running after that window closes.
 
 ## Install
 
@@ -149,83 +115,37 @@ preflights run before Rust:
 $ systemctl --user enable --now wall-in-one.service
 ```
 
-Running `wall-in-one-service` directly is a schema-4-only diagnostic path; it
-bypasses those Python migration preflights.
+Running `wall-in-one-service` directly bypasses Python's migration preparation;
+use the packaged service for normal operation.
 
-`wall-in-one --write-config` performs the same compilation without importing
-GTK or opening a window. Before every systemd-managed service start, the
-packaged unit runs a migration-aware form of that compiler and then asks
-Rust's production parser to validate the exact surviving document without
-claiming a socket or renderer. An upgrade can therefore regenerate an older
-schema without waiting for somebody to open the GUI, while a missing,
-malformed, or still-obsolete document stops before the Rust main process.
-Opening and closing `wall-in-one` later has no effect on rotation.
+Opening and closing the window has no effect on rotation. To compile library
+changes without a window, use `wall-in-one --write-config`. The service runs
+migration preparation and runtime validation before startup; a valid
+last-known-good configuration can keep playback working after an ordinary
+compilation error. Migration conflicts still require attention. See the
+[runtime contract](docs/runtime-config.md) and [migration guide](docs/migrating.md)
+for recovery details.
 
-`wall-in-one --sync-runtime-health` is the matching headless persistence bridge.
-It reads one atomic Rust status snapshot, maps newly reported borked entries
-back to app-owned media, writes their pairing health, recompiles, and asks Rust
-to reload. It never opens GTK, never clears a marker merely because a bounded
-snapshot omitted it, and leaves the last-known-good runtime document untouched
-if compilation fails. A shell or bar integration may invoke it after status
-reports a taboo entry; Rust never runs Python or writes authoring data itself.
-The packaged service also couples a non-persistent systemd timer to Rust and
-runs this bridge 30 seconds after startup and 30 seconds after each prior sync
-finishes. A no-report status returns before any authoring scan/write.
+The packaged health timer saves renderer-failure reports while the window is
+closed. It stops with the runtime and does not replay missed intervals. The
+companion supplies this handoff for direct launches outside systemd.
 
-The retained `wall-in-one --service` is a compatibility fallback during this
-transition, not the packaged unit's implementation. Stop the Rust runtime
-deliberately with `wall-in-one ctl quit`.
+Stop playback with `wall-in-one ctl stop`, or shut down the runtime with
+`wall-in-one ctl quit`. The older `wall-in-one --service` command is a
+compatibility fallback, not the packaged service implementation.
 
-The Nix package also installs `share/systemd/user/wall-in-one.service` plus its
-health-sync service/timer. To start the service with the graphical session:
-
-```console
-$ systemctl --user enable --now wall-in-one.service
-```
-
-The unit first runs `wall-in-one --service-startup-prepare`. Deployed-upgrade
-and unresolved legacy-migration failures remain fatal; only an ordinary
-current-profile compilation error may leave the previous resolved document
-byte-for-byte intact as a candidate. A second `wall-in-one-service
---check-config` preflight loads that exact candidate through Rust's production
-parser without claiming a socket or renderer. Only a consumable schema-4
-document reaches the Rust main process, so a valid last-known-good document can
-keep unattended rotation alive while schema 2, malformed TOML, and missing
-state stop once. The compiler validates every known setting type/range and
-likewise refuses unreadable pairings, playlists, schedules, display
-assignments, or favourites until the named file is repaired.
-
-The runtime claims its mode-0600 socket before applying anything, so a second
-instance loses without changing the wallpaper. At graphical-session startup it
-retries only desktop-readiness failures for a bounded eight seconds; Noctalia
-and niri helper calls themselves time out after three seconds and keep only a
-bounded stderr diagnostic. A deliberate `ctl quit` is a clean exit and is not
-restarted. Abnormal Rust exits and its ordinary runtime-failure status use the
-unit's five-second retry, capped at five starts per minute; configuration
-preflight failures stop once. The checked-in units use bare commands so they
-remain useful outside Nix; the Nix package rewrites every executable to a store
-path.
 If you copy the three units manually from
 `src/wall_in_one/data/systemd/`, make sure
 `wall-in-one`, `wall-in-one-service` and GNU `timeout` are on the user manager's
 `PATH`, then run `systemctl --user daemon-reload` before enabling it.
-
-The health timer is `BindsTo=` the Rust unit, so an explicit stop, crash, or
-failed start cannot leave Python polling in the background. Runs cannot overlap
-and missed intervals are not replayed after login or suspend. Its normal
-no-change stdout is discarded while errors remain in the journal. Stop also
-makes one best-effort persistence attempt capped at two seconds; it cannot hold a
-wedged authoring store open during shutdown. Direct non-systemd daemon launches
-need a bar/shell caller for the hand-off; the matching companion revision adds
-that call. The companion lives in its separate repository; this v0.1.2 app
-follow-up neither changes nor silently republishes it.
 
 If the resolved runtime document itself is missing, invalid, or still uses an
 obsolete schema, the exact Rust preflight leaves the unit failed after one
 attempt. Repair the authoring source and explicitly recover with
 `systemctl --user reset-failed wall-in-one.service` followed by
 `systemctl --user restart wall-in-one.service`. A damaged authoring file alone
-does not stop an otherwise-valid schema-4 last-known-good runtime.
+does not stop an otherwise-valid last-known-good runtime. Migration conflicts
+remain fatal until the reported problem is resolved.
 
 ### Test it away from your desktop
 
@@ -245,37 +165,31 @@ software-rendering/Steam/multi-monitor limits.
 
 ## Using it
 
-The window follows the same path as the data: **Browse -> Media/Pairings ->
-Playlists -> Schedules -> Settings**. The bottom navigation switches between
-five real pages:
+The bottom navigation offers **Store, Library, Playlists, Schedules and
+Settings**. The window opens on your Library. A **pairing** brings together a
+wallpaper's still image, optional animation and colour policy:
 
-- **Browse** searches and downloads from Wallhaven and MotionBGS without
+- **Store** searches and downloads from Wallhaven and MotionBGS without
   leaving the main window.
-- **Media/Pairings** is the complete crafting library, independent of what is
-  currently playing. Left-clicking a tile opens that item's full-size pairing
-  editor; right-clicking plays it through the visible one-entry **Quick choice**
-  playlist. Adaptive colours offer all ten Noctalia generators with real,
-  lazily cached previews. Community and custom palettes show their stored
-  colours. Built-ins remain honestly unpreviewed because Noctalia does not
-  expose their colours without applying them.
-- **Playlists** creates, renames and deletes ordered rotations. Add media from
-  the searchable thumbnail pane by clicking or ordinary drag-and-drop. Within
-  the playlist, drag a row's handle to reorder the live sortable list. The
-  entry's stable id is not changed and the same pairing may appear more than
-  once. Borked media stays visible for repair but cannot be added or dragged
-  into another playback route; retained Borked or missing entries are labelled
-  unavailable, skipped when safe media remains, and disable Play when the list
-  has no usable item. Large rotations load 72 stable order rows at a time while
-  the complete stored order remains available to playback.
-- **Schedules** switches the active playlist, resumes calendar control, chooses
-  the default playlist, assigns playlists to connectors, and edits months,
-  weekdays and local-time windows with visual selectors. Independent mode also
-  exposes each live display's transport, Stop, Cycle and Shuffle controls with
-  their saved-default/manual provenance. Rules lower in the list have higher
-  priority: the last matching rule wins. The editor loads rules 48 at a time,
-  so the supported 512-rule ceiling remains usable rather than a widget burst.
-- **Settings** keeps library roots, playback, providers, colour and appearance
-  controls visible as part of the main workflow rather than another window.
+- **Library** contains your pairings, independent of what is currently playing.
+  Clicking a wallpaper or **Edit** opens its full-size pairing editor. Use the
+  visible **Apply** action to play it; independent-display mode offers an
+  explicit display choice. Right-click opens the actions menu without changing
+  the wallpaper. Applying uses the one-entry **Quick choice** playlist.
+  The editor also lets you choose the representative still and colours.
+- **Playlists** creates, renames and deletes ordered rotations. Add pairings from
+  the searchable Library rows with **+**, double-click, Enter or drag-and-drop.
+  Drag a playlist row's handle to reorder it, or focus the row and use
+  `Ctrl+Up` / `Ctrl+Down`. A pairing can appear more than once. Unavailable
+  entries stay visible but are skipped; Play is disabled if none can play.
+  See [playlist behavior and limits](docs/library.md#playlist-behavior-and-limits).
+- **Schedules** chooses the default playlist and when other playlists take
+  over, using month, weekday and local-time selectors. You can also choose a
+  playlist temporarily or resume calendar control. Independent mode adds
+  playlist assignments and playback controls for each display. Rules lower in
+  the list have higher priority: the last matching rule wins.
+- **Settings** manages library folders, playback defaults, providers, colours
+  and appearance.
 
 On first run, Wall-in-One does not silently turn a detected Noctalia wallpaper
 directory into a place it may write. A one-time prompt shows the exact detected
@@ -297,17 +211,16 @@ everything is stored.
 | `Ctrl+Shift+R` | Random wallpaper |
 | `Ctrl+F` | Search the library |
 | `F5` | Rescan the library |
-| `Ctrl+B` | Find wallpapers online |
+| `Ctrl+B` | Open Store |
 | `Ctrl+,` | Settings |
 | `Ctrl+P` | Palettes |
 | `Ctrl+?` | Keyboard shortcuts |
 | `Ctrl+W` | Close the window |
 
-The same list is in the app under **Keyboard Shortcuts** in the menu. Every
-shortcut is modified, deliberately: the search box holds focus for whole
-seconds at a time, and a bare `n` for "next wallpaper" would land in it. The
-dialogue needs libadwaita 1.9 or newer; on anything older the keys still work
-and the menu item reports that it cannot list them.
+The same list is in the app under **Keyboard Shortcuts** in the menu. These
+shortcuts use modifier keys so typing in the search box does not change the
+wallpaper. The dialogue needs libadwaita 1.9 or newer; on anything older the
+keys still work and the menu item reports that it cannot list them.
 
 ## Video wallpapers
 
@@ -315,10 +228,18 @@ Videos are played by mpvpaper, with the paired still set through Noctalia
 underneath first, so the palette matches what is on screen even if the renderer
 dies.
 
-**Dynamics** (`Settings -> Playback`, or `wall-in-one ctl dynamics off`) pauses
-videos and shows their stills instead. Blur is markedly more expensive over an
-animated wallpaper, so this is a performance control as much as a battery one
--- see [`docs/niri.md`](docs/niri.md).
+**Animate wallpapers** (`Settings -> Playback`, or `wall-in-one ctl dynamics off`)
+controls both videos and Wallpaper Engine scenes. Turning it off releases their
+renderers and shows paired still images. This also avoids repeatedly blurring
+moving wallpaper behind translucent windows; see [`docs/niri.md`](docs/niri.md).
+
+**Stop animations on battery** is a separate, optional switch, off by default.
+It shows paired stills while UPower reports battery power, even with the app
+window closed. Playlists and schedules can continue choosing stills. Plugging
+in resumes only animations allowed by your current playback settings; it does
+not undo a manual Pause or Stop. Restarted videos/scenes may begin again from
+the start. The interface reports when power information is unavailable. See
+[`docs/settings.md`](docs/settings.md#battery-animation-control) for details.
 
 **Audio** is muted by default, because a wallpaper that makes noise is a
 surprise. The track stays loaded rather than being disabled, which is what lets
@@ -365,15 +286,15 @@ above for what has and has not been watched on physical multi-monitor hardware.
 
 ## Finding wallpapers
 
-The search button in the header -- or **Find wallpapers** in the menu, or
-`Ctrl+B` -- opens the Browse tab, which searches [Wallhaven](https://wallhaven.cc) for
+The search button in the header -- or **Store** in the menu, or
+`Ctrl+B` -- opens Store, which searches [Wallhaven](https://wallhaven.cc) for
 stills and [MotionBGS](https://motionbgs.com) for video wallpapers. Downloads
 land under the explicitly chosen first library root, and the library is
 rescanned when one finishes, so the file shows up in the grid without being
-asked for. With no root configured, Browse refuses the download and points to
+asked for. With no root configured, Store refuses the download and points to
 Settings instead of guessing a destination.
 
-Browse uses explicit Previous/Next photo pages with at most 40 heavyweight GTK
+Store uses explicit Previous/Next photo pages with at most 40 heavyweight GTK
 cards alive at once. A 250-result MotionBGS search remains fully reachable, but
 walking it no longer leaves hundreds of decoded card widgets consuming memory;
 search text, cursor, filters and batch picks survive page changes.
@@ -395,20 +316,19 @@ what the download path checks before it writes anything.
 
 ## Colour sync
 
-Noctalia's palette generator is a pure CLI -- `noctalia theme <image>` is a
-deterministic function of its arguments, with no running shell required. That
-makes the whole colour story straightforward, and the app resolves its palette
-in three tiers:
+The app follows Noctalia's colours using three tiers:
 
 1. **Template** -- Noctalia renders its live 72-token palette into
    `~/.local/state/wall-in-one/palette.json` and runs
    `wall-in-one ctl reload-palette`. This is the only tier that can see a
    *built-in* palette such as Gruvbox or Nord, because those are compiled into
    the Noctalia binary and never exposed to the CLI.
-2. **Generated** -- if the current palette comes from the wallpaper, regenerate
-   it by running `noctalia theme` on that same wallpaper. Byte-identical to
-   what Noctalia itself produced.
-3. **Fallback** -- a neutral dark palette, so the app always starts.
+2. **Generated approximation** -- without a usable template, a wallpaper-based
+   palette can be generated using Noctalia's selected generator, saved
+   palette-driving image and pure-black setting. This is not a confirmed
+   snapshot of the shell's colours; high-contrast mode requires the template.
+3. **Fallback** -- a neutral light or dark palette matching the shell's mode
+   when available, so the app still starts without working colour integration.
 
 Tier 1 needs one-time setup:
 
@@ -426,12 +346,17 @@ is backed up first, and a hand-written entry under the same id is never
 overwritten. `--uninstall-theme-template` removes the settings block again.
 
 Check what you have with `--theme-status`, `--print-palette`, or `--print-css`.
+Palette updates are event-driven. A valid template file does not prove that
+every later palette change rendered successfully, particularly within the
+same light/dark mode. If app colours stop matching, check
+`wall-in-one --theme-status` and retry `noctalia msg templates-apply`; follow
+any reported registration or template error before trying again.
 
 **Palettes** in the menu browses what is installed: the ten built-ins,
 community palettes Noctalia has cached, your own custom ones, and a fourth
 group for the pre-5.x `colorschemes/` layout. That fourth group is listed with
 Apply disabled and the reason stated -- Noctalia 5.0.0-beta.7 cannot apply one,
-so offering the button would be a lie. The built-ins are listed without
+so its Apply button is unavailable. The built-ins are listed without
 swatches for a related reason: their names are strings in the binary and their
 colours are not. Palette directories are discovered and parsed on one bounded
 filesystem worker rather than GTK's interface thread. The browser and each
@@ -458,14 +383,20 @@ The complete verb reference and the behaviour behind it are in
 
 ## Settings
 
-The Settings tab writes `~/.config/wall-in-one/settings.toml`; it is also safe
-to edit by hand. The interactive loader clamps bad values so the repair screen
-can still open. The unattended `--write-config` compiler instead rejects an
-invalid typed value and preserves the last-known-good runtime document. The
-complete key, meaning and default table is in
-[`docs/settings.md`](docs/settings.md).
+The Settings tab writes `~/.config/wall-in-one/settings.toml`, which can also be
+edited by hand. The window can open with recovery defaults for inspection,
+but invalid persisted settings must be corrected in the file before new
+Settings changes can be saved. The unattended `--write-config` compiler also
+rejects invalid settings and preserves the last-known-good runtime document.
+See [settings and manual repair](docs/settings.md) for the keys, defaults and
+backup-first recovery steps.
 
 ## Upgrades and migration
+
+For an existing installation, start with [updating Wall-in-One](docs/updating.md).
+It covers replacing the app and service together and checking which build is
+actually running before enabling new features. Installing a package alone does
+not switch an already-running service to that build.
 
 The GUI, headless compiler, and packaged unit's Python preflight first check
 for the exact shipped schema-2 Python/Rust profile. When its independent

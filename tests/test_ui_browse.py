@@ -27,7 +27,9 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
+from wall_in_one import thumbnails  # noqa: E402
 from wall_in_one.browse import Browser, Downloaded  # noqa: E402
+from wall_in_one.library import owned  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
 from wall_in_one.providers import registry, wallhaven  # noqa: E402
 from wall_in_one.providers.base import (  # noqa: E402
@@ -199,6 +201,43 @@ def test_two_download_qualities_become_a_chooser() -> None:
     assert dialog._variants.get_visible()
 
 
+@pytest.mark.parametrize("failure", ["preview", "lookup", "conversion", "cache-write"])
+def test_preview_failures_preserve_metadata_and_download_quality(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = _candidate("motionbgs")
+    detail = CandidateDetail(candidate=candidate, variants=("4k", "hd"))
+    browser = _StubBrowser(detail)
+    monkeypatch.setattr(browser, "preview", lambda _url: b"image")
+    monkeypatch.setattr(thumbnails, "lookup_preview", lambda _url: b"")
+    monkeypatch.setattr(thumbnails, "to_displayable", lambda *_args, **_kw: b"")
+    monkeypatch.setattr(thumbnails, "store_preview", lambda *_args: None)
+
+    def fail(*_args: object, **_kwargs: object) -> bytes:
+        raise ProviderError("timeout", "only the preview failed")
+
+    if failure == "preview":
+        monkeypatch.setattr(browser, "preview", fail)
+    else:
+        name = {
+            "lookup": "lookup_preview",
+            "conversion": "to_displayable",
+            "cache-write": "store_preview",
+        }[failure]
+        monkeypatch.setattr(thumbnails, name, fail)
+    dialog = _open(browser, candidate)
+    try:
+        assert _settle(lambda: dialog._detail is detail)
+        assert dialog._variants.get_visible()
+        requested: list[str] = []
+        dialog._on_download = lambda _candidate, variant: requested.append(variant)
+        dialog._variants.set_selected(1)
+        dialog._download.emit("clicked")
+        assert requested == ["hd"]
+    finally:
+        dialog.cancel_pending()
+
+
 def test_a_failed_lookup_still_allows_the_download() -> None:
     """Failing to describe a wallpaper is no reason to refuse to fetch it.
 
@@ -314,6 +353,15 @@ def _answer(
 
 
 # -- filters -------------------------------------------------------------
+
+
+def test_store_titles_keep_existing_browse_entry_points(
+    dialog: browse_dialog.BrowseDialog,
+) -> None:
+    assert dialog.get_title() == "Store"
+    title = dialog._header.get_title_widget()
+    assert isinstance(title, Adw.WindowTitle)
+    assert title.get_title() == "Store"
 
 
 def test_filters_expand_inline_without_a_popover(dialog: browse_dialog.BrowseDialog) -> None:
@@ -613,6 +661,75 @@ def test_changed_query_can_queue_behind_an_in_flight_search(
 
     assert _settle(lambda: [card.candidate.identifier for card in dialog._cards] == ["new-query"])
     assert asked == ["first", "second"]
+
+
+def test_newest_query_supersedes_a_queued_intermediate_search(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    asked: list[str] = []
+
+    def search(_name: str, query: object) -> SearchResult:
+        text = str(getattr(query, "text", ""))
+        asked.append(text)
+        if text == "first":
+            started.set()
+            assert release.wait(2)
+        return _result(text, page=1)
+
+    monkeypatch.setattr(dialog._browser, "search", search)
+    try:
+        dialog._entry.set_text("first")
+        dialog.start_search(page=1)
+        assert started.wait(2)
+        for text in ("obsolete", "latest"):
+            dialog._entry.set_text(text)
+            dialog.start_search(page=1)
+    finally:
+        release.set()
+    assert _settle(lambda: not dialog._searching)
+    assert asked == ["first", "latest"]
+    assert [card.candidate.identifier for card in dialog._cards] == ["latest"]
+
+
+def test_cached_pages_and_details_do_not_wait_for_ownership_after_refresh(
+    dialog: browse_dialog.BrowseDialog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main_thread = threading.get_ident()
+    started = threading.Event()
+    release = threading.Event()
+    read_threads: list[int] = []
+    candidate = _candidate(identifier="aaa111")
+    index = owned.Index()
+    index.add(candidate, Path("/offline/wallpaper.png"))
+
+    def read(_roots: object) -> owned.Index:
+        read_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(10)
+        return index
+
+    # Start from a searched page with a ready, empty ownership snapshot.
+    _ = dialog._browser.owned
+    dialog._show_result(_result("aaa111", page=1), page=1)
+    monkeypatch.setattr(owned, "read", read)
+    monkeypatch.setattr(dialog._browser, "describe", lambda item: CandidateDetail(candidate=item))
+    monkeypatch.setattr(dialog._browser, "preview", lambda _url: b"")
+    try:
+        dialog.library_refreshed()
+        assert started.wait(2)
+        dialog._materialize_page(0)
+        dialog._open_detail(dialog._cards[0].candidate)
+        assert read_threads and main_thread not in read_threads
+        initially_pickable = dialog._cards[0].can_pick
+        assert initially_pickable
+    finally:
+        release.set()
+    assert _settle(lambda: dialog._ownership_future is None)
+    assert not dialog._cards[0].can_pick
+    detail = next(iter(dialog._detail_dialogs.values()))
+    assert detail._download.get_label() == "In your library"
 
 
 def test_changing_library_roots_retargets_browse_without_losing_the_query(

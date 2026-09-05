@@ -85,6 +85,14 @@ and overrides, and route-attributed renderer/retry diagnostics. Top-level mode
 values can say `mixed`; clients must not render their compatibility boolean as
 “off” in that case. `theme_source` distinguishes the saved colour connector
 from the effective live fallback.
+Newer status-version-2 services also report observed power and automatic
+animation inhibition. These fields do not replace manual playback state: a
+route may be `playing` while battery control keeps its paired still on screen.
+See [battery policy status](runtime-config.md#battery-policy-status) for the
+additive fields and unavailable-power behavior.
+`loaded_config_sha256` identifies the exact loaded file bytes, in addition to
+the compiler's `config_generation`. Updates use an explicit normal restart;
+see the [update procedure](updating.md).
 Configured assignments remain in the same atomic inventory while unplugged,
 with `connected = false`; each schedule row carries its optional connector, so
 a runtime-only bar can distinguish global and targeted rules without querying
@@ -123,7 +131,7 @@ claiming a window was observed. The `displays` spelling is an alias for the
 Display schedules page, so a shell or panel integration does not have to know
 that both concepts share one screen.
 
-`providers`, `search` and `download` reach the same provider code the Browse
+`providers`, `search` and `download` reach the same provider code the Store
 tab uses, so a wallpaper can be found and pulled into the library without
 opening the window. `providers` and `search` print tab-separated rows with `#`
 comment lines around them, which is what `cut -f1` and `while read` already
@@ -225,7 +233,9 @@ rather than imposing the old five-second limit on every request:
 | `select`; authoring-socket playlist fallback including compile, reload and apply | 110 seconds |
 | `download` | 600 seconds |
 
-These are client response deadlines, not unsafe cancellation points. In
+Each exchange shares one deadline across connecting, sending and receiving;
+partial response fragments do not reset it. These are client response
+deadlines, not unsafe cancellation points. In
 particular, an atomic write, directory fsync, trash move or metadata cascade
 which has started must finish its durability boundary even if the caller goes
 away. A renderer command, palette reload, window-open request or process quit

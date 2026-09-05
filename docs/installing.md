@@ -20,7 +20,7 @@ behind it. See [`docs/niri.md`](niri.md) for the other half of that story.
 ## Installing it
 
 ```console
-$ nix profile install github:goober/wall-in-one   # once published
+$ nix profile install github:Go08er/wall-in-one
 $ nix profile install .                           # from a checkout
 ```
 
@@ -33,6 +33,13 @@ the same thing through the system or user profile.
 `nix run` deliberately does not. It builds the package and executes
 `bin/wall-in-one` without adding anything to a profile, so nothing is installed
 and no menu entry appears -- which is the right behaviour for trying it out.
+
+### Updating an existing app installation
+
+Follow [Updating an existing installation](updating.md) before replacing a
+running app or service. Installing a new package does not necessarily update
+loaded user-unit commands or replace an older process. Keep your library paths
+and config/state backups; do not rerun fresh setup as an upgrade shortcut.
 
 ### Upgrading from the retired Noctalia plugin
 
@@ -59,7 +66,7 @@ checkout, a wheel and the store. The package rewrites it during `postInstall` to
 the absolute path of the wrapped binary:
 
 ```
-Exec=/nix/store/...-wall-in-one-0.1.2/bin/wall-in-one
+Exec=/nix/store/...-wall-in-one-0.1.3/bin/wall-in-one
 ```
 
 That rewrite is the difference between a menu entry that works and one that

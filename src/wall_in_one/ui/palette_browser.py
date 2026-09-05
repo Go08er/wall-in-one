@@ -433,7 +433,7 @@ class PaletteBrowserDialog(Adw.Dialog):
 
         self._sync = Adw.SwitchRow(
             title="Also set the scheme in Noctalia",
-            subtitle="Otherwise 'Use' only changes what this app generates for itself",
+            subtitle="Otherwise 'Use' only saves the wallpaper preview preference",
         )
         source.add(self._sync)
         page.add(source)

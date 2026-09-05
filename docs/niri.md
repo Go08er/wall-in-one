@@ -102,8 +102,8 @@ Wall-in-One's whole job includes wallpapers that do change, every frame. With a
 video wallpaper running, xray blur is recomputed **every frame**. It is still
 computed once and shared across all windows rather than per-window, so it is not
 catastrophic, but it is a real cost that a static wallpaper does not pay. The
-app's `dynamics` toggle (`wall-in-one ctl dynamics off`) exists partly for this:
-it pauses video wallpapers and shows their paired stills, which puts the blur
+app's animation toggle (`wall-in-one ctl dynamics off`) exists partly for this:
+it stops video and scene renderers and shows paired stills, which puts the blur
 back to being computed once.
 
 You can ask for true blur -- everything below the window, not just the

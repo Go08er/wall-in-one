@@ -74,6 +74,12 @@ SCHEDULE_TICK_SECONDS: Final = 60
 RUNTIME_STATUS_TICK_SECONDS: Final = 2
 PALETTE_RELOAD_DEBOUNCE_MS: Final = 75
 MAX_GUI_AUTHORING_QUEUE: Final = 32
+PACKAGE_SOURCE_ACTION: Final = "package-source"
+PRESENT_PACKAGE_ACTION: Final = "present-package"
+# Installed Nix package directories are immutable and distinguish revisions
+# even while their human-readable version strings are equal. This is source
+# identity, not a promise that a mutable development checkout is unchanged.
+PACKAGE_SOURCE: Final = str(Path(__file__).resolve().parent.parent)
 
 # GTK reads Noctalia's imported gtk.css at user priority only at startup, while
 # this provider is refreshed after every palette render. Both carry the same
@@ -295,6 +301,18 @@ class Application(Adw.Application):
                 Gio.ApplicationFlags.IS_SERVICE if service else Gio.ApplicationFlags.DEFAULT_FLAGS
             ),
         )
+        identity = Gio.SimpleAction.new_stateful(
+            PACKAGE_SOURCE_ACTION, None, GLib.Variant("s", PACKAGE_SOURCE)
+        )
+        identity.set_enabled(False)
+        # Disabled prevents activation, not change-state. Consume those
+        # requests explicitly so a desktop action client cannot rewrite the
+        # identity that later launchers use for generation checks.
+        identity.connect("change-state", lambda _action, _value: None)
+        self.add_action(identity)
+        present = Gio.SimpleAction.new(PRESENT_PACKAGE_ACTION, GLib.VariantType.new("(ss)"))
+        present.connect("activate", self._present_from_package)
+        self.add_action(present)
         self._service_start = service
         self._initial_page = initial_page
         self._held = False
@@ -450,6 +468,7 @@ class Application(Adw.Application):
         # window even when Python happens to reuse an object address.
         self._window_generation = 0
         self._palette_monitor: Gio.FileMonitor | None = None
+        self._noctalia_settings_monitor: Gio.FileMonitor | None = None
         self._palette_reload_source: int = 0
         # Live palette resolution may make several 10-second shell IPC calls
         # and one 30-second generator call.  A single application-owned worker
@@ -486,6 +505,17 @@ class Application(Adw.Application):
         self._stills = StillMaker(report=self.window_report)
 
     # -- lifecycle -------------------------------------------------------
+
+    def _present_from_package(self, _action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        expected, page = value.unpack()
+        if expected != PACKAGE_SOURCE:
+            # Ownership can change between a remote identity read and its
+            # activation request. Never let that race open an unintended build.
+            return
+        if page:
+            self.present_page(page)
+        else:
+            self.activate()
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
@@ -733,7 +763,7 @@ class Application(Adw.Application):
             return True
         self._show_legacy_migration_progress(
             "Checking older data",
-            "Looking for authoring from the retired Noctalia plugin…",
+            "Looking for settings and playlists from the previous Noctalia plugin…",
         )
         if not self._queue_legacy_migration_job("probe"):
             self._close_legacy_migration_dialog()
@@ -752,7 +782,7 @@ class Application(Adw.Application):
             return
         details = (
             f"\n\nSource: {found.source}"
-            + (f"\nLegacy schema: {found.schema}" if found.schema is not None else "")
+            + (f"\nSaved data format: {found.schema}" if found.schema is not None else "")
             + (
                 f"\nPlaylists: {found.playlists} · displays: {found.outputs}"
                 if found.schema is not None
@@ -763,13 +793,13 @@ class Application(Adw.Application):
         if found.conflicts:
             shown = "\n".join(str(path) for path in found.conflicts[:4])
             conflict_text = (
-                "\n\nCurrent authoring already exists and will never be overwritten or "
+                "\n\nCurrent settings or playlists already exist and will not be overwritten or "
                 f"merged automatically:\n{shown}"
             )
         body = (
-            "Wall-in-One found authoring from the retired Noctalia plugin. "
-            "A safe import leaves every legacy file untouched and only writes "
-            "into an empty current profile. "
+            "Wall-in-One found settings, playlists, and display assignments from the previous "
+            "Noctalia plugin. Importing keeps the original files and adds them only when "
+            "this app has no saved settings or playlists. "
             f"{found.detail}.{details}{conflict_text}"
         )
         if failure:
@@ -1295,9 +1325,31 @@ class Application(Adw.Application):
             # The post-hook remains a complete fast path, so an unavailable
             # monitor should cost redundancy rather than application startup.
             print(f"warning: palette monitor unavailable: {error}", file=sys.stderr)
+        else:
+            monitor.connect("changed", self._on_palette_directory_changed)
+            self._palette_monitor = monitor
+        # Missing/disabled template output cannot notify us. Noctalia writes
+        # scheme and mode changes to settings, so watch that independent event
+        # source too, without introducing a periodic shell-IPC polling loop.
+        self._start_noctalia_settings_monitor()
+
+    def _start_noctalia_settings_monitor(self) -> None:
+        if self._noctalia_settings_monitor is not None:
+            self._noctalia_settings_monitor.cancel()
+            self._noctalia_settings_monitor = None
+        # A fresh install may start before Noctalia has created its state
+        # directory. Watch the nearest existing ancestor, then move the watch
+        # down as directories appear; never create Noctalia's directories.
+        parent = paths.noctalia_settings_path().parent
+        while not parent.is_dir() and parent != parent.parent:
+            parent = parent.parent
+        settings_directory = Gio.File.new_for_path(str(parent))
+        try:
+            settings_monitor = settings_directory.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+        except GLib.Error:
             return
-        monitor.connect("changed", self._on_palette_directory_changed)
-        self._palette_monitor = monitor
+        settings_monitor.connect("changed", self._on_palette_directory_changed)
+        self._noctalia_settings_monitor = settings_monitor
 
     def _stop_palette_monitor(self) -> None:
         if self._palette_reload_source:
@@ -1306,6 +1358,9 @@ class Application(Adw.Application):
         if self._palette_monitor is not None:
             self._palette_monitor.cancel()
             self._palette_monitor = None
+        if self._noctalia_settings_monitor is not None:
+            self._noctalia_settings_monitor.cancel()
+            self._noctalia_settings_monitor = None
 
     def _on_palette_directory_changed(
         self,
@@ -1314,8 +1369,11 @@ class Application(Adw.Application):
         other: Gio.File | None,
         _event_type: Gio.FileMonitorEvent,
     ) -> None:
-        target = str(paths.palette_path())
-        if target not in (changed.get_path(), other.get_path() if other is not None else None):
+        changed_paths = {changed.get_path(), other.get_path() if other is not None else None}
+        settings_path = paths.noctalia_settings_path()
+        if {str(parent) for parent in settings_path.parents}.intersection(changed_paths):
+            self._start_noctalia_settings_monitor()
+        elif not {str(paths.palette_path()), str(settings_path)}.intersection(changed_paths):
             return
         # One atomic render can emit created, moved and changes-done events.
         # Restarting a short trailing timeout turns that burst into one repaint.
@@ -1531,16 +1589,26 @@ class Application(Adw.Application):
             callbacks = tuple(self._theme_reload_callbacks)
             self._theme_reload_callbacks.clear()
 
-        if result.resolved is None:
-            detail = result.error or "unknown palette resolution failure"
+        resolved = result.resolved
+        error = result.error
+        if resolved is not None:
+            try:
+                # Prepare/apply before replacing the authoritative snapshot.
+                # A bad palette must not strand the reload's callbacks or
+                # poison the colors used when another window opens.
+                self._apply_stylesheet(resolved)
+            except Exception as caught:
+                resolved = None
+                error = str(caught) or caught.__class__.__name__
+        if resolved is None:
+            detail = error or "unknown palette resolution failure"
             self.window_report(f"Palette reload failed; keeping current colours: {detail}")
         else:
-            self._resolved = result.resolved
-            self._apply_stylesheet(result.resolved)
+            self._resolved = resolved
             if self._window is not None:
-                self._window.show_palette(result.resolved)
+                self._window.show_palette(resolved)
         for callback in callbacks:
-            callback(result.resolved, result.error)
+            callback(resolved, error)
         return GLib.SOURCE_REMOVE
 
     def apply_noctalia_palette_async(
@@ -1724,6 +1792,11 @@ class Application(Adw.Application):
         remain in place. A newer request cooperatively cancels the older one
         and makes any already-running result ineligible to land.
         """
+        # An idle refresh can already be queued when the final window and
+        # workers shut down. Window absence is not permission to re-enter the
+        # synchronous headless path on a closed Session.
+        if self._runtime_shutdown or self._library_scan_shutdown:
+            return
         if self._removal_active:
             self._refresh_after_removal = True
             return
@@ -2082,6 +2155,8 @@ class Application(Adw.Application):
 
     def _publish_runtime_for_context(self) -> bool:
         """Use the non-blocking path whenever a real window owns this call."""
+        if self._runtime_shutdown:
+            return False
         if self._window is not None:
             published = self._publish_runtime_async()
             if published and self._removal_convergence_held:
@@ -3314,8 +3389,8 @@ class Application(Adw.Application):
         if type(omitted) is int and omitted > self._taboo_omitted_seen:
             self._taboo_omitted_seen = omitted
             self.window_report(
-                f"The runtime has {omitted} older taboo entries outside its bounded "
-                "status inventory; existing saved health markers were retained"
+                f"The runtime has {omitted} older playback warnings not included in this "
+                "status update; existing saved warnings were retained"
             )
         if window is not None:
             window.show_runtime_status(status)
@@ -3490,7 +3565,7 @@ class Application(Adw.Application):
         except pairings.PairingError as error:
             return _RuntimeHealthResult(
                 request,
-                error=f"Could not save borked wallpaper state: {error}",
+                error=f"Could not save wallpaper playback availability: {error}",
             )
         finally:
             if snapshot is not None:
@@ -3740,7 +3815,7 @@ class Application(Adw.Application):
         health = self._session.pairings.health(pairings.Identity.of(item))
         if health.is_borked:
             return Response.failure(
-                f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+                f"Playback unavailable for {item.name}; see Library for details and removal options"
             )
         try:
             chosen = (
@@ -3776,7 +3851,7 @@ class Application(Adw.Application):
         health = self._session.pairings.health(pairings.Identity.of(item))
         if health.is_borked:
             self.window_report(
-                f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+                f"Playback unavailable for {item.name}; see Library for details and removal options"
             )
             return False
         self._quick_choice_pending = True
@@ -3790,7 +3865,7 @@ class Application(Adw.Application):
                 raise ValueError(f"{item.name} was removed before Quick choice could save")
             health = self._session.pairings.health(pairings.Identity.of(current))
             if health.is_borked:
-                raise ValueError(f"{current.name} is marked Borked and cannot play")
+                raise ValueError(f"Playback unavailable for {current.name}")
             playlist_store = self._session.playlists
             return lambda: playlist_store.set_singleton(
                 QUICK_CHOICE_ID,
@@ -3853,8 +3928,7 @@ class Application(Adw.Application):
         health = self._session.pairings.health(pairings.Identity.of(item))
         if health.is_borked:
             self.window_report(
-                f"{item.name} is marked Borked and cannot play on {connector}; "
-                "remove or uninstall it first"
+                f"Playback unavailable for {item.name} on {connector}; remove or uninstall it first"
             )
             return False
         self._quick_choice_pending = True
@@ -3868,7 +3942,7 @@ class Application(Adw.Application):
                 raise ValueError(f"{item.name} was removed before Quick choice could save")
             health = self._session.pairings.health(pairings.Identity.of(current))
             if health.is_borked:
-                raise ValueError(f"{current.name} is marked Borked and cannot play")
+                raise ValueError(f"Playback unavailable for {current.name}")
             playlist_store = self._session.playlists
             return lambda: playlist_store.set_display_singleton(
                 connector,
@@ -5054,7 +5128,8 @@ class _Commands:
             health = session.pairings.health(pairings.Identity.of(item))
             if health.is_borked:
                 return Response.failure(
-                    f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+                    f"Playback unavailable for {item.name}; "
+                    "see Library for details and removal options"
                 )
             return self._app.play_item(item)
 
@@ -5064,7 +5139,8 @@ class _Commands:
             health = session.pairings.health(pairings.Identity.of(item))
             if health.is_borked:
                 raise ValueError(
-                    f"{item.name} is marked Borked and cannot play; remove or uninstall it first"
+                    f"Playback unavailable for {item.name}; "
+                    "see Library for details and removal options"
                 )
             playlist_store = session.playlists
 
@@ -5916,4 +5992,57 @@ def run(
     # Wayland app-id comes from paths.APPLICATION_ID; see docs/niri.md.
     GLib.set_application_name("Wall-in-One")
     application = Application(service=service, initial_page=initial_page)
+    try:
+        application.register(None)
+    except GLib.Error as error:
+        application._stills.shutdown()
+        application._session.shutdown()
+        print(
+            f"Cannot register Wall-in-One with the desktop session: {error.message}",
+            file=sys.stderr,
+        )
+        return 1
+    if application.get_is_remote():
+        # Registration, not a pre-launch socket-existence check, resolves the
+        # actual GApplication owner. Inspect its exported immutable identity
+        # before run() can forward activation to a different package. Old
+        # releases have no action, so their compatibility is unknown, not true.
+        identity = (
+            application.get_action_state(PACKAGE_SOURCE_ACTION)
+            if application.has_action(PACKAGE_SOURCE_ACTION)
+            else None
+        )
+        verified = (
+            identity is not None
+            and identity.get_type_string() == "s"
+            and identity.unpack() == PACKAGE_SOURCE
+            and application.has_action(PRESENT_PACKAGE_ACTION)
+        )
+        # Remote instances never ran do_startup and own no background workers.
+        # Release only resources allocated by this unstarted local shell.
+        application._stills.shutdown()
+        application._session.shutdown()
+        if not verified:
+            from wall_in_one.ui import update_prompt
+
+            print(update_prompt.DESCRIPTION, file=sys.stderr)
+            if service:
+                return 75
+            return update_prompt.run(application.activate)
+        if not service:
+            application.activate_action(
+                PRESENT_PACKAGE_ACTION,
+                GLib.Variant("(ss)", (PACKAGE_SOURCE, initial_page or "")),
+            )
+            connection = application.get_dbus_connection()
+            if connection is not None:
+                try:
+                    connection.flush_sync(None)
+                except GLib.Error as error:
+                    print(
+                        f"Cannot confirm the request reached the running app: {error.message}",
+                        file=sys.stderr,
+                    )
+                    return 1
+        return 0
     return application.run(argv if argv is not None else [])

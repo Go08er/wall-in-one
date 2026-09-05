@@ -449,7 +449,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         # A renderer failure leaves the resolved still on screen and may keep
         # the route's logical playback state as ``playing``. A transient
         # failure can be retried with Play. A session-taboo entry cannot: the
-        # Media/Pairings health surface explains how to remove it safely.
+        # Library pairing editor explains how to remove it safely.
         playing = display.playback_state == "playing" and not display.renderer_failed
         controls.play.set_icon_name(
             "dialog-warning-symbolic"
@@ -459,14 +459,16 @@ class SchedulesPage(Gtk.ScrolledWindow):
             else "media-playback-start-symbolic"
         )
         if taboo:
-            controls.play.set_tooltip_text(
-                "Borked wallpaper: playback is disabled; open it in Media/Pairings"
-            )
+            controls.play.set_tooltip_text("Playback unavailable: open the pairing in Library")
         elif display.renderer_failed:
             controls.play.set_tooltip_text("Retry motion on this display")
         else:
             controls.play.set_tooltip_text(
-                "Pause this display" if playing else "Resume this display"
+                "Pause this display"
+                if playing
+                else f"Resume playback · {truth.power.message}"
+                if truth.power is not None and truth.power.inhibited
+                else "Resume this display"
             )
         controls.play.set_sensitive(not taboo)
         controls.stop.set_sensitive(display.playback_state != "stopped")
@@ -512,9 +514,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             detail = SchedulesPage._bounded_diagnostic(
                 display.last_error or "this wallpaper is marked as a known renderer crasher"
             )
-            return (
-                f"Borked · playback disabled; paired still retained · {display.playlist} · {detail}"
-            )
+            return f"Playback unavailable; paired still retained · {display.playlist} · {detail}"
         if display.renderer_failed:
             detail = SchedulesPage._bounded_diagnostic(
                 display.last_error or "the motion renderer exited"
@@ -540,6 +540,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             else display.playback_state.capitalize()
         )
         parts = [route, display.playlist, playback]
+        if truth.power is not None and truth.power.message:
+            parts.append(truth.power.message)
         if truth.theme_source is not None and truth.theme_source.effective == display.connector:
             parts.append("Colours source")
         return " · ".join(parts)

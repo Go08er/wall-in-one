@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter, defaultdict
 from functools import cmp_to_key
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -550,8 +551,56 @@ class _ReorderList(Gtk.Widget):
         Gtk.Widget.do_dispose(self)  # type: ignore[attr-defined]
 
 
+def _thumbnail_preview(width: int, height: int) -> tuple[Gtk.Picture, Gtk.Overlay]:
+    """Keep loaded paintables from changing a compact row's natural size."""
+    picture = Gtk.Picture(width_request=width, height_request=height)
+    picture.set_content_fit(Gtk.ContentFit.COVER)
+    picture.set_can_shrink(True)
+    frame = Gtk.Overlay(
+        width_request=width,
+        height_request=height,
+        halign=Gtk.Align.START,
+        valign=Gtk.Align.CENTER,
+    )
+    # A Picture's size request is only a minimum; its texture still contributes
+    # a large natural size. An unmeasured overlay fills this stable footprint
+    # without making either the source row or the order row inherit that size.
+    frame.add_overlay(picture)
+    frame.set_measure_overlay(picture, False)
+    frame.set_clip_overlay(picture, True)
+    return picture, frame
+
+
+def _source_descriptions(items: tuple[MediaItem, ...]) -> dict[Path, str]:
+    """Disambiguate same-name, same-type pairings without exposing long paths by default."""
+    descriptions = {item.path: item.kind.value.title() for item in items}
+    groups: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    for item in items:
+        groups[item.name.casefold(), item.kind.value].append(item.path)
+    for paths in groups.values():
+        if len(paths) < 2:
+            continue
+        # Grow only ambiguous suffixes. Distinct filenames need no folder
+        # noise, while identical filenames gain enough context to tell apart.
+        pending = paths
+        depth = 1
+        while pending:
+            suffixes = {path: str(Path(*path.parts[-depth:])) for path in paths}
+            counts = Counter(suffixes.values())
+            unresolved = []
+            for path in pending:
+                suffix = suffixes[path]
+                if counts[suffix] == 1 or depth >= len(path.parts):
+                    descriptions[path] += f" · {suffix}"
+                else:
+                    unresolved.append(path)
+            pending = unresolved
+            depth += 1
+    return descriptions
+
+
 class _MediaCard(Gtk.Box):
-    """A pairing thumbnail that can be dragged, clicked, or removed."""
+    """A compact library pairing row with an explicit add action."""
 
     def __init__(
         self,
@@ -562,34 +611,58 @@ class _MediaCard(Gtk.Box):
         on_drag_started: Any | None = None,
         on_drag_finished: Any | None = None,
     ) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.item = item
-        self.add_css_class("card")
-        self.set_size_request(180, -1)
+        self.set_margin_top(4)
+        self.set_margin_bottom(4)
+        self.set_margin_start(4)
+        self.set_margin_end(4)
+        self.set_tooltip_text(f"{item.name}\n{item.path}")
 
-        self.picture = Gtk.Picture(width_request=180, height_request=102)
-        self.picture.set_content_fit(Gtk.ContentFit.COVER)
-        self.append(self.picture)
-        title = Gtk.Label(label=item.name, ellipsize=Pango.EllipsizeMode.END)
-        title.add_css_class("caption")
-        self.append(title)
+        self.picture, self._preview = _thumbnail_preview(64, 44)
+        # The same bounded frame remains visible before a thumbnail arrives,
+        # and after an absent or failed thumbnail. It also supplies the drag
+        # icon, so an empty picture never becomes an invisible drag ghost.
+        self._preview_placeholder = Gtk.Label(label=item.kind.value.title())
+        self._preview_placeholder.add_css_class("caption")
+        self._preview_placeholder.add_css_class("dim-label")
+        self._preview.add_overlay(self._preview_placeholder)
+        self._preview.set_measure_overlay(self._preview_placeholder, False)
+        self._preview.set_clip_overlay(self._preview_placeholder, True)
+        self.append(self._preview)
+        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        details.set_valign(Gtk.Align.CENTER)
+        title = Gtk.Label(
+            label=item.name,
+            xalign=0.0,
+            ellipsize=Pango.EllipsizeMode.MIDDLE,
+        )
+        details.append(title)
 
-        self._health = Gtk.Label(label="Borked · cannot play")
+        self._description = Gtk.Label(
+            label=item.kind.value.title(),
+            xalign=0.0,
+            ellipsize=Pango.EllipsizeMode.MIDDLE,
+        )
+        self._description.add_css_class("caption")
+        self._description.add_css_class("dim-label")
+        details.append(self._description)
+
+        self._health = Gtk.Label(label="Playback unavailable", xalign=0.0, wrap=True)
         self._health.add_css_class("caption")
         self._health.add_css_class("error")
         self._health.set_visible(False)
-        self.append(self._health)
+        details.append(self._health)
+        self.append(details)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        actions.set_halign(Gtk.Align.CENTER)
         self._add = Gtk.Button(
             icon_name="list-add-symbolic",
             tooltip_text="Add to playlist",
+            valign=Gtk.Align.CENTER,
         )
         self._add.add_css_class("flat")
         self._add.connect("clicked", on_activate)
-        actions.append(self._add)
-        self.append(actions)
+        self.append(self._add)
 
         self._drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
         self._drag.connect(
@@ -603,6 +676,10 @@ class _MediaCard(Gtk.Box):
         self._on_drag_finished = on_drag_finished
         self.add_controller(self._drag)
 
+    def set_description(self, description: str) -> None:
+        self._description.set_label(description)
+        self._description.set_tooltip_text(f"{description}\n{self.item.path}")
+
     def set_borked(self, reason: str) -> None:
         """Keep a known crasher inspectable without offering a play route."""
         borked = bool(reason)
@@ -610,9 +687,9 @@ class _MediaCard(Gtk.Box):
         self._health.set_tooltip_text(reason or None)
         self._add.set_sensitive(not borked)
         self._add.set_tooltip_text(
-            "Borked wallpaper: remove or uninstall it in Media/Pairings"
+            "Playback unavailable: remove or uninstall this wallpaper in Library"
             if borked
-            else "Add to playlist"
+            else f"Add {self.item.name} to playlist"
         )
         self._drag.set_actions(
             Gdk.DragAction(0) if borked else Gdk.DragAction.COPY | Gdk.DragAction.MOVE
@@ -626,10 +703,10 @@ class _MediaCard(Gtk.Box):
         """Keep the gesture visually tied to the image the person grabbed."""
         if self._on_drag_started is not None:
             self._on_drag_started()
-        paintable = self.picture.get_paintable()
-        if paintable is None:
-            paintable = Gtk.WidgetPaintable.new(self)
-        source.set_icon(paintable, 90, 51)
+        # Snapshot the displayed preview, not the texture's intrinsic pixel
+        # size. The drag icon and its hotspot must match the compact picture.
+        paintable = Gtk.WidgetPaintable.new(self._preview)
+        source.set_icon(paintable, 32, 22)
 
     def _drag_cancel(
         self, _source: Gtk.DragSource, _drag: Gdk.Drag, _reason: Gdk.DragCancelReason
@@ -646,6 +723,7 @@ class _MediaCard(Gtk.Box):
 
     def show_thumbnail(self, _item: MediaItem, texture: Gdk.Texture | None) -> None:
         self.picture.set_paintable(texture)
+        self._preview_placeholder.set_visible(texture is None)
 
 
 class _PlaylistEntryRow(Gtk.ListBoxRow):
@@ -674,12 +752,12 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         self.spacer.set_child(Gtk.Box(height_request=24))
         body.append(self.spacer)
 
-        self.surface = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.surface = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.surface.add_css_class("wio-reorder-row")
-        self.surface.set_margin_top(8)
-        self.surface.set_margin_bottom(8)
-        self.surface.set_margin_start(8)
-        self.surface.set_margin_end(8)
+        self.surface.set_margin_top(4)
+        self.surface.set_margin_bottom(4)
+        self.surface.set_margin_start(4)
+        self.surface.set_margin_end(4)
 
         # A button brings a competing click gesture and also aligned the grip
         # against its own button chrome. The passive centre box remains the
@@ -706,9 +784,8 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         self.handle.set_cursor(Gdk.Cursor.new_from_name("grab", None))
         self.surface.append(self.handle)
 
-        self.picture = Gtk.Picture(width_request=96, height_request=54)
-        self.picture.set_content_fit(Gtk.ContentFit.COVER)
-        self.surface.append(self.picture)
+        self.picture, preview = _thumbnail_preview(96, 54)
+        self.surface.append(preview)
 
         self._base_title = item.name if item is not None else f"Missing · {source.name}"
         self.title = Gtk.Label(label=self._base_title, xalign=0.0, hexpand=True)
@@ -719,7 +796,11 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         self.title.add_css_class("heading")
         self.surface.append(self.title)
 
-        remove = Gtk.Button(icon_name="list-remove-symbolic", tooltip_text="Remove from playlist")
+        remove = Gtk.Button(
+            icon_name="list-remove-symbolic",
+            tooltip_text=f"Remove {self._base_title} from playlist",
+            valign=Gtk.Align.CENTER,
+        )
         remove.add_css_class("flat")
         remove.connect("clicked", on_remove)
         self.surface.append(remove)
@@ -730,10 +811,18 @@ class _PlaylistEntryRow(Gtk.ListBoxRow):
         keys.connect("key-pressed", on_key)
         self.add_controller(keys)
 
+    def do_grab_focus(self) -> bool:
+        # These stable rows belong to our custom animated container, not a
+        # Gtk.ListBox. The native ListBoxRow vfunc requires that missing parent
+        # and otherwise refuses focus, breaking repeated keyboard reorders.
+        return Gtk.Widget.do_grab_focus(self)
+
     def set_borked(self, reason: str) -> None:
         """Name an unusable retained entry without removing authoring data."""
         borked = bool(reason)
-        self.title.set_label(f"Borked · {self._base_title}" if borked else self._base_title)
+        self.title.set_label(
+            f"Playback unavailable · {self._base_title}" if borked else self._base_title
+        )
         self.set_tooltip_text(reason or None)
         if borked:
             self.add_css_class("error")
@@ -760,6 +849,7 @@ class PlaylistsPage(Gtk.Box):
         self._source_cards_by_path: dict[Path, _MediaCard] = {}
         self._source_positions: dict[Path, int] = {}
         self._source_inventory: tuple[MediaItem, ...] = ()
+        self._source_descriptions: dict[Path, str] = {}
         self._source_limit = SOURCE_PAGE_SIZE
         self._entry_rows: dict[str, _PlaylistEntryRow] = {}
         # Kept as an alias because permanence is about stable identity, not the
@@ -962,9 +1052,9 @@ class PlaylistsPage(Gtk.Box):
         content.set_margin_bottom(8)
         content.set_margin_start(10)
         content.set_margin_end(10)
-        name = Gtk.Label(xalign=0.0)
+        name = Gtk.Label(xalign=0.0, ellipsize=Pango.EllipsizeMode.END)
         name.add_css_class("heading")
-        detail = Gtk.Label(xalign=0.0)
+        detail = Gtk.Label(xalign=0.0, wrap=True)
         detail.add_css_class("caption")
         detail.add_css_class("dim-label")
         content.append(name)
@@ -1025,6 +1115,7 @@ class PlaylistsPage(Gtk.Box):
         self._source_cards_by_path.clear()
         self._source_positions.clear()
         self._source_inventory = ()
+        self._source_descriptions.clear()
         self._entry_rows.clear()
         self._entry_items.clear()
         self._entry_positions.clear()
@@ -1036,7 +1127,7 @@ class PlaylistsPage(Gtk.Box):
         self._clear_editor()
         page = Adw.StatusPage(
             title="Make a playlist",
-            description="Create a playlist on the left, then add media from your library.",
+            description="Create a playlist, then add pairings from your library.",
             icon_name="view-list-symbolic",
         )
         page.set_vexpand(True)
@@ -1054,6 +1145,8 @@ class PlaylistsPage(Gtk.Box):
         title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._name_entry = Gtk.Entry(text=playlist.name, hexpand=True)
         self._name_entry.add_css_class("title-2")
+        self._name_entry.set_tooltip_text("Playlist name · press Enter to rename")
+        self._name_entry.connect("activate", lambda entry: self._rename(entry.get_text()))
         title_row.append(self._name_entry)
         rename = Gtk.Button(label="Rename")
         rename.connect("clicked", lambda _button: self._rename(self._name_entry.get_text()))
@@ -1083,9 +1176,9 @@ class PlaylistsPage(Gtk.Box):
 
         arranger = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True)
         arranger.set_size_request(MIN_ARRANGER_WIDTH, -1)
-        # Playlist names need enough width to distinguish similarly prefixed
-        # entries; the source cards remain usable as a single 180 px column.
-        arranger.set_position(330)
+        # Compact library rows leave more width for the ordered pairings and
+        # their drag/remove controls, even in the compact navigation view.
+        arranger.set_position(270)
         # The arranger itself carries a 600 px floor. Let Paned shrink each
         # child's *natural* request down within that honest floor; otherwise
         # large labels add both natural widths and GTK refuses an 800 px
@@ -1102,12 +1195,18 @@ class PlaylistsPage(Gtk.Box):
     def _build_source_pane(self) -> Gtk.Widget:
         pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         pane.set_margin_end(8)
-        heading = Gtk.Label(label="Media/Pairings", xalign=0.0)
+        heading = Gtk.Label(label="Library pairings", xalign=0.0)
         heading.add_css_class("title-3")
         pane.append(heading)
         self._source_search = Gtk.SearchEntry(placeholder_text="Search pairings")
         pane.append(self._source_search)
+        self._source_count = Gtk.Label(xalign=0.0, wrap=True)
+        self._source_count.add_css_class("caption")
+        self._source_count.add_css_class("dim-label")
+        pane.append(self._source_count)
         self._source_flow = self._new_flow()
+        self._source_flow.set_activate_on_single_click(False)
+        self._source_flow.connect("child-activated", self._source_activated)
         self._source_flow.set_filter_func(
             lambda child: self._source_visible(child, self._source_search.get_text())
         )
@@ -1120,7 +1219,13 @@ class PlaylistsPage(Gtk.Box):
         self._source_scroll = Gtk.ScrolledWindow(
             vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
         )
-        self._source_scroll.set_child(self._source_flow)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._source_empty = Gtk.Label(xalign=0.0, wrap=True)
+        self._source_empty.add_css_class("dim-label")
+        self._source_empty.set_margin_top(12)
+        content.append(self._source_empty)
+        content.append(self._source_flow)
+        self._source_scroll.set_child(content)
         pane.append(self._source_scroll)
         self._source_more = Gtk.Button()
         self._source_more.set_halign(Gtk.Align.CENTER)
@@ -1144,9 +1249,23 @@ class PlaylistsPage(Gtk.Box):
             wrap=True,
         )
         note.add_css_class("dim-label")
+        note.add_css_class("caption")
         pane.append(note)
+        self._entry_count = Gtk.Label(xalign=0.0, wrap=True)
+        self._entry_count.add_css_class("caption")
+        self._entry_count.add_css_class("dim-label")
+        pane.append(self._entry_count)
 
         self._order_drop_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self._order_empty = Gtk.Label(
+            label="Add a library pairing with +, or drag it here to start your playlist.",
+            xalign=0.0,
+            wrap=True,
+        )
+        self._order_empty.add_css_class("dim-label")
+        self._order_empty.set_margin_top(12)
+        self._order_empty.set_margin_bottom(12)
+        self._order_drop_area.append(self._order_empty)
         self._order_list = _ReorderList()
         self._order_list.add_css_class("boxed-list")
         self._order_list.set_sort_func(self._compare_entry_rows)
@@ -1225,7 +1344,7 @@ class PlaylistsPage(Gtk.Box):
                 "Cannot play · no usable items" if playlist.entries else "Play this playlist now"
             )
             self._play_button.set_tooltip_text(
-                "Every item is missing or marked Borked; repair or remove those entries first"
+                "Every item is missing or has playback disabled; repair or remove those entries"
                 if playlist.entries
                 else "Add media before playing this playlist"
             )
@@ -1247,6 +1366,7 @@ class PlaylistsPage(Gtk.Box):
 
     def _sync_source_cards(self, session: Session) -> None:
         self._source_inventory = session.library.items
+        self._source_descriptions = _source_descriptions(self._source_inventory)
         self._reconcile_source_cards()
 
     def _matching_source_items(self) -> tuple[MediaItem, ...]:
@@ -1300,6 +1420,7 @@ class PlaylistsPage(Gtk.Box):
                 self._source_flow.append(source_card)
                 self._loader.request(item, source_card.show_thumbnail)
             session = self._session
+            source_card.set_description(self._source_descriptions[item.path])
             source_card.set_borked(_borked_reason(session, item) if session is not None else "")
         self._source_flow.invalidate_sort()
         self._source_flow.invalidate_filter()
@@ -1307,6 +1428,27 @@ class PlaylistsPage(Gtk.Box):
         remaining = max(0, len(matches) - self._source_limit)
         self._source_more.set_visible(remaining > 0)
         self._source_more.set_label(f"Show {min(SOURCE_PAGE_SIZE, remaining)} more")
+        shown = min(len(matches), self._source_limit)
+        total = len(self._source_inventory)
+        self._source_count.set_label(
+            f"{shown} of {len(matches)} matching pairings shown"
+            if query
+            else f"{shown} of {total} library pairings shown"
+            if shown < total
+            else f"{total} library pairing{'s' if total != 1 else ''}"
+        )
+        self._source_empty.set_visible(not matches)
+        self._source_empty.set_label(
+            "No matching pairings. Try another name, provider, or path."
+            if query
+            else "No library pairings yet. Add a folder in Settings or get wallpapers from Store."
+        )
+
+    def _source_activated(self, _flow: Gtk.FlowBox, child: Gtk.FlowBoxChild) -> None:
+        """Enter or double-click adds the focused pairing through the same action."""
+        card = child.get_child()
+        if isinstance(card, _MediaCard) and card._add.get_sensitive():
+            card._add.emit("clicked")
 
     def _source_search_changed(self, _entry: Gtk.SearchEntry) -> None:
         self._source_limit = SOURCE_PAGE_SIZE
@@ -1367,6 +1509,12 @@ class PlaylistsPage(Gtk.Box):
             row.set_borked(_borked_reason(session, item))
         if not self._dragging:
             self._order_list.invalidate_sort()
+        count = len(playlist.entries)
+        order_hint = (
+            "fixed choice" if count == 1 else "plays in this order" if count else "empty playlist"
+        )
+        self._entry_count.set_label(f"{count} pairing{'s' if count != 1 else ''} · {order_hint}")
+        self._order_empty.set_visible(count == 0)
         self._update_entry_more(playlist)
 
     def _focused_entry_id(self) -> str:
@@ -1427,10 +1575,10 @@ class PlaylistsPage(Gtk.Box):
         flow = Gtk.FlowBox(
             selection_mode=Gtk.SelectionMode.NONE,
             homogeneous=True,
-            column_spacing=10,
-            row_spacing=10,
+            column_spacing=0,
+            row_spacing=4,
             min_children_per_line=1,
-            max_children_per_line=3,
+            max_children_per_line=1,
             valign=Gtk.Align.START,
         )
         flow.set_margin_top(6)
@@ -1712,7 +1860,7 @@ class PlaylistsPage(Gtk.Box):
             return False
         if reason := _borked_reason(session, item):
             self._app.window_report(
-                f"{item.name} is marked Borked and cannot be added for playback: {reason}"
+                f"Playback unavailable for {item.name}; it cannot be added for playback: {reason}"
             )
             return False
         store = session.playlists
@@ -1754,7 +1902,9 @@ class PlaylistsPage(Gtk.Box):
             if store.get(selected) is None:
                 raise ValueError("the selected playlist was deleted before the drop saved")
             if reason := _borked_reason(self._app.session, current):
-                raise ValueError(f"{current.name} is marked Borked and cannot be added: {reason}")
+                raise ValueError(
+                    f"Playback unavailable for {current.name}; it cannot be added: {reason}"
+                )
             return work
 
         return self._app.authoring_action_async(
@@ -1875,7 +2025,7 @@ class PlaylistsPage(Gtk.Box):
         if not usable:
             self._app.window_report(
                 f"{playlist.name} has no usable items; repair its missing media or remove "
-                "Borked entries first"
+                "entries with playback disabled first"
             )
             return
         self._app.activate_playlist_async(self._selected)
@@ -1884,7 +2034,7 @@ class PlaylistsPage(Gtk.Box):
         def add(_button: Gtk.Button) -> None:
             if reason := _borked_reason(self._app.session, item):
                 self._app.window_report(
-                    f"{item.name} is marked Borked and cannot be added for playback: {reason}"
+                    f"Playback unavailable for {item.name}; it cannot be added: {reason}"
                 )
                 return
             store = self._app.session.playlists
@@ -1900,7 +2050,7 @@ class PlaylistsPage(Gtk.Box):
                     raise ValueError("the selected playlist was deleted before the item saved")
                 if reason := _borked_reason(self._app.session, current):
                     raise ValueError(
-                        f"{current.name} is marked Borked and cannot be added: {reason}"
+                        f"Playback unavailable for {current.name}; it cannot be added: {reason}"
                     )
                 return lambda: store.add(selected, current.path)
 
@@ -1917,9 +2067,28 @@ class PlaylistsPage(Gtk.Box):
         def remove(_button: Gtk.Button) -> None:
             store = self._app.session.playlists
             selected = self._selected
+
+            def saved(_playlist: playlists.Playlist) -> None:
+                # Only move focus if it still belongs to the disappearing row
+                # when the asynchronous save finishes. A user who has already
+                # resumed searching or switched playlist must keep that focus.
+                focus_next = ""
+                if selected == self._selected and self._focused_entry_id() == entry_id:
+                    visible = [
+                        row.identifier
+                        for row in self._order_list.rows()
+                        if isinstance(row, _PlaylistEntryRow)
+                    ]
+                    if entry_id in visible and len(visible) > 1:
+                        index = visible.index(entry_id)
+                        focus_next = visible[index + 1 if index + 1 < len(visible) else index - 1]
+                self._app.playlists_changed()
+                if row := self._entry_rows.get(focus_next):
+                    row.grab_focus()
+
             self._app.authoring_action_async(
                 lambda: store.remove_entry(selected, entry_id),
-                lambda _playlist: self._app.playlists_changed(),
+                saved,
                 failure=self._app.window_report,
             )
 
@@ -1947,28 +2116,46 @@ class PlaylistsPage(Gtk.Box):
             entry_ids = tuple(entry.id for entry in playlist.entries)
             if entry_id not in entry_ids:
                 return True
-            current = entry_ids.index(entry_id)
-            target = min(max(current + step, 0), len(entry_ids) - 1)
-            if target != current:
-                first = self._order_list.capture_positions()
-                store = self._app.session.playlists
-                selected = self._selected
+            store = self._app.session.playlists
+            selected = self._selected
+            before: playlists.Playlist | None = None
+            first: dict[Gtk.Widget, float] = {}
 
-                def saved(_playlist: playlists.Playlist) -> None:
-                    self._app.playlists_changed()
-                    self._order_list.animate_from(first)
-                    focused = self._entry_rows.get(entry_id)
-                    if focused is not None:
-                        focused.grab_focus()
+            def prepare() -> Any:
+                nonlocal before, first
+                # Earlier gestures may still be saving. Capture the visual
+                # starting point only at the head of the actor, but always
+                # let the Store clamp this gesture against its durable order.
+                before = store.get(selected)
+                if selected == self._selected:
+                    first = self._order_list.capture_positions()
+                return lambda: store.move_entry_relative(selected, entry_id, step)
 
-                self._app.authoring_action_async(
-                    lambda: store.move_entry_relative(selected, entry_id, step),
-                    saved,
-                    failure=self._app.window_report,
-                )
+            def saved(updated: playlists.Playlist) -> None:
+                if updated == before:
+                    return  # A true boundary no-op does not publish or animate.
+                # The save may finish after the user resumed searching or
+                # opened another playlist. Only retain the moved row's
+                # focus if it still owns that interaction at completion.
+                keep_focus = selected == self._selected and self._focused_entry_id() == entry_id
+                self._app.playlists_changed()
+                if selected != self._selected:
+                    return
+                self._order_list.animate_from(first)
+                focused = self._entry_rows.get(entry_id)
+                if keep_focus and focused is not None:
+                    focused.grab_focus()
 
-            # The keyed diff keeps this exact row alive. Reclaiming focus after
-            # the synchronous FLIP sort makes repeated Ctrl+Arrow presses reliable.
+            self._app.authoring_action_async(
+                lambda: store.move_entry_relative(selected, entry_id, step),
+                saved,
+                prepare=prepare,
+                failure=self._app.window_report,
+            )
+
+            # Start keyboard interaction on the row itself, even when the key
+            # bubbled from its remove button. Completion above must not reclaim
+            # it after the user has moved elsewhere during an asynchronous save.
             row = self._entry_rows.get(entry_id)
             if row is not None:
                 row.grab_focus()

@@ -9,8 +9,8 @@ dist/
 *.egg-info/
 service/target/
 
-# Agent worktrees, created by the harness for parallel work.
-.claude/
+# Local engineering records, review history and offline benchmark fixtures.
+.project-notes/
 
 # Engineering records kept on the author's machine, not in the published
 # repository: a decision log, a work tracker, and measured facts about

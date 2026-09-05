@@ -1003,7 +1003,7 @@ def test_borked_media_stays_inspectable_but_has_no_playlist_play_route(
     assert source._health.get_visible()
     assert not source._add.get_sensitive()
     assert source._drag.get_actions() == Gdk.DragAction(0)
-    assert entry.title.get_label().startswith("Borked ·")
+    assert entry.title.get_label().startswith("Playback unavailable ·")
     assert "renderer crashed repeatedly" in (entry.get_tooltip_text() or "")
     assert "1 unavailable" in detail.get_label()
     assert page._play_button.get_label() == "Cannot play · no usable items"
@@ -1014,7 +1014,7 @@ def test_borked_media_stays_inspectable_but_has_no_playlist_play_route(
     page._play_now()
     assert len(session.playlists.find(playlist.id).entries) == before
     assert len(reports) == 2
-    assert all("Borked" in message or "no usable" in message for message in reports)
+    assert all("Playback unavailable" in message or "no usable" in message for message in reports)
 
     page.shutdown()
     session.shutdown()

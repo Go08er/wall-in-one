@@ -163,6 +163,11 @@ fn run_bounded(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // A successful helper leader must not leave background work
+                // or inherited capture descriptors behind.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
                 return Ok(BoundedOutput {
                     status,
                     stdout: stdout.finish(),
@@ -202,6 +207,8 @@ pub trait VideoRenderer: Send {
 }
 
 pub trait WallpaperDriver: Send {
+    /// Global automatic policy, separate from saved settings and user transport.
+    fn set_animation_inhibited(&mut self, _inhibited: bool) {}
     fn begin_apply(&mut self) {}
     /// Return the compositor's currently connected output names.
     ///
@@ -368,6 +375,9 @@ impl Mpvpaper {
         };
         match child.try_wait() {
             Ok(Some(status)) => {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
                 self.child.take();
                 self.pause_transport = PauseTransport::None;
                 if let Some(socket) = self.socket.take() {
@@ -549,6 +559,7 @@ pub struct SystemDriver {
     applying_batch: bool,
     output_snapshot: Option<Result<Vec<LiveOutput>, String>>,
     socket_namespace: u64,
+    animations_inhibited: bool,
 }
 
 struct ActiveVideo {
@@ -767,6 +778,7 @@ impl SystemDriver {
             applying_batch: false,
             output_snapshot: None,
             socket_namespace: renderer_socket_namespace(socket),
+            animations_inhibited: false,
         }
     }
 
@@ -950,7 +962,7 @@ impl SystemDriver {
         output: &str,
         runtime: &crate::config::Settings,
     ) -> Result<(), String> {
-        if !runtime.dynamics_enabled {
+        if !runtime.dynamics_enabled || self.animations_inhibited {
             return Ok(());
         }
         match entry.kind {
@@ -1005,6 +1017,9 @@ impl SystemDriver {
 }
 
 impl WallpaperDriver for SystemDriver {
+    fn set_animation_inhibited(&mut self, inhibited: bool) {
+        self.animations_inhibited = inhibited;
+    }
     fn begin_apply(&mut self) {
         self.applying_batch = true;
         self.output_snapshot = None;
@@ -1215,6 +1230,12 @@ impl WallpaperDriver for SystemDriver {
                     // own the output. Match every other hand-over path and
                     // explicitly terminate/reap its process group.
                     stop_group(&mut active.child);
+                } else {
+                    // The renderer leader already exited, but descendants
+                    // can still own inherited pipes or wallpaper resources.
+                    unsafe {
+                        libc::kill(-(active.child.id() as i32), libc::SIGKILL);
+                    }
                 }
                 let diagnostics = active
                     .diagnostics
@@ -1280,6 +1301,11 @@ fn stop_group_with_grace(child: &mut Child, grace: Duration) {
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         if matches!(child.try_wait(), Ok(Some(_))) {
+            // The group leader may exit before a TERM-resistant descendant.
+            // Finish the owned group before releasing its output/capture pipes.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
             return;
         }
         thread::sleep(Duration::from_millis(20));
@@ -1299,6 +1325,31 @@ fn _absolute(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn stopping_a_leader_also_releases_term_resistant_descendant_pipes() {
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "(trap '' TERM; printf 'ready\\n'; while :; do sleep 1; done) & wait",
+            ])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut pipe = BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        pipe.read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
+        let capture = BoundedCapture::start(pipe, 32);
+        stop_group_with_grace(&mut child, Duration::from_millis(200));
+        let captured = capture.finish();
+        assert!(
+            !captured.truncated,
+            "descendant retained the capture pipe after stop"
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn mpvpaper_inspection_failure_reaps_the_live_child_group() {

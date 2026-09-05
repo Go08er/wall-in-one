@@ -461,7 +461,7 @@ def _refuse_challenge(markup: str) -> None:
     if any(marker in prefix for marker in _CHALLENGE_MARKERS):
         raise ProviderError(
             "challenge",
-            "MotionBGS returned an anti-bot challenge; no bypass was attempted",
+            "MotionBGS is requesting browser verification; try again later or open the site",
         )
 
 
@@ -1070,7 +1070,7 @@ def _refuse_error_status(status: int, purpose: str) -> None:
     if status in {403, 429}:
         raise ProviderError(
             "challenge",
-            f"MotionBGS refused the public request (HTTP {status}); no bypass was attempted",
+            f"MotionBGS refused this request (HTTP {status}); try again later or open the site",
         )
     if not 200 <= status < 300:
         raise ProviderError("http", f"MotionBGS returned HTTP {status} for {purpose}")

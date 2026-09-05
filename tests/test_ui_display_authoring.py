@@ -457,16 +457,57 @@ def test_route_failure_keeps_the_schedule_row_compact_but_preserves_diagnostics(
     status["taboo_entries_omitted"] = 7
     page.runtime_status_changed(application.session)
 
-    assert "Borked · playback disabled" in (controls.row.get_subtitle() or "")
+    assert "Playback unavailable" in (controls.row.get_subtitle() or "")
     assert controls.play.get_icon_name() == "dialog-warning-symbolic"
-    assert "Borked wallpaper" in (controls.play.get_tooltip_text() or "")
-    assert "Media/Pairings" in (controls.play.get_tooltip_text() or "")
+    assert "Playback unavailable" in (controls.play.get_tooltip_text() or "")
+    assert "Library" in (controls.play.get_tooltip_text() or "")
     assert not controls.play.get_sensitive()
 
     controls.play.emit("clicked")
 
     assert calls == [("DP-9", "play", None)], "taboo entries cannot be retried by Play"
     assert presented == ["media"]
+
+
+@pytest.mark.parametrize("playback", ("playing", "paused", "stopped"))
+def test_battery_policy_keeps_display_intent_and_explains_static_playback(
+    monkeypatch: pytest.MonkeyPatch, playback: str
+) -> None:
+    monkeypatch.setattr(schedules_page, "_connected_outputs", lambda: ("DP-9",))
+    application = _schedule_app(config.DISPLAY_MODE_INDEPENDENT)
+    calls: list[tuple[str, str, str | None]] = []
+
+    def action(connector: str, verb: str, argument: str | None = None) -> bool:
+        calls.append((connector, verb, argument))
+        return True
+
+    application.runtime_action_on_async = action
+    status = _display_runtime_status()
+    status.update(
+        power_source="battery",
+        power_available=True,
+        stop_animations_on_battery=True,
+        animations_inhibited=True,
+        animation_inhibition_reason="battery",
+    )
+    displays = status["displays"]
+    assert isinstance(displays, list)
+    display = displays[0]
+    assert isinstance(display, dict)
+    display.update(
+        playback_state=playback, paused=playback == "paused", stopped=playback == "stopped"
+    )
+    application.runtime_status = status
+    page = schedules_page.SchedulesPage(application)  # type: ignore[arg-type]
+    page.refresh(application.session)
+    controls = page._display_playback_rows["DP-9"]
+    subtitle = controls.row.get_subtitle() or ""
+    assert "Animations stopped on battery" in subtitle
+    assert ("Playing still" if playback == "playing" else playback.capitalize()) in subtitle
+    assert controls.play.get_sensitive()
+    assert not calls
+    controls.play.emit("clicked")
+    assert calls == [("DP-9", "pause" if playback == "playing" else "play", None)]
 
 
 def test_status_poll_reuses_display_controls_and_preserves_focus(

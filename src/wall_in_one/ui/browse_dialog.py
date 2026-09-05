@@ -13,7 +13,7 @@ import contextlib
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -28,7 +28,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from wall_in_one import browse, thumbnails, worker_processes
 from wall_in_one.browse import Browser, Downloaded
-from wall_in_one.library import workshop
+from wall_in_one.library import owned, workshop
 from wall_in_one.library.model import Kind
 from wall_in_one.providers import registry, wallhaven
 from wall_in_one.providers.base import (
@@ -463,8 +463,7 @@ class BrowseDialog(Adw.Dialog):
         super().__init__()
         self._app = application
         # Downloads land in the first configured root, because that is the one
-        # the user put first. With none configured the Browser asks
-        # `library.scan`, which is the directory being read from anyway.
+        # the user put first. Without one, downloads require a Settings choice.
         configured = application.settings.roots
         # `library_roots` is every configured root rather than just the first:
         # downloads land in one place, but a wallpaper already in *any* of them
@@ -477,7 +476,11 @@ class BrowseDialog(Adw.Dialog):
         # Separate pools: a 40 MB video download must not hold up the next
         # search, and two searches at once would only fight over the cache.
         self._searches = ThreadPoolExecutor(max_workers=1, thread_name_prefix="search")
+        self._search_future: Future[SearchResult] | None = None
         self._downloads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="download")
+        self._ownership_jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browse-owned")
+        self._ownership_future: Future[owned.Index] | None = None
+        self._ownership_generation = 0
         # Detail views share one small lane.  A dialog used to create its own
         # executor, so opening a run of candidates could leave one provider
         # request and one OS thread per window alive until every request
@@ -536,7 +539,7 @@ class BrowseDialog(Adw.Dialog):
         self._closed = False
         self._presentation_parent: Gtk.Widget = self
 
-        self.set_title("Browse")
+        self.set_title("Store")
         self.set_content_width(1000)
         self.set_content_height(760)
         self.connect("closed", self._on_closed)
@@ -630,7 +633,7 @@ class BrowseDialog(Adw.Dialog):
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         self._header = header
-        header.set_title_widget(Adw.WindowTitle(title="Browse", subtitle="Wallhaven, MotionBGS"))
+        header.set_title_widget(Adw.WindowTitle(title="Store", subtitle="Wallhaven, MotionBGS"))
         header.pack_end(self._build_workshop_button())
         toolbar.add_top_bar(header)
         toolbar.add_top_bar(self._build_search_bar())
@@ -997,6 +1000,7 @@ class BrowseDialog(Adw.Dialog):
         both folder roles and discard results whose downloaded badges describe
         the previous library.
         """
+        self._ownership_generation += 1
         self._browser.configure_roots(
             root=roots[0] if roots else None,
             library_roots=roots,
@@ -1009,6 +1013,8 @@ class BrowseDialog(Adw.Dialog):
     def _invalidate_search(self, *, title: str, description: str) -> None:
         """Make every outstanding completion stale and reset the result view."""
         self._search_generation += 1
+        if self._search_future is not None:
+            self._search_future.cancel()
         self._active_search_generation = None
         self._active_search_fingerprint = None
         self._searching = False
@@ -1146,9 +1152,14 @@ class BrowseDialog(Adw.Dialog):
             self._stack.set_visible_child_name("busy")
 
         def work() -> SearchResult:
+            if self._closed or generation != self._search_generation:
+                raise CancelledError("search was superseded")
             return self._browser.search(name, query)
 
+        if self._search_future is not None:
+            self._search_future.cancel()
         future = self._searches.submit(work)
+        self._search_future = future
         future.add_done_callback(
             lambda done: self._deliver(
                 done,
@@ -1319,7 +1330,7 @@ class BrowseDialog(Adw.Dialog):
             return
         self._clear_materialized_cards()
         self._result_page = page
-        held = self._browser.owned
+        held = self._ready_owned()
         for candidate in self._result_pages[page]:
             key = _candidate_key(candidate)
             card = _CandidateCard(
@@ -1457,7 +1468,7 @@ class BrowseDialog(Adw.Dialog):
             self._on_download,
             executor=self._details,
             processes=self._detail_processes,
-            held=self._browser.owned.holds(candidate),
+            held=self._ready_owned().holds(candidate),
         )
         self._detail_dialogs[key] = detail
 
@@ -1553,6 +1564,54 @@ class BrowseDialog(Adw.Dialog):
 
     # -- housekeeping ------------------------------------------------------
 
+    def _ready_owned(self) -> owned.Index:
+        """Render immediately; a cold ownership snapshot belongs on a worker."""
+        ready = self._browser.cached_owned
+        if ready is None:
+            self._refresh_ownership()
+        return ready if ready is not None else owned.Index()
+
+    def library_refreshed(self) -> None:
+        self._browser.forget_owned()
+        self._ownership_generation += 1
+        if self._result_pages or self._detail_dialogs:
+            self._refresh_ownership()
+
+    def _refresh_ownership(self) -> None:
+        if self._closed or self._ownership_future is not None:
+            return
+        generation = self._ownership_generation
+        future = self._ownership_jobs.submit(lambda: self._browser.owned)
+        self._ownership_future = future
+        future.add_done_callback(
+            lambda done: GLib.idle_add(self._finish_ownership, generation, done)
+        )
+
+    def _finish_ownership(self, generation: int, future: Future[owned.Index]) -> bool:
+        if self._ownership_future is future:
+            self._ownership_future = None
+        try:
+            ready = future.result()
+        except Exception:
+            # Ownership is a display hint, never download/deletion authority.
+            # A later search or library refresh can retry an unreadable drive.
+            return GLib.SOURCE_REMOVE
+        if self._closed:
+            return GLib.SOURCE_REMOVE
+        if generation != self._ownership_generation:
+            self._refresh_ownership()
+            return GLib.SOURCE_REMOVE
+        for card in self._cards:
+            if ready.holds(card.candidate):
+                card.mark_downloaded()
+            else:
+                card.set_busy(_candidate_key(card.candidate) in self._downloads_in_flight)
+        for key, detail in self._detail_dialogs.items():
+            detail.set_held(ready.holds(detail._candidate))
+            detail.set_busy(key in self._downloads_in_flight)
+        self._update_pick_controls()
+        return GLib.SOURCE_REMOVE
+
     def report(self, message: str) -> None:
         self._toast.add_toast(Adw.Toast.new(message))
 
@@ -1565,6 +1624,7 @@ class BrowseDialog(Adw.Dialog):
         self._loader.shutdown()
         self._detail_processes.cancel()
         self._searches.shutdown(wait=False, cancel_futures=True)
+        self._ownership_jobs.shutdown(wait=False, cancel_futures=True)
         self._details.shutdown(wait=False, cancel_futures=True)
         # Closing the shared transport wakes active transfers. Providers stage
         # under a private dot-name and only publish after validation, so a
@@ -1599,7 +1659,7 @@ class BrowsePage(Gtk.Box):
 
     def library_refreshed(self) -> None:
         """Make the next provider result compare against the accepted scan."""
-        self._surface._browser.forget_owned()
+        self._surface.library_refreshed()
 
     def shutdown(self) -> None:
         if not self._surface._closed:
@@ -1877,15 +1937,22 @@ class DetailDialog(Adw.Dialog):
         def work() -> tuple[CandidateDetail, bytes]:
             detail = self._browser.describe(candidate)
             url = detail.preview_url
-            cached = thumbnails.lookup_preview(url)
-            if cached:
-                return detail, cached
-            picture = self._browser.preview(url)
-            displayable = (
-                thumbnails.to_displayable(picture, processes=self._processes) if picture else b""
-            )
-            thumbnails.store_preview(url, displayable)
-            return detail, displayable
+            # A preview is optional. CDN, conversion, or cache failures must
+            # not discard successfully fetched facts and download qualities.
+            try:
+                cached = thumbnails.lookup_preview(url)
+                if cached:
+                    return detail, cached
+                picture = self._browser.preview(url)
+                displayable = (
+                    thumbnails.to_displayable(picture, processes=self._processes)
+                    if picture
+                    else b""
+                )
+                thumbnails.store_preview(url, displayable)
+                return detail, displayable
+            except Exception:
+                return detail, b""
 
         future = self._pool.submit(work)
         self._future = future
@@ -1969,8 +2036,12 @@ class DetailDialog(Adw.Dialog):
 
     def downloaded(self) -> None:
         """Called back when the download this dialog started has landed."""
-        self._held = True
-        self._mark_held()
+        self.set_held(True)
+
+    def set_held(self, held: bool) -> None:
+        self._held = held
+        if held:
+            self._mark_held()
 
     def failed(self) -> None:
         self.set_busy(False)

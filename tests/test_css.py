@@ -20,6 +20,16 @@ def test_adwaita_names_are_all_defined() -> None:
         assert f"@define-color {name} " in stylesheet
 
 
+def test_adwaita_variables_use_the_same_colours_as_legacy_widgets() -> None:
+    stylesheet = css.render(fallback_palette(), opacity=0.4)
+    # Share the named definitions, including their fallback tokens and alpha,
+    # instead of maintaining a second palette mapping for modern libadwaita.
+    for name, _token, _fallback in css._ADWAITA_MAPPING:
+        variable = "border-color" if name == "borders" else name.replace("_", "-")
+        assert f"--{variable}: @{name};" in stylesheet
+    assert "--borders:" not in stylesheet
+
+
 def test_opaque_render_has_no_alpha_surfaces() -> None:
     stylesheet = css.render(fallback_palette(), opacity=1.0)
     assert not _alpha_definitions(stylesheet)

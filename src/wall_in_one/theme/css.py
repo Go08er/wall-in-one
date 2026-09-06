@@ -4,8 +4,8 @@ Two layers come out of this:
 
 * Every token as a ``@define-color`` named ``wio_<token>``, so any widget can
   reach the full Noctalia palette by name.
-* Overrides for the libadwaita named colours, so stock widgets pick the palette
-  up without each one needing a rule.
+* Overrides for both libadwaita's named colours and CSS variables, so stock
+  widgets pick the palette up without each one needing a rule.
 
 Translucency is applied only to the window background. Making every surface
 translucent stacks alpha and turns text muddy -- one translucent plane with the
@@ -21,7 +21,7 @@ from wall_in_one.theme.palette import Colour, Palette
 
 #: libadwaita named colour -> the Noctalia token that should drive it, with a
 #: fallback token for palettes written by an older Noctalia that predates it.
-#: See https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/named-colors.html
+#: See https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/css-variables.html
 _ADWAITA_MAPPING: Final[tuple[tuple[str, str, str], ...]] = (
     ("accent_color", "primary", "primary"),
     ("accent_bg_color", "primary", "primary"),
@@ -96,6 +96,20 @@ def adwaita_definitions(palette: Palette, opacity: float) -> Iterable[str]:
         colour = palette.get(token, fallback)
         alpha = opacity if name in _TRANSLUCENT_NAMES else 1.0
         yield _define(name, colour.css(alpha))
+
+
+def adwaita_variables() -> Iterable[str]:
+    """Keep modern widgets on the same live colours as legacy named consumers.
+
+    Noctalia's startup-loaded GTK stylesheet defines CSS variables explicitly;
+    refreshing only the named colours leaves those variables stale. Alias them
+    in our live provider so fallback tokens and translucency stay identical.
+    """
+    yield ":root {"
+    for name, _token, _fallback in _ADWAITA_MAPPING:
+        variable = "border-color" if name == "borders" else name.replace("_", "-")
+        yield f"    --{variable}: @{name};"
+    yield "}"
 
 
 def _structural_rules(palette: Palette, opacity: float) -> str:
@@ -215,6 +229,7 @@ def render(palette: Palette, *, opacity: float = 1.0) -> str:
         f"/* mode: {palette.mode}  tokens: {len(palette.colours)}  opacity: {clamped:.2f} */",
         "\n".join(token_definitions(palette)),
         "\n".join(adwaita_definitions(palette, clamped)),
+        "\n".join(adwaita_variables()),
         _structural_rules(palette, clamped),
     )
     return "\n\n".join(sections) + "\n"

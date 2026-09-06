@@ -162,27 +162,65 @@ def test_noctalia_settings_directory_created_after_start_is_observed(
     assert _spin_until(lambda: len(calls) == 2)
 
 
+@pytest.mark.parametrize("opacity", [1.0, 0.4])
 def test_real_palette_replacement_changes_css_and_adwaita_mode(
     application: Application,
+    opacity: float,
 ) -> None:
     from tests.test_theme_source import _registration
 
     _registration()
     target = paths.palette_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    application._settings = replace(application.settings, opacity=opacity)
 
     def rendered(mode: str, surface: str) -> str:
         palette = source.fallback_palette("light" if mode == "light" else "dark")
         colors = {key: value.hex for key, value in palette.colours.items()}
         colors["surface"] = surface
+        # Change the accent and card surface even within the same dark mode.
+        colors["primary"] = "#8fcff3" if surface == "#182927" else "#adc6ff"
+        colors["surface_container"] = surface
         return json.dumps({"mode": mode, "colors": colors})
 
     display = Gdk.Display.get_default()
     assert display is not None
+    # Noctalia's GTK stylesheet supplies both legacy names and modern CSS
+    # variables. GTK retains this startup copy even after palette.json changes.
+    startup = Gtk.CssProvider()
+    startup.load_from_string("""
+        @define-color accent_color #ffff00;
+        @define-color card_bg_color #444422;
+        @define-color window_bg_color #111100;
+        :root {
+            --accent-color: #ffff00;
+            --card-bg-color: #444422;
+            --window-bg-color: #111100;
+        }
+        .wio-test-card-colour { color: var(--card-bg-color); }
+        .wio-test-window-colour { color: var(--window-bg-color); }
+    """)
+    Gtk.StyleContext.add_provider_for_display(display, startup, Gtk.STYLE_PROVIDER_PRIORITY_USER)
     Gtk.StyleContext.add_provider_for_display(
         display, application._provider, APPLICATION_STYLE_PRIORITY
     )
-    existing = Gtk.Window()
+    manager = Adw.StyleManager.get_default()
+    original_mode = manager.get_color_scheme()
+
+    def create_window() -> tuple[Gtk.Window, tuple[Gtk.Label, ...]]:
+        window = Gtk.Window()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        labels = tuple(
+            Gtk.Label(label="Palette colour", css_classes=[style])
+            for style in ("accent", "wio-test-card-colour", "wio-test-window-colour")
+        )
+        for label in labels:
+            box.append(label)
+        window.set_child(box)
+        window.present()
+        return window, labels
+
+    existing, existing_labels = create_window()
     try:
         application._start_palette_monitor()
         for mode, surface_hex, adw_mode in (
@@ -206,7 +244,7 @@ def test_real_palette_replacement_changes_css_and_adwaita_mode(
             palette = application.resolved_palette
             assert palette is not None
             surface = palette.palette["surface"]
-            reopened = Gtk.Window()
+            reopened, reopened_labels = create_window()
             try:
                 for window in (existing, reopened):
                     found, color = window.get_style_context().lookup_color("window_bg_color")
@@ -214,11 +252,43 @@ def test_real_palette_replacement_changes_css_and_adwaita_mode(
                     assert color.red == pytest.approx(surface.red / 255, abs=0.001)
                     assert color.green == pytest.approx(surface.green / 255, abs=0.001)
                     assert color.blue == pytest.approx(surface.blue / 255, abs=0.001)
+                # Check what widgets actually use, not just lookup_color():
+                # the legacy lookup can be current while controls stay yellow.
+                for labels in (existing_labels, reopened_labels):
+                    for label, token, alpha in zip(
+                        labels,
+                        ("primary", "surface_container", "surface"),
+                        (1.0, 1.0, opacity),
+                        strict=True,
+                    ):
+                        expected = palette.palette[token]
+                        wanted = (
+                            expected.red / 255,
+                            expected.green / 255,
+                            expected.blue / 255,
+                            alpha,
+                        )
+
+                        def colour_matches(
+                            widget: Gtk.Label = label,
+                            rgba: tuple[float, ...] = wanted,
+                        ) -> bool:
+                            actual = widget.get_color()
+                            return (
+                                actual.red,
+                                actual.green,
+                                actual.blue,
+                                actual.alpha,
+                            ) == pytest.approx(rgba, abs=0.001)
+
+                        assert _spin_until(colour_matches), (token, label.get_color().to_string())
             finally:
                 reopened.destroy()
     finally:
         existing.destroy()
         Gtk.StyleContext.remove_provider_for_display(display, application._provider)
+        Gtk.StyleContext.remove_provider_for_display(display, startup)
+        manager.set_color_scheme(original_mode)
 
 
 def test_unrenderable_palette_preserves_last_good_state_and_answers_callbacks(

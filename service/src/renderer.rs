@@ -1119,10 +1119,10 @@ impl WallpaperDriver for SystemDriver {
     fn set_output_paused(&mut self, output: &str, paused: bool) -> Result<(), String> {
         let key = Self::key(output);
         let mut errors = Vec::new();
-        if let Some(video) = self.videos.get_mut(&key) {
-            if let Err(error) = video.renderer.set_paused(paused) {
-                errors.push(error);
-            }
+        if let Some(video) = self.videos.get_mut(&key)
+            && let Err(error) = video.renderer.set_paused(paused)
+        {
+            errors.push(error);
         }
         if let Some(scene) = self.scenes.get(&key) {
             let result = unsafe {
@@ -1463,9 +1463,11 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let socket = root.join("renderer.sock");
         fs::write(&socket, b"sentinel").unwrap();
-        assert!(remove_mpv_socket_with_hook(&socket, || {})
-            .unwrap_err()
-            .contains("non-socket"));
+        assert!(
+            remove_mpv_socket_with_hook(&socket, || {})
+                .unwrap_err()
+                .contains("non-socket")
+        );
         assert_eq!(fs::read(&socket).unwrap(), b"sentinel");
 
         fs::remove_file(&socket).unwrap();

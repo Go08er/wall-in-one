@@ -203,8 +203,9 @@ two physical monitors remain unverified.
 
 Older dated VM runs used companion revisions `a5e23c9` and `a17eb70`; those
 results do not establish the newer startup or battery-display behavior.
-Application v0.1.3 and its VM pin companion v0.1.2 at
-`c154c162fd650567ef8eda5d0e6d875b2b635a21`, including those changes.
+The original v0.1.3 release and its VM pinned companion v0.1.2 at
+`c154c162fd650567ef8eda5d0e6d875b2b635a21`, including those changes. The current
+app and VM use the tested revision in `flake.lock`, retaining that contract.
 Machines moving from an older companion still
 complete the compatible app's schema-4 cutover before loading the strict
 status-v2 client. The contract and old-revision limits are documented in

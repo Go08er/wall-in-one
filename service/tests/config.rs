@@ -5,8 +5,8 @@ use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{
-    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, Palette, Playlist, SceneClamp,
-    SceneScaling, ScheduleRule, MAX_CONFIG_BYTES,
+    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, MAX_CONFIG_BYTES, Palette,
+    Playlist, SceneClamp, SceneScaling, ScheduleRule,
 };
 
 fn temp_file(name: &str) -> PathBuf {
@@ -118,24 +118,27 @@ fn handwritten_config_loads_without_python_or_app_state() {
 
 #[test]
 fn loaded_config_digest_binds_exact_bytes_not_only_its_generation() {
-    use sha2::{Digest, Sha256};
     let original = document(4);
     let changed = format!("{original}\n# same model, different accepted bytes\n");
     let first = Config::from_bytes(original.as_bytes().to_vec()).unwrap();
     let mut second = Config::from_bytes(changed.as_bytes().to_vec()).unwrap();
     assert_eq!(
         first.source_sha256.as_deref(),
-        Some(format!("{:x}", Sha256::digest(original.as_bytes())).as_str())
+        // Independently computed with sha256sum, including the final newline.
+        // Keep the on-disk fingerprint stable across digest-library upgrades.
+        Some("16101ac8499ffbe8758b3408242a2b7d71bd50adf2f22c561b152f7df5b387dc")
     );
     assert_ne!(first.source_sha256, second.source_sha256);
     second.source_sha256.clone_from(&first.source_sha256);
     assert_eq!(first, second);
     // In-memory parsing cannot claim that bytes were accepted from disk, and
     // an input document cannot supply this internal provenance field itself.
-    assert!(toml::from_str::<Config>(&original)
-        .unwrap()
-        .source_sha256
-        .is_none());
+    assert!(
+        toml::from_str::<Config>(&original)
+            .unwrap()
+            .source_sha256
+            .is_none()
+    );
     let forged = format!("source_sha256 = \"{}\"\n{original}", "0".repeat(64));
     assert!(Config::from_bytes(forged.into_bytes()).is_err());
 }
@@ -165,7 +168,12 @@ fn loaded_configuration_keeps_exact_values_without_unused_vector_capacity() {
         source.push_str(tail);
         let mut expected: Config = toml::from_str(&source).unwrap();
         use sha2::{Digest, Sha256};
-        expected.source_sha256 = Some(format!("{:x}", Sha256::digest(source.as_bytes())));
+        expected.source_sha256 = Some(
+            Sha256::digest(source.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        );
         let path = temp_file("compact-config");
         fs::write(&path, source).unwrap();
         let loaded = Config::load(&path).unwrap();
@@ -230,11 +238,13 @@ fn entry_taboo_metadata_is_optional_bounded_and_backwards_compatible() {
 
     let too_long = with_taboo.replace("mpvpaper rejected this wallpaper", &"x".repeat(513));
     let parsed: Config = toml::from_str(&too_long).unwrap();
-    assert!(parsed
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("taboo reason"));
+    assert!(
+        parsed
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("taboo reason")
+    );
 }
 
 #[test]
@@ -290,11 +300,13 @@ fn config_loader_rejects_oversized_regular_files_before_decoding() {
 fn renderer_frame_rate_is_bounded() {
     let scene: Config =
         toml::from_str(&document(4).replace("scene_fps = 30", "scene_fps = 241")).unwrap();
-    assert!(scene
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("scene_fps"));
+    assert!(
+        scene
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("scene_fps")
+    );
 }
 
 #[test]
@@ -317,14 +329,18 @@ fn scene_presentation_modes_are_typed_and_unknown_values_are_refused() {
     assert_eq!(configured.renderer.scene_scaling, SceneScaling::Fill);
     assert_eq!(configured.renderer.scene_clamp, SceneClamp::Border);
 
-    assert!(toml::from_str::<Config>(
-        &document(4).replace("scene_scaling = \"\"", "scene_scaling = \"shell words\"")
-    )
-    .is_err());
-    assert!(toml::from_str::<Config>(
-        &document(4).replace("scene_clamp = \"\"", "scene_clamp = \"mirror\"")
-    )
-    .is_err());
+    assert!(
+        toml::from_str::<Config>(
+            &document(4).replace("scene_scaling = \"\"", "scene_scaling = \"shell words\"")
+        )
+        .is_err()
+    );
+    assert!(
+        toml::from_str::<Config>(
+            &document(4).replace("scene_clamp = \"\"", "scene_clamp = \"mirror\"")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -371,10 +387,12 @@ fn schema_four_display_contract_executes_independent_mode_strictly() {
         "{error}"
     );
 
-    assert!(toml::from_str::<Config>(
-        &document(4).replace("display_mode = \"mirrored\"", "display_mode = \"span\"")
-    )
-    .is_err());
+    assert!(
+        toml::from_str::<Config>(
+            &document(4).replace("display_mode = \"mirrored\"", "display_mode = \"span\"")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -384,29 +402,35 @@ fn connector_fields_are_single_protocol_tokens() {
         "theme_source_connector = \"DP 1\"",
     ))
     .unwrap();
-    assert!(theme
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("whitespace"));
+    assert!(
+        theme
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("whitespace")
+    );
 
     let schedule: Config = toml::from_str(&document(4).replace(
         "id = \"night\"\nplaylist = \"day\"\nweekdays",
         "id = \"night\"\nplaylist = \"day\"\nconnector = \"DP 1\"\nweekdays",
     ))
     .unwrap();
-    assert!(schedule
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("whitespace"));
+    assert!(
+        schedule
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("whitespace")
+    );
 
     let display: Config = toml::from_str(&document(4).replace("eDP-1", "DP 1")).unwrap();
-    assert!(display
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("whitespace"));
+    assert!(
+        display
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("whitespace")
+    );
 }
 
 #[test]

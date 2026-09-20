@@ -20,11 +20,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1786384358,
-        "narHash": "sha256-RzPPiWeUtuvymnpuEWsdtzli5w4kjZs49FqEs3/1u+I=",
+        "lastModified": 1789684949,
+        "narHash": "sha256-ZKhUe/2IJUq1JhKxKMu8rbkgSGmPP2ZCqlIPn40aGCM=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "2fcb964de67fcf60b43471c55d5d99e61a9ccb5a",
+        "rev": "e554fab72f81915600f3f449b786fd9af40439a5",
         "type": "github"
       },
       "original": {
@@ -37,11 +37,11 @@
     "noctalia-plugins": {
       "flake": false,
       "locked": {
-        "lastModified": 1788645879,
-        "narHash": "sha256-oakj3Q/7wclfvpd79xl1H3MJG1QO4sEPP5BqivAXxAE=",
+        "lastModified": 1789329703,
+        "narHash": "sha256-2Hr5cbio6BrtIeISSO3xmHz6Kz0SHwOOBj4el0SIZu4=",
         "owner": "Go08er",
         "repo": "goober-noctalia-plugins-v5",
-        "rev": "c154c162fd650567ef8eda5d0e6d875b2b635a21",
+        "rev": "d2365c05e103e6389673717439d0d55efe80db30",
         "type": "github"
       },
       "original": {

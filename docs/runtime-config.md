@@ -219,9 +219,10 @@ The companion revision paired with this application requires status version 2,
 performs the direct-launch health hand-off, and permits the runtime's bounded
 45-second action. Companion revisions through `a5e23c9` understand only the
 compatibility summary and must not be combined with this application release.
-Application v0.1.3 pins companion v0.1.2 at
-`c154c162fd650567ef8eda5d0e6d875b2b635a21` in `flake.lock`, including
-direct-start migration preflight and battery-status display. The earlier
+The original v0.1.3 release pinned companion v0.1.2 at
+`c154c162fd650567ef8eda5d0e6d875b2b635a21`, including direct-start migration
+preflight and battery-status display. See `flake.lock` for the current tested
+revision, which retains that contract. The earlier
 `a17eb70` companion provides only the base contract, not those newer safeguards.
 See [companion compatibility](migrating.md#companion-noctalia-plugin-compatibility)
 for the new requirements and [updating an existing installation](updating.md)

@@ -220,6 +220,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("old release authors real data at original and temporarily missing roots"):
         check_running(old)
+        old_supports_battery = 5 in status().get("supported_config_schemas", [])
         stop_runtime()
         change_settings(old, {"roots": (media_dir, home + "/Offline Library"), "cycle_enabled": False, "dynamics_enabled": False})
         # roots is a tuple of Paths in Settings; exercise the same writer with
@@ -287,6 +288,10 @@ pkgs.testers.runNixOSTest {
         run(new + "/bin/wall-in-one --write-config")
         assert document(runtime)["schema_version"] == 4
         run(old + "/bin/wall-in-one-service --check-config --config " + q(runtime))
+        # The daemon reloads a newly compiled document asynchronously. Establish
+        # that generation before testing that a refused write cannot change it.
+        generation = document(runtime)["config_generation"]
+        wait_status(lambda value: value["config_generation"] == generation)
         assert snapshot() == before
         record("battery_off_new_compiler_old_parser", {"accepted": True, "authored_and_media_bytes_unchanged": True})
 
@@ -310,7 +315,7 @@ pkgs.testers.runNixOSTest {
         run(old + "/bin/wall-in-one-service --check-config --config " + q(runtime))
         current = wait_status(lambda value: value["config_generation"] == old_status["config_generation"])
         assert check_running(old) == old_runtime_pid
-        assert "stop_animations_on_battery" not in current
+        assert current.get("stop_animations_on_battery", False) is False
         record("battery_on_with_old_runtime", {"refused_before_save": True,
             "settings_runtime_and_authored_bytes_unchanged": True,
             "old_generation_retained": True, "error": refusal})
@@ -464,7 +469,7 @@ pkgs.testers.runNixOSTest {
         record("app_first_companion_update", {"source": "${newPluginSource}", "same_candidate_runtime": True,
             "unrelated_noctalia_settings_preserved_on_publication": True})
 
-    with subtest("battery-enabled B works but package-only rollback to A refuses without data loss"):
+    with subtest("battery-enabled B and the old parser respect their schema compatibility"):
         stop_runtime()
         change_settings(new, {"stop_animations_on_battery": True})
         start_runtime()
@@ -474,16 +479,23 @@ pkgs.testers.runNixOSTest {
         stop_runtime()
         before = snapshot()
         runtime_hash = run("sha256sum " + q(runtime)).split()[0]
-        compiler_code, compiler_output = machine.execute(user(old + "/bin/wall-in-one --write-config 2>&1"))
         parser_code, parser_output = machine.execute(user(old + "/bin/wall-in-one-service --check-config --config " + q(runtime) + " 2>&1"))
-        assert compiler_code != 0 and "stop_animations_on_battery" in compiler_output, (compiler_code, compiler_output)
-        assert parser_code == 78, (parser_code, parser_output)
+        if old_supports_battery:
+            # Maintenance updates may change dependencies without changing the
+            # config schema. An older compatible parser must still accept it.
+            assert parser_code == 0, (parser_code, parser_output)
+            record("battery_enabled_compatible_old_parser", {"parser_exit": parser_code,
+                "schema_five_supported": True, "files_unchanged": True})
+        else:
+            compiler_code, compiler_output = machine.execute(user(old + "/bin/wall-in-one --write-config 2>&1"))
+            assert compiler_code != 0 and "stop_animations_on_battery" in compiler_output, (compiler_code, compiler_output)
+            assert parser_code == 78, (parser_code, parser_output)
+            record("battery_enabled_package_only_rollback", {"compiler_exit": compiler_code, "parser_exit": parser_code,
+                "files_unchanged": True, "compiler_error": compiler_output.strip(), "power_available": enabled["power_available"],
+                "recovery": "restart the compatible newer package; no automatic data downgrade"})
         assert snapshot() == before
         assert run("sha256sum " + q(runtime)).split()[0] == runtime_hash
         machine.fail("test -e ${runtimeDir}/wall-in-one-runtime.sock")
-        record("battery_enabled_package_only_rollback", {"compiler_exit": compiler_code, "parser_exit": parser_code,
-            "files_unchanged": True, "compiler_error": compiler_output.strip(), "power_available": enabled["power_available"],
-            "recovery": "restart the compatible newer package; no automatic data downgrade"})
         start_runtime()
         wait_status(lambda value: value.get("stop_animations_on_battery") is True)
         check_running(new)

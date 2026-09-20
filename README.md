@@ -355,7 +355,7 @@ any reported registration or template error before trying again.
 **Palettes** in the menu browses what is installed: the ten built-ins,
 community palettes Noctalia has cached, your own custom ones, and a fourth
 group for the pre-5.x `colorschemes/` layout. That fourth group is listed with
-Apply disabled and the reason stated -- Noctalia 5.0.0-beta.7 cannot apply one,
+Apply disabled and the reason stated -- Noctalia v5 cannot apply that legacy format,
 so its Apply button is unavailable. The built-ins are listed without
 swatches for a related reason: their names are strings in the binary and their
 colours are not. Palette directories are discovered and parsed on one bounded

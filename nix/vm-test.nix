@@ -757,6 +757,11 @@ pkgs.testers.runNixOSTest {
         # with an older runtime, an old/new release matrix, or pending-writer
         # draining. The GUI is already closed and the existing quarantine from
         # the health test remains authoritative; do not reset it for this check.
+        # Earlier subtests deliberately start/stop this unit several times.
+        # Clear only systemd's test-induced start counter so this independent
+        # scenario does not depend on how fast those earlier cases completed.
+        # The packaged restart/burst limits and authored health data stay intact.
+        machine.succeed(as_user("systemctl --user reset-failed wall-in-one.service"))
         runtime_document = "${home}/.local/state/wall-in-one/runtime.toml"
         runtime_binary = "${wallInOnePackage}/bin/wall-in-one-service"
         settings_document = "${home}/.config/wall-in-one/settings.toml"

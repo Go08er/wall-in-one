@@ -344,7 +344,10 @@ impl Config {
         if bytes.len() as u64 > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge(bytes.len() as u64));
         }
-        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let text = String::from_utf8(bytes).map_err(|error| {
             ConfigError::Io(Error::new(
                 ErrorKind::InvalidData,
@@ -497,7 +500,7 @@ impl Config {
                         _ => return invalid("scene entry needs a numeric scene_id"),
                     },
                     EntryKind::Still => {
-                        return invalid("still entry must not carry motion or scene_id")
+                        return invalid("still entry must not carry motion or scene_id");
                     }
                     EntryKind::Video => return invalid("video entry must not carry scene_id"),
                     EntryKind::Scene => return invalid("scene entry must not carry motion"),
@@ -521,12 +524,12 @@ impl Config {
             return invalid("at least one playlist is required");
         }
         for (id, id_index) in &ids {
-            if let Some(name_index) = names.get(id) {
-                if id_index != name_index {
-                    return invalid(format!(
-                        "playlist id {id:?} is also another playlist's name"
-                    ));
-                }
+            if let Some(name_index) = names.get(id)
+                && id_index != name_index
+            {
+                return invalid(format!(
+                    "playlist id {id:?} is also another playlist's name"
+                ));
             }
         }
         bounded_nonempty(
@@ -570,7 +573,7 @@ impl Config {
                     return invalid(format!(
                         "schedule {:?} has only half a time window",
                         rule.id
-                    ))
+                    ));
                 }
             }
         }

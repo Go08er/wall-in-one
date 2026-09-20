@@ -1,10 +1,10 @@
 use crate::config::{
-    Config, DisplayMode, Entry, EntryKind, Playlist, ScheduleRule, MAX_PATH_BYTES,
-    SUPPORTED_SCHEMA_VERSIONS,
+    Config, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES, Playlist, SUPPORTED_SCHEMA_VERSIONS,
+    ScheduleRule,
 };
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response};
-use crate::renderer::{RendererFailure, WallpaperDriver, MAX_OUTPUT_NAME_BYTES};
+use crate::renderer::{MAX_OUTPUT_NAME_BYTES, RendererFailure, WallpaperDriver};
 use crate::schedule;
 use chrono::NaiveDateTime;
 use serde::Serialize;
@@ -963,10 +963,10 @@ impl<D: WallpaperDriver> Runtime<D> {
         if self.is_independent() {
             let mut unattributed = Vec::new();
             for failure in &failures {
-                if failure.permanent_for_session {
-                    if let Some(key) = self.failure_key(&failure.entry_id, &failure.output) {
-                        self.mark_taboo(key, &failure.message, "renderer-crash");
-                    }
+                if failure.permanent_for_session
+                    && let Some(key) = self.failure_key(&failure.entry_id, &failure.output)
+                {
+                    self.mark_taboo(key, &failure.message, "renderer-crash");
                 }
                 if let Some(route) = self.routes.get_mut(&failure.output) {
                     // A renderer exit is a failed attempt to satisfy the
@@ -1003,10 +1003,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .collect();
             self.last_error = bounded_failure_summary(&messages);
             for failure in &failures {
-                if failure.permanent_for_session {
-                    if let Some(key) = self.failure_key(&failure.entry_id, &failure.output) {
-                        self.mark_taboo(key, &failure.message, "renderer-crash");
-                    }
+                if failure.permanent_for_session
+                    && let Some(key) = self.failure_key(&failure.entry_id, &failure.output)
+                {
+                    self.mark_taboo(key, &failure.message, "renderer-crash");
                 }
             }
             // Videos remain retryable: unlike scenes, SystemDriver does not
@@ -1028,39 +1028,41 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
         let mut schedule_transition_attempted = false;
-        if !had_pending && self.pending_automatic.is_none() && self.manual_playlist.is_none() {
-            if let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at) {
-                let overrode = scheduled.is_some();
-                let wanted = scheduled
-                    .unwrap_or(&self.config.default_playlist)
-                    .to_string();
-                let playlist_changed = wanted != self.active_playlist;
-                let routing_changed = overrode != self.schedule_overrode_default;
-                if routing_changed && !playlist_changed {
-                    // Only provenance changed (for example, a schedule rule
-                    // naming the already-active default). Commit the truth
-                    // shown in status without restarting motion.
-                    self.schedule_overrode_default = overrode;
-                } else if playlist_changed {
-                    schedule_transition_attempted = true;
-                    let baseline = self.selection_state();
-                    self.schedule_overrode_default = overrode;
-                    let mut candidate_available = true;
-                    if playlist_changed {
-                        self.active_playlist = wanted.clone();
-                        candidate_available =
-                            self.reset_cursor_automatic(&self.active_playlist.clone());
-                    }
-                    if candidate_available {
-                        let candidate = self.selection_state();
-                        self.restore_selection(&baseline);
-                        self.start_automatic(baseline, candidate, "schedule", now);
-                    } else {
-                        self.restore_selection(&baseline);
-                        self.last_error = format!(
-                            "scheduled playlist {wanted:?} has no usable entries; every entry is taboo this session"
-                        );
-                    }
+        if !had_pending
+            && self.pending_automatic.is_none()
+            && self.manual_playlist.is_none()
+            && let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at)
+        {
+            let overrode = scheduled.is_some();
+            let wanted = scheduled
+                .unwrap_or(&self.config.default_playlist)
+                .to_string();
+            let playlist_changed = wanted != self.active_playlist;
+            let routing_changed = overrode != self.schedule_overrode_default;
+            if routing_changed && !playlist_changed {
+                // Only provenance changed (for example, a schedule rule
+                // naming the already-active default). Commit the truth
+                // shown in status without restarting motion.
+                self.schedule_overrode_default = overrode;
+            } else if playlist_changed {
+                schedule_transition_attempted = true;
+                let baseline = self.selection_state();
+                self.schedule_overrode_default = overrode;
+                let mut candidate_available = true;
+                if playlist_changed {
+                    self.active_playlist = wanted.clone();
+                    candidate_available =
+                        self.reset_cursor_automatic(&self.active_playlist.clone());
+                }
+                if candidate_available {
+                    let candidate = self.selection_state();
+                    self.restore_selection(&baseline);
+                    self.start_automatic(baseline, candidate, "schedule", now);
+                } else {
+                    self.restore_selection(&baseline);
+                    self.last_error = format!(
+                        "scheduled playlist {wanted:?} has no usable entries; every entry is taboo this session"
+                    );
                 }
             }
         }
@@ -1307,11 +1309,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .cloned()
             .collect();
         for connector in &newly_connected {
-            if let Err(error) = self.refresh_route_decision(connector, true) {
-                if let Some(route) = self.routes.get_mut(connector) {
-                    route.last_error = truncate_middle(&error, MAX_LAST_ERROR_BYTES);
-                    route.renderer_failed = true;
-                }
+            if let Err(error) = self.refresh_route_decision(connector, true)
+                && let Some(route) = self.routes.get_mut(connector)
+            {
+                route.last_error = truncate_middle(&error, MAX_LAST_ERROR_BYTES);
+                route.renderer_failed = true;
             }
         }
 
@@ -1339,15 +1341,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .find(|target| target.output == connector)
                 })
                 .map(|target| (target.output, self.driver.apply_palette_only(&target.entry)));
-            if let Some((connector, Err(error))) = palette_result {
-                if let Some(route) = self.routes.get_mut(&connector) {
-                    route.last_error = truncate_middle(
-                        &format!(
-                            "theme source changed after an output hotplug, but its palette could not be applied: {error}"
-                        ),
-                        MAX_LAST_ERROR_BYTES,
-                    );
-                }
+            if let Some((connector, Err(error))) = palette_result
+                && let Some(route) = self.routes.get_mut(&connector)
+            {
+                route.last_error = truncate_middle(
+                    &format!(
+                        "theme source changed after an output hotplug, but its palette could not be applied: {error}"
+                    ),
+                    MAX_LAST_ERROR_BYTES,
+                );
             }
         }
         self.refresh_independent_last_error();
@@ -1366,19 +1368,19 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .filter(|failure| failure.output == *connector)
                 .cloned()
                 .collect();
-            if failures.is_empty() && recorded_failures.is_empty() {
-                if let (Some(error), Some(entry)) =
+            if failures.is_empty()
+                && recorded_failures.is_empty()
+                && let (Some(error), Some(entry)) =
                     (batch_error, self.route_current_entry(connector))
-                {
-                    failures.push(ApplyFailure {
-                        key: EntryKey {
-                            playlist_id: self.routes[connector].active_playlist.clone(),
-                            entry_id: entry.id.clone(),
-                        },
-                        output: connector.clone(),
-                        reason: error.clone(),
-                    });
-                }
+            {
+                failures.push(ApplyFailure {
+                    key: EntryKey {
+                        playlist_id: self.routes[connector].active_playlist.clone(),
+                        entry_id: entry.id.clone(),
+                    },
+                    output: connector.clone(),
+                    reason: error.clone(),
+                });
             }
 
             if failures.is_empty() {
@@ -1479,14 +1481,14 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             Err(error) => {
                 let mut failures = self.last_apply_failures.clone();
-                if failures.is_empty() {
-                    if let Some(key) = attempted {
-                        failures.push(ApplyFailure {
-                            key,
-                            output: connector.clone(),
-                            reason: error.clone(),
-                        });
-                    }
+                if failures.is_empty()
+                    && let Some(key) = attempted
+                {
+                    failures.push(ApplyFailure {
+                        key,
+                        output: connector.clone(),
+                        reason: error.clone(),
+                    });
                 }
                 pending.failures = failures;
                 let rollback = if pending.restore_baseline {
@@ -2330,20 +2332,21 @@ impl<D: WallpaperDriver> Runtime<D> {
                 });
             }
         }
-        if self.playback_state == PlaybackState::Paused && !self.animations_inhibited() {
-            if let Err(error) = self.driver.set_paused(true) {
-                // The newly started renderer is not paused. Do not leave status
-                // claiming otherwise. Undo any partial multi-output pause on a
-                // best-effort basis before reporting the renderer as playing.
-                self.playback_state = PlaybackState::Playing;
-                let rollback = self
-                    .driver
-                    .set_paused(false)
-                    .err()
-                    .map(|detail| format!("; resume rollback also failed: {detail}"))
-                    .unwrap_or_default();
-                errors.push(format!("could not pause renderer: {error}{rollback}"));
-            }
+        if self.playback_state == PlaybackState::Paused
+            && !self.animations_inhibited()
+            && let Err(error) = self.driver.set_paused(true)
+        {
+            // The newly started renderer is not paused. Do not leave status
+            // claiming otherwise. Undo any partial multi-output pause on a
+            // best-effort basis before reporting the renderer as playing.
+            self.playback_state = PlaybackState::Playing;
+            let rollback = self
+                .driver
+                .set_paused(false)
+                .err()
+                .map(|detail| format!("; resume rollback also failed: {detail}"))
+                .unwrap_or_default();
+            errors.push(format!("could not pause renderer: {error}{rollback}"));
         }
         if errors.is_empty() {
             self.supersede_startup_apply();
@@ -2483,25 +2486,22 @@ impl<D: WallpaperDriver> Runtime<D> {
         if let Some(theme_source) = theme_source
             .as_deref()
             .filter(|connector| selected.contains(*connector))
-        {
-            if let Some(target) = targets
+            && let Some(target) = targets
                 .iter()
                 .find(|target| target.output == theme_source)
                 .filter(|target| !blocked.contains(&target.output))
-            {
-                if let Err(error) = self.driver.apply_palette_only(&target.entry) {
-                    self.last_apply_failures.push(ApplyFailure {
-                        key: EntryKey {
-                            playlist_id: target.playlist_id.clone(),
-                            entry_id: target.entry.id.clone(),
-                        },
-                        output: target.output.clone(),
-                        reason: error.clone(),
-                    });
-                    errors.push(format!("{theme_source} palette: {error}"));
-                    blocked.insert(target.output.clone());
-                }
-            }
+            && let Err(error) = self.driver.apply_palette_only(&target.entry)
+        {
+            self.last_apply_failures.push(ApplyFailure {
+                key: EntryKey {
+                    playlist_id: target.playlist_id.clone(),
+                    entry_id: target.entry.id.clone(),
+                },
+                output: target.output.clone(),
+                reason: error.clone(),
+            });
+            errors.push(format!("{theme_source} palette: {error}"));
+            blocked.insert(target.output.clone());
         }
 
         for target in &targets {
@@ -2540,10 +2540,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             if playback == PlaybackState::Paused
                 && settings.dynamics_enabled
                 && target.entry.kind != crate::config::EntryKind::Still
+                && let Err(error) = self.driver.set_output_paused(&target.output, true)
             {
-                if let Err(error) = self.driver.set_output_paused(&target.output, true) {
-                    errors.push(format!("{} pause: {error}", target.output));
-                }
+                errors.push(format!("{} pause: {error}", target.output));
             }
         }
         let mut route_errors: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -2603,14 +2602,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         } else if self.config.displays.is_empty() {
-            if let Some(playlist) = self.config.playlist(&self.active_playlist) {
-                if let Some(entry) = self.current_entry_for(&playlist.id).cloned() {
-                    targets.push(Target {
-                        playlist_id: playlist.id.clone(),
-                        entry,
-                        output: String::new(),
-                    });
-                }
+            if let Some(playlist) = self.config.playlist(&self.active_playlist)
+                && let Some(entry) = self.current_entry_for(&playlist.id).cloned()
+            {
+                targets.push(Target {
+                    playlist_id: playlist.id.clone(),
+                    entry,
+                    output: String::new(),
+                });
             }
         } else {
             for output in outputs {
@@ -2626,14 +2625,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                             display.playlist.as_str()
                         })
                 };
-                if let Some(playlist) = self.config.playlist(reference) {
-                    if let Some(entry) = self.current_entry_for(&playlist.id).cloned() {
-                        targets.push(Target {
-                            playlist_id: playlist.id.clone(),
-                            entry,
-                            output: output.clone(),
-                        });
-                    }
+                if let Some(playlist) = self.config.playlist(reference)
+                    && let Some(entry) = self.current_entry_for(&playlist.id).cloned()
+                {
+                    targets.push(Target {
+                        playlist_id: playlist.id.clone(),
+                        entry,
+                        output: output.clone(),
+                    });
                 }
             }
         }
@@ -3801,11 +3800,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.restore_reload_snapshot(snapshot);
             return Err(error);
         }
-        if self.is_independent() {
-            if let Err(error) = self.rebuild_independent_routes(&old_route_entries) {
-                self.restore_reload_snapshot(snapshot);
-                return Err(error);
-            }
+        if self.is_independent()
+            && let Err(error) = self.rebuild_independent_routes(&old_route_entries)
+        {
+            self.restore_reload_snapshot(snapshot);
+            return Err(error);
         }
 
         let new_targets = self.current_targets(&self.target_outputs);
@@ -3851,13 +3850,13 @@ impl<D: WallpaperDriver> Runtime<D> {
 
         if renderer_changed {
             self.driver.reconfigure(self.config.renderer.clone());
-        } else if video_audio_changed {
-            if let Err(error) = self.driver.set_video_audio(
+        } else if video_audio_changed
+            && let Err(error) = self.driver.set_video_audio(
                 self.config.renderer.video_muted,
                 self.config.renderer.video_volume,
-            ) {
-                failure = Some(error);
-            }
+            )
+        {
+            failure = Some(error);
         }
         if failure.is_none() && self.is_independent() && output_removed && !apply_needed {
             self.driver.retain_outputs(&self.target_outputs);
@@ -3905,13 +3904,13 @@ impl<D: WallpaperDriver> Runtime<D> {
             let mut rollback_errors = Vec::new();
             if renderer_changed {
                 self.driver.reconfigure(self.config.renderer.clone());
-            } else if video_audio_changed {
-                if let Err(rollback) = self.driver.set_video_audio(
+            } else if video_audio_changed
+                && let Err(rollback) = self.driver.set_video_audio(
                     self.config.renderer.video_muted,
                     self.config.renderer.video_volume,
-                ) {
-                    rollback_errors.push(format!("could not restore video audio: {rollback}"));
-                }
+                )
+            {
+                rollback_errors.push(format!("could not restore video audio: {rollback}"));
             }
             let scoped_independent_rollback =
                 apply_attempted && !mode_changed && self.is_independent();
@@ -5168,8 +5167,8 @@ fn _is_absolute(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        promote_taboo_status_key, push_bounded, EntryKey, MAX_TABOO_STATUS_ENTRIES,
-        PLAYBACK_HISTORY_LIMIT,
+        EntryKey, MAX_TABOO_STATUS_ENTRIES, PLAYBACK_HISTORY_LIMIT, promote_taboo_status_key,
+        push_bounded,
     };
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::config::{parse_time, ConfigError, ScheduleRule};
+use crate::config::{ConfigError, ScheduleRule, parse_time};
 use chrono::{Datelike, Days, NaiveDateTime, Timelike};
 
 pub trait Clock {

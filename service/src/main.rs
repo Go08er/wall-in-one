@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use wall_in_one_service::config::{Config, ConfigError};
 use wall_in_one_service::power::PowerObserver;
-use wall_in_one_service::protocol::{read_request_until, write_response, Request, Response};
+use wall_in_one_service::protocol::{Request, Response, read_request_until, write_response};
 use wall_in_one_service::renderer::SystemDriver;
 use wall_in_one_service::runtime::Runtime;
 
@@ -332,7 +332,7 @@ fn clear_stale_socket_with_hook(path: &Path, before_recheck: impl FnOnce()) -> R
             return Err(format!(
                 "cannot recheck stale socket {}: {error}",
                 path.display()
-            ))
+            ));
         }
     };
     if !current.file_type().is_socket()
@@ -580,8 +580,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_ready_batch, claim_lock_with_hook, clear_stale_socket_with_hook,
-        MAX_ACCEPTS_PER_ITERATION,
+        MAX_ACCEPTS_PER_ITERATION, accept_ready_batch, claim_lock_with_hook,
+        clear_stale_socket_with_hook,
     };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -612,9 +612,11 @@ mod tests {
             fs::write(&lock, b"replacement").unwrap();
             fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
         });
-        assert!(result
-            .unwrap_err()
-            .contains("changed while it was being claimed"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("changed while it was being claimed")
+        );
         assert_eq!(fs::read(&lock).unwrap(), b"replacement");
         assert_eq!(
             fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
@@ -636,9 +638,11 @@ mod tests {
             fs::remove_file(&socket).unwrap();
             fs::write(&socket, b"replacement").unwrap();
         });
-        assert!(result
-            .unwrap_err()
-            .contains("changed while its stale owner"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("changed while its stale owner")
+        );
         assert_eq!(fs::read(&socket).unwrap(), b"replacement");
         fs::remove_dir_all(root).unwrap();
     }

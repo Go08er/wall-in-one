@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::Config;
-use wall_in_one_service::protocol::{write_response, Response, MAX_RESPONSE_BYTES};
+use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
 use wall_in_one_service::renderer::{RendererFailure, SystemDriver, WallpaperDriver};
 use wall_in_one_service::runtime::Runtime;
 
@@ -836,18 +836,24 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         root.join("runtime.toml").to_str().unwrap()
     );
     assert_eq!(crash_status["motion_active"], false);
-    assert!(crash_status["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("scene 12345"));
-    assert!(crash_status["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("linux-wallpaperengine"));
-    assert!(crash_status["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("unsupported scene shader"));
+    assert!(
+        crash_status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("scene 12345")
+    );
+    assert!(
+        crash_status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("linux-wallpaperengine")
+    );
+    assert!(
+        crash_status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported scene shader")
+    );
     assert_eq!(
         fs::read_to_string(&events)
             .unwrap()
@@ -883,10 +889,12 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
 
     fs::write(&config_path, &document).unwrap();
     assert!(runtime_command(&mut runtime, at, "reload", None).ok);
-    assert!(status(&mut runtime, at)["taboo_entries"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        status(&mut runtime, at)["taboo_entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         fs::read_to_string(&launches).unwrap().lines().count(),
         1,
@@ -1314,16 +1322,20 @@ fn battery_startup_and_manual_commands_never_launch_motion() {
         runtime.observe_power(power_observation(Battery));
         runtime.apply_current().unwrap();
         assert!(runtime_command(&mut runtime, at, "next", None).ok);
-        assert!(runtime_command(&mut runtime, at, "play", None)
-            .message
-            .contains("battery"));
+        assert!(
+            runtime_command(&mut runtime, at, "play", None)
+                .message
+                .contains("battery")
+        );
         assert!(runtime_command(&mut runtime, at, "playlist-use", Some("night")).ok);
-        assert!(state
-            .lock()
-            .unwrap()
-            .applies
-            .iter()
-            .all(|(_, motion)| !motion));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .applies
+                .iter()
+                .all(|(_, motion)| !motion)
+        );
         let before = status(&mut runtime, at);
         assert_eq!(before["animations_inhibited"], true);
         assert_eq!(before["motion_active"], false);
@@ -1334,12 +1346,14 @@ fn battery_startup_and_manual_commands_never_launch_motion() {
         assert_eq!(after["motion_active"], true);
         assert_eq!(after["entry_id"], before["entry_id"]);
         assert_eq!(after["playlist_id"], before["playlist_id"]);
-        assert!(state
-            .lock()
-            .unwrap()
-            .stage_events
-            .iter()
-            .all(|event| event.starts_with("motion ")));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .stage_events
+                .iter()
+                .all(|event| event.starts_with("motion "))
+        );
         let applies = state.lock().unwrap().applies.len();
         runtime.observe_power(power_observation(Ac));
         assert_eq!(state.lock().unwrap().applies.len(), applies);
@@ -1458,12 +1472,14 @@ fn failed_independent_battery_pause_resume_restores_selected_still_residency() {
         state.lock().unwrap().active_outputs.is_empty(),
         "rollback must preserve the released still-only renderer state"
     );
-    assert!(state
-        .lock()
-        .unwrap()
-        .stage_events
-        .iter()
-        .all(|event| !event.contains("HDMI-A-1")));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .all(|event| !event.contains("HDMI-A-1"))
+    );
     assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
     assert_eq!(
         state.lock().unwrap().active_outputs,
@@ -1520,12 +1536,14 @@ fn battery_still_cycling_and_hotplug_keep_all_motion_released() {
         .push("DP-2".into());
     runtime.tick(at, now + Duration::from_secs(307));
     assert_eq!(display_status(&mut runtime, at, "DP-2")["connected"], true);
-    assert!(state
-        .lock()
-        .unwrap()
-        .applies
-        .iter()
-        .all(|(_, motion)| !motion));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .all(|(_, motion)| !motion)
+    );
     assert_eq!(status(&mut runtime, at)["renderer_failed"], false);
 }
 
@@ -1635,12 +1653,14 @@ fn battery_reload_samples_the_exact_candidate_before_enabling_motion() {
     );
     assert!(response.ok, "{}", response.message);
     assert!(sampled);
-    assert!(state
-        .lock()
-        .unwrap()
-        .applies
-        .iter()
-        .all(|(_, motion)| !motion));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .applies
+            .iter()
+            .all(|(_, motion)| !motion)
+    );
     assert_eq!(status(&mut runtime, at)["animations_inhibited"], true);
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
@@ -1791,16 +1811,20 @@ fn independent_schedule_precedence_is_targeted_then_global_then_assignment() {
     assert_eq!(dp["schedule_rule_id"], "dp-now");
     assert_eq!(hdmi["playlist_id"], "night");
     assert_eq!(hdmi["schedule_rule_id"], "global-now");
-    assert!(snapshot["schedules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule["id"] == "global-now" && rule["connector"].is_null()));
-    assert!(snapshot["schedules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule["id"] == "dp-now" && rule["connector"] == "DP-1"));
+    assert!(
+        snapshot["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["id"] == "global-now" && rule["connector"].is_null())
+    );
+    assert!(
+        snapshot["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["id"] == "dp-now" && rule["connector"] == "DP-1")
+    );
 
     assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use night")).ok);
     assert_eq!(
@@ -1906,12 +1930,16 @@ fn targeted_handover_never_restarts_or_recolours_an_unselected_display_and_rolls
     assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 next")).ok);
     let events = state.lock().unwrap().stage_events.clone();
     assert!(events.iter().any(|event| event == "stop HDMI-A-1"));
-    assert!(events
-        .iter()
-        .any(|event| event == "still HDMI-A-1 video-two"));
-    assert!(events
-        .iter()
-        .any(|event| event == "motion HDMI-A-1 video-two"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event == "still HDMI-A-1 video-two")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event == "motion HDMI-A-1 video-two")
+    );
     assert!(
         events
             .iter()
@@ -1945,10 +1973,12 @@ fn targeted_handover_never_restarts_or_recolours_an_unselected_display_and_rolls
         .unwrap();
     assert_eq!(hdmi["entry_id"], "still-one");
     assert_eq!(hdmi["renderer_failed"], false);
-    assert!(hdmi["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("previous wallpaper restored"));
+    assert!(
+        hdmi["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("previous wallpaper restored")
+    );
     assert_eq!(dp["entry_id"], "still-one");
     assert_eq!(dp["last_error"], "");
     let events = state.lock().unwrap().stage_events.clone();
@@ -2167,12 +2197,14 @@ fn one_route_retry_never_rewinds_or_reapplies_another_routes_random_choice() {
         display_status(&mut runtime, at, "HDMI-A-1")["entry_id"],
         chosen
     );
-    assert!(state
-        .lock()
-        .unwrap()
-        .stage_events
-        .iter()
-        .all(|event| !event.contains("HDMI-A-1")));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .all(|event| !event.contains("HDMI-A-1"))
+    );
 }
 
 #[test]
@@ -2260,11 +2292,13 @@ fn display_mode_switch_clears_hidden_session_overrides_in_both_directions() {
     assert!(response.ok, "{}", response.message);
     let independent = status(&mut runtime, at);
     assert_ne!(independent["source"], "manual");
-    assert!(independent["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| row["manual_override"] == false));
+    assert!(
+        independent["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["manual_override"] == false)
+    );
     assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 playlist-use night")).ok);
     assert_eq!(
         display_status(&mut runtime, at, "DP-1")["route_source"],
@@ -2280,12 +2314,14 @@ fn display_mode_switch_clears_hidden_session_overrides_in_both_directions() {
     fs::write(&config_path, &independent_document).unwrap();
     assert!(runtime_command(&mut runtime, at, "reload", None).ok);
     let independent_again = status(&mut runtime, at);
-    assert!(independent_again["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|row| row["connected"] == true)
-        .all(|row| row["manual_override"] == false));
+    assert!(
+        independent_again["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["connected"] == true)
+            .all(|row| row["manual_override"] == false)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2343,10 +2379,12 @@ fn independent_renderer_crash_is_attributed_without_poisoning_a_healthy_route() 
     assert_eq!(hdmi["playback_state"], "playing");
     assert_eq!(hdmi["motion_active"], false);
     assert_eq!(hdmi["renderer_failed"], true);
-    assert!(hdmi["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("mpvpaper crashed"));
+    assert!(
+        hdmi["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("mpvpaper crashed")
+    );
 
     state.lock().unwrap().stage_events.clear();
     assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
@@ -2420,12 +2458,14 @@ fn renderer_crash_reasserts_only_the_shell_global_palette_owner() {
             permanent_for_session: false,
         });
     independent.tick(at, Instant::now());
-    assert!(independent_state
-        .lock()
-        .unwrap()
-        .stage_events
-        .iter()
-        .all(|event| !event.starts_with("palette ")));
+    assert!(
+        independent_state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .all(|event| !event.starts_with("palette "))
+    );
 
     independent_state.lock().unwrap().stage_events.clear();
     independent_state
@@ -2623,10 +2663,12 @@ fn status_inventory_keeps_configured_assignments_when_the_connector_is_detached(
         assert_eq!(detached["connected"], false);
         assert_eq!(detached["motion_active"], false);
         assert_eq!(detached["assignment_source"], "explicit");
-        assert!(!detached["assigned_playlist_id"]
-            .as_str()
-            .unwrap()
-            .is_empty());
+        assert!(
+            !detached["assigned_playlist_id"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
@@ -2748,36 +2790,46 @@ fn independent_target_grammar_is_strict_and_controls_are_per_display() {
     assert_eq!(snapshot["playback_state"], "mixed");
 
     assert!(runtime_command(&mut runtime, at, "toggle", None).ok);
-    assert!(status(&mut runtime, at)["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| row["playback_state"] == "paused"));
+    assert!(
+        status(&mut runtime, at)["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["playback_state"] == "paused")
+    );
     assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 stop")).ok);
     let mixed = status(&mut runtime, at);
-    assert!(mixed["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["playback_state"] == "stopped"));
-    assert!(mixed["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["playback_state"] == "paused"));
+    assert!(
+        mixed["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["playback_state"] == "stopped")
+    );
+    assert!(
+        mixed["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["playback_state"] == "paused")
+    );
     assert!(runtime_command(&mut runtime, at, "toggle", None).ok);
-    assert!(status(&mut runtime, at)["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| row["playback_state"] == "playing"));
+    assert!(
+        status(&mut runtime, at)["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["playback_state"] == "playing")
+    );
 
     assert!(runtime_command(&mut runtime, at, "stop", None).ok);
-    assert!(status(&mut runtime, at)["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| row["playback_state"] == "stopped"));
+    assert!(
+        status(&mut runtime, at)["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["playback_state"] == "stopped")
+    );
     assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 play")).ok);
     let snapshot = status(&mut runtime, at);
     assert_eq!(snapshot["playback_state"], "mixed");
@@ -3157,10 +3209,12 @@ fn automatic_cycle_retries_three_times_then_marks_and_skips_the_borked_entry() {
     assert_eq!(taboo["taboo_entries"][0]["entry_id"], "video-two");
     assert_eq!(taboo["taboo_entries"][0]["source"], "automatic-apply");
     assert_eq!(taboo["taboo_entries"][0]["durable"], false);
-    assert!(taboo["taboo_entries"][0]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("borked"));
+    assert!(
+        taboo["taboo_entries"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("borked")
+    );
     assert_eq!(taboo["taboo_entries_omitted"], 0);
 
     runtime.tick(at, due + Duration::from_secs(5));
@@ -3269,12 +3323,14 @@ fn independent_startup_failure_quarantines_only_the_failed_route_and_advances() 
     assert_eq!(recovered["displays"][0]["entry_id"], "video-two");
     assert_eq!(recovered["displays"][0]["motion_active"], true);
     assert_eq!(recovered["displays"][0]["renderer_failed"], false);
-    assert!(state
-        .lock()
-        .unwrap()
-        .stage_events
-        .iter()
-        .all(|event| !event.contains("HDMI-A-1")));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .stage_events
+            .iter()
+            .all(|event| !event.contains("HDMI-A-1"))
+    );
 }
 
 #[test]
@@ -3306,10 +3362,12 @@ fn mirrored_automatic_retry_keeps_renderer_failed_when_rollback_fails() {
     assert_eq!(failed["automatic_retry"]["attempt"], 1);
     assert_eq!(failed["renderer_failed"], true);
     assert_eq!(failed["motion_active"], false);
-    assert!(failed["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("could not restore the previous wallpaper"));
+    assert!(
+        failed["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("could not restore the previous wallpaper")
+    );
 }
 
 #[test]
@@ -3343,10 +3401,12 @@ fn independent_automatic_retry_keeps_renderer_failed_when_rollback_fails() {
     assert_eq!(failed["automatic_retry"]["attempt"], 1);
     assert_eq!(failed["renderer_failed"], true);
     assert_eq!(failed["motion_active"], false);
-    assert!(failed["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("could not restore the previous wallpaper"));
+    assert!(
+        failed["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("could not restore the previous wallpaper")
+    );
     assert_eq!(status(&mut runtime, at)["renderer_failed"], true);
 }
 
@@ -3472,10 +3532,12 @@ fn renderer_crash_is_attributed_and_never_enters_the_apply_retry_machine() {
     assert_eq!(snapshot["taboo_entries"][0]["entry_id"], "scene-three");
     assert_eq!(snapshot["taboo_entries"][0]["scene_id"], "12345");
     assert_eq!(snapshot["taboo_entries"][0]["source"], "renderer-crash");
-    assert!(snapshot["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("linux-wallpaperengine"));
+    assert!(
+        snapshot["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("linux-wallpaperengine")
+    );
 }
 
 #[test]
@@ -3560,9 +3622,11 @@ fn reload_preserves_session_findings_but_app_clear_removes_durable_taboo_before_
     assert_eq!(first["taboo_entries"][0]["observed_config_epoch"], 1);
     let instance = first["runtime_instance"].as_str().unwrap();
     assert_eq!(instance.len(), 32);
-    assert!(instance
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert!(
+        instance
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
 
     // An unrelated compiler reload before the app has consumed status must
     // not mistake absence for an author-owned clear.
@@ -3890,12 +3954,14 @@ fn manual_navigation_and_playlist_routing_skip_taboo_entries_in_both_display_mod
         assert_eq!(status(&mut runtime, summer)["entry_id"], "still-one");
         assert!(command(&mut runtime, "random").ok);
         assert_eq!(status(&mut runtime, summer)["entry_id"], "still-safe");
-        assert!(state
-            .lock()
-            .unwrap()
-            .applies
-            .iter()
-            .all(|(entry, _)| entry != "video-two"));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .applies
+                .iter()
+                .all(|(entry, _)| entry != "video-two")
+        );
 
         let applies_before = state.lock().unwrap().applies.len();
         let refused_playlist = if independent {
@@ -3904,9 +3970,11 @@ fn manual_navigation_and_playlist_routing_skip_taboo_entries_in_both_display_mod
             runtime_command(&mut runtime, summer, "playlist-use", Some("night"))
         };
         assert!(!refused_playlist.ok);
-        assert!(refused_playlist
-            .message
-            .contains("every entry is marked taboo"));
+        assert!(
+            refused_playlist
+                .message
+                .contains("every entry is marked taboo")
+        );
         assert_eq!(status(&mut runtime, summer)["playlist_id"], "day");
 
         let following = if independent {
@@ -3967,12 +4035,14 @@ fn shuffled_random_escapes_a_taboo_current_entry_when_only_one_safe_item_remains
 
         let taboo = status(&mut runtime, at);
         assert_eq!(taboo["entry_taboo"], true);
-        assert!(taboo["displays"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|display| display["connected"] == true)
-            .all(|display| display["entry_taboo"] == true));
+        assert!(
+            taboo["displays"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|display| display["connected"] == true)
+                .all(|display| display["entry_taboo"] == true)
+        );
         if independent {
             let healthy_occurrence = taboo["displays"]
                 .as_array()
@@ -4209,11 +4279,13 @@ fn all_taboo_startup_keeps_a_static_fallback_but_manual_play_is_refused() {
         assert!(!play.ok, "taboo Play unexpectedly succeeded");
         assert!(play.message.contains("marked taboo (Borked)"));
         assert_eq!(state.lock().unwrap().applies.len(), applies_before);
-        assert!(status(&mut runtime, at)["taboo_entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["entry_id"] == "still-one"));
+        assert!(
+            status(&mut runtime, at)["taboo_entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["entry_id"] == "still-one")
+        );
     }
 }
 
@@ -4246,10 +4318,12 @@ fn shuffle_bag_covers_each_entry_then_reshuffles_without_a_seam_repeat() {
     .unwrap();
     runtime.apply_current().unwrap();
 
-    let mut first_round = vec![status(&mut runtime, at)["entry_id"]
-        .as_str()
-        .unwrap()
-        .to_string()];
+    let mut first_round = vec![
+        status(&mut runtime, at)["entry_id"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    ];
     for _ in 1..4 {
         assert!(
             runtime
@@ -5167,11 +5241,13 @@ fn unassigned_live_output_follows_default_and_global_overrides_remain_global() {
     );
     let manual = status(&mut runtime, at);
     assert_eq!(manual["source"], "manual");
-    assert!(manual["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|display| display["playlist_id"] == "day"));
+    assert!(
+        manual["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|display| display["playlist_id"] == "day")
+    );
 
     let scheduled_at = NaiveDate::from_ymd_opt(2026, 12, 3)
         .unwrap()
@@ -5190,11 +5266,13 @@ fn unassigned_live_output_follows_default_and_global_overrides_remain_global() {
     );
     let scheduled = status(&mut runtime, scheduled_at);
     assert_eq!(scheduled["source"], "schedule");
-    assert!(scheduled["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|display| display["playlist_id"] == "night"));
+    assert!(
+        scheduled["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|display| display["playlist_id"] == "night")
+    );
 }
 
 #[test]
@@ -5288,10 +5366,12 @@ fn independent_hotplug_keeps_surviving_renderers_and_quarantines_only_the_new_ro
     runtime.tick(at, base + Duration::from_secs(6));
     {
         let recorded = state.lock().unwrap();
-        assert!(recorded
-            .stage_events
-            .iter()
-            .all(|event| { !event.contains("DP-1") && !event.contains("HDMI-A-1") }));
+        assert!(
+            recorded
+                .stage_events
+                .iter()
+                .all(|event| { !event.contains("DP-1") && !event.contains("HDMI-A-1") })
+        );
         assert!(recorded.active_outputs.contains("DP-1"));
         assert!(recorded.active_outputs.contains("HDMI-A-1"));
     }
@@ -5307,11 +5387,13 @@ fn independent_hotplug_keeps_surviving_renderers_and_quarantines_only_the_new_ro
     );
     runtime.tick(at, base + Duration::from_secs(10));
     let quarantined = status(&mut runtime, at);
-    assert!(quarantined["taboo_entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["entry_id"] == "still-one"));
+    assert!(
+        quarantined["taboo_entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["entry_id"] == "still-one")
+    );
     assert_eq!(
         quarantined["displays"]
             .as_array()
@@ -5359,11 +5441,13 @@ fn schedule_transition_replaces_and_then_restores_per_display_baselines() {
 
     runtime.tick(winter, Instant::now());
     let scheduled = status(&mut runtime, winter);
-    assert!(scheduled["displays"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|display| display["playlist_id"] == "night"));
+    assert!(
+        scheduled["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|display| display["playlist_id"] == "night")
+    );
 
     runtime.tick(summer, Instant::now());
     let baseline = status(&mut runtime, summer);
@@ -5426,11 +5510,13 @@ fn schedule_provenance_change_with_identical_target_never_restarts_motion() {
         } else {
             assert_eq!(snapshot["schedule"]["rule_id"], "same-global");
             assert_eq!(snapshot["schedule"]["in_force"], serde_json::Value::Null);
-            assert!(snapshot["schedules"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|rule| rule["id"] == "same-global" && rule["in_force"] == true));
+            assert!(
+                snapshot["schedules"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|rule| rule["id"] == "same-global" && rule["in_force"] == true)
+            );
         }
     }
 }
@@ -5461,10 +5547,12 @@ fn missing_output_snapshot_degrades_to_known_targets_without_window_mode() {
     assert_eq!(partial_state.lock().unwrap().applied_outputs, vec!["DP-1"]);
     let partial_status = status(&mut partial_runtime, at);
     assert_eq!(partial_status["displays"][0]["connector"], "DP-1");
-    assert!(partial_status["output_discovery_error"]
-        .as_str()
-        .unwrap()
-        .contains("no usable connectors"));
+    assert!(
+        partial_status["output_discovery_error"]
+            .as_str()
+            .unwrap()
+            .contains("no usable connectors")
+    );
 
     let all: Config = toml::from_str(&config(
         Path::new("/bin/true"),
@@ -5535,10 +5623,12 @@ fn transient_output_discovery_failure_keeps_the_last_live_targets() {
     assert_eq!(state.lock().unwrap().applied_outputs, vec!["DP-1", "DP-2"]);
     let snapshot = status(&mut runtime, at);
     assert_eq!(snapshot["displays"][1]["connector"], "DP-2");
-    assert!(snapshot["output_discovery_error"]
-        .as_str()
-        .unwrap()
-        .contains("no usable connectors"));
+    assert!(
+        snapshot["output_discovery_error"]
+            .as_str()
+            .unwrap()
+            .contains("no usable connectors")
+    );
 }
 
 #[test]
@@ -5977,10 +6067,12 @@ fn initial_desktop_readiness_failure_is_visible_and_recovers_within_the_window()
     let failed = request(&socket, "status", None);
     let failed: serde_json::Value =
         serde_json::from_str(failed["message"].as_str().unwrap()).unwrap();
-    assert!(failed["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("desktop bus is not ready yet"));
+    assert!(
+        failed["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("desktop bus is not ready yet")
+    );
     assert_eq!(request(&socket, "shuffle", Some("on"))["ok"], true);
     assert_eq!(request(&socket, "cycle", Some("off"))["ok"], true);
     assert_eq!(request(&socket, "status", None)["ok"], true);
@@ -6162,9 +6254,11 @@ fn stop_during_startup_readiness_applies_the_still_without_starting_motion() {
         );
         thread::sleep(Duration::from_millis(25));
     }
-    assert!(fs::read_to_string(&events)
-        .unwrap()
-        .contains("msg wallpaper-set /tmp/one.png"));
+    assert!(
+        fs::read_to_string(&events)
+            .unwrap()
+            .contains("msg wallpaper-set /tmp/one.png")
+    );
     assert!(
         !launches.exists(),
         "stop must not start the video renderer while recovering the paired still"
@@ -6232,10 +6326,12 @@ fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer()
     let failed = request(&socket, "status", None);
     let failed: serde_json::Value =
         serde_json::from_str(failed["message"].as_str().unwrap()).unwrap();
-    assert!(failed["last_error"]
-        .as_str()
-        .unwrap()
-        .contains("niri IPC is not ready yet"));
+    assert!(
+        failed["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("niri IPC is not ready yet")
+    );
 
     fs::write(&ready, "ready\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);

@@ -501,9 +501,10 @@ It requires matching `wall-in-one` and `wall-in-one-service` executables with
 complete the older installation's cutover before loading the companion.
 Battery handling itself belongs to Rust and works without a companion.
 
-Application v0.1.3 is paired with companion v0.1.2, pinned at
-`c154c162fd650567ef8eda5d0e6d875b2b635a21` in `flake.lock`. That revision
-includes the startup and battery-display changes above. The earlier `a17eb70`
+The original v0.1.3 release paired companion v0.1.2 at
+`c154c162fd650567ef8eda5d0e6d875b2b635a21`. The current tested revision is
+recorded in `flake.lock` and retains the startup and battery-display contract
+above. The earlier `a17eb70`
 companion provides only the older base contract. Updating the app does not
 automatically change a separately configured Noctalia plugin source; select the
 matching companion through that source's owner and follow the

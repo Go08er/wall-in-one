@@ -243,8 +243,14 @@ may likewise cross its observable boundary before its reply. A timed-out
 mutation therefore reports that its outcome is **unknown** and tells the caller
 to verify current state before retrying; it must not be interpreted as a
 refusal. This matters for non-idempotent commands such as Toggle and Next.
-Read-only timeouts retain the simple `timed out after ...` message. The
-graphical authoring actor refuses a second control mutation with
+Read-only timeouts retain the simple `timed out after ...` message. A client
+deadline from `ctl status` exits **75**, meaning status is temporarily
+unavailable, not that the runtime is absent or known healthy. Consumers may
+retry status and display explicitly stale last-known data. Confirmed absence
+remains exit **3**; other control failures and uncertain mutations remain **1**.
+This meaning of 75 is specific to `ctl status`: upgrade/preparation commands
+have their own failure contract and must not be treated as successful startup.
+The graphical authoring actor refuses a second control mutation with
 `authoring-busy` while one is active, so it does not queue a new socket write
 which could begin only after that caller timed out.
 

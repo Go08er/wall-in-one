@@ -131,7 +131,7 @@ def test_the_command_the_entry_runs_is_a_script_pyproject_installs() -> None:
 def test_release_version_matches_source_packages_and_installing_docs() -> None:
     project = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     release = project["project"]["version"]
-    assert release == "0.1.3"
+    assert release == "0.1.4"
     assert wall_in_one.__version__ == release
 
     cargo = tomllib.loads(CARGO_TOML_PATH.read_text(encoding="utf-8"))

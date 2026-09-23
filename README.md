@@ -17,6 +17,10 @@ Noctalia plugin talks to it.
 
 ## Status
 
+Current version: **0.1.4**, paired with Noctalia companion **0.1.3**.
+See the [release notes](docs/releases/v0.1.4.md) and
+[update guide](docs/updating.md) before updating an existing installation.
+
 The app manages a local library, video/still pairings, playlists, schedules,
 Wallpaper Engine scenes, colour sync, and downloads from two wallpaper sites.
 The core workflows have been exercised on a single-display desktop.

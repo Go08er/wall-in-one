@@ -260,6 +260,9 @@ OPEN_PAGE_ALIASES: Final[Mapping[str, str]] = {
 #: Exit code for "the app is not running". Distinct from a failed command so a
 #: caller can react by launching it.
 EXIT_NOT_RUNNING: Final = 3
+# Only `ctl status` maps a typed deadline failure to this temporary result.
+# Mutating commands still return 1: their outcome may be unknown, not retryable.
+EXIT_STATUS_UNAVAILABLE: Final = 75
 
 
 class ControlError(Exception):
@@ -268,6 +271,10 @@ class ControlError(Exception):
 
 class NotRunningError(ControlError):
     """No app is listening on the control socket."""
+
+
+class ControlTimeoutError(ControlError):
+    """The peer did not answer within the control exchange deadline."""
 
 
 class Cancellation:
@@ -356,6 +363,10 @@ def send(
             connection.connect(str(target))
         except (FileNotFoundError, ConnectionRefusedError) as error:
             raise NotRunningError(f"no instance listening on {target}") from error
+        except TimeoutError as error:
+            raise ControlTimeoutError(
+                f"cannot connect to {target}: timed out after {wait:g}s"
+            ) from error
         except OSError as error:
             raise ControlError(f"cannot connect to {target}: {error}") from error
 
@@ -364,7 +375,9 @@ def send(
             connection.sendall(request.encode())
             line = _read_line(connection, max_bytes=max_reply, deadline=deadline)
         except TimeoutError as error:
-            raise ControlError(_timeout_message(request, target=target, wait=wait)) from error
+            raise ControlTimeoutError(
+                _timeout_message(request, target=target, wait=wait)
+            ) from error
         except OSError as error:
             raise ControlError(f"control connection failed: {error}") from error
     finally:
@@ -513,7 +526,11 @@ def dispatch(verb: str, argument: str | None) -> int:
         return EXIT_NOT_RUNNING
     except ControlError as error:
         print(f"error: {error}", file=sys.stderr)
-        return 1
+        return (
+            EXIT_STATUS_UNAVAILABLE
+            if verb == "status" and isinstance(error, ControlTimeoutError)
+            else 1
+        )
 
     if response.kind == "runtime-not-running":
         if response.message:

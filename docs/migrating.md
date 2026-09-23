@@ -502,9 +502,10 @@ complete the older installation's cutover before loading the companion.
 Battery handling itself belongs to Rust and works without a companion.
 
 The original v0.1.3 release paired companion v0.1.2 at
-`c154c162fd650567ef8eda5d0e6d875b2b635a21`. The current tested revision is
-recorded in `flake.lock` and retains the startup and battery-display contract
-above. The earlier `a17eb70`
+`c154c162fd650567ef8eda5d0e6d875b2b635a21`. App v0.1.4 pairs with companion
+v0.1.3; its exact revision is recorded in `flake.lock`. This retains the startup
+and battery-display contract above and tolerates temporary status delays without
+reporting the runtime as stopped. The earlier `a17eb70`
 companion provides only the older base contract. Updating the app does not
 automatically change a separately configured Noctalia plugin source; select the
 matching companion through that source's owner and follow the

@@ -221,8 +221,9 @@ performs the direct-launch health hand-off, and permits the runtime's bounded
 compatibility summary and must not be combined with this application release.
 The original v0.1.3 release pinned companion v0.1.2 at
 `c154c162fd650567ef8eda5d0e6d875b2b635a21`, including direct-start migration
-preflight and battery-status display. See `flake.lock` for the current tested
-revision, which retains that contract. The earlier
+preflight and battery-status display. App v0.1.4 pins companion v0.1.3 in
+`flake.lock`, retaining that contract and adding temporary-status handling.
+The earlier
 `a17eb70` companion provides only the base contract, not those newer safeguards.
 See [companion compatibility](migrating.md#companion-noctalia-plugin-compatibility)
 for the new requirements and [updating an existing installation](updating.md)

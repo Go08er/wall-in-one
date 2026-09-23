@@ -14,9 +14,25 @@ let
   runtimeDir = "/run/user/${uid}";
   app = "${wallInOnePackage}/bin/wall-in-one";
   driverLog = "/tmp/wall-in-one-wallpaper-set.log";
+  slowStart = "/tmp/wall-in-one-slow-start";
+  observedPluginSource = pkgs.runCommand "wall-in-one-observed-companion" { } ''
+    cp -R ${pluginSource} $out
+    chmod u+w $out/wall-in-one/service.luau
+    # Test-only observation of real production state, without a debug IPC API.
+    cat >> $out/wall-in-one/service.luau <<'LUA'
+    noctalia.state.watch("wall_in_one_state", function(state)
+        noctalia.log("VM_WIO_STATE " .. noctalia.json.encode(state))
+    end)
+    LUA
+  '';
   noctaliaProbe = pkgs.writeShellScriptBin "noctalia" ''
     if [ "$#" -ge 2 ] && [ "$1" = msg ] && [ "$2" = wallpaper-set ]; then
       printf '%s\t%s\n' "$PPID" "$*" >> ${driverLog}
+      if [ -f ${slowStart} ]; then
+        rm ${slowStart}
+        printf '%s' "$PPID" > ${slowStart}.pid
+        kill -STOP "$PPID"
+      fi
     fi
     exec ${lib.getExe pkgs.noctalia} "$@"
   '';
@@ -28,10 +44,10 @@ pkgs.testers.runNixOSTest {
   node.specialArgs = {
     inherit
       wallInOnePackage
-      pluginSource
       sampleMedia
       noctaliaProbe
       ;
+    pluginSource = observedPluginSource;
   };
 
   nodes.machine =
@@ -330,6 +346,46 @@ pkgs.testers.runNixOSTest {
             "| grep -F \"started service 'goober/wall-in-one:control'\"",
             timeout=60,
         )
+
+    with subtest("cold companion startup survives a real five-second status timeout"):
+        # Stop the shell first so no resting poll can race our deliberately
+        # absent runtime. Use normal systemd ownership, not a binary override.
+        machine.succeed(as_user("systemctl --user stop noctalia.service wall-in-one.service"))
+        machine.fail("test -S ${runtimeDir}/wall-in-one-runtime.sock")
+        settings = "${home}/.local/state/noctalia/settings.toml"
+        machine.succeed(as_user(f"cp {settings} {settings}.cold-start-backup"))
+        machine.succeed(as_user(f"sed -i 's|^binary_path = .*|binary_path = \"\"|' {settings}"))
+        machine.succeed(as_user("touch ${slowStart}"))
+        cursor = machine.succeed("journalctl -n 0 --show-cursor").split("-- cursor: ")[-1].strip()
+        machine.succeed(as_user("systemctl --user start noctalia.service"))
+        machine.wait_until_succeeds(
+            as_user("systemctl --user is-active wall-in-one.service"), timeout=60
+        )
+        machine.wait_for_file("${slowStart}.pid")
+        paused_pid = machine.succeed("cat ${slowStart}.pid").strip()
+        try:
+            # The helper itself finishes normally; only the runtime is held.
+            # This crosses the client's real deadline without weakening the
+            # renderer's own three-second helper timeout.
+            code, output = machine.execute(as_user("${app} ctl status") + " 2>&1")
+            assert code == 75 and "timed out after 5s" in output, (code, output)
+            time.sleep(2)
+        finally:
+            machine.succeed("kill -CONT " + paused_pid)
+        machine.wait_until_succeeds(status_matches('.last_error == ""'), timeout=60)
+        journal = (
+            "journalctl -b _SYSTEMD_USER_UNIT=noctalia.service --no-pager -o cat --after-cursor="
+            + shlex.quote(cursor)
+        )
+        machine.wait_until_succeeds(journal + " | grep 'VM_WIO_STATE.*\"running\":true'", timeout=30)
+        states = [json.loads(line.split("VM_WIO_STATE ", 1)[1])
+                  for line in machine.succeed(journal).splitlines() if "VM_WIO_STATE " in line]
+        assert any(state["launching"] for state in states), states
+        assert all(not state["error"] for state in states), states
+        pid = machine.succeed(as_user("systemctl --user show -p MainPID --value wall-in-one.service")).strip()
+        # comm is truncated to 15 bytes; this check must find exactly one daemon.
+        assert machine.succeed("pgrep -u ${uid} -x wall-in-one-ser").split() == [pid]
+        machine.succeed(as_user(f"mv {settings}.cold-start-backup {settings}"))
 
     with subtest("nested niri owns a visible output"):
         assert "winit" in niri("outputs")

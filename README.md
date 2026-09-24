@@ -388,10 +388,12 @@ The complete verb reference and the behaviour behind it are in
 ## Settings
 
 The Settings tab writes `~/.config/wall-in-one/settings.toml`, which can also be
-edited by hand. The window can open with recovery defaults for inspection,
-but invalid persisted settings must be corrected in the file before new
-Settings changes can be saved. The unattended `--write-config` compiler also
-rejects invalid settings and preserves the last-known-good runtime document.
+edited by hand. Invalid or unreadable settings at startup open a recovery
+window instead of the main window. Use **Open settings file**, repair the
+reported problem, then select **Try again**. Settings edits also refuse to
+overwrite a file that became invalid while the app was open. The unattended
+`--write-config` compiler also rejects invalid settings and preserves the
+last-known-good runtime document.
 See [settings and manual repair](docs/settings.md) for the keys, defaults and
 backup-first recovery steps.
 

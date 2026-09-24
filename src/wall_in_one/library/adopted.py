@@ -145,6 +145,12 @@ class Adoption:
     marker_fingerprint: file_io.FileFingerprint
     marker_sha256: str
     authorities: tuple[Authority, ...]
+    # Presentation only: captures whose persisted device number may have
+    # changed, but whose inode, size, timestamps, and canonical sidecar still
+    # match. These must never grant pairing, reuse, or deletion authority.
+    internal_captures: tuple[tuple[Path, file_io.FileFingerprint], ...] = field(
+        default=(), compare=False, repr=False
+    )
 
     @property
     def mapping(self) -> Mapping[Path, Path]:
@@ -747,6 +753,65 @@ def _read_manifest(target: Path) -> bytes | None:
         pin.close()
 
 
+def _with_internal_captures(adoption: Adoption, exact: tuple[Authority, ...]) -> Adoption:
+    """Retain display-only provenance when a strict binding has expired.
+
+    Device numbers can change across mounts. That must revoke destructive
+    authority, but does not turn an otherwise unchanged generated image into
+    a user-created wallpaper. A capture and its canonical migration sidecar
+    prove its display role without requiring the original video to remain.
+    All generation fields except the device must still match; replacing or
+    editing the image makes it visible again. No files or manifests are changed.
+    """
+    exact_paths = {authority.capture_path for authority in exact}
+    internal: list[tuple[Path, file_io.FileFingerprint]] = []
+    for authority in adoption.authorities:
+        if authority.capture_path in exact_paths:
+            continue
+        try:
+            with (
+                _pin_absolute_regular(authority.capture_path) as capture_pin,
+                _pin_absolute_regular(authority.sidecar_path) as sidecar_pin,
+            ):
+                _owned_regular(capture_pin, label="internal capture")
+                _owned_regular(sidecar_pin, label="capture sidecar", private_authority=True)
+                generation = capture_pin.fingerprint
+                if generation[1:] != authority.capture_fingerprint[1:]:
+                    continue
+                sidecar_generation = sidecar_pin.fingerprint
+                sidecar = file_io.read_pinned_regular_bytes(
+                    sidecar_pin,
+                    MAX_SIDECAR_BYTES,
+                    expected_fingerprint=sidecar_generation,
+                )
+                _validate_sidecar_document(
+                    sidecar, authority.sidecar_path, authority, adoption.adoption_id
+                )
+                _same_public_file(
+                    capture_pin,
+                    authority.capture_path,
+                    label="internal capture",
+                    expected_fingerprint=generation,
+                )
+                _same_public_file(
+                    sidecar_pin,
+                    authority.sidecar_path,
+                    label="capture sidecar",
+                    expected_fingerprint=sidecar_generation,
+                )
+                internal.append((authority.capture_path, generation))
+        except OSError, ValueError, _ChangedAdoptionError:
+            continue
+    return replace(adoption, authorities=exact, internal_captures=tuple(internal))
+
+
+def recorded() -> Adoption | None:
+    """Read validated migration metadata, NOT current filesystem authority."""
+    target = state_path()
+    raw = _read_manifest(target)
+    return None if raw is None else _parse_manifest(_json_object(raw, target), target)
+
+
 def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
     """Load the completed capture adoption, validating current generations.
 
@@ -755,6 +820,10 @@ def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
     ``strict=False`` policy, filesystem changes revoke only the affected
     bindings; global root/marker replacement revokes all of them.  Migration
     verification uses ``strict=True`` to reject either condition.
+
+    Normal scans also receive separate, display-only ``internal_captures``
+    evidence. An expired authority does not by itself make an unchanged
+    generated capture a standalone wallpaper.
     """
     target = path if path is not None else state_path()
     raw = _read_manifest(target)
@@ -788,7 +857,9 @@ def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
                 label="Automatic Stills marker",
                 expected_fingerprint=adoption.marker_fingerprint,
             )
-            return replace(adoption, authorities=tuple(exact))
+            if strict:
+                return replace(adoption, authorities=tuple(exact))
+            return _with_internal_captures(adoption, tuple(exact))
     except AdoptionError:
         raise
     except (OSError, ValueError, _ChangedAdoptionError) as error:
@@ -796,7 +867,7 @@ def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
             raise AdoptionError(
                 f"capture adoption filesystem proof is no longer exact: {error}"
             ) from error
-        return replace(adoption, authorities=())
+        return _with_internal_captures(adoption, ())
 
 
 def authority_for(

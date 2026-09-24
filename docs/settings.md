@@ -4,31 +4,37 @@ The Settings tab writes `~/.config/wall-in-one/settings.toml` (or
 `$XDG_CONFIG_HOME/wall-in-one/settings.toml` when that variable is set). You can
 also edit it by hand.
 
-The window can open with recovery defaults for inspection: out-of-range values
-may be clamped, and an unreadable file falls back to defaults in memory. This
-does not repair the saved file. Each Settings edit strictly reloads the
-persisted document before saving, so invalid persisted settings must be
-corrected in the file before new changes can be saved.
+Normal startup checks saved settings before opening the main window. Invalid
+or unreadable settings lead to a configuration-recovery window with the error,
+**Open settings file**, and **Try again**. It does not reset your settings or
+open the normal Settings tab with clamped defaults. Repair the named file,
+then retry; the Rust wallpaper service does not need to be running.
+
+Each Settings edit also strictly reloads the persisted document before saving.
+If it becomes invalid while the app is open, the attempted edit fails without
+replacing it; repair the file before retrying the change.
 
 The unattended `wall-in-one --write-config` compiler is also strict. A present
 known key with the wrong type, a non-finite or out-of-range number, an unknown
 key, or an invalid enumerated value is reported and leaves the last resolved
-runtime document untouched. Recovery values shown in the window do not
-authorize publishing them over the saved configuration.
+runtime document untouched. It never substitutes defaults for invalid saved
+settings.
 
 ## Repairing an invalid settings file
 
-1. Read the reported error and use the exact settings path it names. Close the
-   app window and avoid other settings edits while repairing the file.
+1. Read the reported error and use the exact settings path it names. Use
+   **Open settings file** if the recovery window is shown; it can stay open
+   while you repair the file. Avoid other Settings edits during the repair.
 2. Copy the existing file to a separate backup before changing it. Keep its
    `roots` paths and order, display mode, colour-source choice and other
    settings intact.
 3. Correct the reported TOML syntax, type or value using the reference below.
    Do not delete or reset the file as a repair shortcut: that can lose your
    chosen library paths and playback settings.
-4. Reopen the app, check that the saved choices look right, and retry the
-   Settings change that failed. If it still cannot save, address the next
-   reported error; opening the window alone does not prove the file is valid.
+4. Save the file and select **Try again** in the recovery window, or reopen the
+   app if you closed it. Check that the saved choices look right and retry any
+   Settings change that failed. If another error is reported, address it before
+   continuing.
 
 If the error mentions an interrupted migration, conflicting upgrade state or
 settings from a newer app, follow the [migration guide](migrating.md) first.

@@ -260,9 +260,9 @@ $ wall-in-one ctl favourites
 /media/photos/aurora.jpg	no
 ```
 
-A write that fails comes back as a failure with the kind `local-io`, and the
-star still moves: the app keeps it for this session and is telling you it will
-not survive the next launch.
+A write that fails comes back as a failure with the kind `local-io`. The star
+and saved favourites remain unchanged; the failed change is not kept for the
+session.
 
 ## Wallhaven filters
 

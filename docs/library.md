@@ -59,22 +59,32 @@ Noctalia first. Two things follow from that: if the renderer dies the right
 image is still on screen, and Noctalia's generated palette matches what the
 video looks like rather than whatever was up before it.
 
-A video finds its still three ways, in this order:
+A video finds its still in this order:
 
 1. a `<video>.wall-in-one.json` sidecar naming one;
 2. its deterministic path-keyed file under
    `<each configured root>/Wall-in-One/Automatic Stills/`, searched in root
    order;
-3. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
+3. a verified legacy capture recorded by the upgrade migration;
+4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
 
-Only the exact deterministic capture in `Automatic Stills` is absorbed by its
-moving wallpaper. A sibling or manually selected image is user-provided and
-remains a separate library item with its own Pairing, even while one or more
-moving wallpapers use it as their representative.
+Automatic captures, including verified captures from older releases, stay
+internal to their moving wallpaper. A sibling or manually added image is
+user-provided and remains a separate library item with its own Pairing, even
+while one or more moving wallpapers use it as their representative.
 
 New automatic captures are written under the first configured root. Existing
 deterministic captures are discovered under every configured root so changing
 root order does not strand an older representative.
+
+At app or wallpaper-service startup, verified older automatic captures are
+replaced with current captures, generating missing ones and rebinding the
+videos. The app refreshes its playback configuration before deleting the old
+images and their metadata to reclaim space. A video already bound to a separate
+still keeps that choice; its unused old capture needs no rebuild. If rebuilding
+or runtime handover fails, cleanup waits for a later startup; the old images are
+not kept as permanent backups. Unrecognized or modified files, manual images
+and captures still explicitly referenced by saved choices are left untouched.
 
 An explicit representative choice must already be a still item in the latest
 library scan. The picker and `wall-in-one ctl still` refuse an outside file, an
@@ -153,9 +163,9 @@ results or trigger that count.
 Use the star in the corner of a tile to mark a favourite. Favourites are saved
 separately from settings in `~/.local/state/wall-in-one/favourites.json`.
 
-Each change is written through immediately, in the order you starred things.
-If the write fails the star stays where you put it and a toast says it will not
-outlive the session.
+Favourites are kept in the order you starred them. Each change must be saved
+before the app adopts it. If saving fails, the star stays in its previous
+state and an error is shown; there is no session-only favourite change.
 
 **A favourite whose file is not in the library is kept.** Removing a root from
 the scan, disconnecting a drive or reaching the scan limit does not clear its

@@ -413,10 +413,12 @@ def scan(
     overwrite whatever this pass decided.
     """
     resolved_roots = tuple(roots) if roots is not None else default_roots()
+    candidate_internal_captures: tuple[tuple[Path, file_io.FileFingerprint], ...] = ()
     if adoption_candidates is None:
         capture_adoption = adopted.load(strict=False)
         if capture_adoption is not None and capture_adoption.root in resolved_roots:
             candidate_authorities = capture_adoption.authorities
+            candidate_internal_captures = capture_adoption.internal_captures
         else:
             candidate_authorities = ()
     else:
@@ -537,6 +539,17 @@ def scan(
         resolved_roots,
         records,
         adopted_stills=adopted_mapping,
+    )
+    # Display-only provenance never enters adopted_mapping/adopted_stills:
+    # those relationships can be consumed by destructive operations. Recheck
+    # against the walked generation so a later user replacement stays visible.
+    internal_captures = {
+        path
+        for path, generation in candidate_internal_captures
+        if observed_generations.get(path) == (generation, os.getuid(), 1)
+    }
+    paired = tuple(
+        item for item in paired if item.kind is not Kind.STILL or item.path not in internal_captures
     )
     if cancelled is not None and cancelled():
         raise ScanCancelledError

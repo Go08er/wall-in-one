@@ -23,7 +23,20 @@ to make an existing installation look like a fresh install.
    systemctl --user stop wall-in-one-health-sync.timer wall-in-one-health-sync.service
    ```
 
-   Confirm the service is stopped. Do not force-kill an app with unfinished work.
+   For a directly launched runtime, including one started through the
+   companion's **Executable** override, disabling the companion does not stop
+   the daemon. After disabling its automatic launcher, shut it down explicitly:
+
+   ```sh
+   wall-in-one ctl quit
+   ```
+
+   In either case, check `wall-in-one ctl status` before continuing. Exit code
+   **3** means no runtime is listening; a successful status reply or a timeout
+   does not confirm shutdown. Wait and check again if needed. Use the same XDG
+   environment and executable as that installation; if the companion uses an
+   **Executable** override, use that full path in these commands. Do not
+   force-kill an app with unfinished work.
 3. Back up the app's config and state folders, including hidden files, and keep
    the previous app/companion revisions available. Defaults are
    `~/.config/wall-in-one` and `~/.local/state/wall-in-one`; respect custom XDG
@@ -32,7 +45,9 @@ to make an existing installation look like a fresh install.
    For NixOS or Home Manager, update the declaration and activate it normally.
    For manually installed units, refresh only the links owned by that install.
    Installing a package does not update a copied unit pointing at an old store
-   path. Preserve intentional overrides.
+   path. Preserve intentional unit overrides. Update an explicit companion
+   **Executable** path if it still points at the old package, preserving the
+   intended override rather than clearing it.
 5. For systemd, reload definitions, check the package paths, then start:
 
    ```sh
@@ -44,8 +59,9 @@ to make an existing installation look like a fresh install.
    `--update-status` is read-only. It distinguishes the installed package, loaded
    service commands and running process. Resolve old or unverified commands
    through the configuration that owns them; the app does not rewrite pins.
-6. Open the app, check your folders and playback, then enable the companion.
-   Apply any temporary playback choices you want again.
+6. Open the app and check your folders. Re-enable the companion or your usual
+   launcher; the companion prepares and starts a direct runtime when needed.
+   Check playback, then apply any temporary playback choices you want again.
 
 Keep **Stop animations on battery** off until the running service supports it.
 The app refuses to enable it against an older runtime or unverified loaded

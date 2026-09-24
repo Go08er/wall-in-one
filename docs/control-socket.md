@@ -162,9 +162,11 @@ override lasts until it is released or the service restarts; it does not erase
 or disable schedule rules. Entries have identities of their own, printed by
 `playlists <name>` and taken back by `playlist-remove`, so reordering never
 renumbers anything and the same wallpaper can appear twice. A list naming
-wallpapers that are not here keeps them -- an unmounted drive is not a deletion
--- and if none of them are here the rotation quietly falls back to the whole
-library rather than stopping. A playlist whose name has a space in it is
+wallpapers that are not here keeps them -- an unmounted drive is not a deletion.
+If a nonempty playlist has no resolvable entries, compilation reports the
+problem and leaves the last-known-good runtime configuration untouched; it
+does not silently substitute the whole library. Restore the media or repair
+the playlist before retrying. A playlist whose name has a space in it is
 referred to by the id `playlists` prints beside it.
 
 Pairing commands use ` :: ` between their two operands. That delimiter is

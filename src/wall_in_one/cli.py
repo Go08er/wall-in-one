@@ -359,6 +359,7 @@ def _run_graphical_startup_upgrade(
 ) -> int | None:
     """Finish an exact deployed upgrade before GTK reads configuration."""
     from wall_in_one import deployed_upgrade_transaction, legacy_migration
+    from wall_in_one.library import capture_upgrade
 
     while True:
         try:
@@ -366,6 +367,7 @@ def _run_graphical_startup_upgrade(
                 outcome = deployed_upgrade_transaction.ensure()
                 if require_legacy_safe:
                     legacy_migration.require_unattended_safe_locked()
+                capture_upgrade.prepare()
             break
         except deployed_upgrade_transaction.TransactionError as error:
             result, detail = _deployed_upgrade_error(error), str(error)
@@ -429,6 +431,9 @@ def _prepare_service_start() -> int:
     """
 
     def publish_or_retain() -> int:
+        from wall_in_one.library import capture_upgrade
+
+        capture_upgrade.prepare()
         result = _write_runtime_config()
         if result != 1:
             return result

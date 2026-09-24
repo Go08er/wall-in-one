@@ -18,6 +18,8 @@ Noctalia plugin talks to it.
 ## Status
 
 Current version: **0.1.4**, paired with Noctalia companion **0.1.3**.
+This maintenance update improves upgrade stability and cleans up verified
+legacy automatic stills without resetting settings or manual choices.
 See the [release notes](docs/releases/v0.1.4.md) and
 [update guide](docs/updating.md) before updating an existing installation.
 

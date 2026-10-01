@@ -1389,8 +1389,7 @@ class PlaylistPage(Page):
         elif what == "long-name":
             self.state.rename_playlist(self._pid, arg or "Rainy evenings by the old harbor")
         elif what == "assigned":
-            self.state.assigned["HDMI-A-1"] = self._pid
-            self.state.emit_changed("displays")
+            self.state.set_display_playlist("HDMI-A-1", self._pid)
 
     def _demo_empty(self, name: str) -> None:
         pid = name.lower().replace(" ", "-")

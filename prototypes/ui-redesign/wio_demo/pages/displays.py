@@ -19,37 +19,17 @@ gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gtk
 
-from .. import art, data, thumbs, ui
-from ..models import Display, Rule, Wallpaper
-from ..state import rule_matches
+from .. import thumbs, ui
+from ..models import RememberedDisplay, Wallpaper
 from . import Page
 from .displays_arrangement import CSS as ARRANGEMENT_CSS
 from .displays_arrangement import Arrangement, LinkGlyph, MonitorTile, TileInfo
-
-# Outputs the runtime still keeps routes for although they are unplugged.
-REMEMBERED = [
-    {
-        "connector": "eDP-1",
-        "model": "Laptop screen",
-        "icon": "computer-symbolic",
-        "seen": "2 days ago",
-        "playlist": "mc-night",
-    },
-    {
-        "connector": "DP-2",
-        "model": "Samsung Odyssey G7",
-        "icon": "video-display-symbolic",
-        "seen": "3 weeks ago",
-        "playlist": "",
-    },
-]
 
 SCALING = [
     ("fill", "Fill", "Crop to cover the screen"),
     ("fit", "Fit", "Show all of it, with bars"),
     ("stretch", "Stretch", "Squash it to the screen"),
 ]
-DEFAULT_ADVANCED = {"fps": 0, "sound": False, "scaling": "fill", "covered": True}
 
 MODES = {
     "mirrored": "One rotation, shown on every display",
@@ -83,23 +63,17 @@ class DisplaysPage(Page):
     def __init__(self, state) -> None:
         super().__init__(state)
         ui.add_css(CSS)
-        self._selected = self._lead()
-        self._held: set[str] = set()  # displays paused on their own while the rest play
-        self._saved_assigned: dict[str, str] = {}  # kept aside while displays are linked
-        self._advanced = {c: dict(DEFAULT_ADVANCED) for c in state.connectors()}
-        self._remembered = [dict(item) for item in REMEMBERED]
+        self._selected = state.lead_connector()
         self._plays_ids: list[str] = []
         self._building = False
         self._compact = False
         self._linked_shown: bool | None = None
-        self._playback_seen = state.playback
         self._identify_source = 0
         self._focus_source = 0
         self._menu: Gtk.PopoverMenu | None = None
         self._dialog: Adw.AlertDialog | None = None
         self._plays_checks: dict[int, Gtk.Image] = {}
-        self._demo_rules: list[Rule] | None = None  # the real list while a scene hides some
-        self._initial = self._snapshot()
+        self._initial = state.displays_snapshot()
 
         # -- header ----------------------------------------------------------------
         self._identify = Gtk.Button(label="Identify")
@@ -180,7 +154,7 @@ class DisplaysPage(Page):
 
     def activate(self, argument: str | None) -> None:
         if self.state.display_mode == "mirrored":
-            self._sync_linked()
+            self.state.link_displays()
         if argument in self.state.connectors():
             self._selected = argument
         self.refresh()
@@ -197,34 +171,24 @@ class DisplaysPage(Page):
             self._scroll_to(self._settings_section)
         elif what == "pick":  # a temporary "your pick" playlist on one display
             connector = arg or "HDMI-A-1"
-            state.manual[connector] = "mc-night"
-            state.current[connector] = state.playlist("mc-night").entries[1]
+            state.demo_set_pick(connector, "mc-night", 1)
             self._select(connector)
-            state.emit_changed("now")
         elif what == "assigned":  # its own playlist is set, but the schedule wins right now
             connector = arg or "HDMI-A-1"
-            state.assigned[connector] = "cozy-rain"
+            state.set_display_playlist(connector, "cozy-rain")
             self._select(connector)
-            state.emit_changed("displays", "now")
         elif what == "unscheduled":  # nothing is scheduled now, so its own playlist plays
             connector = arg or "HDMI-A-1"
-            # Hide the rules that match now from this state only; rule objects are shared data.
-            self._demo_rules = state.rules
-            state.rules = [r for r in state.rules if not rule_matches(r, state.now, connector)]
-            state.assigned[connector] = "cozy-rain"
-            state.current[connector] = state.playlist("cozy-rain").entries[0]
+            state.demo_unscheduled(connector, "cozy-rain")
             self._select(connector)
-            state.emit_changed("schedule", "displays", "now")
         elif what == "paused":
             connector = arg or "HDMI-A-1"
-            self._held.add(connector)
+            state.demo_hold_display(connector)
             self._select(connector)
-            self.refresh()
         elif what == "colors":
-            state.color_display = arg or "HDMI-A-1"
+            state.set_color_display(arg or "HDMI-A-1")
             if arg in state.connectors():
                 self._select(arg)
-            state.emit_changed("displays")
         elif what == "identify":
             self._identify_displays()
         elif what == "menu":
@@ -238,28 +202,20 @@ class DisplaysPage(Page):
             GLib.timeout_add(450, lambda: (self._plays.activate(), False)[1])
         elif what == "forget":
             self._scroll_to(self._remembered_section)
-            GLib.timeout_add(300, lambda: (self._confirm_forget(self._remembered[0]), False)[1])
+            GLib.timeout_add(300, lambda: (self._confirm_forget(self.state.remembered_displays[0]), False)[1])
         elif what == "mode":
             self._mode.set_active_name(arg or "mirrored")
         elif what == "bottom":
             self._scroll_to(self._remembered_section)
 
     # -- helpers ---------------------------------------------------------------------------
-    def _lead(self) -> str:
-        for display in self.state.displays:
-            if display.primary:
-                return display.connector
-        return self.state.connectors()[0]
-
-    def _display(self, connector: str) -> Display:
-        return next(d for d in self.state.displays if d.connector == connector)
 
     def _mirrored(self) -> bool:
         return self.state.display_mode == "mirrored"
 
     def _key(self, connector: str) -> str:
         """Linked displays all report the lead display's truth."""
-        return self._lead() if self._mirrored() else connector
+        return self.state.lead_connector() if self._mirrored() else connector
 
     def _scope(self, connector: str) -> str:
         return "all" if self._mirrored() else connector
@@ -269,11 +225,10 @@ class DisplaysPage(Page):
 
     def _color_display(self) -> str:
         chosen = self.state.color_display
-        return chosen if chosen in self.state.connectors() else self._lead()
+        return chosen if chosen in self.state.connectors() else self.state.lead_connector()
 
     def _paused(self, connector: str) -> bool:
-        state = self.state
-        return state.playback == "paused" or (not self._mirrored() and connector in self._held)
+        return self.state.display_paused(connector)
 
     def _status(self, connector: str) -> tuple[str, str, bool]:
         state = self.state
@@ -325,31 +280,6 @@ class DisplaysPage(Page):
         pid = self.state.effective_playlist(self._key(connector))
         return "your pick" if pid == "quick" else self.state.playlist(pid).name
 
-    def _snapshot(self) -> tuple:
-        state = self.state
-        return (
-            state.display_mode,
-            dict(state.current),
-            dict(state.manual),
-            dict(state.assigned),
-            state.playback,
-            set(self._held),
-            dict(self._saved_assigned),
-            state.color_display,
-        )
-
-    def _restore(self, snapshot: tuple, emit: bool = True) -> None:
-        state = self.state
-        (mode, current, manual, assigned, playback, held, saved, colors) = snapshot
-        state.display_mode = mode
-        state.current, state.manual, state.assigned = dict(current), dict(manual), dict(assigned)
-        state.playback = playback
-        self._playback_seen = playback
-        self._held, self._saved_assigned = set(held), dict(saved)
-        state.color_display = colors
-        if emit:
-            state.emit_changed("displays", "now", "playback")
-
     def _demo_reset(self) -> None:
         # Scenes share one window: close what the previous scene opened.
         if self._menu is not None:
@@ -375,45 +305,10 @@ class DisplaysPage(Page):
         for tile in self.arrangement.tiles.values():
             tile.set_identify(False)
         self._scroller.get_vadjustment().set_value(0)
-        if self._demo_rules is not None:
-            self.state.rules = self._demo_rules
-            self._demo_rules = None
-        mode = self.state.display_mode  # the scene flags decide the mode
-        self._restore(self._initial, emit=False)
-        self.state.display_mode = mode
-        self._advanced = {c: dict(DEFAULT_ADVANCED) for c in self.state.connectors()}
-        self._remembered = [dict(item) for item in REMEMBERED]
-        self._build_remembered()
         self._advanced_row.set_expanded(False)
-        if mode == "mirrored":
-            self._sync_linked(emit=False)
-        self.state.emit_changed("schedule", "displays", "now", "playback")
-
-    def _sync_linked(self, emit: bool = True) -> None:
-        """Make every display match the lead one (what "Same on all displays" means)."""
-        state, lead = self.state, self._lead()
-        changed = False
-        for connector in state.connectors():
-            if state.assigned.get(connector):
-                self._saved_assigned[connector] = state.assigned[connector]
-                state.assigned[connector] = ""
-                changed = True
-            if connector == lead:
-                continue
-            if state.current[connector] != state.current[lead]:
-                state.current[connector] = state.current[lead]
-                changed = True
-            if state.manual.get(connector) != state.manual.get(lead):
-                if lead in state.manual:
-                    state.manual[connector] = state.manual[lead]
-                else:
-                    state.manual.pop(connector, None)
-                changed = True
-        if self._held:
-            self._held.clear()
-            changed = True
-        if changed and emit:
-            state.emit_changed("displays", "now")
+        # The scene flags decide the mode; the rest goes back to how it started.
+        self.state.demo_restore_displays(self._initial, self.state.display_mode)
+        self._build_remembered()
 
     def _scroll_to(self, widget: Gtk.Widget, above: int = 8) -> None:
         def scroll() -> bool:
@@ -577,26 +472,24 @@ class DisplaysPage(Page):
 
     def _build_remembered(self) -> None:
         self._remembered_list.remove_all()
-        for item in self._remembered:
+        for item in self.state.remembered_displays:
             plays = (
-                f"{self.state.playlist(item['playlist']).name} when nothing is scheduled"
-                if item["playlist"]
+                f"{self.state.playlist(item.playlist).name} when nothing is scheduled"
+                if item.playlist
                 else f"Default ({self.state.playlist(self.state.fallback).name}) when nothing is scheduled"
             )
-            row = Adw.ActionRow(
-                title=f"{item['connector']} · {item['model']}", subtitle=f"Last seen {item['seen']} · {plays}"
-            )
-            icon = Gtk.Image.new_from_icon_name(item["icon"])
+            row = Adw.ActionRow(title=f"{item.connector} · {item.model}", subtitle=f"Last seen {item.seen} · {plays}")
+            icon = Gtk.Image.new_from_icon_name(item.icon)
             icon.set_pixel_size(20)
             icon.set_valign(Gtk.Align.CENTER)
             icon.add_css_class("remembered-icon")
             row.add_prefix(icon)
             forget = Gtk.Button(label="Forget", valign=Gtk.Align.CENTER)
-            forget.set_tooltip_text(f"Stop remembering {item['connector']}")
+            forget.set_tooltip_text(f"Stop remembering {item.connector}")
             forget.connect("clicked", lambda *_, it=item: self._confirm_forget(it))
             row.add_suffix(forget)
             self._remembered_list.append(row)
-        self._remembered_section.set_visible(bool(self._remembered))
+        self._remembered_section.set_visible(bool(self.state.remembered_displays))
 
     def _rebuild_plays_model(self) -> None:
         state = self.state
@@ -662,7 +555,7 @@ class DisplaysPage(Page):
                     image.set_from_icon_name(playlist.icon or "view-grid-symbolic")
                     image.set_pixel_size(20)
                 else:
-                    image.set_from_paintable(art.mosaic(data.cover_keys(playlist), 64))
+                    image.set_from_paintable(self.state.playlist_cover(playlist.id, 64))
                     image.set_pixel_size(28)
                 title.set_label(playlist.name)
                 count = len(playlist.entries)
@@ -683,9 +576,6 @@ class DisplaysPage(Page):
         if topic in ("playlists", "schedule", "settings"):
             self._rebuild_plays_model()
             self._build_remembered()
-        if topic == "playback" and self.state.playback != self._playback_seen:
-            self._held.clear()  # the player bar paused or resumed every display
-        self._playback_seen = self.state.playback
         if topic in ("now", "playback", "displays", "playlists", "schedule", "settings", "system", "theme", "library"):
             self.refresh()
 
@@ -693,7 +583,7 @@ class DisplaysPage(Page):
         state = self.state
         mirrored = self._mirrored()
         connector = self._selected
-        display = self._display(connector)
+        display = self.state.display(connector)
         self._building = True
 
         self._mode.set_active_name(state.display_mode)
@@ -772,14 +662,14 @@ class DisplaysPage(Page):
         self._plays.set_selected(self._plays_ids.index(selected_id) if selected_id in self._plays_ids else 0)
         for position, check in self._plays_checks.items():
             check.set_opacity(1 if position == self._plays.get_selected() else 0)
-        saved = [f"{c} keeps “{state.playlist(p).name}”" for c, p in self._saved_assigned.items()]
+        saved = [f"{c} keeps “{state.playlist(p).name}”" for c, p in state.kept_assignments().items()]
         self._linked_note.set_subtitle(
             f"{', '.join(saved)} for later." if saved else "Choose “Each display separately” to set this one apart."
         )
 
         chosen = state.color_display
         is_source = connector == colors
-        self._colors_swatches.set_colors(data.wallpaper_swatches(wallpaper, state.dark)[1:4])
+        self._colors_swatches.set_colors(state.wallpaper_swatches(wallpaper, state.dark)[1:4])
         if chosen and chosen not in state.connectors():
             subtitle = f"{chosen} isn’t connected, so {colors} is used"
         elif is_source:
@@ -803,13 +693,13 @@ class DisplaysPage(Page):
     # -- advanced ---------------------------------------------------------------------------------
     def _fps_options(self, connector: str) -> list[str]:
         options = ["Default (30 fps)", "15 fps", "24 fps", "30 fps", "60 fps"]
-        refresh = self._display(connector).mode.rpartition("@")[2].strip().split(" ")[0]
+        refresh = self.state.display(connector).mode.rpartition("@")[2].strip().split(" ")[0]
         if refresh.isdigit() and int(refresh) > 60:
             options.append(f"{refresh} fps")
         return options
 
     def _load_advanced(self, connector: str) -> None:
-        values = self._advanced.setdefault(connector, dict(DEFAULT_ADVANCED))
+        values = self.state.display_settings(connector)
         options = self._fps_options(connector)
         model = self._fps.get_model()
         if model is None or [model.get_string(i) for i in range(model.get_n_items())] != options:
@@ -820,10 +710,10 @@ class DisplaysPage(Page):
         self._scaling_row.set_subtitle(next(d for k, _l, d in SCALING if k == values["scaling"]))
         self._covered.set_active(values["covered"])
         self._advanced_row.set_subtitle(self._advanced_summary(connector))
-        self._advanced_reset.set_visible(values != DEFAULT_ADVANCED)
+        self._advanced_reset.set_visible(not self.state.display_settings_are_default(connector))
 
     def _advanced_summary(self, connector: str) -> str:
-        values = self._advanced[connector]
+        values = self.state.display_settings(connector)
         bits = []
         if values["scaling"] != "fill":
             bits.append(next(label for key, label, _d in SCALING if key == values["scaling"]))
@@ -838,7 +728,7 @@ class DisplaysPage(Page):
     def _set_advanced(self, key: str, value) -> None:
         if self._building:
             return
-        self._advanced[self._selected][key] = value
+        self.state.set_display_setting(self._selected, key, value)
         self._building = True
         self._load_advanced(self._selected)
         self._building = False
@@ -854,12 +744,11 @@ class DisplaysPage(Page):
             self._set_advanced("scaling", group.get_active_name())
 
     def _reset_advanced(self, connector: str) -> None:
-        before = dict(self._advanced[connector])
-        self._advanced[connector] = dict(DEFAULT_ADVANCED)
+        restore = self.state.reset_display_settings(connector)
         self.refresh()
 
         def undo() -> None:
-            self._advanced[connector] = before
+            restore()
             self.refresh()
 
         self.state.toast(f"{connector} uses the app’s defaults again", undo)
@@ -876,24 +765,9 @@ class DisplaysPage(Page):
         state = self.state
         if self._building or not mode or mode == state.display_mode:
             return
-        before = self._snapshot()
+        undo = state.set_display_mode(mode)
         if mode == "mirrored":
-            self._sync_linked(emit=False)
-        else:
-            for connector, pid in self._saved_assigned.items():
-                state.assigned[connector] = pid
-                # Its own playlist only plays where nothing is scheduled right now.
-                if connector not in state.manual and state.resolution(connector).rule is None:
-                    state.current[connector] = state.playlist(pid).entries[0]
-            self._saved_assigned = {}
-        state.display_mode = mode
-        state.emit_changed("displays", "now")
-
-        def undo() -> None:
-            self._restore(before)
-
-        if mode == "mirrored":
-            name = state.wallpaper(state.current[self._lead()]).name
+            name = state.wallpaper(state.current[state.lead_connector()]).name
             state.toast(f"All displays now show “{name}”", undo)
         elif any(state.assigned.values()):
             state.toast("Each display has its own settings again", undo)
@@ -910,16 +784,12 @@ class DisplaysPage(Page):
 
     def _assign(self, connector: str, pid: str) -> None:
         state = self.state
-        if state.assigned.get(connector, "") == pid:
+        undo = state.set_display_playlist(connector, pid)
+        if undo is None:
             return
-        before = self._snapshot()
-        state.assigned[connector] = pid
         resolution = state.resolution(connector)
         in_use = resolution.rule is None and connector not in state.manual
         playlist = state.playlist(resolution.playlist)
-        if in_use and state.current[connector] not in playlist.entries:
-            state.current[connector] = playlist.entries[0]
-        state.emit_changed("displays", "now")
         if in_use:
             text = f"{connector} now plays “{playlist.name}”"
         elif pid:
@@ -927,7 +797,7 @@ class DisplaysPage(Page):
         else:
             default = state.playlist(state.fallback).name
             text = f"{connector} plays the default (“{default}”) when nothing is scheduled"
-        state.toast(text, lambda: self._restore(before))
+        state.toast(text, undo)
 
     def _toggle_pause(self, connector: str) -> None:
         state = self.state
@@ -935,29 +805,7 @@ class DisplaysPage(Page):
             state.set_service_running(True)
             state.toast("Wallpaper service started")
             return
-        if state.playback == "stopped":
-            self._held.clear()
-            state.playback = "playing"
-            self._playback_seen = state.playback
-            state.emit_changed("playback")
-            return
-        if self._mirrored():
-            state.toggle_play()
-            return
-        connectors = set(state.connectors())
-        if self._paused(connector):
-            if state.playback != "playing":
-                state.playback = "playing"
-                self._held = connectors - {connector}  # the others stay paused
-            else:
-                self._held.discard(connector)
-        else:
-            self._held.add(connector)
-            if self._held >= connectors:  # everything paused: that's plain "paused"
-                self._held.clear()
-                state.playback = "paused"
-        self._playback_seen = state.playback
-        state.emit_changed("playback")
+        state.toggle_display_pause(connector)
 
     def _resume_display(self, connector: str) -> None:
         state = self.state
@@ -965,24 +813,12 @@ class DisplaysPage(Page):
         if not own:
             state.resume_schedule(self._scope(connector))
             return
-        before = self._snapshot()
-        state.manual.pop(connector, None)
-        playlist = state.playlist(own)
-        state.current[connector] = playlist.entries[0]
-        state.emit_changed("now", "playback")
-        state.toast(f"{connector} is back to “{playlist.name}”", lambda: self._restore(before))
+        undo = state.resume_display_playlist(connector)
+        state.toast(f"{connector} is back to “{state.playlist(own).name}”", undo)
 
     def _set_color_display(self, connector: str) -> None:
-        state = self.state
-        before = state.color_display
-        state.color_display = connector
-        state.emit_changed("displays", "now")
-
-        def undo() -> None:
-            state.color_display = before
-            state.emit_changed("displays", "now")
-
-        state.toast(f"Desktop colors now follow {connector}", undo)
+        undo = self.state.set_color_display(connector)
+        self.state.toast(f"Desktop colors now follow {connector}", undo)
 
     def _identify_displays(self) -> None:
         for tile in self.arrangement.tiles.values():
@@ -999,8 +835,8 @@ class DisplaysPage(Page):
         self._identify_source = GLib.timeout_add(3000, done)
         self.state.toast("Each display shows its number for a moment")
 
-    def _confirm_forget(self, item: dict) -> None:
-        connector = item["connector"]
+    def _confirm_forget(self, item: RememberedDisplay) -> None:
+        connector = item.connector
         dialog = Adw.AlertDialog(
             heading=f"Forget {connector}?",
             body="Its playlist and settings are removed. If it’s plugged in again, it starts with the schedule.",
@@ -1012,14 +848,13 @@ class DisplaysPage(Page):
         dialog.set_close_response("cancel")
 
         def done(_dialog, response: str) -> None:
-            if response != "forget" or item not in self._remembered:
+            if response != "forget" or item not in self.state.remembered_displays:
                 return
-            index = self._remembered.index(item)
-            self._remembered.remove(item)
+            restore = self.state.forget_display(connector)
             self._build_remembered()
 
             def undo() -> None:
-                self._remembered.insert(index, item)
+                restore()
                 self._build_remembered()
 
             self.state.toast(f"Forgot {connector}", undo)

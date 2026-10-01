@@ -8,6 +8,7 @@ scope (the player bar's display scope).
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import random
 from collections.abc import Callable
@@ -20,7 +21,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GObject
 
 from . import art, data
-from .models import Palette, Playlist, Rule, Wallpaper
+from .models import Display, Palette, Playlist, RememberedDisplay, Rule, Wallpaper
 
 #: An Undo callback, as returned by the actions that pages offer Undo for.
 Undo = Callable[[], None]
@@ -103,6 +104,11 @@ class AppState(GObject.Object):
         self.assigned = {"DP-1": "", "HDMI-A-1": ""}
         # Noctalia has one shell-wide palette; in independent mode one display drives it.
         self.color_display = "DP-1"
+        self._held: set[str] = set()  # displays paused on their own while the rest play
+        self._kept_assigned: dict[str, str] = {}  # display playlists kept aside while linked
+        self._display_settings: dict[str, dict] = {}  # per-display renderer settings
+        self.remembered_displays: list[RememberedDisplay] = [copy.copy(item) for item in data.REMEMBERED_DISPLAYS]
+        self._demo_hidden_rules: list[Rule] | None = None
         self.playback = "playing"  # playing | paused | stopped
         self.rotate = True
         self.next_change_minutes = 12
@@ -307,7 +313,7 @@ class AppState(GObject.Object):
             self.current[connector] = wid
             self.manual[connector] = "quick"
         if self.playback == "stopped":
-            self.playback = "playing"
+            self._set_playback("playing")
         self.emit_changed("now", "playback")
         where = "all displays" if scope == "all" or self.display_mode == "mirrored" else scope
 
@@ -326,7 +332,7 @@ class AppState(GObject.Object):
         for connector in self.targets(scope):
             self.manual[connector] = pid
             self.current[connector] = playlist.entries[start]
-        self.playback = "playing"
+        self._set_playback("playing")
         self.emit_changed("now", "playback")
         self.toast(f"Playing “{playlist.name}” until you resume the schedule")
 
@@ -338,12 +344,17 @@ class AppState(GObject.Object):
         self.emit_changed("now", "playback")
         self.toast("Following the schedule again")
 
+    def _set_playback(self, playback: str) -> None:
+        if playback != self.playback:
+            self._held.clear()  # the player bar paused, resumed or stopped every display
+        self.playback = playback
+
     def toggle_play(self) -> None:
-        self.playback = "paused" if self.playback == "playing" else "playing"
+        self._set_playback("paused" if self.playback == "playing" else "playing")
         self.emit_changed("playback")
 
     def stop(self) -> None:
-        self.playback = "stopped"
+        self._set_playback("stopped")
         self.emit_changed("playback")
         self.toast("Animation stopped — the still stays on screen")
 
@@ -690,6 +701,193 @@ class AppState(GObject.Object):
         entries[:] = picked + rest
         self.emit_changed("playlists")
 
+    # -- displays: queries ------------------------------------------------------
+    def display(self, connector: str) -> Display:
+        return next(display for display in self.displays if display.connector == connector)
+
+    def lead_connector(self) -> str:
+        """The display the others follow when they are linked: the primary one."""
+        for display in self.displays:
+            if display.primary:
+                return display.connector
+        return self.connectors()[0]
+
+    def display_paused(self, connector: str) -> bool:
+        """Paused everywhere, or (each display separately) paused on its own."""
+        return self.playback == "paused" or (self.display_mode != "mirrored" and connector in self._held)
+
+    def kept_assignments(self) -> dict[str, str]:
+        """Display playlists kept aside while the displays are linked."""
+        return dict(self._kept_assigned)
+
+    def display_settings(self, connector: str) -> dict:
+        """A display's renderer settings (frame rate, sound, scaling, covered)."""
+        return dict(self._display_settings.setdefault(connector, dict(data.DISPLAY_SETTINGS_DEFAULT)))
+
+    def display_settings_are_default(self, connector: str) -> bool:
+        return self.display_settings(connector) == data.DISPLAY_SETTINGS_DEFAULT
+
+    def displays_snapshot(self) -> tuple:
+        """Everything the Displays page can change, for Undo (and demo resets)."""
+        return (
+            self.display_mode,
+            dict(self.current),
+            dict(self.manual),
+            dict(self.assigned),
+            self.playback,
+            set(self._held),
+            dict(self._kept_assigned),
+            self.color_display,
+        )
+
+    def _restore_displays(self, snapshot: tuple, emit: bool = True) -> None:
+        (mode, current, manual, assigned, playback, held, kept, colors) = snapshot
+        self.display_mode = mode
+        self.current, self.manual, self.assigned = dict(current), dict(manual), dict(assigned)
+        self.playback = playback
+        self._held, self._kept_assigned = set(held), dict(kept)
+        self.color_display = colors
+        if emit:
+            self.emit_changed("displays", "now", "playback")
+
+    def _undo_displays(self) -> Undo:
+        before = self.displays_snapshot()
+        return lambda: self._restore_displays(before)
+
+    # -- displays: actions --------------------------------------------------------
+    def set_display_mode(self, mode: str) -> Undo:
+        """ "mirrored": every display shows the lead display's wallpaper, and their own
+        playlists are kept aside; "independent": each display plays its own again."""
+        undo = self._undo_displays()
+        if mode == "mirrored":
+            self._link_displays()
+        else:
+            for connector, pid in self._kept_assigned.items():
+                self.assigned[connector] = pid
+                # Its own playlist only plays where nothing is scheduled right now.
+                if connector not in self.manual and self.resolution(connector).rule is None:
+                    self.current[connector] = self.playlist(pid).entries[0]
+            self._kept_assigned = {}
+        self.display_mode = mode
+        self.emit_changed("displays", "now")
+        return undo
+
+    def link_displays(self) -> None:
+        """Make every display match the lead one (what "Same on all displays" means)."""
+        if self._link_displays():
+            self.emit_changed("displays", "now")
+
+    def _link_displays(self) -> bool:
+        lead, changed = self.lead_connector(), False
+        for connector in self.connectors():
+            if self.assigned.get(connector):
+                self._kept_assigned[connector] = self.assigned[connector]
+                self.assigned[connector] = ""
+                changed = True
+            if connector == lead:
+                continue
+            if self.current[connector] != self.current[lead]:
+                self.current[connector] = self.current[lead]
+                changed = True
+            if self.manual.get(connector) != self.manual.get(lead):
+                if lead in self.manual:
+                    self.manual[connector] = self.manual[lead]
+                else:
+                    self.manual.pop(connector, None)
+                changed = True
+        if self._held:
+            self._held.clear()
+            changed = True
+        return changed
+
+    def set_display_playlist(self, connector: str, pid: str) -> Undo | None:
+        """What a display plays when nothing is scheduled ("" = the default). None
+        when that is already its playlist."""
+        if self.assigned.get(connector, "") == pid:
+            return None
+        undo = self._undo_displays()
+        self.assigned[connector] = pid
+        resolution = self.resolution(connector)
+        in_use = resolution.rule is None and connector not in self.manual
+        playlist = self.playlist(resolution.playlist)
+        if in_use and self.current[connector] not in playlist.entries:
+            self.current[connector] = playlist.entries[0]
+        self.emit_changed("displays", "now")
+        return undo
+
+    def set_color_display(self, connector: str) -> Undo:
+        """Which display's wallpaper colors the desktop (each display separately)."""
+        before = self.color_display
+        self.color_display = connector
+        self.emit_changed("displays", "now")
+
+        def undo() -> None:
+            self.color_display = before
+            self.emit_changed("displays", "now")
+
+        return undo
+
+    def toggle_display_pause(self, connector: str) -> None:
+        """Pause or resume one display; the player bar's own Pause covers them all."""
+        if self.playback == "stopped":
+            self._held.clear()
+            self.playback = "playing"
+            self.emit_changed("playback")
+            return
+        if self.display_mode == "mirrored":
+            self.toggle_play()
+            return
+        connectors = set(self.connectors())
+        if self.display_paused(connector):
+            if self.playback != "playing":
+                self.playback = "playing"
+                self._held = connectors - {connector}  # the others stay paused
+            else:
+                self._held.discard(connector)
+        else:
+            self._held.add(connector)
+            if self._held >= connectors:  # everything paused: that's plain "paused"
+                self._held.clear()
+                self.playback = "paused"
+        self.emit_changed("playback")
+
+    def resume_display_playlist(self, connector: str) -> Undo:
+        """Drop a display's pick and go back to its own playlist (nothing is scheduled)."""
+        undo = self._undo_displays()
+        self.manual.pop(connector, None)
+        self.current[connector] = self.playlist(self.assigned[connector]).entries[0]
+        self.emit_changed("now", "playback")
+        return undo
+
+    def set_display_setting(self, connector: str, key: str, value) -> None:
+        self._display_settings.setdefault(connector, dict(data.DISPLAY_SETTINGS_DEFAULT))[key] = value
+        self.emit_changed("display-settings")
+
+    def reset_display_settings(self, connector: str) -> Undo:
+        """Use the app's defaults on a display again."""
+        before = self.display_settings(connector)
+        self._display_settings[connector] = dict(data.DISPLAY_SETTINGS_DEFAULT)
+        self.emit_changed("display-settings")
+
+        def undo() -> None:
+            self._display_settings[connector] = before
+            self.emit_changed("display-settings")
+
+        return undo
+
+    def forget_display(self, connector: str) -> Undo:
+        """Stop remembering a disconnected display, with its playlist and settings."""
+        item = next(item for item in self.remembered_displays if item.connector == connector)
+        index = self.remembered_displays.index(item)
+        self.remembered_displays.remove(item)
+        self.emit_changed("displays")
+
+        def undo() -> None:
+            self.remembered_displays.insert(index, item)
+            self.emit_changed("displays")
+
+        return undo
+
     def advance(self, minutes: int) -> None:
         """Demo clock: move time forward, letting the schedule and rotation act."""
         before = {connector: self.effective_playlist(connector) for connector in self.connectors()}
@@ -728,3 +926,41 @@ class AppState(GObject.Object):
     def set_service_running(self, value: bool) -> None:
         self.service_running = value
         self.emit_changed("system", "playback", "now")
+
+    # -- demo scenes ------------------------------------------------------------
+    # Used only by the pages' demo() hooks for screenshots and the smoke test;
+    # a real-app adapter doesn't need them.
+    def demo_set_pick(self, connector: str, pid: str, index: int) -> None:
+        """A pick of ``pid`` on one display, showing its entry ``index``."""
+        self.manual[connector] = pid
+        self.current[connector] = self.playlist(pid).entries[index]
+        self.emit_changed("now")
+
+    def demo_hold_display(self, connector: str) -> None:
+        """One display paused on its own while the others play."""
+        self._held.add(connector)
+        self.emit_changed("playback")
+
+    def demo_unscheduled(self, connector: str, pid: str) -> None:
+        """Nothing scheduled on ``connector`` right now, so its own ``pid`` plays.
+        Hides the rules that match now from this state only (rules are shared data)."""
+        if self._demo_hidden_rules is None:
+            self._demo_hidden_rules = self.rules
+        self.rules = [rule for rule in self.rules if not rule_matches(rule, self.now, connector)]
+        self.assigned[connector] = pid
+        self.current[connector] = self.playlist(pid).entries[0]
+        self.emit_changed("schedule", "displays", "now")
+
+    def demo_restore_displays(self, snapshot: tuple, mode: str) -> None:
+        """Back to ``snapshot`` (displays_snapshot()) in ``mode``, with the hidden
+        rules, display settings and remembered displays restored too."""
+        if self._demo_hidden_rules is not None:
+            self.rules = self._demo_hidden_rules
+            self._demo_hidden_rules = None
+        self._restore_displays(snapshot, emit=False)
+        self.display_mode = mode
+        self._display_settings = {}
+        self.remembered_displays = [copy.copy(item) for item in data.REMEMBERED_DISPLAYS]
+        if mode == "mirrored":
+            self._link_displays()
+        self.emit_changed("schedule", "displays", "now", "playback")

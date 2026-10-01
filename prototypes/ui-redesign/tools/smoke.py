@@ -166,6 +166,56 @@ def playlist_actions(state, window) -> None:
     assert not state.has_playlist(copy)
 
 
+def display_actions(state, window) -> None:
+    window.navigate("displays")
+    page = window.pages["displays"]
+    if state.display_mode != "independent":
+        state.set_display_mode("independent")  # the "mode:mirrored" scene linked them
+    page.demo("select:HDMI-A-1")  # starts from the page's first state
+    undo = state.set_display_playlist("HDMI-A-1", "mc-day")
+    assert state.assigned["HDMI-A-1"] == "mc-day"
+    assert state.set_display_playlist("HDMI-A-1", "mc-day") is None  # no change, no Undo
+    undo()
+    assert state.assigned["HDMI-A-1"] == ""
+    page._assign("HDMI-A-1", "cozy-rain")
+    # Linking keeps a display's playlist aside; unlinking brings it back.
+    undo = state.set_display_mode("mirrored")
+    assert state.current["HDMI-A-1"] == state.current["DP-1"] and state.kept_assignments() == {"HDMI-A-1": "cozy-rain"}
+    state.set_display_mode("independent")
+    assert state.assigned["HDMI-A-1"] == "cozy-rain" and not state.kept_assignments()
+    state.set_display_mode("mirrored")
+    undo()  # back to before the first switch
+    assert state.display_mode == "independent" and state.assigned["HDMI-A-1"] == "cozy-rain"
+    # Pausing one display, then the other, is plain "paused"; resuming one keeps the other held.
+    page._toggle_pause("HDMI-A-1")
+    assert state.display_paused("HDMI-A-1") and state.playback == "playing"
+    page._toggle_pause("DP-1")
+    assert state.playback == "paused"
+    page._toggle_pause("DP-1")
+    assert state.playback == "playing" and state.display_paused("HDMI-A-1") and not state.display_paused("DP-1")
+    state.toggle_play()  # the player bar's Pause clears the per-display holds
+    state.toggle_play()
+    assert not state.display_paused("HDMI-A-1")
+    page._set_color_display("HDMI-A-1")
+    assert state.color_display == "HDMI-A-1"
+    state.set_display_setting("DP-1", "sound", True)
+    assert not state.display_settings_are_default("DP-1")
+    undo = state.reset_display_settings("DP-1")
+    assert state.display_settings_are_default("DP-1")
+    undo()
+    assert state.display_settings("DP-1")["sound"]
+    page._reset_advanced("DP-1")
+    undo = state.forget_display("eDP-1")
+    assert [d.connector for d in state.remembered_displays] == ["DP-2"]
+    undo()
+    page.demo("unscheduled:HDMI-A-1")
+    state.demo_set_pick("HDMI-A-1", "mc-night", 1)
+    page._resume_display("HDMI-A-1")
+    assert "HDMI-A-1" not in state.manual and state.current["HDMI-A-1"] == state.playlist("cozy-rain").entries[0]
+    page.demo("select:DP-1")
+    assert state.assigned == {"DP-1": "", "HDMI-A-1": ""} and state.color_display == "DP-1"
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -215,8 +265,8 @@ def build_steps(app, holder):
         ),
         ("battery on/off", lambda: (s().set_battery(True), s().set_battery(False))),
         ("service off/on", lambda: (s().set_service_running(False), s().set_service_running(True))),
-        ("mirrored", lambda: (setattr(s(), "display_mode", "mirrored"), s().emit_changed("displays", "now"))),
-        ("independent", lambda: (setattr(s(), "display_mode", "independent"), s().emit_changed("displays", "now"))),
+        ("mirrored", lambda: s().set_display_mode("mirrored")),
+        ("independent", lambda: s().set_display_mode("independent")),
         ("light", lambda: (setattr(s(), "dark", False), s().emit_changed("theme", "now"))),
         ("dark", lambda: (setattr(s(), "dark", True), s().emit_changed("theme", "now"))),
     ]
@@ -255,6 +305,7 @@ def build_steps(app, holder):
             "forget",
             "mode:mirrored",
             "colors:eDP-1",
+            "paused",
         ],
         "settings": [
             "search:battery",
@@ -317,6 +368,7 @@ def build_steps(app, holder):
     )
     steps.append(("library select off", lambda: w().pages["library"]._select.set_active(False)))
     steps.append(("playlist actions", lambda: playlist_actions(s(), w())))
+    steps.append(("display actions", lambda: display_actions(s(), w())))
     steps.append(
         (
             "store select all",

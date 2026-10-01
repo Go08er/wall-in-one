@@ -12,7 +12,7 @@ import colorsys
 import hashlib
 
 from . import art
-from .models import Display, Palette, Playlist, Rule, StoreItem, Wallpaper
+from .models import Display, Palette, Playlist, RememberedDisplay, Rule, StoreItem, Wallpaper
 
 # ---------------------------------------------------------------------------
 # Wallpapers
@@ -455,6 +455,15 @@ DISPLAYS: list[Display] = [
     Display("DP-1", "Dell U2723QE", "3840 × 2160 @ 60 Hz", 1.5, 0, 0, 2560, 1440, primary=True),
     Display("HDMI-A-1", "LG 24GL600F", "1920 × 1080 @ 144 Hz", 1.0, 2560, 200, 1920, 1080),
 ]
+
+# Outputs the runtime still keeps routes for although they are unplugged.
+REMEMBERED_DISPLAYS: list[RememberedDisplay] = [
+    RememberedDisplay("eDP-1", "Laptop screen", "computer-symbolic", "2 days ago", "mc-night"),
+    RememberedDisplay("DP-2", "Samsung Odyssey G7", "video-display-symbolic", "3 weeks ago", ""),
+]
+
+# Per-display renderer settings (Displays → Advanced) until a display changes them.
+DISPLAY_SETTINGS_DEFAULT = {"fps": 0, "sound": False, "scaling": "fill", "covered": True}
 
 # ---------------------------------------------------------------------------
 # Store

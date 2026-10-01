@@ -261,6 +261,189 @@ def version_fault(path: Path, document: dict[str, Any], expected: int) -> str | 
     return f"{path.name} has unsupported version {version!r}; expected {expected}"
 
 
+#: The two kinds of Store fault. A document from a newer build is read-only
+#: here: it is shown as far as this build understands it, and every mutation
+#: is refused with this kind so the file stays byte-identical and no
+#: ``.broken`` copy is made. Anything else this build cannot use is
+#: ``unreadable`` and keeps the historical recovery, in which the next write
+#: moves the original aside before saving what could be parsed.
+NEWER_VERSION: Final = "newer-version"
+UNREADABLE: Final = "unreadable"
+
+
+def newer_version_fault(path: Path, document: Mapping[str, Any], understood: int) -> str | None:
+    """Explain a schema marker newer than every version this build understands.
+
+    Only an integer above ``understood`` qualifies: a newer build wrote it,
+    and whatever it added must survive this build untouched. Every other
+    marker this build does not accept (a string, a bool, zero, an older
+    unknown number) is damage rather than the future, and stays an ordinary
+    unreadable fault. Callers check this before any shape validation, since a
+    newer schema may have moved the very container an older parser expects.
+    """
+    version = document.get("version")
+    if type(version) is int and version > understood:
+        return (
+            f"{path.name} was saved by a newer version of Wall-in-One "
+            f"(unsupported version {version}; this version understands up to {understood})"
+        )
+    return None
+
+
+def newer_version_refusal(path: Path) -> str:
+    """The sentence every Store uses when it refuses to change a newer file."""
+    return (
+        f"{path.name} was saved by a newer version of Wall-in-One; "
+        "open that version to change it. Nothing was changed."
+    )
+
+
+def fault_kind(fault: str | None, *, newer_version: bool) -> str | None:
+    """Classify a Store fault as :data:`NEWER_VERSION` or :data:`UNREADABLE`."""
+    if fault is None:
+        return None
+    return NEWER_VERSION if newer_version else UNREADABLE
+
+
+@dataclass(frozen=True, slots=True)
+class Shape:
+    """The fields of one kind of JSON object that this build models.
+
+    Everything outside ``known`` is carried, not interpreted: it is captured
+    when a Store reads its file and merged back when the Store writes it.
+    ``records`` names fields that hold a list of objects, each found again
+    after an edit by its ``identity`` field; ``objects`` names fields that
+    hold one nested object. Both kinds of field count as known.
+    ``strip_identity`` mirrors a parser that trims the identity it stores, so
+    the merge finds the record under the identity it is written back with.
+    """
+
+    known: frozenset[str]
+    identity: str | None = None
+    strip_identity: bool = False
+    records: Mapping[str, Shape] = field(default_factory=dict)
+    objects: Mapping[str, Shape] = field(default_factory=dict)
+
+    def models(self, key: str) -> bool:
+        return key in self.known or key in self.records or key in self.objects
+
+    def identity_of(self, record: Mapping[str, Any]) -> str | None:
+        if self.identity is None:
+            return None
+        value = record.get(self.identity)
+        if not isinstance(value, str):
+            return None
+        return value.strip() if self.strip_identity else value
+
+
+@dataclass(frozen=True, slots=True)
+class Unknown:
+    """Fields a document carried that this build does not model.
+
+    A newer build, or a person, may add a key without this build knowing what
+    it means. Dropping it on the next unrelated edit loses data silently, so
+    it rides through every save instead: at the top level, on each record
+    still present (keyed by identity, so reordering and renaming keep it),
+    and inside nested objects. A key this build *does* model is never
+    carried, so clearing or omitting one of its own fields stays possible.
+    """
+
+    fields: Mapping[str, Any] = field(default_factory=dict)
+    records: Mapping[str, Mapping[str, Unknown]] = field(default_factory=dict)
+    objects: Mapping[str, Unknown] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        return bool(self.fields or self.records or self.objects)
+
+
+NOTHING_UNKNOWN: Final = Unknown()
+
+
+def capture_unknown(document: Mapping[str, Any], shape: Shape) -> Unknown:
+    """Collect every field of ``document`` that ``shape`` does not model."""
+    fields = {key: value for key, value in document.items() if not shape.models(key)}
+    records: dict[str, dict[str, Unknown]] = {}
+    for name, child in shape.records.items():
+        stored = document.get(name)
+        if not isinstance(stored, list):
+            continue
+        seen: set[str] = set()
+        found: dict[str, Unknown] = {}
+        for raw in stored:
+            if not isinstance(raw, dict):
+                continue
+            identity = child.identity_of(raw)
+            if identity is None or identity in seen:
+                # The first record with an identity owns it, as a duplicate is
+                # already a fault the parser reports.
+                continue
+            seen.add(identity)
+            nested = capture_unknown(raw, child)
+            if nested:
+                found[identity] = nested
+        if found:
+            records[name] = found
+    objects: dict[str, Unknown] = {}
+    for name, child in shape.objects.items():
+        stored = document.get(name)
+        if isinstance(stored, dict):
+            nested = capture_unknown(stored, child)
+            if nested:
+                objects[name] = nested
+    if not (fields or records or objects):
+        return NOTHING_UNKNOWN
+    return Unknown(fields=fields, records=records, objects=objects)
+
+
+def merge_unknown(document: dict[str, Any], unknown: Unknown, shape: Shape) -> dict[str, Any]:
+    """Put captured fields back into a freshly serialized ``document``.
+
+    Never overwrites a key the serializer wrote. A record or nested object
+    the serializer no longer writes takes its unknown fields with it: those
+    belonged to something this edit removed.
+    """
+    for key, value in unknown.fields.items():
+        if not shape.models(key):
+            document.setdefault(key, value)
+    for name, nested in unknown.objects.items():
+        child = shape.objects.get(name)
+        current = document.get(name)
+        if child is not None and isinstance(current, dict):
+            merge_unknown(current, nested, child)
+    for name, by_identity in unknown.records.items():
+        child = shape.records.get(name)
+        current = document.get(name)
+        if child is None or not isinstance(current, list):
+            continue
+        for record in current:
+            if not isinstance(record, dict):
+                continue
+            identity = child.identity_of(record)
+            if identity is not None and identity in by_identity:
+                merge_unknown(record, by_identity[identity], child)
+    return document
+
+
+@dataclass(frozen=True, slots=True)
+class Reading[T]:
+    """One Store document as parsed: its value and how it was read.
+
+    ``value`` is whatever could be recovered, so the interactive app can still
+    show it. ``fault`` keeps its historical meaning for runtime compilation,
+    which refuses any faulted store; ``newer_version`` says the fault is a
+    document from a newer build, which no mutation may rewrite.
+    """
+
+    value: T
+    fault: str | None = None
+    newer_version: bool = False
+    unknown: Unknown = NOTHING_UNKNOWN
+
+    @property
+    def fault_kind(self) -> str | None:
+        return fault_kind(self.fault, newer_version=self.newer_version)
+
+
 def joined_faults(faults: list[str]) -> str | None:
     """One stable message for a Store's public ``fault`` property."""
     return "; ".join(faults) if faults else None

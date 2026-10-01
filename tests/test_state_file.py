@@ -659,3 +659,159 @@ def test_marker_lock_can_exclude_migration_without_owning_every_state_gate(
         target.write_text("saved", encoding="utf-8")
 
     assert target.read_text(encoding="utf-8") == "saved"
+
+
+# -- forward compatibility: newer versions and unknown keys -------------------
+
+
+@pytest.mark.parametrize("version", (2, 3, 99))
+def test_an_integer_version_above_the_understood_one_is_a_newer_version_fault(
+    version: int,
+) -> None:
+    fault = state_file.newer_version_fault(Path("/s/playlists.json"), {"version": version}, 1)
+
+    assert fault == (
+        "playlists.json was saved by a newer version of Wall-in-One "
+        f"(unsupported version {version}; this version understands up to 1)"
+    )
+
+
+@pytest.mark.parametrize("version", (None, 0, 1, -3, True, False, "2", 2.0, [2], {"v": 2}))
+def test_only_an_integer_above_the_understood_version_is_newer(version: object) -> None:
+    """Damage (a string, a bool, zero, an older unknown) is never the future."""
+    document = {} if version is None else {"version": version}
+
+    assert state_file.newer_version_fault(Path("/s/x.json"), document, 1) is None
+
+
+def test_the_newer_version_refusal_says_what_happened_and_what_to_do() -> None:
+    assert state_file.newer_version_refusal(Path("/s/schedules.json")) == (
+        "schedules.json was saved by a newer version of Wall-in-One; "
+        "open that version to change it. Nothing was changed."
+    )
+
+
+def test_fault_kinds_distinguish_newer_from_unreadable() -> None:
+    assert state_file.fault_kind(None, newer_version=False) is None
+    assert state_file.fault_kind("x", newer_version=False) == state_file.UNREADABLE
+    assert state_file.fault_kind("x", newer_version=True) == state_file.NEWER_VERSION
+    assert state_file.NEWER_VERSION == "newer-version"
+    assert state_file.Reading(1).fault_kind is None
+    assert state_file.Reading(1, "bad").fault_kind == state_file.UNREADABLE
+    assert state_file.Reading(1, "new", newer_version=True).fault_kind == "newer-version"
+
+
+_ENTRY = state_file.Shape(known=frozenset({"id", "source"}), identity="id", strip_identity=True)
+_SHAPE = state_file.Shape(
+    known=frozenset({"version"}),
+    records={
+        "items": state_file.Shape(
+            known=frozenset({"id", "name"}),
+            identity="id",
+            strip_identity=True,
+            records={"entries": _ENTRY},
+            objects={"health": state_file.Shape(known=frozenset({"state"}))},
+        )
+    },
+)
+
+
+def test_unknown_fields_are_captured_at_every_level_and_merged_back_by_identity() -> None:
+    stored = {
+        "version": 1,
+        "written_by": "a newer build",
+        "items": [
+            {
+                "id": " a ",
+                "name": "A",
+                "description": "kept",
+                "entries": [{"id": "e1", "source": "/x", "weight": 3}],
+                "health": {"state": "borked", "since": "yesterday"},
+            },
+            {"id": "b", "name": "B"},
+        ],
+    }
+    unknown = state_file.capture_unknown(stored, _SHAPE)
+    assert unknown
+
+    # A rewrite in another order, with a renamed record and its parser's
+    # trimmed identity, still finds every captured field again.
+    rewritten = {
+        "version": 1,
+        "items": [
+            {"id": "b", "name": "B"},
+            {
+                "id": "a",
+                "name": "Renamed",
+                "entries": [{"id": "e2", "source": "/y"}, {"id": "e1", "source": "/x"}],
+                "health": {"state": "borked"},
+            },
+        ],
+    }
+    merged = state_file.merge_unknown(rewritten, unknown, _SHAPE)
+
+    assert merged == {
+        "version": 1,
+        "items": [
+            {"id": "b", "name": "B"},
+            {
+                "id": "a",
+                "name": "Renamed",
+                "entries": [
+                    {"id": "e2", "source": "/y"},
+                    {"id": "e1", "source": "/x", "weight": 3},
+                ],
+                "health": {"state": "borked", "since": "yesterday"},
+                "description": "kept",
+            },
+        ],
+        "written_by": "a newer build",
+    }
+
+
+def test_known_fields_are_never_carried_and_a_written_field_is_never_overwritten() -> None:
+    """Clearing a modelled optional field must not resurrect the old value."""
+    unknown = state_file.capture_unknown(
+        {"version": 1, "items": [{"id": "a", "name": "Old", "extra": "carried"}]},
+        _SHAPE,
+    )
+    merged = state_file.merge_unknown({"items": [{"id": "a", "extra": "new"}]}, unknown, _SHAPE)
+
+    assert merged == {"items": [{"id": "a", "extra": "new"}]}
+
+
+def test_a_removed_record_or_nested_object_takes_its_unknown_fields_with_it() -> None:
+    unknown = state_file.capture_unknown(
+        {
+            "items": [
+                {"id": "gone", "name": "G", "note": "x"},
+                {"id": "kept", "name": "K", "health": {"state": "borked", "since": 1}},
+            ]
+        },
+        _SHAPE,
+    )
+
+    merged = state_file.merge_unknown({"items": [{"id": "kept", "name": "K"}]}, unknown, _SHAPE)
+
+    assert merged == {"items": [{"id": "kept", "name": "K"}]}
+
+
+def test_a_duplicate_identity_carries_only_the_first_records_fields() -> None:
+    unknown = state_file.capture_unknown(
+        {"items": [{"id": "a", "note": "first"}, {"id": "a", "note": "second"}]}, _SHAPE
+    )
+
+    merged = state_file.merge_unknown({"items": [{"id": "a"}]}, unknown, _SHAPE)
+
+    assert merged == {"items": [{"id": "a", "note": "first"}]}
+
+
+def test_a_document_with_nothing_unknown_captures_nothing() -> None:
+    unknown = state_file.capture_unknown(
+        {"version": 1, "items": [{"id": "a", "name": "A", "entries": [], "health": {}}]},
+        _SHAPE,
+    )
+
+    assert not unknown
+    assert unknown is state_file.NOTHING_UNKNOWN
+    assert state_file.merge_unknown({"version": 1}, unknown, _SHAPE) == {"version": 1}

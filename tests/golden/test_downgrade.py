@@ -4,13 +4,18 @@ Opt-in: ``-m downgrade`` with ``WIO_OLD_SRC`` pointing at an older checkout's
 ``src`` (``tools/golden-downgrade.sh`` sets it up). The old build runs in a
 child process (``downgrade_driver.py``) against the same sandbox, with a fake
 runtime answering on a real socket, as the old service would after a rollback.
+
+Same-version files must lose nothing with any old build. For what Release 2
+will write -- unknown keys, a version bump -- the outcome depends on the old
+build: one with Release 1's guard keeps or refuses them; one without it
+(v0.1.4) narrows them, which the ``pre_guard`` tests pin down as the reason
+Release 1 must be installed before anything writes newer files.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import tomllib
@@ -28,6 +33,7 @@ from tests.golden.sandbox import (
     UNKNOWN_TOP,
     Golden,
     broken_copies,
+    decorate,
     pairing_item,
     playlist_ids,
     read_json,
@@ -39,7 +45,6 @@ from wall_in_one.library import displays, favourites, pairings, playlists, sched
 pytestmark = pytest.mark.downgrade
 
 OLD_SOURCE_ENV: Final = "WIO_OLD_SRC"
-GUARD: Final = "needs r1-store-guard"
 DRIVER: Final = Path(__file__).with_name("downgrade_driver.py")
 DOWNGRADE_FILES: Final = (
     "playlists.json",
@@ -90,14 +95,10 @@ def _run_old(environment_for: Profile, action: str, *arguments: str) -> dict[str
 
 @dataclass(frozen=True, slots=True)
 class OldBuild:
-    version: tuple[int, ...]
     text: str
-
-    @property
-    def has_guard(self) -> bool:
-        # Release 1 (0.1.5) is the first build meant to carry the forward-
-        # compatibility guard. Every build before it narrows newer files.
-        return self.version >= (0, 1, 5)
+    #: Whether the old build has Release 1's forward-compatibility guard,
+    #: by capability rather than by version number.
+    has_guard: bool
 
 
 @pytest.fixture(scope="session")
@@ -106,8 +107,14 @@ def old_build(tmp_path_factory: pytest.TempPathFactory) -> OldBuild:
     probe = Profile(root, root, root / "home", harness.FIXTURE_HOME, root / "run")
     for path in probe.environment().values():
         Path(path).mkdir(parents=True, exist_ok=True)
-    text = str(_run_old(probe, "version")["version"])
-    return OldBuild(tuple(int(part) for part in re.findall(r"\d+", text)[:3]), text)
+    report = _run_old(probe, "version")
+    return OldBuild(str(report["version"]), bool(report["has_guard"]))
+
+
+def _require(old: OldBuild, *, guard: bool) -> None:
+    if old.has_guard != guard:
+        state = "has" if old.has_guard else "lacks"
+        pytest.skip(f"old build {old.text} {state} the forward-compatibility guard")
 
 
 def _current_build_edits(profile: Profile) -> None:
@@ -190,44 +197,16 @@ def test_downgrade_old_build_edits_lose_nothing(downgrade: tuple[Golden, OldBuil
     assert sorted(profile.app_state.glob("*.broken*")) == []
 
 
-def _guard_expected(request: pytest.FixtureRequest, old: OldBuild) -> None:
-    if not old.has_guard:
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason=f"{GUARD}: old build {old.text} predates the forward-compatibility guard",
-            )
-        )
-
-
-def _decorate(document: dict[str, Any]) -> set[str]:
-    """Add what a newer build would: a top-level key and a key on every record."""
-    document[UNKNOWN_TOP] = {"written-by": "a newer build"}
-    keys: set[str] = set()
-    for value in document.values():
-        if isinstance(value, list):
-            for record in value:
-                if isinstance(record, dict):
-                    record[UNKNOWN_RECORD] = "kept"
-                    keys.add(str(record.get("id", record.get("identity"))))
-    return keys
-
-
-@pytest.mark.parametrize("filename", DOWNGRADE_FILES)
-def test_downgrade_old_build_keeps_unknown_keys(
-    request: pytest.FixtureRequest, downgrade: tuple[Golden, OldBuild], filename: str
-) -> None:
-    """What Release 2 will add (new keys, same version) survives an old build's edit."""
-    golden, old = downgrade
-    _guard_expected(request, old)
-    target = golden.profile.app_state / filename
+def _newer_keys(target: Path) -> set[str]:
+    """Write what Release 2 will add to ``target``; return the marked records."""
     document = read_json(target)
-    decorated = _decorate(document)
+    decorated = decorate(document)
     write_json(target, document)
+    return decorated
 
-    report = _run_old(golden.profile, "edit", filename)
 
+def _unknown_keys_left(target: Path, decorated: set[str]) -> tuple[list[str], int]:
+    """Which of the marked keys are gone now, and how many marked records remain."""
     after = read_json(target)
     lost = [] if after.get(UNKNOWN_TOP) == {"written-by": "a newer build"} else [UNKNOWN_TOP]
     kept = 0
@@ -241,29 +220,92 @@ def test_downgrade_old_build_keeps_unknown_keys(
                     kept += 1
                     if record.get(UNKNOWN_RECORD) != "kept":
                         lost.append(f"{UNKNOWN_RECORD} on {key}")
+    return lost, kept
+
+
+def _bump_version(target: Path) -> tuple[bytes, int]:
+    document = read_json(target)
+    document["version"] = int(document["version"]) + 1
+    return write_json(target, document), int(document["version"])
+
+
+@pytest.mark.parametrize("filename", DOWNGRADE_FILES)
+def test_downgrade_guarded_build_keeps_unknown_keys(
+    downgrade: tuple[Golden, OldBuild], filename: str
+) -> None:
+    """What Release 2 will add (new keys, same version) survives an old build's edit."""
+    golden, old = downgrade
+    _require(old, guard=True)
+    target = golden.profile.app_state / filename
+    decorated = _newer_keys(target)
+
+    report = _run_old(golden.profile, "edit", filename)
+
+    lost, kept = _unknown_keys_left(target, decorated)
+    assert report["errors"] == {}, report["errors"]
     assert kept == len(decorated), f"the old build dropped {len(decorated) - kept} records"
-    assert not lost, f"old build {old.text} silently dropped {len(lost)} unknown key(s): {lost[:4]}"
+    assert not lost, f"old build {old.text} dropped unknown key(s): {lost[:4]}"
     assert broken_copies(target) == [], report
 
 
 @pytest.mark.parametrize("filename", DOWNGRADE_FILES)
-def test_downgrade_old_build_does_not_rewrite_a_newer_version(
-    request: pytest.FixtureRequest, downgrade: tuple[Golden, OldBuild], filename: str
+def test_downgrade_guarded_build_refuses_a_newer_version(
+    downgrade: tuple[Golden, OldBuild], filename: str
 ) -> None:
-    """A Release-2 version bump: the old build must refuse, not rewrite it as its own."""
+    """A Release-2 version bump: the old build refuses and leaves every byte."""
     golden, old = downgrade
-    _guard_expected(request, old)
+    _require(old, guard=True)
     target = golden.profile.app_state / filename
-    document = read_json(target)
-    document["version"] = int(document["version"]) + 1
-    original = write_json(target, document)
+    original, _version = _bump_version(target)
 
     report = _run_old(golden.profile, "edit", filename)
 
-    after = target.read_bytes()
-    broken = [path.name for path in broken_copies(target)]
-    assert after == original and not broken, (
-        f"old build {old.text} accepted the edit (errors: {report['errors']}), moved the "
-        f"version-{document['version']} file aside as {broken} and rewrote it as version "
-        f"{json.loads(after).get('version')}"
-    )
+    assert target.read_bytes() == original
+    assert broken_copies(target) == []
+    assert "newer-version" in report["errors"].get(filename, ""), report
+
+
+@pytest.mark.parametrize("filename", DOWNGRADE_FILES)
+def test_downgrade_pre_guard_build_drops_unknown_keys(
+    downgrade: tuple[Golden, OldBuild], filename: str
+) -> None:
+    """v0.1.4 accepts the edit and silently drops every key it does not model.
+
+    Pinned, not merely expected to fail: this is the narrowing that makes a
+    rollback from Release 2 to v0.1.4 lossy, and why Release 1 ships first.
+    """
+    golden, old = downgrade
+    _require(old, guard=False)
+    target = golden.profile.app_state / filename
+    decorated = _newer_keys(target)
+
+    report = _run_old(golden.profile, "edit", filename)
+
+    lost, kept = _unknown_keys_left(target, decorated)
+    assert report["errors"] == {}, report["errors"]
+    assert kept == len(decorated), "records themselves are kept"
+    expected = [UNKNOWN_TOP, *(f"{UNKNOWN_RECORD} on {key}" for key in decorated)]
+    assert sorted(lost) == sorted(expected), lost
+    assert broken_copies(target) == [], "nothing is kept aside: the keys are simply gone"
+
+
+@pytest.mark.parametrize("filename", DOWNGRADE_FILES)
+def test_downgrade_pre_guard_build_rewrites_a_newer_version(
+    downgrade: tuple[Golden, OldBuild], filename: str
+) -> None:
+    """v0.1.4 moves a newer file aside as ``.broken`` and rewrites it as its own.
+
+    The original survives only in the ``.broken`` copy; the live file is
+    narrowed to the old version, and the edit reports success.
+    """
+    golden, old = downgrade
+    _require(old, guard=False)
+    target = golden.profile.app_state / filename
+    original, version = _bump_version(target)
+
+    report = _run_old(golden.profile, "edit", filename)
+
+    assert report["errors"] == {}, report["errors"]
+    (broken,) = broken_copies(target)
+    assert broken.read_bytes() == original
+    assert read_json(target)["version"] == version - 1

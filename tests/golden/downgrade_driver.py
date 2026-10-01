@@ -111,9 +111,13 @@ EDITS: dict[str, Callable[[], list[str]]] = {
 
 
 def main(arguments: list[str]) -> int:
+    from wall_in_one.library import state_file
+
     report: dict[str, object] = {
         "module": wall_in_one.__file__,
         "version": getattr(wall_in_one, "__version__", "unknown"),
+        # Release 1's forward-compatibility guard introduced this constant.
+        "has_guard": hasattr(state_file, "NEWER_VERSION"),
     }
     if arguments[:1] == ["edit"]:
         chosen = arguments[1:] or list(EDITS)

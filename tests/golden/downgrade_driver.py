@@ -5,9 +5,10 @@ checkout's ``src`` and every XDG variable pointed at a golden sandbox. It must
 therefore import nothing from this checkout and use only Store APIs that
 v0.1.4 (``dbfbaa0``) already had.
 
-Usage: ``downgrade_driver.py version`` or ``downgrade_driver.py edit [FILE...]``.
-Prints one JSON object: the module and version that ran, which records each
-edit touched, and any edit that was refused (by message).
+Usage: ``downgrade_driver.py version``, ``downgrade_driver.py edit [FILE...]``
+or ``downgrade_driver.py same-schedule-edit``. Prints one JSON object: the
+module and version that ran, which records each edit touched, and any edit
+that was refused (by message).
 """
 
 from __future__ import annotations
@@ -58,6 +59,23 @@ def edit_schedules() -> list[str]:
     store.set_enabled(rule, True)
     store.add("quick-choice", start="06:00", end="06:30")
     return [rule]
+
+
+def same_schedule_edit() -> list[str]:
+    """One deterministic, unnamed schedule edit that every build makes the same way.
+
+    The test runs it here under the old build and again under this one from
+    the same starting bytes: an unnamed edit must write identical bytes.
+    """
+    rules = _records("schedules.json", "rules")
+    first = str(rules[0]["id"])
+    second = rules[1]
+    store = schedules.Store.open()
+    store.set_enabled(first, rules[0].get("enabled") is False)
+    store.update(str(second["id"]), str(second["playlist"]), weekdays=["sat"])
+    store.add("quick-choice", weekdays=["sun"], start="06:00", end="06:30", rule_id="same-edit")
+    store.move("same-edit", 0)
+    return [first, str(second["id"]), "same-edit"]
 
 
 def edit_pairings() -> list[str]:
@@ -118,6 +136,8 @@ def main(arguments: list[str]) -> int:
         "version": getattr(wall_in_one, "__version__", "unknown"),
         # Release 1's forward-compatibility guard introduced this constant.
         "has_guard": hasattr(state_file, "NEWER_VERSION"),
+        # The newest schedules.json it understands; 3 added rule names.
+        "schedules_format": schedules.FORMAT_VERSION,
     }
     if arguments[:1] == ["edit"]:
         chosen = arguments[1:] or list(EDITS)
@@ -130,6 +150,9 @@ def main(arguments: list[str]) -> int:
                 errors[name] = f"{type(error).__name__}: {error}"
         report["touched"] = touched
         report["errors"] = errors
+    elif arguments[:1] == ["same-schedule-edit"]:
+        report["touched"] = {"schedules.json": same_schedule_edit()}
+        report["errors"] = {}
     elif arguments[:1] != ["version"]:
         print(__doc__, file=sys.stderr)
         return 2

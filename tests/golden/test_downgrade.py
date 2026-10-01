@@ -10,6 +10,11 @@ will write -- unknown keys, a version bump -- the outcome depends on the old
 build: one with Release 1's guard keeps or refuses them; one without it
 (v0.1.4) narrows them, which the ``pre_guard`` tests pin down as the reason
 Release 1 must be installed before anything writes newer files.
+
+Rule names are the first real bump (schedules.json version 3). An unnamed
+edit writes the same bytes in every build, so it stays safe everywhere; a
+named schedule is refused read-only by Release 1 and narrowed by v0.1.4,
+which is what backs the release note "install 0.1.5 before 0.2.0".
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from typing import Any, Final
 
 import pytest
 
-from tests.golden import harness, sandbox
+from tests.golden import downgrade_driver, harness, sandbox
 from tests.golden.harness import Profile
 from tests.golden.sandbox import (
     UNKNOWN_RECORD,
@@ -99,6 +104,8 @@ class OldBuild:
     #: Whether the old build has Release 1's forward-compatibility guard,
     #: by capability rather than by version number.
     has_guard: bool
+    #: The newest schedules.json version the old build understands.
+    schedules_format: int
 
 
 @pytest.fixture(scope="session")
@@ -108,7 +115,9 @@ def old_build(tmp_path_factory: pytest.TempPathFactory) -> OldBuild:
     for path in probe.environment().values():
         Path(path).mkdir(parents=True, exist_ok=True)
     report = _run_old(probe, "version")
-    return OldBuild(str(report["version"]), bool(report["has_guard"]))
+    return OldBuild(
+        str(report["version"]), bool(report["has_guard"]), int(report["schedules_format"])
+    )
 
 
 def _require(old: OldBuild, *, guard: bool) -> None:
@@ -309,3 +318,98 @@ def test_downgrade_pre_guard_build_rewrites_a_newer_version(
     (broken,) = broken_copies(target)
     assert broken.read_bytes() == original
     assert read_json(target)["version"] == version - 1
+
+
+# -- rule names: schedules.json version 3 ------------------------------------------------
+
+
+def _require_before_rule_names(old: OldBuild) -> None:
+    if old.schedules_format >= schedules.NAMED_FORMAT_VERSION:
+        pytest.skip(f"old build {old.text} already understands named rules")
+
+
+def test_downgrade_an_unnamed_schedule_edit_writes_the_same_bytes_in_both_builds(
+    downgrade: tuple[Golden, OldBuild],
+) -> None:
+    """Guard 1: without a name, this build's file is the old build's, byte for byte."""
+    golden, old = downgrade
+    _require_before_rule_names(old)
+    target = golden.profile.app_state / "schedules.json"
+    start = target.read_bytes()
+    assert read_json(target)["version"] == 2, "this build's unnamed edits must stay version 2"
+
+    report = _run_old(golden.profile, "same-schedule-edit")
+    theirs = target.read_bytes()
+    target.write_bytes(start)
+    ours = downgrade_driver.same_schedule_edit()
+
+    assert report["errors"] == {}
+    assert report["touched"] == {"schedules.json": ours}
+    assert target.read_bytes() == theirs
+    assert read_json(target)["version"] == 2
+    assert sorted(golden.profile.app_state.glob("*-backup")) == []
+
+
+def _name_a_rule(profile: Profile) -> tuple[bytes, bytes]:
+    """This build names one rule; returns the version-2 bytes and the version-3 ones."""
+    target = profile.app_state / "schedules.json"
+    released = target.read_bytes()
+    rule = read_json(target)["rules"][0]["id"]
+    schedules.Store.open().set_name(rule, "Frog day")
+    named = target.read_bytes()
+    assert read_json(target)["version"] == 3
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == released
+    return released, named
+
+
+def test_downgrade_guarded_build_refuses_a_named_schedule(
+    downgrade: tuple[Golden, OldBuild],
+) -> None:
+    """Release 1 opens this build's version 3 read-only and never rewrites it."""
+    golden, old = downgrade
+    _require(old, guard=True)
+    _require_before_rule_names(old)
+    target = golden.profile.app_state / "schedules.json"
+    released, named = _name_a_rule(golden.profile)
+
+    report = _run_old(golden.profile, "edit", "schedules.json")
+
+    assert "newer-version" in report["errors"].get("schedules.json", ""), report
+    assert target.read_bytes() == named
+    assert broken_copies(target) == []
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == released
+
+
+def test_downgrade_pre_guard_build_narrows_a_named_schedule(
+    downgrade: tuple[Golden, OldBuild],
+) -> None:
+    """v0.1.4 cannot safely edit this build's version 3: pinned, not merely expected.
+
+    It moves the file aside as ``.broken`` and rewrites it as version 2
+    without the names, reporting success. Nothing is lost outright -- the
+    names are in ``.broken`` and the released bytes in ``.v2-backup`` -- but
+    the live schedule loses its names, which is why 0.2.0's release notes say
+    to install 0.1.5 first. Back on this build, naming again bumps again and
+    the first backup is never overwritten.
+    """
+    golden, old = downgrade
+    _require(old, guard=False)
+    target = golden.profile.app_state / "schedules.json"
+    backup = target.with_name("schedules.json.v2-backup")
+    released, named = _name_a_rule(golden.profile)
+
+    report = _run_old(golden.profile, "edit", "schedules.json")
+
+    assert report["errors"] == {}, report["errors"]
+    (broken,) = broken_copies(target)
+    assert broken.read_bytes() == named
+    narrowed = read_json(target)
+    assert narrowed["version"] == 2
+    assert not any("name" in rule for rule in narrowed["rules"])
+    assert backup.read_bytes() == released
+
+    schedules.Store.open().set_name(narrowed["rules"][0]["id"], "Frog day again")
+
+    assert read_json(target)["version"] == 3
+    assert backup.read_bytes() == released
+    assert sorted(path.name for path in target.parent.glob("*-backup")) == [backup.name]

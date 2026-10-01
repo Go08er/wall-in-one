@@ -26,6 +26,8 @@ answering on a real socket, as its service would after a rollback.
   unchanged runtime.toml. v0.1.4's service unit still starts on that
   runtime.toml, but v0.1.4 publishes nothing while a bumped store is still at
   its new version, and narrows each store on its next edit.
+* Copying a ``.broken`` file back by hand on this build restores what was
+  narrowed, as docs/updating.md describes.
 
 What this build does with a file from a release newer than itself (0.2.0
 opening a 0.3.0 file read-only) needs no old build: that is
@@ -703,3 +705,46 @@ def test_downgrade_v0_1_4_narrows_both_stores(downgrade: Golden) -> None:
         target.with_name("playlists.json.v1-backup").read_bytes()
         == in_use.stores["playlists.json"][0]
     )
+
+
+# -- getting narrowed data back by hand ----------------------------------------------------
+
+
+def test_downgrade_copying_the_broken_files_back_restores_what_v0_1_4_narrowed(
+    downgrade: Golden, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """docs/updating.md's recovery, on this build after re-upgrading.
+
+    Each ``.broken`` file is this build's file as it was when v0.1.4 first
+    edited it. Copied over the live file (with the app closed), this build
+    reads it with no fault, the names, rotation and opt-in are back, and the
+    next compile publishes the overrides again. What v0.1.4 changed in that
+    file is not in the copy; the ``.v<old>-backup`` files are never needed.
+    """
+    profile = downgrade.profile
+    state = profile.app_state
+    sidecar = state / runtime_config.OVERRIDES_FILENAME
+    _name_a_rule(profile)
+    in_use = _use_overrides(profile, independent=False)
+    backups = {path.name: path.read_bytes() for path in state.glob("*-backup")}
+    bumped = ("schedules.json", *OVERRIDE_STORES)
+    assert _run_old(profile, "edit", *bumped)["errors"] == {}
+    assert cli.main(["--write-config"]) == 0
+    assert not sidecar.exists(), "re-upgraded, nothing is in use any more"
+
+    for name in bumped:
+        (broken,) = broken_copies(state / name)
+        (state / name).write_bytes(broken.read_bytes())
+
+    for store in (schedules, playlists, displays):
+        assert store.Store.open().fault is None, store.__name__
+    assert any(rule.name == "Frog day" for rule in schedules.Store.open().rules)
+    assert any(playlist.has_rotation_override for playlist in playlists.Store.open().all())
+    assert displays.Store.open().beats_global_rules("DP-1")
+    assert not any(
+        playlist.name == downgrade_driver.OLD_PLAYLIST for playlist in playlists.Store.open().all()
+    ), "v0.1.4's own edit of the file is not in the .broken copy"
+    capsys.readouterr()
+    assert cli.main(["--write-config"]) == 0
+    assert sidecar.read_bytes() == in_use.overrides
+    assert {path.name: path.read_bytes() for path in state.glob("*-backup")} == backups

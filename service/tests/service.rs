@@ -2889,6 +2889,7 @@ fn sixty_four_display_failures_and_detached_inventory_fit_the_status_wire() {
         .map(|index| wall_in_one_service::config::DisplayAssignment {
             connector: format!("DETACHED-{index:02}"),
             playlist: "day".into(),
+            beats_global_rules: false,
         })
         .collect();
     parsed.validate().unwrap();

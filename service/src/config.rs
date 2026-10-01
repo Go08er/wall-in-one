@@ -12,6 +12,18 @@ pub const SCHEMA_VERSION: u32 = 5;
 pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[4, SCHEMA_VERSION];
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The optional sibling of `runtime.toml` that carries per-playlist rotation
+/// and display precedence. It is found by this name next to the main
+/// document and never referenced from it, so a service that predates it
+/// never opens it and the main document keeps exactly its released shape.
+pub const OVERRIDES_FILENAME: &str = "runtime-overrides.toml";
+pub const OVERRIDES_SCHEMA_VERSION: u32 = 1;
+pub const SUPPORTED_OVERRIDE_SCHEMAS: &[u32] = &[OVERRIDES_SCHEMA_VERSION];
+const MAX_OVERRIDES_BYTES: u64 = 1024 * 1024;
+/// Same bounds as the global `cycle_interval_seconds` the app compiles.
+pub const MIN_CYCLE_INTERVAL_SECONDS: u64 = 5;
+pub const MAX_CYCLE_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+
 // These mirror the authoring-store ceilings.  The generated all-media
 // fallback, one global Quick choice, and up to 64 connector Quick choices are
 // additional to the 512 playlists a person can create.
@@ -67,6 +79,9 @@ pub struct Config {
     /// Identity of the exact successfully parsed bytes, never an authored key.
     #[serde(skip)]
     pub source_sha256: Option<String>,
+    /// Identity of the applied `runtime-overrides.toml` bytes, if one exists.
+    #[serde(skip)]
+    pub overrides_sha256: Option<String>,
     pub schema_version: u32,
     pub config_generation: String,
     pub default_playlist: String,
@@ -197,6 +212,16 @@ impl VideoInterpolation {
 pub struct Playlist {
     pub id: String,
     pub name: String,
+    /// This playlist's own rotation interval, from `runtime-overrides.toml`
+    /// only (never a `runtime.toml` key). `None` means the global
+    /// `settings.cycle_interval_seconds`.
+    #[serde(skip)]
+    pub cycle_interval_seconds: Option<u64>,
+    /// This playlist's own shuffle default, from `runtime-overrides.toml`
+    /// only. `None` means the global `settings.shuffle`. A live
+    /// `shuffle on|off` override still wins.
+    #[serde(skip)]
+    pub shuffle: Option<bool>,
     pub entries: Vec<Entry>,
 }
 
@@ -300,6 +325,110 @@ pub struct ScheduleRule {
 pub struct DisplayAssignment {
     pub connector: String,
     pub playlist: String,
+    /// Opt-in from `runtime-overrides.toml` only: this display's own playlist
+    /// beats global (untargeted) schedule rules. Rules aimed at this
+    /// connector still win. Off keeps the established order: manual, any
+    /// matching rule, assignment, default.
+    #[serde(skip)]
+    pub beats_global_rules: bool,
+}
+
+/// `runtime-overrides.toml`: what the app sets beyond the released document.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Overrides {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub playlists: Vec<PlaylistOverride>,
+    #[serde(default)]
+    pub displays: Vec<DisplayOverride>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistOverride {
+    /// The runtime playlist id, exactly as in `runtime.toml`.
+    pub id: String,
+    #[serde(default)]
+    pub cycle_interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub shuffle: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayOverride {
+    /// A connector that has an explicit assignment in `runtime.toml`.
+    pub connector: String,
+    pub beats_global_rules: bool,
+}
+
+impl Overrides {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let text = std::str::from_utf8(bytes).map_err(|error| {
+            ConfigError::Io(Error::new(
+                ErrorKind::InvalidData,
+                format!("{OVERRIDES_FILENAME} is not UTF-8: {error}"),
+            ))
+        })?;
+        let overrides: Self = toml::from_str(text).map_err(ConfigError::Decode)?;
+        overrides.validate()?;
+        Ok(overrides)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !SUPPORTED_OVERRIDE_SCHEMAS.contains(&self.schema_version) {
+            return invalid(format!(
+                "{OVERRIDES_FILENAME} schema_version {} is unsupported; expected {OVERRIDES_SCHEMA_VERSION}",
+                self.schema_version
+            ));
+        }
+        if self.playlists.len() > MAX_PLAYLISTS || self.displays.len() > MAX_DISPLAYS {
+            return invalid(format!(
+                "{OVERRIDES_FILENAME} has more than {MAX_PLAYLISTS} playlists or {MAX_DISPLAYS} displays"
+            ));
+        }
+        let mut ids = HashSet::new();
+        for playlist in &self.playlists {
+            bounded_nonempty("override playlist id", &playlist.id, MAX_IDENTIFIER_BYTES)?;
+            if !ids.insert(playlist.id.as_str()) {
+                return invalid(format!(
+                    "{OVERRIDES_FILENAME} repeats playlist {:?}",
+                    playlist.id
+                ));
+            }
+            if playlist.cycle_interval_seconds.is_none() && playlist.shuffle.is_none() {
+                return invalid(format!(
+                    "{OVERRIDES_FILENAME} playlist {:?} overrides nothing",
+                    playlist.id
+                ));
+            }
+            if let Some(seconds) = playlist.cycle_interval_seconds
+                && !(MIN_CYCLE_INTERVAL_SECONDS..=MAX_CYCLE_INTERVAL_SECONDS).contains(&seconds)
+            {
+                return invalid(format!(
+                    "{OVERRIDES_FILENAME} playlist {:?} cycle_interval_seconds must be between {MIN_CYCLE_INTERVAL_SECONDS} and {MAX_CYCLE_INTERVAL_SECONDS}",
+                    playlist.id
+                ));
+            }
+        }
+        let mut connectors = HashSet::new();
+        for display in &self.displays {
+            bounded_connector("override display connector", &display.connector, true)?;
+            if !connectors.insert(display.connector.as_str()) {
+                return invalid(format!(
+                    "{OVERRIDES_FILENAME} repeats display {:?}",
+                    display.connector
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where `runtime-overrides.toml` lives for one `runtime.toml` path.
+pub fn overrides_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name(OVERRIDES_FILENAME)
 }
 
 fn default_true() -> bool {
@@ -307,12 +436,79 @@ fn default_true() -> bool {
 }
 
 impl Config {
+    /// Load `runtime.toml` and, when present, its `runtime-overrides.toml`.
+    ///
+    /// A missing overrides file is the ordinary case. A present one must be
+    /// valid, or the whole load fails like any other config error; its
+    /// entries that name a playlist or connector this document lacks are
+    /// skipped with a log line (the app writes the overrides first, so a
+    /// reader can briefly see them ahead of the document they belong to).
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        Self::from_bytes(Self::read_bytes(path)?)
+        let mut config = Self::from_bytes(Self::read_bytes(path)?)?;
+        let sidecar = overrides_path(path);
+        match Self::read_bytes_bounded(&sidecar, MAX_OVERRIDES_BYTES) {
+            Ok(bytes) => {
+                let digest = sha256_hex(&bytes);
+                let overrides = Overrides::from_bytes(&bytes).map_err(|error| {
+                    ConfigError::Invalid(format!("{}: {error}", sidecar.display()))
+                })?;
+                for skipped in config.apply_overrides(&overrides) {
+                    eprintln!("wall-in-one-service: {}: {skipped}", sidecar.display());
+                }
+                config.overrides_sha256 = Some(digest);
+            }
+            Err(ConfigError::Io(error)) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ConfigError::Invalid(format!(
+                    "{}: {error}",
+                    sidecar.display()
+                )));
+            }
+        }
+        Ok(config)
+    }
+
+    /// Apply validated overrides onto this document; return what was skipped.
+    ///
+    /// Only an explicit assignment can beat global rules, so a connector this
+    /// document does not assign is skipped. (The runtime still leaves the
+    /// opt-in dormant in mirrored mode, where there is one route.)
+    pub fn apply_overrides(&mut self, overrides: &Overrides) -> Vec<String> {
+        let mut skipped = Vec::new();
+        for wanted in &overrides.playlists {
+            match self.playlists.iter_mut().find(|p| p.id == wanted.id) {
+                Some(playlist) => {
+                    playlist.cycle_interval_seconds = wanted.cycle_interval_seconds;
+                    playlist.shuffle = wanted.shuffle;
+                }
+                None => skipped.push(format!(
+                    "ignoring rotation for playlist {:?}, which this runtime.toml does not have",
+                    wanted.id
+                )),
+            }
+        }
+        for wanted in &overrides.displays {
+            match self
+                .displays
+                .iter_mut()
+                .find(|d| d.connector == wanted.connector)
+            {
+                Some(display) => display.beats_global_rules = wanted.beats_global_rules,
+                None => skipped.push(format!(
+                    "ignoring beats_global_rules for display {:?}, which this runtime.toml does not assign",
+                    wanted.connector
+                )),
+            }
+        }
+        skipped
     }
 
     /// Read one bounded generation; parsing and status hash the same bytes.
     pub fn read_bytes(path: &Path) -> Result<Vec<u8>, ConfigError> {
+        Self::read_bytes_bounded(path, MAX_CONFIG_BYTES)
+    }
+
+    fn read_bytes_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, ConfigError> {
         // Open once, without following a final symlink or waiting on a FIFO,
         // then inspect and read that exact descriptor. A metadata(path) followed
         // by read_to_string(path) lets an attacker replace the path between the
@@ -327,14 +523,14 @@ impl Config {
         if !metadata.is_file() {
             return invalid("config path is not a regular file");
         }
-        if metadata.len() > MAX_CONFIG_BYTES {
+        if metadata.len() > maximum {
             return Err(ConfigError::TooLarge(metadata.len()));
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_CONFIG_BYTES + 1)
+        file.take(maximum + 1)
             .read_to_end(&mut bytes)
             .map_err(ConfigError::Io)?;
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        if bytes.len() as u64 > maximum {
             return Err(ConfigError::TooLarge(bytes.len() as u64));
         }
         Ok(bytes)
@@ -344,10 +540,7 @@ impl Config {
         if bytes.len() as u64 > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge(bytes.len() as u64));
         }
-        let digest = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let digest = sha256_hex(&bytes);
         let text = String::from_utf8(bytes).map_err(|error| {
             ConfigError::Io(Error::new(
                 ErrorKind::InvalidData,
@@ -662,6 +855,13 @@ impl Config {
             .iter()
             .find(|p| p.id == value || p.name == value)
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn absolute(label: &str, path: &Path) -> Result<(), ConfigError> {

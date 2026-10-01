@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use wall_in_one_service::config::{Config, ConfigError};
+use wall_in_one_service::config::{Config, ConfigError, overrides_path};
 use wall_in_one_service::power::PowerObserver;
 use wall_in_one_service::protocol::{Request, Response, read_request_until, write_response};
 use wall_in_one_service::renderer::SystemDriver;
@@ -206,9 +206,20 @@ fn accept_ready_batch(
     Ok(count)
 }
 
-fn fingerprint(path: &Path) -> Option<(u64, u64, SystemTime)> {
+type Fingerprint = Option<(u64, u64, SystemTime)>;
+
+fn file_fingerprint(path: &Path) -> Fingerprint {
     let metadata = fs::metadata(path).ok()?;
     Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
+}
+
+/// The document and its optional `runtime-overrides.toml`. Either changing,
+/// appearing or disappearing is a new generation to load.
+fn fingerprint(path: &Path) -> (Fingerprint, Fingerprint) {
+    (
+        file_fingerprint(path),
+        file_fingerprint(&overrides_path(path)),
+    )
 }
 
 fn install_signal_handlers() {
@@ -540,7 +551,7 @@ fn run() -> Result<(), ServiceError> {
         let now = Instant::now();
         if now >= next_config_check {
             let current = fingerprint(&options.config);
-            if current.is_some() && current != known {
+            if current.0.is_some() && current != known {
                 let response = runtime.handle_with_power(
                     Request {
                         verb: "reload".into(),

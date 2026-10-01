@@ -5,8 +5,9 @@ use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{
-    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, MAX_CONFIG_BYTES, Palette,
-    Playlist, SceneClamp, SceneScaling, ScheduleRule,
+    Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, MAX_CONFIG_BYTES,
+    OVERRIDES_FILENAME, Overrides, Palette, Playlist, SceneClamp, SceneScaling, ScheduleRule,
+    overrides_path,
 };
 
 fn temp_file(name: &str) -> PathBuf {
@@ -33,6 +34,174 @@ fn battery_policy_requires_schema_five_and_legacy_defaults_off() {
         let config: Config = toml::from_str(&enabled).unwrap();
         assert_eq!(config.validate().is_ok(), schema == 5);
     }
+}
+
+#[test]
+fn override_fields_are_never_runtime_toml_keys() {
+    // runtime.toml keeps its released shape: an older service, which reads
+    // it with deny_unknown_fields, can always load what this build writes.
+    for schema in [4, 5] {
+        for (needle, key) in [
+            (
+                "id = \"day\"\nname = \"Day\"\n",
+                "cycle_interval_seconds = 60\n",
+            ),
+            ("id = \"day\"\nname = \"Day\"\n", "shuffle = true\n"),
+            (
+                "connector = \"eDP-1\"\nplaylist = \"day\"\n",
+                "beats_global_rules = true\n",
+            ),
+        ] {
+            let source = document(schema).replace(needle, &format!("{needle}{key}"));
+            let error = toml::from_str::<Config>(&source).unwrap_err().to_string();
+            assert!(error.contains("unknown field"), "{schema} {key}: {error}");
+        }
+    }
+    let error = Config::from_bytes(document(6).into_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("expected 4 or 5"), "{error}");
+}
+
+fn config_directory(label: &str) -> PathBuf {
+    let path = temp_file(label).with_extension("d");
+    fs::create_dir_all(&path).unwrap();
+    path
+}
+
+const OVERRIDES: &str = "schema_version = 1\n\
+[[playlists]]\nid = \"day\"\ncycle_interval_seconds = 60\nshuffle = true\n\
+[[displays]]\nconnector = \"eDP-1\"\nbeats_global_rules = true\n";
+
+#[test]
+fn overrides_beside_the_document_are_applied_on_load() {
+    let root = config_directory("overrides");
+    let path = root.join("runtime.toml");
+    fs::write(&path, document(4)).unwrap();
+    let plain = Config::load(&path).unwrap();
+    assert_eq!(
+        plain,
+        Config::from_bytes(document(4).into_bytes()).unwrap(),
+        "no overrides file is the ordinary case"
+    );
+    assert_eq!(plain.overrides_sha256, None);
+    assert_eq!(
+        (
+            plain.playlists[0].cycle_interval_seconds,
+            plain.playlists[0].shuffle
+        ),
+        (None, None)
+    );
+    assert!(!plain.displays[0].beats_global_rules);
+
+    fs::write(overrides_path(&path), OVERRIDES).unwrap();
+    assert_eq!(overrides_path(&path), root.join(OVERRIDES_FILENAME));
+    let loaded = Config::load(&path).unwrap();
+    assert_eq!(loaded.playlists[0].cycle_interval_seconds, Some(60));
+    assert_eq!(loaded.playlists[0].shuffle, Some(true));
+    assert!(loaded.displays[0].beats_global_rules);
+    assert_eq!(
+        loaded.source_sha256, plain.source_sha256,
+        "runtime.toml identity"
+    );
+    assert_eq!(loaded.overrides_sha256.as_ref().map(String::len), Some(64));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn overrides_for_playlists_or_displays_the_document_lacks_are_skipped() {
+    // The app writes the overrides first and runtime.toml second, so a load
+    // between the two can see entries for things the document lacks yet.
+    let mut config = parsed();
+    let overrides = Overrides::from_bytes(
+        b"schema_version = 1\n\
+          [[playlists]]\nid = \"gone\"\nshuffle = true\n\
+          [[playlists]]\nid = \"day\"\ncycle_interval_seconds = 900\n\
+          [[displays]]\nconnector = \"HDMI-A-9\"\nbeats_global_rules = true\n",
+    )
+    .unwrap();
+    let skipped = config.apply_overrides(&overrides);
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert!(skipped[0].contains("\"gone\"") && skipped[1].contains("\"HDMI-A-9\""));
+    assert_eq!(config.playlists[0].cycle_interval_seconds, Some(900));
+    assert!(!config.displays[0].beats_global_rules);
+}
+
+#[test]
+fn a_malformed_overrides_file_fails_the_whole_load() {
+    let root = config_directory("bad-overrides");
+    let path = root.join("runtime.toml");
+    fs::write(&path, document(5)).unwrap();
+    for (label, overrides) in [
+        ("newer schema", "schema_version = 2\n".to_string()),
+        ("unknown key", format!("{OVERRIDES}colour = \"red\"\n")),
+        (
+            "unknown playlist key",
+            "schema_version = 1\n[[playlists]]\nid = \"day\"\nweight = 2\n".into(),
+        ),
+        (
+            "interval too short",
+            OVERRIDES.replace("cycle_interval_seconds = 60", "cycle_interval_seconds = 4"),
+        ),
+        (
+            "interval too long",
+            OVERRIDES.replace(
+                "cycle_interval_seconds = 60",
+                "cycle_interval_seconds = 86401",
+            ),
+        ),
+        (
+            "nothing overridden",
+            "schema_version = 1\n[[playlists]]\nid = \"day\"\n".into(),
+        ),
+        (
+            "repeated playlist",
+            format!("{OVERRIDES}[[playlists]]\nid = \"day\"\nshuffle = false\n"),
+        ),
+        (
+            "repeated display",
+            format!("{OVERRIDES}[[displays]]\nconnector = \"eDP-1\"\nbeats_global_rules = false\n"),
+        ),
+        ("not toml", "schema_version = \n".into()),
+        (
+            "wrong type",
+            OVERRIDES.replace("shuffle = true", "shuffle = \"yes\""),
+        ),
+    ] {
+        fs::write(overrides_path(&path), &overrides).unwrap();
+        let error = Config::load(&path).unwrap_err();
+        assert!(matches!(error, ConfigError::Invalid(_)), "{label}: {error}");
+        assert!(
+            error.to_string().contains(OVERRIDES_FILENAME),
+            "{label}: {error}"
+        );
+    }
+    fs::remove_file(overrides_path(&path)).unwrap();
+    symlink(&path, overrides_path(&path)).unwrap();
+    assert!(
+        Config::load(&path).is_err(),
+        "a symlinked overrides file is refused"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn overrides_bounds_match_the_global_interval() {
+    for (seconds, valid) in [(5, true), (86_400, true)] {
+        let source = OVERRIDES.replace(
+            "cycle_interval_seconds = 60",
+            &format!("cycle_interval_seconds = {seconds}"),
+        );
+        assert_eq!(Overrides::from_bytes(source.as_bytes()).is_ok(), valid);
+    }
+    assert!(
+        Overrides::from_bytes(
+            OVERRIDES
+                .replace("cycle_interval_seconds = 60", "cycle_interval_seconds = -1")
+                .as_bytes()
+        )
+        .is_err()
+    );
 }
 
 fn document(schema: u32) -> String {
@@ -503,6 +672,7 @@ fn compiler_cardinality_bounds_are_enforced() {
         .map(|index| DisplayAssignment {
             connector: format!("DP-{index}"),
             playlist: "day".into(),
+            beats_global_rules: false,
         })
         .collect();
     let error = displays.validate().unwrap_err().to_string();
@@ -558,6 +728,8 @@ fn ambiguous_playlist_identity_is_refused() {
     folded.playlists.push(Playlist {
         id: "other".into(),
         name: "day".into(),
+        cycle_interval_seconds: None,
+        shuffle: None,
         entries: base.playlists[0].entries.clone(),
     });
     let error = folded.validate().unwrap_err().to_string();
@@ -567,6 +739,8 @@ fn ambiguous_playlist_identity_is_refused() {
     crossed.playlists.push(Playlist {
         id: "Day".into(),
         name: "Other".into(),
+        cycle_interval_seconds: None,
+        shuffle: None,
         entries: crossed.playlists[0].entries.clone(),
     });
     let error = crossed.validate().unwrap_err().to_string();

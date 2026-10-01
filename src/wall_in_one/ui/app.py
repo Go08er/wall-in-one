@@ -50,6 +50,7 @@ from wall_in_one.session import (
     Session,
 )
 from wall_in_one.theme import css, noctalia, source
+from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
 from wall_in_one.ui.window_services import WindowServices
@@ -439,7 +440,11 @@ class Application(Adw.Application):
         # The Rust snapshot is the sole playback truth for every GUI surface.
         # Keep the last valid answer through a transient deadline so the
         # header and authoring pages cannot briefly contradict one another.
-        self._runtime_status: dict[str, object] | None = None
+        # Every runtime-status answer is published to this model and to
+        # nothing else; the forwarding subscriber below hands each publication
+        # to the window exactly as the call sites used to.
+        self._status_model = RuntimeStatusModel()
+        self._status_model.subscribe(self._forward_runtime_status)
         self._taboo_omitted_seen = 0
         self._runtime_action_pending = False
         self._quick_choice_pending = False
@@ -755,10 +760,12 @@ class Application(Adw.Application):
             window.connect("close-request", self._on_close_request)
             self._window = window
             self._window_generation += 1
+            # A new window starts from nothing; replay what the previous one
+            # was showing. This is per window, not a model publication.
             if self._runtime_action_pending:
                 window.set_runtime_busy(True)
-            if self._runtime_status is not None:
-                window.show_runtime_status(self._runtime_status)
+            if self._status_model.status is not None:
+                window.show_runtime_status(self._status_model.status)
         assert self._window is not None
         self._window.present()
         self._start_runtime_status_timer()
@@ -1368,7 +1375,35 @@ class Application(Adw.Application):
     @property
     def runtime_status(self) -> dict[str, object] | None:
         """Last valid atomic Rust status, retained across transient timeouts."""
-        return self._runtime_status
+        return self._status_model.status
+
+    @property
+    def status_model(self) -> RuntimeStatusModel:
+        """The application's single holder of runtime status, for windows to observe."""
+        return self._status_model
+
+    def _forward_runtime_status(self, change: StatusChange, view: RuntimeStatusView) -> None:
+        """Hand one model publication to the window as its call site used to.
+
+        Publications happen exactly where the window used to be called, so
+        this is the only place runtime status reaches the window. A window
+        that renders from the model itself may implement these as no-ops.
+        """
+        window = self._window
+        if window is None:
+            return
+        match change:
+            case StatusChange.STATUS:
+                assert view.status is not None
+                window.show_runtime_status(view.status)
+            case StatusChange.UNAVAILABLE:
+                window.show_runtime_unavailable()
+            case StatusChange.DELAYED:
+                window.show_runtime_delayed()
+            case StatusChange.INVALID:
+                window.show_runtime_protocol_error(view.protocol_error)
+            case StatusChange.BUSY:
+                window.set_runtime_busy(view.busy)
 
     def present_page(self, page: str) -> None:
         """Present the singleton window with one primary workflow page visible."""
@@ -2192,8 +2227,7 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime("reload")
         except client.NotRunningError:
-            if self._window is not None:
-                self._window.show_runtime_unavailable()
+            self._status_model.mark_unavailable(forget=False)
             return True
         except client.ControlError as error:
             self.window_report(f"Runtime reload failed: {error}")
@@ -2828,9 +2862,7 @@ class Application(Adw.Application):
             response = Response.failure(f"runtime command failed: {error}")
             runtime_answered = True
         if not runtime_answered:
-            self._runtime_status = None
-            if self._window is not None:
-                self._window.show_runtime_unavailable()
+            self._status_model.mark_unavailable(forget=True)
         if response.ok:
             if on_success is not None:
                 on_success()
@@ -3195,8 +3227,7 @@ class Application(Adw.Application):
             if publication.error:
                 self.window_report(publication.error)
             elif publication.unavailable:
-                if self._window is not None:
-                    self._window.show_runtime_unavailable()
+                self._status_model.mark_unavailable(forget=False)
             elif publication.response is not None and not publication.response.ok:
                 self.window_report(
                     f"Runtime rejected the new configuration: {publication.response.message}"
@@ -3245,8 +3276,7 @@ class Application(Adw.Application):
             try:
                 response = future.result()
             except client.NotRunningError:
-                if self._window is not None:
-                    self._window.show_runtime_unavailable()
+                self._status_model.mark_unavailable(forget=False)
             except client.ControlError as error:
                 self.window_report(f"Runtime reload failed: {error}")
             else:
@@ -3380,23 +3410,22 @@ class Application(Adw.Application):
             reply = future.result()
         except client.NotRunningError:
             if current:
-                self._runtime_status = None
-                window.show_runtime_unavailable()
+                self._status_model.mark_unavailable(forget=True)
         except client.ControlError:
             # A missed deadline is not proof that nobody owns the runtime.
             # Retain the last atomic answer rather than making the header and
             # authoring pages jump to Python's stale Session state. Crucially,
             # no compatibility callback is allowed to start a second driver.
             if current:
-                window.show_runtime_delayed()
+                self._status_model.mark_delayed()
         else:
             if current:
                 if not reply.response.ok:
-                    window.show_runtime_protocol_error(
+                    self._status_model.mark_invalid(
                         f"Runtime rejected its status request: {reply.response.message}"
                     )
                 elif reply.protocol_error:
-                    window.show_runtime_protocol_error(reply.protocol_error)
+                    self._status_model.mark_invalid(reply.protocol_error)
                 else:
                     assert reply.status is not None
                     self._adopt_runtime_status(
@@ -3414,30 +3443,26 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime("status", timeout=0.25)
         except client.NotRunningError:
-            self._runtime_status = None
-            if self._window is not None:
-                self._window.show_runtime_unavailable()
+            self._status_model.mark_unavailable(forget=True)
             return False
         except client.ControlError:
             # A timeout or malformed answer is not proof that the process is
             # absent.  In particular, the retained Python fallback must not
             # start applying wallpapers merely because a busy Rust runtime
             # missed one status deadline.
-            if self._window is not None:
-                self._window.show_runtime_delayed()
+            self._status_model.mark_delayed()
             return True
-        if self._window is not None and not response.ok:
-            self._window.show_runtime_protocol_error(
+        if not response.ok:
+            self._status_model.mark_invalid(
                 f"Runtime rejected its status request: {response.message}"
             )
-        elif response.ok:
+        else:
             try:
                 status: object = json.loads(response.message)
             except ValueError, RecursionError:
-                if self._window is not None:
-                    self._window.show_runtime_protocol_error(
-                        "Runtime returned a status reply that was not valid JSON"
-                    )
+                self._status_model.mark_invalid(
+                    "Runtime returned a status reply that was not valid JSON"
+                )
             else:
                 if (
                     isinstance(status, dict)
@@ -3450,10 +3475,9 @@ class Application(Adw.Application):
                         health_document=response.message,
                     )
                 else:
-                    if self._window is not None:
-                        self._window.show_runtime_protocol_error(
-                            "Runtime returned a status reply without playlist state"
-                        )
+                    self._status_model.mark_invalid(
+                        "Runtime returned a status reply without playlist state"
+                    )
         # Even a rejected status request proves that this socket has an owner;
         # do not turn a protocol failure into permission for a second driver.
         return True
@@ -3470,8 +3494,11 @@ class Application(Adw.Application):
         Missing reports never clear health.  Mapping entries, taking the
         compiler lock, reloading stores, rendering a large document and
         fsyncing Pairings all belong to the ordered worker, never GTK.
+
+        ``window`` is the application's current window, or None when there is
+        none; it chooses how health is persisted. The snapshot reaches that
+        window through the status model's forwarding subscriber.
         """
-        self._runtime_status = status
         omitted = status.get("taboo_entries_omitted", 0)
         if type(omitted) is int and omitted > self._taboo_omitted_seen:
             self._taboo_omitted_seen = omitted
@@ -3479,8 +3506,8 @@ class Application(Adw.Application):
                 f"The runtime has {omitted} older playback warnings not included in this "
                 "status update; existing saved warnings were retained"
             )
-        if window is not None:
-            window.show_runtime_status(status)
+        # After the report above, which used to precede the window's render.
+        self._status_model.adopt(status)
         reports = status.get("taboo_entries")
         if not isinstance(reports, list) or not reports:
             return
@@ -3698,8 +3725,7 @@ class Application(Adw.Application):
         if publication.error:
             self.window_report(publication.error)
         elif publication.unavailable:
-            if self._window is not None:
-                self._window.show_runtime_unavailable()
+            self._status_model.mark_unavailable(forget=False)
         elif publication.response is not None and not publication.response.ok:
             self.window_report(
                 f"Runtime rejected the new configuration: {publication.response.message}"
@@ -3740,14 +3766,12 @@ class Application(Adw.Application):
         window = self._window
         generation = self._window_generation
         self._runtime_action_pending = True
-        if window is not None:
-            window.set_runtime_busy(True)
+        self._status_model.set_busy(True)
         try:
             future = self._runtime_pool().submit(self._execute_gui_runtime_call, work)
         except RuntimeError:
             self._runtime_action_pending = False
-            if window is not None:
-                window.set_runtime_busy(False)
+            self._status_model.set_busy(False)
             if on_complete is not None:
                 on_complete(Response.failure("application is shutting down"), False)
             return False
@@ -3811,9 +3835,7 @@ class Application(Adw.Application):
             # A definitive missing socket retires the last Rust snapshot.  The
             # authoring GUI does not take rendering ownership, so the honest
             # next state is unavailable rather than stale playback truth.
-            self._runtime_status = None
-            if self._window is not None:
-                self._window.show_runtime_unavailable()
+            self._status_model.mark_unavailable(forget=True)
         if response.ok and on_success is not None:
             on_success(runtime_answered)
         self._runtime_action_pending = False
@@ -3825,16 +3847,16 @@ class Application(Adw.Application):
             and self._window is window
             and self._window_generation == generation
         )
+        # A command belongs to the application, not to one incarnation of
+        # its window. The single-flight busy flag is released for whichever
+        # window is open now; only the result stays away from a reopened one.
+        if not self._runtime_shutdown:
+            self._status_model.set_busy(False)
         if current and window is not None:
-            window.set_runtime_busy(False)
             if not response.ok:
                 window.report(response.message)
             self.refresh_runtime_status_async()
         elif not self._runtime_shutdown and self._window is not None:
-            # A command belongs to the application, not to one incarnation of
-            # its window.  Its result stays away from a reopened window, but
-            # the global single-flight busy flag still has to be released.
-            self._window.set_runtime_busy(False)
             self.refresh_runtime_status_async()
         return GLib.SOURCE_REMOVE
 
@@ -3877,9 +3899,7 @@ class Application(Adw.Application):
         try:
             response = client.send_runtime(verb, argument)
         except client.NotRunningError:
-            self._runtime_status = None
-            if self._window is not None:
-                self._window.show_runtime_unavailable()
+            self._status_model.mark_unavailable(forget=True)
             if not self._service_start:
                 return Response.failure("the wallpaper runtime is unavailable")
             actions: dict[str, Callable[[], Applied]] = {

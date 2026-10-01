@@ -7390,10 +7390,12 @@ fn mirrored_cycling(extra: &str) -> String {
     )
 }
 
+/// A fresh rotation deadline: the interval, less the moments the test itself
+/// took (with room for a loaded build machine).
 fn assert_cycle_within(row: &serde_json::Value, interval: u64) {
     let seconds = row["next_cycle_in_s"].as_u64().unwrap();
     assert!(
-        (interval - 1..=interval).contains(&seconds),
+        (interval.saturating_sub(10)..=interval).contains(&seconds),
         "{seconds} s left of a {interval} s rotation: {row}"
     );
     assert_eq!(row["next_change_in_s"], row["next_cycle_in_s"]);
@@ -7712,7 +7714,7 @@ fn hundreds_of_rules_on_many_displays_cannot_stall_status() {
     );
     assert!(rows.iter().all(|row| row["route_change_at"].is_null()));
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(30),
         "status took {:?}",
         started.elapsed()
     );

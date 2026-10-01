@@ -33,6 +33,7 @@ from wall_in_one.library import (
     removals,
     scan,
     schedules,
+    state_file,
 )
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import Library, MediaItem
@@ -360,6 +361,7 @@ class Application(Adw.Application):
         self._authoring_repair_started = False
         self._headless_authoring_started = False
         self._activation_waiting_for_repair = False
+        self._newer_version_notice_shown = False
         self._provider = Gtk.CssProvider()
         self._control: server.SocketServer | None = None
         self._resolved: source.ResolvedPalette | None = None
@@ -569,8 +571,21 @@ class Application(Adw.Application):
 
     @staticmethod
     def _repair_dangling_playlist_references() -> _PlaylistReferenceRepairResult:
-        """Remove only references whose playlist identity is durably absent."""
+        """Remove only references whose playlist identity is durably absent.
+
+        A store saved by a newer version is skipped rather than failed: it is
+        read-only here, so it cannot be repaired, and pausing every write
+        (and the first library scan) for it would turn a rollback into an
+        empty app. A newer ``playlists.json`` skips the whole repair, because
+        what this build can parse of it cannot prove which playlists are
+        gone; repairing from it would delete the user's rules, display
+        assignments and default. This build cannot delete playlists from that
+        file either, so it creates no new dangling references, and runtime
+        compilation refuses the faulted file meanwhile.
+        """
         playlist_store = playlists.Store.open()
+        if playlist_store.fault_kind == state_file.NEWER_VERSION:
+            return _PlaylistReferenceRepairResult()
         if playlist_store.fault is not None:
             return _PlaylistReferenceRepairResult(failures=(f"playlists: {playlist_store.fault}",))
         valid = frozenset(playlist.id for playlist in playlist_store.all())
@@ -579,7 +594,9 @@ class Application(Adw.Application):
         repaired_displays: list[str] = []
 
         schedule_store = schedules.Store.open()
-        if schedule_store.fault is not None:
+        if schedule_store.fault_kind == state_file.NEWER_VERSION:
+            pass
+        elif schedule_store.fault is not None:
             failures.append(f"schedule rules: {schedule_store.fault}")
         else:
             dangling = sorted({rule.playlist for rule in schedule_store.rules} - valid)
@@ -593,7 +610,9 @@ class Application(Adw.Application):
                         repaired_schedules.append(playlist_id)
 
         display_store = displays.Store.open()
-        if display_store.fault is not None:
+        if display_store.fault_kind == state_file.NEWER_VERSION:
+            pass
+        elif display_store.fault is not None:
             failures.append(f"display assignments: {display_store.fault}")
         else:
             dangling = sorted({playlist for _connector, playlist in display_store.all()} - valid)
@@ -745,11 +764,37 @@ class Application(Adw.Application):
         if not self._authoring_migration_ready:
             self._activation_waiting_for_repair = True
             return
+        self._report_newer_version_files()
         self.reload_palette()
         if self._settings.roots:
             self.refresh_library()
         else:
             self._prompt_for_library_root()
+
+    def _report_newer_version_files(self) -> None:
+        """Say once, without blocking, which files only a newer version may change.
+
+        The Session read every store when it opened, so this is an in-memory
+        check. Each refused edit still explains itself; this is the warning
+        before the first one.
+        """
+        if self._newer_version_notice_shown or self._window is None:
+            return
+        names = self._session.newer_version_files()
+        if not names:
+            return
+        self._newer_version_notice_shown = True
+        if len(names) == 1:
+            self.window_report(
+                f"{names[0]} was saved by a newer version of Wall-in-One. It is read-only "
+                "here; open that version to change it."
+            )
+            return
+        listed = ", ".join(names[:-1]) + f" and {names[-1]}"
+        self.window_report(
+            f"{listed} were saved by a newer version of Wall-in-One. They are read-only "
+            "here; open that version to change them."
+        )
 
     def _prompt_for_legacy_migration(self) -> bool:
         """Check for predecessor data without reading it on GTK's thread."""

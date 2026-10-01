@@ -1906,6 +1906,128 @@ def test_startup_repair_is_fail_closed_and_retries_every_dangling_playlist_tail(
         _close(application)
 
 
+def test_startup_repair_skips_a_newer_playlists_file_instead_of_pausing_authoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback must open read-only, not wedge with every write paused.
+
+    What this build parses of a newer playlists.json cannot prove which
+    playlists are gone, so nothing that names one is "repaired" away either.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config.save(replace(config.Settings(), active_playlist="evening"))
+    schedules.Store.open().add("evening", rule_id="kept-rule")
+    displays.Store.open().assign("DP-1", "evening")
+    newer = playlists.state_path()
+    newer.write_text(
+        json.dumps({"version": 2, "lists": [{"id": "evening", "name": "Evening"}]}),
+        encoding="utf-8",
+    )
+    original = newer.read_bytes()
+    application = Application()
+    try:
+        repaired = application._repair_dangling_playlist_references()
+        response = application._finish_playlist_reference_repair(repaired)
+
+        assert response.ok
+        assert bool(application.authoring_ready)
+        assert config.load_strict().active_playlist == "evening"
+        assert [rule.id for rule in schedules.Store.open().rules] == ["kept-rule"]
+        assert displays.Store.open().all() == (("DP-1", "evening"),)
+        assert newer.read_bytes() == original
+        assert not list(newer.parent.glob("playlists.json.broken*"))
+    finally:
+        _close(application)
+
+
+def test_startup_repair_skips_only_the_newer_reference_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config.save(config.Settings())
+    displays.Store.open().assign("DP-1", "deleted")
+    newer = schedules.state_path()
+    newer.write_text(
+        json.dumps({"version": 3, "rules": [{"id": "r", "playlist": "deleted"}]}),
+        encoding="utf-8",
+    )
+    original = newer.read_bytes()
+    application = Application()
+    try:
+        repaired = application._repair_dangling_playlist_references()
+        response = application._finish_playlist_reference_repair(repaired)
+
+        assert response.ok
+        assert bool(application.authoring_ready)
+        assert repaired.display_playlists == ("deleted",)
+        assert displays.Store.open().all() == ()
+        assert newer.read_bytes() == original
+    finally:
+        _close(application)
+
+
+def test_files_from_a_newer_version_are_reported_once_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config.save(config.Settings())
+    state = playlists.state_path().parent
+    state.mkdir(parents=True, exist_ok=True)
+    playlists.state_path().write_text(json.dumps({"version": 2, "playlists": []}))
+    favourites.state_path().write_text(json.dumps({"version": 2, "paths": []}))
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(application, "reload_palette", lambda: None)
+    monkeypatch.setattr(application, "_prompt_for_library_root", lambda: None)
+    try:
+        assert application.session.newer_version_files() == (
+            "playlists.json",
+            "favourites.json",
+        )
+        application._continue_first_activation()
+        application._continue_first_activation()
+
+        assert window.reports == [
+            "playlists.json and favourites.json were saved by a newer version of "
+            "Wall-in-One. They are read-only here; open that version to change them."
+        ]
+    finally:
+        _close(application)
+
+
+def test_a_single_newer_file_notice_names_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config.save(config.Settings())
+    target = pairings.state_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"version": 3, "pairings": []}))
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(application, "reload_palette", lambda: None)
+    monkeypatch.setattr(application, "_prompt_for_library_root", lambda: None)
+    try:
+        application._continue_first_activation()
+
+        assert window.reports == [
+            "pairings.json was saved by a newer version of Wall-in-One. It is read-only "
+            "here; open that version to change it."
+        ]
+    finally:
+        _close(application)
+
+
 def test_control_select_keeps_a_delayed_runtime_socket_off_gtk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

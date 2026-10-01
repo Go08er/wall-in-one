@@ -741,3 +741,37 @@ def test_unknown_keys_in_current_files_do_not_change_the_compiled_runtime(
 
     assert runtime.read_bytes() == plain_runtime
     assert b"UNKNOWN" not in plain_runtime
+
+
+def test_the_session_names_every_file_a_newer_version_saved(tmp_path: Path) -> None:
+    from wall_in_one import config
+    from wall_in_one.session import Session
+
+    for case in CASES:
+        module: Any = {
+            "playlists.json": playlists,
+            "schedules.json": schedules,
+            "pairings.json": pairings,
+            "displays.json": displays,
+            "favourites.json": favourites,
+            "pending-removals.json": removals,
+        }[case.filename]
+        _write(module.state_path(), case.newer if case.name != "displays" else case.current)
+    session = Session(config.Settings(scan_workshop=False))
+    try:
+        assert session.newer_version_files() == (
+            "pairings.json",
+            "playlists.json",
+            "schedules.json",
+            "favourites.json",
+            "pending-removals.json",
+        )
+        assert [name for name, _fault in session.authoring_faults()] == [
+            "pairings",
+            "playlists",
+            "schedules",
+            "favourites",
+            "pending removals",
+        ]
+    finally:
+        session.shutdown()

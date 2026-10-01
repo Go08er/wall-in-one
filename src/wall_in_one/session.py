@@ -28,6 +28,7 @@ from wall_in_one.library import (
     removals,
     scan,
     schedules,
+    state_file,
     stills,
     workshop,
 )
@@ -1290,6 +1291,22 @@ class Session:
             ("pending removals", self._removals),
         )
         return tuple((name, fault) for name, store in stores if (fault := store.fault))
+
+    def newer_version_files(self) -> tuple[str, ...]:
+        """Authoring files a newer build saved, as this Session last read them.
+
+        Such a file is shown as far as this build understands it, but every
+        Store refuses to change it and runtime compilation refuses to use it.
+        """
+        stores = (
+            (pairings.STATE_FILENAME, self._pairings),
+            (playlists.STATE_FILENAME, self._playlists),
+            (schedules.STATE_FILENAME, self._schedules),
+            (displays.STATE_FILENAME, self._displays),
+            (favourites.STATE_FILENAME, self._favourites),
+            (removals.STATE_FILENAME, self._removals),
+        )
+        return tuple(name for name, store in stores if store.fault_kind == state_file.NEWER_VERSION)
 
     def _rebuild_playlist(self) -> None:
         self._in_force = self.active_playlist()

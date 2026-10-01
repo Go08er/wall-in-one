@@ -66,13 +66,13 @@ def test_write_config_takes_the_compiler_lock_before_reading_authoring_state(
             nonlocal entered
             entered = False
 
-    def load_under_lock(*, require_present: bool = False) -> config.Settings:
+    def load_under_lock(*, require_present: bool = False) -> config.LoadedSettings:
         assert entered
         assert require_present
         raise config.ConfigError("authoring fixture stops here")
 
     monkeypatch.setattr(runtime_config, "compiler_lock", ObservedLock)
-    monkeypatch.setattr(config, "load_strict", load_under_lock)
+    monkeypatch.setattr(config, "load_strict_document", load_under_lock)
 
     assert cli.main(["--write-config"]) == 1
     assert "authoring fixture stops here" in capsys.readouterr().err

@@ -196,10 +196,11 @@ def test_no_health_reports_return_before_any_authoring_scan(
     item = _media(tmp_path)
     _write_runtime_config()
 
-    def unexpected_authoring_read() -> config.Settings:
+    def unexpected_authoring_read(*_arguments: object, **_keywords: object) -> config.Settings:
         raise AssertionError("health no-op scanned authoring state")
 
     monkeypatch.setattr(config, "load_strict", unexpected_authoring_read)
+    monkeypatch.setattr(config, "load_strict_document", unexpected_authoring_read)
     monkeypatch.setattr(
         client,
         "send_runtime",
@@ -235,6 +236,28 @@ def test_health_sync_persists_compiles_and_reloads_one_new_finding(
         "source": "automatic-apply",
     }
     assert "wall_in_one.ui.app" not in sys.modules
+
+
+def test_health_sync_uses_known_settings_when_settings_have_unknown_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A key this build does not know is warned about, never a sync failure."""
+    item = _media(tmp_path)
+    _write_runtime_config()
+    settings = paths.settings_path()
+    before = settings.read_bytes() + b"future_setting = true\n"
+    settings.write_bytes(before)
+    capsys.readouterr()
+
+    def send(verb: str) -> Response:
+        return _snapshot(item) if verb == "status" else Response.success("reloaded")
+
+    monkeypatch.setattr(client, "send_runtime", send)
+
+    assert cli.main(["--sync-runtime-health"]) == 0
+    assert "doesn't recognize (future_setting)" in capsys.readouterr().err
+    assert pairings.Store.open().health(pairings.Identity.of(item)).is_borked
+    assert settings.read_bytes() == before
 
 
 def test_shutdown_health_sync_persists_without_reloading_the_exiting_runtime(

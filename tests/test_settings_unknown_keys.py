@@ -156,3 +156,84 @@ def test_key_descriptions_are_bounded_and_escaped() -> None:
     assert config.describe_keys(("x" * 100,)) == "x" * 64 + "…"
     many = [f"key{index}" for index in range(8)]
     assert config.describe_keys(many) == "key0, key1, key2, key3, key4, and 3 more"
+
+
+# -- headless --------------------------------------------------------------
+
+
+def _library_with_wallpaper(tmp_path: Path) -> Path:
+    root = tmp_path / "Library"
+    root.mkdir()
+    (root / "paper.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    return root
+
+
+def test_service_start_runs_on_known_keys_instead_of_exiting_78(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The decision path systemd's ExecStartPre takes, without a real service."""
+    from wall_in_one import cli
+
+    root = _library_with_wallpaper(tmp_path)
+    target = config.save(config.Settings(roots=(root,), scan_workshop=False))
+    before = target.read_bytes() + UNKNOWN
+    target.write_bytes(before)
+
+    def no_window(_message: str) -> bool:
+        pytest.fail("an unknown settings key opened the recovery window")
+
+    # The pre-GTK upgrade gate no longer classifies the profile as corrupt.
+    assert cli._run_graphical_startup_upgrade(require_legacy_safe=True, retry=no_window) is None
+    assert cli._run_graphical_startup_upgrade(require_legacy_safe=False, retry=no_window) is None
+    capsys.readouterr()
+
+    assert cli.main(["--service-startup-prepare"]) == 0
+    err = capsys.readouterr().err
+    assert "doesn't recognize (future_setting)" in err
+    assert "leaving the file unchanged" in err
+    # Compiled for real, not softened into "keep the last-known-good one".
+    assert "could not be compiled" not in err
+    assert paths.runtime_config_path().is_file()
+
+    assert cli.main(["--write-config"]) == 0
+    assert target.read_bytes() == before
+    assert not list(target.parent.glob("settings.toml.*"))
+
+
+def test_runtime_document_is_exactly_the_one_compiled_without_the_unknown_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regenerating runtime.toml can neither lose nor mis-apply anything.
+
+    Unknown keys never reach `Settings`, so the compiled document is the one
+    the known keys alone produce. "already current" proves byte equality.
+    """
+    from wall_in_one import cli
+
+    root = _library_with_wallpaper(tmp_path)
+    target = config.save(config.Settings(roots=(root,), scan_workshop=False, cycle_interval=42))
+    assert cli.main(["--write-config"]) == 0
+    assert "wrote:" in capsys.readouterr().out
+    runtime = paths.runtime_config_path().read_bytes()
+    assert b"cycle_interval_seconds = 42\n" in runtime
+
+    with_unknown = target.read_bytes() + b'future_setting = true\n[future_table]\nmode = "x"\n'
+    target.write_bytes(with_unknown)
+    assert cli.main(["--write-config"]) == 0
+    output = capsys.readouterr()
+    assert "already current:" in output.out
+    assert "future_setting, future_table" in output.err
+    assert paths.runtime_config_path().read_bytes() == runtime
+    assert target.read_bytes() == with_unknown
+
+
+def test_malformed_settings_still_stop_the_headless_service(tmp_path: Path) -> None:
+    """Unparseable bytes have no trustworthy key list: behavior is unchanged."""
+    from wall_in_one import cli
+
+    target = paths.settings_path()
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"future_setting = \n")
+
+    assert cli.main(["--service-startup-prepare"]) == cli.EXIT_CONFIG
+    assert target.read_bytes() == b"future_setting = \n"

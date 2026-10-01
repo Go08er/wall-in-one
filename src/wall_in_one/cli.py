@@ -384,6 +384,26 @@ def _run_graphical_startup_upgrade(
     return None
 
 
+def _warn_unknown_settings(unknown_keys: Sequence[str]) -> None:
+    """Say which settings the headless path skipped, without failing on them.
+
+    The runtime document is compiled from the known keys alone, exactly as it
+    would be without the unknown ones, and settings.toml is never written
+    here. Stopping the service over a key this build cannot act on would only
+    take the wallpaper away.
+    """
+    if not unknown_keys:
+        return
+    from wall_in_one import config
+
+    print(
+        f"warning: {paths.settings_path()} has settings this version of "
+        f"Wall-in-One doesn't recognize ({config.describe_keys(unknown_keys)}); "
+        "using the settings it knows and leaving the file unchanged",
+        file=sys.stderr,
+    )
+
+
 def _write_runtime_config() -> int:
     """Compile authoring state for Rust without constructing a GTK application."""
     from wall_in_one import config, runtime_config
@@ -397,7 +417,9 @@ def _write_runtime_config() -> int:
             # First-run defaults are suitable for the GUI, not for publishing
             # a runtime without its owning settings. Such an orphan makes the
             # next migration probe correctly refuse to assume a fresh install.
-            settings = config.load_strict(require_present=True)
+            loaded = config.load_strict_document(require_present=True)
+            _warn_unknown_settings(loaded.unknown_keys)
+            settings = loaded.settings
             session = Session(settings)
             try:
                 # Runtime publication is a read-only authoring snapshot. The
@@ -501,7 +523,9 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                 print("runtime reported no visible wallpaper health changes")
                 return 0
 
-            settings = config.load_strict()
+            loaded = config.load_strict_document()
+            _warn_unknown_settings(loaded.unknown_keys)
+            settings = loaded.settings
             session = Session(settings)
             # Health sync may update Pairings under its mutation lock, but it
             # must not opportunistically rewrite the other authoring stores.

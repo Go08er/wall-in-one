@@ -513,7 +513,9 @@ pkgs.testers.runNixOSTest {
         original = snapshot()
         # Leave the saved paths and settings visible in the editor. Removing
         # this single invalid final line restores their exact original bytes.
-        run("printf 'future_setting = true' >> " + q(settings))
+        # It must be malformed TOML: a well-formed unknown key no longer stops
+        # the service; it only makes Settings read-only in the GUI.
+        run("printf 'future_setting = ' >> " + q(settings))
         run("${pkgs.glib.bin}/bin/gio mime application/toml org.xfce.mousepad.desktop")
         run("${pkgs.glib.bin}/bin/gio mime text/plain org.xfce.mousepad.desktop")
         broken_hash = run("sha256sum " + q(settings)).split()[0]

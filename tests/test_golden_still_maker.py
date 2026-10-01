@@ -7,6 +7,9 @@ interfaces run it after every scan (`Application._make_missing_stills`).
 
 The golden run is the nix check's machine: no linux-wallpaperengine and no
 niri on PATH. No still can be captured, so the whitelist must hold as it is.
+A second machine has the engine and a measured display but refuses the
+engine's process: there the only extra write allowed is the one claim pair a
+withdrawn named temporary leaves (the engine needs a ``.png`` name).
 The still maker is spied on (its work runs) and waited for, since the
 application's shutdown cancels it without waiting. Before the fix the golden
 scene's 2x2 still was judged against a 2560x1440 guess, a capture was tried
@@ -23,10 +26,11 @@ from __future__ import annotations
 
 import shutil
 import struct
+import subprocess
 import tempfile
 import time
 import zlib
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -42,6 +46,7 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.golden import harness, sandbox  # noqa: E402
 from tests.golden.harness import Allowance  # noqa: E402
 from tests.golden.test_idle import first_start_writes  # noqa: E402
+from tests.golden.test_stills_idle import RETAINED, assert_one_claim_pair  # noqa: E402
 from tests.test_ui_next_slice import IDLE_SECONDS, _cache_touch  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402
     Step,
@@ -77,9 +82,10 @@ def golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[sandbox.
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
+@pytest.mark.parametrize("machine", ["nix-check", "engine-refused"])
 @pytest.mark.parametrize("ui", ["classic", "next"])
 def test_idling_with_the_still_maker_writes_only_the_whitelist(
-    golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch, ui: str
+    golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch, ui: str, machine: str
 ) -> None:
     def no_ffmpeg(item: MediaItem, **_keywords: object) -> Path:
         raise thumbnail_cache.ThumbnailError(f"no processes in the golden sandbox: {item.path}")
@@ -87,8 +93,27 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
     # As in test_ui_next_slice: the thumbnailer's refused-ffmpeg temporary is a
     # sandbox artefact, not what this test is about.
     monkeypatch.setattr(thumbnail_cache, "generate", no_ffmpeg)
-    monkeypatch.setattr(scenes, "is_available", lambda: False)
-    monkeypatch.setattr(outputs, "is_available", lambda: False)
+    engine_started: list[object] = []
+    if machine == "nix-check":
+        # No engine, no niri: nothing at all may be written.
+        monkeypatch.setattr(scenes, "is_available", lambda: False)
+        monkeypatch.setattr(outputs, "is_available", lambda: False)
+    else:
+        # The engine is installed and niri measured the panel, so the 2x2
+        # golden still is due; but the engine's process is refused. Its named
+        # temporary then leaves one claim pair (accepted for now), and nothing
+        # else may change.
+        monkeypatch.setattr(scenes, "is_available", lambda: True)
+        monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: (2560, 1600))
+        sealed: Callable[..., object] = subprocess.Popen
+
+        def refuse_the_engine(arguments: object, *args: object, **kwargs: object) -> object:
+            if isinstance(arguments, list) and arguments[:1] == ["linux-wallpaperengine"]:
+                engine_started.append(arguments)
+                raise PermissionError(13, "process start refused")
+            return sealed(arguments, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", refuse_the_engine)
     asked: list[Path] = []
     request = StillMaker.request
 
@@ -128,6 +153,11 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
             lane.shutdown(wait=True)  # type: ignore[attr-defined]
     assert application._window is None
     assert asked, "the application asked its still maker for this library"
+    assert len(engine_started) == (machine == "engine-refused"), "one capture was tried"
+    changes = harness.diff(before, harness.snapshot(profile.home))
+    if machine == "engine-refused":
+        assert_one_claim_pair([c for c in changes if c.path.startswith(RETAINED)])
+        changes = [c for c in changes if not c.path.startswith(RETAINED)]
     allowed = [
         *first_start_writes(profile, None),
         Allowance(
@@ -137,7 +167,7 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
             _cache_touch,
         ),
     ]
-    harness.check_changes(harness.diff(before, harness.snapshot(profile.home)), allowed)
+    harness.check_changes(changes, allowed)
 
 
 # -- the same selection on a real machine -----------------------------------------------

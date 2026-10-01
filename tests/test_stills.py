@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import subprocess
+import sys
 import tempfile
+import zlib
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1140,6 +1143,151 @@ def test_a_scene_capture_that_cannot_be_made_writes_nothing(
         stills.capture_scene(scene, root, force=True)
     assert stills.ensure(scene, root) is None
     assert not root.exists(), "not even the Automatic Stills directory"
+
+
+def _real_png(width: int, height: int) -> bytes:
+    """A complete, decodable PNG, unlike `_png_header`."""
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+        return len(body).to_bytes(4, "big") + kind + body + crc.to_bytes(4, "big")
+
+    header = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes((8, 2, 0, 0, 0))
+    rows = (b"\x00" + b"\x40\x80\xc0" * width) * height
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_the_engine_is_handed_a_png_path_another_process_can_write(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """The contract with linux-wallpaperengine's ``--screenshot``.
+
+    The engine chooses its encoder from the path's extension and refuses any
+    other before rendering: liblinux-wallpaperengine-lib.so's
+    ``ApplicationContext::validateScreenshot`` fails with "Cannot determine
+    screenshot format, unknown extension". A ``/proc/<pid>/fd/<n>`` path has
+    none. A fake ``screenshot`` cannot notice that, so this runs the real
+    `scenes.screenshot` with a real child process in the engine's place,
+    writing by the exact path string it was given, the way stbi_write_png's
+    fopen does.
+    """
+    target = pairing.still_directory(root) / "1647046763.png"
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", directory=installation)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (64, 40))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    frame = _real_png(64, 40)
+    real_popen = subprocess.Popen
+    handed: list[str] = []
+
+    def engine(arguments: list[str], *args: Any, **kwargs: Any) -> Any:
+        assert arguments[0] == "linux-wallpaperengine"
+        path = arguments[arguments.index("--screenshot") + 1]
+        handed.append(path)
+        script = (
+            "import sys, time\n"
+            "if not sys.argv[1].endswith(('.png', '.jpg', '.jpeg', '.bmp')):\n"
+            "    sys.exit('Cannot determine screenshot format, unknown extension')\n"
+            "open(sys.argv[1], 'wb').write(bytes.fromhex(sys.argv[2]))\n"
+            "time.sleep(60)\n"
+        )
+        return real_popen([sys.executable, "-c", script, path, frame.hex()], *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", engine)
+
+    assert stills.capture_scene(scene, root) == target
+
+    (path,) = handed
+    assert path.endswith(".png")
+    assert re.fullmatch(rf"/proc/{os.getpid()}/fd/\d+/\.1647046763\.png\..+\.tmp\.png", path)
+    assert target.read_bytes() == frame
+    assert list(target.parent.iterdir()) == [target]
+
+
+def _retained_claims(directory: Path) -> tuple[int, int]:
+    """(empty claim directories, empty tombstones) under ``directory``'s retained entries."""
+    retained = directory / file_io.RETAINED_ENTRY_DIRECTORY
+    entries = tuple(retained.iterdir())
+    claims = [path for path in entries if path.is_dir()]
+    tombstones = [path for path in entries if path.is_file()]
+    assert len(claims) + len(tombstones) == len(entries)
+    assert all(tuple(claim.iterdir()) == () for claim in claims)
+    assert all(tombstone.stat().st_size == 0 for tombstone in tombstones)
+    return len(claims), len(tombstones)
+
+
+def test_an_engine_that_cannot_be_started_keeps_the_still_and_only_its_claim(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """Accepted for now: the named temporary is withdrawn through file_io.
+
+    The engine needs a named ``.png`` path, so the temporary exists before the
+    process is started; `file_io`'s claim-and-retain then leaves one empty
+    claim directory and one 0-byte tombstone. Only after the engine and a
+    measured display were both found -- without either nothing is written
+    (`test_a_scene_capture_that_cannot_be_made_writes_nothing`).
+    """
+    target = pairing.still_directory(root) / "1647046763.png"
+    _png_header(target, 1270, 1537)
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", target, directory=installation)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    started: list[object] = []
+
+    def refused(arguments: object, *_args: object, **_kwargs: object) -> None:
+        started.append(arguments)
+        raise PermissionError(13, "process start refused")
+
+    monkeypatch.setattr(subprocess, "Popen", refused)
+
+    with pytest.raises(stills.StillError, match="cannot start linux-wallpaperengine"):
+        stills.capture_scene(scene, root)
+
+    assert len(started) == 1
+    assert stills._png_size(target) == (1270, 1537)
+    names = {path.name for path in target.parent.iterdir()}
+    assert names == {target.name, file_io.RETAINED_ENTRY_DIRECTORY}
+    assert _retained_claims(target.parent) == (1, 1)
+
+
+def test_an_engine_that_dies_mid_frame_publishes_nothing_torn(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", directory=installation)
+    target = pairing.still_directory(root) / "1647046763.png"
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+
+    def die(
+        _scene_id: str,
+        destination: Path,
+        *,
+        size: tuple[int, int],
+        prepared_output: bool,
+    ) -> Path:
+        del size, prepared_output
+        destination.write_bytes(b"\x89PNG\r\n\x1a\nhalf a frame")
+        raise scenes.SceneError("linux-wallpaperengine stopped before writing a screenshot")
+
+    monkeypatch.setattr(scenes, "screenshot", die)
+
+    with pytest.raises(stills.StillError, match="stopped before"):
+        stills.capture_scene(scene, root)
+
+    assert not target.exists()
+    names = {path.name for path in target.parent.iterdir()}
+    assert names == {file_io.RETAINED_ENTRY_DIRECTORY}, "no torn still, no temporary"
+    assert _retained_claims(target.parent) == (1, 1)
 
 
 def test_scene_capture_replaces_the_managed_still_atomically(

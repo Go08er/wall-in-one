@@ -764,6 +764,35 @@ def _private_image_temporary(
         raise
 
 
+def _engine_output_path(
+    temporary: _ImageTemporary,
+    target_context: file_io.PinnedDirectoryContext,
+) -> Path:
+    """The scene engine's ``--screenshot`` path: the temporary by name, ending ``.png``.
+
+    linux-wallpaperengine chooses its encoder from that path's extension and
+    refuses anything else before rendering ("Cannot determine screenshot
+    format, unknown extension", ``ApplicationContext::validateScreenshot`` in
+    liblinux-wallpaperengine-lib.so). The descriptor path ffmpeg is given,
+    ``/proc/<pid>/fd/<n>``, has no extension, so the engine gets the name
+    instead, reached through this process's pinned directory descriptor so a
+    rename of the public directory cannot redirect it. Only the pinned inode
+    is ever published: if the name were swapped before the engine opened it,
+    the pinned output stays empty and publication refuses.
+    """
+    if temporary.pin is None:
+        raise OSError(f"the private still output {temporary.logical_path} is closed")
+    if not temporary.path.name.endswith(STILL_SUFFIX):
+        raise ValueError(f"the engine needs a {STILL_SUFFIX} path, not {temporary.path.name}")
+    return (
+        Path("/proc")
+        / str(os.getpid())
+        / "fd"
+        / str(target_context.directory_descriptor)
+        / temporary.path.name
+    )
+
+
 def _pin_target_directory(
     root: Path,
     target: Path,
@@ -1290,17 +1319,18 @@ def _capture_scene_from_source(
             f"could not create a temporary still in {target.parent}: {error}"
         ) from error
     try:
+        engine_output = _engine_output_path(temporary, target_context)
         if processes is None:
             scenes.screenshot(
                 item.scene,
-                temporary.writer_path,
+                engine_output,
                 size=size,
                 prepared_output=True,
             )
         else:
             scenes.screenshot(
                 item.scene,
-                temporary.writer_path,
+                engine_output,
                 size=size,
                 processes=processes,
                 prepared_output=True,

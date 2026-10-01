@@ -50,10 +50,11 @@ from wall_in_one.session import (
     Session,
 )
 from wall_in_one.theme import css, noctalia, source
+from wall_in_one.ui.next.window import NextWindow
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
-from wall_in_one.ui.window_services import WindowServices
+from wall_in_one.ui.window_services import DEFAULT_UI, UiKind, WindowServices
 from wall_in_one.wallpaper import outputs
 from wall_in_one.wallpaper.applier import Applied, ApplyError
 
@@ -300,7 +301,13 @@ class _PlaylistReferenceRepairResult:
 class Application(Adw.Application):
     """Owns app-wide state: settings, the live palette, and the CSS provider."""
 
-    def __init__(self, *, service: bool = False, initial_page: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        service: bool = False,
+        initial_page: str | None = None,
+        ui: UiKind = DEFAULT_UI,
+    ) -> None:
         super().__init__(
             application_id=paths.APPLICATION_ID,
             # IS_SERVICE suppresses the initial activation, so `--service`
@@ -325,6 +332,10 @@ class Application(Adw.Application):
         self.add_action(present)
         self._service_start = service
         self._initial_page = initial_page
+        # Which window every activation of this process builds. Fixed for the
+        # process: a second launch with another --ui reaches this instance
+        # and is shown this window (see `run`).
+        self._ui: UiKind = ui
         self._held = False
         loaded_settings = config.load_document()
         self._settings = loaded_settings.settings
@@ -754,7 +765,7 @@ class Application(Adw.Application):
 
     def do_activate(self) -> None:
         if self._window is None:
-            window = MainWindow(self, self._settings)
+            window = self._build_window()
             # Connected on the concrete GTK class: the signal is not part of
             # what the application asks of a window once it is stored.
             window.connect("close-request", self._on_close_request)
@@ -779,6 +790,12 @@ class Application(Adw.Application):
         if self._prompt_for_legacy_migration():
             return
         self._continue_first_activation()
+
+    def _build_window(self) -> MainWindow | NextWindow:
+        """The window this process was started with: classic unless ``--ui=next``."""
+        if self._ui == "next":
+            return NextWindow(self, self._settings)
+        return MainWindow(self, self._settings)
 
     def _continue_first_activation(self) -> None:
         """Scan or ask for a root only after legacy authoring has a disposition."""
@@ -1373,6 +1390,11 @@ class Application(Adw.Application):
         return self._service_start
 
     @property
+    def ui(self) -> UiKind:
+        """Which window this process builds, from ``--ui``."""
+        return self._ui
+
+    @property
     def runtime_status(self) -> dict[str, object] | None:
         """Last valid atomic Rust status, retained across transient timeouts."""
         return self._status_model.status
@@ -1405,15 +1427,19 @@ class Application(Adw.Application):
             case StatusChange.BUSY:
                 window.set_runtime_busy(view.busy)
 
-    def present_page(self, page: str) -> None:
-        """Present the singleton window with one primary workflow page visible."""
+    def present_page(self, page: str) -> bool:
+        """Present the singleton window with one primary workflow page visible.
+
+        False when the window has no such page yet (the new interface while
+        it is being ported); the window is presented either way and says so.
+        """
         # In service mode there is no window yet. Activating this same
         # GApplication constructs one locally; an ordinary second invocation
         # is forwarded here by Gio for the same reason.
         self.activate()
         if self._window is None:  # pragma: no cover - a broken GTK invariant
             raise RuntimeError("Wall-in-One could not create its window")
-        self._window.show_page(page)
+        return self._window.show_page(page)
 
     # -- palette ---------------------------------------------------------
 
@@ -5214,7 +5240,14 @@ class _Commands:
             return Response.failure(
                 "usage: open <browse|media|pairings|playlists|schedules|displays|settings>"
             )
-        self._app.present_page(page)
+        # ``is False``, not falsiness: lightweight Application doubles predate
+        # the answer and return None, which still means the page opened.
+        if self._app.present_page(page) is False:
+            return Response.failure(
+                f"the {page} page is not available in the new UI yet; the window is open. "
+                "Start Wall-in-One with --ui=classic to use it.",
+                kind="not-in-new-ui",
+            )
         return Response.success(f"opened {page}")
 
     def report_status(self) -> Response:
@@ -6114,12 +6147,24 @@ def run(
     *,
     service: bool = False,
     initial_page: str | None = None,
+    ui: UiKind | None = None,
 ) -> int:
+    """Start, or hand off to, the single Wall-in-One instance.
+
+    ``ui`` is None unless ``--ui`` was given; the window is then classic. The
+    choice belongs to the process that starts: a launch which finds an
+    instance already running presents that instance's window unchanged and
+    only notes that its ``--ui`` was not applied.
+    """
     # GtkApplication overwrites prgname with the application id on Wayland, so
     # setting it here would be cosmetic at best and misleading at worst. The
     # Wayland app-id comes from paths.APPLICATION_ID; see docs/niri.md.
     GLib.set_application_name("Wall-in-One")
-    application = Application(service=service, initial_page=initial_page)
+    application = Application(
+        service=service,
+        initial_page=initial_page,
+        ui=DEFAULT_UI if ui is None else ui,
+    )
     try:
         application.register(None)
     except GLib.Error as error:
@@ -6131,6 +6176,14 @@ def run(
         )
         return 1
     if application.get_is_remote():
+        if ui is not None:
+            # The activation forwarded below carries only the package and the
+            # page: older builds define its (ss) shape, so it cannot grow.
+            print(
+                f"note: Wall-in-One is already running, so --ui={ui} was not applied; "
+                "it keeps the interface it started with. Close it and start again to switch.",
+                file=sys.stderr,
+            )
         # Registration, not a pre-launch socket-existence check, resolves the
         # actual GApplication owner. Inspect its exported immutable identity
         # before run() can forward activation to a different package. Old

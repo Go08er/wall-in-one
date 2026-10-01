@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import __version__, paths
+from wall_in_one.ui.window_services import UI_KINDS
 
 EXIT_TEMPFAIL: Final = 75
 EXIT_CONFIG: Final = 78
@@ -116,6 +117,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "settings",
         ),
         help="present the GUI on one workflow page",
+    )
+    # Which window the GUI builds. Hidden while the new interface is a
+    # placeholder; default (absent) is the classic window. Only a process
+    # that starts the app applies it: see ui.app.run for a running instance.
+    parser.add_argument(
+        "--ui",
+        choices=UI_KINDS,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--write-config",
@@ -752,7 +762,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from wall_in_one.ui.app import run
 
-    return run(service=options.service, initial_page=options.open_page)
+    if options.ui is None:
+        # The default launch calls run() exactly as before --ui existed.
+        return run(service=options.service, initial_page=options.open_page)
+    return run(service=options.service, initial_page=options.open_page, ui=options.ui)
 
 
 if __name__ == "__main__":

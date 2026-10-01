@@ -668,8 +668,11 @@ class MainWindow(Adw.ApplicationWindow):
         if self._stack.get_visible_child_name() == "playlists":
             self._playlists_page.refresh(session)
 
-    def show_page(self, page: str) -> None:
-        """Show a primary workflow page after the caller validates its name."""
+    def show_page(self, page: str) -> bool:
+        """Show a primary workflow page after the caller validates its name.
+
+        Always True: this window has every page a caller may name.
+        """
         self._content_stack.set_visible_child_name("primary")
         self._switcher.set_reveal(True)
         self._stack.set_visible_child_name(page)
@@ -678,6 +681,7 @@ class MainWindow(Adw.ApplicationWindow):
         # cheap and keeps a remotely opened page populated even if a backend
         # defers that notification until the next frame.
         self._refresh_visible_page()
+        return True
 
     def _on_page_changed(self, _stack: Adw.ViewStack, _property: object) -> None:
         self._update_page_title()

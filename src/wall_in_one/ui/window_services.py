@@ -17,17 +17,27 @@ Three things deliberately stay out:
 * The pages' own collaborators (`AppServices` in the R9 notes) are a separate
   seam: pages talk to the application, never to this Protocol.
 
-GTK-free on purpose: annotations only, so importing this costs nothing.
+Which window gets built is the process's ``--ui`` choice (`UiKind`). The
+classic `MainWindow` is the default; ``next`` builds the new interface while it
+is being ported, behind the flag.
+
+GTK-free on purpose: annotations only, so the command line can import the
+choices without loading GTK.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 if TYPE_CHECKING:
     from wall_in_one import config
     from wall_in_one.session import Session
     from wall_in_one.theme import source
+
+#: The window a process builds: today's interface, or the one being ported.
+UiKind = Literal["classic", "next"]
+UI_KINDS: Final[tuple[UiKind, ...]] = ("classic", "next")
+DEFAULT_UI: Final[UiKind] = "classic"
 
 
 class WindowServices(Protocol):
@@ -41,8 +51,8 @@ class WindowServices(Protocol):
     def report(self, message: str) -> None:
         """Show one short, transient message (a toast); never blocks or asks."""
 
-    def show_page(self, page: str) -> None:
-        """Navigate to a validated page name (`browse`, `media`, `playlists`, …)."""
+    def show_page(self, page: str) -> bool:
+        """Navigate to a validated page name; False if this window has no such page yet."""
 
     # -- settings and theme ----------------------------------------------
 

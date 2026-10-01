@@ -71,6 +71,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
 # PyGObject requires gi.require_version() to run before the corresponding
 # `from gi.repository import ...`, so imports cannot all sit at the top.
 "src/wall_in_one/ui/*.py" = ["E402"]
+"src/wall_in_one/ui/next/*.py" = ["E402"]
 # Tests reach into module internals to assert on the exact marker text the
 # installer writes into another program's config file.
 "tests/*.py" = ["SLF001"]

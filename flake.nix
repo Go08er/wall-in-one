@@ -244,7 +244,9 @@
           # Python and Rust intentionally have different authoring/runtime
           # sockets. This process-level check catches the seam a unit test
           # cannot: with no XDG_RUNTIME_DIR, `wall-in-one ctl status` must find
-          # the Rust service at their shared XDG_STATE_HOME fallback.
+          # the Rust service at their shared XDG_STATE_HOME fallback. It also
+          # hands a compiled runtime.toml and runtime-overrides.toml to this
+          # service's own loader, and a malformed overrides file to be refused.
           runtime-socket-fallback =
             pkgs.runCommand "wall-in-one-runtime-socket-fallback"
               {
@@ -263,8 +265,9 @@
                 export WALL_IN_ONE_TEST_TRUE=${pkgs.coreutils}/bin/true
                 export WALL_IN_ONE_TEST_FALSE=${pkgs.coreutils}/bin/false
                 cd ${./.}
-                PYTHONPATH=$PWD/src pytest tests/test_runtime_socket_fallback.py -q \
-                  -p no:cacheprovider
+                PYTHONPATH=$PWD/src pytest tests/test_runtime_socket_fallback.py \
+                  "tests/test_runtime_overrides.py::test_the_rust_service_loads_what_the_compiler_writes" \
+                  -q -p no:cacheprovider
                 touch $out
               '';
 

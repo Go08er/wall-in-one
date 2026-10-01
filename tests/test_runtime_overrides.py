@@ -1,31 +1,60 @@
-"""Release 2's per-playlist rotation and display opt-in in their stores.
+"""Release 2's runtime-backed features, from authoring to the runtime files.
 
 Per-playlist interval and shuffle live in ``playlists.json`` version 2; a
 display's opt-in to beat global schedule rules lives in ``displays.json``
-version 2. The transition rule: nothing changes for a profile until
-somebody uses one.
+version 2. Both reach the runtime through ``runtime-overrides.toml``, a
+sibling of ``runtime.toml`` that only this release's service reads. The
+transition rule: nothing changes for a profile until somebody uses one.
 
 * Lazy bump: a store moves to version 2 only on the save that first uses a
   new field, and never moves back.
 * One-time backup: before that first bump the version-1 bytes are kept as
   ``<file>.v1-backup``, byte for byte, never overwritten.
-* Saving never consults the running service: the runtime reads these from a
-  file only this release's service opens (see the compiler's tests).
+* ``runtime.toml`` never changes because of them: with the fields in use it
+  is byte-identical to the same profile with them cleared, so every released
+  service still loads it. The overrides file exists only while one is used.
+* Mixed versions: saving never consults the running service. One that
+  predates the overrides file ignores it, so a setting applies once the
+  updated service runs (``runtime_applies_overrides`` says which).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tomllib
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from wall_in_one import config, runtime_config
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import displays, playlists
 from wall_in_one.library.playlists import KEEP, PlaylistError
+from wall_in_one.session import Session
+
+RELEASE_ONE_SERVICE = {"status_version": 2, "supported_config_schemas": [4, 5]}
+THIS_SERVICE = {
+    "status_version": 2,
+    "supported_config_schemas": [4, 5],
+    "supported_override_schemas": [1],
+}
+
+
+def _service(monkeypatch: pytest.MonkeyPatch, status: object) -> list[str]:
+    asked: list[str] = []
+
+    def send(verb: str, *, timeout: float) -> Response:
+        asked.append(verb)
+        return Response(ok=True, message=json.dumps(status))
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    return asked
 
 
 def _no_service_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,3 +377,271 @@ def test_saving_never_consults_the_running_service(
     _no_service_call(monkeypatch)
     use()
     assert _json(target)["version"] == 2
+
+
+def test_status_says_whether_the_running_service_applies_overrides() -> None:
+    assert runtime_config.runtime_applies_overrides(THIS_SERVICE)
+    older: tuple[object, ...] = (
+        RELEASE_ONE_SERVICE,
+        {"status_version": 2},
+        None,
+        [],
+        {"supported_override_schemas": "1"},
+    )
+    for status in older:
+        assert not runtime_config.runtime_applies_overrides(status)
+
+
+# -- the runtime files ----------------------------------------------------------------
+
+
+@pytest.fixture
+def library(tmp_path: Path) -> Path:
+    root = tmp_path / "library"
+    root.mkdir(exist_ok=True)
+    (root / "one.png").write_bytes(b"fixture")
+    (root / "two.png").write_bytes(b"fixture")
+    return root
+
+
+def _overrides(text: str | None) -> dict[str, Any]:
+    assert text is not None
+    document = tomllib.loads(text)
+    assert document["schema_version"] == runtime_config.OVERRIDES_SCHEMA_VERSION
+    return document
+
+
+def test_runtime_toml_is_the_same_bytes_with_the_fields_in_use_or_cleared(
+    library: Path,
+) -> None:
+    settings = config.Settings(roots=(library,), scan_workshop=False)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.displays.assign("DP-1", made.id)
+    cleared = runtime_config.render(settings, session)
+    assert tomllib.loads(cleared)["schema_version"] == runtime_config.SCHEMA_VERSION
+    assert runtime_config.render_overrides(settings, session) is None
+    battery = replace(settings, stop_animations_on_battery=True)
+    battery_cleared = runtime_config.render(battery, session)
+    independent = replace(
+        settings, display_mode=config.DISPLAY_MODE_INDEPENDENT, theme_source_connector="DP-1"
+    )
+    independent_cleared = runtime_config.render(independent, session)
+
+    session.playlists.set_rotation(made.id, cycle_interval=60, shuffle=True)
+    session.displays.set_beats_global_rules("DP-1", True)
+
+    for chosen, expected in (
+        (settings, cleared),
+        (battery, battery_cleared),
+        (independent, independent_cleared),
+    ):
+        assert runtime_config.render(chosen, session) == expected
+        assert b"cycle_interval_seconds = 60" not in expected.encode()
+        assert "beats_global_rules" not in expected
+    assert tomllib.loads(battery_cleared)["schema_version"] == runtime_config.BATTERY_SCHEMA_VERSION
+    assert _overrides(runtime_config.render_overrides(independent, session))["displays"] == [
+        {"connector": "DP-1", "beats_global_rules": True}
+    ]
+
+    # Clearing them leaves the stores at version 2 and no overrides at all.
+    session.playlists.set_rotation(made.id, cycle_interval=None, shuffle=None)
+    session.displays.set_beats_global_rules("DP-1", False)
+    assert _json(playlists.state_path())["version"] == 2
+    assert runtime_config.render_overrides(independent, session) is None
+    session.shutdown()
+
+
+def test_overrides_carry_only_what_reaches_the_runtime(library: Path) -> None:
+    mirrored = config.Settings(roots=(library,), scan_workshop=False)
+    independent = replace(
+        mirrored, display_mode=config.DISPLAY_MODE_INDEPENDENT, theme_source_connector="DP-1"
+    )
+    session = Session(mirrored)
+    session.refresh()
+    fast = session.playlists.create("Fast")
+    session.playlists.add(fast.id, library / "one.png")
+    session.playlists.set_rotation(fast.id, cycle_interval=45, shuffle=False)
+    plain = session.playlists.create("Plain")
+    session.playlists.add(plain.id, library / "two.png")
+    # An override on a playlist that is not compiled goes nowhere.
+    empty = session.playlists.create("Empty")
+    session.playlists.set_rotation(empty.id, shuffle=True)
+    session.displays.assign("DP-1", fast.id)
+    session.displays.assign("HDMI-A-1", fast.id)
+    session.displays.set_beats_global_rules("DP-1", True)
+
+    routed = _overrides(runtime_config.render_overrides(independent, session))
+    assert routed["playlists"] == [{"id": fast.id, "cycle_interval_seconds": 45, "shuffle": False}]
+    assert routed["displays"] == [{"connector": "DP-1", "beats_global_rules": True}]
+    # Mirrored mode leaves the assignments, and the opt-in, dormant.
+    dormant = _overrides(runtime_config.render_overrides(mirrored, session))
+    assert dormant == {
+        "schema_version": 1,
+        "playlists": [{"id": fast.id, "cycle_interval_seconds": 45, "shuffle": False}],
+    }
+    compiled_ids = {
+        playlist["id"]
+        for playlist in tomllib.loads(runtime_config.render(independent, session))["playlists"]
+    }
+    assert {entry["id"] for entry in routed["playlists"]} <= compiled_ids
+    assert {display["connector"] for display in routed["displays"]} <= {
+        display["connector"]
+        for display in tomllib.loads(runtime_config.render(independent, session))["displays"]
+    }
+    session.shutdown()
+
+
+def test_publication_writes_the_overrides_first_and_removes_them_durably(
+    library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = config.Settings(roots=(library,), scan_workshop=False)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    target = runtime_config.write(settings, session)
+    sidecar = runtime_config.overrides_path(target)
+    assert sidecar == target.with_name("runtime-overrides.toml")
+    assert not sidecar.exists()
+    released = target.read_bytes()
+    identity = target.stat().st_ino
+    assert runtime_config.update(settings, session) is False
+
+    seen: list[bool] = []
+    install = runtime_config._install
+
+    def observing(document: str, path: Path) -> None:
+        seen.append(runtime_config.overrides_path(path).exists())
+        install(document, path)
+
+    monkeypatch.setattr(runtime_config, "_install", observing)
+    session.playlists.set_rotation(made.id, shuffle=True)
+    assert runtime_config.update(settings, session) is True
+    assert seen == [], "runtime.toml did not change, so it was not rewritten"
+    assert (target.read_bytes(), target.stat().st_ino) == (released, identity)
+    assert _overrides(sidecar.read_text())["playlists"] == [{"id": made.id, "shuffle": True}]
+    assert runtime_config.update(settings, session) is False
+
+    # Both change: the overrides land before runtime.toml.
+    other = session.playlists.create("Other")
+    session.playlists.add(other.id, library / "two.png")
+    session.playlists.set_rotation(other.id, cycle_interval=600)
+    assert runtime_config.update(settings, session) is True
+    assert seen == [True]
+    # In the compiled order: playlists by name, as runtime.toml lists them.
+    assert [entry["id"] for entry in _overrides(sidecar.read_text())["playlists"]] == [
+        made.id,
+        other.id,
+    ]
+
+    session.playlists.set_rotation(made.id, shuffle=None)
+    session.playlists.set_rotation(other.id, cycle_interval=None)
+    assert runtime_config.update(settings, session) is True
+    assert not sidecar.exists()
+    assert runtime_config.update(settings, session) is False
+    session.shutdown()
+
+
+def test_a_refused_runtime_publication_writes_neither_file(
+    library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Error copy matches what was written: the overrides wait for runtime.toml."""
+    settings = config.Settings(roots=(library,), scan_workshop=False)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    target = runtime_config.write(settings, session)
+    before = target.read_bytes()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, shuffle=True)
+    # Battery handling needs schema 5, which a v0.1.2 service cannot load.
+    battery = replace(settings, stop_animations_on_battery=True)
+    _service(monkeypatch, {"status_version": 2})
+    for writer in (runtime_config.write, runtime_config.update):
+        with pytest.raises(runtime_config.RuntimeConfigError, match="No changes were saved"):
+            writer(battery, session)
+        assert target.read_bytes() == before
+        assert not runtime_config.overrides_path(target).exists()
+    session.shutdown()
+
+
+def test_a_release_one_service_still_gets_both_files_and_ignores_the_overrides(
+    library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = config.Settings(
+        roots=(library,), scan_workshop=False, stop_animations_on_battery=True
+    )
+    _service(monkeypatch, RELEASE_ONE_SERVICE)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, cycle_interval=120)
+    target = runtime_config.write(settings, session)
+    assert tomllib.loads(target.read_text())["schema_version"] == 5
+    assert runtime_config.overrides_path(target).is_file()
+    assert not runtime_config.runtime_applies_overrides(RELEASE_ONE_SERVICE)
+    session.shutdown()
+
+
+def test_the_constants_name_one_contract() -> None:
+    assert runtime_config.OVERRIDES_FILENAME == "runtime-overrides.toml"
+    assert runtime_config.OVERRIDES_SCHEMA_VERSION == 1
+    assert playlists.ROTATION_VERSION == displays.PRECEDENCE_VERSION == 2
+
+
+def _service_binary() -> Path | None:
+    # Only an explicitly chosen build: never whatever happens to be installed.
+    configured = os.environ.get("WALL_IN_ONE_SERVICE_BINARY", "")
+    return Path(configured) if configured else None
+
+
+def test_the_rust_service_loads_what_the_compiler_writes(library: Path, tmp_path: Path) -> None:
+    """Cross-binary: the strict Rust loader takes runtime.toml plus its overrides."""
+    binary = _service_binary()
+    if binary is None:
+        pytest.skip("set WALL_IN_ONE_SERVICE_BINARY to check the compiled files in Rust")
+    settings = replace(
+        config.Settings(roots=(library,), scan_workshop=False),
+        display_mode=config.DISPLAY_MODE_INDEPENDENT,
+        theme_source_connector="DP-1",
+        stop_animations_on_battery=True,
+    )
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, cycle_interval=60, shuffle=True)
+    session.displays.assign("DP-1", made.id)
+    session.displays.set_beats_global_rules("DP-1", True)
+    folder = tmp_path / "compiled"
+    folder.mkdir()
+    document = folder / "runtime.toml"
+    document.write_text(runtime_config.render(settings, session), encoding="utf-8")
+    sidecar = runtime_config.overrides_path(document)
+    overrides = runtime_config.render_overrides(settings, session)
+    assert overrides is not None
+    sidecar.write_text(overrides, encoding="utf-8")
+    session.shutdown()
+
+    def check() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(binary), "--config", str(document), "--check-config"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    checked = check()
+    assert checked.returncode == 0, checked.stderr
+    sidecar.write_text(overrides + "unknown = true\n", encoding="utf-8")
+    refused = check()
+    assert refused.returncode != 0
+    assert "runtime-overrides.toml" in refused.stderr

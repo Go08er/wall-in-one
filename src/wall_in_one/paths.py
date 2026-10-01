@@ -84,6 +84,11 @@ def settings_path() -> Path:
     return app_config_dir() / "settings.toml"
 
 
+def ui_prefs_path() -> Path:
+    """The new UI's own versioned preferences; see `wall_in_one.ui_prefs`."""
+    return app_config_dir() / "ui.toml"
+
+
 def palette_path() -> Path:
     """Where Noctalia's user template renders the live palette for us."""
     return app_state_dir() / "palette.json"

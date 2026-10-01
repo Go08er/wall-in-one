@@ -547,6 +547,7 @@ def write_atomic_text(
     contents: str,
     *,
     replace_existing: bool = True,
+    mode: int | None = None,
 ) -> None:
     """Durably replace ``path`` from a private same-directory temporary.
 
@@ -559,6 +560,8 @@ def write_atomic_text(
     recovery sets ``replace_existing=False`` after moving the unreadable
     generation aside: if a manual repair appears in that newly empty pathname,
     the repair wins instead of being overwritten by the recovered mutation.
+    ``mode`` sets the new file's permission bits before any byte is written;
+    without it the file keeps ``mkstemp``'s private 0600.
     """
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
@@ -572,6 +575,8 @@ def write_atomic_text(
             os.dup(descriptor),
             stat.S_IFREG,
         )
+        if mode is not None:
+            os.fchmod(descriptor, mode)
         handle = os.fdopen(descriptor, "w", encoding="utf-8")
         # ``fdopen`` owns the descriptor from this point. Transfer ownership
         # before write/flush/fsync can fail so the outer cleanup never closes a

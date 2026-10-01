@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import shlex
@@ -2245,3 +2246,37 @@ def test_status_tracks_installation(fake_home: Path) -> None:
     assert template.status() == "not installed"
     template.install()
     assert template.status().startswith("installed, enabled")
+
+
+def test_edit_settings_backs_up_then_exchanges_and_releases_the_file(fake_home: Path) -> None:
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    original = settings_path.read_bytes()
+    expected = hashlib.sha256(original).hexdigest()
+
+    edit = template.edit_settings(expected, lambda text: text.replace('wallpaper"', 'custom"'))
+
+    assert settings_path.read_text() == SAMPLE_SETTINGS.replace('wallpaper"', 'custom"')
+    assert edit.before_sha256 == expected
+    assert edit.after_sha256 == hashlib.sha256(settings_path.read_bytes()).hexdigest()
+    assert edit.backup_path.read_bytes() == original
+    assert edit.displaced_path.read_bytes() == original
+    assert edit.displaced_path.name == f"{edit.backup_path.name}.original"
+    _assert_no_current_transaction(settings_path)
+    assert template.read_settings_document() == settings_path.read_bytes()
+
+
+def test_edit_settings_refuses_a_file_rewritten_since_it_was_read(fake_home: Path) -> None:
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    seen = hashlib.sha256(settings_path.read_bytes()).hexdigest()
+    # Noctalia saves its own settings with an atomic rename.
+    replacement = settings_path.with_name("settings.toml.noctalia-tmp")
+    replacement.write_text(SAMPLE_SETTINGS + '\n[bar]\nposition = "top"\n')
+    os.replace(replacement, settings_path)
+    rewritten = settings_path.read_bytes()
+    before = sorted(path.name for path in settings_path.parent.iterdir())
+
+    with pytest.raises(template.SettingsChangedError):
+        template.edit_settings(seen, lambda text: text + "\n# never written\n")
+
+    assert settings_path.read_bytes() == rewritten
+    assert sorted(path.name for path in settings_path.parent.iterdir()) == before

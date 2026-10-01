@@ -99,6 +99,10 @@ class TemplateInstallError(Exception):
     """Registering or removing the template failed."""
 
 
+class SettingsChangedError(TemplateInstallError):
+    """Noctalia's settings changed since the caller read them; nothing was written."""
+
+
 @dataclass(frozen=True, slots=True)
 class InstallResult:
     changed: bool
@@ -2388,6 +2392,43 @@ def _post_hook_command() -> str:
     return shlex.join((executable, "ctl", "reload-palette"))
 
 
+def ensure_installed_template() -> tuple[Path, bool]:
+    """Publish the bundled template at its content-addressed name if missing.
+
+    Returns the installed path and whether this call created it. An existing
+    file at that name is only ever verified, never replaced.
+    """
+    source = bundled_template()
+    try:
+        source_document = file_io.read_regular_bytes(source, MAX_TEMPLATE_BYTES)
+    except OSError as error:
+        raise TemplateInstallError(f"cannot safely read palette template: {error}") from error
+    if source_document is None:
+        raise TemplateInstallError(f"palette template disappeared: {source}")
+    destination = installed_template_path(source_document)
+    _ensure_durable_directory(destination.parent)
+    try:
+        destination_document = file_io.read_regular_bytes(destination, MAX_TEMPLATE_BYTES)
+    except OSError as error:
+        raise TemplateInstallError(f"cannot safely read palette template: {error}") from error
+    if destination_document is not None and destination_document != source_document:
+        raise TemplateInstallError(
+            f"refusing to replace existing content-addressed palette template {destination}"
+        )
+    template_changed = destination_document is None
+    if template_changed:
+        try:
+            _write_bytes_atomically(destination, source_document)
+        except TemplateInstallError:
+            # A concurrent installer may have linked and synced the same
+            # immutable document after our absence check. Converge only
+            # after independently pinning and durably verifying it.
+            _verify_and_sync_installed_template(destination, source_document)
+            template_changed = False
+    _verify_and_sync_installed_template(destination, source_document)
+    return destination, template_changed
+
+
 def install(*, reload_config: bool = True) -> InstallResult:
     """Register the template, copying it to a stable location first."""
     settings_path = paths.noctalia_settings_path()
@@ -2398,36 +2439,8 @@ def install(*, reload_config: bool = True) -> InstallResult:
         except (tomllib.TOMLDecodeError, RecursionError) as error:
             raise TemplateInstallError(f"{settings_path} is not valid TOML: {error}") from error
 
-        source = bundled_template()
         output_path = paths.palette_path()
-
-        try:
-            source_document = file_io.read_regular_bytes(source, MAX_TEMPLATE_BYTES)
-        except OSError as error:
-            raise TemplateInstallError(f"cannot safely read palette template: {error}") from error
-        if source_document is None:
-            raise TemplateInstallError(f"palette template disappeared: {source}")
-        destination = installed_template_path(source_document)
-        _ensure_durable_directory(destination.parent)
-        try:
-            destination_document = file_io.read_regular_bytes(destination, MAX_TEMPLATE_BYTES)
-        except OSError as error:
-            raise TemplateInstallError(f"cannot safely read palette template: {error}") from error
-        if destination_document is not None and destination_document != source_document:
-            raise TemplateInstallError(
-                f"refusing to replace existing content-addressed palette template {destination}"
-            )
-        template_changed = destination_document is None
-        if template_changed:
-            try:
-                _write_bytes_atomically(destination, source_document)
-            except TemplateInstallError:
-                # A concurrent installer may have linked and synced the same
-                # immutable document after our absence check. Converge only
-                # after independently pinning and durably verifying it.
-                _verify_and_sync_installed_template(destination, source_document)
-                template_changed = False
-        _verify_and_sync_installed_template(destination, source_document)
+        destination, template_changed = ensure_installed_template()
 
         block = _render_block(destination, output_path, _post_hook_command())
         existing = _existing_entry(settings)
@@ -2539,6 +2552,66 @@ def uninstall(*, reload_config: bool = True) -> InstallResult:
             backup_path=backup,
             detail="removed",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsEdit:
+    """One committed edit of Noctalia's settings, made by :func:`edit_settings`."""
+
+    before_sha256: str
+    after_sha256: str
+    #: The synced byte copy taken before the edit.
+    backup_path: Path
+    #: The replaced inode itself, kept beside the backup.
+    displaced_path: Path
+
+
+def read_settings_document() -> bytes:
+    """Noctalia's settings bytes, read safely (bounded, no links) and released.
+
+    Nothing stays open after this returns: Noctalia rewrites the file
+    atomically, so no caller may hold a pin on it across an operation.
+    """
+    with _read_settings_snapshot(paths.noctalia_settings_path()) as snapshot:
+        return snapshot.document
+
+
+def recover_interrupted_edit() -> bool:
+    """Finish or roll back an interrupted settings edit; ``True`` if one was found.
+
+    This writes when it recovers something, so only call it from a
+    user-requested change, never from a preview.
+    """
+    return _reconcile_interrupted_transaction(paths.noctalia_settings_path())
+
+
+def edit_settings(expected_sha256: str, transform: Callable[[str], str]) -> SettingsEdit:
+    """Replace Noctalia's settings with ``transform(text)`` through the template
+    transaction: a synced backup, a recovery record, one atomic exchange.
+
+    Refuses without writing anything when the file's bytes no longer hash to
+    ``expected_sha256`` (Noctalia rewrote it since the caller looked), and the
+    exchange itself refuses if the file changes while the edit is prepared.
+    The snapshot is released before this returns.
+    """
+    settings_path = paths.noctalia_settings_path()
+    with _read_settings_snapshot(settings_path) as snapshot:
+        before = hashlib.sha256(snapshot.document).hexdigest()
+        if before != expected_sha256:
+            raise SettingsChangedError(
+                f"{settings_path} changed since it was read; nothing was written"
+            )
+        updated = transform(snapshot.text)
+        if updated == snapshot.text:
+            raise TemplateInstallError(f"the edit would not change {settings_path}")
+        displaced = _write_atomically(settings_path, updated, snapshot)
+    backup = displaced.with_name(displaced.name.rsplit(".original", 1)[0])
+    return SettingsEdit(
+        before_sha256=before,
+        after_sha256=hashlib.sha256(updated.encode("utf-8")).hexdigest(),
+        backup_path=backup,
+        displaced_path=displaced,
+    )
 
 
 def status() -> str:

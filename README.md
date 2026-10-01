@@ -477,6 +477,29 @@ desktop or Noctalia session.
 Anything touching Noctalia's settings file is tested against a sandboxed set of
 XDG directories -- never the real one.
 
+### The new interface behind `--ui=next`
+
+The redesigned interface is being ported from `prototypes/ui-redesign` behind a
+hidden flag. `wall-in-one --ui=next` builds `ui/next/window.py`'s `NextWindow`
+instead of the classic window; `--ui=classic`, or no flag, is today's app.
+For now `NextWindow` is a placeholder that shows the live runtime status and the
+library size, and says which pages are not ported yet.
+
+- **One process, one interface.** The choice belongs to the process that starts
+  the app. A second `wall-in-one --ui=…` that reaches an already-running instance
+  presents that instance's window unchanged and prints a note that its `--ui`
+  was not applied; close the app and start it again to switch. The forwarded
+  activation carries only the package and the page, because older builds fix
+  its shape.
+- **`ctl open <page>`** presents the window either way. In the new interface it
+  answers `not-in-new-ui`, with exit status 1, until that page is ported. When
+  no app is running, `ctl open` launches the classic interface.
+- **The seams.** `Application` talks to its window only through the
+  `WindowServices` Protocol (`ui/window_services.py`), which mypy checks both
+  windows against. Runtime status goes through one `RuntimeStatusModel`
+  (`ui/status_model.py`). The classic window receives it through a forwarding
+  subscriber; the new window subscribes directly.
+
 ## Licence
 
 MIT. See [`LICENSE`](LICENSE).

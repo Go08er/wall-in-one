@@ -482,8 +482,25 @@ XDG directories -- never the real one.
 The redesigned interface is being ported from `prototypes/ui-redesign` behind a
 hidden flag. `wall-in-one --ui=next` builds `ui/next/window.py`'s `NextWindow`
 instead of the classic window; `--ui=classic`, or no flag, is today's app.
-For now `NextWindow` is a placeholder that shows the live runtime status and the
-library size, and says which pages are not ported yet.
+
+- **What it has so far.** The redesign's sidebar, header and player bar, and a
+  paged Library grid with the details pane beside it, all over the app's real
+  library, stores and runtime status. Its only changes are **Apply** (to all
+  displays, or the display the player bar is scoped to) and **favorites**; the
+  playback controls are shown but off, and there is no undo yet. The player bar
+  says what the runtime reports and why ("Evening · from schedule", "Your
+  pick"). Store, Playlists, Schedule, Displays and Settings say they are not in
+  the new interface yet.
+- **Read-only states.** A store saved by a newer version turns Apply and
+  favorites off and says so in a notice under the header, as do settings keys
+  this version doesn't know.
+- **Its own preferences.** The window style (solid, translucent or frosted), its
+  opacity and frost dials and the thumbnail size live in `ui.toml`, written only
+  when you change one of them.
+- **One set of widgets.** The shell, player bar, Library and details pane in
+  `ui/next/` are the prototype's: `prototypes/ui-redesign` runs the same modules
+  over its dummy data, through the `AppState` Protocol in `ui/next/state.py`.
+  `ui/next/real_state.py` is the app's side of that boundary.
 
 - **One process, one interface.** The choice belongs to the process that starts
   the app. A second `wall-in-one --ui=…` that reaches an already-running instance
@@ -492,8 +509,9 @@ library size, and says which pages are not ported yet.
   activation carries only the package and the page, because older builds fix
   its shape.
 - **`ctl open <page>`** presents the window either way. In the new interface it
-  answers `not-in-new-ui`, with exit status 1, until that page is ported. When
-  no app is running, `ctl open` launches the classic interface.
+  answers `not-in-new-ui`, with exit status 1, until that page is ported; the
+  Library (`media`) is. When no app is running, `ctl open` launches the classic
+  interface.
 - **The seams.** `Application` talks to its window only through the
   `WindowServices` Protocol (`ui/window_services.py`), which mypy checks both
   windows against. Runtime status goes through one `RuntimeStatusModel`

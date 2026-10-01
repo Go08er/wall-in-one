@@ -139,7 +139,7 @@ window. The `displays` spelling is an alias for the Display schedules page, so
 a shell or panel integration does not have to know that both concepts share one
 screen. An app started with the in-progress `--ui=next` interface still
 presents its window. Until that page is ported it answers with kind
-`not-in-new-ui` and exit status 1.
+`not-in-new-ui` and exit status 1; `media` (the Library) is ported.
 
 `providers`, `search` and `download` reach the same provider code the Store
 tab uses, so a wallpaper can be found and pulled into the library without

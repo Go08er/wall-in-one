@@ -76,8 +76,11 @@ existing key, ever again; an older release would read either one as a typo.
 
 - New preferences for the window itself (glass style, opacity, frost,
   thumbnail size, the page to reopen) go in `ui.toml`, beside
-  `settings.toml`. Today's interface never reads or writes it; it is there
-  for the new interface.
+  `settings.toml`. The classic interface never reads or writes it. The new
+  interface (`--ui=next`) reads it when its window opens and writes it only
+  when you change the window style, an opacity or frost dial, or the
+  thumbnail size: never on start, while idle or on close. It does not save
+  the page to reopen or the window size.
 - New wallpaper behavior goes in a versioned authoring store, with a version
   bump.
 

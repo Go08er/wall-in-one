@@ -373,18 +373,6 @@ def make_palettes() -> list[Palette]:
 # ---------------------------------------------------------------------------
 
 
-def cover_keys(playlist: Playlist) -> tuple[tuple[str, int, bool], ...]:
-    """The pictures of a playlist's cover: its first four different wallpapers."""
-    seen: list[tuple[str, int, bool]] = []
-    for entry in playlist.entries:
-        key = BY_ID[entry].key
-        if key not in seen:
-            seen.append(key)
-        if len(seen) == 4:
-            break
-    return tuple(seen)
-
-
 PLAYLISTS: list[Playlist] = [
     Playlist(
         "frog-day",

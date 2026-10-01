@@ -91,12 +91,20 @@ class AppState(GObject.Object):
         "navigate": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self) -> None:
+    def __init__(self, library: list[Wallpaper] | None = None) -> None:
+        """``library`` replaces the demo's wallpapers (e.g. thousands, to test paging)."""
         super().__init__()
         # A fixed demo clock keeps screenshots reproducible: Wednesday afternoon.
         self.now = dt.datetime(2026, 9, 30, 14, 35)
-        self.wallpapers = data.WALLPAPERS
-        self._wallpaper_index = data.BY_ID
+        # The demo's lists are shared module data (every AppState sees the same
+        # library, playlists and rules), as the screenshot tour and smoke test expect.
+        if library is None:
+            self.wallpapers = data.WALLPAPERS
+            self._wallpaper_index = data.BY_ID
+        else:
+            self.wallpapers = library
+            self._wallpaper_index = {wallpaper.id: wallpaper for wallpaper in library}
+        self._playlist_index = data.PLAYLIST_BY_ID
         self.playlists = data.PLAYLISTS
         self.rules = data.RULES
         self.fallback = data.FALLBACK_PLAYLIST
@@ -266,7 +274,7 @@ class AppState(GObject.Object):
         return self._wallpaper_index[wid]
 
     def playlist(self, pid: str) -> Playlist:
-        return data.PLAYLIST_BY_ID[pid]
+        return self._playlist_index[pid]
 
     def connectors(self) -> list[str]:
         return [display.connector for display in self.displays]
@@ -324,7 +332,7 @@ class AppState(GObject.Object):
             if connector in self.manual:
                 continue
             pid = self.resolution(connector).playlist
-            entries = self.playlist(pid).entries if pid in data.PLAYLIST_BY_ID else []
+            entries = self.playlist(pid).entries if pid in self._playlist_index else []
             if entries and self.current.get(connector) not in entries:
                 self.current[connector] = entries[0]
         self.emit_changed("schedule", "now")
@@ -536,14 +544,14 @@ class AppState(GObject.Object):
     def set_shuffle(self, value: bool, scope: str | None = None) -> None:
         for connector in self.targets(scope):
             playlist_id = self.effective_playlist(connector)
-            if playlist_id in data.PLAYLIST_BY_ID:
+            if playlist_id in self._playlist_index:
                 self.playlist(playlist_id).shuffle = value
         self.emit_changed("playback", "playlists")
 
     def shuffle_on(self, scope: str | None = None) -> bool:
         connector = self.targets(scope)[0]
         playlist_id = self.effective_playlist(connector)
-        return playlist_id in data.PLAYLIST_BY_ID and self.playlist(playlist_id).shuffle
+        return playlist_id in self._playlist_index and self.playlist(playlist_id).shuffle
 
     # -- library: queries ------------------------------------------------------
     def has_wallpaper(self, wid: str) -> bool:
@@ -754,10 +762,10 @@ class AppState(GObject.Object):
 
     # -- playlists: queries -----------------------------------------------------
     def has_playlist(self, pid: str) -> bool:
-        return pid in data.PLAYLIST_BY_ID
+        return pid in self._playlist_index
 
     def playlist_name(self, pid: str) -> str:
-        return data.PLAYLIST_BY_ID[pid].name if pid in data.PLAYLIST_BY_ID else "Missing playlist"
+        return self._playlist_index[pid].name if pid in self._playlist_index else "Missing playlist"
 
     def playlist_cover(self, pid: str, size: int) -> Gdk.Texture:
         """A 2x2 mosaic of the playlist's first four different wallpapers (cached)."""
@@ -775,11 +783,11 @@ class AppState(GObject.Object):
         """A new, empty playlist after the user's others; returns its id."""
         base = name.lower().replace(" ", "-")
         pid, number = base, 2
-        while pid in data.PLAYLIST_BY_ID:  # a second "Frog day" must not replace the first
+        while pid in self._playlist_index:  # a second "Frog day" must not replace the first
             pid, number = f"{base}-{number}", number + 1
         playlist = Playlist(pid, name, [])
         self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
-        data.PLAYLIST_BY_ID[pid] = playlist
+        self._playlist_index[pid] = playlist
         self.emit_changed("playlists")
         return pid
 
@@ -814,18 +822,18 @@ class AppState(GObject.Object):
         while name in names:
             name, number = f"{source.name} (copy {number})", number + 1
         copy_id, number = f"{source.id}-copy", 2
-        while copy_id in data.PLAYLIST_BY_ID:
+        while copy_id in self._playlist_index:
             copy_id, number = f"{source.id}-copy-{number}", number + 1
         copy = Playlist(copy_id, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
         user_count = len([p for p in playlists if not p.automatic])
         playlists.insert(playlists.index(source) + 1 if not source.automatic else user_count, copy)
-        data.PLAYLIST_BY_ID[copy_id] = copy
+        self._playlist_index[copy_id] = copy
         self.emit_changed("playlists")
 
         def undo() -> None:
             if copy in playlists:
                 playlists.remove(copy)
-            data.PLAYLIST_BY_ID.pop(copy_id, None)
+            self._playlist_index.pop(copy_id, None)
             self.emit_changed("playlists")
 
         return copy_id, name, undo
@@ -845,12 +853,12 @@ class AppState(GObject.Object):
         for connector in [c for c, p in self.manual.items() if p == pid]:
             del self.manual[connector]
         playlists.remove(playlist)
-        data.PLAYLIST_BY_ID.pop(pid, None)
+        self._playlist_index.pop(pid, None)
         self.emit_changed("playlists", "schedule", "displays", "now", "playback")
 
         def undo() -> None:
             playlists.insert(min(position, len(playlists)), playlist)
-            data.PLAYLIST_BY_ID[pid] = playlist
+            self._playlist_index[pid] = playlist
             for index, rule in rules:
                 self.rules.insert(min(index, len(self.rules)), rule)
             self.assigned.clear()
@@ -1121,7 +1129,7 @@ class AppState(GObject.Object):
                     )
                 connector = self.connectors()[0]
                 playlist_id = self.effective_playlist(connector)
-                interval = self.playlist(playlist_id).interval if playlist_id in data.PLAYLIST_BY_ID else 0
+                interval = self.playlist(playlist_id).interval if playlist_id in self._playlist_index else 0
                 self.next_change_minutes += interval or self.default_interval
         self.emit_changed("schedule", "now", "playback", "clock")
 

@@ -8,13 +8,16 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
-from .. import thumbs, ui
+from .. import art, thumbs, ui
 from ..catalog import KIND_LABEL
 from ..models import Wallpaper
 from . import Page
 from .inspector import Inspector
 
 SORTS = [("added", "Recently added"), ("name", "Name"), ("kind", "Type"), ("color", "Color")]
+#: Cards are built a page at a time, like the real app's grid (MEDIA_PAGE_SIZE in
+#: ui/grid.py), so a library of thousands builds 72 cards, not thousands.
+PAGE_SIZE = 72
 
 
 class LibraryPage(Page):
@@ -30,8 +33,10 @@ class LibraryPage(Page):
         self._card_width = 208
         self._select_mode = False
         self._selected: set[str] = set()
-        self._cards: dict[str, ui.WallpaperCard] = {}
+        self._cards: dict[str, ui.WallpaperCard] = {}  # only the wallpapers with a card now
         self._inspected: str | None = None
+        self._limit = PAGE_SIZE  # how many of the matching wallpapers get a card
+        self._matching = 0
 
         # -- header ------------------------------------------------------------
         self.search = Gtk.SearchEntry(placeholder_text="Search wallpapers, tags, folders")
@@ -100,8 +105,17 @@ class LibraryPage(Page):
             margin_top=20,  # clears the lower half of the hanging Select pill
             margin_bottom=18,
         )
+        # Only the first pages of the filtered, sorted library are cards; "Show
+        # more" adds a page. Filtering, sorting and counting see every wallpaper.
+        self._more = Gtk.Button(halign=Gtk.Align.CENTER, margin_bottom=18, visible=False)
+        self._more.add_css_class("pill")
+        self._more.set_tooltip_text("Show another page of wallpapers")
+        self._more.connect("clicked", lambda *_: self._show_more())
+        pages = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.START)
+        pages.append(self.flow)
+        pages.append(self._more)
         scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        scroller.set_child(self.flow)
+        scroller.set_child(pages)
         self._empty = Adw.StatusPage(
             icon_name="edit-find-symbolic",
             title="No wallpapers match",
@@ -326,36 +340,14 @@ class LibraryPage(Page):
 
     # -- building ----------------------------------------------------------------------
     def _rebuild(self) -> None:
+        """The state changed: drop every card and build the current pages again
+        (how many pages are shown survives, as in the real app)."""
         for card in self._cards.values():
             if card._menu is not None:
                 card._menu.unparent()
         self.flow.remove_all()
         self._cards = {}
-        playing: dict[str, list[str]] = {}
-        for connector, wid in self.state.current.items():
-            playing.setdefault(wid, []).append(connector)
-        for wallpaper in self.state.wallpapers:
-            menu = self._card_menu(wallpaper)
-            card = ui.WallpaperCard(
-                wallpaper,
-                width=self._card_width,
-                playing_on=playing.get(wallpaper.id),
-                on_open=self._on_card,
-                on_apply=lambda w: self.state.apply(w.id, self.state.scope),
-                apply_tooltip=self._apply_target,
-                on_favorite=lambda w: self.state.toggle_favorite(w.id),
-                menu=menu,
-                **ui.card_colors(self.state, wallpaper),
-            )
-            card.set_selected(wallpaper.id == self._inspected)
-            if self._select_mode:
-                card.set_selectable(True)
-                card.set_checked(wallpaper.id in self._selected)
-            self._attach_drag(card, wallpaper)
-            self._cards[wallpaper.id] = card
-            self.flow.append(card)
-        self._apply_sort()
-        self._apply_filter()
+        self._materialize()
         problems = [w for w in self.state.wallpapers if w.problem]
         self._notice.set_title(
             f"{len(problems)} wallpaper is being skipped after a playback problem"
@@ -363,7 +355,62 @@ class LibraryPage(Page):
             else f"{len(problems)} wallpapers are being skipped after playback problems"
         )
         self._notice.set_revealed(bool(problems))
+
+    def _matches(self) -> list[Wallpaper]:
+        """Every wallpaper that passes the filters, in the chosen order."""
+        order = {wallpaper.id: index for index, wallpaper in enumerate(self.state.wallpapers)}
+        matching = [wallpaper for wallpaper in self.state.wallpapers if self._visible(wallpaper)]
+        return sorted(matching, key=lambda wallpaper: self._sort_key(wallpaper, order))
+
+    def _materialize(self) -> None:
+        """Give cards to the first ``self._limit`` matches, plus the wallpapers on
+        screen and the one whose details are open wherever they sort (the real
+        app keeps current tiles past page one too). Cards that still fit are kept."""
+        matches = self._matches()
+        keep = set(self.state.current.values()) | {self._inspected}
+        wanted = [w for index, w in enumerate(matches) if index < self._limit or w.id in keep]
+        wanted_ids = {wallpaper.id for wallpaper in wanted}
+        for wid in [wid for wid in self._cards if wid not in wanted_ids]:
+            card = self._cards.pop(wid)
+            if card._menu is not None:
+                card._menu.unparent()
+        self.flow.remove_all()
+        for wallpaper in wanted:
+            card = self._cards.get(wallpaper.id) or self._card(wallpaper)
+            self._cards[wallpaper.id] = card
+            self.flow.append(card)
+        self._matching = len(matches)
         self._update_count()
+
+    def _card(self, wallpaper: Wallpaper) -> ui.WallpaperCard:
+        playing = [connector for connector, wid in self.state.current.items() if wid == wallpaper.id]
+        card = ui.WallpaperCard(
+            wallpaper,
+            width=self._card_width,
+            playing_on=playing or None,
+            on_open=self._on_card,
+            on_apply=lambda w: self.state.apply(w.id, self.state.scope),
+            apply_tooltip=self._apply_target,
+            on_favorite=lambda w: self.state.toggle_favorite(w.id),
+            menu=self._card_menu(wallpaper),
+            **ui.card_colors(self.state, wallpaper),
+        )
+        card.set_selected(wallpaper.id == self._inspected)
+        if self._select_mode:
+            card.set_selectable(True)
+            card.set_checked(wallpaper.id in self._selected)
+        self._attach_drag(card, wallpaper)
+        return card
+
+    def _show_more(self) -> None:
+        """Add a page of cards without rebuilding the ones already shown."""
+        self._limit += PAGE_SIZE
+        self._materialize()
+
+    def _refilter(self) -> None:
+        """A new search, filter or order starts again from one page."""
+        self._limit = PAGE_SIZE
+        self._materialize()
 
     def _attach_drag(self, card: ui.WallpaperCard, wallpaper: Wallpaper) -> None:
         source = Gtk.DragSource(actions=Gdk.DragAction.COPY)
@@ -398,34 +445,24 @@ class LibraryPage(Page):
             return all(word in haystack.lower() for word in self._query.lower().split())
         return True
 
-    def _apply_filter(self) -> None:
-        for card in self._cards.values():
-            card.set_visible(self._visible(card.wallpaper))
-        self.flow.queue_resize()
-        self._update_count()
-
-    def _sort_key(self, wallpaper: Wallpaper):
+    def _sort_key(self, wallpaper: Wallpaper, order: dict[str, int]):
         if self._sort == "name":
             return wallpaper.name.lower()
         if self._sort == "kind":
             return (wallpaper.kind, wallpaper.name.lower())
         if self._sort == "color":
-            from .. import art
-
             return art.look_for(*wallpaper.key).hue
-        return [w.id for w in self.state.wallpapers].index(wallpaper.id)
-
-    def _apply_sort(self) -> None:
-        ordered = sorted(self._cards.values(), key=lambda card: self._sort_key(card.wallpaper))
-        self.flow.remove_all()
-        for card in ordered:
-            self.flow.append(card)
+        return order[wallpaper.id]
 
     def _update_count(self) -> None:
-        shown = sum(1 for w in self.state.wallpapers if self._visible(w))
+        shown = self._matching
         total = len(self.state.wallpapers)
         self._count.set_label(f"{shown} of {total}" if shown != total else f"{total} wallpapers")
         self._grid_stack.set_visible_child_name("grid" if shown else "empty")
+        remaining = shown - len(self._cards)
+        self._more.set_visible(remaining > 0)
+        if remaining > 0:
+            self._more.set_label(f"Show {min(PAGE_SIZE, remaining)} more · {len(self._cards)} of {shown} shown")
 
     # -- callbacks ------------------------------------------------------------------------
     def _on_changed(self, _state, topic: str) -> None:
@@ -434,15 +471,15 @@ class LibraryPage(Page):
 
     def _on_search(self, entry: Gtk.SearchEntry) -> None:
         self._query = entry.get_text().strip()
-        self._apply_filter()
+        self._refilter()
 
     def _on_kind(self, group: Adw.ToggleGroup, _param) -> None:
         self._kind = group.get_active_name()
-        self._apply_filter()
+        self._refilter()
 
     def _on_fav(self, button: Gtk.ToggleButton) -> None:
         self._favorites = button.get_active()
-        self._apply_filter()
+        self._refilter()
 
     def _clear_filters(self) -> None:
         self.search.set_text("")
@@ -453,7 +490,7 @@ class LibraryPage(Page):
         self._sort = key
         self._sort_content.set_label("" if self._narrow else dict(SORTS)[key])
         self._sort_button.set_tooltip_text(f"Sorted by {dict(SORTS)[key].lower()} · sort and size")
-        self._apply_sort()
+        self._refilter()
 
     def _set_narrow(self, narrow: bool) -> None:
         """Narrow windows: Favorites and Sort keep their icons, lose their words."""
@@ -502,6 +539,8 @@ class LibraryPage(Page):
         self._inspected = wallpaper.id
         if previous in self._cards:
             self._cards[previous].set_selected(False)
+        if wallpaper.id not in self._cards and self._visible(wallpaper):
+            self._materialize()  # past the pages shown: give it a card so it is outlined
         if wallpaper.id in self._cards:  # it may have been removed from the library
             self._cards[wallpaper.id].set_selected(True)
         self.inspector.show(wallpaper)
@@ -535,7 +574,8 @@ class LibraryPage(Page):
             self._selected.discard(wid)
         else:
             self._selected.add(wid)
-        self._cards[wid].set_checked(wid in self._selected)
+        if wid in self._cards:
+            self._cards[wid].set_checked(wid in self._selected)
         self._update_selection_bar()
 
     def select_all(self) -> None:

@@ -16,7 +16,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib
 from wio_demo import art, data, store_catalog, thumbs, ui
-from wio_demo.models import Rule
+from wio_demo.models import Rule, Wallpaper
+from wio_demo.pages import library as library_page
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
 
@@ -75,6 +76,60 @@ def check_thumbnails_off_main_thread(library) -> None:
     assert not on_main, f"card thumbnails drawn on {set(on_main)}"
     blank = [card.wallpaper.id for card in library._cards.values() if card.frame.get_child()._paintable is None]
     assert not blank, f"cards still showing placeholders: {blank}"
+
+
+def check_library_paging() -> None:
+    """A library of 2,000 builds one page of cards; "Show more" adds a page; a new
+    search or order starts from one page again; wallpapers on screen and the one
+    being inspected keep their cards wherever they sort."""
+    base = list(data.WALLPAPERS)
+    extra = [
+        Wallpaper(
+            f"generated-{n:04d}",
+            f"Generated {n:04d}",
+            "still",
+            art.STYLES[n % len(art.STYLES)],
+            1000 + n,
+            n % 2 == 1,
+            "Local",
+            "~/Pictures/Wallpapers",
+            "3840 × 2160",
+            "6.2 MB",
+            "12 Sep",
+        )
+        for n in range(2000 - len(base))
+    ]
+    state = AppState(library=base + extra)
+    page = library_page.create(state)
+    size = library_page.PAGE_SIZE
+    assert len(page._cards) == size, len(page._cards)
+    assert thumbs.LOADER.pending() <= size, thumbs.LOADER.pending()
+    assert page._more.get_visible() and page._more.get_label() == f"Show {size} more · {size} of 2000 shown"
+    page._show_more()
+    assert len(page._cards) == 2 * size and f"{2 * size} of 2000" in page._more.get_label()
+    search = page.search
+
+    def find(text: str) -> None:
+        search.set_text(text)
+        page._on_search(search)  # search-changed itself comes after a short delay
+
+    find("generated 15")  # words match anywhere: 0015, 0150…0159, 1500…1599, …
+    count = sum(1 for wallpaper in extra if "15" in wallpaper.name)
+    assert page._matching == count and len(page._cards) == min(size, count), (page._matching, count)
+    assert page._more.get_visible() == (count > size)
+    find("generated 1500")
+    assert page._matching == 1 and list(page._cards) == ["generated-1500"] and not page._more.get_visible()
+    find("")
+    assert len(page._cards) == size
+    page._set_sort("name")  # "Lily pond" and "Rainy window" (on screen) sort past the first page
+    assert len(page._cards) == size + 2 and {"lily-pond", "rain-window"} <= set(page._cards)
+    page.inspect(state.wallpaper("generated-1500"))
+    assert "generated-1500" in page._cards and len(page._cards) == size + 3
+    page._select.set_active(True)
+    page.select_all()
+    assert len(page._selected) == len(page._cards) == size + 3  # "every wallpaper shown"
+    page._select.set_active(False)
+    settle(lambda: not thumbs.LOADER.pending(), 20)
 
 
 def inspector_colors(state, library) -> None:
@@ -383,6 +438,7 @@ def build_steps(app, holder):
     steps.append(
         ("thumbnails off the main thread", lambda: (w().navigate("library"), check_thumbnails_off_main_thread(lib())))
     )
+    steps.append(("library paging", check_library_paging))
     for wallpaper in data.WALLPAPERS:
         steps.append((f"inspect {wallpaper.id}", lambda wp=wallpaper: (w().navigate("library"), lib().inspect(wp))))
     for mode in ("palette", "keep", "adaptive"):

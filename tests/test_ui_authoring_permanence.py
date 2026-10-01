@@ -1459,3 +1459,59 @@ def test_unchanged_pairing_refresh_keeps_editor_widgets(tmp_path: Path) -> None:
     assert page._editor_scroll.get_vadjustment().get_value() == 29.0
     page.shutdown()
     session.shutdown()
+
+
+class _StatusScheduleApp(ScheduleApp):
+    def __init__(self, session: Session) -> None:
+        super().__init__(session)
+        self.runtime_status: dict[str, object] | None = None
+
+
+def test_a_named_rule_is_shown_by_name_and_editing_it_keeps_the_name(tmp_path: Path) -> None:
+    """Rules are keyed by id everywhere; the name is what a person reads."""
+    initial, playlist, _items = _session(tmp_path)
+    rules = schedules.Store(path=tmp_path / "schedules.json")
+    rules.add(playlist.id, weekdays=("sat",), rule_id="frog", name="Frog & toad")
+    rules.add(playlist.id, months=(2,), rule_id="plain")
+    session = Session(
+        config.Settings(active_playlist=playlist.id),
+        scanner=lambda _roots: initial.library,
+        playlist_store=initial.playlists,
+        schedule_store=rules,
+    )
+    initial.shutdown()
+    session.refresh()
+    application = _StatusScheduleApp(session)
+    application.runtime_status = {
+        "playlist_id": playlist.id,
+        "playlist": playlist.name,
+        "source": "schedule",
+        "schedule": {
+            "following": True,
+            "playlist_id": playlist.id,
+            "playlist": playlist.name,
+            "rule_id": "frog",
+        },
+    }
+    page = SchedulesPage(application)  # type: ignore[arg-type]
+    page.refresh(session)
+
+    named, plain = (cast(Adw.SwitchRow, row) for row in page._rule_rows[:2])
+    assert named.get_title() == "Frog & toad"
+    assert named.get_use_markup() is False
+    assert named.get_subtitle() == "Evening · All displays · priority 1 · sat"
+    assert plain.get_title() == "Evening"
+    assert plain.get_subtitle() == "All displays · priority 2 · months 2"
+    playback = page._playback_row
+    assert playback is not None
+    assert playback.get_subtitle() == "Following schedule · rule Frog & toad selects Evening."
+
+    page._edit_rule(rules.rules[0])
+    page._weekdays[6].set_active(True)
+    page._rule_commit.emit("clicked")
+
+    assert application.published == 1
+    assert rules.rules[0].name == "Frog & toad"
+    assert rules.rules[0].weekdays == frozenset({5, 6})
+    assert schedules.Store.open(tmp_path / "schedules.json").rules[0].name == "Frog & toad"
+    session.shutdown()

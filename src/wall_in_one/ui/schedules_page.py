@@ -220,6 +220,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             title="Active playlist",
             subtitle=self._playback_description(session, truth),
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
+            # Playlist and rule names are the person's text, never markup.
+            use_markup=False,
         )
         row.set_selected(self._playback_selected(session, choices, truth))
         self._playback_row = row
@@ -336,7 +338,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         connector: str,
         choices: tuple[Any, ...],
     ) -> _DisplayControls:
-        row = Adw.ExpanderRow(title=connector)
+        row = Adw.ExpanderRow(title=connector, use_markup=False)
         playlist = Adw.ComboRow(
             title="Active playlist",
             model=Gtk.StringList.new(
@@ -429,7 +431,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
             display.playlist_id,
             display.entry_id,
         )
-        description = self._display_playback_description(display, truth, taboo=taboo)
+        description = self._display_playback_description(
+            display, truth, taboo=taboo, rule_names=self._rule_names(self._session)
+        )
         controls.row.set_subtitle(description)
         diagnostic = (
             display.automatic_retry.reason
@@ -498,11 +502,19 @@ class SchedulesPage(Gtk.ScrolledWindow):
         return 0
 
     @staticmethod
+    def _rule_names(session: Session | None) -> dict[str, str]:
+        """Rule id to name, for the named rules: the runtime reports ids only."""
+        if session is None:
+            return {}
+        return {rule.id: rule.name for rule in session.schedules.rules if rule.name is not None}
+
+    @staticmethod
     def _display_playback_description(
         display: runtime_truth.DisplayRuntimeTruth,
         truth: runtime_truth.RuntimeTruth,
         *,
         taboo: bool,
+        rule_names: dict[str, str] | None = None,
     ) -> str:
         if display.automatic_retry is not None:
             retry = display.automatic_retry
@@ -523,9 +535,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
         if display.route_source == "manual":
             route = "Manual override"
         elif display.route_source == "schedule":
+            rule_id = display.schedule_rule_id
             route = (
-                f"Schedule rule {display.schedule_rule_id}"
-                if display.schedule_rule_id
+                f"Schedule rule {(rule_names or {}).get(rule_id, rule_id)}"
+                if rule_id
                 else "Scheduled override"
             )
         elif display.route_source == "assignment":
@@ -609,8 +622,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         if truth.is_multi_display:
             return "Following schedule · screens use their assigned or default playlists."
         if truth.schedule_rule_id is not None:
+            rule = SchedulesPage._rule_names(session).get(
+                truth.schedule_rule_id, truth.schedule_rule_id
+            )
             return (
-                f"Following schedule · rule {truth.schedule_rule_id} selects "
+                f"Following schedule · rule {rule} selects "
                 f"{truth.scheduled_playlist or truth.playlist}."
             )
         return f"Following schedule · default selects {truth.scheduled_playlist or truth.playlist}."
@@ -719,10 +735,14 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if rule.id not in materialised_ids:
                 continue
             target = rule.connector or "All displays"
+            playlist = names.get(rule.playlist, f"Missing playlist {rule.playlist}")
+            # A named rule leads with its name and still says what it plays.
+            details = f"{target} · priority {index + 1} · {rule.describe()}"
             row = Adw.SwitchRow(
-                title=names.get(rule.playlist, f"Missing playlist {rule.playlist}"),
-                subtitle=f"{target} · priority {index + 1} · {rule.describe()}",
+                title=playlist if rule.name is None else rule.name,
+                subtitle=details if rule.name is None else f"{playlist} · {details}",
                 active=rule.enabled,
+                use_markup=False,
             )
             row.connect("notify::active", self._make_enabled(rule.id))
             actions = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)

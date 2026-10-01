@@ -630,3 +630,29 @@ def test_schedule_targets_include_live_runtime_connector_when_gdk_is_unnamed(
     page.refresh(application.session)
 
     assert "niri-DP-7" in page._rule_connectors
+
+
+@pytest.mark.parametrize(("name", "shown"), [("Dock & desk", "Dock & desk"), (None, "dock")])
+def test_a_display_following_a_rule_names_it_when_the_rule_has_a_name(
+    monkeypatch: pytest.MonkeyPatch, name: str | None, shown: str
+) -> None:
+    """The runtime reports the rule's id; the page says what the person called it."""
+    monkeypatch.setattr(schedules_page, "_connected_outputs", lambda: ("DP-9",))
+    application = _schedule_app(config.DISPLAY_MODE_INDEPENDENT)
+    application.session.schedules = SimpleNamespace(
+        rules=(schedules.Rule(id="dock", playlist="evening", connector="DP-9", name=name),)
+    )
+    status = _display_runtime_status()
+    raw_displays = status["displays"]
+    assert isinstance(raw_displays, list)
+    display = raw_displays[0]
+    assert isinstance(display, dict)
+    display.update(route_source="schedule", manual_override=False, schedule_rule_id="dock")
+    application.runtime_status = status
+    page = schedules_page.SchedulesPage(application)  # type: ignore[arg-type]
+
+    page.refresh(application.session)
+
+    row = page._display_playback_rows["DP-9"].row
+    assert (row.get_subtitle() or "").startswith(f"Schedule rule {shown} · Evening · ")
+    assert row.get_use_markup() is False

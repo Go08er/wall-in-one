@@ -110,11 +110,11 @@ class _Journal:
 
     @property
     def settings_token(self) -> str:
-        return hashlib.sha256(f"{self.adoption_id}:settings".encode()).hexdigest()[:32]
+        return _role_token(self.adoption_id, "settings")
 
     @property
     def runtime_token(self) -> str:
-        return hashlib.sha256(f"{self.adoption_id}:runtime".encode()).hexdigest()[:32]
+        return _role_token(self.adoption_id, "runtime")
 
     @property
     def adoption(self) -> adopted.Adoption:
@@ -148,6 +148,11 @@ class _Completion:
 
 def _sha256(contents: bytes) -> str:
     return hashlib.sha256(contents).hexdigest()
+
+
+def _role_token(adoption_id: str, role: Literal["settings", "runtime"]) -> str:
+    """The first durable claim token for one replaced file of one adoption."""
+    return hashlib.sha256(f"{adoption_id}:{role}".encode()).hexdigest()[:32]
 
 
 def _hex(value: object, *, length: int, label: str) -> str:
@@ -1883,6 +1888,54 @@ def _recover_claim_slots(
             recovered.close()
         raise
     return recovered, available
+
+
+@dataclass(frozen=True, slots=True)
+class FinishedClaims:
+    """Where a completed upgrade left its durable claims, and their tokens.
+
+    Each slot directory beside ``settings.toml`` or ``runtime.toml`` that is
+    named for one of these tokens can only hold the predecessor generation
+    the upgrade replaced (or nothing). See :func:`finished_claims`.
+    """
+
+    adoption_id: str
+    settings_parent: Path
+    settings_tokens: frozenset[str]
+    runtime_parent: Path
+    runtime_tokens: frozenset[str]
+
+
+def finished_claims() -> FinishedClaims | None:
+    """The replay slots of a *completed* deployed upgrade, read-only; else ``None``.
+
+    Completion is the commit boundary, and nothing reads these slots after it:
+    :func:`probe_future` reports ``complete`` from the marker and manifest
+    without recovering, trusting or allocating a slot; :func:`ensure` then
+    retires only the authenticated journal and stage; and the slot clearance
+    check runs only for a ``ready`` predecessor, which a completion marker
+    rules out because the future probe answers first. The tokens derive from
+    the marker's adoption id exactly as the transaction derived them.
+
+    ``None`` whenever :func:`probe` is not ``complete`` or the marker cannot
+    be read: then nothing is proven and every slot must stay where it is.
+    """
+    try:
+        if probe().status != "complete":
+            return None
+        record = _read_completion()
+    except deployed_upgrade.UpgradeError, TransactionError, OSError, ValueError:
+        return None
+    if record is None:
+        return None
+    adoption_id = record[0].adoption_id
+    return FinishedClaims(
+        adoption_id=adoption_id,
+        settings_parent=paths.settings_path().parent,
+        settings_tokens=frozenset(_claim_tokens(_role_token(adoption_id, "settings"))),
+        runtime_parent=paths.runtime_config_path().parent,
+        runtime_tokens=frozenset(_claim_tokens(_role_token(adoption_id, "runtime"))),
+    )
 
 
 def _pin_replacement_source(

@@ -1716,3 +1716,48 @@ def test_cleaned_completion_is_historical_after_later_settings_edit(
 
     assert not resumed.changed
     assert resumed.status == "complete"
+
+
+def test_finished_claims_name_the_slots_a_completed_upgrade_left_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tidy up archives only slots this proves; the derivation must not drift."""
+    _profile(tmp_path, monkeypatch, videos=1)
+    monkeypatch.setattr(stills, "generate", _forbid_decoder)
+    monkeypatch.setattr(stills, "capture_scene", _forbid_decoder)
+    monkeypatch.setattr(scenes, "screenshot", _forbid_decoder)
+    assert deployed_upgrade_transaction.finished_claims() is None, "a predecessor proves nothing"
+
+    deployed_upgrade_transaction.ensure(cutover=False)
+    journal_record = deployed_upgrade_transaction._read_journal()
+    assert journal_record is not None
+    journal, _raw = journal_record
+    assert deployed_upgrade_transaction.finished_claims() is None, "prepared is not finished"
+
+    deployed_upgrade_transaction.ensure()
+    before = _snapshot()
+    finished = deployed_upgrade_transaction.finished_claims()
+
+    assert _snapshot() == before, "finished_claims is read-only"
+    assert finished is not None
+    assert finished.adoption_id == journal.adoption_id
+    assert finished.settings_parent == paths.settings_path().parent
+    assert finished.runtime_parent == paths.runtime_config_path().parent
+    assert finished.settings_tokens == frozenset(
+        deployed_upgrade_transaction._claim_tokens(journal.settings_token)
+    )
+    assert finished.runtime_tokens == frozenset(
+        deployed_upgrade_transaction._claim_tokens(journal.runtime_token)
+    )
+    left = {
+        (path.parent, path.name.removeprefix(file_io.DELETION_CLAIM_PREFIX))
+        for parent in (finished.settings_parent, finished.runtime_parent)
+        for path in parent.glob(f"{file_io.DELETION_CLAIM_PREFIX}*")
+    }
+    assert left == {
+        (finished.settings_parent, journal.settings_token),
+        (finished.runtime_parent, journal.runtime_token),
+    }
+    assert "roots = []" in (
+        finished.settings_parent / f"{file_io.DELETION_CLAIM_PREFIX}{journal.settings_token}"
+    ).joinpath("entry").read_text(encoding="utf-8")

@@ -242,7 +242,6 @@ def test_generation_reader_turns_pathological_toml_nesting_into_a_config_error()
             "roots[0] cannot expand its path",
         ),
         ('roots = ["~bad\\u0000/Pictures"]\n', "roots[0] cannot expand its path"),
-        ("future_setting = true\n", "unknown setting"),
     ),
 )
 def test_write_config_refuses_semantically_invalid_settings_without_replacing_runtime(

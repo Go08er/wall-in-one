@@ -13,14 +13,12 @@ from wall_in_one import cli, config, paths
     "damaged",
     [
         b"roots = [broken",
-        b"roots = []\nfuture_setting = true\n",
         b'roots = ["~wio_nonexistent_user_20260905/Pictures"]\n',
         b'roots = ["~bad\\u0000/Pictures"]\n',
         b"opacity = " + b"1" + b"0" * 400 + b"\n",
     ],
     ids=[
         "malformed-toml",
-        "unknown-key",
         "missing-home-account",
         "invalid-home-account",
         "oversized-opacity",

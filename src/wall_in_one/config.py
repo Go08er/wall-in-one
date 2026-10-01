@@ -4,6 +4,15 @@ Deliberately small and flat. Noctalia remains the source of truth for the live
 palette and theme mode. Library roots are app-owned because downloads and still
 generation need an explicit write destination; Noctalia's path is only a
 first-run suggestion.
+
+``settings.toml`` is frozen: it has no version field, so no build may add a
+key to it, or a new value to an existing key, ever again. New presentation-only
+preferences belong in the versioned ``ui.toml`` (:mod:`wall_in_one.ui_prefs`);
+new behavior belongs in a versioned authoring store. A file can still contain
+keys this build does not know -- a typo, a hand edit, or a build that broke
+the freeze -- so every reader loads the keys it knows and reports the rest,
+and every writer refuses while they are present. Rewriting the file would
+silently drop them.
 """
 
 from __future__ import annotations
@@ -11,8 +20,9 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import re
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Self
@@ -49,6 +59,59 @@ class ConfigError(Exception):
 
 class MissingSettingsError(ConfigError):
     """Unattended publication was requested before a profile was saved."""
+
+
+#: How many unrecognized keys a message names before summarizing the rest.
+_MAX_NAMED_KEYS: Final = 5
+_MAX_KEY_DISPLAY_CHARS: Final = 64
+_BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def describe_keys(keys: Iterable[str]) -> str:
+    """Name a few keys for a person, bounded and free of control characters.
+
+    The keys come from a file anybody can edit, so one could be enormous or
+    contain a newline. Bare TOML keys are shown as written; anything else is
+    quoted with its control characters escaped.
+    """
+    ordered = tuple(keys)
+    shown: list[str] = []
+    for key in ordered[:_MAX_NAMED_KEYS]:
+        clipped = key[:_MAX_KEY_DISPLAY_CHARS]
+        if _BARE_KEY.fullmatch(clipped):
+            text = clipped
+        else:
+            text = json.dumps(clipped, ensure_ascii=False)
+            text = "".join(
+                character if character.isprintable() else f"\\u{ord(character):04x}"
+                for character in text
+            )
+        shown.append(text + ("…" if len(key) > _MAX_KEY_DISPLAY_CHARS else ""))
+    hidden = len(ordered) - len(shown)
+    if hidden > 0:
+        shown.append(f"and {hidden} more")
+    return ", ".join(shown)
+
+
+def read_only_message(unknown_keys: Sequence[str]) -> str:
+    """Why settings cannot be changed, for refusals, toasts and the banner.
+
+    It starts with the file rather than "Settings ..." because callers prefix
+    it with their own "Settings were not saved; nothing changed: ".
+    """
+    return (
+        "settings.toml has settings this version of Wall-in-One doesn't "
+        f"recognize ({describe_keys(unknown_keys)}); changes are disabled so "
+        "they aren't lost"
+    )
+
+
+class SettingsReadOnlyError(ConfigError):
+    """A write was refused because settings.toml has keys this build lacks."""
+
+    def __init__(self, unknown_keys: Sequence[str]) -> None:
+        self.unknown_keys = tuple(unknown_keys)
+        super().__init__(read_only_message(self.unknown_keys))
 
 
 def _tidy_roots(roots: Sequence[Path]) -> tuple[Path, ...]:
@@ -353,22 +416,65 @@ def _roots_line(roots: Sequence[Path]) -> str:
     return f"roots = [{inner}]"
 
 
+#: Every key this build reads and writes. Frozen with the file: see the module
+#: docstring before adding a field to `Settings`.
+KNOWN_KEYS: Final = frozenset(Settings.__dataclass_fields__)
+
+
+def unknown_keys(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """The top-level keys of a parsed settings document this build lacks."""
+    return tuple(sorted(set(raw) - KNOWN_KEYS))
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedSettings:
+    """Settings built from the known keys, plus the keys that were skipped.
+
+    Unknown keys never reach `Settings`, so nothing derived from it -- the
+    runtime document included -- can depend on them. Their presence only
+    makes the file read-only for this build.
+    """
+
+    settings: Settings
+    unknown_keys: tuple[str, ...] = ()
+
+    @property
+    def read_only(self) -> bool:
+        return bool(self.unknown_keys)
+
+
 def load(path: Path | None = None) -> Settings:
     """Read settings, falling back to defaults when absent or unreadable."""
+    return load_document(path).settings
+
+
+def load_document(path: Path | None = None) -> LoadedSettings:
+    """`load`, also naming any keys this build does not know.
+
+    A malformed document has no trustworthy key list, so it reports none; the
+    strict loader still refuses it, which keeps it out of every write path.
+    """
     target = path if path is not None else paths.settings_path()
     try:
         document = file_io.read_regular_bytes(target, MAX_SETTINGS_BYTES)
         if document is None:
-            return Settings()
+            return LoadedSettings(Settings())
         raw = tomllib.loads(document.decode("utf-8"))
     except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
         # A corrupt settings file should not be fatal; defaults are always
         # usable and the user can fix or delete the file.
-        return Settings()
-    return Settings.from_mapping(raw)
+        return LoadedSettings(Settings())
+    return LoadedSettings(Settings.from_mapping(raw), unknown_keys(raw))
 
 
 def load_strict(path: Path | None = None, *, require_present: bool = False) -> Settings:
+    """Read settings for unattended compilation; see `load_strict_document`."""
+    return load_strict_document(path, require_present=require_present).settings
+
+
+def load_strict_document(
+    path: Path | None = None, *, require_present: bool = False
+) -> LoadedSettings:
     """Read settings for unattended compilation, rejecting unreadable bytes.
 
     The interactive application deliberately recovers from a damaged file so
@@ -379,6 +485,12 @@ def load_strict(path: Path | None = None, *, require_present: bool = False) -> S
     unless the caller is about to publish derived runtime state: that requires
     saved settings so the next startup cannot mistake an orphan runtime for a
     damaged existing profile. A present document must always parse.
+
+    Keys this build does not know are reported, not refused: the known keys
+    still describe exactly what the user chose for everything this build can
+    act on, and the caller decides whether to warn (headless) or go
+    read-only (GUI). A malformed document, or a known key with an invalid
+    value, is still refused.
     """
     target = path if path is not None else paths.settings_path()
     try:
@@ -389,14 +501,19 @@ def load_strict(path: Path | None = None, *, require_present: bool = False) -> S
                     "No Wall-in-One settings have been saved. Open Wall-in-One and "
                     "choose a library folder before starting the wallpaper service."
                 )
-            return Settings()
+            return LoadedSettings(Settings())
     except OSError as error:
         raise ConfigError(f"cannot read {target}: {error}") from error
-    return parse_strict_bytes(document, target)
+    return parse_strict_document(document, target)
 
 
 def parse_strict_bytes(document: bytes, target: Path) -> Settings:
     """Parse a retained settings snapshot without reopening its public path."""
+    return parse_strict_document(document, target).settings
+
+
+def parse_strict_document(document: bytes, target: Path) -> LoadedSettings:
+    """`parse_strict_bytes`, also naming any keys this build does not know."""
     if len(document) > MAX_SETTINGS_BYTES:
         raise ConfigError(f"cannot parse {target}: settings exceed their byte limit")
     try:
@@ -404,7 +521,7 @@ def parse_strict_bytes(document: bytes, target: Path) -> Settings:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as error:
         raise ConfigError(f"cannot parse {target}: {error}") from error
     _validate_strict_mapping(raw, target)
-    return Settings.from_mapping(raw)
+    return LoadedSettings(Settings.from_mapping(raw), unknown_keys(raw))
 
 
 def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
@@ -415,13 +532,12 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
     substituting defaults there can atomically publish a valid but unintended
     runtime document.  Keep the two policies separate and make every known
     unattended value unambiguous before calling the shared mapper.
-    """
 
-    known = frozenset(Settings.__dataclass_fields__)
-    unknown = sorted(set(raw) - known)
-    if unknown:
-        joined = ", ".join(unknown)
-        raise ConfigError(f"cannot use {target}: unknown setting(s): {joined}")
+    Unknown keys are deliberately not checked here. They cannot change what
+    the known keys mean, and refusing them used to stop the headless service
+    (exit 78) over a key nothing in this build would have read. The writers
+    refuse them instead, so they are never dropped.
+    """
 
     booleans = (
         "follow_noctalia_palette",
@@ -565,10 +681,31 @@ def _validate_runtime_text(
         raise ConfigError(f"cannot use {target}: {key} cannot contain control characters")
 
 
+def _refuse_unknown_keys(target: Path) -> None:
+    """Refuse to replace a parseable document that has keys this build lacks.
+
+    ``save`` writes a whole snapshot without rebasing on the current file, so
+    it has to look first. Unreadable or malformed bytes keep ``save``'s
+    long-standing behavior of being replaced; only a document whose key list
+    is known to include something this build would drop is protected here.
+    """
+    try:
+        document = file_io.read_regular_bytes(target, MAX_SETTINGS_BYTES)
+        if document is None:
+            return
+        raw = tomllib.loads(document.decode("utf-8"))
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
+        return
+    unknown = unknown_keys(raw)
+    if unknown:
+        raise SettingsReadOnlyError(unknown)
+
+
 def save(settings: Settings, path: Path | None = None) -> Path:
     target = path if path is not None else paths.settings_path()
     try:
         with state_file.mutation_lock(target, description="settings"):
+            _refuse_unknown_keys(target)
             _check_runtime_compatibility(settings, target)
             paths.ensure_directory(target.parent)
             state_file.write_atomic_text(target, settings.validated().to_toml())
@@ -617,11 +754,19 @@ def mutate(
     change: Callable[[Settings], Settings],
     path: Path | None = None,
 ) -> Settings:
-    """Apply one settings transformation to the lock-owned latest snapshot."""
+    """Apply one settings transformation to the lock-owned latest snapshot.
+
+    Refused with `SettingsReadOnlyError` while the file has keys this build
+    does not know: the serializer writes known keys only, so any write would
+    drop them.
+    """
     target = path if path is not None else paths.settings_path()
     try:
         with state_file.mutation_lock(target, description="settings"):
-            current = load_strict(target)
+            loaded = load_strict_document(target)
+            if loaded.read_only:
+                raise SettingsReadOnlyError(loaded.unknown_keys)
+            current = loaded.settings
             candidate = change(current).validated()
             _validate_strict_mapping(tomllib.loads(candidate.to_toml()), target)
             _check_runtime_compatibility(candidate, target)
@@ -643,14 +788,19 @@ def forget_playlist_default(
     The condition is evaluated under the settings mutation lock.  A concurrent
     user choice of a different default therefore survives a delayed playlist
     deletion instead of being replaced by an unconditional empty value.
-    ``None`` means no settings write was needed.
+    ``None`` means no settings write was needed. When one is needed but the
+    file has keys this build does not know, `SettingsReadOnlyError` is raised
+    and nothing is written.
     """
     target = path if path is not None else paths.settings_path()
     try:
         with state_file.mutation_lock(target, description="settings"):
-            current = load_strict(target)
+            loaded = load_strict_document(target)
+            current = loaded.settings
             if current.active_playlist != playlist:
                 return None
+            if loaded.read_only:
+                raise SettingsReadOnlyError(loaded.unknown_keys)
             candidate = replace(current, active_playlist="").validated()
             paths.ensure_directory(target.parent)
             state_file.write_atomic_text(target, candidate.to_toml())
@@ -659,3 +809,23 @@ def forget_playlist_default(
         raise
     except (OSError, TimeoutError) as error:
         raise ConfigError(f"cannot safely update {target}: {error}") from error
+
+
+def require_playlist_deletable(playlist: str, path: Path | None = None) -> None:
+    """Refuse up front a deletion that would need a read-only settings write.
+
+    Deleting the saved default playlist also clears ``active_playlist``. When
+    that write is refused, the deletion has already committed and the saved
+    default points at nothing, which stops runtime compilation. Callers check
+    this before deleting so the whole operation is refused instead.
+
+    Only that case is refused. An unreadable or malformed file keeps its
+    existing outcome: the deletion proceeds and clearing the default reports
+    its own error.
+    """
+    try:
+        loaded = load_strict_document(path)
+    except ConfigError:
+        return
+    if loaded.read_only and loaded.settings.active_playlist == playlist:
+        raise SettingsReadOnlyError(loaded.unknown_keys)

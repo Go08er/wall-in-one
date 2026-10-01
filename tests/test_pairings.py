@@ -314,6 +314,29 @@ def test_choosing_a_palette_leaves_a_chosen_still_alone(tmp_path: Path) -> None:
     assert (bundle.palette.kind, bundle.palette.name) == ("builtin", "Nord")
 
 
+def test_choosing_only_a_palette_keeps_the_chosen_light_or_dark_mode(tmp_path: Path) -> None:
+    """The tile menu and `ctl palette` choose colours, not a mode.
+
+    Regression: they decoded the policy without a mode, so picking a palette
+    reset a wallpaper's light/dark choice to "keep".
+    """
+    picture = png(tmp_path / "a.png")
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_palette(item(picture), PalettePolicy("builtin", "Nord", pairings.Mode.DARK))
+    store.choose_palette(item(picture), PalettePolicy("custom", "Moss"), keep_mode=True)
+    reopened = Store.open(tmp_path / "pairings.json").resolve(item(picture), roots=[tmp_path])
+    assert (reopened.palette.kind, reopened.palette.name) == ("custom", "Moss")
+    assert reopened.palette.mode is pairings.Mode.DARK
+
+
+def test_the_pairing_editor_still_sets_the_mode_it_asks_for(tmp_path: Path) -> None:
+    picture = png(tmp_path / "a.png")
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_palette(item(picture), PalettePolicy("builtin", "Nord", pairings.Mode.DARK))
+    store.choose_palette(item(picture), PalettePolicy("builtin", "Nord", pairings.Mode.LIGHT))
+    assert store.resolve(item(picture), roots=[tmp_path]).palette.mode is pairings.Mode.LIGHT
+
+
 def test_a_deleted_wallpaper_loses_its_record(tmp_path: Path) -> None:
     """Records outlive a missing file on purpose. Not one we destroyed."""
     picture = png(tmp_path / "a.png")

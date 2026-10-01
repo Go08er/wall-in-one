@@ -5268,7 +5268,9 @@ class _Commands:
         if self._app.legacy_service:
             session = self._app.session
             item = server.resolve(session.library, source, verb="palette")
-            self._legacy_authoring(lambda: session.pairings.choose_palette(item, policy))
+            self._legacy_authoring(
+                lambda: session.pairings.choose_palette(item, policy, keep_mode=True)
+            )
             self._app.pairing_changed(item)
             return Response.success(f"{item.name} asks for {policy.encode()}")
 
@@ -5278,7 +5280,7 @@ class _Commands:
             pairing_store = session.pairings
 
             def work() -> tuple[MediaItem, pairings.Pairing]:
-                return item, pairing_store.choose_palette(item, policy)
+                return item, pairing_store.choose_palette(item, policy, keep_mode=True)
 
             return work
 

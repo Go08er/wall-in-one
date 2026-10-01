@@ -871,18 +871,28 @@ class Store:
 
         return self._mutate(choose)
 
-    def choose_palette(self, item: MediaItem, palette: PalettePolicy) -> Pairing:
-        """Record which colours ``item`` asks for."""
+    def choose_palette(
+        self, item: MediaItem, palette: PalettePolicy, *, keep_mode: bool = False
+    ) -> Pairing:
+        """Record which colours ``item`` asks for.
+
+        ``keep_mode`` is for callers that only choose a palette and carry no
+        light/dark choice of their own (the tile menu, ``ctl palette``): the
+        mode already recorded for the item is kept instead of being reset.
+        """
         identity = Identity.of(item)
 
         def choose(records: dict[str, Pairing]) -> tuple[Pairing, bool]:
             existing = records.get(identity.key)
             still = existing.still if existing is not None else None
             health = existing.health if existing is not None else Health()
+            chosen = palette
+            if keep_mode and existing is not None:
+                chosen = replace(palette, mode=existing.palette.mode)
             record = Pairing(
                 identity=identity,
                 still=still,
-                palette=palette,
+                palette=chosen,
                 customized=True,
                 health=health,
             )

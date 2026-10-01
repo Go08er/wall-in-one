@@ -1205,11 +1205,13 @@ class MainWindow(Adw.ApplicationWindow):
         policy = pairings.PalettePolicy.decode(encoded)
         store = self._app.session.pairings
         self._app.authoring_action_async(
-            lambda: store.choose_palette(item, policy),
+            lambda: store.choose_palette(item, policy, keep_mode=True),
             lambda _record: self._app.pairing_changed(item),
             prepare=lambda: self._app.prepare_pairing_mutation(
                 item,
-                lambda current_store, current: current_store.choose_palette(current, policy),
+                lambda current_store, current: current_store.choose_palette(
+                    current, policy, keep_mode=True
+                ),
             ),
             failure=lambda _error: self.report(
                 f"The colours for {item.name} could not be saved; nothing changed"

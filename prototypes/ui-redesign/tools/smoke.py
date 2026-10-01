@@ -357,6 +357,22 @@ def store_actions(state, window) -> None:
     state.resume_schedule("all")
 
 
+def window_actions(state, window) -> None:
+    window.navigate("library")
+    window.activate_action("win.dark", None)  # the ☰ menu's dark style switch
+    assert not state.dark
+    window.activate_action("win.dark", None)
+    assert state.dark
+    window.activate_action("win.style", GLib.Variant("s", "translucent"))
+    assert state.window_style == "translucent"
+    window.activate_action("win.style", GLib.Variant("s", "solid"))
+    state.set_use_live_colors(False)  # no real Noctalia in the smoke test
+    assert not state.live_colors()
+    state.set_scope("HDMI-A-1")
+    assert state.targets() == ["HDMI-A-1"]
+    state.set_scope("all")
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -408,8 +424,8 @@ def build_steps(app, holder):
         ("service off/on", lambda: (s().set_service_running(False), s().set_service_running(True))),
         ("mirrored", lambda: s().set_display_mode("mirrored")),
         ("independent", lambda: s().set_display_mode("independent")),
-        ("light", lambda: (setattr(s(), "dark", False), s().emit_changed("theme", "now"))),
-        ("dark", lambda: (setattr(s(), "dark", True), s().emit_changed("theme", "now"))),
+        ("light", lambda: s().set_dark(False)),
+        ("dark", lambda: s().set_dark(True)),
     ]
     for page, scenes in {
         "store": [
@@ -531,6 +547,7 @@ def build_steps(app, holder):
     steps.append(("schedule actions", lambda: schedule_actions(s(), w())))
     steps.append(("settings actions", lambda: settings_actions(s(), w())))
     steps.append(("store actions", lambda: store_actions(s(), w())))
+    steps.append(("window actions", lambda: window_actions(s(), w())))
     steps.append(
         (
             "store select all",
@@ -617,8 +634,8 @@ def build_steps(app, holder):
         )
     )
     steps.append(("style frosted again", lambda: s().set_window_style("frosted")))
-    steps.append(("frosted light", lambda: (setattr(s(), "dark", False), s().emit_changed("theme", "now"))))
-    steps.append(("frosted dark", lambda: (setattr(s(), "dark", True), s().emit_changed("theme", "now"))))
+    steps.append(("frosted light", lambda: s().set_dark(False)))
+    steps.append(("frosted dark", lambda: s().set_dark(True)))
     # A simulated day with the schedule page showing, then the library.
     steps.append(("show schedule", lambda: w().navigate("schedule")))
     for tick in range(36):

@@ -425,8 +425,11 @@ class AppState(GObject.Object):
 
     def reorder_rules(self, rule_ids: list[str]) -> Undo | None:
         """Store a new priority order, lowest first (a later rule wins). None when
-        the order is unchanged."""
+        the order is unchanged, or when it doesn't list exactly the current rules
+        (a move that settled after a rule was added or deleted)."""
         before = list(self.rules)
+        if sorted(rule_ids) != sorted(rule.id for rule in before):
+            return None
         order = [self.rule(rule_id) for rule_id in rule_ids]
         if before == order:
             return None
@@ -887,8 +890,13 @@ class AppState(GObject.Object):
         return removed, undo
 
     def reorder_entries(self, pid: str, wids: list[str]) -> None:
-        """Store a playlist's entries in a new order (a finished drag or keyboard move)."""
-        self.playlist(pid).entries[:] = wids
+        """Store a playlist's entries in a new order (a finished drag or keyboard move).
+        Ignored unless ``wids`` holds exactly the current entries: a move that settled
+        after entries were added or removed must not drop or bring back any."""
+        entries = self.playlist(pid).entries
+        if sorted(wids) != sorted(entries):
+            return
+        entries[:] = wids
         self.emit_changed("playlists")
 
     def move_entries_to_top(self, pid: str, indices: list[int]) -> None:
@@ -1268,6 +1276,22 @@ class AppState(GObject.Object):
             self.emit_changed("folders", "settings")
 
         return undo
+
+    # -- window ---------------------------------------------------------------------
+    def set_scope(self, scope: str) -> None:
+        """The player bar's display scope: "all" or a connector."""
+        self.scope = scope
+        self.emit_changed("scope")
+
+    def set_dark(self, dark: bool) -> None:
+        self.dark = dark
+        self.emit_changed("theme", "now")
+
+    def set_use_live_colors(self, use: bool) -> None:
+        """Follow the real Noctalia's colors (read-only) instead of the simulated desktop."""
+        self.use_live_colors = use
+        self.sync_live()  # adopt the real mode when switching on
+        self.emit_changed("settings", "now")
 
     def set_battery(self, value: bool) -> None:
         self.on_battery = value

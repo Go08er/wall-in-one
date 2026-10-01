@@ -390,18 +390,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.add_action(action)
             return action
 
-        def dark(value: bool) -> None:
-            self.state.dark = value
-            self.state.emit_changed("theme", "now")
-
-        dark_action = toggle("dark", self.state.dark, dark)
-
-        def live_colors(value: bool) -> None:
-            self.state.use_live_colors = value
-            self.state.sync_live()  # adopt the real mode when switching on
-            self.state.emit_changed("settings", "now")
-
-        live = toggle("live", self.state.live_colors(), live_colors)
+        dark_action = toggle("dark", self.state.dark, self.state.set_dark)
+        live = toggle("live", self.state.live_colors(), self.state.set_use_live_colors)
         live.set_enabled(self.state.live is not None and self.state.live.found)
 
         def sync_toggles(_state, topic: str) -> None:
@@ -439,8 +429,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         def set_style(action: Gio.SimpleAction, value: GLib.Variant) -> None:
             action.set_state(value)
-            self.state.window_style = value.get_string()
-            self.state.emit_changed("appearance")
+            self.state.set_window_style(value.get_string())
 
         style.connect("activate", set_style)
         # Keep the radio in step when Settings changes the style.

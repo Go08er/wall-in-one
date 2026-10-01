@@ -175,9 +175,8 @@ class PlayerBar(Gtk.Box):
 
     def _on_scope(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         action.set_state(value)
-        self.state.scope = value.get_string()
+        self.state.set_scope(value.get_string())  # e.g. the inspector's "Apply to …" follows
         self.refresh()
-        self.state.emit_changed("scope")  # e.g. the inspector's "Apply to …" follows
 
     def _show_current(self, *_args) -> None:
         connector = self.state.targets()[0]

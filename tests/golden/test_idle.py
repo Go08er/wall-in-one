@@ -11,14 +11,31 @@ from __future__ import annotations
 import json
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
 from tests.golden import harness
 from tests.golden.harness import Allowance, Change, FakeRuntime, Profile
-from tests.golden.sandbox import STATE, Golden, read_json, runtime_document
-from wall_in_one import deployed_upgrade_transaction, runtime_config
+from tests.golden.sandbox import (
+    STATE,
+    STORE_FILES,
+    Golden,
+    decorate,
+    read_json,
+    runtime_document,
+    write_json,
+)
+from wall_in_one import cli, deployed_upgrade_transaction, runtime_config
+from wall_in_one.library import (
+    displays,
+    favourites,
+    pairings,
+    playlists,
+    removals,
+    schedules,
+    state_file,
+)
 from wall_in_one.session import QUICK_CHOICE_ID
 
 # -- the fixture's own contract -------------------------------------------------------
@@ -195,13 +212,26 @@ def test_no_allowance_may_touch_evidence() -> None:
             assert ".wall-in-one-removal-" not in allowance.pattern
 
 
-@pytest.mark.parametrize("scenario", ["quiet", "one-failure"])
+def _decorate_every_store(profile: Profile) -> None:
+    """What Release 2 will write: unknown keys at the top and on every record."""
+    for name in STORE_FILES:
+        target = profile.app_state / name
+        if target.is_file():
+            document = read_json(target)
+            decorate(document)
+            write_json(target, document)
+
+
+@pytest.mark.parametrize("scenario", ["quiet", "one-failure", "one-failure-newer-keys"])
 def test_idle_round_trip_writes_only_what_is_whitelisted(any_golden: Golden, scenario: str) -> None:
+    """``one-failure-newer-keys``: the health marker write carries every unknown key."""
     profile = any_golden.profile
     failed: tuple[Path, str, str] | None = None
-    if scenario == "one-failure":
+    if scenario.startswith("one-failure"):
         video = _video_under_test(profile)
         failed = (video, *_report_failure(any_golden.runtime, video))
+    if scenario.endswith("newer-keys"):
+        _decorate_every_store(profile)
 
     before = harness.snapshot(profile.home)
     first = harness.run_idle()
@@ -209,8 +239,12 @@ def test_idle_round_trip_writes_only_what_is_whitelisted(any_golden: Golden, sce
     assert first.library_size > 0
     assert first.skipped == 0
     assert first.service_prepare == 0
+    assert first.gui_compile in ("changed", "unchanged"), first.gui_compile
     assert first.health_sync == 0
     assert first.health_sync_on_stop == 0
+    assert first.newer_version_files == ()
+    assert first.unknown_settings == ()
+    assert first.repair_paused == ()
     harness.check_changes(harness.diff(before, after_first), first_start_writes(profile, failed))
 
     # Steady state: the same build, the same inputs, nothing written at all.
@@ -219,3 +253,92 @@ def test_idle_round_trip_writes_only_what_is_whitelisted(any_golden: Golden, sce
     assert second == first
     assert any_golden.processes == []
     assert "status" in any_golden.runtime.verbs
+
+
+# -- a newer file opened by this build: read-only, nothing rewritten ----------------------
+
+STORE_MODULES: Final[dict[str, Any]] = {
+    "pairings.json": pairings,
+    "playlists.json": playlists,
+    "schedules.json": schedules,
+    "displays.json": displays,
+    "favourites.json": favourites,
+    "pending-removals.json": removals,
+}
+
+
+@pytest.mark.parametrize("scenario", ["quiet", "one-failure"])
+@pytest.mark.parametrize("filename", STORE_FILES)
+def test_idle_with_a_newer_store_file_writes_nothing_at_all(
+    golden: Golden, filename: str, scenario: str
+) -> None:
+    """Release 2's version bump, opened by this build: reported, compiled from
+    nothing, written to never. Not even the first-start runtime.toml rebase:
+    compilation refuses a newer store, so the last-known-good document stays.
+    """
+    profile = golden.profile
+    if scenario == "one-failure":
+        _report_failure(golden.runtime, _video_under_test(profile))
+    target = profile.app_state / filename
+    document = read_json(target)
+    document["version"] = int(document["version"]) + 1
+    decorate(document)
+    write_json(target, document)
+
+    before = harness.snapshot(profile.home)
+    run = harness.run_idle()
+    harness.check_changes(harness.diff(before, harness.snapshot(profile.home)), ())
+
+    assert run.newer_version_files == (filename,)
+    assert run.service_prepare == 0, "the service must still start on the last-known-good config"
+    assert run.gui_compile.startswith("refused:"), run.gui_compile
+    assert "newer version" in run.gui_compile
+    # The health sync reads authoring only when the runtime reported something.
+    expected_sync = 1 if scenario == "one-failure" else 0
+    assert (run.health_sync, run.health_sync_on_stop) == (expected_sync, expected_sync)
+    assert golden.processes == []
+    store = STORE_MODULES[filename].Store.open()
+    try:
+        assert store.fault_kind == state_file.NEWER_VERSION, store.fault
+    finally:
+        if isinstance(store, removals.Store):
+            store.close()
+
+
+# -- settings.toml with a key from a newer build -----------------------------------------
+
+
+def test_idle_with_an_unknown_settings_key_never_writes_settings(
+    golden: Golden, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Read-only settings: the service starts on the known keys, the file stays.
+
+    runtime.toml may be (re)compiled, but only to exactly what the known keys
+    produce: removing the unknown key afterwards must leave it current.
+    """
+    profile = golden.profile
+    settings = profile.app_config / "settings.toml"
+    settings.write_bytes(settings.read_bytes() + b"ui_glass_frost = 0.3\n")
+    before = harness.snapshot(profile.home)
+
+    run = harness.run_idle()
+    allowed = [
+        *first_start_writes(profile, None),
+        Allowance(
+            ".config/wall-in-one/.settings.toml.mutation.lock",
+            frozenset({"created", "rewritten"}),
+            "a refused settings write still takes the settings lock (created if absent)",
+        ),
+    ]
+    harness.check_changes(harness.diff(before, harness.snapshot(profile.home)), allowed)
+    assert run.unknown_settings == ("ui_glass_frost",)
+    assert run.service_prepare == 0
+    assert run.gui_compile in ("changed", "unchanged"), run.gui_compile
+    assert "ui_glass_frost" in capsys.readouterr().err
+
+    compiled = (profile.app_state / "runtime.toml").read_bytes()
+    text = settings.read_text().replace("ui_glass_frost = 0.3\n", "")
+    settings.write_text(text)
+    assert cli.main(["--write-config"]) == 0
+    assert "already current" in capsys.readouterr().out
+    assert (profile.app_state / "runtime.toml").read_bytes() == compiled

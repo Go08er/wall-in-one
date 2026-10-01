@@ -111,6 +111,32 @@ def write_json(path: Path, document: dict[str, Any]) -> bytes:
     return data
 
 
+def decorate(document: dict[str, Any]) -> set[str]:
+    """Add what a newer build would: a top-level key and a key on every record.
+
+    Returns the identities (``id`` or ``identity``) of the records it marked.
+    """
+    document[UNKNOWN_TOP] = {"written-by": "a newer build"}
+    keys: set[str] = set()
+    for value in list(document.values()):
+        if isinstance(value, list):
+            for record in value:
+                if isinstance(record, dict):
+                    record[UNKNOWN_RECORD] = "kept"
+                    keys.add(str(record.get("id", record.get("identity"))))
+    return keys
+
+
+STORE_FILES: Final = (
+    "pairings.json",
+    "playlists.json",
+    "schedules.json",
+    "displays.json",
+    "favourites.json",
+    "pending-removals.json",
+)
+
+
 def broken_copies(path: Path) -> list[Path]:
     return sorted(path.parent.glob(path.name + ".broken*"))
 

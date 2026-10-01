@@ -772,31 +772,44 @@ def serve(runtime: FakeRuntime, path: Path) -> Iterator[None]:
 # -- the idle sequence --------------------------------------------------------------
 
 
-def assert_no_dangling_references() -> None:
+def assert_no_dangling_references() -> tuple[str, ...]:
     """The read half of ``ui.app.App._repair_dangling_playlist_references``.
 
     That repair runs on every graphical start, but lives in the GTK module.
     It writes only when a schedule, display or the default names a playlist
-    that no longer exists, so on a consistent profile it is these reads.
+    that no longer exists, so on a consistent profile it is these reads. A
+    store it cannot read (unreadable or newer) pauses it instead; those are
+    returned, as the app reports them.
     """
     from wall_in_one import config
     from wall_in_one.library import displays, playlists, schedules
 
     playlist_store = playlists.Store.open()
-    assert playlist_store.fault is None, playlist_store.fault
+    if playlist_store.fault is not None:
+        return (f"playlists: {playlist_store.fault}",)
     valid = {playlist.id for playlist in playlist_store.all()}
+    paused: list[str] = []
     schedule_store = schedules.Store.open()
-    assert schedule_store.fault is None, schedule_store.fault
-    assert {rule.playlist for rule in schedule_store.rules} <= valid
+    if schedule_store.fault is not None:
+        paused.append(f"schedule rules: {schedule_store.fault}")
+    else:
+        assert {rule.playlist for rule in schedule_store.rules} <= valid
     display_store = displays.Store.open()
-    assert display_store.fault is None, display_store.fault
-    assert {playlist for _connector, playlist in display_store.all()} <= valid
+    if display_store.fault is not None:
+        paused.append(f"display assignments: {display_store.fault}")
+    else:
+        assert {playlist for _connector, playlist in display_store.all()} <= valid
     active = config.load_strict().active_playlist
     assert not active or active in valid, active
+    return tuple(paused)
 
 
-def compile_like_the_gui(library: object) -> bool:
-    """``ui.app.App._compile_runtime_request`` without GTK: same locks, same calls."""
+def compile_like_the_gui(library: object) -> str:
+    """``ui.app.App._compile_runtime_request`` without GTK: same locks, same calls.
+
+    Returns ``changed``, ``unchanged`` or the refusal, which the app reports
+    in its window rather than raising.
+    """
     from wall_in_one import config, legacy_migration, runtime_config
     from wall_in_one.library.model import Library
     from wall_in_one.session import Session
@@ -807,19 +820,30 @@ def compile_like_the_gui(library: object) -> bool:
         snapshot = Session(settings)
         try:
             snapshot.adopt_library(library, reconcile_workshop=False)
-            return runtime_config.update(settings, snapshot)
+            changed = runtime_config.update(settings, snapshot)
+        except runtime_config.RuntimeConfigError as error:
+            return f"refused: {error}"
         finally:
             snapshot.shutdown()
+    return "changed" if changed else "unchanged"
 
 
 @dataclass(frozen=True, slots=True)
 class IdleRun:
+    """What one idle start reported; the writes are judged separately."""
+
     service_prepare: int
+    gui_compile: str
     health_sync: int
     health_sync_on_stop: int
-    gui_compile_changed: bool
     library_size: int
     skipped: int
+    #: As ``App._report_newer_version_files`` would show them.
+    newer_version_files: tuple[str, ...]
+    #: As ``App`` keeps them from ``config.load_document`` (read-only settings).
+    unknown_settings: tuple[str, ...]
+    #: Why the dangling-reference repair paused, if it did.
+    repair_paused: tuple[str, ...]
 
 
 def run_idle() -> IdleRun:
@@ -828,9 +852,10 @@ def run_idle() -> IdleRun:
     Every step is the production entry point the packaged install runs:
     ``cli._run_graphical_startup_upgrade`` (before GTK reads anything), the
     service unit's ``--service-startup-prepare``, the application's own
-    Session/Library/Store construction and first refresh, its runtime
-    publication, the palette resolution, the 30 s timer's
+    settings, Session, Library and Store construction and first refresh, its
+    runtime publication, the palette resolution, the 30 s timer's
     ``--sync-runtime-health``, and the unit's ``--sync-runtime-health-on-stop``.
+    Refusals are recorded, not raised: a read-only profile must still idle.
     """
     from wall_in_one import cli, config, legacy_migration
     from wall_in_one.session import Session
@@ -840,15 +865,16 @@ def run_idle() -> IdleRun:
     assert blocked is None, f"the pre-GTK startup gate refused to open: {blocked}"
     service_prepare = cli.main(["--service-startup-prepare"])
 
-    settings = config.load()
-    session = Session(settings)
+    loaded = config.load_document()
+    session = Session(loaded.settings)
     try:
         found = legacy_migration.probe()
         assert not found.needs_decision, found.detail
-        assert_no_dangling_references()
+        paused = assert_no_dangling_references()
         plan = session.prepare_library_refresh()
         session.adopt_library_refresh(plan.run())
-        changed = compile_like_the_gui(session.library)
+        newer = session.newer_version_files()
+        compiled = compile_like_the_gui(session.library)
         source.resolve()
         health_sync = cli.main(["--sync-runtime-health"])
     finally:
@@ -856,9 +882,12 @@ def run_idle() -> IdleRun:
     health_sync_on_stop = cli.main(["--sync-runtime-health-on-stop"])
     return IdleRun(
         service_prepare=service_prepare,
+        gui_compile=compiled,
         health_sync=health_sync,
         health_sync_on_stop=health_sync_on_stop,
-        gui_compile_changed=changed,
         library_size=len(session.library.items),
         skipped=len(session.library.skipped),
+        newer_version_files=tuple(newer),
+        unknown_settings=tuple(loaded.unknown_keys),
+        repair_paused=paused,
     )

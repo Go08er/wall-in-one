@@ -34,9 +34,13 @@ Look at them (they are the only way to review the design) and iterate.
 ```
 demo.py                 entry point + screenshot runner
 wio_demo/
-  art.py                procedural wallpaper art → Gdk.Texture (cached)
-  data.py               dummy domain data (wallpapers, playlists, rules, displays, store, palettes)
-  state.py              AppState(GObject): actions + signals; schedule resolution
+  art.py                procedural wallpaper art: render() pixels (any thread) → texture() (cached)
+  data.py               dummy domain data (wallpapers, playlists, rules, displays, folders, palettes)
+  models.py             view-model types pages read: Wallpaper, Playlist, Rule, Display, Folder, Palette…
+  catalog.py            fixed words and choices (kind labels, day and month names, interval presets)
+  state.py              AppState(GObject): the only boundary between pages and data (see below)
+  thumbs.py             thumbnails: drawn on worker threads, delivered to the main thread
+  store_catalog.py      dummy Store providers (the real app's Browser): options, item facts, search
   ui.py                 shared widgets: Thumb, WallpaperCard, Swatches, pill(), heading(), dim(), add_css()
   style.css             shared styles
   shell.py              window: Adw.Sidebar navigation, ONE shared header bar, banner, toasts, demo menu
@@ -44,7 +48,7 @@ wio_demo/
   pages/__init__.py     Page contract
   pages/library.py      Library grid + filters + selection + drag to playlists
   pages/inspector.py    wallpaper details: still, motion, colors (pairing editor)
-  pages/store.py        Store (online providers); store_widgets.py, store_catalog.py
+  pages/store.py        Store (online providers); store_widgets.py
   pages/playlists.py    one playlist (sidebar lists them); playlists_picker.py
   pages/schedule.py     week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
   pages/displays.py     monitor arrangement + per-display assignment; displays_arrangement.py
@@ -77,13 +81,29 @@ A page module exposes `create(state) -> Page`. A `Page` has:
 Pages never import each other. They talk through `state`:
 - `state.navigate("playlist:frog-day")`, `state.navigate("settings:log")`;
 - `state.toast(text, undo=callable_or_None)` — prefer reversible actions with **Undo**;
-- `state.emit_changed(topic)` after mutating state. Topics: `now`, `playback`,
-  `library`, `playlists` (the shell rebuilds the sidebar), `schedule`, `displays`,
-  `settings`, `system`, `theme`;
-- listen with `state.connect("changed", lambda _s, topic: ...)`.
+- listen with `state.connect("changed", lambda _s, topic: ...)`. Topics: `now`,
+  `playback`, `library`, `playlists` (the shell rebuilds the sidebar), `schedule`,
+  `displays`, `settings`, `system`, `theme`, `appearance`, `scope`, `clock`,
+  `folders`, `preferences`, `display-settings`.
 
-Useful state: `state.wallpapers`, `state.playlists`, `state.rules`, `state.fallback`,
-`state.displays`, `state.display_mode` (`mirrored`/`independent`), `state.current`
+`AppState` is the only boundary between pages and data, so a real-app adapter
+can replace it without touching the pages:
+- **Reads** go through its lists, lookups and queries: `state.wallpapers`,
+  `state.playlists`, `state.rules`, `state.displays`, `state.wallpaper(id)`,
+  `state.playlist(id)`, `state.playlist_name(id)`, `state.playlist_cover(id, size)`,
+  `state.schemes()`, `state.palettes(origin)`, `state.store_search(query)`, …
+- **Writes** only through its named methods (`rename_playlist`, `remove_entries`,
+  `set_rule_enabled`, `add_rule`, `set_display_playlist`, `set_color_display`,
+  `apply_palette`, `set_wallpaper_colors`, …). Never assign a state field or
+  change one of its lists or view-model objects. Each method emits its own
+  topics and, where the page offers Undo, returns the undo callable; the page
+  words the toast.
+- Pages never import `data`. Fixed words come from `catalog`; pictures from
+  `ui.Thumb.of(...)` / `thumbs`; the Store's option tables and per-item facts from
+  `store_catalog` (its searches go through `state`).
+- `demo()` hooks may use the `state.demo_*` helpers to set up scenes.
+
+Useful state: `state.display_mode` (`mirrored`/`independent`), `state.current`
 (connector → wallpaper id), `state.manual`, `state.assigned` (connector → playlist id or
 "" = follow schedule), `state.now` (fixed demo clock: Wed 30 Sep 2026 14:35),
 `state.resolution(connector)` (playlist, winning rule, until, next), `state.apply()`,
@@ -97,9 +117,12 @@ Shared look: use `ui.add_css(...)` for page CSS; don't edit `style.css`.
 - libadwaita idioms first: `Adw.ToolbarView`, boxed lists (`.boxed-list` + `Adw.*Row`),
   `Adw.ToggleGroup` for segmented choices, `Adw.Dialog`/`Adw.AlertDialog`, `Adw.StatusPage`
   for empty states, `Adw.Banner` for persistent conditions, toasts for results.
-- Pictures carry the UI. Use `ui.Thumb`/`ui.thumbnail(...)` (exact size, rounded, cover-fit)
-  and `ui.WallpaperCard`. Generated art comes from `wallpaper.thumb(w, h)`, `art.texture(...)`,
-  `art.mosaic(playlist.cover_keys, size)`.
+- Pictures carry the UI. Use `ui.Thumb.of(source, w, h, size=…)`/`ui.thumbnail(...)` (exact
+  size, rounded, cover-fit) and `ui.WallpaperCard`: they draw off the main thread and show a
+  flat placeholder until the picture arrives. `thumbs.texture(source, w, h)` draws at once
+  (drag icons); playlist covers come from `state.playlist_cover(id, size)`.
+- Long grids build cards a page at a time: the Library shows 72 (the real app's
+  `MEDIA_PAGE_SIZE`) and offers "Show more".
 - Section headings inside panels: small caps-like labels (`.section-label`).
 - Reordering: `reorder.ReorderList` is the only way to make a list reorderable
   (rows lift and roll; no drag-and-drop). Call `append(row, handle)`, commit on

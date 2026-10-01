@@ -1,9 +1,22 @@
-"""In-memory app state for the prototype. Every action just updates this object.
+"""In-memory app state for the prototype: the only boundary between pages and data.
 
-Pages observe `changed(topic)` and repaint; nothing talks to a real runtime.
-Topics: now, playback, library, playlists, schedule, displays, settings,
-system (battery/service banners), theme, appearance (window style and dials),
-scope (the player bar's display scope).
+Pages read AppState's lists, lookups and queries, and change anything only by
+calling its named methods (rename_playlist, set_rule_enabled, …). Each method
+emits the topics it touches and, where the page offers Undo, returns the undo
+callable; the page words the toast. (apply, play_playlist, resume_schedule,
+stop and add_to_playlist are older and still toast themselves.) Pages never
+import ``data``, so a real-app adapter can replace this class without touching
+them. View-model types are in ``models``, fixed words in ``catalog``, and
+pictures come from ``thumbs``.
+
+Nothing here talks to a real runtime: the demo's data is shared module state
+(``data``), and "now" is simulated (resolution(), advance()).
+
+Pages observe ``changed(topic)`` and repaint. Topics: now, playback, library,
+playlists, schedule, displays, settings, system (battery/service banners),
+theme, appearance (window style and dials), scope (the player bar's display
+scope), clock (the demo clock ticked), folders (library folders), preferences
+(rows only Settings shows) and display-settings (per-display renderer settings).
 """
 
 from __future__ import annotations
@@ -91,6 +104,7 @@ class AppState(GObject.Object):
         "navigate": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
+    # -- signals and plumbing -------------------------------------------------
     def __init__(self, library: list[Wallpaper] | None = None) -> None:
         """``library`` replaces the demo's wallpapers (e.g. thousands, to test paging)."""
         super().__init__()
@@ -166,96 +180,6 @@ class AppState(GObject.Object):
         self._rng = random.Random(4)
         self._rule_serial = 0
 
-    # -- helpers ------------------------------------------------------------
-    @property
-    def default_scheme(self) -> str:
-        """The adaptive scheme inherited by wallpapers that don't choose one."""
-        return data.DEFAULT_SCHEME
-
-    @property
-    def background_alpha(self) -> float:
-        """Background opacity of the current window style (1.0 when solid)."""
-        return self.background_opacity.get(self.window_style, 1.0)
-
-    @background_alpha.setter
-    def background_alpha(self, value: float) -> None:
-        if self.window_style in self.background_opacity:
-            self.background_opacity[self.window_style] = max(0.0, min(1.0, value))
-
-    @property
-    def panel_alpha(self) -> float:
-        """Panel and element opacity of the current window style (1.0 when solid)."""
-        return self.panel_opacity.get(self.window_style, 1.0)
-
-    @panel_alpha.setter
-    def panel_alpha(self, value: float) -> None:
-        if self.window_style in self.panel_opacity:
-            self.panel_opacity[self.window_style] = max(0.0, min(1.0, value))
-
-    # -- colors -------------------------------------------------------------
-    def color_connector(self) -> str:
-        """The display whose wallpaper drives the desktop palette."""
-        lead = self.connectors()[0]
-        chosen = self.color_display
-        return chosen if self.display_mode == "independent" and chosen in self.current else lead
-
-    def color_wallpaper(self) -> Wallpaper:
-        return self.wallpaper(self.current[self.color_connector()])
-
-    def palette_override(self) -> Palette | None:
-        """The palette applied by hand in Settings, until the wallpaper changes."""
-        if self._override and self._override[1] != self.color_wallpaper().id:
-            self._override = None
-        return self._override[0] if self._override else None
-
-    def attach_live(self, live, follow: bool = True) -> None:
-        """Follow the real Noctalia: its palette, its light/dark mode and its wallpaper."""
-        self.live = live
-        self.use_live_colors = follow and live.found
-        live.connect("changed", lambda _live: self.sync_live())
-        self.sync_live()
-
-    def sync_live(self) -> None:
-        if not self.live_colors():
-            return
-        dark = self.live.mode == "dark"
-        if dark != self.dark:
-            self.dark = dark
-            self.emit_changed("theme")
-        self.emit_changed("settings", "now")
-
-    def live_colors(self) -> bool:
-        return bool(self.use_live_colors and self.live is not None and self.live.found)
-
-    def live_tokens(self) -> dict[str, str] | None:
-        """The real palette's tokens, when they fit the current light/dark mode."""
-        if self.live_colors() and (self.live.mode == "dark") == self.dark:
-            return self.live.tokens
-        return None
-
-    def desktop_swatches(self) -> list[str]:
-        """The colors Noctalia shows right now: [surface, primary, secondary, tertiary, error].
-
-        Like the real desktop this has memory: a wallpaper set to "keep",
-        desktop colors turned off, or a missing template all leave the last
-        colors in place. An empty list means Noctalia's own default.
-        """
-        if self.live_colors():
-            return self.live.swatches()
-        wallpaper = self.color_wallpaper()
-        override = self.palette_override()
-        if self.desktop_colors and self.template_ok:
-            if override is not None:
-                self._desktop_source = override
-            elif wallpaper.color_mode != "keep":
-                self._desktop_source = wallpaper
-        source = self._desktop_source
-        if source is None:
-            return []
-        if isinstance(source, Wallpaper):
-            return data.wallpaper_swatches(source, self.dark)
-        return source.strip(self.dark)
-
     def emit_changed(self, *topics: str) -> None:
         for topic in topics:
             self.emit("changed", topic)
@@ -270,14 +194,48 @@ class AppState(GObject.Object):
     def navigate(self, page: str) -> None:
         self.emit("navigate", page)
 
+    # -- lookups --------------------------------------------------------------
     def wallpaper(self, wid: str) -> Wallpaper:
         return self._wallpaper_index[wid]
+
+    def has_wallpaper(self, wid: str) -> bool:
+        return wid in self._wallpaper_index
 
     def playlist(self, pid: str) -> Playlist:
         return self._playlist_index[pid]
 
+    def has_playlist(self, pid: str) -> bool:
+        return pid in self._playlist_index
+
+    def playlist_name(self, pid: str) -> str:
+        return self._playlist_index[pid].name if pid in self._playlist_index else "Missing playlist"
+
+    def playlist_cover(self, pid: str, size: int) -> Gdk.Texture:
+        """A 2x2 mosaic of the playlist's first four different wallpapers (cached)."""
+        keys: list[tuple[str, int, bool]] = []
+        for wid in self.playlist(pid).entries:
+            key = self.wallpaper(wid).key
+            if key not in keys:
+                keys.append(key)
+            if len(keys) == 4:
+                break
+        return art.mosaic(tuple(keys), size)
+
+    def rule(self, rule_id: str) -> Rule | None:
+        return next((rule for rule in self.rules if rule.id == rule_id), None)
+
+    def display(self, connector: str) -> Display:
+        return next(display for display in self.displays if display.connector == connector)
+
     def connectors(self) -> list[str]:
         return [display.connector for display in self.displays]
+
+    def lead_connector(self) -> str:
+        """The display the others follow when they are linked: the primary one."""
+        for display in self.displays:
+            if display.primary:
+                return display.connector
+        return self.connectors()[0]
 
     def targets(self, scope: str | None = None) -> list[str]:
         scope = scope or self.scope
@@ -289,7 +247,8 @@ class AppState(GObject.Object):
             return "All displays"
         return scope
 
-    # -- schedule -----------------------------------------------------------
+    # -- now ------------------------------------------------------------------
+    # What plays where, and why. The runtime answers these; an adapter reads its status.
     def unscheduled_playlist(self, connector: str | None) -> str:
         """What a display plays when no rule matches: its own playlist, else the default."""
         return (self.assigned.get(connector or "") or self.fallback) if connector else self.fallback
@@ -321,10 +280,562 @@ class AppState(GObject.Object):
         targets = self.targets(connector) if connector else self.connectors()
         return not any(target in self.manual for target in targets)
 
-    def rule(self, rule_id: str) -> Rule | None:
-        return next((rule for rule in self.rules if rule.id == rule_id), None)
+    def shuffle_on(self, scope: str | None = None) -> bool:
+        connector = self.targets(scope)[0]
+        playlist_id = self.effective_playlist(connector)
+        return playlist_id in self._playlist_index and self.playlist(playlist_id).shuffle
 
-    # -- schedule: actions ------------------------------------------------------
+    def display_paused(self, connector: str) -> bool:
+        """Paused everywhere, or (each display separately) paused on its own."""
+        return self.playback == "paused" or (self.display_mode != "mirrored" and connector in self._held)
+
+    # -- playback -------------------------------------------------------------
+    # The runtime's verbs (play, pause, next, …) and the demo clock.
+    def apply(self, wid: str, scope: str = "all") -> None:
+        before = dict(self.current), dict(self.manual)
+        for connector in self.targets(scope):
+            self.current[connector] = wid
+            self.manual[connector] = "quick"
+        if self.playback == "stopped":
+            self._set_playback("playing")
+        self.emit_changed("now", "playback")
+        where = "all displays" if scope == "all" or self.display_mode == "mirrored" else scope
+
+        def undo() -> None:
+            self.current, self.manual = before
+            self.emit_changed("now", "playback")
+
+        self.toast(f"“{self.wallpaper(wid).name}” is now on {where}", undo)
+
+    def play_playlist(self, pid: str, scope: str = "all", start: int = 0) -> None:
+        """Your pick: play a playlist (from entry ``start``) until you resume the schedule."""
+        playlist = self.playlist(pid)
+        if not playlist.entries:
+            self.toast(f"“{playlist.name}” is empty — add wallpapers first")
+            return
+        for connector in self.targets(scope):
+            self.manual[connector] = pid
+            self.current[connector] = playlist.entries[start]
+        self._set_playback("playing")
+        self.emit_changed("now", "playback")
+        self.toast(f"Playing “{playlist.name}” until you resume the schedule")
+
+    def resume_schedule(self, scope: str = "all") -> None:
+        for connector in self.targets(scope):
+            self.manual.pop(connector, None)
+            entries = self.playlist(self.effective_playlist(connector)).entries
+            self.current[connector] = entries[0]
+        self.emit_changed("now", "playback")
+        self.toast("Following the schedule again")
+
+    def _set_playback(self, playback: str) -> None:
+        if playback != self.playback:
+            self._held.clear()  # the player bar paused, resumed or stopped every display
+        self.playback = playback
+
+    def toggle_play(self) -> None:
+        self._set_playback("paused" if self.playback == "playing" else "playing")
+        self.emit_changed("playback")
+
+    def stop(self) -> None:
+        self._set_playback("stopped")
+        self.emit_changed("playback")
+        self.toast("Animation stopped — the still stays on screen")
+
+    def step(self, direction: int, scope: str | None = None) -> None:
+        for connector in self.targets(scope):
+            playlist_id = self.effective_playlist(connector)
+            entries = self.playlist(playlist_id).entries if playlist_id != "quick" else [self.current[connector]]
+            current = self.current[connector]
+            index = entries.index(current) if current in entries else -1
+            self.current[connector] = entries[(index + direction) % len(entries)]
+        self.next_change_minutes = self.default_interval
+        self.emit_changed("now")
+
+    def random(self, scope: str | None = None) -> None:
+        for connector in self.targets(scope):
+            playlist_id = self.effective_playlist(connector)
+            entries = self.playlist(playlist_id).entries if playlist_id != "quick" else [w.id for w in self.wallpapers]
+            self.current[connector] = self._rng.choice(entries)
+        self.emit_changed("now")
+
+    def set_rotate(self, value: bool) -> None:
+        self.rotate = value
+        self.emit_changed("playback")
+
+    def set_shuffle(self, value: bool, scope: str | None = None) -> None:
+        for connector in self.targets(scope):
+            playlist_id = self.effective_playlist(connector)
+            if playlist_id in self._playlist_index:
+                self.playlist(playlist_id).shuffle = value
+        self.emit_changed("playback", "playlists")
+
+    def set_scope(self, scope: str) -> None:
+        """The player bar's display scope: "all" or a connector."""
+        self.scope = scope
+        self.emit_changed("scope")
+
+    def set_battery(self, value: bool) -> None:
+        self.on_battery = value
+        self.emit_changed("system", "playback")
+
+    def set_service_running(self, value: bool) -> None:
+        self.service_running = value
+        self.emit_changed("system", "playback", "now")
+
+    def advance(self, minutes: int) -> None:
+        """Demo clock: move time forward, letting the schedule and rotation act."""
+        before = {connector: self.effective_playlist(connector) for connector in self.connectors()}
+        self.now += dt.timedelta(minutes=minutes)
+        for connector in self.connectors():
+            if connector in self.manual:
+                continue
+            after = self.effective_playlist(connector)
+            if after != before[connector] and self.playlist(after).entries:
+                self.current[connector] = self.playlist(after).entries[0]
+        if self.rotate and self.playback != "stopped" and self.service_running:
+            self.next_change_minutes -= minutes
+            while self.next_change_minutes <= 0:
+                for connector in self.connectors():
+                    playlist_id = self.effective_playlist(connector)
+                    if playlist_id == "quick":
+                        continue
+                    entries = self.playlist(playlist_id).entries
+                    current = self.current[connector]
+                    index = entries.index(current) if current in entries else -1
+                    self.current[connector] = (
+                        self._rng.choice(entries)
+                        if self.playlist(playlist_id).shuffle
+                        else entries[(index + 1) % len(entries)]
+                    )
+                connector = self.connectors()[0]
+                playlist_id = self.effective_playlist(connector)
+                interval = self.playlist(playlist_id).interval if playlist_id in self._playlist_index else 0
+                self.next_change_minutes += interval or self.default_interval
+        self.emit_changed("schedule", "now", "playback", "clock")
+
+    # -- library --------------------------------------------------------------
+    def toggle_favorite(self, wid: str) -> None:
+        wallpaper = self.wallpaper(wid)
+        wallpaper.favorite = not wallpaper.favorite
+        self.emit_changed("library")
+
+    def favorite_wallpapers(self, wids: list[str]) -> None:
+        for wid in wids:
+            self.wallpaper(wid).favorite = True
+        self.emit_changed("library")
+
+    def retry_wallpaper(self, wid: str) -> None:
+        """Forget a playback problem so the runtime tries the wallpaper again."""
+        self.wallpaper(wid).problem = ""
+        self.emit_changed("library")
+
+    def set_wallpaper_colors(
+        self, wid: str, *, mode: str | None = None, scheme=UNCHANGED, palette: str | None = None, theme_mode=None
+    ) -> None:
+        """Change how a wallpaper colors the desktop: ``mode`` (adaptive, palette or
+        keep), its ``scheme`` (None = the default), its ``palette`` and its light or
+        dark ``theme_mode``. Choosing "palette" without one picks Catppuccin."""
+        wallpaper = self.wallpaper(wid)
+        if mode is not None:
+            wallpaper.color_mode = mode
+            if mode == "palette" and not wallpaper.palette:
+                wallpaper.palette = "Catppuccin"
+        if scheme is not UNCHANGED:
+            wallpaper.scheme = scheme
+        if palette is not None:
+            wallpaper.palette = palette
+        if theme_mode is not None:
+            wallpaper.theme_mode = theme_mode
+        self.emit_changed("library")
+
+    def remove_wallpapers(self, wids: list[str]) -> Undo:
+        """Take wallpapers out of the library; returns an undo that puts them back in place."""
+        library = self.wallpapers
+        chosen = [self.wallpaper(wid) for wid in wids]
+        spots = [(library.index(w), w) for w in chosen if w in library]
+        for _index, wallpaper in spots:
+            library.remove(wallpaper)
+        self.emit_changed("library")
+
+        def undo() -> None:
+            for index, wallpaper in sorted(spots, key=lambda spot: spot[0]):
+                if wallpaper not in library:
+                    library.insert(min(index, len(library)), wallpaper)
+            self.emit_changed("library")
+
+        return undo
+
+    # -- store ----------------------------------------------------------------
+    def store_search(self, query: store_catalog.Query) -> list[StoreItem]:
+        """A provider's results for ``query`` (the real app: Browser.search)."""
+        return store_catalog.search(query)
+
+    def store_item(self, item_id: str) -> StoreItem | None:
+        return store_catalog.by_id(item_id)
+
+    def store_like_source(self, text: str) -> StoreItem | None:
+        """The item a Wallhaven "like:<id>" search refers to."""
+        return store_catalog.like_source(text)
+
+    def import_store_item(self, item_id: str, quality: str | None = None, fresh: bool = False) -> str:
+        """The Library entry for a downloaded Store item, created on first use (and
+        added to the automatic playlists); returns its wallpaper id. ``fresh`` = it
+        was downloaded just now."""
+        item = self.store_item(item_id)
+        item.in_library = True
+        wid = f"store-{item.id}"
+        if self.has_wallpaper(wid):
+            return wid
+        moving = item.provider == "MotionBGS"
+        width, height = (1920, 1080) if moving and quality == "hd" else store_catalog.size(item)
+        wallpaper = Wallpaper(
+            id=wid,
+            name=item.title,
+            kind="video" if moving else "still",
+            style=item.style,
+            seed=item.seed,
+            night=item.night,
+            source=item.provider,
+            folder=f"{self.download_folder}/Wall-in-One/Downloads/{item.provider}",
+            resolution=f"{width} × {height}",
+            size=f"{store_catalog.megabytes(item, quality):.1f} MB",
+            added="Just now" if fresh else "12 Sep",
+            duration=store_catalog.duration(item),
+            still_note="Captured from the video at 0:03" if moving else "This image is its own still",
+            tags=tuple(store_catalog.tags(item)),
+        )
+        self.wallpapers.insert(0, wallpaper)
+        self._wallpaper_index[wid] = wallpaper
+        for playlist in self.playlists:
+            if playlist.automatic:
+                playlist.entries.append(wid)
+        self.emit_changed("library")
+        return wid
+
+    # -- colors ---------------------------------------------------------------
+    @property
+    def default_scheme(self) -> str:
+        """The adaptive scheme inherited by wallpapers that don't choose one."""
+        return data.DEFAULT_SCHEME
+
+    def schemes(self) -> list[tuple[str, str, str]]:
+        """Noctalia's color schemes: (key, name, description)."""
+        return list(data.SCHEMES)
+
+    def scheme_name(self, key: str) -> str:
+        return data.SCHEME_NAME.get(key, "")
+
+    def scheme_swatches(self, wallpaper: Wallpaper, scheme: str | None, dark: bool = True) -> list[str]:
+        """[surface, primary, secondary, tertiary, error] for ``wallpaper`` under ``scheme``
+        (None = the default scheme)."""
+        return data.scheme_swatches(wallpaper, scheme, dark)
+
+    def wallpaper_swatches(self, wallpaper: Wallpaper, dark: bool = True) -> list[str]:
+        """The colors ``wallpaper`` puts on the desktop; empty when it keeps them."""
+        return data.wallpaper_swatches(wallpaper, dark)
+
+    def color_connector(self) -> str:
+        """The display whose wallpaper drives the desktop palette."""
+        lead = self.connectors()[0]
+        chosen = self.color_display
+        return chosen if self.display_mode == "independent" and chosen in self.current else lead
+
+    def color_wallpaper(self) -> Wallpaper:
+        return self.wallpaper(self.current[self.color_connector()])
+
+    def palette_override(self) -> Palette | None:
+        """The palette applied by hand in Settings, until the wallpaper changes."""
+        if self._override and self._override[1] != self.color_wallpaper().id:
+            self._override = None
+        return self._override[0] if self._override else None
+
+    def desktop_swatches(self) -> list[str]:
+        """The colors Noctalia shows right now: [surface, primary, secondary, tertiary, error].
+
+        Like the real desktop this has memory: a wallpaper set to "keep",
+        desktop colors turned off, or a missing template all leave the last
+        colors in place. An empty list means Noctalia's own default.
+        """
+        if self.live_colors():
+            return self.live.swatches()
+        wallpaper = self.color_wallpaper()
+        override = self.palette_override()
+        if self.desktop_colors and self.template_ok:
+            if override is not None:
+                self._desktop_source = override
+            elif wallpaper.color_mode != "keep":
+                self._desktop_source = wallpaper
+        source = self._desktop_source
+        if source is None:
+            return []
+        if isinstance(source, Wallpaper):
+            return data.wallpaper_swatches(source, self.dark)
+        return source.strip(self.dark)
+
+    def attach_live(self, live, follow: bool = True) -> None:
+        """Follow the real Noctalia: its palette, its light/dark mode and its wallpaper."""
+        self.live = live
+        self.use_live_colors = follow and live.found
+        live.connect("changed", lambda _live: self.sync_live())
+        self.sync_live()
+
+    def sync_live(self) -> None:
+        if not self.live_colors():
+            return
+        dark = self.live.mode == "dark"
+        if dark != self.dark:
+            self.dark = dark
+            self.emit_changed("theme")
+        self.emit_changed("settings", "now")
+
+    def live_colors(self) -> bool:
+        return bool(self.use_live_colors and self.live is not None and self.live.found)
+
+    def live_tokens(self) -> dict[str, str] | None:
+        """The real palette's tokens, when they fit the current light/dark mode."""
+        if self.live_colors() and (self.live.mode == "dark") == self.dark:
+            return self.live.tokens
+        return None
+
+    def set_use_live_colors(self, use: bool) -> None:
+        """Follow the real Noctalia's colors (read-only) instead of the simulated desktop."""
+        self.use_live_colors = use
+        self.sync_live()  # adopt the real mode when switching on
+        self.emit_changed("settings", "now")
+
+    def set_dark(self, dark: bool) -> None:
+        self.dark = dark
+        self.emit_changed("theme", "now")
+
+    # -- palettes -------------------------------------------------------------
+    def palettes(self, origin: str | None = None) -> list[Palette]:
+        """Noctalia's palettes, optionally of one origin (custom, builtin, community)."""
+        return [palette for palette in self._palettes if origin is None or palette.origin == origin]
+
+    def find_palette(self, name: str) -> Palette | None:
+        return next((palette for palette in self._palettes if palette.name == name), None)
+
+    def applied_palette(self) -> Palette | None:
+        """The palette applied by hand, until the wallpaper changes."""
+        return self.palette_override()
+
+    def apply_palette(self, name: str | None) -> Undo:
+        """Put a palette on the desktop until the wallpaper changes (None = stop)."""
+        before = self.applied_palette()
+        palette = self.find_palette(name) if name else None
+        self._override = (palette, self.color_wallpaper().id) if palette else None
+        self.emit_changed("settings")
+
+        def undo() -> None:
+            self._override = (before, self.color_wallpaper().id) if before else None
+            self.emit_changed("settings")
+
+        return undo
+
+    def duplicate_palette(self, name: str) -> tuple[Palette, Undo]:
+        """Copy a palette into "Yours", where it can be edited."""
+        source = self.find_palette(name)
+        copy = Palette(
+            self._unique_palette_name(f"{source.name} copy"), "custom", dict(source.light), dict(source.dark)
+        )
+        self._palettes.insert(len(self.palettes("custom")), copy)
+        self.emit_changed("settings")
+
+        def undo() -> None:
+            if copy in self._palettes:
+                self._palettes.remove(copy)
+                self.emit_changed("settings")
+
+        return copy, undo
+
+    def save_palette(self, name: str, new_name: str, light: dict[str, str], dark: dict[str, str]) -> None:
+        """Store an edited custom palette under ``new_name``."""
+        palette = self.find_palette(name)
+        palette.name = new_name
+        palette.light = dict(light)
+        palette.dark = dict(dark)
+        self.emit_changed("settings")
+
+    def delete_palette(self, name: str) -> Undo:
+        palette = self.find_palette(name)
+        index = self._palettes.index(palette)
+        self._palettes.remove(palette)
+        applied = self.applied_palette()
+        was_applied = applied is not None and applied.name == name
+        if was_applied:
+            self._override = None
+        self.emit_changed("settings")
+
+        def undo() -> None:
+            self._palettes.insert(index, palette)
+            if was_applied:
+                self._override = (palette, self.color_wallpaper().id)
+            self.emit_changed("settings")
+
+        return undo
+
+    def _unique_palette_name(self, base: str) -> str:
+        names = {palette.name for palette in self._palettes}
+        if base not in names:
+            return base
+        index = 2
+        while f"{base} {index}" in names:
+            index += 1
+        return f"{base} {index}"
+
+    # -- playlists ------------------------------------------------------------
+    def create_playlist(self, name: str) -> str:
+        """A new, empty playlist after the user's others; returns its id."""
+        base = name.lower().replace(" ", "-")
+        pid, number = base, 2
+        while pid in self._playlist_index:  # a second "Frog day" must not replace the first
+            pid, number = f"{base}-{number}", number + 1
+        playlist = Playlist(pid, name, [])
+        self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
+        self._playlist_index[pid] = playlist
+        self.emit_changed("playlists")
+        return pid
+
+    def rename_playlist(self, pid: str, name: str) -> Undo:
+        playlist = self.playlist(pid)
+        old = playlist.name
+        playlist.name = name
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            playlist.name = old
+            self.emit_changed("playlists")
+
+        return undo
+
+    def set_playlist_interval(self, pid: str, minutes: int) -> None:
+        """How often a playlist changes wallpaper (0 = it doesn't)."""
+        self.playlist(pid).interval = minutes
+        self.emit_changed("playlists", "playback")
+
+    def set_playlist_shuffle(self, pid: str, shuffle: bool) -> None:
+        self.playlist(pid).shuffle = shuffle
+        self.emit_changed("playlists", "playback")
+
+    def duplicate_playlist(self, pid: str) -> tuple[str, str, Undo]:
+        """Copy a playlist, just after it (or after the user's own ones for an
+        automatic one). Returns (new id, new name, undo)."""
+        source, playlists = self.playlist(pid), self.playlists
+        base = f"{source.name} (copy)"
+        name, number = base, 2
+        names = {p.name for p in playlists}
+        while name in names:
+            name, number = f"{source.name} (copy {number})", number + 1
+        copy_id, number = f"{source.id}-copy", 2
+        while copy_id in self._playlist_index:
+            copy_id, number = f"{source.id}-copy-{number}", number + 1
+        copy = Playlist(copy_id, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
+        user_count = len([p for p in playlists if not p.automatic])
+        playlists.insert(playlists.index(source) + 1 if not source.automatic else user_count, copy)
+        self._playlist_index[copy_id] = copy
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            if copy in playlists:
+                playlists.remove(copy)
+            self._playlist_index.pop(copy_id, None)
+            self.emit_changed("playlists")
+
+        return copy_id, name, undo
+
+    def delete_playlist(self, pid: str) -> Undo:
+        """Delete a playlist with the rules that use it; displays that played it
+        follow the schedule again, and so does a pick of it."""
+        playlist, playlists = self.playlist(pid), self.playlists
+        position = playlists.index(playlist)
+        rules = [(i, rule) for i, rule in enumerate(self.rules) if rule.playlist == pid]
+        assigned, manual = dict(self.assigned), dict(self.manual)
+        for index, _rule in reversed(rules):
+            del self.rules[index]
+        for connector, value in self.assigned.items():
+            if value == pid:
+                self.assigned[connector] = ""
+        for connector in [c for c, p in self.manual.items() if p == pid]:
+            del self.manual[connector]
+        playlists.remove(playlist)
+        self._playlist_index.pop(pid, None)
+        self.emit_changed("playlists", "schedule", "displays", "now", "playback")
+
+        def undo() -> None:
+            playlists.insert(min(position, len(playlists)), playlist)
+            self._playlist_index[pid] = playlist
+            for index, rule in rules:
+                self.rules.insert(min(index, len(self.rules)), rule)
+            self.assigned.clear()
+            self.assigned.update(assigned)
+            self.manual.clear()
+            self.manual.update(manual)
+            self.emit_changed("playlists", "schedule", "displays", "now", "playback")
+
+        return undo
+
+    def add_to_playlist(self, pid: str, wids: list[str]) -> None:
+        playlist = self.playlist(pid)
+        playlist.entries.extend(wids)
+        self.emit_changed("playlists")
+        noun = f"“{self.wallpaper(wids[0]).name}”" if len(wids) == 1 else f"{len(wids)} wallpapers"
+
+        def undo() -> None:
+            del playlist.entries[-len(wids) :]
+            self.emit_changed("playlists")
+
+        self.toast(f"Added {noun} to “{playlist.name}”", undo)
+
+    def insert_entries(self, pid: str, position: int, wids: list[str]) -> Undo:
+        """Put wallpapers into a playlist at ``position`` (the drop line)."""
+        entries = self.playlist(pid).entries
+        entries[position:position] = wids
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            del entries[position : position + len(wids)]
+            self.emit_changed("playlists")
+
+        return undo
+
+    def remove_entries(self, pid: str, indices: list[int]) -> tuple[list[tuple[int, str]], Undo]:
+        """Take entries out of a playlist; returns [(index, wallpaper id)] and an undo
+        that puts each back where it was."""
+        entries = self.playlist(pid).entries
+        removed = [(i, entries[i]) for i in sorted(set(indices)) if 0 <= i < len(entries)]
+        for index, _wid in reversed(removed):
+            del entries[index]
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            for index, wid in removed:
+                entries.insert(min(index, len(entries)), wid)
+            self.emit_changed("playlists")
+
+        return removed, undo
+
+    def reorder_entries(self, pid: str, wids: list[str]) -> None:
+        """Store a playlist's entries in a new order (a finished drag or keyboard move).
+        Ignored unless ``wids`` holds exactly the current entries: a move that settled
+        after entries were added or removed must not drop or bring back any."""
+        entries = self.playlist(pid).entries
+        if sorted(wids) != sorted(entries):
+            return
+        entries[:] = wids
+        self.emit_changed("playlists")
+
+    def move_entries_to_top(self, pid: str, indices: list[int]) -> None:
+        entries = self.playlist(pid).entries
+        chosen = set(indices)
+        picked = [entries[i] for i in sorted(chosen)]
+        rest = [wid for i, wid in enumerate(entries) if i not in chosen]
+        entries[:] = picked + rest
+        self.emit_changed("playlists")
+
+    # -- schedule -------------------------------------------------------------
+    # Every change lets the displays that follow the schedule switch playlist,
+    # as the runtime would, then emits "schedule" and "now".
     # Every change lets displays that follow the schedule switch playlist, as the
     # runtime would, then emits "schedule" and "now".
     def _schedule_changed(self) -> None:
@@ -468,468 +979,7 @@ class AppState(GObject.Object):
 
         return undo
 
-    # -- actions --------------------------------------------------------------
-    def apply(self, wid: str, scope: str = "all") -> None:
-        before = dict(self.current), dict(self.manual)
-        for connector in self.targets(scope):
-            self.current[connector] = wid
-            self.manual[connector] = "quick"
-        if self.playback == "stopped":
-            self._set_playback("playing")
-        self.emit_changed("now", "playback")
-        where = "all displays" if scope == "all" or self.display_mode == "mirrored" else scope
-
-        def undo() -> None:
-            self.current, self.manual = before
-            self.emit_changed("now", "playback")
-
-        self.toast(f"“{self.wallpaper(wid).name}” is now on {where}", undo)
-
-    def play_playlist(self, pid: str, scope: str = "all", start: int = 0) -> None:
-        """Your pick: play a playlist (from entry ``start``) until you resume the schedule."""
-        playlist = self.playlist(pid)
-        if not playlist.entries:
-            self.toast(f"“{playlist.name}” is empty — add wallpapers first")
-            return
-        for connector in self.targets(scope):
-            self.manual[connector] = pid
-            self.current[connector] = playlist.entries[start]
-        self._set_playback("playing")
-        self.emit_changed("now", "playback")
-        self.toast(f"Playing “{playlist.name}” until you resume the schedule")
-
-    def resume_schedule(self, scope: str = "all") -> None:
-        for connector in self.targets(scope):
-            self.manual.pop(connector, None)
-            entries = self.playlist(self.effective_playlist(connector)).entries
-            self.current[connector] = entries[0]
-        self.emit_changed("now", "playback")
-        self.toast("Following the schedule again")
-
-    def _set_playback(self, playback: str) -> None:
-        if playback != self.playback:
-            self._held.clear()  # the player bar paused, resumed or stopped every display
-        self.playback = playback
-
-    def toggle_play(self) -> None:
-        self._set_playback("paused" if self.playback == "playing" else "playing")
-        self.emit_changed("playback")
-
-    def stop(self) -> None:
-        self._set_playback("stopped")
-        self.emit_changed("playback")
-        self.toast("Animation stopped — the still stays on screen")
-
-    def step(self, direction: int, scope: str | None = None) -> None:
-        for connector in self.targets(scope):
-            playlist_id = self.effective_playlist(connector)
-            entries = self.playlist(playlist_id).entries if playlist_id != "quick" else [self.current[connector]]
-            current = self.current[connector]
-            index = entries.index(current) if current in entries else -1
-            self.current[connector] = entries[(index + direction) % len(entries)]
-        self.next_change_minutes = self.default_interval
-        self.emit_changed("now")
-
-    def random(self, scope: str | None = None) -> None:
-        for connector in self.targets(scope):
-            playlist_id = self.effective_playlist(connector)
-            entries = self.playlist(playlist_id).entries if playlist_id != "quick" else [w.id for w in self.wallpapers]
-            self.current[connector] = self._rng.choice(entries)
-        self.emit_changed("now")
-
-    def set_rotate(self, value: bool) -> None:
-        self.rotate = value
-        self.emit_changed("playback")
-
-    def set_shuffle(self, value: bool, scope: str | None = None) -> None:
-        for connector in self.targets(scope):
-            playlist_id = self.effective_playlist(connector)
-            if playlist_id in self._playlist_index:
-                self.playlist(playlist_id).shuffle = value
-        self.emit_changed("playback", "playlists")
-
-    def shuffle_on(self, scope: str | None = None) -> bool:
-        connector = self.targets(scope)[0]
-        playlist_id = self.effective_playlist(connector)
-        return playlist_id in self._playlist_index and self.playlist(playlist_id).shuffle
-
-    # -- library: queries ------------------------------------------------------
-    def has_wallpaper(self, wid: str) -> bool:
-        return wid in self._wallpaper_index
-
-    def schemes(self) -> list[tuple[str, str, str]]:
-        """Noctalia's color schemes: (key, name, description)."""
-        return list(data.SCHEMES)
-
-    def scheme_name(self, key: str) -> str:
-        return data.SCHEME_NAME.get(key, "")
-
-    def scheme_swatches(self, wallpaper: Wallpaper, scheme: str | None, dark: bool = True) -> list[str]:
-        """[surface, primary, secondary, tertiary, error] for ``wallpaper`` under ``scheme``
-        (None = the default scheme)."""
-        return data.scheme_swatches(wallpaper, scheme, dark)
-
-    def wallpaper_swatches(self, wallpaper: Wallpaper, dark: bool = True) -> list[str]:
-        """The colors ``wallpaper`` puts on the desktop; empty when it keeps them."""
-        return data.wallpaper_swatches(wallpaper, dark)
-
-    # -- library: actions -------------------------------------------------------
-    def toggle_favorite(self, wid: str) -> None:
-        wallpaper = self.wallpaper(wid)
-        wallpaper.favorite = not wallpaper.favorite
-        self.emit_changed("library")
-
-    def favorite_wallpapers(self, wids: list[str]) -> None:
-        for wid in wids:
-            self.wallpaper(wid).favorite = True
-        self.emit_changed("library")
-
-    def retry_wallpaper(self, wid: str) -> None:
-        """Forget a playback problem so the runtime tries the wallpaper again."""
-        self.wallpaper(wid).problem = ""
-        self.emit_changed("library")
-
-    def set_wallpaper_colors(
-        self, wid: str, *, mode: str | None = None, scheme=UNCHANGED, palette: str | None = None, theme_mode=None
-    ) -> None:
-        """Change how a wallpaper colors the desktop: ``mode`` (adaptive, palette or
-        keep), its ``scheme`` (None = the default), its ``palette`` and its light or
-        dark ``theme_mode``. Choosing "palette" without one picks Catppuccin."""
-        wallpaper = self.wallpaper(wid)
-        if mode is not None:
-            wallpaper.color_mode = mode
-            if mode == "palette" and not wallpaper.palette:
-                wallpaper.palette = "Catppuccin"
-        if scheme is not UNCHANGED:
-            wallpaper.scheme = scheme
-        if palette is not None:
-            wallpaper.palette = palette
-        if theme_mode is not None:
-            wallpaper.theme_mode = theme_mode
-        self.emit_changed("library")
-
-    def remove_wallpapers(self, wids: list[str]) -> Undo:
-        """Take wallpapers out of the library; returns an undo that puts them back in place."""
-        library = self.wallpapers
-        chosen = [self.wallpaper(wid) for wid in wids]
-        spots = [(library.index(w), w) for w in chosen if w in library]
-        for _index, wallpaper in spots:
-            library.remove(wallpaper)
-        self.emit_changed("library")
-
-        def undo() -> None:
-            for index, wallpaper in sorted(spots, key=lambda spot: spot[0]):
-                if wallpaper not in library:
-                    library.insert(min(index, len(library)), wallpaper)
-            self.emit_changed("library")
-
-        return undo
-
-    # -- store ----------------------------------------------------------------------
-    def store_search(self, query: store_catalog.Query) -> list[StoreItem]:
-        """A provider's results for ``query`` (the real app: Browser.search)."""
-        return store_catalog.search(query)
-
-    def store_item(self, item_id: str) -> StoreItem | None:
-        return store_catalog.by_id(item_id)
-
-    def store_like_source(self, text: str) -> StoreItem | None:
-        """The item a Wallhaven "like:<id>" search refers to."""
-        return store_catalog.like_source(text)
-
-    def import_store_item(self, item_id: str, quality: str | None = None, fresh: bool = False) -> str:
-        """The Library entry for a downloaded Store item, created on first use (and
-        added to the automatic playlists); returns its wallpaper id. ``fresh`` = it
-        was downloaded just now."""
-        item = self.store_item(item_id)
-        item.in_library = True
-        wid = f"store-{item.id}"
-        if self.has_wallpaper(wid):
-            return wid
-        moving = item.provider == "MotionBGS"
-        width, height = (1920, 1080) if moving and quality == "hd" else store_catalog.size(item)
-        wallpaper = Wallpaper(
-            id=wid,
-            name=item.title,
-            kind="video" if moving else "still",
-            style=item.style,
-            seed=item.seed,
-            night=item.night,
-            source=item.provider,
-            folder=f"{self.download_folder}/Wall-in-One/Downloads/{item.provider}",
-            resolution=f"{width} × {height}",
-            size=f"{store_catalog.megabytes(item, quality):.1f} MB",
-            added="Just now" if fresh else "12 Sep",
-            duration=store_catalog.duration(item),
-            still_note="Captured from the video at 0:03" if moving else "This image is its own still",
-            tags=tuple(store_catalog.tags(item)),
-        )
-        self.wallpapers.insert(0, wallpaper)
-        self._wallpaper_index[wid] = wallpaper
-        for playlist in self.playlists:
-            if playlist.automatic:
-                playlist.entries.append(wid)
-        self.emit_changed("library")
-        return wid
-
-    # -- palettes ---------------------------------------------------------------
-    def palettes(self, origin: str | None = None) -> list[Palette]:
-        """Noctalia's palettes, optionally of one origin (custom, builtin, community)."""
-        return [palette for palette in self._palettes if origin is None or palette.origin == origin]
-
-    def find_palette(self, name: str) -> Palette | None:
-        return next((palette for palette in self._palettes if palette.name == name), None)
-
-    def applied_palette(self) -> Palette | None:
-        """The palette applied by hand, until the wallpaper changes."""
-        return self.palette_override()
-
-    def apply_palette(self, name: str | None) -> Undo:
-        """Put a palette on the desktop until the wallpaper changes (None = stop)."""
-        before = self.applied_palette()
-        palette = self.find_palette(name) if name else None
-        self._override = (palette, self.color_wallpaper().id) if palette else None
-        self.emit_changed("settings")
-
-        def undo() -> None:
-            self._override = (before, self.color_wallpaper().id) if before else None
-            self.emit_changed("settings")
-
-        return undo
-
-    def duplicate_palette(self, name: str) -> tuple[Palette, Undo]:
-        """Copy a palette into "Yours", where it can be edited."""
-        source = self.find_palette(name)
-        copy = Palette(
-            self._unique_palette_name(f"{source.name} copy"), "custom", dict(source.light), dict(source.dark)
-        )
-        self._palettes.insert(len(self.palettes("custom")), copy)
-        self.emit_changed("settings")
-
-        def undo() -> None:
-            if copy in self._palettes:
-                self._palettes.remove(copy)
-                self.emit_changed("settings")
-
-        return copy, undo
-
-    def save_palette(self, name: str, new_name: str, light: dict[str, str], dark: dict[str, str]) -> None:
-        """Store an edited custom palette under ``new_name``."""
-        palette = self.find_palette(name)
-        palette.name = new_name
-        palette.light = dict(light)
-        palette.dark = dict(dark)
-        self.emit_changed("settings")
-
-    def delete_palette(self, name: str) -> Undo:
-        palette = self.find_palette(name)
-        index = self._palettes.index(palette)
-        self._palettes.remove(palette)
-        applied = self.applied_palette()
-        was_applied = applied is not None and applied.name == name
-        if was_applied:
-            self._override = None
-        self.emit_changed("settings")
-
-        def undo() -> None:
-            self._palettes.insert(index, palette)
-            if was_applied:
-                self._override = (palette, self.color_wallpaper().id)
-            self.emit_changed("settings")
-
-        return undo
-
-    def _unique_palette_name(self, base: str) -> str:
-        names = {palette.name for palette in self._palettes}
-        if base not in names:
-            return base
-        index = 2
-        while f"{base} {index}" in names:
-            index += 1
-        return f"{base} {index}"
-
-    def add_to_playlist(self, pid: str, wids: list[str]) -> None:
-        playlist = self.playlist(pid)
-        playlist.entries.extend(wids)
-        self.emit_changed("playlists")
-        noun = f"“{self.wallpaper(wids[0]).name}”" if len(wids) == 1 else f"{len(wids)} wallpapers"
-
-        def undo() -> None:
-            del playlist.entries[-len(wids) :]
-            self.emit_changed("playlists")
-
-        self.toast(f"Added {noun} to “{playlist.name}”", undo)
-
-    # -- playlists: queries -----------------------------------------------------
-    def has_playlist(self, pid: str) -> bool:
-        return pid in self._playlist_index
-
-    def playlist_name(self, pid: str) -> str:
-        return self._playlist_index[pid].name if pid in self._playlist_index else "Missing playlist"
-
-    def playlist_cover(self, pid: str, size: int) -> Gdk.Texture:
-        """A 2x2 mosaic of the playlist's first four different wallpapers (cached)."""
-        keys: list[tuple[str, int, bool]] = []
-        for wid in self.playlist(pid).entries:
-            key = self.wallpaper(wid).key
-            if key not in keys:
-                keys.append(key)
-            if len(keys) == 4:
-                break
-        return art.mosaic(tuple(keys), size)
-
-    # -- playlists: actions -----------------------------------------------------
-    def create_playlist(self, name: str) -> str:
-        """A new, empty playlist after the user's others; returns its id."""
-        base = name.lower().replace(" ", "-")
-        pid, number = base, 2
-        while pid in self._playlist_index:  # a second "Frog day" must not replace the first
-            pid, number = f"{base}-{number}", number + 1
-        playlist = Playlist(pid, name, [])
-        self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
-        self._playlist_index[pid] = playlist
-        self.emit_changed("playlists")
-        return pid
-
-    def rename_playlist(self, pid: str, name: str) -> Undo:
-        playlist = self.playlist(pid)
-        old = playlist.name
-        playlist.name = name
-        self.emit_changed("playlists")
-
-        def undo() -> None:
-            playlist.name = old
-            self.emit_changed("playlists")
-
-        return undo
-
-    def set_playlist_interval(self, pid: str, minutes: int) -> None:
-        """How often a playlist changes wallpaper (0 = it doesn't)."""
-        self.playlist(pid).interval = minutes
-        self.emit_changed("playlists", "playback")
-
-    def set_playlist_shuffle(self, pid: str, shuffle: bool) -> None:
-        self.playlist(pid).shuffle = shuffle
-        self.emit_changed("playlists", "playback")
-
-    def duplicate_playlist(self, pid: str) -> tuple[str, str, Undo]:
-        """Copy a playlist, just after it (or after the user's own ones for an
-        automatic one). Returns (new id, new name, undo)."""
-        source, playlists = self.playlist(pid), self.playlists
-        base = f"{source.name} (copy)"
-        name, number = base, 2
-        names = {p.name for p in playlists}
-        while name in names:
-            name, number = f"{source.name} (copy {number})", number + 1
-        copy_id, number = f"{source.id}-copy", 2
-        while copy_id in self._playlist_index:
-            copy_id, number = f"{source.id}-copy-{number}", number + 1
-        copy = Playlist(copy_id, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
-        user_count = len([p for p in playlists if not p.automatic])
-        playlists.insert(playlists.index(source) + 1 if not source.automatic else user_count, copy)
-        self._playlist_index[copy_id] = copy
-        self.emit_changed("playlists")
-
-        def undo() -> None:
-            if copy in playlists:
-                playlists.remove(copy)
-            self._playlist_index.pop(copy_id, None)
-            self.emit_changed("playlists")
-
-        return copy_id, name, undo
-
-    def delete_playlist(self, pid: str) -> Undo:
-        """Delete a playlist with the rules that use it; displays that played it
-        follow the schedule again, and so does a pick of it."""
-        playlist, playlists = self.playlist(pid), self.playlists
-        position = playlists.index(playlist)
-        rules = [(i, rule) for i, rule in enumerate(self.rules) if rule.playlist == pid]
-        assigned, manual = dict(self.assigned), dict(self.manual)
-        for index, _rule in reversed(rules):
-            del self.rules[index]
-        for connector, value in self.assigned.items():
-            if value == pid:
-                self.assigned[connector] = ""
-        for connector in [c for c, p in self.manual.items() if p == pid]:
-            del self.manual[connector]
-        playlists.remove(playlist)
-        self._playlist_index.pop(pid, None)
-        self.emit_changed("playlists", "schedule", "displays", "now", "playback")
-
-        def undo() -> None:
-            playlists.insert(min(position, len(playlists)), playlist)
-            self._playlist_index[pid] = playlist
-            for index, rule in rules:
-                self.rules.insert(min(index, len(self.rules)), rule)
-            self.assigned.clear()
-            self.assigned.update(assigned)
-            self.manual.clear()
-            self.manual.update(manual)
-            self.emit_changed("playlists", "schedule", "displays", "now", "playback")
-
-        return undo
-
-    def insert_entries(self, pid: str, position: int, wids: list[str]) -> Undo:
-        """Put wallpapers into a playlist at ``position`` (the drop line)."""
-        entries = self.playlist(pid).entries
-        entries[position:position] = wids
-        self.emit_changed("playlists")
-
-        def undo() -> None:
-            del entries[position : position + len(wids)]
-            self.emit_changed("playlists")
-
-        return undo
-
-    def remove_entries(self, pid: str, indices: list[int]) -> tuple[list[tuple[int, str]], Undo]:
-        """Take entries out of a playlist; returns [(index, wallpaper id)] and an undo
-        that puts each back where it was."""
-        entries = self.playlist(pid).entries
-        removed = [(i, entries[i]) for i in sorted(set(indices)) if 0 <= i < len(entries)]
-        for index, _wid in reversed(removed):
-            del entries[index]
-        self.emit_changed("playlists")
-
-        def undo() -> None:
-            for index, wid in removed:
-                entries.insert(min(index, len(entries)), wid)
-            self.emit_changed("playlists")
-
-        return removed, undo
-
-    def reorder_entries(self, pid: str, wids: list[str]) -> None:
-        """Store a playlist's entries in a new order (a finished drag or keyboard move).
-        Ignored unless ``wids`` holds exactly the current entries: a move that settled
-        after entries were added or removed must not drop or bring back any."""
-        entries = self.playlist(pid).entries
-        if sorted(wids) != sorted(entries):
-            return
-        entries[:] = wids
-        self.emit_changed("playlists")
-
-    def move_entries_to_top(self, pid: str, indices: list[int]) -> None:
-        entries = self.playlist(pid).entries
-        chosen = set(indices)
-        picked = [entries[i] for i in sorted(chosen)]
-        rest = [wid for i, wid in enumerate(entries) if i not in chosen]
-        entries[:] = picked + rest
-        self.emit_changed("playlists")
-
-    # -- displays: queries ------------------------------------------------------
-    def display(self, connector: str) -> Display:
-        return next(display for display in self.displays if display.connector == connector)
-
-    def lead_connector(self) -> str:
-        """The display the others follow when they are linked: the primary one."""
-        for display in self.displays:
-            if display.primary:
-                return display.connector
-        return self.connectors()[0]
-
-    def display_paused(self, connector: str) -> bool:
-        """Paused everywhere, or (each display separately) paused on its own."""
-        return self.playback == "paused" or (self.display_mode != "mirrored" and connector in self._held)
-
+    # -- displays -------------------------------------------------------------
     def kept_assignments(self) -> dict[str, str]:
         """Display playlists kept aside while the displays are linked."""
         return dict(self._kept_assigned)
@@ -968,7 +1018,6 @@ class AppState(GObject.Object):
         before = self.displays_snapshot()
         return lambda: self._restore_displays(before)
 
-    # -- displays: actions --------------------------------------------------------
     def set_display_mode(self, mode: str) -> Undo:
         """ "mirrored": every display shows the lead display's wallpaper, and their own
         playlists are kept aside; "independent": each display plays its own again."""
@@ -1102,38 +1151,7 @@ class AppState(GObject.Object):
 
         return undo
 
-    def advance(self, minutes: int) -> None:
-        """Demo clock: move time forward, letting the schedule and rotation act."""
-        before = {connector: self.effective_playlist(connector) for connector in self.connectors()}
-        self.now += dt.timedelta(minutes=minutes)
-        for connector in self.connectors():
-            if connector in self.manual:
-                continue
-            after = self.effective_playlist(connector)
-            if after != before[connector] and self.playlist(after).entries:
-                self.current[connector] = self.playlist(after).entries[0]
-        if self.rotate and self.playback != "stopped" and self.service_running:
-            self.next_change_minutes -= minutes
-            while self.next_change_minutes <= 0:
-                for connector in self.connectors():
-                    playlist_id = self.effective_playlist(connector)
-                    if playlist_id == "quick":
-                        continue
-                    entries = self.playlist(playlist_id).entries
-                    current = self.current[connector]
-                    index = entries.index(current) if current in entries else -1
-                    self.current[connector] = (
-                        self._rng.choice(entries)
-                        if self.playlist(playlist_id).shuffle
-                        else entries[(index + 1) % len(entries)]
-                    )
-                connector = self.connectors()[0]
-                playlist_id = self.effective_playlist(connector)
-                interval = self.playlist(playlist_id).interval if playlist_id in self._playlist_index else 0
-                self.next_change_minutes += interval or self.default_interval
-        self.emit_changed("schedule", "now", "playback", "clock")
-
-    # -- settings: queries -------------------------------------------------------
+    # -- settings -------------------------------------------------------------
     @property
     def template_ok(self) -> bool:
         """Noctalia's template is installed (a reinstall in progress counts)."""
@@ -1146,7 +1164,6 @@ class AppState(GObject.Object):
     def runtime_log(self) -> list[str]:
         return list(data.RUNTIME_LOG) + list(data.RUNTIME_LOG_EXTRA)
 
-    # -- settings: actions -------------------------------------------------------
     def set_setting(self, key: str, value) -> None:
         self.preferences[key] = value
         self.emit_changed("preferences")
@@ -1190,6 +1207,28 @@ class AppState(GObject.Object):
         self.follow_noctalia_colors = follow
         self.emit_changed("settings", "playback")
 
+    # -- appearance -----------------------------------------------------------
+    # This window's style and glass dials.
+    @property
+    def background_alpha(self) -> float:
+        """Background opacity of the current window style (1.0 when solid)."""
+        return self.background_opacity.get(self.window_style, 1.0)
+
+    @background_alpha.setter
+    def background_alpha(self, value: float) -> None:
+        if self.window_style in self.background_opacity:
+            self.background_opacity[self.window_style] = max(0.0, min(1.0, value))
+
+    @property
+    def panel_alpha(self) -> float:
+        """Panel and element opacity of the current window style (1.0 when solid)."""
+        return self.panel_opacity.get(self.window_style, 1.0)
+
+    @panel_alpha.setter
+    def panel_alpha(self, value: float) -> None:
+        if self.window_style in self.panel_opacity:
+            self.panel_opacity[self.window_style] = max(0.0, min(1.0, value))
+
     def set_window_style(self, style: str) -> None:
         """ "solid", "translucent" (the compositor shows the desktop behind) or "frosted"."""
         self.window_style = style
@@ -1210,7 +1249,7 @@ class AppState(GObject.Object):
         self.frost = value
         self.emit_changed("appearance")
 
-    # -- settings: library folders -----------------------------------------------
+    # -- library folders ------------------------------------------------------
     def add_library_folder(self, path: str) -> Undo:
         """Add a folder; it shows as scanning for a moment."""
         folder = Folder(path, "38 files", scanning=True)
@@ -1285,33 +1324,9 @@ class AppState(GObject.Object):
 
         return undo
 
-    # -- window ---------------------------------------------------------------------
-    def set_scope(self, scope: str) -> None:
-        """The player bar's display scope: "all" or a connector."""
-        self.scope = scope
-        self.emit_changed("scope")
-
-    def set_dark(self, dark: bool) -> None:
-        self.dark = dark
-        self.emit_changed("theme", "now")
-
-    def set_use_live_colors(self, use: bool) -> None:
-        """Follow the real Noctalia's colors (read-only) instead of the simulated desktop."""
-        self.use_live_colors = use
-        self.sync_live()  # adopt the real mode when switching on
-        self.emit_changed("settings", "now")
-
-    def set_battery(self, value: bool) -> None:
-        self.on_battery = value
-        self.emit_changed("system", "playback")
-
-    def set_service_running(self, value: bool) -> None:
-        self.service_running = value
-        self.emit_changed("system", "playback", "now")
-
-    # -- demo scenes ------------------------------------------------------------
-    # Used only by the pages' demo() hooks for screenshots and the smoke test;
-    # a real-app adapter doesn't need them.
+    # -- demo scenes ----------------------------------------------------------
+    # Only the pages' demo() hooks use these (screenshots, the smoke test); a
+    # real-app adapter doesn't need them.
     def demo_set_pick(self, connector: str, pid: str, index: int) -> None:
         """A pick of ``pid`` on one display, showing its entry ``index``."""
         self.manual[connector] = pid

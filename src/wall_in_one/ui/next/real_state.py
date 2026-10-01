@@ -7,7 +7,9 @@ why comes from the `RuntimeStatusModel`: each connected display's route
 (``route_source``: a pick, a schedule rule, the display's own playlist or the
 default), its playlist and its entry, resolved to a library item by
 `runtime_truth.media_playback`. Nothing here resolves a schedule: "until"
-stays empty because the runtime does not report when a reason ends.
+(when a reason ends) and "Next in" (when the rotation advances) are the
+runtime's own per-display timing, and stay empty with a service that does not
+report it.
 
 **Writes.** Apply, Favorite and the player bar's playback controls, and
 nothing else. Apply is the classic window's Quick choice (`play_item_async`,
@@ -31,6 +33,7 @@ application, which renders them into its own stylesheet.
 from __future__ import annotations
 
 import datetime
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -234,6 +237,17 @@ def scheme_name(key: str) -> str:
 
 def _is_quick_choice(playlist_id: str) -> bool:
     return playlist_id == QUICK_CHOICE_ID or playlist_id.startswith(DISPLAY_QUICK_CHOICE_ID_PREFIX)
+
+
+def _timing(rows: Sequence[runtime_truth.DisplayRuntimeTruth]) -> str:
+    """The soonest rotation in scope as "Next in 12 min", or empty when none is due.
+
+    Minutes round up, and never read 0, the way the companion panel counts.
+    """
+    deadlines = [row.next_cycle_in_s for row in rows if row.next_cycle_in_s is not None]
+    if not deadlines:
+        return ""
+    return f"Next in {max(1, math.ceil(min(deadlines) / 60))} min"
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -449,7 +463,8 @@ class RealAppState(GObject.Object):
             wid = self._current.get(display.connector, "")
             route = _ROUTES.get(display.route_source, "default")
             picked_one = route == "pick" and _is_quick_choice(display.playlist_id)
-            reason = Reason(route, "" if picked_one else display.playlist)
+            until = "" if route == "pick" else display.until or ""
+            reason = Reason(route, "" if picked_one else display.playlist, until)
             name = self._index[wid].name if wid in self._index else ""
             screens.append(OnScreen(display.connector, wid, name, reason))
             states.append(display.playback_state)
@@ -477,8 +492,7 @@ class RealAppState(GObject.Object):
             following_schedule=following,
             shuffle=shuffle,
             rotate=rotate,
-            # The runtime reports whether it changes wallpaper, not when.
-            timing="" if rotate else "Not changing",
+            timing=_timing(rows) if rotate else "Not changing",
             notes=notes,
         )
 

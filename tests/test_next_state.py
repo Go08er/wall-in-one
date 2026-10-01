@@ -391,6 +391,53 @@ def test_what_plays_and_why_come_from_the_runtime(backend: FakeApplication) -> N
     assert [screen.connector for screen in adapter.player().screens] == ["DP-1"]
 
 
+def test_until_and_next_in_come_from_the_runtimes_timing(backend: FakeApplication) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    stills = {"DP-1": items[1].path, "HDMI-A-1": items[0].path}
+
+    def timed(dp: dict[str, object], hdmi: dict[str, object], **routes: str) -> None:
+        status = _status(stills, **routes)
+        displays = status["displays"]
+        assert isinstance(displays, list)
+        for record in displays:
+            record.update(dp if record["connector"] == "DP-1" else hdmi)
+        backend.status_model.adopt(status)
+
+    # The runtime's own "until" and its soonest rotation, rounded up to minutes.
+    timed(
+        {
+            "route_change_at": "2026-08-03T18:00:00",
+            "route_change_in_s": 3600,
+            "until": "18:00",
+            "next_cycle_at": "2026-08-03T17:11:30",
+            "next_cycle_in_s": 690,
+        },
+        {"until": "18:00", "next_cycle_at": "2026-08-03T17:25:00", "next_cycle_in_s": 1500},
+        **{"HDMI-A-1": "manual"},
+    )
+    player = adapter.player()
+    reasons = {screen.connector: reason_text(screen.reason) for screen in player.screens}
+    assert reasons == {"DP-1": "Evening · from schedule until 18:00", "HDMI-A-1": "Your pick"}
+    assert player.timing == "Next in 12 min"
+    adapter.set_scope("HDMI-A-1")
+    assert adapter.player().timing == "Next in 25 min"
+    adapter.set_scope("DP-1")
+
+    # Due now still reads as a minute, never "0 min".
+    timed({"next_cycle_at": "2026-08-03T17:00:00", "next_cycle_in_s": 0}, {})
+    assert adapter.player().timing == "Next in 1 min"
+
+    # Rotating but paused: no deadline, so nothing is promised.
+    timed({}, {})
+    assert adapter.player().rotate and adapter.player().timing == ""
+    assert "until" not in reason_text(adapter.player().screens[0].reason)
+
+    # Not rotating at all.
+    timed({"cycle_enabled": False}, {"cycle_enabled": False})
+    assert adapter.player().timing == "Not changing"
+
+
 def test_a_repeated_poll_says_nothing(backend: FakeApplication) -> None:
     items = backend.session.library.items
     adapter, _keeper = _adapter(backend)

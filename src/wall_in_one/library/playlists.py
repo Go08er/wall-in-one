@@ -39,8 +39,11 @@ from wall_in_one.library.model import MediaItem
 #: The file, under `paths.app_state_dir()`, beside the favourites and pairings.
 STATE_FILENAME: Final = "playlists.json"
 
-#: Bumped only if the shape changes. Newer documents are recovered for the UI
-#: but faulted so this build cannot silently compile or rewrite them.
+#: Bumped only if the shape changes. A newer document is recovered for the UI
+#: but faulted, so this build never compiles it, and every mutation is refused
+#: (kind ``newer-version``) so the file is left byte-identical, with no
+#: ``.broken`` copy. Unknown keys in a same-version document are carried
+#: through every save; see `DOCUMENT_SHAPE`.
 FORMAT_VERSION: Final = 1
 
 #: Ceilings, so a file that grew a zero cannot be read forever. People retain
@@ -81,7 +84,7 @@ class PlaylistError(Exception):
     """A playlist could not be changed, with a machine-readable reason.
 
     Kinds in use: ``local-io``, ``no-such-playlist``, ``no-such-entry``,
-    ``invalid-name``, ``identity-conflict``, ``full``.
+    ``invalid-name``, ``identity-conflict``, ``full``, ``newer-version``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -515,17 +518,46 @@ def _playlist(raw: object) -> Playlist | None:
     return Playlist(id=identifier.strip(), name=name.strip(), entries=tuple(entries))
 
 
+#: What this build models; everything else in the file is carried, not dropped.
+DOCUMENT_SHAPE: Final = state_file.Shape(
+    known=frozenset({"version"}),
+    records={
+        "playlists": state_file.Shape(
+            known=frozenset({"id", "name"}),
+            identity="id",
+            strip_identity=True,
+            records={
+                "entries": state_file.Shape(
+                    known=frozenset({"id", "source"}),
+                    identity="id",
+                    strip_identity=True,
+                )
+            },
+        )
+    },
+)
+
+
 def state_path() -> Path:
     return paths.app_state_dir() / STATE_FILENAME
 
 
-def _read(path: Path) -> tuple[dict[str, Playlist], str | None]:
+def _read(path: Path) -> state_file.Reading[dict[str, Playlist]]:
     """Every stored playlist by id, plus why the file was passed over."""
     payload, fault = state_file.read_object(
         path, maximum_bytes=MAX_STATE_BYTES, description="playlists"
     )
     if payload is None:
-        return {}, fault
+        return state_file.Reading({}, fault)
+    found, fault = _parse(path, payload)
+    unknown = state_file.capture_unknown(payload, DOCUMENT_SHAPE)
+    newer = state_file.newer_version_fault(path, payload, FORMAT_VERSION)
+    if newer is not None:
+        return state_file.Reading(found, newer, newer_version=True, unknown=unknown)
+    return state_file.Reading(found, fault, unknown=unknown)
+
+
+def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Playlist], str | None]:
     faults = [
         found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
     ]
@@ -572,8 +604,7 @@ def _read(path: Path) -> tuple[dict[str, Playlist], str | None]:
 
 def load(path: Path | None = None) -> dict[str, Playlist]:
     """The stored playlists, or none at all. Never raises."""
-    found, _fault = _read(path if path is not None else state_path())
-    return found
+    return _read(path if path is not None else state_path()).value
 
 
 def save(
@@ -581,8 +612,13 @@ def save(
     path: Path | None = None,
     *,
     replace_existing: bool = True,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
 ) -> Path:
-    """Write them atomically, and return where they went."""
+    """Write them atomically, and return where they went.
+
+    ``unknown`` is what the previous document carried beyond this build's
+    model; it is merged back so a newer field survives an older build's edit.
+    """
     target = path if path is not None else state_path()
     try:
         paths.ensure_directory(target.parent)
@@ -591,10 +627,14 @@ def save(
             "local-io", f"could not create {target.parent}: {error.strerror or error}"
         ) from error
 
-    payload = {
-        "version": FORMAT_VERSION,
-        "playlists": [playlists[key].to_json() for key in sorted(playlists)],
-    }
+    payload = state_file.merge_unknown(
+        {
+            "version": FORMAT_VERSION,
+            "playlists": [playlists[key].to_json() for key in sorted(playlists)],
+        },
+        unknown,
+        DOCUMENT_SHAPE,
+    )
     try:
         state_file.write_atomic_text(
             target,
@@ -625,6 +665,7 @@ class Store:
         self._playlists: dict[str, Playlist] = dict(playlists or {})
         self._path = path
         self._fault: str | None = None
+        self._fault_kind: str | None = None
         # Direct construction may intentionally seed an absent file. ``open``
         # is always a disk snapshot, including when that snapshot was empty.
         self._loaded = _loaded
@@ -632,9 +673,10 @@ class Store:
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         target = path if path is not None else state_path()
-        found, fault = _read(target)
-        store = cls(found, target, _loaded=True)
-        store._fault = fault
+        reading = _read(target)
+        store = cls(reading.value, target, _loaded=True)
+        store._fault = reading.fault
+        store._fault_kind = reading.fault_kind
         return store
 
     def worker_copy(self, *, rebase: bool = False) -> Store:
@@ -657,11 +699,17 @@ class Store:
                 return type(self).open(target)
         copied = type(self)(self._playlists, target, _loaded=self._loaded)
         copied._fault = self._fault
+        copied._fault_kind = self._fault_kind
         return copied
 
     @property
     def fault(self) -> str | None:
         return self._fault
+
+    @property
+    def fault_kind(self) -> str | None:
+        """``newer-version`` (read-only here), ``unreadable``, or ``None``."""
+        return self._fault_kind
 
     def __len__(self) -> int:
         return len(self._playlists)
@@ -1000,6 +1048,7 @@ class Store:
             self._playlists[identifier] = replace(playlist, entries=kept)
             changed = True
         self._fault = None
+        self._fault_kind = None
         self._loaded = True
         return changed
 
@@ -1008,6 +1057,7 @@ class Store:
         if self._fault != expected:
             return False
         self._fault = None
+        self._fault_kind = None
         self._loaded = True
         return True
 
@@ -1040,7 +1090,18 @@ class Store:
                 else:
                     present = True
 
-                current, fault = _read(target)
+                reading = _read(target)
+                if reading.newer_version:
+                    # Decided from this locked read, not from memory: a file a
+                    # newer build wrote since this Store opened is refused too.
+                    # Adopt the fault (not the value) so this process stops
+                    # compiling its older snapshot over the newer file.
+                    self._fault = reading.fault
+                    self._fault_kind = reading.fault_kind
+                    raise PlaylistError(
+                        state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
+                    )
+                current, fault = reading.value, reading.fault
                 authored = dict(current) if present or self._loaded else dict(self._playlists)
                 result, changed = change(authored)
                 if changed:
@@ -1053,15 +1114,21 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(authored, target, replace_existing=False)
+                        save(
+                            authored,
+                            target,
+                            replace_existing=False,
+                            unknown=reading.unknown,
+                        )
                     else:
-                        save(authored, target)
+                        save(authored, target, unknown=reading.unknown)
                     fault = None
 
                 # Adopt memory only after the durable write, so an exception
                 # leaves the Store on its previous known-good snapshot.
                 self._playlists = authored
                 self._fault = fault
+                self._fault_kind = state_file.fault_kind(fault, newer_version=False)
                 self._loaded = True
                 return result
         except PlaylistError:

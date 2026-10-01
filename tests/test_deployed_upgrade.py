@@ -18,6 +18,7 @@ from wall_in_one.library import (
     playlists,
     removals,
     schedules,
+    state_file,
 )
 from wall_in_one.library import model as library_model
 
@@ -608,7 +609,7 @@ def test_present_authoring_generation_is_retained_through_store_open(
     original_read = playlists._read
     replaced = False
 
-    def replace_after_read(path: Path) -> tuple[dict[str, playlists.Playlist], str | None]:
+    def replace_after_read(path: Path) -> state_file.Reading[dict[str, playlists.Playlist]]:
         nonlocal replaced
         result = original_read(path)
         if path == target and not replaced:

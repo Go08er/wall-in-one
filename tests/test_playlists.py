@@ -568,7 +568,7 @@ def test_a_store_write_failure_does_not_change_the_in_memory_playlist(
     store = Store(path=target)
     made = store.create("First", entry_id="playlist")
 
-    def fail(_playlists: object, _path: object) -> None:
+    def fail(_playlists: object, _path: object, **_options: object) -> None:
         raise PlaylistError("local-io", "injected write failure")
 
     monkeypatch.setattr(playlists, "save", fail)
@@ -633,11 +633,12 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         path: Path | None = None,
         *,
         replace_existing: bool = True,
+        unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save({manual.id: manual}, target)
-        return save(updated, target, replace_existing=replace_existing)
+        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
 
     monkeypatch.setattr(playlists, "save", repair_then_save)
 

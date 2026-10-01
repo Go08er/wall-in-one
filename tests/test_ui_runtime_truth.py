@@ -219,6 +219,61 @@ def test_status_v2_preserves_mixed_per_display_truth_and_palette_fallback() -> N
     assert global_rule is not None and global_rule.connector is None
 
 
+def test_runtime_overrides_status_fields_are_additive_for_this_parser() -> None:
+    """A display whose own playlist beats a global rule still reads as today.
+
+    A service that applies ``runtime-overrides.toml`` adds per-row
+    ``beats_global_rules`` and ``cycle_interval_seconds``, a top-level
+    ``cycle_interval_seconds`` that is ``null`` when routes disagree,
+    ``supported_override_schemas`` and ``loaded_overrides_sha256``.
+    ``route_source`` keeps its four values, so this parser (and an older
+    GUI's) neither rejects nor needs them.
+    """
+    own = _display_status("DP-1", "evening", "Evening", route_source="assignment", manual=False)
+    own.update(shuffle=True, shuffle_default=True)
+    ruled = _display_status(
+        "HDMI-A-1", "night", "Night", route_source="schedule", manual=False, rule_id="global"
+    )
+
+    def status(*rows: dict[str, object], **top: object) -> dict[str, object]:
+        return {
+            "status_version": 2,
+            "display_mode": "independent",
+            "theme_source": {"configured": "DP-1", "effective": "DP-1", "fallback": False},
+            "playlist_id": "",
+            "playlist": "Multiple displays",
+            "source": "schedule",
+            "displays": list(rows),
+            **top,
+        }
+
+    before = runtime_truth.from_status(status(own, ruled))
+    truth = runtime_truth.from_status(
+        status(
+            {**own, "beats_global_rules": True, "cycle_interval_seconds": 120},
+            {**ruled, "beats_global_rules": False, "cycle_interval_seconds": 900},
+            supported_config_schemas=[4, 5],
+            supported_override_schemas=[1],
+            loaded_overrides_sha256="0" * 64,
+            cycle_interval_seconds=None,
+        )
+    )
+
+    assert truth is not None
+    assert truth == before
+    beating = truth.display("DP-1")
+    assert beating is not None
+    assert (beating.route_source, beating.schedule_rule_id) == ("assignment", None)
+    assert (beating.shuffle, beating.shuffle_default, beating.shuffle_source) == (
+        True,
+        True,
+        "config",
+    )
+    following = truth.display("HDMI-A-1")
+    assert following is not None and following.schedule_rule_id == "global"
+    assert truth.active_playlist_ids == ("evening", "night")
+
+
 def test_detached_route_is_inventory_not_current_playback() -> None:
     first = _item("/library/first.png")
     second = _item("/library/second.png")

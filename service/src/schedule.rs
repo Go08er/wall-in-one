@@ -64,6 +64,25 @@ pub fn resolve_rule_for<'a>(
     Ok(chosen)
 }
 
+/// Resolve the last matching rule aimed at exactly this connector.
+///
+/// This is the scope of a display whose own playlist beats global rules:
+/// untargeted rules are invisible to it, while rules naming the connector keep
+/// their authored last-match-wins order among themselves.
+pub fn resolve_targeted_rule<'a>(
+    rules: &'a [ScheduleRule],
+    connector: &str,
+    at: NaiveDateTime,
+) -> Result<Option<&'a ScheduleRule>, ConfigError> {
+    let mut chosen = None;
+    for rule in rules {
+        if !rule.connector.is_empty() && rule.connector == connector && matches(rule, at)? {
+            chosen = Some(rule);
+        }
+    }
+    Ok(chosen)
+}
+
 pub fn matches(rule: &ScheduleRule, at: NaiveDateTime) -> Result<bool, ConfigError> {
     if !rule.enabled {
         return Ok(false);
@@ -217,6 +236,65 @@ mod tests {
                 .playlist,
             "global-first",
             "mirrored resolution must ignore targeted rules"
+        );
+    }
+
+    #[test]
+    fn targeted_scope_ignores_global_rules_and_keeps_authored_order() {
+        let global_first = rule("global-first", None, None);
+        let mut dp_early = rule("dp-early", None, None);
+        dp_early.connector = "DP-1".into();
+        let mut dp_late = rule("dp-late", None, None);
+        dp_late.connector = "DP-1".into();
+        let mut dp_off = rule("dp-off", None, None);
+        dp_off.connector = "DP-1".into();
+        dp_off.enabled = false;
+        let mut hdmi = rule("hdmi", None, None);
+        hdmi.connector = "HDMI-A-1".into();
+        let global_last = rule("global-last", None, None);
+        let now = at(2026, 8, 3, 10, 0);
+
+        let rules = [
+            global_first.clone(),
+            dp_early.clone(),
+            dp_late,
+            dp_off,
+            hdmi,
+            global_last.clone(),
+        ];
+        assert_eq!(
+            resolve_targeted_rule(&rules, "DP-1", now)
+                .unwrap()
+                .unwrap()
+                .id,
+            "dp-late",
+            "a later global rule must not beat a targeted one in this scope"
+        );
+        assert_eq!(
+            resolve_rule_for(&rules, Some("DP-1"), now)
+                .unwrap()
+                .unwrap()
+                .id,
+            "global-last",
+            "the established connector scope is unchanged"
+        );
+        assert!(
+            resolve_targeted_rule(&[global_first, global_last], "DP-1", now)
+                .unwrap()
+                .is_none()
+        );
+        let mut evening = dp_early;
+        evening.start = Some("18:00".into());
+        evening.end = Some("22:00".into());
+        assert!(
+            resolve_targeted_rule(std::slice::from_ref(&evening), "DP-1", now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_targeted_rule(&[evening], "DP-1", at(2026, 8, 3, 19, 0))
+                .unwrap()
+                .is_some()
         );
     }
 }

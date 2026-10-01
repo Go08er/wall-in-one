@@ -6586,7 +6586,7 @@ fn exhausted_startup_readiness_is_fatal_for_systemd_recovery() {
     fs::remove_dir_all(root).unwrap();
 }
 
-// -- runtime-overrides.toml: per-playlist rotation --------------------------
+// -- runtime-overrides.toml: per-playlist rotation and display precedence ---
 
 /// A third, two-still playlist so rule winners and cycling are observable.
 const EVENING_PLAYLIST: &str = "\n[[playlists]]\nid = \"evening\"\nname = \"Evening\"\n\
@@ -6598,6 +6598,11 @@ palette = { kind = \"keep\", mode = \"keep\" }\n";
 /// The independent fixture with the evening playlist and `extra` appended.
 fn independent_with_evening(extra: &str) -> String {
     format!("{}{EVENING_PLAYLIST}{extra}", independent_config())
+}
+
+/// One display's opt-in, as a `runtime-overrides.toml` fragment.
+fn beats(connector: &str) -> String {
+    format!("[[displays]]\nconnector = \"{connector}\"\nbeats_global_rules = true\n")
 }
 
 /// One playlist's own rotation, as a `runtime-overrides.toml` fragment.
@@ -6647,6 +6652,16 @@ fn started_runtime(
     (runtime, state)
 }
 
+fn rule_status(snapshot: &serde_json::Value, id: &str) -> serde_json::Value {
+    snapshot["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["id"] == id)
+        .unwrap()
+        .clone()
+}
+
 fn route(snapshot: &serde_json::Value, connector: &str) -> serde_json::Value {
     snapshot["displays"]
         .as_array()
@@ -6655,6 +6670,265 @@ fn route(snapshot: &serde_json::Value, connector: &str) -> serde_json::Value {
         .find(|row| row["connector"] == connector)
         .unwrap()
         .clone()
+}
+
+/// Status without the per-process identity, for comparing two runtimes.
+fn comparable_status<D: WallpaperDriver>(
+    runtime: &mut Runtime<D>,
+    at: chrono::NaiveDateTime,
+) -> serde_json::Value {
+    let mut snapshot = status(runtime, at);
+    snapshot.as_object_mut().unwrap().remove("runtime_instance");
+    snapshot
+}
+
+const GLOBAL_NOW: &str = "\n[[schedules]]\nid = \"global-now\"\nplaylist = \"night\"\n";
+
+#[test]
+fn display_precedence_with_the_flag_off_is_exactly_todays_order() {
+    // No overrides, and an explicit opt-out, route exactly like the released
+    // document: same winners, same status.
+    let document = format!("{}{GLOBAL_NOW}", independent_config());
+    let at = noon();
+    let (mut today, _) = started_runtime(loaded(&document, &[]), at);
+    let expected = comparable_status(&mut today, at);
+    assert_eq!(route(&expected, "DP-1")["playlist_id"], "night");
+    assert_eq!(route(&expected, "DP-1")["route_source"], "schedule");
+    assert_eq!(route(&expected, "DP-1")["schedule_rule_id"], "global-now");
+    assert_eq!(route(&expected, "DP-1")["beats_global_rules"], false);
+    assert_eq!(rule_status(&expected, "global-now")["selected"], true);
+    assert_eq!(
+        expected["supported_config_schemas"],
+        serde_json::json!([4, 5])
+    );
+    assert_eq!(
+        expected["supported_override_schemas"],
+        serde_json::json!([1])
+    );
+    assert!(expected["loaded_overrides_sha256"].is_null());
+    let opted_out = "[[displays]]\nconnector = \"DP-1\"\nbeats_global_rules = false\n".to_string();
+    let (mut runtime, _) = started_runtime(loaded(&document, &[opted_out]), at);
+    assert_eq!(comparable_status(&mut runtime, at), expected);
+}
+
+#[test]
+fn display_flag_beats_global_rules_and_status_stops_selecting_the_beaten_rule() {
+    let at = noon();
+    let document = independent_with_evening(GLOBAL_NOW);
+    let (mut runtime, _) = started_runtime(loaded(&document, &[beats("DP-1")]), at);
+    let snapshot = status(&mut runtime, at);
+    let dp = route(&snapshot, "DP-1");
+    assert_eq!(dp["playlist_id"], "day");
+    assert_eq!(dp["route_source"], "assignment");
+    assert!(dp["schedule_rule_id"].is_null());
+    assert_eq!(dp["beats_global_rules"], true);
+    assert_eq!(dp["manual_override"], false);
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(hdmi["playlist_id"], "night");
+    assert_eq!(hdmi["route_source"], "schedule");
+    assert_eq!(hdmi["schedule_rule_id"], "global-now");
+    assert_eq!(hdmi["beats_global_rules"], false);
+    // The rule still wins on the display that did not opt in.
+    let rule = rule_status(&snapshot, "global-now");
+    assert_eq!(
+        (&rule["selected"], &rule["in_force"]),
+        (&true.into(), &true.into())
+    );
+    assert_eq!(snapshot["source"], "schedule");
+    assert!(snapshot["schedule"]["rule_id"].is_null());
+
+    // With both displays opted in, the global rule wins nowhere.
+    let (mut runtime, _) =
+        started_runtime(loaded(&document, &[beats("DP-1"), beats("HDMI-A-1")]), at);
+    let snapshot = status(&mut runtime, at);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        assert_eq!(route(&snapshot, connector)["playlist_id"], "day");
+        assert_eq!(route(&snapshot, connector)["route_source"], "assignment");
+    }
+    let rule = rule_status(&snapshot, "global-now");
+    assert_eq!(
+        (&rule["selected"], &rule["in_force"]),
+        (&false.into(), &false.into())
+    );
+    assert_eq!(snapshot["schedule"]["playlist_id"], "day");
+    assert!(snapshot["schedule"]["rule_id"].is_null());
+}
+
+#[test]
+fn display_flag_never_beats_a_rule_aimed_at_that_display() {
+    // A targeted rule followed by a later global one: today the later global
+    // rule wins on DP-1 (last match). Opted in, DP-1's own rule wins instead,
+    // because only global rules lose to the display's own playlist.
+    let rules = "\n[[schedules]]\nid = \"dp-now\"\nplaylist = \"night\"\nconnector = \"DP-1\"\n\
+                 [[schedules]]\nid = \"global-later\"\nplaylist = \"evening\"\n";
+    let at = noon();
+    let document = independent_with_evening(rules);
+    let (mut runtime, _) = started_runtime(loaded(&document, &[]), at);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "global-later");
+    assert_eq!(route(&snapshot, "DP-1")["playlist_id"], "evening");
+
+    let (mut runtime, _) = started_runtime(loaded(&document, &[beats("DP-1")]), at);
+    let snapshot = status(&mut runtime, at);
+    let dp = route(&snapshot, "DP-1");
+    assert_eq!(dp["playlist_id"], "night");
+    assert_eq!(dp["route_source"], "schedule");
+    assert_eq!(dp["schedule_rule_id"], "dp-now");
+    assert_eq!(dp["beats_global_rules"], true);
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(hdmi["playlist_id"], "evening");
+    assert_eq!(hdmi["schedule_rule_id"], "global-later");
+    assert_eq!(rule_status(&snapshot, "dp-now")["in_force"], true);
+    assert_eq!(rule_status(&snapshot, "global-later")["in_force"], true);
+}
+
+#[test]
+fn display_flag_follows_the_clock_and_a_manual_choice_still_wins() {
+    let rules = "\n[[schedules]]\nid = \"global-evening\"\nplaylist = \"night\"\n\
+                 start = \"18:00\"\nend = \"22:00\"\n\
+                 [[schedules]]\nid = \"dp-late\"\nplaylist = \"evening\"\nconnector = \"DP-1\"\n\
+                 start = \"20:00\"\nend = \"21:00\"\n";
+    let config = loaded(&independent_with_evening(rules), &[beats("DP-1")]);
+    let at = |hour: u32, minute: u32| {
+        NaiveDate::from_ymd_opt(2026, 8, 3)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap()
+    };
+    let (mut runtime, state) = started_runtime(config, at(12, 0));
+    let now = Instant::now();
+    let dp_applies = |state: &Arc<Mutex<RuntimeDriverState>>| -> usize {
+        state
+            .lock()
+            .unwrap()
+            .applied_outputs
+            .iter()
+            .filter(|output| *output == "DP-1")
+            .count()
+    };
+
+    let before = dp_applies(&state);
+    runtime.tick(at(19, 0), now + Duration::from_secs(1));
+    let snapshot = status(&mut runtime, at(19, 0));
+    assert_eq!(route(&snapshot, "DP-1")["playlist_id"], "day");
+    assert_eq!(route(&snapshot, "DP-1")["route_source"], "assignment");
+    assert_eq!(
+        dp_applies(&state),
+        before,
+        "a beaten rule must not restart DP-1"
+    );
+    assert_eq!(route(&snapshot, "HDMI-A-1")["playlist_id"], "night");
+    assert_eq!(
+        route(&snapshot, "HDMI-A-1")["schedule_rule_id"],
+        "global-evening"
+    );
+
+    runtime.tick(at(20, 30), now + Duration::from_secs(2));
+    let dp = route(&status(&mut runtime, at(20, 30)), "DP-1");
+    assert_eq!(dp["playlist_id"], "evening");
+    assert_eq!(dp["route_source"], "schedule");
+    assert_eq!(dp["schedule_rule_id"], "dp-late");
+
+    assert!(
+        runtime_command(
+            &mut runtime,
+            at(20, 30),
+            "on",
+            Some("DP-1 playlist-use day")
+        )
+        .ok
+    );
+    let dp = route(&status(&mut runtime, at(20, 30)), "DP-1");
+    assert_eq!(dp["route_source"], "manual");
+    assert_eq!(dp["playlist_id"], "day");
+    assert!(runtime_command(&mut runtime, at(20, 30), "on", Some("DP-1 schedule-follow")).ok);
+    assert_eq!(
+        route(&status(&mut runtime, at(20, 30)), "DP-1")["schedule_rule_id"],
+        "dp-late"
+    );
+
+    runtime.tick(at(21, 30), now + Duration::from_secs(3));
+    let dp = route(&status(&mut runtime, at(21, 30)), "DP-1");
+    assert_eq!(dp["playlist_id"], "day");
+    assert_eq!(dp["route_source"], "assignment");
+}
+
+#[test]
+fn reloading_the_overrides_file_reroutes_and_its_removal_restores() {
+    let root = directory("overrides-reload");
+    let path = root.join("runtime.toml");
+    let sidecar = root.join(wall_in_one_service::config::OVERRIDES_FILENAME);
+    let document = independent_with_evening(GLOBAL_NOW);
+    fs::write(&path, &document).unwrap();
+    let at = noon();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        path.clone(),
+        Config::load(&path).unwrap(),
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert_eq!(
+        route(&status(&mut runtime, at), "DP-1")["playlist_id"],
+        "night"
+    );
+
+    fs::write(
+        &sidecar,
+        overrides(&[
+            beats("DP-1"),
+            rotation("night", "cycle_interval_seconds = 45"),
+        ]),
+    )
+    .unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(route(&snapshot, "DP-1")["playlist_id"], "day");
+    assert_eq!(route(&snapshot, "DP-1")["route_source"], "assignment");
+    assert_eq!(route(&snapshot, "HDMI-A-1")["playlist_id"], "night");
+    assert_eq!(route(&snapshot, "HDMI-A-1")["cycle_interval_seconds"], 45);
+    assert_eq!(
+        snapshot["loaded_overrides_sha256"].as_str().map(str::len),
+        Some(64)
+    );
+
+    // A malformed overrides file is a failed reload: everything stays.
+    fs::write(&sidecar, "schema_version = 2\n").unwrap();
+    assert!(!runtime_command(&mut runtime, at, "reload", None).ok);
+    assert_eq!(
+        route(&status(&mut runtime, at), "DP-1")["playlist_id"],
+        "day"
+    );
+
+    fs::remove_file(&sidecar).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "global-now");
+    assert_eq!(route(&snapshot, "HDMI-A-1")["cycle_interval_seconds"], 300);
+    assert!(snapshot["loaded_overrides_sha256"].is_null());
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn display_flag_is_dormant_in_mirrored_mode() {
+    let document = format!(
+        "{}{GLOBAL_NOW}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"day\"\n",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    );
+    let at = noon();
+    let (mut runtime, _) = started_runtime(loaded(&document, &[beats("DP-1")]), at);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["display_mode"], "mirrored");
+    let dp = route(&snapshot, "DP-1");
+    assert_eq!(dp["playlist_id"], "night");
+    assert_eq!(dp["route_source"], "schedule");
+    assert_eq!(dp["beats_global_rules"], false);
 }
 
 #[test]
@@ -6825,6 +7099,7 @@ fn rotation_status_without_overrides_reports_the_global_settings() {
         for row in snapshot["displays"].as_array().unwrap() {
             assert_eq!(row["cycle_interval_seconds"], 300);
             assert_eq!(row["shuffle_default"], false);
+            assert_eq!(row["beats_global_rules"], false);
         }
     }
 }

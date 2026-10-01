@@ -233,6 +233,12 @@ pub struct DisplayStatus<'a> {
     /// Effective rotation interval for this route's playlist: its own
     /// override, otherwise the global setting.
     pub cycle_interval_seconds: u64,
+    /// This display's opt-in from `runtime-overrides.toml`: its own
+    /// (explicitly assigned) playlist beats global, untargeted schedule rules,
+    /// while rules aimed at this connector still win. False in mirrored mode,
+    /// where the flag is dormant. When the assignment wins, `route_source`
+    /// stays `assignment` as before.
+    pub beats_global_rules: bool,
     pub renderer_failed: bool,
     pub last_error: String,
     pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
@@ -1967,6 +1973,57 @@ impl<D: WallpaperDriver> Runtime<D> {
             .unwrap_or_else(|| self.mirrored_shuffle_default())
     }
 
+    /// Whether `connector`'s explicit assignment opted in to beating global
+    /// schedule rules. Mirrored mode never routes per connector, so the flag
+    /// stays dormant there.
+    fn beats_global_rules(&self, connector: &str) -> bool {
+        self.is_independent()
+            && self.config.displays.iter().any(|assignment| {
+                assignment.connector == connector && assignment.beats_global_rules
+            })
+    }
+
+    /// The automatic (non-manual) winner for one independent connector.
+    ///
+    /// Without the display's opt-in this is the established order: the last
+    /// matching rule visible to the connector (global or targeted, in authored
+    /// order), then its assignment, then the default playlist. With the
+    /// opt-in, only rules aimed at this connector can beat its own playlist;
+    /// global rules are outranked by it. Routing and status both use this, so
+    /// a beaten global rule is never reported as selected for this display.
+    fn automatic_route(
+        &self,
+        connector: &str,
+        at: NaiveDateTime,
+    ) -> Result<(String, RouteSource, Option<String>), String> {
+        let assignment = self
+            .config
+            .displays
+            .iter()
+            .find(|assignment| assignment.connector == connector);
+        let rule = if self.beats_global_rules(connector) {
+            schedule::resolve_targeted_rule(&self.config.schedules, connector, at)
+        } else {
+            schedule::resolve_rule_for(&self.config.schedules, Some(connector), at)
+        }
+        .map_err(|error| error.to_string())?;
+        if let Some(rule) = rule {
+            return Ok((
+                rule.playlist.clone(),
+                RouteSource::Schedule,
+                Some(rule.id.clone()),
+            ));
+        }
+        if let Some(assignment) = assignment {
+            return Ok((assignment.playlist.clone(), RouteSource::Assignment, None));
+        }
+        Ok((
+            self.config.default_playlist.clone(),
+            RouteSource::Default,
+            None,
+        ))
+    }
+
     fn route_decision(
         &self,
         connector: &str,
@@ -1976,28 +2033,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         if let Some(manual) = manual {
             return Ok((manual.to_string(), RouteSource::Manual, None));
         }
-        if let Some(rule) = schedule::resolve_rule_for(&self.config.schedules, Some(connector), at)
-            .map_err(|error| error.to_string())?
-        {
-            return Ok((
-                rule.playlist.clone(),
-                RouteSource::Schedule,
-                Some(rule.id.clone()),
-            ));
-        }
-        if let Some(assignment) = self
-            .config
-            .displays
-            .iter()
-            .find(|assignment| assignment.connector == connector)
-        {
-            return Ok((assignment.playlist.clone(), RouteSource::Assignment, None));
-        }
-        Ok((
-            self.config.default_playlist.clone(),
-            RouteSource::Default,
-            None,
-        ))
+        self.automatic_route(connector, at)
     }
 
     fn new_route_cursor(
@@ -4519,6 +4555,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         "config"
                     },
                     cycle_interval_seconds: self.mirrored_cycle_interval_seconds(),
+                    beats_global_rules: false,
                     renderer_failed: self.renderer_failed,
                     last_error: truncate_middle(&self.last_error, MAX_DISPLAY_ERROR_BYTES),
                     automatic_retry: self.pending_automatic.as_ref().map(|pending| {
@@ -4617,6 +4654,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             "config"
                         },
                         cycle_interval_seconds: self.mirrored_cycle_interval_seconds(),
+                        beats_global_rules: false,
                         renderer_failed: self.renderer_failed,
                         last_error: truncate_middle(&self.last_error, MAX_DISPLAY_ERROR_BYTES),
                         automatic_retry: self.pending_automatic.as_ref().map(|pending| {
@@ -4800,23 +4838,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             .target_outputs
             .iter()
             .map(|connector| {
-                let rule = schedule::resolve_rule_for(
-                    &self.config.schedules,
-                    Some(connector.as_str()),
-                    at,
-                )
-                .map_err(|error| error.to_string())?;
-                let playlist = rule
-                    .map(|rule| rule.playlist.clone())
-                    .or_else(|| {
-                        self.config
-                            .displays
-                            .iter()
-                            .find(|assignment| assignment.connector == *connector)
-                            .map(|assignment| assignment.playlist.clone())
-                    })
-                    .unwrap_or_else(|| self.config.default_playlist.clone());
-                Ok((playlist, rule.map(|rule| rule.id.clone())))
+                let (playlist, _source, rule) = self.automatic_route(connector, at)?;
+                Ok((playlist, rule))
             })
             .collect::<Result<_, String>>()?;
         let common_scheduled = scheduled
@@ -4933,6 +4956,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 },
                 cycle_interval_seconds: self
                     .playlist_cycle_interval_seconds(&route.active_playlist),
+                beats_global_rules: self.beats_global_rules(&target.output),
                 renderer_failed: route.renderer_failed,
                 last_error: truncate_middle(&route.last_error, MAX_DISPLAY_ERROR_BYTES),
                 automatic_retry: self.pending_routes.get(&target.output).map(|pending| {

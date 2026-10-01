@@ -1,0 +1,17 @@
+# empty means the library folder is not configured
+roots = []
+opacity = 0.85
+preview_scheme = "m3-tonal-spot"
+follow_noctalia_palette = true
+cycle_interval = 900
+cycle_enabled = true
+shuffle = true
+dynamics_enabled = true
+video_muted = true
+video_volume = 0
+video_when_hidden = "stop"
+cycle_favourites_only = false
+active_playlist = ""
+scan_workshop = true
+own_scene_renderer = true
+output = ""

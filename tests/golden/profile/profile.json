@@ -1,0 +1,276 @@
+{
+  "format": 1,
+  "home": "/home/user",
+  "description": "Synthetic Wall-in-One profile shaped like a real v0.1.4 profile: quick-choice with a disabled rule pointing at it, a stale palette.json.tmpl registration, deployed-upgrade markers, removal and retained evidence.",
+  "tree": {
+    "cache/wall-in-one": {
+      "type": "dir",
+      "mode": "0755"
+    },
+    "cache/wall-in-one/thumbnails": {
+      "type": "dir",
+      "mode": "0755"
+    },
+    "cache/wall-in-one/thumbnails/2e1cc8caf53955376fd92e76f8712167.png": {
+      "mode": "0644"
+    },
+    "cache/wall-in-one/thumbnails/6d4f47767c732dd874abc9f4f13b5d45.png": {
+      "mode": "0644"
+    },
+    "cache/wall-in-one/thumbnails/9e107d9d372bb6826bd81d3542a419d6.preview": {
+      "mode": "0644"
+    },
+    "config/wall-in-one": {
+      "type": "dir",
+      "mode": "0755"
+    },
+    "config/wall-in-one/.wall-in-one-removal-7c1d4e9a2b6f4c08a3e5d71b9f02c6aa/entry": {
+      "mode": "0644"
+    },
+    "state/noctalia": {
+      "type": "dir",
+      "mode": "0755"
+    },
+    "state/noctalia/settings.toml": {
+      "mode": "0644"
+    },
+    "state/noctalia/settings.toml.bak-wall-in-one-20260808-155237": {
+      "mode": "0644"
+    },
+    "state/wall-in-one": {
+      "type": "dir",
+      "mode": "0755"
+    },
+    "state/wall-in-one/.wall-in-one-removal-e1f2a3b4c5d6e7f8091a2b3c4d5e6f70/entry": {
+      "mode": "0644"
+    },
+    "state/wall-in-one/.wall-in-one-retained/entry-h4kq8wz2": {
+      "type": "dir",
+      "mode": "0700"
+    },
+    "state/wall-in-one/.wall-in-one-retained/entry-r9tm3vxa": {
+      "type": "dir",
+      "mode": "0700"
+    },
+    "state/wall-in-one/palette.json": {
+      "mode": "0644",
+      "mtime_ns": 1788048000000000000
+    },
+    "state/wall-in-one/palette.json.tmpl": {
+      "mode": "0644",
+      "mtime_ns": 1783900800000000000
+    }
+  },
+  "library": [
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/libraryfolders.vdf",
+      "type": "text",
+      "text": "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"/home/user/.local/share/Steam\"\n\t}\n}\n",
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000001/lantern-festival.mp4",
+      "type": "sparse",
+      "size": 8192,
+      "mtime_ns": 1784764800000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000001/preview.gif",
+      "type": "sparse",
+      "size": 512,
+      "mtime_ns": 1784764800000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000001/project.json",
+      "type": "text",
+      "text": "{\n\t\"file\": \"lantern-festival.mp4\",\n\t\"preview\": \"preview.gif\",\n\t\"title\": \"Lantern Festival\",\n\t\"type\": \"video\"\n}\n",
+      "mtime_ns": 1784764800000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000002/night-train.mp4",
+      "type": "sparse",
+      "size": 6144,
+      "mtime_ns": 1784851200000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000002/preview.gif",
+      "type": "sparse",
+      "size": 512,
+      "mtime_ns": 1784851200000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000002/project.json",
+      "type": "text",
+      "text": "{\n\t\"file\": \"night-train.mp4\",\n\t\"preview\": \"preview.gif\",\n\t\"title\": \"Night Train\",\n\t\"type\": \"Video\"\n}\n",
+      "mtime_ns": 1784851200000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000003/preview.gif",
+      "type": "sparse",
+      "size": 512,
+      "mtime_ns": 1784937600000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000003/project.json",
+      "type": "text",
+      "text": "{\n\t\"file\": \"slow-snow.mp4\",\n\t\"preview\": \"preview.gif\",\n\t\"title\": \"Slow Snow\",\n\t\"type\": \"video\"\n}\n",
+      "mtime_ns": 1784937600000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000003/slow-snow.mp4",
+      "type": "sparse",
+      "size": 5120,
+      "mtime_ns": 1784937600000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000004/preview.gif",
+      "type": "sparse",
+      "size": 512,
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000004/project.json",
+      "type": "text",
+      "text": "{\n\t\"file\": \"scene.json\",\n\t\"preview\": \"preview.gif\",\n\t\"title\": \"Paper Lanterns\",\n\t\"type\": \"scene\"\n}\n",
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000004/scene.pkg",
+      "type": "sparse",
+      "size": 2048,
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/.managed-by-wall-in-one-v1.json",
+      "type": "text",
+      "text": "{\n  \"schema\": 1,\n  \"plugin\": \"goober/wall-in-one\",\n  \"kind\": \"automatic-stills\",\n  \"ownership\": \"managed\"\n}\n",
+      "mtime_ns": 1783036800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/.wall-in-one-retained",
+      "type": "dir",
+      "mode": "0700"
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/.wall-in-one-retained/entry-0f3e2d1c0b9a88776655443322110fed",
+      "type": "text",
+      "text": "",
+      "mode": "0600"
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/.wall-in-one-retained/entry-q7m2x9ka",
+      "type": "dir",
+      "mode": "0700"
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/2910000004.png",
+      "type": "image",
+      "rgb": [
+        200,
+        120,
+        60
+      ],
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/video-353fff20c9c54d2e938775b1.png",
+      "type": "image",
+      "rgb": [
+        90,
+        70,
+        140
+      ],
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/video-715ff06850221dac7a559c2f.png",
+      "type": "image",
+      "rgb": [
+        30,
+        120,
+        150
+      ],
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/video-ff23ee842c60773b27d09e0b.png",
+      "type": "image",
+      "rgb": [
+        150,
+        70,
+        140
+      ],
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/video-7ba94d8f3c097ef330c47b92.png",
+      "type": "image",
+      "rgb": [
+        120,
+        70,
+        140
+      ],
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/.wall-in-one-motionbgs-managed.json",
+      "type": "text",
+      "text": "{\n  \"schema\": 1,\n  \"owner\": \"goober/wall-in-one\",\n  \"provider\": \"MotionBGS\",\n  \"deletion_authority\": \"adjacent .motionbgs.json sidecar required\"\n}\n",
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/.wall-in-one-removal-5b0c2d6e9f1a4b3c8d7e6f5a4b3c2d1e",
+      "type": "dir",
+      "mode": "0700"
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/.wall-in-one-retained",
+      "type": "dir",
+      "mode": "0700"
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/tide-pool.hd.mp4",
+      "type": "sparse",
+      "size": 4096,
+      "mtime_ns": 1786924800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/tide-pool.hd.mp4.motionbgs.json",
+      "type": "text",
+      "text": "{\"schema\":1,\"plugin\":\"goober/wall-in-one\",\"provider\":\"MotionBGS\",\"id\":\"tide-pool\",\"path\":\"/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/tide-pool.hd.mp4\",\"title\":\"Tide Pool\",\"source_page\":\"https://motionbgs.com/tide-pool/\",\"download_url\":\"https://motionbgs.com/dl/hd/1001/\",\"quality\":\"hd\",\"content_type\":\"video/mp4\",\"bytes\":4096,\"sha256\":\"ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7\",\"downloaded_at\":\"2026-08-17T10:00:00Z\"}\n",
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/tide-pool.hd.mp4.wall-in-one.json",
+      "type": "text",
+      "text": "{\n  \"still_path\": \"/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills/video-715ff06850221dac7a559c2f.png\"\n}\n",
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/Wall-in-One/Wallhaven/.managed-by-wall-in-one-v1.json",
+      "type": "text",
+      "text": "{\n  \"schema\": 1,\n  \"plugin\": \"goober/wall-in-one\",\n  \"provider\": \"Wallhaven\",\n  \"kind\": \"wallhaven\",\n  \"ownership\": \"managed\",\n  \"deletion_authority\": \"adjacent .wallhaven.json sidecar required\"\n}\n",
+      "mtime_ns": 1788220800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/harbour-dusk.png",
+      "type": "image",
+      "rgb": [
+        38,
+        58,
+        92
+      ],
+      "mtime_ns": 1785628800000000000
+    },
+    {
+      "path": "/home/user/Pictures/Wallpapers/meadow-light.png",
+      "type": "image",
+      "rgb": [
+        120,
+        162,
+        84
+      ],
+      "mtime_ns": 1786492800000000000
+    }
+  ]
+}

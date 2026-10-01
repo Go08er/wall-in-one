@@ -1,0 +1,26 @@
+# wall-in-one settings
+
+roots = ["/home/user/Pictures/Wallpapers"]
+opacity = 0.40
+preview_scheme = "m3-tonal-spot"
+follow_noctalia_palette = true
+cycle_interval = 900
+cycle_enabled = true
+shuffle = true
+dynamics_enabled = true
+video_muted = true
+video_volume = 0
+video_when_hidden = "stop"
+video_interpolation = "oversample"
+video_hardware_decode = true
+scene_fps = 60
+scene_scaling = ""
+scene_clamp = ""
+display_mode = "mirrored"
+theme_source_connector = ""
+cycle_favourites_only = false
+active_playlist = "bd7adc21870f0664"
+scan_workshop = true
+own_scene_renderer = true
+output = ""
+stop_animations_on_battery = true

@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "id": "43560a6152c83d6e",
+      "playlist": "quick-choice",
+      "enabled": false
+    },
+    {
+      "id": "464de2c6449c281c",
+      "playlist": "a545a472f65dd73b",
+      "start": "21:00",
+      "end": "04:00",
+      "enabled": false
+    },
+    {
+      "id": "af5d9a02e281e683",
+      "playlist": "bd7adc21870f0664",
+      "start": "21:00",
+      "end": "04:00"
+    },
+    {
+      "id": "faf63ef2afd87548",
+      "playlist": "79e68864b167b9d6",
+      "connector": "HDMI-A-1",
+      "months": [
+        6,
+        7,
+        8
+      ],
+      "weekdays": [
+        "sat",
+        "sun"
+      ]
+    }
+  ]
+}

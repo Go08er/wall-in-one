@@ -1,0 +1,33 @@
+config_version = 3
+
+[theme]
+builtin = "Gruvbox"
+community_palette = "Osaka jade"
+mode = "dark"
+pure_black_dark = false
+source = "wallpaper"
+wallpaper_scheme = "m3-tonal-spot"
+
+[theme.templates]
+builtin_ids = []
+community_ids = []
+enable_builtin_templates = true
+
+[theme.templates.user.wall-in-one]
+enabled = true
+input_path = "/home/user/.local/state/wall-in-one/palette.json.tmpl"
+output_path = "/home/user/.local/state/wall-in-one/palette.json"
+post_hook = "/run/current-system/sw/bin/wall-in-one ctl reload-palette"
+
+[wallpaper]
+directory = "/home/user/Pictures/Wallpapers"
+enabled = true
+
+[wallpaper.last]
+path = "/home/user/Pictures/Wallpapers/harbour-dusk.png"
+
+[plugin_settings."goober/wall-in-one"]
+capture_directory = "/home/user/Pictures/Wallpapers/Wall-in-One/Automatic Stills"
+cycle_enabled = true
+cycle_interval = 900
+mpvpaper_backend = true

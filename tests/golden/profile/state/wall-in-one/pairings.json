@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "pairings": [
+    {
+      "identity": "scene:2910000004",
+      "palette": "adaptive"
+    },
+    {
+      "identity": "still:/home/user/Pictures/Wallpapers/harbour-dusk.png",
+      "palette": "community:Osaka jade",
+      "mode": "light"
+    },
+    {
+      "identity": "video:/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000001/lantern-festival.mp4",
+      "palette": "adaptive:m3-tonal-spot"
+    },
+    {
+      "identity": "video:/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000002/night-train.mp4",
+      "palette": "adaptive"
+    },
+    {
+      "identity": "video:/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000003/slow-snow.mp4",
+      "palette": "builtin:Gruvbox",
+      "mode": "dark"
+    },
+    {
+      "identity": "video:/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/tide-pool.hd.mp4",
+      "palette": "adaptive:m3-content"
+    }
+  ]
+}

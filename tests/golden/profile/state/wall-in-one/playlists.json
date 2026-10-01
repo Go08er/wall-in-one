@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "playlists": [
+    {
+      "id": "79e68864b167b9d6",
+      "name": "Calm stills",
+      "entries": [
+        {
+          "id": "29c73060ce9e304c",
+          "source": "/home/user/Pictures/Wallpapers/harbour-dusk.png"
+        },
+        {
+          "id": "723bf167bf6ca3e7",
+          "source": "/home/user/Pictures/Wallpapers/meadow-light.png"
+        },
+        {
+          "id": "812aef163951a85a",
+          "source": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000004"
+        }
+      ]
+    },
+    {
+      "id": "a545a472f65dd73b",
+      "name": "Travel",
+      "entries": [
+        {
+          "id": "ab5a33c8d8c6737d",
+          "source": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000002/night-train.mp4"
+        },
+        {
+          "id": "4fe0da46ab64eb1f",
+          "source": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000003/slow-snow.mp4"
+        },
+        {
+          "id": "2ea11ad7867ab697",
+          "source": "/home/user/Pictures/Wallpapers/harbour-dusk.png"
+        }
+      ]
+    },
+    {
+      "id": "bd7adc21870f0664",
+      "name": "Evenings",
+      "entries": [
+        {
+          "id": "cfb9d44a77088f56",
+          "source": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000001/lantern-festival.mp4"
+        },
+        {
+          "id": "c613fb1d7b253ca6",
+          "source": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000002/night-train.mp4"
+        },
+        {
+          "id": "d4a12b07c7e7e49a",
+          "source": "/home/user/Pictures/Wallpapers/Wall-in-One/MotionBGS/tide-pool.hd.mp4"
+        }
+      ]
+    },
+    {
+      "id": "quick-choice",
+      "name": "Quick choice",
+      "entries": [
+        {
+          "id": "9fa7b216be9ed09f",
+          "source": "/home/user/.local/share/Steam/steamapps/workshop/content/431960/2910000003/slow-snow.mp4"
+        }
+      ]
+    }
+  ]
+}

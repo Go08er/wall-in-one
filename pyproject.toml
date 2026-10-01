@@ -52,6 +52,8 @@ disallow_any_unimported = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Print every thread's stack if a test runs this long, so a stall says where.
+faulthandler_timeout = 60
 markers = [
     "gui: needs a display and the GTK stack",
     "noctalia: needs the noctalia binary on PATH",

@@ -6706,6 +6706,7 @@ fn display_precedence_with_the_flag_off_is_exactly_todays_order() {
         serde_json::json!([1])
     );
     assert!(expected["loaded_overrides_sha256"].is_null());
+    assert!(expected["overrides_ignored"].is_null());
     let opted_out = "[[displays]]\nconnector = \"DP-1\"\nbeats_global_rules = false\n".to_string();
     let (mut runtime, _) = started_runtime(loaded(&document, &[opted_out]), at);
     assert_eq!(comparable_status(&mut runtime, at), expected);
@@ -6897,8 +6898,9 @@ fn reloading_the_overrides_file_reroutes_and_its_removal_restores() {
         Some(64)
     );
 
-    // A malformed overrides file is a failed reload: everything stays.
-    fs::write(&sidecar, "schema_version = 2\n").unwrap();
+    // A malformed overrides file of this schema is a failed reload:
+    // everything stays.
+    fs::write(&sidecar, "schema_version = 1\ncolour = \"red\"\n").unwrap();
     assert!(!runtime_command(&mut runtime, at, "reload", None).ok);
     assert_eq!(
         route(&status(&mut runtime, at), "DP-1")["playlist_id"],
@@ -6911,6 +6913,60 @@ fn reloading_the_overrides_file_reroutes_and_its_removal_restores() {
     assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "global-now");
     assert_eq!(route(&snapshot, "HDMI-A-1")["cycle_interval_seconds"], 300);
     assert!(snapshot["loaded_overrides_sha256"].is_null());
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_newer_overrides_schema_is_ignored_and_reported_while_reloads_keep_working() {
+    let root = directory("overrides-newer");
+    let path = root.join("runtime.toml");
+    let sidecar = root.join(wall_in_one_service::config::OVERRIDES_FILENAME);
+    let document = independent_with_evening(GLOBAL_NOW);
+    fs::write(&path, &document).unwrap();
+    // What a later release might write: a new schema with keys this one lacks.
+    fs::write(
+        &sidecar,
+        "schema_version = 2\n[[displays]]\nconnector = \"DP-1\"\nbeats_global_rules = true\n\
+         precedence = \"own-playlist\"\n[[wallpapers]]\nid = \"x\"\n",
+    )
+    .unwrap();
+    let at = noon();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        path.clone(),
+        Config::load(&path).unwrap(),
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(
+        snapshot["overrides_ignored"],
+        "unsupported schema_version 2"
+    );
+    assert!(snapshot["loaded_overrides_sha256"].is_null());
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "global-now");
+
+    // Reloads keep working around it, and a supported file applies again.
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    fs::write(&sidecar, overrides(&[beats("DP-1")])).unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let snapshot = status(&mut runtime, at);
+    assert!(snapshot["overrides_ignored"].is_null());
+    assert_eq!(route(&snapshot, "DP-1")["route_source"], "assignment");
+    fs::write(&sidecar, "schema_version = 3\n").unwrap();
+    assert!(runtime_command(&mut runtime, at, "reload", None).ok);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(
+        snapshot["overrides_ignored"],
+        "unsupported schema_version 3"
+    );
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "global-now");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
 }

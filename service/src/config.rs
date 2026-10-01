@@ -82,6 +82,10 @@ pub struct Config {
     /// Identity of the applied `runtime-overrides.toml` bytes, if one exists.
     #[serde(skip)]
     pub overrides_sha256: Option<String>,
+    /// Why a present `runtime-overrides.toml` was not applied: a schema this
+    /// service does not know, written by a newer release.
+    #[serde(skip)]
+    pub overrides_ignored: Option<String>,
     pub schema_version: u32,
     pub config_generation: String,
     pub default_playlist: String,
@@ -333,6 +337,13 @@ pub struct DisplayAssignment {
     pub beats_global_rules: bool,
 }
 
+/// The one key of `runtime-overrides.toml` every schema shares, read without
+/// rejecting anything else: a newer schema may add keys this service lacks.
+#[derive(Deserialize)]
+struct OverridesSchema {
+    schema_version: u32,
+}
+
 /// `runtime-overrides.toml`: what the app sets beyond the released document.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -364,6 +375,24 @@ pub struct DisplayOverride {
 }
 
 impl Overrides {
+    /// The schema an overrides file declares, ignoring everything else.
+    ///
+    /// Additions to the file bump its `schema_version`, and a service skips
+    /// a version it does not know instead of refusing to start, so a newer
+    /// release's file never stops an older service after a rollback. A file
+    /// that is not TOML or names no integer schema is damage, not the future.
+    pub fn declared_schema(bytes: &[u8]) -> Result<u32, ConfigError> {
+        let text = std::str::from_utf8(bytes).map_err(|error| {
+            ConfigError::Io(Error::new(
+                ErrorKind::InvalidData,
+                format!("{OVERRIDES_FILENAME} is not UTF-8: {error}"),
+            ))
+        })?;
+        let declared: OverridesSchema = toml::from_str(text).map_err(ConfigError::Decode)?;
+        Ok(declared.schema_version)
+    }
+
+    /// Parse and validate a file of a schema this service supports.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
         let text = std::str::from_utf8(bytes).map_err(|error| {
             ConfigError::Io(Error::new(
@@ -438,20 +467,34 @@ fn default_true() -> bool {
 impl Config {
     /// Load `runtime.toml` and, when present, its `runtime-overrides.toml`.
     ///
-    /// A missing overrides file is the ordinary case. A present one must be
-    /// valid, or the whole load fails like any other config error; its
-    /// entries that name a playlist or connector this document lacks are
-    /// skipped with a log line (the app writes the overrides first, so a
-    /// reader can briefly see them ahead of the document they belong to).
+    /// A missing overrides file is the ordinary case. One declaring a schema
+    /// this service does not know (a newer release wrote it) is skipped with
+    /// one log line and reported in status; the service runs without it. One
+    /// declaring a supported schema must be valid, or the whole load fails
+    /// like any other config error. Its entries that name a playlist or
+    /// connector this document lacks are skipped with a log line (the app
+    /// writes the overrides first, so a reader can briefly see them ahead of
+    /// the document they belong to).
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let mut config = Self::from_bytes(Self::read_bytes(path)?)?;
         let sidecar = overrides_path(path);
         match Self::read_bytes_bounded(&sidecar, MAX_OVERRIDES_BYTES) {
             Ok(bytes) => {
-                let digest = sha256_hex(&bytes);
-                let overrides = Overrides::from_bytes(&bytes).map_err(|error| {
+                let invalid_sidecar = |error: ConfigError| {
                     ConfigError::Invalid(format!("{}: {error}", sidecar.display()))
-                })?;
+                };
+                let schema = Overrides::declared_schema(&bytes).map_err(invalid_sidecar)?;
+                if !SUPPORTED_OVERRIDE_SCHEMAS.contains(&schema) {
+                    let reason = format!("unsupported schema_version {schema}");
+                    eprintln!(
+                        "wall-in-one-service: {}: not applied: {reason}; this service applies schema_version {OVERRIDES_SCHEMA_VERSION}",
+                        sidecar.display()
+                    );
+                    config.overrides_ignored = Some(reason);
+                    return Ok(config);
+                }
+                let digest = sha256_hex(&bytes);
+                let overrides = Overrides::from_bytes(&bytes).map_err(invalid_sidecar)?;
                 for skipped in config.apply_overrides(&overrides) {
                     eprintln!("wall-in-one-service: {}: {skipped}", sidecar.display());
                 }

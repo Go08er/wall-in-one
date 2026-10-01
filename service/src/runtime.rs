@@ -91,6 +91,9 @@ pub struct Status<'a> {
     pub supported_override_schemas: &'static [u32],
     /// Identity of the applied `runtime-overrides.toml`, `None` without one.
     pub loaded_overrides_sha256: Option<&'a str>,
+    /// Why a present `runtime-overrides.toml` is not applied, e.g.
+    /// `unsupported schema_version 2`; `None` when there is nothing to say.
+    pub overrides_ignored: Option<&'a str>,
     pub runtime_version: &'static str,
     pub runtime_executable: Option<&'a str>,
     pub power_source: &'static str,
@@ -4673,6 +4676,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
             supported_override_schemas: SUPPORTED_OVERRIDE_SCHEMAS,
             loaded_overrides_sha256: self.config.overrides_sha256.as_deref(),
+            overrides_ignored: self.config.overrides_ignored.as_deref(),
             runtime_version: env!("CARGO_PKG_VERSION"),
             runtime_executable: self.runtime_executable.as_deref(),
             power_source: self.power.observation.source.name(),
@@ -5023,6 +5027,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
             supported_override_schemas: SUPPORTED_OVERRIDE_SCHEMAS,
             loaded_overrides_sha256: self.config.overrides_sha256.as_deref(),
+            overrides_ignored: self.config.overrides_ignored.as_deref(),
             runtime_version: env!("CARGO_PKG_VERSION"),
             runtime_executable: self.runtime_executable.as_deref(),
             power_source: self.power.observation.source.name(),

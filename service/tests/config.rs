@@ -133,7 +133,12 @@ fn a_malformed_overrides_file_fails_the_whole_load() {
     let path = root.join("runtime.toml");
     fs::write(&path, document(5)).unwrap();
     for (label, overrides) in [
-        ("newer schema", "schema_version = 2\n".to_string()),
+        ("no schema", OVERRIDES.replace("schema_version = 1\n", "")),
+        (
+            "text schema",
+            OVERRIDES.replace("schema_version = 1", "schema_version = \"1\""),
+        ),
+        ("negative schema", "schema_version = -1\n".into()),
         ("unknown key", format!("{OVERRIDES}colour = \"red\"\n")),
         (
             "unknown playlist key",
@@ -181,6 +186,41 @@ fn a_malformed_overrides_file_fails_the_whole_load() {
     assert!(
         Config::load(&path).is_err(),
         "a symlinked overrides file is refused"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_newer_overrides_schema_is_ignored_rather_than_fatal() {
+    // A newer release adds keys only behind a schema bump. After a rollback
+    // this service must keep running on runtime.toml alone.
+    let root = config_directory("newer-overrides");
+    let path = root.join("runtime.toml");
+    fs::write(&path, document(5)).unwrap();
+    let plain = Config::load(&path).unwrap();
+    let newer = OVERRIDES
+        .replace("schema_version = 1", "schema_version = 2")
+        .replace("shuffle = true", "shuffle = \"bag\"\ncolour = \"red\"")
+        + "[[wallpapers]]\nid = \"x\"\n";
+    fs::write(overrides_path(&path), &newer).unwrap();
+    let loaded = Config::load(&path).unwrap();
+    assert_eq!(
+        loaded.overrides_ignored.as_deref(),
+        Some("unsupported schema_version 2")
+    );
+    assert_eq!(loaded.overrides_sha256, None);
+    assert_eq!(
+        Config {
+            overrides_ignored: None,
+            ..loaded
+        },
+        plain,
+        "nothing from the newer file was applied"
+    );
+    assert_eq!(Overrides::declared_schema(newer.as_bytes()).unwrap(), 2);
+    assert!(
+        Overrides::from_bytes(newer.as_bytes()).is_err(),
+        "strict parse is unchanged"
     );
     fs::remove_dir_all(root).unwrap();
 }

@@ -219,7 +219,11 @@ def application_lanes(application: Application) -> list[ThreadPoolExecutor]:
 
 
 def settled(application: Application) -> bool:
-    """Nothing is in flight: no write, settings batch, command, scan or palette work."""
+    """Nothing is in flight: no write, settings batch, command, scan, palette work,
+    or runtime-config publication. The publication's own unattended-safety probe
+    runs on the runtime lane after a scan, so a check that stops at the scan can
+    count that probe against whatever the test does next."""
+    request = application._runtime_authoring_request
     return (
         application.authoring_ready
         and not application._authoring_active
@@ -228,6 +232,8 @@ def settled(application: Application) -> bool:
         and not application._runtime_action_pending
         and application._library_scan_future is None
         and not application._theme_draining
+        and not application._runtime_compile_pending
+        and (request is None or request.generation <= application._runtime_compiled_generation)
     )
 
 

@@ -382,11 +382,28 @@ publication writes neither file.
 
 The service reads it after `runtime.toml`, at start, on `reload` and when the
 watcher sees either file change, appear or disappear; `--check-config`
-validates both. A missing file is the ordinary case; a malformed one is a
-config error like a malformed `runtime.toml` (a failed reload keeps the
-running configuration). An entry naming a playlist or connector that
-`runtime.toml` lacks is skipped with a journal line rather than refused,
-which covers the moment between the two writes.
+validates both. A missing file is the ordinary case. The service first reads
+only `schema_version`, ignoring every other key:
+
+- A schema it supports (`1`) is then parsed strictly. A malformed file of
+  that schema is a config error like a malformed `runtime.toml` (a failed
+  reload keeps the running configuration), because it claims to be this
+  release's format.
+- Any other integer means a newer release wrote the file. The service runs on
+  `runtime.toml` alone, logs one journal line, reports `overrides_ignored`
+  (for example `unsupported schema_version 2`) in status, and
+  `--check-config` passes with that warning. A file that is not TOML or names
+  no integer schema is a config error.
+
+So the rule for later releases is: any addition to this file bumps its
+`schema_version`, and services ignore versions they do not know. The app
+side matches it: a compiler never rewrites or removes an overrides file that
+declares a newer schema than it writes, so rolling forward again finds the
+file as the newer release left it.
+
+An entry naming a playlist or connector that `runtime.toml` lacks is skipped
+with a journal line rather than refused, which covers the moment between the
+two writes.
 
 The service resolves shuffle as: a live `shuffle on|off` override, else the
 playlist's own `shuffle`, else `settings.shuffle`; `shuffle default` returns
@@ -421,6 +438,7 @@ did. A beaten global rule is not `selected` or `in_force` for that display
 | --- | --- | --- |
 | `supported_override_schemas` | top level | `[1]`. A service without this field never reads `runtime-overrides.toml`. |
 | `loaded_overrides_sha256` | top level | SHA-256 of the applied overrides file; `null` without one. |
+| `overrides_ignored` | top level | Why a present overrides file is not applied (a newer schema); `null` otherwise. |
 | `cycle_interval_seconds` | top level | The summary route's interval; `null` when independent routes disagree. |
 | `cycle_interval_seconds` | each display row | The interval of the playlist the route is playing. |
 | `beats_global_rules` | each display row | The opt-in as it applies to that route; `false` in mirrored mode. |

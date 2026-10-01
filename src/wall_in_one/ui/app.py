@@ -324,7 +324,13 @@ class Application(Adw.Application):
         self._service_start = service
         self._initial_page = initial_page
         self._held = False
-        self._settings = config.load()
+        loaded_settings = config.load_document()
+        self._settings = loaded_settings.settings
+        # Keys in settings.toml this build does not know. Any settings write
+        # would drop them, so while there are some the GUI is read-only for
+        # settings: Preferences shows why and every write path refuses. This
+        # is the startup snapshot; config's writers re-check the file itself.
+        self._settings_unknown_keys = loaded_settings.unknown_keys
         self._window: MainWindow | None = None
         # An unresolved first run is asked once per graphical process. A real
         # choice persists naturally as the first configured root; dismissing
@@ -4337,7 +4343,10 @@ class Application(Adw.Application):
             # The playlist is the authoritative lifecycle boundary.  Once it
             # commits, every independent cleanup is attempted and reported;
             # throwing on the first tail would hide a real deletion and leave
-            # later references needlessly dangling.
+            # later references needlessly dangling.  The one tail checked
+            # first is a saved default that read-only settings cannot clear:
+            # refusing the whole deletion beats a default naming nothing.
+            config.require_playlist_deletable(playlist.id)
             playlist_store.delete(playlist.id)
             failures: list[str] = []
             try:
@@ -4737,6 +4746,11 @@ class Application(Adw.Application):
         with self._settings_authoring_lock:
             return self._settings_requested
 
+    @property
+    def settings_unknown_keys(self) -> tuple[str, ...]:
+        """Unrecognized settings.toml keys; non-empty means settings are read-only."""
+        return self._settings_unknown_keys
+
     def update_settings_async(
         self,
         *,
@@ -4754,6 +4768,15 @@ class Application(Adw.Application):
         if not self.require_authoring_ready():
             if on_error is not None:
                 on_error(self._migration_blocked_response().message)
+            return False
+        if self._settings_unknown_keys:
+            # Refused before queuing anything, so no control ever shows a
+            # value that was not saved. ``config.mutate`` refuses as well.
+            message = config.read_only_message(self._settings_unknown_keys)
+            if on_error is not None:
+                on_error(message)
+            else:
+                self.window_report(f"Settings were not saved; nothing changed: {message}")
             return False
         try:
             with self._settings_authoring_lock:
@@ -4893,6 +4916,8 @@ class Application(Adw.Application):
             self.window_report(f"Settings were not saved; nothing changed: {message}")
 
     def update_settings(self, **changes: Any) -> config.Settings:
+        if self._settings_unknown_keys:
+            raise config.SettingsReadOnlyError(self._settings_unknown_keys)
         previous = self._settings
         # Explicit legacy-service and non-GUI callers retain a synchronous
         # boundary.  They still rebase semantic fields so a stale process

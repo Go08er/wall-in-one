@@ -85,12 +85,45 @@ class PreferencesPage(Adw.PreferencesPage):
         # programmatic changes do not read as user edits and write back.
         self._loading = False
 
+        # Shown while settings.toml has keys this build does not know. Those
+        # keys come from a file anyone can edit, so no markup.
+        self._read_only_banner = Adw.Banner(use_markup=False)
+        self.set_banner(self._read_only_banner)
+
         self.add(self._build_library_group())
         self.add(self._build_playback_group())
         self.add(self._build_providers_group())
         self.add(self._build_colour_group())
         self.add(self._build_appearance_group())
 
+        # Every control here that writes settings.toml. The Wallhaven key
+        # rows and the palette actions are deliberately absent: they write
+        # other files, or nothing.
+        self._settings_controls: tuple[Gtk.Widget, ...] = (
+            self._add_root,
+            self._workshop,
+            self._shuffle,
+            self._cycle,
+            self._interval,
+            self._dynamics,
+            self._battery_animations,
+            self._own_scenes,
+            self._display_mode,
+            self._theme_source,
+            self._favourites_only,
+            self._muted,
+            self._volume,
+            self._hardware_decode,
+            self._interpolation,
+            self._scene_fps,
+            self._scene_scaling,
+            self._scene_clamp,
+            self._when_hidden,
+            self._follow_palette,
+            self._scheme,
+            self._opacity,
+        )
+        self._refresh_read_only()
         self._load(application.settings)
         self._watch_output_changes()
         self._refresh_roots()
@@ -112,6 +145,7 @@ class PreferencesPage(Adw.PreferencesPage):
         add.add_css_class("flat")
         add.connect("clicked", self._on_add_root)
         group.set_header_suffix(add)
+        self._add_root = add
 
         # Rebuilt wholesale on every change: a handful of rows, and tracking
         # which one moved would be more code than making them again.
@@ -141,8 +175,12 @@ class PreferencesPage(Adw.PreferencesPage):
             self._root_rows.append(row)
             return
 
+        read_only = bool(self._read_only_keys())
         for index, root in enumerate(roots):
             row = Adw.ActionRow(title=root.name or str(root), subtitle=str(root), use_markup=False)
+            # Every suffix button rewrites `roots`. The row itself stays
+            # sensitive so its path remains readable.
+            writers: list[Gtk.Button] = []
             if index == 0:
                 row.set_title(f"{root.name or str(root)} · Downloads & generated stills")
                 row.add_prefix(Gtk.Image(icon_name="folder-download-symbolic"))
@@ -156,6 +194,7 @@ class PreferencesPage(Adw.PreferencesPage):
                 destination.add_css_class("flat")
                 destination.connect("clicked", self._make_root_primary(root))
                 row.add_suffix(destination)
+                writers.append(destination)
             if not root.is_dir():
                 # Said plainly rather than dropped: a folder on a drive that is
                 # not mounted should come back when it is, not disappear.
@@ -168,6 +207,9 @@ class PreferencesPage(Adw.PreferencesPage):
             remove.add_css_class("flat")
             remove.connect("clicked", self._make_root_remover(root))
             row.add_suffix(remove)
+            writers.append(remove)
+            for button in writers:
+                button.set_sensitive(not read_only)
             self._roots_group.add(row)
             self._root_rows.append(row)
 
@@ -686,6 +728,25 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._opacity)
         return group
 
+    # -- read-only settings ----------------------------------------------
+
+    def _read_only_keys(self) -> tuple[str, ...]:
+        # Simple application doubles predate read-only settings.
+        return tuple(getattr(self._app, "settings_unknown_keys", ()))
+
+    def _refresh_read_only(self) -> None:
+        """Show why settings cannot change, and stop offering to change them."""
+        keys = self._read_only_keys()
+        if keys:
+            self._read_only_banner.set_title(
+                f"Settings are read-only. {config.read_only_message(keys)}. Correct a "
+                "typo there, or change settings in the newer version that added them, "
+                "then reopen Wall-in-One."
+            )
+        self._read_only_banner.set_revealed(bool(keys))
+        for control in self._settings_controls:
+            control.set_sensitive(not keys)
+
     # -- state -----------------------------------------------------------
 
     def apply_settings(self, settings: config.Settings) -> None:
@@ -696,6 +757,7 @@ class PreferencesPage(Adw.PreferencesPage):
         reloading their values prevents the next local edit from serialising a
         stale copy of every unrelated field.
         """
+        self._refresh_read_only()
         self._load(settings)
         self._refresh_roots()
 

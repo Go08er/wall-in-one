@@ -282,7 +282,7 @@ def test_idle_with_a_newer_store_file_writes_nothing_at_all(
         _report_failure(golden.runtime, _video_under_test(profile))
     target = profile.app_state / filename
     document = read_json(target)
-    document["version"] = int(document["version"]) + 1
+    document["version"] = STORE_MODULES[filename].FORMAT_VERSION + 1
     decorate(document)
     write_json(target, document)
 

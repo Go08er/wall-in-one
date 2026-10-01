@@ -1895,7 +1895,11 @@ def _targets(source: _LegacySource, converted: _Converted, created_at: str) -> t
         "playlists": [converted.playlists[key].to_json() for key in sorted(converted.playlists)],
     }
     schedules_payload = {
-        "version": schedules.FORMAT_VERSION,
+        # The oldest format that holds the imported rules (they have no names),
+        # so an import never moves a profile past what older builds read.
+        "version": schedules.FORMATS.to_write(
+            None, schedules.required_version(converted.schedules)
+        ),
         "rules": [rule.to_json() for rule in converted.schedules],
     }
     displays_payload = {"version": displays.FORMAT_VERSION, "displays": converted.displays}

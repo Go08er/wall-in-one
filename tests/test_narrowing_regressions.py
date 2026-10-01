@@ -8,6 +8,10 @@ from the 2026-09-30 compatibility survey). Before the store guard:
 2. editing a same-version playlists.json silently dropped a record's unknown
    ``description``, with no fault and no backup;
 3. editing schedules.json silently dropped a rule's unknown ``name``.
+
+Since Release 2 a rule ``name`` is a modeled field of schedules version 3, so
+probe three now proves the name is read as one and kept, the file moves to
+version 3, and the version-2 bytes are kept beside it first.
 """
 
 from __future__ import annotations
@@ -75,18 +79,23 @@ def test_probe_two_a_same_version_record_keeps_its_unknown_key(tmp_path: Path) -
     assert not target.with_name(target.name + ".broken").exists()
 
 
-def test_probe_three_a_schedule_rule_keeps_its_unknown_name(tmp_path: Path) -> None:
+def test_probe_three_a_schedule_rule_keeps_its_name(tmp_path: Path) -> None:
     target = tmp_path / "state" / "schedules.json"
     target.parent.mkdir()
     target.write_text(
         json.dumps({"version": 2, "rules": [{"id": "a", "playlist": "X", "name": "Evening rule"}]})
     )
+    original = target.read_bytes()
     store = schedules.Store.open(target)
     assert store.fault is None
+    assert store.rules[0].name == "Evening rule"
 
     store.add("Y", rule_id="b")
 
-    assert json.loads(target.read_text())["rules"] == [
+    document = json.loads(target.read_text())
+    assert document["version"] == 3
+    assert document["rules"] == [
         {"id": "a", "playlist": "X", "name": "Evening rule"},
         {"id": "b", "playlist": "Y"},
     ]
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == original

@@ -104,13 +104,18 @@ CASES = (
         filename="schedules.json",
         open=schedules.Store.open,
         error=schedules.ScheduleError,
-        newer={"version": 3, "rules": [{"id": "a", "playlist": "X", "name": "Evening"}]},
-        readable=lambda store: [rule.id for rule in store.rules] == ["a"],
+        newer={
+            "version": schedules.FORMAT_VERSION + 1,
+            "rules": [{"id": "a", "playlist": "X", "name": "Evening", "colour": "teal"}],
+        },
+        readable=lambda store: [(rule.id, rule.name) for rule in store.rules] == [("a", "Evening")],
         current={"version": 2, "rules": [{"id": "a", "playlist": "X"}]},
         mutations=(
             ("add", lambda store: store.add("Y", rule_id="b")),
             ("remove", lambda store: store.remove("a")),
             ("set-enabled", lambda store: store.set_enabled("a", False)),
+            ("set-name", lambda store: store.set_name("a", "Late")),
+            ("clear-name", lambda store: store.set_name("a", None)),
             ("update", lambda store: store.update("a", "Y")),
             ("move", lambda store: store.move("a", 0)),
             ("move-relative", lambda store: store.move_relative("a", 1)),
@@ -453,7 +458,7 @@ def test_schedules_carry_unknown_keys_without_resurrecting_cleared_fields(
             "version": 2,
             "note": "kept",
             "rules": [
-                {"id": "a", "playlist": "X", "name": "Evening rule", "enabled": False},
+                {"id": "a", "playlist": "X", "colour": "teal", "enabled": False},
                 {"id": "b", "playlist": "Y", "start": "21:00", "end": "04:00"},
             ],
         },
@@ -466,11 +471,12 @@ def test_schedules_carry_unknown_keys_without_resurrecting_cleared_fields(
     store.move("a", 2)
 
     saved = _saved(target)
+    assert saved["version"] == 2
     assert saved["note"] == "kept"
     assert saved["rules"] == [
         {"id": "b", "playlist": "Y"},
         {"id": "c", "playlist": "Z"},
-        {"id": "a", "playlist": "X", "name": "Evening rule"},
+        {"id": "a", "playlist": "X", "colour": "teal"},
     ]
 
 
@@ -480,7 +486,7 @@ def test_the_lazy_schedule_upgrade_carries_unknown_keys_into_version_two(
     target = tmp_path / "schedules.json"
     _write(
         target,
-        {"version": 1, "note": "kept", "rules": [{"id": "a", "playlist": "X", "name": "N"}]},
+        {"version": 1, "note": "kept", "rules": [{"id": "a", "playlist": "X", "colour": "N"}]},
     )
     store = schedules.Store.open(target)
     assert store.fault is None
@@ -490,7 +496,8 @@ def test_the_lazy_schedule_upgrade_carries_unknown_keys_into_version_two(
     saved = _saved(target)
     assert saved["version"] == 2
     assert saved["note"] == "kept"
-    assert saved["rules"][0] == {"id": "a", "playlist": "X", "name": "N"}
+    assert saved["rules"][0] == {"id": "a", "playlist": "X", "colour": "N"}
+    assert not list(tmp_path.glob("*-backup")), "v1 to v2 is the old upgrade, not a bump"
 
 
 def test_pairings_carry_unknown_keys_through_edits_and_the_health_sync(tmp_path: Path) -> None:
@@ -707,7 +714,7 @@ def test_unknown_keys_in_current_files_do_not_change_the_compiled_runtime(
             {
                 "version": 2,
                 "unknown_top": "UNKNOWN-4",
-                "rules": [{"id": "r", "playlist": "x", "name": "UNKNOWN-5"}],
+                "rules": [{"id": "r", "playlist": "x", "colour": "UNKNOWN-5"}],
             },
         ),
         pairings.state_path(): (

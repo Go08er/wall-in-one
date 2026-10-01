@@ -49,6 +49,8 @@ class StoreCase:
 
     name: str
     filename: str
+    #: The newest version of the file this build understands; one above it
+    #: is what a newer build writes.
     version: int
     collection: str
     #: The edit a user makes most often, through the Store API.
@@ -100,12 +102,26 @@ def _edit_removals(profile: Profile) -> object:
 
 
 STORES: Final = (
-    StoreCase("playlists", "playlists.json", 1, "playlists", _edit_playlists, 0, 1),
-    StoreCase("schedules", "schedules.json", 2, "rules", _edit_schedules, 0, 1),
-    StoreCase("pairings", "pairings.json", 2, "pairings", _edit_pairings, 0, 1),
-    StoreCase("displays", "displays.json", 1, "displays", _edit_displays),
-    StoreCase("favourites", "favourites.json", 1, "paths", _edit_favourites),
-    StoreCase("pending-removals", "pending-removals.json", 1, "removals", _edit_removals),
+    StoreCase(
+        "playlists", "playlists.json", playlists.FORMAT_VERSION, "playlists", _edit_playlists, 0, 1
+    ),
+    StoreCase(
+        "schedules", "schedules.json", schedules.FORMAT_VERSION, "rules", _edit_schedules, 0, 1
+    ),
+    StoreCase(
+        "pairings", "pairings.json", pairings.FORMAT_VERSION, "pairings", _edit_pairings, 0, 1
+    ),
+    StoreCase("displays", "displays.json", displays.FORMAT_VERSION, "displays", _edit_displays),
+    StoreCase(
+        "favourites", "favourites.json", favourites.FORMAT_VERSION, "paths", _edit_favourites
+    ),
+    StoreCase(
+        "pending-removals",
+        "pending-removals.json",
+        removals.FORMAT_VERSION,
+        "removals",
+        _edit_removals,
+    ),
 )
 RECORD_STORES: Final = tuple(case for case in STORES if case.untouched_record is not None)
 

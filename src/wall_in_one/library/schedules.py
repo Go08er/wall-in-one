@@ -30,17 +30,29 @@ from pathlib import Path
 from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
-from wall_in_one.library import state_file
+from wall_in_one.library import playlists, state_file
 
 #: The file, under `paths.app_state_dir()`.
 STATE_FILENAME: Final = "schedules.json"
 
-#: Version 1 is still read and is rewritten as version 2 on the next edit. A
-#: newer version is shown but never compiled or rewritten: every mutation is
-#: refused (kind ``newer-version``). Unknown keys in a version this build
-#: reads are carried through every save; see `DOCUMENT_SHAPE`.
-FORMAT_VERSION: Final = 2
+#: Versions 1 to 3 are read. Version 1 is rewritten as version 2 on the next
+#: edit, as it always was. Version 3 adds an optional ``name`` per rule and is
+#: written only when a rule has one (format-change guard 1, lazy bump on use):
+#: a schedule without names stays version 2, byte for byte what 0.1.4 and
+#: 0.1.5 write. The first save that moves a file to version 3 first keeps the
+#: old bytes as ``schedules.json.v<old>-backup`` (guard 2). A file stays at
+#: version 3 once there, even after its last name is cleared. A newer version
+#: is shown but never compiled or rewritten: every mutation is refused (kind
+#: ``newer-version``). Unknown keys in a version this build reads are carried
+#: through every save; see `DOCUMENT_SHAPE`.
+FORMAT_VERSION: Final = 3
 LEGACY_FORMAT_VERSION: Final = 1
+#: What every supported older build reads and writes; see `FORMATS`.
+UNNAMED_FORMAT_VERSION: Final = 2
+NAMED_FORMAT_VERSION: Final = 3
+FORMATS: Final = state_file.FormatVersions(
+    oldest=LEGACY_FORMAT_VERSION, floor=UNNAMED_FORMAT_VERSION, current=FORMAT_VERSION
+)
 
 #: Ceilings, so a file that grew a zero cannot be read forever.
 MAX_RULES: Final = 512
@@ -54,6 +66,8 @@ WEEKDAY_NAMES: Final[tuple[str, ...]] = ("mon", "tue", "wed", "thu", "fri", "sat
 
 MINUTES_IN_A_DAY: Final = 24 * 60
 MAX_CONNECTOR_BYTES: Final = 256
+#: A rule's name fits where a playlist's does: a menu, a row, a dropdown.
+MAX_NAME_LENGTH: Final = playlists.MAX_NAME_LENGTH
 
 _MutationResult = TypeVar("_MutationResult")
 
@@ -63,7 +77,8 @@ class ScheduleError(Exception):
 
     Kinds in use: ``local-io``, ``no-such-rule``, ``identity-conflict``,
     ``invalid-time``, ``invalid-day``, ``invalid-month``,
-    ``invalid-connector``, ``full``, ``newer-version``.
+    ``invalid-connector``, ``invalid-name``, ``full``, ``newer-version``,
+    ``no-backup``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -100,6 +115,27 @@ def clean_connector(raw: str) -> str:
     if any(ord(character) < 32 or 0x7F <= ord(character) <= 0x9F for character in connector):
         raise ScheduleError("invalid-connector", "connector cannot contain control characters")
     return connector
+
+
+def tidy_name(raw: str | None) -> str | None:
+    """A rule name as it will be stored, ``None`` for no name, or raise.
+
+    Whitespace is collapsed, as for a playlist name, so a tab or newline can
+    never invent a column or a row in the listing ``ctl schedule`` prints. An
+    empty name, or one that is only spaces, means the rule has none.
+    """
+    if raw is None:
+        return None
+    name = " ".join(raw.split())
+    if not name:
+        return None
+    if len(name) > MAX_NAME_LENGTH:
+        raise ScheduleError("invalid-name", f"a name has to be under {MAX_NAME_LENGTH} characters")
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ScheduleError("invalid-name", "a rule name must be valid UTF-8") from error
+    return name
 
 
 def parse_time(raw: str) -> int:
@@ -169,6 +205,10 @@ class Rule:
     start: int | None = None
     end: int | None = None
     enabled: bool = True
+    #: What the person calls this rule, or ``None``. Display only: the rule is
+    #: still identified by ``id`` everywhere, and the name never reaches the
+    #: runtime. Saving a named rule needs format version 3.
+    name: str | None = None
 
     def matches(self, at: datetime, connector: str = "") -> bool:
         if self.connector and self.connector != connector:
@@ -238,6 +278,8 @@ class Rule:
             payload["end"] = format_time(self.end)
         if not self.enabled:
             payload["enabled"] = False
+        if self.name is not None:
+            payload["name"] = self.name
         return payload
 
 
@@ -288,7 +330,49 @@ def _rule(raw: object) -> Rule | None:
         start=start,
         end=end,
         enabled=enabled if isinstance(enabled, bool) else True,
+        name=_stored_name(raw.get("name")),
     )
+
+
+def _stored_name(value: object) -> str | None:
+    """A stored name, or ``None`` when absent or unusable (``_parse`` counts that)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return tidy_name(value)
+    except ScheduleError:
+        return None
+
+
+def _name_is_malformed(raw: dict[str, Any]) -> bool:
+    if "name" not in raw:
+        return False
+    value = raw["name"]
+    if not isinstance(value, str):
+        return True
+    try:
+        tidy_name(value)
+    except ScheduleError:
+        return True
+    return False
+
+
+def required_version(rules: Sequence[Rule]) -> int:
+    """The oldest format that can hold ``rules``: 3 once any rule is named.
+
+    This is format-change guard 1 for schedules; `FORMATS` turns it into the
+    version a save actually writes.
+    """
+    if any(rule.name is not None for rule in rules):
+        return NAMED_FORMAT_VERSION
+    return UNNAMED_FORMAT_VERSION
+
+
+def rule_label(rule: Rule, playlist_names: Mapping[str, str] | None = None) -> str:
+    """What to call a rule for a person: its name, else its playlist's."""
+    if rule.name is not None:
+        return rule.name
+    return (playlist_names or {}).get(rule.playlist, rule.playlist)
 
 
 def resolve_rule(rules: Sequence[Rule], at: datetime, connector: str = "") -> Rule | None:
@@ -321,7 +405,17 @@ DOCUMENT_SHAPE: Final = state_file.Shape(
     records={
         "rules": state_file.Shape(
             known=frozenset(
-                {"id", "playlist", "connector", "months", "weekdays", "start", "end", "enabled"}
+                {
+                    "id",
+                    "playlist",
+                    "connector",
+                    "months",
+                    "weekdays",
+                    "start",
+                    "end",
+                    "enabled",
+                    "name",
+                }
             ),
             identity="id",
             strip_identity=True,
@@ -345,18 +439,15 @@ def _read(path: Path) -> state_file.Reading[tuple[Rule, ...]]:
     newer = state_file.newer_version_fault(path, payload, FORMAT_VERSION)
     if newer is not None:
         return state_file.Reading(rules, newer, newer_version=True, unknown=unknown)
-    return state_file.Reading(rules, fault, unknown=unknown)
+    return state_file.Reading(rules, fault, unknown=unknown, version=FORMATS.declared(payload))
 
 
 def _parse(path: Path, payload: dict[str, Any]) -> tuple[tuple[Rule, ...], str | None]:
-    version = payload.get("version")
     faults: list[str] = []
-    if version is not None and not (
-        type(version) is int and version in (LEGACY_FORMAT_VERSION, FORMAT_VERSION)
-    ):
+    if FORMATS.declared(payload) is None:
         faults.append(
-            f"{path.name} has unsupported version {version!r}; expected "
-            f"{LEGACY_FORMAT_VERSION} or {FORMAT_VERSION}"
+            f"{path.name} has unsupported version {payload.get('version')!r}; expected "
+            f"{LEGACY_FORMAT_VERSION} to {FORMAT_VERSION}"
         )
     stored = payload.get("rules")
     if not isinstance(stored, list):
@@ -384,6 +475,8 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[tuple[Rule, ...], str |
             malformed += 1
         if ("start" in raw) != ("end" in raw):
             malformed += 1
+        if _name_is_malformed(raw):
+            malformed += 1
         if rule.id in identifiers:
             duplicate += 1
             continue
@@ -407,9 +500,20 @@ def save(
     *,
     replace_existing: bool = True,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+    version: int | None = None,
 ) -> Path:
-    """Write the rules atomically, carrying ``unknown`` fields back in."""
+    """Write the rules atomically, carrying ``unknown`` fields back in.
+
+    ``version`` defaults to the oldest format that holds ``rules`` (see
+    `required_version`), so unnamed rules are written as version 2. This
+    writes what it is given and nothing more: keeping a file's newer version,
+    and the backup before a bump, belong to `Store`, which knows what is on
+    disk.
+    """
     target = path if path is not None else state_path()
+    written = version if version is not None else FORMATS.to_write(None, required_version(rules))
+    if required_version(rules) > written or not FORMATS.floor <= written <= FORMATS.current:
+        raise ValueError(f"schedules cannot be saved as version {written}")
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
@@ -418,7 +522,7 @@ def save(
         ) from error
 
     payload = state_file.merge_unknown(
-        {"version": FORMAT_VERSION, "rules": [rule.to_json() for rule in rules]},
+        {"version": written, "rules": [rule.to_json() for rule in rules]},
         unknown,
         DOCUMENT_SHAPE,
     )
@@ -491,10 +595,15 @@ class Store:
         end: str = "",
         connector: str = "",
         rule_id: str | None = None,
+        name: str | None = None,
     ) -> Rule:
-        """Append a rule. Later rules win, so appending is how you override."""
+        """Append a rule. Later rules win, so appending is how you override.
+
+        A ``name`` moves the file to format version 3; see `FORMAT_VERSION`.
+        """
         if bool(start) != bool(end):
             raise ScheduleError("invalid-time", "a window needs both a start and an end")
+        chosen_name = tidy_name(name)
         identifier = rule_id or new_id()
         try:
             identifier.encode("utf-8")
@@ -514,6 +623,7 @@ class Store:
             weekdays=parse_weekdays(weekdays),
             start=parse_time(start) if start else None,
             end=parse_time(end) if end else None,
+            name=chosen_name,
         )
         if not rule.playlist:
             raise ScheduleError("no-such-rule", "a rule needs a playlist")
@@ -552,6 +662,26 @@ class Store:
 
         return self._mutate(set_enabled)
 
+    def set_name(self, rule_id: str, name: str | None) -> Rule:
+        """Name a rule, or clear its name with ``None`` or an empty name.
+
+        Naming the first rule moves the file to format version 3, after
+        keeping the version-2 bytes as ``schedules.json.v2-backup``; if that
+        backup cannot be kept, nothing is saved (kind ``no-backup``).
+        Clearing the last name leaves the file at version 3.
+        """
+        chosen = tidy_name(name)
+
+        def set_name(rules: list[Rule]) -> tuple[Rule, bool]:
+            for index, rule in enumerate(rules):
+                if rule.id == rule_id:
+                    updated = replace(rule, name=chosen)
+                    rules[index] = updated
+                    return updated, updated != rule
+            raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
+        return self._mutate(set_name)
+
     def update(
         self,
         rule_id: str,
@@ -563,7 +693,7 @@ class Store:
         end: str = "",
         connector: str = "",
     ) -> Rule:
-        """Edit a rule in place without changing its id or priority."""
+        """Edit a rule in place without changing its id, name or priority."""
         if bool(start) != bool(end):
             raise ScheduleError("invalid-time", "a window needs both a start and an end")
         if not playlist.strip():
@@ -594,6 +724,7 @@ class Store:
                     start=chosen_start,
                     end=chosen_end,
                     enabled=rule.enabled,
+                    name=rule.name,
                 )
                 rules[index] = updated
                 return updated, updated != rule
@@ -712,6 +843,12 @@ class Store:
                     self._loaded = True
                 result, changed = change(rules)
                 if changed:
+                    # Format-change guards: keep the file's version unless
+                    # these rules need a newer one, and keep the old bytes
+                    # before the first bump -- before anything is moved.
+                    version = FORMATS.to_write(reading.version, required_version(rules))
+                    if reading.version is not None and FORMATS.is_bump(reading.version, version):
+                        self._back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:
                         try:
                             state_file.preserve_faulted(target, observed=observed)
@@ -721,9 +858,15 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(rules, target, replace_existing=False, unknown=reading.unknown)
+                        save(
+                            rules,
+                            target,
+                            replace_existing=False,
+                            unknown=reading.unknown,
+                            version=version,
+                        )
                     else:
-                        save(rules, target, unknown=reading.unknown)
+                        save(rules, target, unknown=reading.unknown, version=version)
                     fault = None
 
                 # File first, then memory: failed persistence cannot make the
@@ -739,6 +882,25 @@ class Store:
             raise ScheduleError(
                 "local-io",
                 f"could not safely update schedules at {target}: {error.strerror or error}",
+            ) from error
+
+    @staticmethod
+    def _back_up_before_bump(
+        target: Path,
+        observed: state_file.StateFileObservation,
+        replaced: int,
+        version: int,
+    ) -> None:
+        """Guard 2, or refuse: never bump a file without its old bytes kept."""
+        try:
+            state_file.backup_before_bump(target, observed=observed, replaced=replaced)
+        except OSError as error:
+            backup = state_file.version_backup_path(target, replaced)
+            raise ScheduleError(
+                "no-backup",
+                f"could not keep a copy of {target.name} (version {replaced}) as {backup.name} "
+                f"before saving it as version {version}: {error.strerror or error}. "
+                "Nothing was changed.",
             ) from error
 
     def _reuse_unchanged_rules(self, current: Sequence[Rule]) -> list[Rule]:
@@ -765,12 +927,14 @@ def describe(
     ``names`` maps playlist ids to what they are called. Rules store the id,
     because a rename must not break a schedule -- but a listing full of
     sixteen-character hex is unreadable, and this is output for a person.
+    The rule's own name, if it has one, comes last so the earlier columns
+    stay where scripts already find them; ``-`` means none.
     """
     winner = resolve(rules, at, connector)
     default = (names or {}).get(active, active) if active else "(All media)"
     lines = [
         f"# schedule: {len(rules)} rules, default {default}",
-        "# fields: rule, playlist, when, enabled, in-force",
+        "# fields: rule, playlist, when, enabled, in-force, name",
     ]
     # The last match wins, so only the final matching rule is in force.
     last_match = ""
@@ -781,8 +945,9 @@ def describe(
     for rule in rules:
         in_force = "yes" if rule.id == last_match and winner else "no"
         called = known.get(rule.playlist, rule.playlist)
+        enabled = "yes" if rule.enabled else "no"
         lines.append(
-            f"{rule.id}\t{called}\t{rule.describe()}\t{'yes' if rule.enabled else 'no'}\t{in_force}"
+            f"{rule.id}\t{called}\t{rule.describe()}\t{enabled}\t{in_force}\t{rule.name or '-'}"
         )
     return "\n".join(lines)
 

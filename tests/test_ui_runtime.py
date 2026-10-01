@@ -1943,7 +1943,12 @@ def test_startup_repair_skips_only_the_newer_reference_store(
     displays.Store.open().assign("DP-1", "deleted")
     newer = schedules.state_path()
     newer.write_text(
-        json.dumps({"version": 3, "rules": [{"id": "r", "playlist": "deleted"}]}),
+        json.dumps(
+            {
+                "version": schedules.FORMAT_VERSION + 1,
+                "rules": [{"id": "r", "playlist": "deleted"}],
+            }
+        ),
         encoding="utf-8",
     )
     original = newer.read_bytes()

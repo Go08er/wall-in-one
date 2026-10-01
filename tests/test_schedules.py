@@ -16,6 +16,7 @@ import os
 from datetime import datetime
 from multiprocessing.connection import Connection
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -697,11 +698,14 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         *,
         replace_existing: bool = True,
         unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+        version: int | None = None,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save((manual,), target)
-        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
+        return save(
+            updated, target, replace_existing=replace_existing, unknown=unknown, version=version
+        )
 
     monkeypatch.setattr(schedules, "save", repair_then_save)
 
@@ -760,10 +764,10 @@ def test_a_listing_marks_the_rule_in_force(store: Store) -> None:
     store.add("Weekdays")
     winner = store.add("Festive", months=[12])
     message = schedules.describe(store.rules, "Everyday", CHRISTMAS)
-    lines = [line for line in message.splitlines() if not line.startswith("#")]
-    in_force = [line for line in lines if line.endswith("\tyes")]
+    rows = [line.split("\t") for line in message.splitlines() if not line.startswith("#")]
+    in_force = [row for row in rows if row[4] == "yes"]
     assert len(in_force) == 1
-    assert in_force[0].startswith(winner.id)
+    assert in_force[0][0] == winner.id
 
 
 def test_a_listing_says_what_the_default_is(store: Store) -> None:
@@ -775,3 +779,367 @@ def test_a_rule_describes_itself_in_the_words_it_was_written_in(store: Store) ->
     rule = store.add("Night", weekdays=["sat"], start="22:00", end="06:00")
     assert rule.describe() == "sat 22:00-06:00"
     assert store.add("Always").describe() == "always"
+
+
+# -- rule names: format version 3, written only when used ---------------------------
+
+#: A version-2 file exactly as 0.1.4 and 0.1.5 write it.
+V2_RULES: list[dict[str, Any]] = [
+    {"id": "quiet", "playlist": "quick-choice", "enabled": False},
+    {"id": "night", "playlist": "Night", "start": "21:00", "end": "04:00"},
+    {
+        "id": "summer",
+        "playlist": "Summer",
+        "connector": "HDMI-A-1",
+        "months": [6, 7, 8],
+        "weekdays": ["sat", "sun"],
+    },
+]
+
+
+def _as_written(document: dict[str, object]) -> bytes:
+    """The serializer every schedules version so far has used, byte for byte."""
+    return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _v2_file(tmp_path: Path, rules: list[dict[str, Any]] | None = None) -> tuple[Path, bytes]:
+    target = tmp_path / "schedules.json"
+    original = _as_written({"version": 2, "rules": rules if rules is not None else V2_RULES})
+    target.write_bytes(original)
+    target.chmod(0o644)
+    return target, original
+
+
+def _backups(target: Path) -> list[str]:
+    return sorted(path.name for path in target.parent.glob(f"{target.name}.v*-backup"))
+
+
+def _document(target: Path) -> dict[str, object]:
+    loaded = json.loads(target.read_bytes())
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+@pytest.mark.parametrize(
+    ("raw", "stored"),
+    (
+        ("Frog day", "Frog day"),
+        ("  Frog \t day\n", "Frog day"),
+        ("", None),
+        ("   \t\n", None),
+        (None, None),
+        ("x" * schedules.MAX_NAME_LENGTH, "x" * schedules.MAX_NAME_LENGTH),
+    ),
+)
+def test_a_name_is_trimmed_and_an_empty_one_is_none(raw: str | None, stored: str | None) -> None:
+    assert schedules.tidy_name(raw) == stored
+
+
+def test_a_name_is_bounded_like_a_playlist_name() -> None:
+    assert schedules.MAX_NAME_LENGTH == 120
+    with pytest.raises(ScheduleError) as caught:
+        schedules.tidy_name("x" * (schedules.MAX_NAME_LENGTH + 1))
+    assert caught.value.kind == "invalid-name"
+    with pytest.raises(ScheduleError):
+        schedules.tidy_name("\ud800")
+
+
+def test_unnamed_edits_keep_version_two_byte_for_byte(tmp_path: Path) -> None:
+    """Guard 1: without a name the file is exactly what 0.1.4 and 0.1.5 write."""
+    target, _original = _v2_file(tmp_path)
+    store = Store.open(target)
+
+    store.add("Evening", weekdays=["fri"], start="18:00", end="23:00", rule_id="evening")
+    store.set_enabled("quiet", True)
+    store.update("night", "Night", start="22:00", end="05:00")
+    store.move("summer", 0)
+    store.set_name("night", "   ")
+
+    expected = [
+        V2_RULES[2],
+        {"id": "quiet", "playlist": "quick-choice"},
+        {"id": "night", "playlist": "Night", "start": "22:00", "end": "05:00"},
+        {
+            "id": "evening",
+            "playlist": "Evening",
+            "weekdays": ["fri"],
+            "start": "18:00",
+            "end": "23:00",
+        },
+    ]
+    assert target.read_bytes() == _as_written({"version": 2, "rules": expected})
+    assert _backups(target) == []
+
+
+def test_a_new_unnamed_schedule_is_version_two(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    Store.open(target).add("Evening", rule_id="evening")
+    assert target.read_bytes() == _as_written(
+        {"version": 2, "rules": [{"id": "evening", "playlist": "Evening"}]}
+    )
+
+
+def test_naming_a_rule_bumps_to_version_three_after_one_exact_backup(tmp_path: Path) -> None:
+    target, original = _v2_file(tmp_path)
+    store = Store.open(target)
+
+    named = store.set_name("night", "  Frog   night ")
+
+    assert named.name == "Frog night"
+    assert store.rules[1] == named
+    document = _document(target)
+    assert document["version"] == 3
+    assert document["rules"] == [
+        V2_RULES[0],
+        {**V2_RULES[1], "name": "Frog night"},
+        V2_RULES[2],
+    ]
+    backup = target.with_name("schedules.json.v2-backup")
+    assert _backups(target) == [backup.name]
+    assert backup.read_bytes() == original
+    assert os.stat(backup).st_mode & 0o777 == 0o644
+
+    # Further edits at version 3 never touch the backup again.
+    before = backup.stat()
+    store.set_name("quiet", "Your pick, parked")
+    store.add("Evening", rule_id="evening", name="Evening")
+    assert backup.read_bytes() == original
+    assert file_io.file_fingerprint(backup.stat()) == file_io.file_fingerprint(before)
+    assert _backups(target) == [backup.name]
+
+
+def test_a_second_bump_never_overwrites_the_first_backup(tmp_path: Path) -> None:
+    """0.1.4 narrows a version-3 file back to 2; naming again bumps again."""
+    target, original = _v2_file(tmp_path)
+    Store.open(target).set_name("night", "Frog night")
+    narrowed = _as_written({"version": 2, "rules": [{"id": "night", "playlist": "Night"}]})
+    target.write_bytes(narrowed)
+
+    store = Store.open(target)
+    assert store.rules[0].name is None
+    store.set_name("night", "Frog night again")
+
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
+    assert _document(target)["version"] == 3
+    assert _backups(target) == ["schedules.json.v2-backup"]
+
+
+def test_clearing_the_last_name_stays_on_version_three(tmp_path: Path) -> None:
+    """Decided: a bumped file never flips back, though the data would fit v2."""
+    target, original = _v2_file(tmp_path)
+    store = Store.open(target)
+    store.set_name("night", "Frog night")
+
+    store.set_name("night", None)
+    assert _document(target) == {"version": 3, "rules": V2_RULES}
+    store.set_name("quiet", "")
+    store.set_enabled("quiet", True)
+
+    assert _document(target)["version"] == 3
+    assert all(rule.name is None for rule in Store.open(target).rules)
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
+    assert _backups(target) == ["schedules.json.v2-backup"]
+
+
+def test_a_named_rule_keeps_its_name_through_every_other_edit(tmp_path: Path) -> None:
+    target, _original = _v2_file(tmp_path)
+    store = Store.open(target)
+    store.set_name("night", "Frog night")
+
+    store.update("night", "Evening", weekdays=["sat"])
+    store.set_enabled("night", False)
+    store.move("night", 0)
+    store.move_relative("night", 1)
+
+    (night,) = [rule for rule in Store.open(target).rules if rule.id == "night"]
+    assert night.name == "Frog night"
+    assert night.playlist == "Evening"
+    assert night.weekdays == frozenset({5})
+    assert not night.enabled
+
+
+def test_a_version_three_file_round_trips_its_names(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_bytes(
+        _as_written(
+            {
+                "version": 3,
+                "rules": [
+                    {"id": "a", "playlist": "X", "name": "Frog day"},
+                    {"id": "b", "playlist": "Y"},
+                ],
+            }
+        )
+    )
+    store = Store.open(target)
+    assert store.fault is None
+    assert [(rule.id, rule.name) for rule in store.rules] == [("a", "Frog day"), ("b", None)]
+
+    store.set_enabled("b", False)
+
+    assert _document(target) == {
+        "version": 3,
+        "rules": [
+            {"id": "a", "playlist": "X", "name": "Frog day"},
+            {"id": "b", "playlist": "Y", "enabled": False},
+        ],
+    }
+    assert _backups(target) == [], "already version 3: nothing to back up"
+
+
+def test_a_named_rule_in_a_new_file_needs_no_backup(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    Store.open(target).add("Evening", rule_id="evening", name="Evening")
+    assert _document(target) == {
+        "version": 3,
+        "rules": [{"id": "evening", "playlist": "Evening", "name": "Evening"}],
+    }
+    assert _backups(target) == []
+
+
+def test_a_version_one_file_named_is_backed_up_as_version_one(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    original = _as_written({"version": 1, "rules": [{"id": "a", "playlist": "X"}]})
+    target.write_bytes(original)
+
+    Store.open(target).set_name("a", "First")
+
+    assert _document(target)["version"] == 3
+    assert target.with_name("schedules.json.v1-backup").read_bytes() == original
+    assert _backups(target) == ["schedules.json.v1-backup"]
+
+
+@pytest.mark.parametrize("occupant", ("directory", "symlink"))
+def test_a_refused_backup_means_no_bump(tmp_path: Path, occupant: str) -> None:
+    """Guard 2: no backup, no save. The file and the live schedule stay put."""
+    target, original = _v2_file(tmp_path)
+    backup = target.with_name("schedules.json.v2-backup")
+    if occupant == "directory":
+        backup.mkdir()
+    else:
+        backup.symlink_to(tmp_path / "nowhere")
+    store = Store.open(target)
+    before = store.rules
+
+    with pytest.raises(ScheduleError) as caught:
+        store.set_name("night", "Frog night")
+
+    assert caught.value.kind == "no-backup"
+    assert "schedules.json.v2-backup" in str(caught.value)
+    assert str(caught.value).endswith("Nothing was changed.")
+    assert target.read_bytes() == original
+    assert store.rules == before
+    assert store.fault is None
+    assert not list(tmp_path.glob("*.broken*"))
+    assert not list(tmp_path.glob(".schedules.json*.tmp"))
+
+    # An unnamed edit needs no bump, so it still works meanwhile.
+    store.set_enabled("quiet", True)
+    assert _document(target)["version"] == 2
+
+
+def test_a_failed_backup_write_means_no_bump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, original = _v2_file(tmp_path)
+    real = state_file.write_atomic_bytes
+
+    def full_disk(
+        path: Path, contents: bytes, *, replace_existing: bool = True, mode: int | None = None
+    ) -> None:
+        if path.name.endswith("-backup"):
+            raise OSError(28, "No space left on device")
+        real(path, contents, replace_existing=replace_existing, mode=mode)
+
+    monkeypatch.setattr(state_file, "write_atomic_bytes", full_disk)
+    store = Store.open(target)
+
+    with pytest.raises(ScheduleError) as caught:
+        store.add("Evening", name="Evening")
+
+    assert caught.value.kind == "no-backup"
+    assert "No space left on device" in str(caught.value)
+    assert target.read_bytes() == original
+    assert len(store) == len(V2_RULES)
+    assert not target.with_name("schedules.json.v2-backup").exists()
+
+
+def test_a_faulted_file_is_backed_up_before_it_is_moved_aside(tmp_path: Path) -> None:
+    """The bump's backup and the fault's ``.broken`` copy both hold the original."""
+    target, original = _v2_file(tmp_path, [*V2_RULES, {"id": "bad", "playlist": 7}])
+    store = Store.open(target)
+    assert store.fault is not None
+
+    store.set_name("night", "Frog night")
+
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
+    assert target.with_name("schedules.json.broken").read_bytes() == original
+    assert _document(target)["version"] == 3
+    assert Store.open(target).fault is None
+
+
+@pytest.mark.parametrize("name", (7, None, ["Frog"], "x" * (schedules.MAX_NAME_LENGTH + 1)))
+def test_a_malformed_stored_name_is_a_fault(tmp_path: Path, name: object) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_bytes(
+        _as_written({"version": 3, "rules": [{"id": "a", "playlist": "X", "name": name}]})
+    )
+    store = Store.open(target)
+    assert store.fault is not None
+    assert "malformed" in store.fault
+    assert [(rule.id, rule.name) for rule in store.rules] == [("a", None)]
+
+
+def test_a_blank_stored_name_is_no_name(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_bytes(
+        _as_written({"version": 3, "rules": [{"id": "a", "playlist": "X", "name": "  "}]})
+    )
+    store = Store.open(target)
+    assert store.fault is None
+    assert store.rules[0].name is None
+
+
+def test_naming_an_unknown_rule_says_so(store: Store) -> None:
+    with pytest.raises(ScheduleError) as caught:
+        store.set_name("nope", "Frog")
+    assert caught.value.kind == "no-such-rule"
+    with pytest.raises(ScheduleError) as caught:
+        store.add("Evening", name="x" * 500)
+    assert caught.value.kind == "invalid-name"
+
+
+def test_save_writes_the_oldest_version_that_holds_the_rules(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    schedules.save([Rule(id="a", playlist="X")], target)
+    assert _document(target)["version"] == 2
+    schedules.save([Rule(id="a", playlist="X", name="Frog")], target)
+    assert _document(target)["version"] == 3
+    schedules.save([Rule(id="a", playlist="X")], target, version=3)
+    assert _document(target) == {"version": 3, "rules": [{"id": "a", "playlist": "X"}]}
+    with pytest.raises(ValueError):
+        schedules.save([Rule(id="a", playlist="X", name="Frog")], target, version=2)
+    with pytest.raises(ValueError):
+        schedules.save([Rule(id="a", playlist="X")], target, version=4)
+
+
+def test_a_rule_is_called_by_its_name_else_its_playlist() -> None:
+    names = {"x": "Evening"}
+    assert schedules.rule_label(Rule(id="a", playlist="x", name="Frog day"), names) == "Frog day"
+    assert schedules.rule_label(Rule(id="a", playlist="x"), names) == "Evening"
+    assert schedules.rule_label(Rule(id="a", playlist="gone"), names) == "gone"
+
+
+def test_a_listing_shows_each_rules_name_last(store: Store) -> None:
+    named = store.add("Weekdays", name="Work days")
+    plain = store.add("Festive", months=[12])
+    message = schedules.describe(store.rules, "Everyday", CHRISTMAS)
+    assert "# fields: rule, playlist, when, enabled, in-force, name" in message
+    rows = {
+        row[0]: row
+        for row in (line.split("\t") for line in message.splitlines())
+        if not row[0].startswith("#")
+    }
+    assert rows[named.id][5] == "Work days"
+    assert rows[plain.id][5] == "-"
+    assert all(len(row) == 6 for row in rows.values())

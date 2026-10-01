@@ -15,8 +15,9 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gtk  # noqa: E402
 
+from tests.gtk_helpers import settle  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import schedules  # noqa: E402
 from wall_in_one.ui import preferences, schedules_page  # noqa: E402
@@ -522,15 +523,12 @@ def test_status_poll_reuses_display_controls_and_preserves_focus(
     page = schedules_page.SchedulesPage(application)  # type: ignore[arg-type]
     host = Gtk.Window(child=page)
     host.present()
-    context = GLib.MainContext.default()
-    while context.pending():
-        context.iteration(False)
+    settle(0.1)
     try:
         page.refresh(application.session)
         before = page._display_playback_rows["DP-9"]
         assert before.playlist.grab_focus()
-        while context.pending():
-            context.iteration(False)
+        settle(0.1)
         focus = host.get_focus()
         assert focus is not None
 
@@ -568,9 +566,7 @@ def test_status_tick_cannot_absorb_external_authoring_or_hotplug_state(
     page = schedules_page.SchedulesPage(application)  # type: ignore[arg-type]
     host = Gtk.Window(child=page)
     host.present()
-    context = GLib.MainContext.default()
-    while context.pending():
-        context.iteration(False)
+    settle(0.1)
     try:
         page.refresh(application.session)
         page._months[7].set_active(True)
@@ -578,8 +574,7 @@ def test_status_tick_cannot_absorb_external_authoring_or_hotplug_state(
         page._start_hour.set_selected(22)
         page._start_minute.set_selected(30)
         assert page._start_hour.grab_focus()
-        while context.pending():
-            context.iteration(False)
+        settle(0.1)
 
         application.session.displays.values += (("DP-2", "evening"),)
         application.session.schedules.rules += (

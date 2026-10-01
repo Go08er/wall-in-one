@@ -32,6 +32,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
+from tests.gtk_helpers import settle  # noqa: E402
 from wall_in_one.library.filter import Query, Sort  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE, WallpaperGrid, WallpaperTile  # noqa: E402
@@ -163,16 +164,6 @@ def test_borked_health_updates_the_existing_tile_in_place(grid: WallpaperGrid) -
     assert tile._menu.get_menu_model() is None
 
 
-def _settle_widgets() -> None:
-    """Allow native button activation animations and allocation to finish."""
-    context = GLib.MainContext.default()
-    deadline = time.monotonic() + 0.3
-    while time.monotonic() < deadline:
-        while context.pending():
-            context.iteration(False)
-        time.sleep(0.002)
-
-
 @pytest.mark.parametrize("independent", [False, True])
 def test_visible_tile_actions_fit_compact_layout_and_keyboard_activation_dispatches_once(
     loader: CountingLoader, independent: bool
@@ -206,7 +197,7 @@ def test_visible_tile_actions_fit_compact_layout_and_keyboard_activation_dispatc
     window.set_default_size(360, 400)
     window.set_child(grid)
     window.present()
-    _settle_widgets()
+    settle(0.3)
     try:
         apply = tile._apply_targets if independent else tile._apply
         assert apply.get_label() == ("Apply to…" if independent else "Apply")
@@ -218,7 +209,7 @@ def test_visible_tile_actions_fit_compact_layout_and_keyboard_activation_dispatc
         assert apply.get_width() > 0 and tile._edit.get_width() > 0
         assert tile._edit.grab_focus()
         assert tile._edit.activate()
-        _settle_widgets()
+        settle(0.3)
         assert edited == [media]
         edited.clear()
 
@@ -229,14 +220,14 @@ def test_visible_tile_actions_fit_compact_layout_and_keyboard_activation_dispatc
             tile._apply_targets.popdown()
         else:
             assert apply.activate()
-            _settle_widgets()
+            settle(0.3)
             assert applied == [media]
             applied.clear()
         assert edited == []
         assert applied == []
 
         tile._star.activate()
-        _settle_widgets()
+        settle(0.3)
         assert starred == [True]
         tile._menu.popup()
         assert built[-1] == "context"
@@ -283,7 +274,7 @@ def test_context_shortcuts_cover_default_tile_and_nested_button_focus_once(
     window = Gtk.Window()
     window.set_child(grid)
     window.present()
-    _settle_widgets()
+    settle(0.3)
     try:
         # A controller on tile cannot see events targeting its FlowBoxChild
         # ancestor. Pin the real event-routing owner, not only the handler.
@@ -1321,7 +1312,7 @@ def test_open_target_menu_refreshes_connector_snapshot_without_applying(
     window, played, targeted = apply_window
     tile = next(iter(window._grid._tiles.values()))
     window.present()
-    _settle_widgets()
+    settle(0.3)
     tile._apply_targets.popup()
     menu = tile._apply_targets.get_menu_model()
     assert menu is not None and "Apply to DP-1" in _menu_labels(menu)

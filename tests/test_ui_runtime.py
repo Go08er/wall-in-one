@@ -26,6 +26,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from wall_in_one import config, paths, runtime_config, runtime_health  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
@@ -125,17 +126,6 @@ def _application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Application
 def _attach(application: Application, window: FakeWindow) -> None:
     application._window = cast(MainWindow, window)
     application._window_generation += 1
-
-
-def _spin_until(predicate: Any, *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    context = GLib.MainContext.default()
-    while not predicate():
-        while context.pending():
-            context.iteration(False)
-        if time.monotonic() >= deadline:
-            raise AssertionError("GLib callback did not arrive before the test deadline")
-        time.sleep(0.002)
 
 
 def _observe_removal_worker(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
@@ -269,7 +259,7 @@ def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
         finding = cast(list[dict[str, object]], snapshot["taboo_entries"])[0]
         finding["reason"] = "mutated after queue"
         release_worker.set()
-        _spin_until(
+        spin_until(
             lambda: application.session.pairings.health(pairings.Identity.of(item)).is_borked
         )
         assert (
@@ -283,7 +273,7 @@ def test_status_taboo_is_persisted_once_and_missing_reports_never_clear_it(
             {"playlist_id": playlist.id, "playlist": playlist.name, "source": "schedule"},
             real_window,
         )
-        _spin_until(lambda: not application._runtime_health_pending)
+        spin_until(lambda: not application._runtime_health_pending)
 
         health = application.session.pairings.health(pairings.Identity.of(item))
         assert health.is_borked
@@ -362,7 +352,7 @@ def test_display_quick_choice_compiles_reloads_then_targets_only_one_route(
     try:
         identifier = playlists.display_quick_choice_id("DP-1")
         assert application.play_item_on_async(item, "DP-1")
-        _spin_until(
+        spin_until(
             lambda: (
                 application.session.playlists.get(identifier) is not None
                 and not application._authoring_active
@@ -422,7 +412,7 @@ def test_second_gui_quick_choice_is_refused_before_it_can_overwrite_the_first(
         assert started.wait(1)
         assert not application.play_item_async(second)
         release.set()
-        _spin_until(lambda: not application._quick_choice_pending and bool(runtime_calls))
+        spin_until(lambda: not application._quick_choice_pending and bool(runtime_calls))
 
         chosen = application.session.playlists.find("quick-choice")
         assert [entry.path for entry in chosen.entries] == [first.path]
@@ -453,7 +443,7 @@ def test_display_mode_defaults_are_one_ordered_gui_action(
     monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: _status("Only"))
     try:
         assert application.reset_display_modes_on_async("DP-1")
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: window.busy == [True, False])
 
         assert calls == [
             ("DP-1", "cycle", "default"),
@@ -498,8 +488,8 @@ def test_display_mode_default_refusal_stops_honestly_and_refreshes_truth(
     monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: _status("Only"))
     try:
         assert application.reset_display_modes_on_async("DP-1")
-        _spin_until(lambda: window.busy == [True, False])
-        _spin_until(lambda: bool(window.statuses))
+        spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: bool(window.statuses))
 
         assert tuple(calls) == expected_calls
         assert len(window.reports) == 1 and message in window.reports[0]
@@ -613,10 +603,10 @@ def test_delayed_status_keeps_the_glib_heartbeat_responsive(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert window.statuses == [], "the worker should still be waiting"
         release.set()
-        _spin_until(lambda: window.statuses)
+        spin_until(lambda: window.statuses)
         assert window.statuses[-1]["playlist"] == "After"
     finally:
         release.set()
@@ -644,9 +634,9 @@ def test_held_compiler_lock_never_blocks_the_glib_heartbeat(
         with runtime_config.compiler_lock():
             assert application._publish_runtime_async()
             GLib.timeout_add(10, beat)
-            _spin_until(lambda: heartbeat)
+            spin_until(lambda: heartbeat)
             assert application._runtime_compile_pending
-        _spin_until(lambda: not application._runtime_compile_pending)
+        spin_until(lambda: not application._runtime_compile_pending)
     finally:
         _close(application)
 
@@ -682,10 +672,10 @@ def test_control_display_discovery_is_deferred_and_keeps_glib_responsive(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert replies == []
         release.set()
-        _spin_until(lambda: replies)
+        spin_until(lambda: replies)
         assert replies[0].ok
         assert "no screens reported" in replies[0].message
     finally:
@@ -750,14 +740,14 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        _spin_until(lambda: application._removal_runtime_invalidated)
+        spin_until(lambda: application._removal_runtime_invalidated)
         assert application._runtime_authoring_request is None
         assert not application._runtime_library_ready.is_set()
 
         release_compile.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
         try:
-            _spin_until(lambda: removed == [True] and refreshes == [True])
+            spin_until(lambda: removed == [True] and refreshes == [True])
         except AssertionError as error:
             raise AssertionError(
                 f"removal did not converge: removed={removed}, refreshes={refreshes}, "
@@ -824,14 +814,14 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        _spin_until(lambda: application._removal_runtime_invalidated)
+        spin_until(lambda: application._removal_runtime_invalidated)
         # The delete worker waits for the stale runtime acknowledgement.  It
         # may never make a loaded config point at an already-unlinked source.
         assert source.exists()
 
         release_reload.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
-        _spin_until(lambda: removed == [True] and refreshes == [True])
+        spin_until(lambda: removed == [True] and refreshes == [True])
         assert source_seen_during_reload == [True]
         assert not source.exists()
     finally:
@@ -889,7 +879,7 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
         assert application.remove_item_async(
             item, trash=True, finish=lambda result: removed.append(result.committed)
         )
-        _spin_until(lambda: application._removal_runtime_invalidated)
+        spin_until(lambda: application._removal_runtime_invalidated)
         assert flush_entered.wait(30), "real removal did not reach the source-directory flush"
         heartbeat: list[bool] = []
 
@@ -898,7 +888,7 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         application.request_quit()
         assert not storage_finished.is_set()
         assert removed == []
@@ -911,7 +901,7 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
 
         release_flush.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
-        _spin_until(lambda: removed == [True] and refreshes == [True])
+        spin_until(lambda: removed == [True] and refreshes == [True])
         assert not source.exists()
         # The fake refresh has not completed the post-delete convergence tail;
         # graceful quit must still retain it after the physical worker ends.
@@ -1010,12 +1000,12 @@ def test_explicit_quit_drains_committed_removal_scan_and_reconciliation(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        _spin_until(lambda: removed == [True] and scan_started.is_set(), timeout=5)
+        spin_until(lambda: removed == [True] and scan_started.is_set(), timeout=5)
         application.request_quit()
         assert quits == []
 
         release_scan.set()
-        _spin_until(lambda: reconciled == [True] and quits == [True], timeout=5)
+        spin_until(lambda: reconciled == [True] and quits == [True], timeout=5)
         assert not application._authoring_active
         assert not application._authoring_queue
         assert application._authoring_lifetime_holds == 0
@@ -1062,9 +1052,9 @@ def test_control_authoring_waits_for_the_store_lock_without_stopping_gtk(
             )
             assert started.wait(1)
             GLib.timeout_add(10, beat)
-            _spin_until(lambda: heartbeat)
+            spin_until(lambda: heartbeat)
             assert replies == []
-        _spin_until(lambda: replies)
+        spin_until(lambda: replies)
         assert replies[0] == Response.success("made Evening")
         assert application.session.playlists.find("Evening").name == "Evening"
         assert window.playlist_changes == 1
@@ -1113,8 +1103,8 @@ def test_last_window_close_waits_for_committed_authoring_runtime_publication(
         outcome = _Commands(application).add_to_playlist(f"{saved.id} {source}")
         assert isinstance(outcome, server.Deferred)
         outcome.start(replies.append)
-        _spin_until(compile_started.is_set)
-        _spin_until(lambda: replies == [Response.success("personal added to Saved")])
+        spin_until(compile_started.is_set)
+        spin_until(lambda: replies == [Response.success("personal added to Saved")])
         assert not application._authoring_active
         assert application._authoring_lifetime_holds == 0
         assert application._runtime_publication_held
@@ -1124,7 +1114,7 @@ def test_last_window_close_waits_for_committed_authoring_runtime_publication(
         assert application._runtime_publication_held
 
         release_compile.set()
-        _spin_until(lambda: not application._runtime_publication_held)
+        spin_until(lambda: not application._runtime_publication_held)
         assert reloads == ["reload"]
         document = paths.runtime_config_path().read_text(encoding="utf-8")
         assert "Saved" in document
@@ -1168,12 +1158,12 @@ def test_control_authoring_fsync_never_owns_the_gtk_frame(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert replies == []
         assert worker_threads == [worker_threads[0]]
         assert worker_threads[0] != threading.get_ident()
         release.set()
-        _spin_until(lambda: replies)
+        spin_until(lambda: replies)
         assert replies[0].ok
     finally:
         release.set()
@@ -1206,7 +1196,7 @@ def test_control_mutation_is_rejected_busy_and_never_commits_later(
 
         assert replies and replies[0].kind == "authoring-busy"
         release.set()
-        _spin_until(lambda: adopted == [True])
+        spin_until(lambda: adopted == [True])
         assert application.session.playlists.get("ghost") is None
     finally:
         release.set()
@@ -1244,7 +1234,7 @@ def test_same_value_settings_request_during_blocked_write_keeps_both_callbacks(
             on_success=lambda _settings: callbacks.append("second"),
         )
         release.set()
-        _spin_until(lambda: callbacks == ["first", "second"])
+        spin_until(lambda: callbacks == ["first", "second"])
 
         assert calls == 2
         assert application.settings.opacity == 0.5
@@ -1292,7 +1282,7 @@ def test_explicit_quit_drains_an_already_accepted_settings_tail(
         assert quits == []
 
         release.set()
-        _spin_until(lambda: callbacks == ["first", "second"] and quits == [True])
+        spin_until(lambda: callbacks == ["first", "second"] and quits == [True])
         saved = config.load_strict()
         assert saved.opacity == 0.5
         assert saved.cycle_enabled
@@ -1361,13 +1351,13 @@ def test_source_settings_wait_for_an_active_runtime_publication(
             roots=(new_root,),
             on_success=callbacks.append,
         )
-        _spin_until(lambda: application._authoring_active)
+        spin_until(lambda: application._authoring_active)
 
         assert not settings_write_started.is_set()
         assert config.load_strict().roots == (old_root,)
 
         release_compile.set()
-        _spin_until(lambda: len(callbacks) == 1, timeout=5)
+        spin_until(lambda: len(callbacks) == 1, timeout=5)
         assert settings_write_started.is_set()
         assert callbacks[0].roots == (new_root,)
         assert config.load_strict().roots == (new_root,)
@@ -1435,8 +1425,8 @@ def test_explicit_quit_waits_for_source_scan_and_runtime_publication(
             scan_workshop=False,
             on_success=callbacks.append,
         )
-        _spin_until(scan_started.is_set, timeout=5)
-        _spin_until(lambda: callbacks and not application._authoring_active)
+        spin_until(scan_started.is_set, timeout=5)
+        spin_until(lambda: callbacks and not application._authoring_active)
         assert application._runtime_library_scan_held
         assert not application._runtime_publication_held
 
@@ -1444,7 +1434,7 @@ def test_explicit_quit_waits_for_source_scan_and_runtime_publication(
         assert quits == []
 
         release_scan.set()
-        _spin_until(lambda: reconciled == [True] and quits == [True], timeout=5)
+        spin_until(lambda: reconciled == [True] and quits == [True], timeout=5)
         assert reload_seen.is_set()
         document = paths.runtime_config_path().read_text(encoding="utf-8")
         assert str(source) in document
@@ -1534,7 +1524,7 @@ def test_queued_item_authoring_cannot_resurrect_metadata_after_removal(
         )
 
         release.set()
-        _spin_until(lambda: removed == [True] and len(refused) == 3)
+        spin_until(lambda: removed == [True] and len(refused) == 3)
 
         assert not source.exists()
         assert not favourites.Store.open().is_favourite(item.path)
@@ -1582,7 +1572,7 @@ def test_committed_removal_filters_live_library_before_a_failed_refresh(
             return outcome
         replies: list[Response] = []
         outcome.start(replies.append)
-        _spin_until(lambda: bool(replies))
+        spin_until(lambda: bool(replies))
         return replies[0]
 
     try:
@@ -1591,7 +1581,7 @@ def test_committed_removal_filters_live_library_before_a_failed_refresh(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        _spin_until(lambda: removed == [True] and refreshes == [True])
+        spin_until(lambda: removed == [True] and refreshes == [True])
         assert application.session.library.find(item.path) is None
         assert all(
             candidate.path != item.path for candidate in application.session.library.still_inventory
@@ -1669,7 +1659,7 @@ def test_clear_still_resolves_default_off_gtk_and_immediate_read_is_pure(
         outcome = _Commands(application).set_still(f"{video_path} default")
         assert isinstance(outcome, server.Deferred)
         outcome.start(replies.append)
-        _spin_until(lambda: bool(replies))
+        spin_until(lambda: bool(replies))
         assert replies[0].ok
         assert probe_threads and all(thread != gtk_thread for thread in probe_threads)
         accepted = application.session.library.find(video_path)
@@ -1737,7 +1727,7 @@ def test_queued_still_choice_cannot_relink_a_removed_library_still(
         )
 
         release.set()
-        _spin_until(lambda: removed == [True] and len(refused) == 1)
+        spin_until(lambda: removed == [True] and len(refused) == 1)
 
         assert not still_path.exists()
         durable = pairings.Store.open().get(pairings.Identity.of(video))
@@ -1788,7 +1778,7 @@ def test_unexpected_removal_worker_failure_releases_guard_and_deferred_refresh(
         application._refresh_after_removal = True
         monkeypatch.setattr(application, "refresh_library", lambda: refreshed.append(True))
         release.set()
-        _spin_until(
+        spin_until(
             lambda: not application._removal_active and bool(reports) and refreshed == [True]
         )
         assert any("unexpected worker failure" in report for report in reports)
@@ -1801,7 +1791,7 @@ def test_unexpected_removal_worker_failure_releases_guard_and_deferred_refresh(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        _spin_until(lambda: removed == [True])
+        spin_until(lambda: removed == [True])
         assert not application._removal_active
         assert not source.exists()
     finally:
@@ -1858,7 +1848,7 @@ def test_removal_invalidates_a_stale_health_write_queued_behind_it(
         )
         application._queue_runtime_health(request)
         release.set()
-        _spin_until(lambda: removed == [True] and not application._runtime_health_pending)
+        spin_until(lambda: removed == [True] and not application._runtime_health_pending)
 
         assert stale_health_calls == []
         assert pairings.Store.open().get(pairings.Identity.of(item)) is None
@@ -2063,7 +2053,7 @@ def test_control_select_keeps_a_delayed_runtime_socket_off_gtk(
             Request("select", str(item.path)).encode(),
             replies.append,
         )
-        _spin_until(started.is_set)
+        spin_until(started.is_set)
         heartbeat: list[bool] = []
 
         def beat() -> bool:
@@ -2071,11 +2061,11 @@ def test_control_select_keeps_a_delayed_runtime_socket_off_gtk(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert replies == []
         assert runtime_threads[0] != threading.get_ident()
         release.set()
-        _spin_until(lambda: replies)
+        spin_until(lambda: replies)
         assert replies == [Response.success("runtime selected aurora")]
         assert application.session.playlists.find("quick-choice").entries[0].source == str(
             item.path
@@ -2148,11 +2138,11 @@ def test_second_control_select_is_busy_and_never_commits_after_the_first(
             first.path
         )
 
-        _spin_until(first_runtime_started.is_set)
+        spin_until(first_runtime_started.is_set)
         assert mutations == [first.path]
         assert len(replies) == 1 and replies[0].kind == "authoring-busy"
         release_first_runtime.set()
-        _spin_until(lambda: len(replies) == 2)
+        spin_until(lambda: len(replies) == 2)
         assert mutations == [first.path]
         assert played_sources == [str(first.path)]
         assert replies[1] == Response.success("played first.png")
@@ -2192,12 +2182,12 @@ def test_control_playlist_mode_change_is_single_flight_and_never_ghosts(
     try:
         verbs = server.build_verb_table(_Commands(application))
         server.dispatch(verbs, Request("playlist-use", first.id).encode(), replies.append)
-        _spin_until(first_started.is_set)
+        spin_until(first_started.is_set)
         server.dispatch(verbs, Request("playlist-use", second.id).encode(), replies.append)
         time.sleep(0.05)
         assert calls == [("playlist-use", first.id)]
         release_first.set()
-        _spin_until(lambda: len(replies) == 2)
+        spin_until(lambda: len(replies) == 2)
         assert calls == [("playlist-use", first.id)]
         assert replies[0].kind == "authoring-busy"
         assert replies[1] == Response.success("playing First")
@@ -2243,7 +2233,7 @@ def test_shutdown_suppresses_a_late_authoring_reply_and_adoption(
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert replies == []
         assert window.playlist_changes == 0
     finally:
@@ -2284,7 +2274,7 @@ def test_shutdown_suppresses_a_late_deferred_display_reply(
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert replies == []
     finally:
         release.set()
@@ -2333,10 +2323,10 @@ def test_large_publication_captures_only_the_frozen_library_and_keeps_gtk_live(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert application._runtime_compile_pending
         release.set()
-        _spin_until(lambda: not application._runtime_compile_pending, timeout=5)
+        spin_until(lambda: not application._runtime_compile_pending, timeout=5)
         assert len(requests) == 1
     finally:
         release.set()
@@ -2387,8 +2377,8 @@ def test_newest_publication_is_compiled_and_reloaded_before_a_queued_action(
         assert application.runtime_action_async("pause")
         release_first.set()
 
-        _spin_until(lambda: "pause" in socket_calls)
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: "pause" in socket_calls)
+        spin_until(lambda: window.busy == [True, False])
         assert compiled == [first, second]
         assert socket_calls[:2] == ["reload", "pause"]
         assert not any("superseded fixture" in report for report in window.reports)
@@ -2431,7 +2421,7 @@ def test_action_waits_for_new_root_scan_instead_of_publishing_the_old_library(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert socket_calls == []
         assert window.busy == [True]
 
@@ -2444,8 +2434,8 @@ def test_action_waits_for_new_root_scan_instead_of_publishing_the_old_library(
         assert application._publish_runtime_async()
         application._finish_runtime_library_scan(7)
 
-        _spin_until(lambda: "pause" in socket_calls, timeout=5)
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: "pause" in socket_calls, timeout=5)
+        spin_until(lambda: window.busy == [True, False])
         assert socket_calls[:2] == ["reload", "pause"]
         document = paths.runtime_config_path().read_text(encoding="utf-8")
         assert str(new_root / "new.png") in document
@@ -2510,11 +2500,11 @@ def test_failed_new_source_scan_never_reloads_an_already_compiled_old_document(
         application.session.update_settings(changed, rescan_library=False)
         application._begin_runtime_library_scan(17)
         release_compile.set()
-        _spin_until(lambda: not application._runtime_compile_pending)
+        spin_until(lambda: not application._runtime_compile_pending)
         assert application._runtime_publication_held
 
         application._finish_runtime_library_scan(17, error="new-root scan failed")
-        _spin_until(lambda: not application._runtime_publication_held, timeout=5)
+        spin_until(lambda: not application._runtime_publication_held, timeout=5)
 
         assert "reload" not in socket_calls
         assert any("new-root scan failed" in report for report in window.reports)
@@ -2551,7 +2541,7 @@ def test_shutdown_invalidates_a_blocked_runtime_compiler_delivery(
         assert application._runtime_jobs is not None
         application._runtime_jobs.shutdown(wait=True, cancel_futures=True)
         application._runtime_jobs = None
-        _spin_until(lambda: not application._runtime_compile_pending)
+        spin_until(lambda: not application._runtime_compile_pending)
         assert window.reports == []
     finally:
         release.set()
@@ -2593,7 +2583,7 @@ def test_status_ticks_coalesce_and_a_stale_window_never_receives_completion(
         assert not application.refresh_runtime_status_async()
         first_release.set()
 
-        _spin_until(lambda: bool(new.statuses))
+        spin_until(lambda: bool(new.statuses))
         assert calls == [1, 2]
         assert old.statuses == []
         assert new.statuses[-1]["playlist"] == "New"
@@ -2631,11 +2621,11 @@ def test_delayed_runtime_action_is_async_and_controls_are_busy(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(10, beat)
-        _spin_until(lambda: heartbeat)
+        spin_until(lambda: heartbeat)
         assert window.busy == [True]
         release.set()
-        _spin_until(lambda: window.busy == [True, False])
-        _spin_until(lambda: bool(window.statuses))
+        spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: bool(window.statuses))
         assert window.reports == []
     finally:
         release.set()
@@ -2660,12 +2650,12 @@ def test_timeout_never_authorises_the_python_fallback(
     monkeypatch.setattr(client, "send_runtime", status_then_timeout)
     try:
         assert application.refresh_runtime_status_async()
-        _spin_until(lambda: len(window.statuses) == 1)
+        spin_until(lambda: len(window.statuses) == 1)
         remembered = application.runtime_status
         assert remembered is window.statuses[-1]
 
         assert application.refresh_runtime_status_async()
-        _spin_until(lambda: window.delayed == 1)
+        spin_until(lambda: window.delayed == 1)
         assert application.runtime_status is remembered
         assert len(window.statuses) == 1
         assert window.unavailable == 0
@@ -2693,7 +2683,7 @@ def test_invalid_first_status_is_visibly_degraded(
     monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: response)
     try:
         assert application.refresh_runtime_status_async()
-        _spin_until(lambda: bool(window.protocol_errors))
+        spin_until(lambda: bool(window.protocol_errors))
         assert application.runtime_status is None
         assert window.statuses == []
         assert window.unavailable == 0
@@ -2712,11 +2702,11 @@ def test_invalid_later_status_preserves_the_last_atomic_snapshot(
     monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: next(answers))
     try:
         assert application.refresh_runtime_status_async()
-        _spin_until(lambda: len(window.statuses) == 1)
+        spin_until(lambda: len(window.statuses) == 1)
         remembered = application.runtime_status
 
         assert application.refresh_runtime_status_async()
-        _spin_until(lambda: bool(window.protocol_errors))
+        spin_until(lambda: bool(window.protocol_errors))
 
         assert application.runtime_status is remembered
         assert len(window.statuses) == 1
@@ -2757,7 +2747,7 @@ def test_failed_playlist_mode_change_does_not_mutate_python_session(
             else application.resume_schedule_async()
         )
         assert started
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: window.busy == [True, False])
         assert application.session.manual_playlist == before
         assert window.reports == [f"{verb} rejected"]
     finally:
@@ -2783,7 +2773,7 @@ def test_missing_socket_never_starts_the_legacy_renderer_from_the_gui(
     monkeypatch.setattr(application, "apply", forbidden_fallback)
     try:
         assert application.runtime_action_async("next")
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: window.busy == [True, False])
         assert applied_on == []
         assert window.reports == ["the wallpaper runtime is unavailable"]
     finally:
@@ -2835,7 +2825,7 @@ def test_successful_rust_navigation_does_not_advance_the_python_cursor(
     monkeypatch.setattr(client, "send_runtime", runtime)
     try:
         assert application.runtime_action_async("next")
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: window.busy == [True, False])
         assert application.session.cursor is before
     finally:
         _close(application)
@@ -2899,8 +2889,8 @@ def test_action_cannot_overtake_a_trailing_configuration_reload(
         assert application.runtime_action_async("pause")
         release_first.set()
 
-        _spin_until(lambda: "pause" in calls)
-        _spin_until(lambda: window.busy == [True, False])
+        spin_until(lambda: "pause" in calls)
+        spin_until(lambda: window.busy == [True, False])
         assert calls[:3] == ["reload", "reload", "pause"]
     finally:
         release_first.set()

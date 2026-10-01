@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import threading
-import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +16,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from wall_in_one import cli, config, deployed_upgrade, legacy_migration, paths  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
@@ -62,17 +61,6 @@ def _capture_dialog(monkeypatch: pytest.MonkeyPatch) -> list[Adw.AlertDialog]:
         lambda dialog, _parent: shown.append(dialog),
     )
     return shown
-
-
-def _spin_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    context = GLib.MainContext.default()
-    while not predicate():
-        while context.pending():
-            context.iteration(False)
-        if time.monotonic() >= deadline:
-            raise AssertionError("GLib callback did not arrive before the test deadline")
-        time.sleep(0.002)
 
 
 def test_fresh_service_preparation_does_not_block_the_library_folder_prompt(
@@ -150,7 +138,7 @@ def test_import_safely_is_offered_first_and_reopens_every_imported_store(
         assert progress.get_heading() == "Checking older data"
         assert not progress.get_can_close()
         assert not progress.get_response_enabled("working")
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         dialog = shown[-1]
         assert dialog.get_heading() == "Older Wall-in-One data found"
         assert str(source) in dialog.get_body()
@@ -162,7 +150,7 @@ def test_import_safely_is_offered_first_and_reopens_every_imported_store(
         dialog.emit("response", "import")
         assert shown[-1].get_heading() == "Importing older data"
         assert not shown[-1].get_can_close()
-        _spin_until(lambda: bool(reopened))
+        spin_until(lambda: bool(reopened))
 
         assert migrated == [source]
         assert worker_threads == [worker_threads[0]]
@@ -201,9 +189,9 @@ def test_not_now_is_process_local_and_does_not_continue_into_empty_root_setup(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         shown[-1].emit("response", "later")
-        _spin_until(lambda: application._legacy_migration_deferred)
+        spin_until(lambda: application._legacy_migration_deferred)
 
         assert postponed == [found.source]
         assert continued == []
@@ -243,9 +231,9 @@ def test_start_fresh_persists_the_exact_source_decision_then_continues(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         shown[-1].emit("response", "fresh")
-        _spin_until(lambda: bool(continued))
+        spin_until(lambda: bool(continued))
 
         assert declined == [found.source]
         assert continued == [True]
@@ -270,7 +258,7 @@ def test_existing_current_authoring_shows_conflicts_and_never_offers_import(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         dialog = shown[-1]
         assert str(conflict) in dialog.get_body()
         assert dialog.get_response_label("fresh") == "Keep current"
@@ -295,7 +283,7 @@ def test_interrupted_import_only_offers_resume_and_not_now(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         dialog = shown[-1]
         assert dialog.get_response_label("import") == "Resume import"
         assert dialog.get_response_label("later") == "Not now"
@@ -336,7 +324,7 @@ def test_blocked_probe_keeps_gtk_responsive_before_any_first_run_write(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(5, heartbeat)
-        _spin_until(lambda: bool(pulses))
+        spin_until(lambda: bool(pulses))
         assert len(shown) == 1
         checking = _Commands(application).authoring_gate()
         assert checking == Response.failure(
@@ -345,7 +333,7 @@ def test_blocked_probe_keeps_gtk_responsive_before_any_first_run_write(
         )
 
         release.set()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         assert worker_threads[0] != threading.get_ident()
         assert shown[-1].get_heading() == "Older Wall-in-One data found"
         decision = _Commands(application).authoring_gate()
@@ -396,12 +384,12 @@ def test_control_gate_stays_truthfully_busy_through_absent_probe_and_repair(
         assert commands.authoring_gate() == checking
 
         release_probe.set()
-        _spin_until(repair_started.is_set)
+        spin_until(repair_started.is_set)
         assert not application.authoring_ready
         assert commands.authoring_gate() == checking
 
         release_repair.set()
-        _spin_until(lambda: application.authoring_ready)
+        spin_until(lambda: application.authoring_ready)
         assert commands.authoring_gate() is None
     finally:
         release_probe.set()
@@ -428,7 +416,7 @@ def test_probe_failure_changes_control_gate_from_checking_to_decision_required(
         assert checking is not None
         assert checking.kind == "authoring-busy"
 
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         assert shown[-1].get_heading() == "Could not check older data"
         blocked = _Commands(application).authoring_gate()
         assert blocked is not None
@@ -490,7 +478,7 @@ def test_blocked_import_keeps_gtk_responsive_and_duplicate_response_is_ignored(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         choice = shown[-1]
         choice.emit("response", "import")
         choice.emit("response", "import")
@@ -508,13 +496,13 @@ def test_blocked_import_keeps_gtk_responsive_and_duplicate_response_is_ignored(
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(5, heartbeat)
-        _spin_until(lambda: bool(pulses))
+        spin_until(lambda: bool(pulses))
         assert reopened == []
         assert continued == []
         assert calls == 1
 
         release.set()
-        _spin_until(lambda: bool(reopened))
+        spin_until(lambda: bool(reopened))
         assert calls == 1
         assert worker_threads[0] != threading.get_ident()
         assert continued == [True]
@@ -552,12 +540,12 @@ def test_closed_window_discards_a_late_import_result(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         shown[-1].emit("response", "import")
         assert started.wait(1)
         assert not application._on_close_request(parent)
         release.set()
-        _spin_until(lambda: application._legacy_migration_future is None)
+        spin_until(lambda: application._legacy_migration_future is None)
 
         assert reopened == []
         assert continued == []
@@ -606,14 +594,14 @@ def test_shutdown_invalidates_a_running_import_delivery(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         shown[-1].emit("response", "import")
         assert started.wait(1)
 
         application._shutdown_legacy_migration_jobs(wait=False)
         release.set()
         assert worker_finished.wait(1)
-        _spin_until(lambda: bool(deliveries))
+        spin_until(lambda: bool(deliveries))
 
         assert reopened == []
         assert continued == []
@@ -644,9 +632,9 @@ def test_import_failure_reopens_the_safe_choice_without_continuing(
 
     try:
         assert application._prompt_for_legacy_migration()
-        _spin_until(lambda: len(shown) == 2)
+        spin_until(lambda: len(shown) == 2)
         shown[-1].emit("response", "import")
-        _spin_until(lambda: len(shown) == 4)
+        spin_until(lambda: len(shown) == 4)
 
         retry = shown[-1]
         assert "blocked" in retry.get_body()

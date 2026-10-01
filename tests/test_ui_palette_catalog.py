@@ -19,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 import wall_in_one.ui.pairings_page as pairings_page  # noqa: E402
+from tests.gtk_helpers import settle, spin_until  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
@@ -71,12 +72,6 @@ def _catalogue(count: int = 512) -> palettes.Discovery:
     )
 
 
-def _drain() -> None:
-    context = GLib.MainContext.default()
-    while context.pending():
-        context.iteration(False)
-
-
 def _first_scroller(widget: Gtk.Widget) -> Gtk.ScrolledWindow | None:
     child = widget.get_first_child()
     while child is not None:
@@ -109,17 +104,10 @@ def test_blocked_discovery_does_not_block_a_gtk_heartbeat() -> None:
 
     GLib.timeout_add(10, beat)
 
-    deadline = time.monotonic() + 1
-    context = GLib.MainContext.default()
-    while not heartbeat.is_set() and time.monotonic() < deadline:
-        context.iteration(True)
-
-    assert heartbeat.is_set()
+    spin_until(heartbeat.is_set, 1, what="a GTK heartbeat while discovery is blocked")
     assert catalog.state.phase == "loading"
     release.set()
-    deadline = time.monotonic() + 2
-    while not catalog.state.discovery.entries and time.monotonic() < deadline:
-        context.iteration(True)
+    spin_until(lambda: catalog.state.discovery.entries, 2)
     current = catalog.state
     assert current.phase == "ready"
     catalog.shutdown()
@@ -145,7 +133,7 @@ def test_browser_materialises_one_page_and_preserves_search_focus_scroll_and_row
     root = Gtk.Window()
     root.present()
     dialog.present(root)
-    _drain()
+    settle(0.1)
     focused = search.grab_focus()
     focus = root.get_focus()
     scroller = _first_scroller(browse)
@@ -176,7 +164,7 @@ def test_browser_materialises_one_page_and_preserves_search_focus_scroll_and_row
     assert next(iter(dialog._entry_rows))[1] == "Palette 0511"
 
     dialog.close()
-    _drain()
+    settle(0.1)
     root.destroy()
     catalog.shutdown()
 

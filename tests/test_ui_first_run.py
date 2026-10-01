@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -15,8 +13,9 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library.model import Library  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
@@ -39,17 +38,6 @@ def _close(application: Application, parent: Gtk.Window | None = None) -> None:
     application._shutdown_authoring_jobs()
     application._stills.shutdown()
     application.session.shutdown()
-
-
-def _spin_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    context = GLib.MainContext.default()
-    while not predicate():
-        while context.pending():
-            context.iteration(False)
-        if time.monotonic() >= deadline:
-            raise AssertionError("GLib callback did not arrive before the test deadline")
-        time.sleep(0.002)
 
 
 def test_unconfigured_app_asks_once_with_both_choices_and_the_exact_default(
@@ -104,7 +92,7 @@ def test_a_chosen_default_is_persisted_and_prevents_the_next_prompt(
     try:
         application._save_initial_library_root(root)
 
-        _spin_until(
+        spin_until(
             lambda: (
                 config.load().roots == (root,)
                 and application.settings.roots == (root,)

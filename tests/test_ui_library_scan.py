@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
@@ -19,6 +18,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tests.gtk_helpers import settle, spin_until  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import favourites, pairings, playlists, removals, scan  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
@@ -35,17 +35,6 @@ def toolkit() -> None:
     except Exception:  # pragma: no cover - only on a headless machine
         pytest.skip("no display")
     Adw.init()
-
-
-def _spin_until(predicate: Any, *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    context = GLib.MainContext.default()
-    while not predicate():
-        while context.pending():
-            context.iteration(False)
-        if time.monotonic() >= deadline:
-            raise AssertionError("GLib callback did not arrive before the test deadline")
-        time.sleep(0.002)
 
 
 def _item(root: Path) -> MediaItem:
@@ -178,12 +167,12 @@ def test_gui_scan_yields_to_gtk_and_only_the_newest_generation_lands(
         return GLib.SOURCE_REMOVE
 
     GLib.idle_add(beat)
-    _spin_until(lambda: bool(heartbeat))
+    spin_until(lambda: bool(heartbeat))
     assert window.libraries == [], "the blocked worker must not block or mutate GTK"
 
     application.update_settings(roots=(second,))
     release.set()
-    _spin_until(lambda: window.libraries == [(second,)])
+    spin_until(lambda: window.libraries == [(second,)])
 
     assert scans == [(first,), (second,)]
     assert worker_threads and all(identifier != gtk_thread for identifier in worker_threads)
@@ -247,7 +236,7 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
         # transaction performs real lock/fsync work and shares a loaded Nix
         # release gate with the GUI suite, so retain a finite deadlock bound
         # without racing the held scanner's own deadline.
-        _spin_until(lambda: removed == [True], timeout=10)
+        spin_until(lambda: removed == [True], timeout=10)
         assert item.path in application._removed_item_paths
         # The committed delete synchronously redraws the filtered immutable
         # Library; this is not the held pre-delete scan landing.
@@ -256,12 +245,12 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
         window.libraries.clear()
 
         release_first.set()
-        _spin_until(second_started.is_set, timeout=10)
+        spin_until(second_started.is_set, timeout=10)
         assert window.libraries == []
         assert item.path in application._removed_item_paths
 
         release_second.set()
-        _spin_until(lambda: len(window.libraries) == 1, timeout=10)
+        spin_until(lambda: len(window.libraries) == 1, timeout=10)
         assert session.library.items == ()
         assert item.path in application._removed_item_paths
     finally:
@@ -331,7 +320,7 @@ def test_held_removal_replay_yields_and_stale_cleanup_cannot_resurrect_metadata(
 
     monkeypatch.setattr(pairings.Store, "forget_item", held_forget)
     application.refresh_library()
-    _spin_until(cleanup_started.is_set)
+    spin_until(cleanup_started.is_set)
 
     heartbeat: list[bool] = []
 
@@ -340,12 +329,12 @@ def test_held_removal_replay_yields_and_stale_cleanup_cannot_resurrect_metadata(
         return GLib.SOURCE_REMOVE
 
     GLib.idle_add(beat)
-    _spin_until(lambda: bool(heartbeat))
+    spin_until(lambda: bool(heartbeat))
     assert window.libraries == []
 
     application.update_settings(roots=(second,))
     release_cleanup.set()
-    _spin_until(lambda: window.libraries == [(second,)])
+    spin_until(lambda: window.libraries == [(second,)])
 
     assert cleanup_threads and all(identifier != gtk_thread for identifier in cleanup_threads)
     assert session.library.roots == (second,)
@@ -435,10 +424,10 @@ def test_held_workshop_uninstall_cleanup_yields_and_lands_only_explicit_deltas(
     assert application.authoring_action_async(held_authoring, lambda _record: None)
     assert authoring_started.wait(1)
     application.refresh_library()
-    _spin_until(lambda: bool(application._authoring_queue))
+    spin_until(lambda: bool(application._authoring_queue))
     assert not cleanup_started.is_set()
     release_authoring.set()
-    _spin_until(cleanup_started.is_set)
+    spin_until(cleanup_started.is_set)
     heartbeat: list[bool] = []
 
     def beat() -> bool:
@@ -446,11 +435,11 @@ def test_held_workshop_uninstall_cleanup_yields_and_lands_only_explicit_deltas(
         return GLib.SOURCE_REMOVE
 
     GLib.idle_add(beat)
-    _spin_until(lambda: bool(heartbeat))
+    spin_until(lambda: bool(heartbeat))
     assert window.libraries == []
 
     release_cleanup.set()
-    _spin_until(lambda: window.libraries == [(root,)])
+    spin_until(lambda: window.libraries == [(root,)])
 
     assert cleanup_thread != gtk_thread
     assert session.removed_workshop == (scene,)
@@ -493,9 +482,7 @@ def test_scan_shutdown_cancels_active_plan_and_discards_late_delivery(
     release.set()
     with pytest.raises(LibraryRefreshCancelledError):
         pending.result(timeout=2)
-    context = GLib.MainContext.default()
-    while context.pending():
-        context.iteration(False)
+    settle(0.1)
 
     assert session.library.items == ()
     assert window.libraries == []
@@ -662,19 +649,19 @@ def test_live_wallpaper_query_is_off_gtk_and_cannot_land_in_a_newer_scan(
     monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
 
     application.refresh_library()
-    _spin_until(query_started.is_set)
+    spin_until(query_started.is_set)
     assert session.library.roots == (first,)
 
     newer = replace(settings, roots=(second,))
     application._settings = newer
     session.update_settings(newer, rescan_library=False)
     application.refresh_library()
-    _spin_until(lambda: session.library.roots == (second,))
+    spin_until(lambda: session.library.roots == (second,))
     release_query.set()
 
-    _spin_until(lambda: query_count == 2)
-    _spin_until(lambda: session.cursor is not None and session.cursor.path == second_item.path)
-    _spin_until(lambda: adopted == [second_item.path])
+    spin_until(lambda: query_count == 2)
+    spin_until(lambda: session.cursor is not None and session.cursor.path == second_item.path)
+    spin_until(lambda: adopted == [second_item.path])
     assert query_threads and all(identifier != gtk_thread for identifier in query_threads)
 
     application._library_scan_shutdown = True

@@ -16,8 +16,9 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
 from wall_in_one.theme.noctalia import ALL_SCHEMES  # noqa: E402
@@ -279,9 +280,7 @@ def test_application_side_settings_refresh_the_open_preferences_page(
 
         assert window._settings_page._dynamics.get_active() is False
         window._settings_page._opacity.set_value(0.75)
-        context = GLib.MainContext.default()
-        while application.settings.opacity != 0.75:
-            context.iteration(True)
+        spin_until(lambda: application.settings.opacity == 0.75, 5)
         assert application.settings.dynamics_enabled is False
         assert application.settings.opacity == 0.75
     finally:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +47,18 @@ class DisplayRuntimeTruth:
     renderer_failed: bool
     last_error: str
     automatic_retry: AutomaticRetryTruth | None
+    #: When the schedule next changes this route's playlist or reason (local
+    #: time), and whole seconds until then. None from a service that does not
+    #: say, while a pick holds, or with no change within eight days.
+    route_change_at: datetime.datetime | None = None
+    route_change_in_s: int | None = None
+    #: When the rotation next advances, and whole seconds until then. None
+    #: from a service that does not say, or when the route is paused or does
+    #: not cycle.
+    next_cycle_at: datetime.datetime | None = None
+    next_cycle_in_s: int | None = None
+    #: ``route_change_at`` as local ``HH:MM``, only when less than a day away.
+    until: str | None = None
 
 
 @dataclass(frozen=True)
@@ -464,6 +478,13 @@ def _display_truth(
             or (record.get("automatic_retry") is not None and automatic_retry is None)
         ):
             return None if required else ()
+        route_change_at, route_change_in_s = _timing_pair(
+            record.get("route_change_at"), record.get("route_change_in_s")
+        )
+        next_cycle_at, next_cycle_in_s = _timing_pair(
+            record.get("next_cycle_at"), record.get("next_cycle_in_s")
+        )
+        until = record.get("until")
         parsed.append(
             DisplayRuntimeTruth(
                 connector=connector,
@@ -489,9 +510,42 @@ def _display_truth(
                 renderer_failed=renderer_failed,
                 last_error=last_error,
                 automatic_retry=automatic_retry,
+                route_change_at=route_change_at,
+                route_change_in_s=route_change_in_s,
+                next_cycle_at=next_cycle_at,
+                next_cycle_in_s=next_cycle_in_s,
+                until=(
+                    until
+                    if isinstance(until, str)
+                    and _CLOCK_TIME.fullmatch(until)
+                    and route_change_at is not None
+                    else None
+                ),
             )
         )
     return tuple(parsed)
+
+
+_CLOCK_TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
+
+
+def _timing_pair(
+    when: object, seconds: object
+) -> tuple[datetime.datetime, int] | tuple[None, None]:
+    """One additive timing field pair: a local wall-clock time and its seconds.
+
+    Advisory, so a malformed pair is dropped rather than rejecting the whole
+    snapshot; a service that predates these fields reports neither.
+    """
+    if not isinstance(when, str) or type(seconds) is not int or seconds < 0:
+        return None, None
+    try:
+        parsed = datetime.datetime.fromisoformat(when)
+    except ValueError:
+        return None, None
+    if parsed.tzinfo is not None:
+        return None, None
+    return parsed, seconds
 
 
 def _automatic_retry_truth(raw: object) -> AutomaticRetryTruth | None:

@@ -1,5 +1,7 @@
 """Offline checks for the GUI's view of one atomic runtime status."""
 
+import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from wall_in_one import runtime_config, runtime_health
@@ -272,6 +274,106 @@ def test_runtime_overrides_status_fields_are_additive_for_this_parser() -> None:
     following = truth.display("HDMI-A-1")
     assert following is not None and following.schedule_rule_id == "global"
     assert truth.active_playlist_ids == ("evening", "night")
+
+
+def _timing_status(*rows: dict[str, object]) -> dict[str, object]:
+    return {
+        "status_version": 2,
+        "display_mode": "independent",
+        "theme_source": {"configured": "DP-1", "effective": "DP-1", "fallback": False},
+        "playlist_id": "",
+        "playlist": "Multiple displays",
+        "source": "mixed",
+        "displays": list(rows),
+    }
+
+
+#: The timing fields a 0.2.0 service appends to every display row.
+_TIMING = {
+    "route_change_at": "2026-08-03T18:00:00",
+    "route_change_in_s": 3600,
+    "next_cycle_at": "2026-08-03T17:12:00",
+    "next_cycle_in_s": 720,
+    "until": "18:00",
+    "next_change_in_s": 720,
+}
+
+
+def test_timing_status_fields_are_read_and_their_absence_is_tolerated() -> None:
+    ruled = _display_status(
+        "DP-1", "frog-day", "Frog day", route_source="schedule", manual=False, rule_id="day"
+    )
+    picked = _display_status("HDMI-A-1", "night", "Night", route_source="manual", manual=True)
+    nothing = {key: None for key in _TIMING}
+
+    older = runtime_truth.from_status(_timing_status(ruled, picked))
+    truth = runtime_truth.from_status(
+        _timing_status(
+            {**ruled, **_TIMING},
+            {
+                **picked,
+                **nothing,
+                "next_cycle_in_s": 60,
+                "next_cycle_at": "2026-08-03T17:01:00",
+                "next_change_in_s": 60,
+            },
+        )
+    )
+
+    assert older is not None and truth is not None
+    for display in older.displays:
+        assert (display.route_change_at, display.route_change_in_s) == (None, None)
+        assert (display.next_cycle_at, display.next_cycle_in_s, display.until) == (
+            None,
+            None,
+            None,
+        )
+    timed = truth.display("DP-1")
+    assert timed is not None
+    assert timed.route_change_at == datetime.datetime(2026, 8, 3, 18, 0)
+    assert timed.route_change_in_s == 3600
+    assert timed.next_cycle_at == datetime.datetime(2026, 8, 3, 17, 12)
+    assert timed.next_cycle_in_s == 720
+    assert timed.until == "18:00"
+    held = truth.display("HDMI-A-1")
+    assert held is not None
+    assert (held.route_change_at, held.until, held.next_cycle_in_s) == (None, None, 60)
+    # Everything else reads exactly as from an older service.
+    assert replace(truth, displays=tuple(_untimed(d) for d in truth.displays)) == older
+
+
+def _untimed(display: runtime_truth.DisplayRuntimeTruth) -> runtime_truth.DisplayRuntimeTruth:
+    return replace(
+        display,
+        route_change_at=None,
+        route_change_in_s=None,
+        next_cycle_at=None,
+        next_cycle_in_s=None,
+        until=None,
+    )
+
+
+def test_malformed_timing_fields_are_dropped_without_rejecting_the_snapshot() -> None:
+    row = _display_status("DP-1", "day", "Day", route_source="schedule", manual=False)
+    for broken in (
+        {"route_change_at": "18:00", "until": "18:00"},
+        {"route_change_in_s": -5},
+        {"route_change_in_s": True},
+        {"route_change_at": "2026-08-03T18:00:00+02:00"},
+        {"next_cycle_in_s": "720"},
+        {"next_cycle_at": 1, "until": "25:00"},
+    ):
+        truth = runtime_truth.from_status(_timing_status({**row, **_TIMING, **broken}))
+        assert truth is not None, broken
+        display = truth.display("DP-1")
+        assert display is not None
+        if set(broken) & {"route_change_at", "route_change_in_s"}:
+            assert (display.route_change_at, display.route_change_in_s) == (None, None)
+            assert display.until is None
+        if set(broken) & {"next_cycle_at", "next_cycle_in_s"}:
+            assert (display.next_cycle_at, display.next_cycle_in_s) == (None, None)
+        if broken.get("until") == "25:00":
+            assert display.until is None
 
 
 def test_detached_route_is_inventory_not_current_playback() -> None:

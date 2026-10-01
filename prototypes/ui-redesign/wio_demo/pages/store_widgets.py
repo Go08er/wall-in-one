@@ -17,9 +17,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk
 
+from .. import store_catalog as catalog
 from .. import ui
 from ..models import StoreItem
-from . import store_catalog as catalog
 
 CSS = """
 .store-card .store-owned image { color: #8ff0a4; }

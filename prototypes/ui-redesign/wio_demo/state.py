@@ -20,8 +20,8 @@ import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
-from . import art, data
-from .models import Display, Folder, Palette, Playlist, RememberedDisplay, Rule, Wallpaper
+from . import art, data, store_catalog
+from .models import Display, Folder, Palette, Playlist, RememberedDisplay, Rule, StoreItem, Wallpaper
 
 #: An Undo callback, as returned by the actions that pages offer Undo for.
 Undo = Callable[[], None]
@@ -96,6 +96,7 @@ class AppState(GObject.Object):
         # A fixed demo clock keeps screenshots reproducible: Wednesday afternoon.
         self.now = dt.datetime(2026, 9, 30, 14, 35)
         self.wallpapers = data.WALLPAPERS
+        self._wallpaper_index = data.BY_ID
         self.playlists = data.PLAYLISTS
         self.rules = data.RULES
         self.fallback = data.FALLBACK_PLAYLIST
@@ -262,7 +263,7 @@ class AppState(GObject.Object):
         self.emit("navigate", page)
 
     def wallpaper(self, wid: str) -> Wallpaper:
-        return data.BY_ID[wid]
+        return self._wallpaper_index[wid]
 
     def playlist(self, pid: str) -> Playlist:
         return data.PLAYLIST_BY_ID[pid]
@@ -543,7 +544,7 @@ class AppState(GObject.Object):
 
     # -- library: queries ------------------------------------------------------
     def has_wallpaper(self, wid: str) -> bool:
-        return wid in data.BY_ID
+        return wid in self._wallpaper_index
 
     def schemes(self) -> list[tuple[str, str, str]]:
         """Noctalia's color schemes: (key, name, description)."""
@@ -612,6 +613,53 @@ class AppState(GObject.Object):
             self.emit_changed("library")
 
         return undo
+
+    # -- store ----------------------------------------------------------------------
+    def store_search(self, query: store_catalog.Query) -> list[StoreItem]:
+        """A provider's results for ``query`` (the real app: Browser.search)."""
+        return store_catalog.search(query)
+
+    def store_item(self, item_id: str) -> StoreItem | None:
+        return store_catalog.by_id(item_id)
+
+    def store_like_source(self, text: str) -> StoreItem | None:
+        """The item a Wallhaven "like:<id>" search refers to."""
+        return store_catalog.like_source(text)
+
+    def import_store_item(self, item_id: str, quality: str | None = None, fresh: bool = False) -> str:
+        """The Library entry for a downloaded Store item, created on first use (and
+        added to the automatic playlists); returns its wallpaper id. ``fresh`` = it
+        was downloaded just now."""
+        item = self.store_item(item_id)
+        item.in_library = True
+        wid = f"store-{item.id}"
+        if self.has_wallpaper(wid):
+            return wid
+        moving = item.provider == "MotionBGS"
+        width, height = (1920, 1080) if moving and quality == "hd" else store_catalog.size(item)
+        wallpaper = Wallpaper(
+            id=wid,
+            name=item.title,
+            kind="video" if moving else "still",
+            style=item.style,
+            seed=item.seed,
+            night=item.night,
+            source=item.provider,
+            folder=f"{self.download_folder}/Wall-in-One/Downloads/{item.provider}",
+            resolution=f"{width} × {height}",
+            size=f"{store_catalog.megabytes(item, quality):.1f} MB",
+            added="Just now" if fresh else "12 Sep",
+            duration=store_catalog.duration(item),
+            still_note="Captured from the video at 0:03" if moving else "This image is its own still",
+            tags=tuple(store_catalog.tags(item)),
+        )
+        self.wallpapers.insert(0, wallpaper)
+        self._wallpaper_index[wid] = wallpaper
+        for playlist in self.playlists:
+            if playlist.automatic:
+                playlist.entries.append(wid)
+        self.emit_changed("library")
+        return wid
 
     # -- palettes ---------------------------------------------------------------
     def palettes(self, origin: str | None = None) -> list[Palette]:

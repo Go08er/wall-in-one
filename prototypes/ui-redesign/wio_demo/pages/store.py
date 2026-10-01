@@ -15,10 +15,10 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from .. import data, ui
-from ..models import StoreItem, Wallpaper
+from .. import store_catalog as catalog
+from .. import ui
+from ..models import StoreItem
 from . import Page
-from . import store_catalog as catalog
 from .store_widgets import CSS, ColorDot, StoreCard, StorePreview, color_button
 
 PAGE_SIZE = 16
@@ -377,11 +377,11 @@ class StorePage(Page):
             card = self._cards.get(arg) or next(iter(self._cards.values()))
             GLib.timeout_add(300, lambda: (self.popup_menu(card, 120, 70), False)[1])
         elif what == "like":
-            item = catalog.by_id(arg or "wallhaven-0")
+            item = self.state.store_item(arg or "wallhaven-0")
             self.more_like(item)
         elif what == "nsfw-key":
             self._demo_key = True
-            self.state.wallhaven_key_saved = True
+            self.state.set_wallhaven_key_saved(True)
             self._sync_key()
             self._sync_controls()
             GLib.timeout_add(300, lambda: (self._purity_button.popup(), False)[1])
@@ -389,14 +389,14 @@ class StorePage(Page):
     def _reset_demo(self) -> None:
         if getattr(self, "_demo_key", False):
             self._demo_key = False
-            self.state.wallhaven_key_saved = False
+            self.state.set_wallhaven_key_saved(False)
             self._sync_key()
         for button in (self._sort_button, *self._wallhaven_filters, *self._motion_filters, self._more):
             button.popdown()
         if self._dialog:
             self._dialog.force_close()
         for item_id in list(self._progress):
-            self.cancel(catalog.by_id(item_id))
+            self.cancel(self.state.store_item(item_id))
         self._select.set_active(False)
         self._quiet = True
         self._providers.set_active_name("Wallhaven")
@@ -411,7 +411,7 @@ class StorePage(Page):
         self._refresh(instant=True)
 
     def _show_demo_item(self, item_id: str) -> StoreItem:
-        item = catalog.by_id(item_id) or self._results[0]
+        item = self.state.store_item(item_id) or self._results[0]
         if item.provider != self._provider:
             self._providers.set_active_name(item.provider)
         self.preview(item)
@@ -465,7 +465,7 @@ class StorePage(Page):
         radio("quality", "any", lambda v: self._changed("_quality", v))
 
         def find(item_id: str) -> StoreItem:
-            return catalog.by_id(item_id)
+            return self.state.store_item(item_id)
 
         simple("preview", lambda v: self.preview(find(v)))
         simple("download", lambda v: self.download(find(v)))
@@ -638,8 +638,7 @@ class StorePage(Page):
 
     # -- syncing controls with the options ------------------------------------------------
     def _has_key(self) -> bool:
-        # Not modeled in the shared state yet; see the report's suggested change.
-        return bool(getattr(self.state, "wallhaven_key_saved", False) or getattr(self.state, "wallhaven_api_key", ""))
+        return self.state.wallhaven_key_saved
 
     def _sync_key(self) -> None:
         if "nsfw" in self._actions:
@@ -832,7 +831,7 @@ class StorePage(Page):
     def _heading_text(self) -> str:
         text = self._query
         if text.startswith("like:"):
-            source = catalog.like_source(text)
+            source = self.state.store_like_source(text)
             return f"More like “{source.title}”" if source else "Similar wallpapers"
         if text:
             return f"Results for “{text}”"
@@ -868,7 +867,7 @@ class StorePage(Page):
 
     def _show_results(self) -> bool:
         self._pending = 0
-        self._results = catalog.search(self._current_query())
+        self._results = self.state.store_search(self._current_query())
         self._clear_cards()
         self._shown = 0
         self._heading.set_label(self._heading_text())
@@ -1059,8 +1058,7 @@ class StorePage(Page):
 
     def _finish(self, item: StoreItem) -> None:
         self._progress.pop(item.id, None)
-        item.in_library = True
-        wid = self._ensure_wallpaper(item, fresh=True)
+        wid = self.state.import_store_item(item.id, self._qualities.get(item.id), fresh=True)
         self._update_item(item)
         if item.id in self._apply_after:
             self._apply_after.discard(item.id)
@@ -1090,10 +1088,10 @@ class StorePage(Page):
         if not item.in_library:
             self.download(item, apply=True)
             return
-        self.state.apply(self._ensure_wallpaper(item, fresh=False), self.state.scope)
+        self.state.apply(self.state.import_store_item(item.id, self._qualities.get(item.id)), self.state.scope)
 
     def show_in_library(self, item: StoreItem) -> None:
-        self.state.navigate(f"library:{self._ensure_wallpaper(item, fresh=False)}")
+        self.state.navigate(f"library:{self.state.import_store_item(item.id, self._qualities.get(item.id))}")
 
     def open_site(self, item: StoreItem) -> None:
         self.state.toast(f"Would open {catalog.url(item)} in your browser")
@@ -1151,38 +1149,6 @@ class StorePage(Page):
         if self._select_mode:
             self._update_selection_bar()
 
-    def _ensure_wallpaper(self, item: StoreItem, fresh: bool) -> str:
-        """The Library entry for a downloaded Store item (created on first use)."""
-        wid = f"store-{item.id}"
-        if wid in data.BY_ID:
-            return wid
-        moving = item.provider == "MotionBGS"
-        quality = self._qualities.get(item.id)
-        width, height = (1920, 1080) if moving and quality == "hd" else catalog.size(item)
-        wallpaper = Wallpaper(
-            id=wid,
-            name=item.title,
-            kind="video" if moving else "still",
-            style=item.style,
-            seed=item.seed,
-            night=item.night,
-            source=item.provider,
-            folder=f"{self.state.download_folder}/Wall-in-One/Downloads/{item.provider}",
-            resolution=f"{width} × {height}",
-            size=f"{catalog.megabytes(item, quality):.1f} MB",
-            added="Just now" if fresh else "12 Sep",
-            duration=catalog.duration(item),
-            still_note="Captured from the video at 0:03" if moving else "This image is its own still",
-            tags=tuple(catalog.tags(item)),
-        )
-        self.state.wallpapers.insert(0, wallpaper)
-        data.BY_ID[wid] = wallpaper
-        for playlist in self.state.playlists:
-            if playlist.automatic:
-                playlist.entries.append(wid)
-        self.state.emit_changed("library")
-        return wid
-
     def _toast_with_action(self, text: str, label: str, callback) -> None:
         """A toast whose button is not "Undo" (state.toast only offers Undo)."""
         overlay = self.widget.get_ancestor(Adw.ToastOverlay)
@@ -1235,7 +1201,7 @@ class StorePage(Page):
         self._action_bar.set_revealed(self._select_mode)
 
     def _download_picked(self) -> None:
-        picked = [catalog.by_id(item_id) for item_id in self._picked]
+        picked = [self.state.store_item(item_id) for item_id in self._picked]
         self._batch_size = len(picked)
         self._select.set_active(False)
         for item in picked:

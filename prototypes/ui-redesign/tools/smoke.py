@@ -15,7 +15,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib
-from wio_demo import art, data, thumbs, ui
+from wio_demo import art, data, store_catalog, thumbs, ui
 from wio_demo.models import Rule
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
@@ -332,6 +332,31 @@ def settings_actions(state, window) -> None:
     page.demo("")
 
 
+def store_actions(state, window) -> None:
+    window.navigate("store")
+    page = window.pages["store"]
+    page.demo("reset")
+    results = state.store_search(store_catalog.Query("Wallhaven", text="night"))
+    assert results and all(item.provider == "Wallhaven" for item in results)
+    source = state.store_item("wallhaven-3")
+    like = state.store_like_source(f"like:{store_catalog.site_id(source)}")
+    assert like is source
+    owned = next(
+        item
+        for item in state.store_search(store_catalog.Query("Wallhaven"))
+        if item.in_library and not state.has_wallpaper(f"store-{item.id}")
+    )
+    count = len(state.wallpapers)
+    page.apply_item(owned)  # already in the library: it gets a Library entry, then Apply
+    wid = f"store-{owned.id}"
+    assert state.has_wallpaper(wid) and len(state.wallpapers) == count + 1, (wid, count, len(state.wallpapers))
+    assert state.current[state.targets()[0]] == wid, state.current
+    assert wid in state.playlist("all-media").entries
+    assert state.import_store_item(owned.id) == wid and len(state.wallpapers) == count + 1
+    page.show_in_library(owned)
+    state.resume_schedule("all")
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -396,6 +421,9 @@ def build_steps(app, holder):
             "rate-limit",
             "filters",
             "select",
+            "saved",
+            "like:wallhaven-3",
+            "nsfw-key",
             "reset",
         ],
         "playlist:frog-day": [
@@ -502,6 +530,7 @@ def build_steps(app, holder):
     steps.append(("display actions", lambda: display_actions(s(), w())))
     steps.append(("schedule actions", lambda: schedule_actions(s(), w())))
     steps.append(("settings actions", lambda: settings_actions(s(), w())))
+    steps.append(("store actions", lambda: store_actions(s(), w())))
     steps.append(
         (
             "store select all",

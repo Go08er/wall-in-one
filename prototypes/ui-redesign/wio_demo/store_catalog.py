@@ -1,4 +1,10 @@
-"""Dummy provider catalog for the Store page.
+"""Dummy provider catalog for the Store page: the demo's stand-in for the real
+app's browse.Browser and its providers.
+
+Pages import this module only for its option tables (sorts, sizes, ratios,
+categories, colors…) and for facts derived from one item (site id, URL, size,
+duration, tags…), which a real provider returns with the item. Anything that
+returns items (search, by_id, like_source) goes through AppState.
 
 Everything is deterministic: the same search, sort and filters always return the
 same results, so screenshots are reproducible. The options mirror what the real
@@ -11,8 +17,8 @@ import colorsys
 import random
 from dataclasses import dataclass
 
-from .. import art, data
-from ..models import StoreItem
+from . import art, data
+from .models import StoreItem
 
 # ---------------------------------------------------------------------------
 # Providers and their options

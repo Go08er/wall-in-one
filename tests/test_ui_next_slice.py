@@ -131,6 +131,28 @@ def status(stills: dict[str, str], routes: dict[str, str] | None = None) -> dict
     return document
 
 
+def settled_after_a_refused_publication(application: Application) -> bool:
+    """`settled`, where the runtime configuration was refused (a newer store).
+
+    Compilation refuses while a store from a newer version exists, so the
+    authoring request never becomes the compiled generation `settled` waits
+    for: the refusal is the end of that work. Everything else is the same.
+    """
+    if settled(application):
+        return True
+    return (
+        application._runtime_authoring_request is not None
+        and application.authoring_ready
+        and not application._authoring_active
+        and not application._authoring_queue
+        and not application._settings_authoring_running
+        and not application._runtime_action_pending
+        and application._library_scan_future is None
+        and not application._theme_draining
+        and not application._runtime_compile_pending
+    )
+
+
 def library_page(window: NextWindow) -> LibraryPage:
     page = window.pages["library"]
     assert isinstance(page, LibraryPage)
@@ -308,7 +330,10 @@ def test_a_newer_playlists_file_turns_apply_and_favorite_off_with_the_notice(
         page = library_page(window)
         yield (
             "the first scan",
-            lambda: settled(application) and window.library_text == "80 wallpapers in the library",
+            lambda: (
+                settled_after_a_refused_publication(application)
+                and window.library_text == "80 wallpapers in the library"
+            ),
         )
         assert window.notice.get_revealed()
         assert window.notice.get_title().startswith(
@@ -328,11 +353,13 @@ def test_a_newer_playlists_file_turns_apply_and_favorite_off_with_the_notice(
         # Even when asked directly, nothing is written or sent.
         window.state.apply(wid)
         window.state.toggle_favorite(wid)
-        yield "the refusals to settle", lambda: settled(application)
+        yield "the refusals to settle", lambda: settled_after_a_refused_publication(application)
         assert runtime.requested("playlist-use") == [] and runtime.requested("on") == []
         assert newer.read_bytes() == document
         assert Path(wid) not in favourites.Store.open().paths
-        yield from finish(application, window, lanes)
+        yield "every tail to settle", lambda: settled_after_a_refused_publication(application)
+        lanes.extend(application_lanes(application))
+        window.close()
 
     run(application, scenario(), lanes)
 

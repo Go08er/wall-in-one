@@ -634,7 +634,7 @@ def test_observed_authoring_absence_is_revalidated_after_store_open(
     original_read = favourites._read
     appeared = False
 
-    def create_after_absent_read(path: Path) -> tuple[favourites.Favourites, str | None]:
+    def create_after_absent_read(path: Path) -> state_file.Reading[favourites.Favourites]:
         nonlocal appeared
         result = original_read(path)
         if path == target and not appeared:

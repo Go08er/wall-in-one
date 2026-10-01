@@ -597,10 +597,10 @@ def test_one_status_snapshot_causes_one_pairings_store_write(
     writes = 0
     real_save = pairings.save
 
-    def save(records: object, path: Path | None = None) -> Path:
+    def save(records: object, path: Path | None = None, **options: object) -> Path:
         nonlocal writes
         writes += 1
-        return real_save(records, path)  # type: ignore[arg-type]
+        return real_save(records, path, **options)  # type: ignore[arg-type]
 
     def send(verb: str) -> Response:
         return (

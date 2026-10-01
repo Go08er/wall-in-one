@@ -55,8 +55,11 @@ from wall_in_one.theme import noctalia
 STATE_FILENAME: Final = "pairings.json"
 
 #: Bumped only if the shape below changes. A newer marker is recovered for the
-#: interactive UI but reported as a fault, so an older build cannot compile or
-#: rewrite a document whose extra meaning it does not understand.
+#: interactive UI but reported as a fault, so an older build cannot compile
+#: it, and every mutation (including the health sync) is refused with kind
+#: ``newer-version`` so it cannot rewrite a document whose extra meaning it
+#: does not understand. Unknown keys in a version this build reads are carried
+#: through every save; see `DOCUMENT_SHAPE`.
 FORMAT_VERSION: Final = 2
 LEGACY_FORMAT_VERSIONS: Final = frozenset((1,))
 
@@ -99,7 +102,7 @@ _MutationResult = TypeVar("_MutationResult")
 class PairingError(Exception):
     """A pairing could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``, ``invalid-state``.
+    Kinds in use: ``local-io``, ``invalid-state``, ``newer-version``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -373,6 +376,19 @@ def _record(raw: object) -> Pairing | None:
     )
 
 
+#: What this build models; everything else in the file is carried, not dropped.
+DOCUMENT_SHAPE: Final = state_file.Shape(
+    known=frozenset({"version"}),
+    records={
+        "pairings": state_file.Shape(
+            known=frozenset({"identity", "still", "palette", "mode"}),
+            identity="identity",
+            objects={"health": state_file.Shape(known=frozenset({"state", "reason", "source"}))},
+        )
+    },
+)
+
+
 def state_path() -> Path:
     return paths.app_state_dir() / STATE_FILENAME
 
@@ -484,7 +500,7 @@ def _mutation_lock(
         _LOCAL_MUTATION_GATE.release()
 
 
-def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
+def _read(path: Path) -> state_file.Reading[dict[str, Pairing]]:
     """Every stored record by key, plus why the file was passed over.
 
     Never raises. A wallpaper manager that will not start over its own
@@ -494,7 +510,16 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
         path, maximum_bytes=MAX_STATE_BYTES, description="pairings"
     )
     if payload is None:
-        return {}, fault
+        return state_file.Reading({}, fault)
+    found, fault = _parse(path, payload)
+    unknown = state_file.capture_unknown(payload, DOCUMENT_SHAPE)
+    newer = state_file.newer_version_fault(path, payload, FORMAT_VERSION)
+    if newer is not None:
+        return state_file.Reading(found, newer, newer_version=True, unknown=unknown)
+    return state_file.Reading(found, fault, unknown=unknown)
+
+
+def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Pairing], str | None]:
     version = payload.get("version")
     version_fault = (
         None
@@ -555,8 +580,7 @@ def _read(path: Path) -> tuple[dict[str, Pairing], str | None]:
 
 def load(path: Path | None = None) -> dict[str, Pairing]:
     """The stored customizations, or none at all. Never raises."""
-    records, _fault = _read(path if path is not None else state_path())
-    return records
+    return _read(path if path is not None else state_path()).value
 
 
 def save(
@@ -564,6 +588,7 @@ def save(
     path: Path | None = None,
     *,
     replace_existing: bool = True,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
 ) -> Path:
     """Write the customizations atomically, and return where they went.
 
@@ -580,10 +605,14 @@ def save(
             "local-io", f"could not create {target.parent}: {error.strerror or error}"
         ) from error
 
-    payload = {
-        "version": FORMAT_VERSION,
-        "pairings": [records[key].to_json() for key in sorted(records)],
-    }
+    payload = state_file.merge_unknown(
+        {
+            "version": FORMAT_VERSION,
+            "pairings": [records[key].to_json() for key in sorted(records)],
+        },
+        unknown,
+        DOCUMENT_SHAPE,
+    )
     try:
         state_file.write_atomic_text(
             target,
@@ -723,6 +752,7 @@ class Store:
         self._records: dict[str, Pairing] = dict(records or {})
         self._path = path
         self._fault: str | None = None
+        self._fault_kind: str | None = None
         # Distinguish an intentional direct seed from Store.open observing an
         # absent durable file.  A worker rebase may retain only the former.
         self._loaded = _loaded
@@ -731,9 +761,10 @@ class Store:
     def open(cls, path: Path | None = None) -> Store:
         """Read the file. Never raises; a broken one degrades to no records."""
         target = path if path is not None else state_path()
-        records, fault = _read(target)
-        store = cls(records, target, _loaded=True)
-        store._fault = fault
+        reading = _read(target)
+        store = cls(reading.value, target, _loaded=True)
+        store._fault = reading.fault
+        store._fault_kind = reading.fault_kind
         return store
 
     def worker_copy(self, *, rebase: bool = False) -> Store:
@@ -756,6 +787,7 @@ class Store:
                 return type(self).open(target)
         copied = type(self)(self._records, target, _loaded=self._loaded)
         copied._fault = self._fault
+        copied._fault_kind = self._fault_kind
         return copied
 
     @property
@@ -766,6 +798,11 @@ class Store:
     def fault(self) -> str | None:
         """Why the file was passed over, for a toast to say. `None` when fine."""
         return self._fault
+
+    @property
+    def fault_kind(self) -> str | None:
+        """``newer-version`` (read-only here), ``unreadable``, or ``None``."""
+        return self._fault_kind
 
     def __len__(self) -> int:
         return len(self._records)
@@ -1102,6 +1139,7 @@ class Store:
             self._records[key] = replace(existing, still=None)
             changed = True
         self._fault = None
+        self._fault_kind = None
         self._loaded = True
         return changed
 
@@ -1110,6 +1148,7 @@ class Store:
         if self._fault != expected:
             return False
         self._fault = None
+        self._fault_kind = None
         self._loaded = True
         return True
 
@@ -1146,7 +1185,19 @@ class Store:
         target = self._path if self._path is not None else state_path()
         try:
             with _mutation_lock(target), state_file.observe(target) as observed:
-                records, fault = _read(target)
+                reading = _read(target)
+                if reading.newer_version:
+                    # Decided from this locked read, not from memory, and
+                    # before any operation runs: interactive edits and the
+                    # unattended health sync alike. Adopt the fault (not the
+                    # value) so this process stops compiling its older
+                    # snapshot over the newer file.
+                    self._fault = reading.fault
+                    self._fault_kind = reading.fault_kind
+                    raise PairingError(
+                        state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
+                    )
+                records, fault = reading.value, reading.fault
                 if fault is not None and refuse_fault:
                     raise PairingError(
                         "invalid-state",
@@ -1157,15 +1208,20 @@ class Store:
                 result, changed = operation(updated)
                 if changed:
                     previous_fault = self._fault
+                    previous_kind = self._fault_kind
                     self._fault = fault
                     try:
-                        self._write(updated, observed=observed)
+                        self._write(updated, observed=observed, unknown=reading.unknown)
                     except PairingError:
-                        self._fault = previous_fault if fault is None else fault
+                        if fault is None:
+                            self._fault, self._fault_kind = previous_fault, previous_kind
+                        else:
+                            self._fault, self._fault_kind = fault, reading.fault_kind
                         raise
                     fault = None
                 self._records = updated
                 self._fault = fault
+                self._fault_kind = state_file.fault_kind(fault, newer_version=False)
                 self._loaded = True
                 return result
         except PairingError:
@@ -1181,6 +1237,7 @@ class Store:
         records: Mapping[str, Pairing],
         *,
         observed: state_file.StateFileObservation,
+        unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     ) -> None:
         target = self._path if self._path is not None else state_path()
         recovering_fault = self._fault is not None
@@ -1195,6 +1252,7 @@ class Store:
                     f"could not preserve unreadable {target}: {error.strerror or error}",
                 ) from error
             self._fault = None
-            save(records, target, replace_existing=False)
+            self._fault_kind = None
+            save(records, target, replace_existing=False, unknown=unknown)
         else:
-            save(records, target)
+            save(records, target, unknown=unknown)

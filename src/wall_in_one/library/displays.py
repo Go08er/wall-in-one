@@ -26,14 +26,21 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Final, TypeVar
+from typing import Any, Final, TypeVar
 
 from wall_in_one import paths
 from wall_in_one.library import state_file
 
 STATE_FILENAME: Final = "displays.json"
 BROKEN_SUFFIX: Final = ".broken"
+#: A newer version is shown but never compiled or rewritten: every mutation
+#: is refused (kind ``newer-version``). Unknown top-level keys in this version
+#: are carried through every save.
 FORMAT_VERSION: Final = 1
+
+#: What this build models. The ``displays`` map itself is connector to
+#: playlist, so only the top level can carry fields this build does not know.
+DOCUMENT_SHAPE: Final = state_file.Shape(known=frozenset({"version", "displays"}))
 
 #: A connector name is short. This is a ceiling on damage from a file somebody
 #: has been editing, not a limit anybody will meet.
@@ -45,7 +52,10 @@ _MutationResult = TypeVar("_MutationResult")
 
 
 class DisplayError(Exception):
-    """An assignment could not be stored."""
+    """An assignment could not be stored.
+
+    Kinds in use: ``local-io``, ``validation``, ``newer-version``.
+    """
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
@@ -91,13 +101,22 @@ def _clean_connector(value: object) -> str:
     return value
 
 
-def _read(path: Path) -> tuple[dict[str, str], str | None]:
+def _read(path: Path) -> state_file.Reading[dict[str, str]]:
     """Stored assignments, plus why the file was passed over."""
     document, fault = state_file.read_object(
         path, maximum_bytes=MAX_STATE_BYTES, description="display assignments"
     )
     if document is None:
-        return {}, fault
+        return state_file.Reading({}, fault)
+    found, fault = _parse(path, document)
+    unknown = state_file.capture_unknown(document, DOCUMENT_SHAPE)
+    newer = state_file.newer_version_fault(path, document, FORMAT_VERSION)
+    if newer is not None:
+        return state_file.Reading(found, newer, newer_version=True, unknown=unknown)
+    return state_file.Reading(found, fault, unknown=unknown)
+
+
+def _parse(path: Path, document: dict[str, Any]) -> tuple[dict[str, str], str | None]:
     faults = [
         found for found in (state_file.version_fault(path, document, FORMAT_VERSION),) if found
     ]
@@ -127,10 +146,15 @@ def save(
     path: Path | None = None,
     *,
     replace_existing: bool = True,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
 ) -> Path:
-    """Write the assignments, atomically."""
+    """Write the assignments, atomically, carrying ``unknown`` fields back in."""
     target = path if path is not None else state_path()
-    payload = {"version": FORMAT_VERSION, "displays": dict(assignments)}
+    payload = state_file.merge_unknown(
+        {"version": FORMAT_VERSION, "displays": dict(assignments)},
+        unknown,
+        DOCUMENT_SHAPE,
+    )
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
@@ -162,6 +186,7 @@ class Store:
         self._assignments: dict[str, str] = dict(assignments or {})
         self._path = path
         self._fault: str | None = None
+        self._fault_kind: str | None = None
         # Direct construction may intentionally seed an absent file. Opening
         # one is a disk snapshot even when the file was absent, so its later
         # mutation must rebase rather than overwrite another process's write.
@@ -170,14 +195,20 @@ class Store:
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         target = path if path is not None else state_path()
-        found, fault = _read(target)
-        store = cls(found, target, _loaded=True)
-        store._fault = fault
+        reading = _read(target)
+        store = cls(reading.value, target, _loaded=True)
+        store._fault = reading.fault
+        store._fault_kind = reading.fault_kind
         return store
 
     @property
     def fault(self) -> str | None:
         return self._fault
+
+    @property
+    def fault_kind(self) -> str | None:
+        """``newer-version`` (read-only here), ``unreadable``, or ``None``."""
+        return self._fault_kind
 
     def __len__(self) -> int:
         return len(self._assignments)
@@ -288,7 +319,17 @@ class Store:
                 else:
                     present = True
 
-                current, fault = _read(target)
+                reading = _read(target)
+                if reading.newer_version:
+                    # Decided from this locked read, not from memory. Adopt
+                    # the fault (not the value) so this process stops
+                    # compiling its older snapshot over the newer file.
+                    self._fault = reading.fault
+                    self._fault_kind = reading.fault_kind
+                    raise DisplayError(
+                        state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
+                    )
+                current, fault = reading.value, reading.fault
                 using_durable = present or self._loaded
                 assignments = dict(current) if using_durable else dict(self._assignments)
                 if using_durable:
@@ -296,6 +337,7 @@ class Store:
                     # semantic change later fails; do not adopt its value
                     # until persistence succeeds or no write is required.
                     self._fault = fault
+                    self._fault_kind = reading.fault_kind
                     self._loaded = True
                 result, changed = change(assignments)
                 if changed:
@@ -308,15 +350,21 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(assignments, target, replace_existing=False)
+                        save(
+                            assignments,
+                            target,
+                            replace_existing=False,
+                            unknown=reading.unknown,
+                        )
                     else:
-                        save(assignments, target)
+                        save(assignments, target, unknown=reading.unknown)
                     fault = None
 
                 # Adopt only after persistence, so a failed save leaves the
                 # Store on the last state it could truthfully report.
                 self._assignments = assignments
                 self._fault = fault
+                self._fault_kind = state_file.fault_kind(fault, newer_version=False)
                 self._loaded = using_durable or changed
                 return result
         except DisplayError:

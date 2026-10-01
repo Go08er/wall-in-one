@@ -616,7 +616,7 @@ def test_a_store_write_failure_does_not_change_the_in_memory_schedule(
     store = Store(path=target)
     made = store.add("Evening", rule_id="rule")
 
-    def fail(_rules: object, _path: object) -> None:
+    def fail(_rules: object, _path: object, **_options: object) -> None:
         raise ScheduleError("local-io", "injected write failure")
 
     monkeypatch.setattr(schedules, "save", fail)
@@ -696,11 +696,12 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         path: Path | None = None,
         *,
         replace_existing: bool = True,
+        unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save((manual,), target)
-        return save(updated, target, replace_existing=replace_existing)
+        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
 
     monkeypatch.setattr(schedules, "save", repair_then_save)
 

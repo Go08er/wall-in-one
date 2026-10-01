@@ -606,7 +606,7 @@ def test_a_store_write_failure_does_not_change_its_in_memory_record(
     store = Store(path=target)
     store.choose_palette(medium, PalettePolicy("builtin", "First"))
 
-    def fail(_records: object, _path: object) -> None:
+    def fail(_records: object, _path: object, **_options: object) -> None:
         raise PairingError("local-io", "injected write failure")
 
     monkeypatch.setattr(pairings, "save", fail)
@@ -759,11 +759,12 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         path: Path | None = None,
         *,
         replace_existing: bool = True,
+        unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save({manual_identity.key: manual}, target)
-        return save(updated, target, replace_existing=replace_existing)
+        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
 
     monkeypatch.setattr(pairings, "save", repair_then_save)
 

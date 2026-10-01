@@ -35,6 +35,10 @@ from wall_in_one.library import state_file
 #: The file, under `paths.app_state_dir()`.
 STATE_FILENAME: Final = "schedules.json"
 
+#: Version 1 is still read and is rewritten as version 2 on the next edit. A
+#: newer version is shown but never compiled or rewritten: every mutation is
+#: refused (kind ``newer-version``). Unknown keys in a version this build
+#: reads are carried through every save; see `DOCUMENT_SHAPE`.
 FORMAT_VERSION: Final = 2
 LEGACY_FORMAT_VERSION: Final = 1
 
@@ -59,7 +63,7 @@ class ScheduleError(Exception):
 
     Kinds in use: ``local-io``, ``no-such-rule``, ``identity-conflict``,
     ``invalid-time``, ``invalid-day``, ``invalid-month``,
-    ``invalid-connector``, ``full``.
+    ``invalid-connector``, ``full``, ``newer-version``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -311,16 +315,40 @@ def resolve(rules: Sequence[Rule], at: datetime, connector: str = "") -> str:
     return chosen.playlist if chosen is not None else ""
 
 
+#: What this build models; everything else in the file is carried, not dropped.
+DOCUMENT_SHAPE: Final = state_file.Shape(
+    known=frozenset({"version"}),
+    records={
+        "rules": state_file.Shape(
+            known=frozenset(
+                {"id", "playlist", "connector", "months", "weekdays", "start", "end", "enabled"}
+            ),
+            identity="id",
+            strip_identity=True,
+        )
+    },
+)
+
+
 def state_path() -> Path:
     return paths.app_state_dir() / STATE_FILENAME
 
 
-def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
+def _read(path: Path) -> state_file.Reading[tuple[Rule, ...]]:
     payload, fault = state_file.read_object(
         path, maximum_bytes=MAX_STATE_BYTES, description="schedule"
     )
     if payload is None:
-        return (), fault
+        return state_file.Reading((), fault)
+    rules, fault = _parse(path, payload)
+    unknown = state_file.capture_unknown(payload, DOCUMENT_SHAPE)
+    newer = state_file.newer_version_fault(path, payload, FORMAT_VERSION)
+    if newer is not None:
+        return state_file.Reading(rules, newer, newer_version=True, unknown=unknown)
+    return state_file.Reading(rules, fault, unknown=unknown)
+
+
+def _parse(path: Path, payload: dict[str, Any]) -> tuple[tuple[Rule, ...], str | None]:
     version = payload.get("version")
     faults: list[str] = []
     if version is not None and not (
@@ -370,8 +398,7 @@ def _read(path: Path) -> tuple[tuple[Rule, ...], str | None]:
 
 def load(path: Path | None = None) -> tuple[Rule, ...]:
     """The stored rules, in order. Never raises."""
-    rules, _fault = _read(path if path is not None else state_path())
-    return rules
+    return _read(path if path is not None else state_path()).value
 
 
 def save(
@@ -379,7 +406,9 @@ def save(
     path: Path | None = None,
     *,
     replace_existing: bool = True,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
 ) -> Path:
+    """Write the rules atomically, carrying ``unknown`` fields back in."""
     target = path if path is not None else state_path()
     try:
         paths.ensure_directory(target.parent)
@@ -388,7 +417,11 @@ def save(
             "local-io", f"could not create {target.parent}: {error.strerror or error}"
         ) from error
 
-    payload = {"version": FORMAT_VERSION, "rules": [rule.to_json() for rule in rules]}
+    payload = state_file.merge_unknown(
+        {"version": FORMAT_VERSION, "rules": [rule.to_json() for rule in rules]},
+        unknown,
+        DOCUMENT_SHAPE,
+    )
     try:
         state_file.write_atomic_text(
             target,
@@ -414,6 +447,7 @@ class Store:
         self._rules: list[Rule] = list(rules)
         self._path = path
         self._fault: str | None = None
+        self._fault_kind: str | None = None
         # A directly constructed Store may intentionally seed an absent file.
         # Store.open is different: even an absent file is a durable snapshot,
         # so a later stale mutation must rebase rather than resurrect the seed.
@@ -422,9 +456,10 @@ class Store:
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         target = path if path is not None else state_path()
-        rules, fault = _read(target)
-        store = cls(rules, target, _loaded=True)
-        store._fault = fault
+        reading = _read(target)
+        store = cls(reading.value, target, _loaded=True)
+        store._fault = reading.fault
+        store._fault_kind = reading.fault_kind
         return store
 
     @property
@@ -434,6 +469,11 @@ class Store:
     @property
     def fault(self) -> str | None:
         return self._fault
+
+    @property
+    def fault_kind(self) -> str | None:
+        """``newer-version`` (read-only here), ``unreadable``, or ``None``."""
+        return self._fault_kind
 
     def __len__(self) -> int:
         return len(self._rules)
@@ -649,7 +689,17 @@ class Store:
                 else:
                     present = True
 
-                current, fault = _read(target)
+                reading = _read(target)
+                if reading.newer_version:
+                    # Decided from this locked read, not from memory. Adopt
+                    # the fault (not the value) so this process stops
+                    # compiling its older snapshot over the newer file.
+                    self._fault = reading.fault
+                    self._fault_kind = reading.fault_kind
+                    raise ScheduleError(
+                        state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
+                    )
+                current, fault = reading.value, reading.fault
                 using_durable = present or self._loaded
                 rules = self._reuse_unchanged_rules(current) if using_durable else list(self._rules)
                 if using_durable:
@@ -658,6 +708,7 @@ class Store:
                     # fails. The authored value itself is adopted only after
                     # a successful or no-op transaction.
                     self._fault = fault
+                    self._fault_kind = reading.fault_kind
                     self._loaded = True
                 result, changed = change(rules)
                 if changed:
@@ -670,15 +721,16 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(rules, target, replace_existing=False)
+                        save(rules, target, replace_existing=False, unknown=reading.unknown)
                     else:
-                        save(rules, target)
+                        save(rules, target, unknown=reading.unknown)
                     fault = None
 
                 # File first, then memory: failed persistence cannot make the
                 # live schedule claim a mutation which was never durable.
                 self._rules = rules
                 self._fault = fault
+                self._fault_kind = state_file.fault_kind(fault, newer_version=False)
                 self._loaded = using_durable or changed
                 return result
         except ScheduleError:

@@ -6,7 +6,8 @@ from the 2026-09-30 compatibility survey). Before the store guard:
 1. editing a ``version: 99`` playlists.json moved the original to ``.broken``
    and rewrote it as version 1 without the unknown ``description``;
 2. editing a same-version playlists.json silently dropped a record's unknown
-   ``description``, with no fault and no backup.
+   ``description``, with no fault and no backup;
+3. editing schedules.json silently dropped a rule's unknown ``name``.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one.library import playlists, state_file
+from wall_in_one.library import playlists, schedules, state_file
 
 
 def test_probe_one_an_older_build_never_narrows_a_newer_playlists_file(tmp_path: Path) -> None:
@@ -72,3 +73,20 @@ def test_probe_two_a_same_version_record_keeps_its_unknown_key(tmp_path: Path) -
         ["entries", "id", "name"],
     ]
     assert not target.with_name(target.name + ".broken").exists()
+
+
+def test_probe_three_a_schedule_rule_keeps_its_unknown_name(tmp_path: Path) -> None:
+    target = tmp_path / "state" / "schedules.json"
+    target.parent.mkdir()
+    target.write_text(
+        json.dumps({"version": 2, "rules": [{"id": "a", "playlist": "X", "name": "Evening rule"}]})
+    )
+    store = schedules.Store.open(target)
+    assert store.fault is None
+
+    store.add("Y", rule_id="b")
+
+    assert json.loads(target.read_text())["rules"] == [
+        {"id": "a", "playlist": "X", "name": "Evening rule"},
+        {"id": "b", "playlist": "Y"},
+    ]

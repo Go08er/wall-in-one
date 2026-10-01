@@ -274,11 +274,12 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         path: Path | None = None,
         *,
         replace_existing: bool = True,
+        unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save(manual, target)
-        return save(updated, target, replace_existing=replace_existing)
+        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
 
     monkeypatch.setattr(displays, "save", repair_then_save)
 
@@ -316,7 +317,7 @@ def test_a_store_write_failure_does_not_change_the_in_memory_assignment(
     store = Store(path=target)
     store.assign("eDP-1", "Quiet")
 
-    def fail(_assignments: object, _path: object) -> None:
+    def fail(_assignments: object, _path: object, **_options: object) -> None:
         raise DisplayError("local-io", "injected write failure")
 
     monkeypatch.setattr(displays, "save", fail)

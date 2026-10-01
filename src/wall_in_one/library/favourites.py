@@ -35,7 +35,9 @@ truncated or hand-mangled file degrades to no favourites, because a wallpaper
 manager that will not start over its own bookmark list is worse than one that
 starts empty. What it does not do is throw the bytes away: the first save
 after a fault moves the unreadable file aside instead of replacing it, so
-whatever was in there is still recoverable by hand.
+whatever was in there is still recoverable by hand. A file a newer version
+wrote is not unreadable, only not ours to change: it is shown, and every save
+is refused until that version is used again.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ import json
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from wall_in_one import paths
 from wall_in_one.library import state_file
@@ -54,8 +56,13 @@ STATE_FILENAME: Final = "favourites.json"
 
 #: Bumped only if the shape below ever changes. Newer documents remain
 #: recoverable in the interactive UI, but fault so an older build never
-#: rewrites fields it cannot understand.
+#: compiles them, and every mutation is refused (kind ``newer-version``) so it
+#: never rewrites fields it cannot understand. Unknown top-level keys in this
+#: version are carried through every save.
 FORMAT_VERSION: Final = 1
+
+#: What this build models; any other top-level key is carried, not dropped.
+DOCUMENT_SHAPE: Final = state_file.Shape(known=frozenset({"version", "paths"}))
 
 #: A ceiling, so a file that grew a zero on the end cannot be read forever.
 MAX_FAVOURITES: Final = 10_000
@@ -70,7 +77,7 @@ BROKEN_SUFFIX: Final = ".broken"
 class FavouritesError(Exception):
     """The favourites could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``.
+    Kinds in use: ``local-io``, ``newer-version``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -154,15 +161,18 @@ class Favourites:
         known = set(present)
         return tuple(entry for entry in self.entries if entry not in known)
 
-    def to_json(self) -> str:
-        payload = {
+    def to_document(self) -> dict[str, Any]:
+        return {
             "version": FORMAT_VERSION,
             "paths": [str(entry) for entry in self.entries],
         }
+
+    def to_json(self, unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN) -> str:
+        payload = state_file.merge_unknown(self.to_document(), unknown, DOCUMENT_SHAPE)
         return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 
-def _read(path: Path) -> tuple[Favourites, str | None]:
+def _read(path: Path) -> state_file.Reading[Favourites]:
     """Parse the file, with a sentence about why it could not be parsed.
 
     Never raises. The fault is a message for a toast, not a control flow: the
@@ -172,7 +182,16 @@ def _read(path: Path) -> tuple[Favourites, str | None]:
         path, maximum_bytes=MAX_STATE_BYTES, description="favourites"
     )
     if payload is None:
-        return Favourites(), fault
+        return state_file.Reading(Favourites(), fault)
+    favourites, fault = _parse(path, payload)
+    unknown = state_file.capture_unknown(payload, DOCUMENT_SHAPE)
+    newer = state_file.newer_version_fault(path, payload, FORMAT_VERSION)
+    if newer is not None:
+        return state_file.Reading(favourites, newer, newer_version=True, unknown=unknown)
+    return state_file.Reading(favourites, fault, unknown=unknown)
+
+
+def _parse(path: Path, payload: dict[str, Any]) -> tuple[Favourites, str | None]:
     faults = [
         found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
     ]
@@ -201,8 +220,7 @@ def _read(path: Path) -> tuple[Favourites, str | None]:
 
 def load(path: Path | None = None) -> Favourites:
     """The stored favourites, or none at all. Never raises."""
-    favourites, _fault = _read(path if path is not None else state_path())
-    return favourites
+    return _read(path if path is not None else state_path()).value
 
 
 def save(
@@ -210,6 +228,7 @@ def save(
     path: Path | None = None,
     *,
     replace_existing: bool = True,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
 ) -> Path:
     """Write ``favourites`` atomically, and return where they went.
 
@@ -230,7 +249,7 @@ def save(
     try:
         state_file.write_atomic_text(
             target,
-            favourites.to_json(),
+            favourites.to_json(unknown),
             replace_existing=replace_existing,
         )
     except OSError as error:
@@ -260,6 +279,7 @@ class Store:
         self._path = path
         self._paths = self._favourites.paths
         self._fault: str | None = None
+        self._fault_kind: str | None = None
         # A directly constructed Store may carry an intentional unsaved seed
         # (mostly useful to tests and importers). ``open`` is different: even
         # when its file was absent, a later mutation must re-read disk rather
@@ -270,9 +290,10 @@ class Store:
     def open(cls, path: Path | None = None) -> Store:
         """Load from disk. Always succeeds; ``fault`` says if something was lost."""
         target = path if path is not None else state_path()
-        favourites, fault = _read(target)
-        store = cls(favourites, target, _loaded=True)
-        store._fault = fault
+        reading = _read(target)
+        store = cls(reading.value, target, _loaded=True)
+        store._fault = reading.fault
+        store._fault_kind = reading.fault_kind
         return store
 
     def worker_copy(self, *, rebase: bool = False) -> Store:
@@ -298,6 +319,7 @@ class Store:
                 return type(self).open(target)
         copied = type(self)(self._favourites, target, _loaded=self._loaded)
         copied._fault = self._fault
+        copied._fault_kind = self._fault_kind
         return copied
 
     # -- state -----------------------------------------------------------
@@ -319,6 +341,11 @@ class Store:
         told it was unreadable rather than left to conclude the app forgot.
         """
         return self._fault
+
+    @property
+    def fault_kind(self) -> str | None:
+        """``newer-version`` (read-only here), ``unreadable``, or ``None``."""
+        return self._fault_kind
 
     def __len__(self) -> int:
         return len(self._favourites)
@@ -357,7 +384,17 @@ class Store:
                 else:
                     present = True
 
-                current, fault = _read(target)
+                reading = _read(target)
+                if reading.newer_version:
+                    # Decided from this locked read, not from memory. Adopt
+                    # the fault (not the value) so this process stops
+                    # compiling its older snapshot over the newer file.
+                    self._fault = reading.fault
+                    self._fault_kind = reading.fault_kind
+                    raise FavouritesError(
+                        state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
+                    )
+                current, fault = reading.value, reading.fault
                 # Preserve the historical direct-construction contract: an
                 # explicit in-memory seed is the base only until a real file
                 # has ever existed. Store.open(...), including an absent file,
@@ -377,9 +414,14 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(updated, target, replace_existing=False)
+                        save(
+                            updated,
+                            target,
+                            replace_existing=False,
+                            unknown=reading.unknown,
+                        )
                     else:
-                        save(updated, target)
+                        save(updated, target, unknown=reading.unknown)
                     fault = None
 
                 # File first, then memory. A failed write leaves this Store on
@@ -388,6 +430,7 @@ class Store:
                 self._favourites = updated
                 self._paths = updated.paths
                 self._fault = fault
+                self._fault_kind = state_file.fault_kind(fault, newer_version=False)
                 self._loaded = True
                 return changed
         except FavouritesError:
@@ -427,6 +470,7 @@ class Store:
         self._favourites = updated
         self._paths = updated.paths
         self._fault = None
+        self._fault_kind = None
         self._loaded = True
         return changed
 
@@ -435,6 +479,7 @@ class Store:
         if self._fault != expected:
             return False
         self._fault = None
+        self._fault_kind = None
         self._loaded = True
         return True
 

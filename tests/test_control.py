@@ -1866,7 +1866,7 @@ def test_removal_journal_failure_refuses_before_touching_media(
     item = _on_disk(path, Ownership.MANAGED)
     commands, app = _commands(sandbox, [item])
 
-    def refuse(_records: object, _path: Path) -> None:
+    def refuse(_records: object, _path: Path, **_options: object) -> None:
         raise removals.RemovalJournalError("local-io", "state directory is read-only")
 
     monkeypatch.setattr(removals, "_save", refuse)

@@ -23,13 +23,17 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, Literal, TypeVar
+from typing import Any, Final, Literal, TypeVar
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 from wall_in_one.library.model import Kind, MediaItem
 
 STATE_FILENAME: Final = "pending-removals.json"
+#: Strict: any other version is a fault and no intent in it is acted on. A
+#: newer version refuses every mutation with kind ``newer-version`` (any
+#: other fault keeps ``invalid-state``); neither is ever rewritten. Unknown
+#: keys in this version are carried through every save; see `DOCUMENT_SHAPE`.
 FORMAT_VERSION: Final = 1
 MAX_PENDING_REMOVALS: Final = 4096
 MAX_STATE_BYTES: Final = 4 * 1024 * 1024
@@ -50,7 +54,11 @@ OriginalGenerationState = Literal[
 
 
 class RemovalJournalError(Exception):
-    """A removal intent could not be durably recorded or updated."""
+    """A removal intent could not be durably recorded or updated.
+
+    Kinds in use include ``local-io``, ``invalid-state``, ``full``, ``busy``
+    and ``newer-version``.
+    """
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
@@ -58,6 +66,40 @@ class RemovalJournalError(Exception):
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
+
+
+#: What this build models; everything else in the file is carried, not dropped.
+DOCUMENT_SHAPE: Final = state_file.Shape(
+    known=frozenset({"version"}),
+    records={
+        "removals": state_file.Shape(
+            known=frozenset(
+                {
+                    "identity",
+                    "path",
+                    "kind",
+                    "roots",
+                    "scene",
+                    "provider",
+                    "token",
+                    "external",
+                    "committed",
+                    "device",
+                    "inode",
+                    "source_size",
+                    "source_mtime_ns",
+                    "source_ctime_ns",
+                    "source_root",
+                    "root_device",
+                    "root_inode",
+                    "parent_device",
+                    "parent_inode",
+                }
+            ),
+            identity="identity",
+        )
+    },
+)
 
 
 def state_path() -> Path:
@@ -367,14 +409,26 @@ def _parse_intent(raw: object) -> Intent | None:
     return intent if raw.get("identity") == intent.identity else None
 
 
-def _read(path: Path) -> tuple[dict[str, Intent], str | None]:
+def _read(path: Path) -> state_file.Reading[dict[str, Intent]]:
     document, fault = state_file.read_object(
         path,
         maximum_bytes=MAX_STATE_BYTES,
         description="pending-removals",
     )
     if fault is not None or document is None:
-        return {}, fault
+        return state_file.Reading({}, fault)
+    newer = state_file.newer_version_fault(path, document, FORMAT_VERSION)
+    if newer is not None:
+        # A newer journal may describe destructive work this build does not
+        # understand, so none of it is acted on.
+        return state_file.Reading({}, newer, newer_version=True)
+    records, fault = _parse(path, document)
+    return state_file.Reading(
+        records, fault, unknown=state_file.capture_unknown(document, DOCUMENT_SHAPE)
+    )
+
+
+def _parse(path: Path, document: dict[str, Any]) -> tuple[dict[str, Intent], str | None]:
     version = document.get("version")
     if type(version) is not int or version != FORMAT_VERSION:
         return {}, f"{path.name} has unsupported version {version!r}; expected {FORMAT_VERSION}"
@@ -403,7 +457,11 @@ def _read(path: Path) -> tuple[dict[str, Intent], str | None]:
     return records, state_file.joined_faults(faults)
 
 
-def _save(records: Mapping[str, Intent], path: Path) -> None:
+def _save(
+    records: Mapping[str, Intent],
+    path: Path,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+) -> None:
     if len(records) > MAX_PENDING_REMOVALS:
         raise RemovalJournalError(
             "full", f"pending removal journal is limited to {MAX_PENDING_REMOVALS} items"
@@ -417,10 +475,14 @@ def _save(records: Mapping[str, Intent], path: Path) -> None:
             raise RemovalJournalError(
                 "invalid-state", "pending removal journal contains an invalid intent"
             )
-    payload = {
-        "version": FORMAT_VERSION,
-        "removals": [records[key].to_json() for key in sorted(records)],
-    }
+    payload = state_file.merge_unknown(
+        {
+            "version": FORMAT_VERSION,
+            "removals": [records[key].to_json() for key in sorted(records)],
+        },
+        unknown,
+        DOCUMENT_SHAPE,
+    )
     rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     try:
         encoded = rendered.encode("utf-8")
@@ -454,6 +516,7 @@ class Store:
         self._records = dict(records or {})
         self._path = path if path is not None else state_path()
         self._fault = fault
+        self._fault_kind = state_file.fault_kind(fault, newer_version=False)
         self._operation_descriptor: int | None = None
         self._operation_token: str | None = None
         self._source_pin: file_io.PinnedPath | None = None
@@ -461,8 +524,10 @@ class Store:
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
         target = path if path is not None else state_path()
-        records, fault = _read(target)
-        return cls(records, target, fault=fault)
+        reading = _read(target)
+        store = cls(reading.value, target, fault=reading.fault)
+        store._fault_kind = reading.fault_kind
+        return store
 
     def worker_copy(self, *, rebase: bool = False) -> Store:
         """Return an unleased Store for a background reconciliation owner.
@@ -473,7 +538,9 @@ class Store:
         """
         if rebase:
             return type(self).open(self._path)
-        return type(self)(self._records, self._path, fault=self._fault)
+        copied = type(self)(self._records, self._path, fault=self._fault)
+        copied._fault_kind = self._fault_kind
+        return copied
 
     @property
     def operation_owned(self) -> bool:
@@ -485,6 +552,7 @@ class Store:
         if self._fault != expected:
             return False
         self._fault = None
+        self._fault_kind = None
         return True
 
     @property
@@ -495,23 +563,36 @@ class Store:
     def fault(self) -> str | None:
         return self._fault
 
+    @property
+    def fault_kind(self) -> str | None:
+        """``newer-version`` (read-only here), ``unreadable``, or ``None``."""
+        return self._fault_kind
+
     def _mutate(self, change: Callable[[dict[str, Intent]], _Result]) -> _Result:
         try:
             with state_file.mutation_lock(
                 self._path,
                 description="pending-removals",
             ):
-                records, fault = _read(self._path)
+                reading = _read(self._path)
+                records, fault = reading.value, reading.fault
                 if fault is not None:
                     self._fault = fault
+                    self._fault_kind = reading.fault_kind
+                    if reading.newer_version:
+                        raise RemovalJournalError(
+                            state_file.NEWER_VERSION,
+                            state_file.newer_version_refusal(self._path),
+                        )
                     raise RemovalJournalError(
                         "invalid-state",
                         f"cannot safely update pending removals: {fault}",
                     )
                 result = change(records)
-                _save(records, self._path)
+                _save(records, self._path, unknown=reading.unknown)
                 self._records = records
                 self._fault = None
+                self._fault_kind = None
                 return result
         except OSError as error:
             raise RemovalJournalError(
@@ -856,9 +937,10 @@ class Store:
             self._release_operation_lease(intent.token)
 
     def reload(self) -> tuple[Intent, ...]:
-        records, fault = _read(self._path)
-        self._records = records
-        self._fault = fault
+        reading = _read(self._path)
+        self._records = reading.value
+        self._fault = reading.fault
+        self._fault_kind = reading.fault_kind
         return self.records
 
     def owns(self, intent: Intent) -> bool:

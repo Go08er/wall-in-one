@@ -382,6 +382,11 @@ class Application(Adw.Application):
         self._authoring_repair_started = False
         self._headless_authoring_started = False
         self._activation_waiting_for_repair = False
+        # Process work, done once: the first window to pass the migration gate
+        # resolves the live palette and loads the library. Every later
+        # activation only presents a window; one built later is shown what
+        # the application already has (see `do_activate`).
+        self._first_activation_done = False
         self._newer_version_notice_shown = False
         self._provider = Gtk.CssProvider()
         self._control: server.SocketServer | None = None
@@ -764,7 +769,18 @@ class Application(Adw.Application):
             self.set_accels_for_action(action, accelerators)
 
     def do_activate(self) -> None:
-        if self._window is None:
+        """Present the window, building it first when there is none.
+
+        Every activation lands here: the first launch, a second launch that
+        Gio forwards, the desktop, and `present_page` (``ctl open`` and the
+        in-app links). Presenting an existing window is all a repeat
+        activation does. Only a new window does more: it is shown what the
+        application already has, it asks the migration question while that
+        is still open, and the process's first window resolves the palette
+        and loads the library.
+        """
+        created = self._window is None
+        if created:
             window = self._build_window()
             # Connected on the concrete GTK class: the signal is not part of
             # what the application asks of a window once it is stored.
@@ -787,9 +803,36 @@ class Application(Adw.Application):
             }.get(self._initial_page, self._initial_page)
             self._window.show_page(page)
             self._initial_page = None
-        if self._prompt_for_legacy_migration():
+        if not created:
+            # The palette monitor and the post-hook keep the colours current,
+            # and F5 rescans; re-resolving or rescanning here made every
+            # `ctl open` cost a shell round trip and a library walk.
+            return
+        self._replay_application_state(self._window)
+        # Once authoring is open the predecessor has its disposition, and
+        # the gate never closes again: a new window has nothing to ask.
+        if not self._authoring_migration_ready and self._prompt_for_legacy_migration():
             return
         self._continue_first_activation()
+
+    def _replay_application_state(self, window: WindowServices) -> None:
+        """Show a newly built window the palette and library the process holds.
+
+        Both are application state, kept current without a window: the
+        palette by its monitor and the post-hook, the library by every path
+        that changes it. A window built after the first activation therefore
+        needs them shown, not resolved and scanned again.
+        """
+        if self._resolved is not None:
+            window.show_palette(self._resolved)
+        # Before the first activation, or with no library folder chosen yet,
+        # there is no library to show; the window keeps saying so.
+        if not self._first_activation_done or not self._settings.roots:
+            return
+        window.show_library(self._session)
+        if self._library_scan_future is not None:
+            # The scan a closed window started lands on this one and clears it.
+            window.show_library_scanning(True)
 
     def _build_window(self) -> MainWindow | NextWindow:
         """The window this process was started with: classic unless ``--ui=next``."""
@@ -798,10 +841,18 @@ class Application(Adw.Application):
         return MainWindow(self, self._settings)
 
     def _continue_first_activation(self) -> None:
-        """Scan or ask for a root only after legacy authoring has a disposition."""
+        """Scan or ask for a root only after legacy authoring has a disposition.
+
+        Once per process: the migration and repair completions call this too,
+        and a window built later is shown the results instead (see
+        `do_activate`).
+        """
         if not self._authoring_migration_ready:
             self._activation_waiting_for_repair = True
             return
+        if self._first_activation_done:
+            return
+        self._first_activation_done = True
         self._report_newer_version_files()
         self.reload_palette()
         if self._settings.roots:
@@ -1435,7 +1486,9 @@ class Application(Adw.Application):
         """
         # In service mode there is no window yet. Activating this same
         # GApplication constructs one locally; an ordinary second invocation
-        # is forwarded here by Gio for the same reason.
+        # is forwarded here by Gio for the same reason. With a window already
+        # open, activation only presents it, so this stays cheap for the
+        # panel's `ctl open` links and the in-app ones.
         self.activate()
         if self._window is None:  # pragma: no cover - a broken GTK invariant
             raise RuntimeError("Wall-in-One could not create its window")

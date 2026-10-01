@@ -923,6 +923,75 @@ def test_atomic_move_rejects_directory_relocation_even_with_a_pin(tmp_path: Path
     assert not destination.exists()
 
 
+def test_directory_move_keeps_the_inode_and_never_replaces(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir(mode=0o700)
+    (source / "entry").write_bytes(b"kept")
+    taken = tmp_path / "taken"
+    taken.mkdir()
+    identity = file_io.path_identity(source)
+
+    with pytest.raises(FileExistsError):
+        file_io.move_directory_no_replace(source, taken, expected_identity=identity)
+    assert (source / "entry").read_bytes() == b"kept"
+
+    destination = tmp_path / "archive" / "moved"
+    destination.parent.mkdir()
+    file_io.move_directory_no_replace(source, destination, expected_identity=identity)
+
+    assert not source.exists()
+    assert file_io.path_identity(destination) == identity
+    assert (destination / "entry").read_bytes() == b"kept"
+
+
+def test_directory_move_refuses_a_different_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+
+    with pytest.raises(file_io.PathChangedError):
+        file_io.move_directory_no_replace(
+            source,
+            tmp_path / "destination",
+            expected_identity=file_io.path_identity(other),
+        )
+    assert source.is_dir()
+    assert not (tmp_path / "destination").exists()
+
+
+def test_directory_move_puts_back_a_replacement_that_won_the_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    expected = file_io.path_identity(source)
+    original = tmp_path / "original"
+    destination = tmp_path / "destination"
+    real_rename = file_io._rename_noreplace
+    raced = False
+
+    def replace_then_rename(current: Path, target: Path) -> None:
+        nonlocal raced
+        if current == source and not raced:
+            raced = True
+            current.rename(original)
+            current.mkdir()
+            (current / "replacement").write_bytes(b"new")
+        real_rename(current, target)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", replace_then_rename)
+
+    with pytest.raises(file_io.PathChangedError) as caught:
+        file_io.move_directory_no_replace(source, destination, expected_identity=expected)
+
+    assert caught.value.preserved_path is None
+    assert (source / "replacement").read_bytes() == b"new"
+    assert file_io.path_identity(original) == expected
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize(
     "operation_token",
     (None, "0123456789abcdef0123456789abcdef"),

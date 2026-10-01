@@ -888,6 +888,54 @@ def atomic_move_no_replace(
             pinned_source.close()
 
 
+def move_directory_no_replace(
+    source: Path,
+    destination: Path,
+    *,
+    expected_identity: PathIdentity,
+) -> None:
+    """Atomically move one exact directory to an unused pathname, to archive it.
+
+    :func:`atomic_move_no_replace` refuses directories because a deletion
+    claim needs relocation *authority*, and a directory pin taken after
+    ``mkdir`` cannot prove who created it. Archiving asks for less. The
+    caller has already recorded ``expected_identity`` durably (an archive
+    manifest), the destination is a private archive rather than a discard
+    path, and the move can be reversed by moving the same inode back. Nothing
+    here deletes or empties anything, and it grants no cleanup authority.
+
+    The source is pinned through an ``O_PATH`` descriptor across the rename,
+    so its inode cannot be recycled, and the destination is checked against
+    that pin afterwards. A replacement which won the gap is moved back
+    without replacing a newer source; if that is impossible it stays at the
+    destination and :class:`PathChangedError` names it. The caller syncs the
+    two parent directories (once, for a batch of moves).
+    """
+    pinned = pin_directory_path(source, expected_identity=expected_identity)
+    try:
+        named = source.lstat()
+        if not _same_pinned_entry(pinned.status(), named, stat.S_IFDIR):
+            raise PathChangedError(f"{source} changed before it could be moved")
+        _rename_noreplace(source, destination)
+        try:
+            moved = destination.lstat()
+            pinned_after = pinned.status()
+        except OSError as error:
+            preserved = _restore_after_failed_verification(source, destination)
+            raise PathChangedError(
+                f"could not verify {source} after moving it: {error}",
+                preserved_path=preserved,
+            ) from error
+        if not _same_pinned_entry(pinned_after, moved, stat.S_IFDIR):
+            preserved = _restore_after_failed_verification(source, destination)
+            raise PathChangedError(
+                f"{source} changed while it was being moved",
+                preserved_path=preserved,
+            )
+    finally:
+        pinned.close()
+
+
 @dataclass(slots=True)
 class ClaimedPath:
     """An expected regular file held at an unpredictable private pathname."""

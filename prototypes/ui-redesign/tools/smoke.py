@@ -268,6 +268,70 @@ def schedule_actions(state, window) -> None:
     assert state.fallback == "all-media" and state.rules[0].id == "daytime"
 
 
+def settings_actions(state, window) -> None:
+    window.navigate("settings")
+    page = window.pages["settings"]
+    page.demo("")
+    # Folders: add (scans for a moment), locate, choose the download folder, remove.
+    page._add_folder()
+    added = state.folders[-1]
+    assert added.path == "~/Downloads/Wallpapers" and added.scanning
+    settle(lambda: not added.scanning, 3)
+    assert not added.scanning
+    undo = state.add_library_folder("~/Pictures/Backgrounds")
+    undo()
+    assert [f.path for f in state.folders][-1] == "~/Downloads/Wallpapers"
+    missing = next(f for f in state.folders if f.missing)
+    undo = state.locate_folder(missing.path, "/run/media/goober/Archive/wallpapers")
+    assert not missing.missing
+    undo()
+    assert missing.missing
+    first, second = state.folders[0].path, state.folders[1].path
+    undo = state.set_download_folder(second)
+    assert state.folders[0].path == second and state.download_folder == second
+    undo()
+    assert state.folders[0].path == first and state.download_folder == first
+    undo = state.remove_library_folder(first)  # downloads move to the next folder
+    assert state.download_folder == second
+    undo()
+    assert state.download_folder == first and state.folders[0].path == first
+    state.remove_library_folder("~/Downloads/Wallpapers")
+    # Preferences, playback defaults, colors and the template.
+    state.set_setting("volume", 40)
+    assert state.setting("volume") == 40
+    state.set_setting("volume", 100)
+    page._interval.set_selected(4)
+    assert state.default_interval == 60
+    page._interval.set_selected(3)
+    page._battery.set_active(False)
+    assert not state.stop_on_battery
+    page._battery.set_active(True)
+    dialog = page._open_scheme_dialog()
+    dialog.pick("vibrant")
+    assert state.default_scheme == "vibrant"
+    dialog.pick("m3-tonal-spot")
+    dialog.force_close()
+    undo = state.set_default_scheme("soft")
+    undo()
+    assert state.default_scheme == "m3-tonal-spot"
+    page._reinstall_template()
+    assert state.template_status == "busy" and state.template_ok
+    settle(lambda: state.template_status == "working", 3)
+    state.set_template_status("missing")
+    assert not state.template_ok
+    state.set_template_status("working")
+    page._forget_key(toast=False)
+    assert not state.wallhaven_key_saved
+    page._set_key_saved(True)
+    page._follow.set_active(False)
+    assert not state.follow_noctalia_colors
+    page._follow.set_active(True)
+    page._style_toggle.set_active_name("frosted")
+    assert state.window_style == "frosted"
+    page._style_toggle.set_active_name("solid")
+    page.demo("")
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -437,6 +501,7 @@ def build_steps(app, holder):
     steps.append(("playlist actions", lambda: playlist_actions(s(), w())))
     steps.append(("display actions", lambda: display_actions(s(), w())))
     steps.append(("schedule actions", lambda: schedule_actions(s(), w())))
+    steps.append(("settings actions", lambda: settings_actions(s(), w())))
     steps.append(
         (
             "store select all",
@@ -449,29 +514,27 @@ def build_steps(app, holder):
         )
     )
     for style in ("frosted", "translucent", "frosted"):
-        steps.append(
-            (f"style {style}", lambda st=style: (setattr(s(), "window_style", st), s().emit_changed("appearance")))
-        )
-    steps.append(("panel 40%", lambda: (setattr(s(), "panel_alpha", 0.4), s().emit_changed("appearance"))))
-    steps.append(("background 10%", lambda: (setattr(s(), "background_alpha", 0.1), s().emit_changed("appearance"))))
+        steps.append((f"style {style}", lambda st=style: s().set_window_style(st)))
+    steps.append(("panel 40%", lambda: s().set_panel_opacity(0.4)))
+    steps.append(("background 10%", lambda: s().set_background_opacity(0.1)))
     steps.append(
         (
             "panel below background",
             lambda: (
-                setattr(s(), "background_alpha", 0.8),
-                setattr(s(), "panel_alpha", 0.2),
+                s().set_background_opacity(0.8),
+                s().set_panel_opacity(0.2),
                 s().emit_changed("appearance"),
             ),
         )
     )
     for frost in (0.0, 0.25, 1.0):
-        steps.append((f"frost {frost}", lambda f=frost: (setattr(s(), "frost", f), s().emit_changed("appearance"))))
+        steps.append((f"frost {frost}", lambda f=frost: s().set_frost(f)))
     steps.append(
         (
             "all clear frosted",
             lambda: (
-                setattr(s(), "panel_alpha", 0.0),
-                setattr(s(), "background_alpha", 0.0),
+                s().set_panel_opacity(0.0),
+                s().set_background_opacity(0.0),
                 s().emit_changed("appearance"),
             ),
         )
@@ -488,13 +551,13 @@ def build_steps(app, holder):
     steps.append(
         (
             "desktop colors off",
-            lambda: (settings_page().values.__setitem__("desktop_colors", False), settings_page()._refresh_colors()),
+            lambda: (settings_page(), s().set_desktop_colors(False)),
         )
     )
     steps.append(
         (
             "desktop colors on",
-            lambda: (settings_page().values.__setitem__("desktop_colors", True), settings_page()._refresh_colors()),
+            lambda: (settings_page(), s().set_desktop_colors(True)),
         )
     )
     steps.append(("template missing", lambda: settings_page().demo("template-missing")))
@@ -508,8 +571,8 @@ def build_steps(app, holder):
         (
             "style solid opacity",
             lambda: (
-                setattr(s(), "window_style", "solid"),
-                setattr(s(), "panel_alpha", 0.2),
+                s().set_window_style("solid"),
+                s().set_panel_opacity(0.2),
                 s().emit_changed("appearance"),
             ),
         )
@@ -518,15 +581,13 @@ def build_steps(app, holder):
         (
             "style translucent floor",
             lambda: (
-                setattr(s(), "window_style", "translucent"),
-                setattr(s(), "background_alpha", 0.0),
+                s().set_window_style("translucent"),
+                s().set_background_opacity(0.0),
                 s().emit_changed("appearance"),
             ),
         )
     )
-    steps.append(
-        ("style frosted again", lambda: (setattr(s(), "window_style", "frosted"), s().emit_changed("appearance")))
-    )
+    steps.append(("style frosted again", lambda: s().set_window_style("frosted")))
     steps.append(("frosted light", lambda: (setattr(s(), "dark", False), s().emit_changed("theme", "now"))))
     steps.append(("frosted dark", lambda: (setattr(s(), "dark", True), s().emit_changed("theme", "now"))))
     # A simulated day with the schedule page showing, then the library.

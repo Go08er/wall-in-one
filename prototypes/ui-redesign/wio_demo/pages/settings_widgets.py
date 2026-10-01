@@ -15,7 +15,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk
 
-from .. import data, ui
+from .. import ui
 from ..models import Wallpaper
 
 
@@ -173,7 +173,7 @@ class SchemeDialog(Adw.Dialog):
             row_spacing=8,
             margin_top=4,
         )
-        for key, name, description in data.SCHEMES:
+        for key, name, description in state.schemes():
             button = Gtk.Button()
             button.add_css_class("choice-card")
             button.add_css_class("flat")
@@ -206,7 +206,7 @@ class SchemeDialog(Adw.Dialog):
         self._mark(state.default_scheme)
 
     def _colors(self, scheme: str) -> list[str]:
-        return data.scheme_swatches(self.wallpaper, scheme, self._dark)[:5]
+        return self.state.scheme_swatches(self.wallpaper, scheme, self._dark)[:5]
 
     def _mark(self, scheme: str) -> None:
         for key, card in self._cards.items():

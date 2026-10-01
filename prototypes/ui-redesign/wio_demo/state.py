@@ -18,10 +18,10 @@ from typing import ClassVar
 import gi
 
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GObject
+from gi.repository import Gdk, GLib, GObject
 
 from . import art, data
-from .models import Display, Palette, Playlist, RememberedDisplay, Rule, Wallpaper
+from .models import Display, Folder, Palette, Playlist, RememberedDisplay, Rule, Wallpaper
 
 #: An Undo callback, as returned by the actions that pages offer Undo for.
 Undo = Callable[[], None]
@@ -125,7 +125,7 @@ class AppState(GObject.Object):
         # What drives Noctalia's palette (Settings → Colors). The app follows
         # whatever the desktop shows, see desktop_swatches().
         self.desktop_colors = True
-        self.template_ok = True
+        self.template_status = "working"  # Noctalia's template: working | busy | missing
         self._override: tuple[Palette, str] | None = None  # (palette applied by hand, wallpaper id it covers)
         self._palettes: list[Palette] = data.make_palettes()
         self._desktop_source: object | None = None  # what last set the desktop's colors
@@ -138,6 +138,12 @@ class AppState(GObject.Object):
         # Shared between Settings and the Store.
         self.wallhaven_key_saved = True
         self.download_folder = data.LIBRARY_FOLDERS[0][0]
+        self.folders = [
+            Folder(path, "" if "not found" in note.lower() else note.split(" · ")[0], "not found" in note.lower())
+            for path, note, _primary in data.LIBRARY_FOLDERS
+        ]
+        # Preferences only the Settings page shows (nothing else in the demo acts on them).
+        self.preferences = dict(data.PREFERENCES)
         # Window look: "solid", "translucent" (the compositor shows/blurs the
         # desktop behind) or "frosted" (the app draws your wallpaper, blurred).
         self.window_style = "solid"
@@ -156,12 +162,6 @@ class AppState(GObject.Object):
     def default_scheme(self) -> str:
         """The adaptive scheme inherited by wallpapers that don't choose one."""
         return data.DEFAULT_SCHEME
-
-    @default_scheme.setter
-    def default_scheme(self, value: str) -> None:
-        # data.scheme_swatches reads this at call time, so cards, the inspector
-        # and the app tint all follow the new default.
-        data.DEFAULT_SCHEME = value
 
     @property
     def background_alpha(self) -> float:
@@ -1068,6 +1068,158 @@ class AppState(GObject.Object):
                 interval = self.playlist(playlist_id).interval if playlist_id in data.PLAYLIST_BY_ID else 0
                 self.next_change_minutes += interval or self.default_interval
         self.emit_changed("schedule", "now", "playback", "clock")
+
+    # -- settings: queries -------------------------------------------------------
+    @property
+    def template_ok(self) -> bool:
+        """Noctalia's template is installed (a reinstall in progress counts)."""
+        return self.template_status != "missing"
+
+    def setting(self, key: str):
+        """A preference the rest of the demo doesn't act on (Settings rows only)."""
+        return self.preferences[key]
+
+    def runtime_log(self) -> list[str]:
+        return list(data.RUNTIME_LOG) + list(data.RUNTIME_LOG_EXTRA)
+
+    # -- settings: actions -------------------------------------------------------
+    def set_setting(self, key: str, value) -> None:
+        self.preferences[key] = value
+        self.emit_changed("preferences")
+
+    def set_default_interval(self, minutes: int) -> None:
+        self.default_interval = minutes
+        self.emit_changed("settings")
+
+    def set_stop_on_battery(self, stop: bool) -> None:
+        self.stop_on_battery = stop
+        self.emit_changed("settings", "system", "playback")
+
+    def set_default_scheme(self, scheme: str) -> Undo:
+        """The scheme wallpapers without their own use; cards, the inspector and the
+        app tint follow it (data.scheme_swatches reads it at call time)."""
+        before = data.DEFAULT_SCHEME
+        data.DEFAULT_SCHEME = scheme
+        self.emit_changed("settings", "library")
+        return lambda: self.set_default_scheme(before)
+
+    def set_desktop_colors(self, on: bool) -> None:
+        """Whether wallpapers recolor the desktop (Noctalia's palette)."""
+        if on != self.desktop_colors:
+            self.desktop_colors = on
+            self.emit_changed("settings")
+
+    def set_template_status(self, status: str) -> None:
+        """Noctalia's template: "working", "busy" (being reinstalled) or "missing"."""
+        was_ok = self.template_ok
+        self.template_status = status
+        if self.template_ok != was_ok:
+            self.emit_changed("settings")
+
+    def set_wallhaven_key_saved(self, saved: bool) -> None:
+        """Shared with the Store, which offers NSFW only with a key."""
+        self.wallhaven_key_saved = saved
+        self.emit_changed("settings")
+
+    def set_follow_noctalia_colors(self, follow: bool) -> None:
+        """Whether this window takes its colors from the desktop at all."""
+        self.follow_noctalia_colors = follow
+        self.emit_changed("settings", "playback")
+
+    def set_window_style(self, style: str) -> None:
+        """ "solid", "translucent" (the compositor shows the desktop behind) or "frosted"."""
+        self.window_style = style
+        self.emit_changed("appearance")
+
+    def set_background_opacity(self, value: float) -> None:
+        """The current glass style's page background opacity, 0–1."""
+        self.background_alpha = value
+        self.emit_changed("appearance")
+
+    def set_panel_opacity(self, value: float) -> None:
+        """The current glass style's panel and card opacity, 0–1."""
+        self.panel_alpha = value
+        self.emit_changed("appearance")
+
+    def set_frost(self, value: float) -> None:
+        """How strongly the frosted style blurs the wallpaper, 0 (clear) – 1."""
+        self.frost = value
+        self.emit_changed("appearance")
+
+    # -- settings: library folders -----------------------------------------------
+    def add_library_folder(self, path: str) -> Undo:
+        """Add a folder; it shows as scanning for a moment."""
+        folder = Folder(path, "38 files", scanning=True)
+        self.folders.append(folder)
+        self.emit_changed("folders")
+
+        def scanned() -> bool:
+            folder.scanning = False
+            if folder in self.folders:
+                self.emit_changed("folders")
+            return False
+
+        GLib.timeout_add(1600, scanned)
+
+        def undo() -> None:
+            if folder in self.folders:
+                self.folders.remove(folder)
+                self.emit_changed("folders")
+
+        return undo
+
+    def locate_folder(self, path: str, found: str) -> Undo:
+        """A missing folder turned up at ``found`` (e.g. a drive mounted elsewhere)."""
+        folder = next(folder for folder in self.folders if folder.path == path)
+        before = (folder.path, folder.count, folder.missing)
+        folder.path, folder.count, folder.missing = found, "2,310 files", False
+        self.emit_changed("folders")
+
+        def undo() -> None:
+            folder.path, folder.count, folder.missing = before
+            self.emit_changed("folders")
+
+        return undo
+
+    def remove_library_folder(self, path: str) -> Undo:
+        """Take a folder out of the library (files stay on disk). Removing the
+        downloads folder moves downloads to the next one."""
+        folder = next(folder for folder in self.folders if folder.path == path)
+        index = self.folders.index(folder)
+        before = self.download_folder
+        self.folders.remove(folder)
+        if index == 0 and self.folders:
+            self.download_folder = self.folders[0].path
+        self.emit_changed("folders", "library")
+        if self.download_folder != before:
+            self.emit_changed("settings")
+
+        def undo() -> None:
+            self.folders.insert(index, folder)
+            moved = self.download_folder != before
+            self.download_folder = before
+            self.emit_changed("folders", "library")
+            if moved:
+                self.emit_changed("settings")
+
+        return undo
+
+    def set_download_folder(self, path: str) -> Undo:
+        """Save downloads and captured stills in ``path``: it becomes the first folder."""
+        before = list(self.folders)
+        chosen = next(folder for folder in self.folders if folder.path == path)
+        # An explicit choice: the chosen folder becomes first. Nothing else moves.
+        self.folders.remove(chosen)
+        self.folders.insert(0, chosen)
+        self.download_folder = chosen.path
+        self.emit_changed("folders", "settings")
+
+        def undo() -> None:
+            self.folders[:] = before
+            self.download_folder = before[0].path
+            self.emit_changed("folders", "settings")
+
+        return undo
 
     def set_battery(self, value: bool) -> None:
         self.on_battery = value

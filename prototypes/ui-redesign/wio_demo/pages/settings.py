@@ -20,8 +20,9 @@ gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 
-from .. import data, ui
+from .. import ui
 from ..catalog import INTERVALS
+from ..models import Folder
 from . import Page
 from .settings_palettes import PalettesDialog
 from .settings_widgets import LogView, SchemeDialog
@@ -93,22 +94,6 @@ SCALING = [
 ]
 EDGES = [("", "Renderer default"), ("clamp", "Clamp to edge"), ("border", "Border color"), ("repeat", "Repeat")]
 
-# Lines with file paths, so "Hide file paths" has something to hide. They are
-# merged with data.RUNTIME_LOG by time.
-EXTRA_LOG = [
-    "09:00:00  library   Scanned /home/goober/Pictures/Wallpapers — 1,204 files",
-    "09:00:00  library   Skipped /mnt/archive/wallpapers — folder not found",
-    "11:02:15  renderer  Scene output saved to /home/goober/.local/state/wall-in-one/scenes/neon-rain.log",
-]
-
-
-@dataclass
-class Folder:
-    path: str
-    count: str = ""
-    missing: bool = False
-    scanning: bool = False
-
 
 @dataclass
 class _Entry:
@@ -137,14 +122,6 @@ class _Section:
     groups: list[_Group] = field(default_factory=list)
 
 
-def _folders() -> list[Folder]:
-    folders = []
-    for path, subtitle, _primary in data.LIBRARY_FOLDERS:
-        missing = "not found" in subtitle.lower()
-        folders.append(Folder(path, "" if missing else subtitle.split(" · ")[0], missing))
-    return folders
-
-
 def _row_text(row: Gtk.Widget) -> str:
     bits = []
     if isinstance(row, Adw.PreferencesRow):
@@ -170,29 +147,6 @@ class SettingsPage(Page):
         self._dialogs: list[Adw.Dialog] = []
         self._animation: Adw.TimedAnimation | None = None
         self._narrow_setters: list[tuple[GObject.Object, str, object]] = []
-
-        # Page-local values for settings the shared state doesn't model.
-        self.folders = _folders()
-        self.values = {
-            "workshop": True,
-            "shuffle": False,
-            "autostart": True,
-            "covered": "pause",
-            "desktop_colors": True,
-            "theme_mode": "auto",
-            "key_saved": True,
-            "purity": "sketchy",
-            "decoding": "auto",
-            "smoothing": "off",
-            "sound": False,
-            "volume": 100,
-            "run_scenes": True,
-            "fps": "30",
-            "scaling": "",
-            "edges": "",
-            "hide_paths": True,
-            "template": "working",
-        }
 
         # -- header ------------------------------------------------------------
         self.search = Gtk.SearchEntry(placeholder_text="Search settings", hexpand=True)
@@ -274,7 +228,7 @@ class SettingsPage(Page):
         elif what == "remove-folder":
             index = 0 if arg == "download" else (2 if arg == "missing" else 1)
             self.scroll_to("library", flash=False)
-            self._confirm_remove(self.folders[index])
+            self._confirm_remove(self.state.folders[index])
         elif what == "download-folder":
             self.scroll_to("library", flash=False)
             self._choose_download_folder()
@@ -283,7 +237,7 @@ class SettingsPage(Page):
             self._add_folder()
         elif what == "locate":
             self.scroll_to("library", flash=False)
-            self._locate(self.folders[2])
+            self._locate(self.state.folders[2])
         elif what == "scheme":
             self._open_scheme_dialog()
         elif what == "palettes":
@@ -299,7 +253,7 @@ class SettingsPage(Page):
             self.scroll_to("playback.battery", flash=False)
             self._battery.set_active(False)
         elif what == "template-missing":
-            self.values["template"] = "missing"
+            self.state.set_template_status("missing")
             self._refresh_template()
             self.scroll_to("colors", flash=False)
 
@@ -379,10 +333,10 @@ class SettingsPage(Page):
     def _switch(
         self, title: str, subtitle: str, key: str, on_change: Callable[[bool], None] | None = None
     ) -> Adw.SwitchRow:
-        row = Adw.SwitchRow(title=title, subtitle=subtitle or None, active=self.values.get(key, False))
+        row = Adw.SwitchRow(title=title, subtitle=subtitle or None, active=self.state.setting(key))
 
         def changed(r: Adw.SwitchRow, _p) -> None:
-            self.values[key] = r.get_active()
+            self.state.set_setting(key, r.get_active())
             if on_change and not self._syncing:
                 on_change(r.get_active())
 
@@ -404,7 +358,7 @@ class SettingsPage(Page):
         return group
 
     def _set(self, key: str) -> Callable[[str], None]:
-        return lambda value: self.values.__setitem__(key, value)
+        return lambda value: self.state.set_setting(key, value)
 
     # ---------------------------------------------------------------------------
     # 1. Library & downloads
@@ -440,14 +394,14 @@ class SettingsPage(Page):
             group.widget.remove(self._add_folder_row)
         group.entries = []
         self._folder_rows = []
-        for index, folder in enumerate(self.folders):
+        for index, folder in enumerate(self.state.folders):
             row = self._folder_row(index, folder)
             keywords = f"folder {folder.path} {'missing unplugged locate' if folder.missing else ''}"
             if index == 0:
                 keywords += " downloads save store wallhaven motionbgs stills captured destination"
             self._add(group, row, keywords, target="library.download" if index == 0 else None)
             self._folder_rows.append(row)
-        if not self.folders:
+        if not self.state.folders:
             row = Adw.ActionRow(title="No folders yet", subtitle="Add one to start your library")
             self._add(group, row, "folder empty")
             self._folder_rows.append(row)
@@ -479,7 +433,7 @@ class SettingsPage(Page):
             badge = Gtk.Button(child=label, valign=Gtk.Align.CENTER)
             badge.add_css_class("flat")
             badge.add_css_class("st-badge-button")
-            others = sum(1 for other in self.folders if other is not folder and not other.missing)
+            others = sum(1 for other in self.state.folders if other is not folder and not other.missing)
             badge.set_sensitive(others > 0)
             badge.set_tooltip_text(
                 "Downloads and captured stills are saved here · click to choose another folder"
@@ -505,50 +459,28 @@ class SettingsPage(Page):
 
     def _add_folder(self) -> None:
         # Unwired: stands in for the folder chooser with a plausible pick.
-        known = {folder.path for folder in self.folders}
+        known = {folder.path for folder in self.state.folders}
         path = next(
             (p for p in ("~/Downloads/Wallpapers", "~/Pictures/Backgrounds", "~/Videos/Loops") if p not in known), None
         )
         if path is None:
             self.state.toast("All the demo folders are already in the library")
             return
-        folder = Folder(path, "38 files", scanning=True)
-        self.folders.append(folder)
-        self._rebuild_folders()
-
-        def finished() -> bool:
-            folder.scanning = False
-            if folder in self.folders:
-                self._rebuild_folders()
-            return False
-
-        GLib.timeout_add(1600, finished)
-
-        def undo() -> None:
-            if folder in self.folders:
-                self.folders.remove(folder)
-                self._rebuild_folders()
-
+        undo = self.state.add_library_folder(path)
         self.state.toast(f"Added {path} · scanning", undo)
 
     def _locate(self, folder: Folder) -> None:
         # Unwired: pretends the chooser found the drive under /run/media.
-        before = (folder.path, folder.count, folder.missing)
-        folder.path, folder.count, folder.missing = "/run/media/goober/Archive/wallpapers", "2,310 files", False
-        self._rebuild_folders()
-
-        def undo() -> None:
-            folder.path, folder.count, folder.missing = before
-            self._rebuild_folders()
-
+        undo = self.state.locate_folder(folder.path, "/run/media/goober/Archive/wallpapers")
         self.state.toast("Found on “Archive” · 2,310 files", undo)
 
     def _confirm_remove(self, folder: Folder) -> None:
-        index = self.folders.index(folder)
+        folders = self.state.folders
+        index = folders.index(folder)
         path = GLib.markup_escape_text(folder.path)
         body = f"<b>{path}</b> leaves the library and every playlist. Files stay on disk."
-        if index == 0 and len(self.folders) > 1:
-            body += f"\n\nNew downloads will be saved in <b>{GLib.markup_escape_text(self.folders[1].path)}</b>."
+        if index == 0 and len(folders) > 1:
+            body += f"\n\nNew downloads will be saved in <b>{GLib.markup_escape_text(folders[1].path)}</b>."
         elif index == 0:
             body += "\n\nDownloads stop until you add a folder."
         dialog = Adw.AlertDialog(heading="Remove from library?", body=body, body_use_markup=True)
@@ -559,17 +491,9 @@ class SettingsPage(Page):
         dialog.set_close_response("cancel")
 
         def done(_dialog, response: str) -> None:
-            if response != "remove" or folder not in self.folders:
+            if response != "remove" or folder not in self.state.folders:
                 return
-            self.folders.remove(folder)
-            self._rebuild_folders()
-            self.state.emit_changed("library")
-
-            def undo() -> None:
-                self.folders.insert(index, folder)
-                self._rebuild_folders()
-                self.state.emit_changed("library")
-
+            undo = self.state.remove_library_folder(folder.path)
             self.state.toast(f"Removed {folder.path} · files stay on disk", undo)
 
         dialog.connect("response", done)
@@ -582,9 +506,10 @@ class SettingsPage(Page):
         )
         rows = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         rows.add_css_class("boxed-list")
-        choice: dict[str, Folder | None] = {"folder": self.folders[0] if self.folders else None}
+        folders = self.state.folders
+        choice: dict[str, Folder | None] = {"folder": folders[0] if folders else None}
         first_check: Gtk.CheckButton | None = None
-        for index, folder in enumerate(self.folders):
+        for index, folder in enumerate(folders):
             check = Gtk.CheckButton(active=index == 0, valign=Gtk.Align.CENTER)
             if first_check is None:
                 first_check = check
@@ -607,22 +532,9 @@ class SettingsPage(Page):
 
         def done(_dialog, response: str) -> None:
             chosen = choice["folder"]
-            if response != "use" or chosen is None or chosen is self.folders[0]:
+            if response != "use" or chosen is None or chosen is self.state.folders[0]:
                 return
-            before = list(self.folders)
-            # An explicit choice: the chosen folder becomes first. Nothing else moves.
-            self.folders.remove(chosen)
-            self.folders.insert(0, chosen)
-            self._rebuild_folders()
-            self.state.download_folder = chosen.path
-            self.state.emit_changed("settings")
-
-            def undo() -> None:
-                self.folders[:] = before
-                self._rebuild_folders()
-                self.state.download_folder = before[0].path
-                self.state.emit_changed("settings")
-
+            undo = self.state.set_download_folder(chosen.path)
             self.state.toast(f"Downloads now go to {chosen.path}", undo)
 
         dialog.connect("response", done)
@@ -666,7 +578,7 @@ class SettingsPage(Page):
             "When a window covers it",
             "For videos · takes effect on the next one",
             COVERED,
-            self.values["covered"],
+            self.state.setting("covered"),
             self._set("covered"),
         )
         self._add(group, covered, "pause covered hidden fullscreen window maximized stop memory obscured")
@@ -674,15 +586,13 @@ class SettingsPage(Page):
     def _set_interval(self, minutes: int) -> None:
         if self._syncing:
             return
-        self.state.default_interval = minutes
-        self.state.emit_changed("settings")
+        self.state.set_default_interval(minutes)
 
     def _on_battery(self, switch: Gtk.Switch, _param) -> None:
         if self._syncing:
             return
-        self.state.stop_on_battery = switch.get_active()
+        self.state.set_stop_on_battery(switch.get_active())
         self._refresh_battery()
-        self.state.emit_changed("settings", "system", "playback")
 
     def _refresh_battery(self) -> None:
         state = self.state
@@ -701,12 +611,12 @@ class SettingsPage(Page):
         section = self._section("colors")
         group = self._group(section, "Colors", keywords="colors colors noctalia theme desktop palette")
 
-        desktop = self._switch(
-            "Use wallpaper colors on the desktop",
-            "Noctalia recolors to match each wallpaper",
-            "desktop_colors",
-            lambda _on: self._refresh_colors(),
+        desktop = Adw.SwitchRow(
+            title="Use wallpaper colors on the desktop",
+            subtitle="Noctalia recolors to match each wallpaper",
+            active=self.state.desktop_colors,
         )
+        desktop.connect("notify::active", self._on_desktop_colors)
         self._add(group, desktop, "adaptive follow noctalia recolor shell bar")
 
         self._follow_display = Adw.ActionRow(
@@ -781,7 +691,7 @@ class SettingsPage(Page):
                     ("dark", "Dark", None),
                     ("keep", "Don't change", "Leave the current mode"),
                 ],
-                self.values["theme_mode"],
+                self.state.setting("theme_mode"),
                 self._set("theme_mode"),
             )
         )
@@ -790,7 +700,7 @@ class SettingsPage(Page):
 
     def _refresh_colors(self) -> None:
         state = self.state
-        on = self.values["desktop_colors"]
+        on = state.desktop_colors
         for row in self._color_dependents:
             row.set_sensitive(on)
         source_connector = state.color_connector()
@@ -799,19 +709,19 @@ class SettingsPage(Page):
         applied = state.applied_palette()
         if not on:
             text, swatches = "Off · desktop colors stay as they are", []
-        elif self.values["template"] != "working":
+        elif state.template_status != "working":
             text, swatches = "Template missing · desktop colors can't change", []
         elif applied:
             text, swatches = f"“{applied.name}” palette · until the wallpaper changes", applied.strip(state.dark)
         elif wallpaper.color_mode == "palette":
             text = f"“{wallpaper.palette}” palette · set by “{wallpaper.name}”"
-            swatches = data.wallpaper_swatches(wallpaper, state.dark)
+            swatches = state.wallpaper_swatches(wallpaper, state.dark)
         elif wallpaper.color_mode == "keep":
             text, swatches = f"Unchanged · “{wallpaper.name}” keeps your colors", []
         else:
             scheme = wallpaper.scheme or state.default_scheme
-            text = f"Generated from “{wallpaper.name}” · {data.SCHEME_NAME[scheme]}"
-            swatches = data.scheme_swatches(wallpaper, scheme, state.dark)
+            text = f"Generated from “{wallpaper.name}” · {state.scheme_name(scheme)}"
+            swatches = state.scheme_swatches(wallpaper, scheme, state.dark)
         self._source.set_subtitle(text)
         # An empty, dashed dot when nothing is being generated.
         self._source_swatches.set_colors(swatches[1:4] if swatches else [])
@@ -826,15 +736,14 @@ class SettingsPage(Page):
             self._scheme_thumb.remove(child)
         self._scheme_thumb.append(ui.thumbnail(wallpaper, 56, 32, 6))
         users = sum(1 for w in state.wallpapers if w.color_mode == "adaptive" and not w.scheme)
-        self._scheme.set_subtitle(f"{data.SCHEME_NAME[state.default_scheme]} · used by {users} wallpapers")
-        self._scheme_swatches.set_colors(data.scheme_swatches(wallpaper, state.default_scheme, state.dark)[1:4])
+        self._scheme.set_subtitle(f"{state.scheme_name(state.default_scheme)} · used by {users} wallpapers")
+        self._scheme_swatches.set_colors(state.scheme_swatches(wallpaper, state.default_scheme, state.dark)[1:4])
 
-        # Hand these switches to the shared state so the window's own colors
-        # follow the desktop too. A busy reinstall doesn't count as missing.
-        follows = (on, self.values["template"] != "missing")
-        if follows != (state.desktop_colors, state.template_ok):
-            state.desktop_colors, state.template_ok = follows
-            state.emit_changed("settings")
+    def _on_desktop_colors(self, row: Adw.SwitchRow, _param) -> None:
+        # The window's own colors follow the desktop too (state.desktop_swatches).
+        self.state.set_desktop_colors(row.get_active())
+        if not self._syncing:
+            self._refresh_colors()
 
     def _reload_palette(self) -> None:
         self._reload.set_sensitive(False)
@@ -863,7 +772,7 @@ class SettingsPage(Page):
         while child:
             self._template_status.remove(child)
             child = self._template_status.get_first_child()
-        status = self.values["template"]
+        status = self.state.template_status
         menu = Gio.Menu()
         if status == "working":
             self._template_status.append(ui.pill("Installed · working", "object-select-symbolic", "success"))
@@ -883,12 +792,12 @@ class SettingsPage(Page):
             self._refresh_colors()
 
     def _reinstall_template(self) -> None:
-        was = self.values["template"]
-        self.values["template"] = "busy"
+        was = self.state.template_status
+        self.state.set_template_status("busy")
         self._refresh_template()
 
         def done() -> bool:
-            self.values["template"] = "working"
+            self.state.set_template_status("working")
             self._refresh_template()
             self.state.toast("Noctalia template reinstalled" if was == "working" else "Noctalia template installed")
             return False
@@ -907,11 +816,11 @@ class SettingsPage(Page):
 
         def done(_dialog, response: str) -> None:
             if response == "remove":
-                self.values["template"] = "missing"
+                self.state.set_template_status("missing")
                 self._refresh_template()
                 self.state.toast(
                     "Template removed",
-                    lambda: (self.values.__setitem__("template", "working"), self._refresh_template()),
+                    lambda: (self.state.set_template_status("working"), self._refresh_template()),
                 )
 
         dialog.connect("response", done)
@@ -921,9 +830,8 @@ class SettingsPage(Page):
         before = self.state.default_scheme
 
         def pick(scheme: str) -> None:
-            self.state.default_scheme = scheme
+            self.state.set_default_scheme(scheme)
             self._refresh_colors()
-            self.state.emit_changed("settings", "library")
 
         dialog = SchemeDialog(self.state, pick)
 
@@ -935,7 +843,7 @@ class SettingsPage(Page):
             def undo() -> None:
                 pick(before)
 
-            self.state.toast(f"Default scheme is now {data.SCHEME_NAME[after]}", undo)
+            self.state.toast(f"Default scheme is now {self.state.scheme_name(after)}", undo)
 
         dialog.connect("closed", closed)
         self._present(dialog)
@@ -970,7 +878,7 @@ class SettingsPage(Page):
                 ("sketchy", "+ Sketchy", "Also show sketchy results"),
                 ("nsfw", "+ NSFW", "Also show NSFW results"),
             ],
-            self.values["purity"],
+            self.state.setting("purity"),
             self._set("purity"),
         )
         purity.add_suffix(self._purity)
@@ -983,14 +891,11 @@ class SettingsPage(Page):
 
     def _set_key_saved(self, saved: bool) -> None:
         # Shared with the Store, which enables NSFW only with a key.
-        self.values["key_saved"] = saved
-        self.state.wallhaven_key_saved = saved
-        self.state.emit_changed("settings")
+        self.state.set_wallhaven_key_saved(saved)
         self._refresh_key()
 
     def _refresh_key(self) -> None:
         saved = self.state.wallhaven_key_saved
-        self.values["key_saved"] = saved
         self._key_row.set_subtitle("Saved · only you can read it" if saved else "Not set · needed for NSFW")
         self._key_remove.set_visible(saved)
         self._key_entry.set_title("Replace key" if saved else "Paste your key")
@@ -1042,16 +947,13 @@ class SettingsPage(Page):
         self._add(group, style_row, "window style glass frosted blur translucent transparent solid")
 
         def set_background(percent: int) -> None:
-            self.state.background_alpha = percent / 100
-            self.state.emit_changed("appearance")
+            self.state.set_background_opacity(percent / 100)
 
         def set_panels(percent: int) -> None:
-            self.state.panel_alpha = percent / 100
-            self.state.emit_changed("appearance")
+            self.state.set_panel_opacity(percent / 100)
 
         def set_frost(percent: int) -> None:
-            self.state.frost = percent / 100
-            self.state.emit_changed("appearance")
+            self.state.set_frost(percent / 100)
 
         self._background_row, self._background_scale = self._dial(
             "Background opacity", "The page behind the grid and lists", set_background
@@ -1099,8 +1001,7 @@ class SettingsPage(Page):
     def _on_window_style(self, group: Adw.ToggleGroup, _param) -> None:
         if self._syncing:
             return
-        self.state.window_style = group.get_active_name()
-        self.state.emit_changed("appearance")
+        self.state.set_window_style(group.get_active_name())
         self._sync_window_style()
 
     def _sync_window_style(self) -> None:
@@ -1160,8 +1061,7 @@ class SettingsPage(Page):
     def _on_follow(self, row: Adw.SwitchRow, _param) -> None:
         if self._syncing:
             return
-        self.state.follow_noctalia_colors = row.get_active()
-        self.state.emit_changed("settings", "playback")
+        self.state.set_follow_noctalia_colors(row.get_active())
 
     # ---------------------------------------------------------------------------
     # 6. Advanced
@@ -1181,7 +1081,7 @@ class SettingsPage(Page):
                 "Hardware decoding",
                 "Turn off if videos glitch",
                 DECODING,
-                self.values["decoding"],
+                self.state.setting("decoding"),
                 self._set("decoding"),
             ),
             "hardware decoding gpu vaapi cpu driver artifacts glitch",
@@ -1193,7 +1093,7 @@ class SettingsPage(Page):
                 "Smooth motion",
                 "For low-frame-rate videos",
                 SMOOTHING,
-                self.values["smoothing"],
+                self.state.setting("smoothing"),
                 self._set("smoothing"),
             ),
             "smooth motion interpolation oversample linear frame rate judder",
@@ -1202,24 +1102,24 @@ class SettingsPage(Page):
         self._add_child(group, video, sound, "sound audio mute muted")
         self._volume = Adw.ActionRow(title="Volume")
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
-        scale.set_value(self.values["volume"])
+        scale.set_value(self.state.setting("volume"))
         scale.set_draw_value(False)
         scale.set_size_request(150, -1)
         scale.set_valign(Gtk.Align.CENTER)
         scale.update_property([Gtk.AccessibleProperty.LABEL], ["Volume"])
-        volume_value = Gtk.Label(label=f"{self.values['volume']}%", width_chars=4, xalign=1)
+        volume_value = Gtk.Label(label=f"{self.state.setting('volume')}%", width_chars=4, xalign=1)
         volume_value.add_css_class("st-value")
         volume_value.add_css_class("dimmed")
         scale.connect(
             "value-changed",
             lambda s: (
-                self.values.__setitem__("volume", round(s.get_value())),
+                self.state.set_setting("volume", round(s.get_value())),
                 volume_value.set_label(f"{round(s.get_value())}%"),
             ),
         )
         self._volume.add_suffix(scale)
         self._volume.add_suffix(volume_value)
-        self._volume.set_sensitive(self.values["sound"])
+        self._volume.set_sensitive(self.state.setting("sound"))
         self._add_child(group, video, self._volume, "volume sound audio loud")
 
         scenes = Adw.ExpanderRow(title="Scenes", subtitle="Wallpaper Engine renderer")
@@ -1235,14 +1135,16 @@ class SettingsPage(Page):
         self._add_child(group, scenes, run, "run own renderer linux-wallpaperengine start")
         fps = Adw.ActionRow(title="Frame rate", subtitle="Lower saves power")
         fps.add_suffix(
-            self._toggles([(v, v, f"{v} fps") for v in ("15", "24", "30", "60")], self.values["fps"], self._set("fps"))
+            self._toggles(
+                [(v, v, f"{v} fps") for v in ("15", "24", "30", "60")], self.state.setting("fps"), self._set("fps")
+            )
         )
         scene_rows: list[Gtk.Widget] = [fps]
         self._add_child(group, scenes, fps, "frame rate fps power")
-        scaling = self._combo("Scaling", "", SCALING, self.values["scaling"], self._set("scaling"))
+        scaling = self._combo("Scaling", "", SCALING, self.state.setting("scaling"), self._set("scaling"))
         scene_rows.append(scaling)
         self._add_child(group, scenes, scaling, "scaling fit fill stretch crop aspect")
-        edges = self._combo("Texture edges", "", EDGES, self.values["edges"], self._set("edges"))
+        edges = self._combo("Texture edges", "", EDGES, self.state.setting("edges"), self._set("edges"))
         scene_rows.append(edges)
         self._add_child(group, scenes, edges, "texture edges clamp border repeat sampling")
         renderer = Adw.ActionRow(title="Renderer", subtitle="linux-wallpaperengine found")
@@ -1302,7 +1204,7 @@ class SettingsPage(Page):
     # ---------------------------------------------------------------------------
     def _build_log(self) -> None:
         section = self._section("log")
-        self.log = LogView(list(data.RUNTIME_LOG) + EXTRA_LOG)
+        self.log = LogView(self.state.runtime_log())
         problems = self.log.problems
         description = f"Today · {len(self.log)} events" + (f" · {problems} problems" if problems else "")
         group = self._group(
@@ -1337,7 +1239,7 @@ class SettingsPage(Page):
         clipboard = self.widget.get_clipboard()
         clipboard.set_content(Gdk.ContentProvider.new_for_value(GObject.Value(GObject.TYPE_STRING, text)))
         lines = text.count("\n") + 1
-        self.state.toast(f"Copied {lines} lines" + (" · file paths hidden" if self.values["hide_paths"] else ""))
+        self.state.toast(f"Copied {lines} lines" + (" · file paths hidden" if self.state.setting("hide_paths") else ""))
 
     # ---------------------------------------------------------------------------
     # 8. About
@@ -1539,6 +1441,9 @@ class SettingsPage(Page):
         self._refresh_service()
 
     def _on_changed(self, _state, topic: str) -> None:
+        if topic == "folders":
+            self._rebuild_folders()
+            return
         if topic == "appearance":
             self._syncing = True
             self._style_toggle.set_active_name(self.state.window_style)

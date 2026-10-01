@@ -538,3 +538,30 @@ RUNTIME_LOG = [
     "11:02:15  renderer  Neon rain skipped for this session; showing its still",
     "11:30:00  rotation  Next wallpaper: Misty pines",
 ]
+
+# Lines with file paths, so "Hide file paths" has something to hide. Shown
+# after RUNTIME_LOG and sorted in with it by time.
+RUNTIME_LOG_EXTRA = [
+    "09:00:00  library   Scanned /home/goober/Pictures/Wallpapers — 1,204 files",
+    "09:00:00  library   Skipped /mnt/archive/wallpapers — folder not found",
+    "11:02:15  renderer  Scene output saved to /home/goober/.local/state/wall-in-one/scenes/neon-rain.log",
+]
+
+# Settings rows that only the Settings page shows.
+PREFERENCES = {
+    "workshop": True,
+    "shuffle": False,
+    "autostart": True,
+    "covered": "pause",
+    "theme_mode": "auto",
+    "purity": "sketchy",
+    "decoding": "auto",
+    "smoothing": "off",
+    "sound": False,
+    "volume": 100,
+    "run_scenes": True,
+    "fps": "30",
+    "scaling": "",
+    "edges": "",
+    "hide_paths": True,
+}

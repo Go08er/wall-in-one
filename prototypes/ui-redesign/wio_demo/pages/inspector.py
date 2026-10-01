@@ -16,7 +16,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk
 
-from .. import art, data, ui
+from .. import art, data, thumbs, ui
+from ..catalog import KIND_LABEL
+from ..models import Wallpaper
 
 ui_css = """
 .inspector-preview-badges { margin: 10px; }
@@ -35,7 +37,7 @@ class DesktopPreview(Gtk.DrawingArea):
     """A miniature desktop: the wallpaper with a Noctalia-style bar in the
     colors this wallpaper would apply. Shows the effect, not just the dots."""
 
-    def __init__(self, wallpaper: data.Wallpaper, colors: list[str]) -> None:
+    def __init__(self, wallpaper: Wallpaper, colors: list[str]) -> None:
         super().__init__()
         self.wallpaper, self.colors = wallpaper, colors
         self.set_content_height(150)
@@ -127,7 +129,7 @@ class Inspector(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.state = state
         self.add_css_class("inspector")
-        self.wallpaper: data.Wallpaper | None = None
+        self.wallpaper: Wallpaper | None = None
         self._on_close = on_close
         ui.add_css(ui_css)
 
@@ -153,7 +155,7 @@ class Inspector(Gtk.Box):
             self.show(self.wallpaper)
 
     # -- building --------------------------------------------------------------
-    def show(self, wallpaper: data.Wallpaper) -> None:
+    def show(self, wallpaper: Wallpaper) -> None:
         keep_scroll = self.wallpaper is wallpaper
         scroll = self._scroller.get_vadjustment().get_value() if keep_scroll else 0.0
         self.wallpaper = wallpaper
@@ -174,7 +176,7 @@ class Inspector(Gtk.Box):
 
         # Preview with badges
         overlay = Gtk.Overlay()
-        overlay.set_child(ui.Thumb(wallpaper.thumb(960, 540), 360, 203, radius=14, fill=True))
+        overlay.set_child(ui.Thumb(thumbs.texture(wallpaper, 960, 540), 360, 203, radius=14, fill=True))
         badges = Gtk.Box(spacing=6, valign=Gtk.Align.START, halign=Gtk.Align.START)
         badges.add_css_class("inspector-preview-badges")
         if wallpaper.is_moving:
@@ -203,7 +205,7 @@ class Inspector(Gtk.Box):
 
         title = Gtk.Label(label=wallpaper.name, xalign=0, wrap=True)
         title.add_css_class("inspector-title")
-        meta_bits = [data.KIND_LABEL[wallpaper.kind]]
+        meta_bits = [KIND_LABEL[wallpaper.kind]]
         if wallpaper.duration:
             meta_bits.append(wallpaper.duration)
         if wallpaper.kind != "scene":
@@ -257,7 +259,7 @@ class Inspector(Gtk.Box):
         box.append(child)
         return box
 
-    def _problem(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _problem(self, wallpaper: Wallpaper) -> Gtk.Widget:
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.add_css_class("problem-card")
         top = Gtk.Box(spacing=8)
@@ -280,13 +282,13 @@ class Inspector(Gtk.Box):
         card.append(buttons)
         return card
 
-    def _retry(self, wallpaper: data.Wallpaper) -> None:
+    def _retry(self, wallpaper: Wallpaper) -> None:
         wallpaper.problem = ""
         self.state.emit_changed("library")
         self.show(wallpaper)
         self.state.toast(f"“{wallpaper.name}” will be tried again")
 
-    def _actions(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _actions(self, wallpaper: Wallpaper) -> Gtk.Widget:
         row = Gtk.Box(spacing=8)
         menu = Gio.Menu()
         menu.append("All displays", f"lib.apply::{wallpaper.id}|all")
@@ -322,7 +324,7 @@ class Inspector(Gtk.Box):
         self._apply.set_label(f"Apply to {where}")
         self._apply.set_tooltip_text(f"Show it now on {where} (the player bar's choice)")
 
-    def _playlist_menu(self, wallpaper: data.Wallpaper) -> Gio.Menu:
+    def _playlist_menu(self, wallpaper: Wallpaper) -> Gio.Menu:
         menu = Gio.Menu()
         for playlist in self.state.playlists:
             if not playlist.automatic:
@@ -332,7 +334,7 @@ class Inspector(Gtk.Box):
         menu.append_section(None, new)
         return menu
 
-    def _still(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _still(self, wallpaper: Wallpaper) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         row = Gtk.Box(spacing=12)
         row.append(ui.thumbnail(wallpaper, 112, 63, 8))
@@ -377,7 +379,7 @@ class Inspector(Gtk.Box):
             box.append(other)
         return self._section("Still", box)
 
-    def _motion(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _motion(self, wallpaper: Wallpaper) -> Gtk.Widget:
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
         group.append(Adw.SwitchRow(title="Animate", subtitle="Off shows the still instead", active=True))
@@ -388,7 +390,7 @@ class Inspector(Gtk.Box):
             group.append(fps)
         return self._section("Motion", group)
 
-    def _colors(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _colors(self, wallpaper: Wallpaper) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         preview = DesktopPreview(wallpaper, data.wallpaper_swatches(wallpaper, self.state.dark))
         box.append(preview)
@@ -450,7 +452,7 @@ class Inspector(Gtk.Box):
         box.append(theme_row)
         return self._section("Colors", box)
 
-    def _scheme_grid(self, wallpaper: data.Wallpaper, refresh: Callable[[], None]) -> Gtk.Widget:
+    def _scheme_grid(self, wallpaper: Wallpaper, refresh: Callable[[], None]) -> Gtk.Widget:
         flow = Gtk.FlowBox(
             selection_mode=Gtk.SelectionMode.NONE,
             homogeneous=True,
@@ -496,7 +498,7 @@ class Inspector(Gtk.Box):
             flow.append(button)
         return flow
 
-    def _palette_list(self, wallpaper: data.Wallpaper, refresh: Callable[[], None]) -> Gtk.Widget:
+    def _palette_list(self, wallpaper: Wallpaper, refresh: Callable[[], None]) -> Gtk.Widget:
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
         for name, colors in data.PALETTES.items():
@@ -520,7 +522,7 @@ class Inspector(Gtk.Box):
         group.append(community)
         return group
 
-    def _playlists(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _playlists(self, wallpaper: Wallpaper) -> Gtk.Widget:
         wrap = Adw.WrapBox(child_spacing=6, line_spacing=6)
         member = [p for p in self.state.playlists if wallpaper.id in p.entries and not p.automatic]
         for playlist in member:
@@ -542,7 +544,7 @@ class Inspector(Gtk.Box):
             return self._section("In playlists", box)
         return self._section("In playlists", wrap)
 
-    def _file(self, wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _file(self, wallpaper: Wallpaper) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
@@ -563,7 +565,7 @@ class Inspector(Gtk.Box):
         box.append(remove)
         return self._section("File", box)
 
-    def _confirm_remove(self, wallpaper: data.Wallpaper) -> None:
+    def _confirm_remove(self, wallpaper: Wallpaper) -> None:
         owned = wallpaper.source in ("Wallhaven", "MotionBGS")
         dialog = Adw.AlertDialog(
             heading=f"Remove “{wallpaper.name}”?",

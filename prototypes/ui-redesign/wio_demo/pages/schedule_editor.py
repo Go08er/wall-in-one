@@ -15,6 +15,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 from .. import art, data
+from ..catalog import DAYS, DAYS_LONG, MONTHS, MONTHS_LONG
+from ..models import Rule
 from . import schedule_model as model
 from .schedule_calendar import WeekPreview
 
@@ -49,7 +51,7 @@ def playlist_factory(size: int = 26) -> Gtk.SignalListItemFactory:
             image.set_from_icon_name(playlist.icon or "view-grid-symbolic")
             image.add_css_class("schedule-cover-icon")
         else:
-            image.set_from_paintable(art.mosaic(playlist.cover_keys, 64))
+            image.set_from_paintable(art.mosaic(data.cover_keys(playlist), 64))
             image.remove_css_class("schedule-cover-icon")
 
     factory.connect("setup", setup)
@@ -84,19 +86,19 @@ class RuleEditor(Adw.Dialog):
     def __init__(
         self,
         state,
-        rule: data.Rule | None,
+        rule: Rule | None,
         *,
         prefill: dict | None = None,
-        on_save: Callable[[data.Rule, data.Rule | None], None],
-        on_delete: Callable[[data.Rule], None],
+        on_save: Callable[[Rule, Rule | None], None],
+        on_delete: Callable[[Rule], None],
     ) -> None:
         super().__init__(content_width=500, content_height=760)
         self.state, self.original = state, rule
         self._on_save, self._on_delete = on_save, on_delete
         self._ready = False
-        base = rule or data.Rule("new", "cozy-rain")
+        base = rule or Rule("new", "cozy-rain")
         prefill = prefill or {}
-        self.draft = data.Rule(
+        self.draft = Rule(
             base.id,
             prefill.get("playlist", base.playlist),
             list(prefill.get("days", base.days)),
@@ -213,11 +215,11 @@ class RuleEditor(Adw.Dialog):
         chips = Gtk.Box(spacing=6, homogeneous=True)
         self._day_chips: list[Gtk.ToggleButton] = []
         active = set(self.draft.days) if self.draft.days else set(range(7))
-        for index, name in enumerate(data.DAYS):
+        for index, name in enumerate(DAYS):
             chip = Gtk.ToggleButton(label=name, active=index in active)
             chip.add_css_class("chip")
             chip.add_css_class("day-chip")
-            chip.set_tooltip_text(model.DAY_LONG[index])
+            chip.set_tooltip_text(DAYS_LONG[index])
             chip.connect("toggled", lambda *_: self._changed())
             chips.append(chip)
             self._day_chips.append(chip)
@@ -243,11 +245,11 @@ class RuleEditor(Adw.Dialog):
         group.add(self._all_year)
         grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True, margin_top=10)
         self._month_chips: list[Gtk.ToggleButton] = []
-        for index, name in enumerate(data.MONTHS):
+        for index, name in enumerate(MONTHS):
             chip = Gtk.ToggleButton(label=name, active=index in self.draft.months)
             chip.add_css_class("chip")
             chip.add_css_class("day-chip")
-            chip.set_tooltip_text(model.MONTH_LONG[index])
+            chip.set_tooltip_text(MONTHS_LONG[index])
             chip.connect("toggled", lambda *_: self._changed())
             grid.attach(chip, index % 6, index // 6, 1, 1)
             self._month_chips.append(chip)
@@ -309,7 +311,7 @@ class RuleEditor(Adw.Dialog):
         playlist = data.PLAYLIST_BY_ID.get(draft.playlist)
         self._name.set_label(model.playlist_name(draft.playlist))
         if playlist and not playlist.automatic:
-            self._cover.set_from_paintable(art.mosaic(playlist.cover_keys, 96))
+            self._cover.set_from_paintable(art.mosaic(data.cover_keys(playlist), 96))
         else:
             self._cover.set_from_icon_name("view-grid-symbolic")
         problem = "Pick at least one day" if self._no_days else ("Pick at least one month" if self._no_months else "")

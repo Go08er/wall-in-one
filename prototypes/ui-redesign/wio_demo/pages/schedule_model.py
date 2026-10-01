@@ -14,23 +14,10 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 
 from .. import art, data
+from ..catalog import DAYS, MONTHS, MONTHS_LONG
+from ..models import Playlist, Rule
 from ..state import rule_matches
 
-DAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-MONTH_LONG = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-]
 WEEKDAYS = [0, 1, 2, 3, 4]
 WEEKEND = [5, 6]
 DAY_MINUTES = 24 * 60
@@ -51,12 +38,12 @@ def hhmm(value: int) -> str:
     return f"{value // 60:02d}:{value % 60:02d}"
 
 
-def has_window(rule: data.Rule) -> bool:
+def has_window(rule: Rule) -> bool:
     """A real time window. start == end means "always", the same as all day."""
     return bool(rule.start and rule.end and rule.start != rule.end)
 
 
-def wraps(rule: data.Rule) -> bool:
+def wraps(rule: Rule) -> bool:
     return has_window(rule) and minutes(rule.start) > minutes(rule.end)
 
 
@@ -90,13 +77,13 @@ def days_text(days: list[int]) -> str:
     if not days or len(set(days)) == 7:
         return "Every day"
     if len(days) == 1:
-        return data.DAYS[days[0]]
+        return DAYS[days[0]]
     parts = []
     for run in _runs(days, 7):
         if len(run) >= 2 and not (len(run) == 2 and len(days) > 3):
-            parts.append(f"{data.DAYS[run[0]]}–{data.DAYS[run[-1]]}")
+            parts.append(f"{DAYS[run[0]]}–{DAYS[run[-1]]}")
         else:
-            parts.extend(data.DAYS[v] for v in run)
+            parts.extend(DAYS[v] for v in run)
     return ", ".join(parts)
 
 
@@ -104,17 +91,17 @@ def months_text(months: list[int]) -> str:
     if not months or len(set(months)) == 12:
         return "All year"
     if len(months) == 1:
-        return MONTH_LONG[months[0]]
+        return MONTHS_LONG[months[0]]
     parts = []
     for run in _runs(months, 12):
         if len(run) >= 3:
-            parts.append(f"{data.MONTHS[run[0]]}–{data.MONTHS[run[-1]]}")
+            parts.append(f"{MONTHS[run[0]]}–{MONTHS[run[-1]]}")
         else:
-            parts.extend(data.MONTHS[v] for v in run)
+            parts.extend(MONTHS[v] for v in run)
     return ", ".join(parts)
 
 
-def time_text(rule: data.Rule, overnight: bool = True) -> str:
+def time_text(rule: Rule, overnight: bool = True) -> str:
     if not has_window(rule):
         return "All day"
     text = f"{rule.start}–{rule.end}"
@@ -123,7 +110,7 @@ def time_text(rule: data.Rule, overnight: bool = True) -> str:
     return text
 
 
-def summary(rule: data.Rule, display: bool = True, overnight: bool = True) -> str:
+def summary(rule: Rule, display: bool = True, overnight: bool = True) -> str:
     """'Mon–Fri · 09:00–17:00 · HDMI-A-1', 'Every day · 18:00–07:00 (overnight)', 'All day · December'."""
     parts: list[str] = []
     if has_window(rule):
@@ -168,7 +155,7 @@ def _hue(hex_color: str) -> float:
     return colorsys.rgb_to_hls(r, g, b)[0]
 
 
-def _mood_hue(playlist: data.Playlist) -> float:
+def _mood_hue(playlist: Playlist) -> float:
     """Day playlists are colored by their land, night playlists by their sky."""
     if not playlist.entries:
         return 0.6
@@ -181,7 +168,7 @@ def _mood_hue(playlist: data.Playlist) -> float:
 _COLORS: dict[tuple[str, ...], dict[str, str]] = {}
 
 
-def playlist_colors(playlists: list[data.Playlist]) -> dict[str, str]:
+def playlist_colors(playlists: list[Playlist]) -> dict[str, str]:
     key = tuple(p.id for p in playlists)
     if key not in _COLORS:
         taken: dict[str, str] = {}
@@ -218,11 +205,11 @@ class Span:
     day: int  # column 0..6 (Mon..Sun)
     start: int  # minutes from midnight
     end: int  # exclusive, up to 1440
-    rule: data.Rule | None  # winner; None = the fallback playlist
-    losers: list[data.Rule] = field(default_factory=list)  # matching but overridden (low → high)
+    rule: Rule | None  # winner; None = the fallback playlist
+    losers: list[Rule] = field(default_factory=list)  # matching but overridden (low → high)
 
     @property
-    def top_loser(self) -> data.Rule | None:
+    def top_loser(self) -> Rule | None:
         return self.losers[-1] if self.losers else None
 
 
@@ -233,12 +220,12 @@ class DisplayException:
     day: int
     start: int
     end: int
-    rule: data.Rule
+    rule: Rule
     wins: bool
-    over: data.Rule | None = None  # what it replaces on that display
+    over: Rule | None = None  # what it replaces on that display
 
 
-def _breakpoints(rules: list[data.Rule]) -> list[int]:
+def _breakpoints(rules: list[Rule]) -> list[int]:
     points = {0, DAY_MINUTES}
     for rule in rules:
         if has_window(rule):
@@ -267,7 +254,7 @@ def _merge(spans: list[Span]) -> list[Span]:
     return merged
 
 
-def day_spans(rules: list[data.Rule], day: dt.date, column: int, display: str | None) -> list[Span]:
+def day_spans(rules: list[Rule], day: dt.date, column: int, display: str | None) -> list[Span]:
     """Pieces of one day; inside each piece no rule changes its answer."""
     points = _breakpoints(rules)
     spans = []
@@ -278,11 +265,11 @@ def day_spans(rules: list[data.Rule], day: dt.date, column: int, display: str | 
     return _merge(spans)
 
 
-def week_spans(rules: list[data.Rule], monday: dt.date, display: str | None) -> list[list[Span]]:
+def week_spans(rules: list[Rule], monday: dt.date, display: str | None) -> list[list[Span]]:
     return [day_spans(rules, monday + dt.timedelta(days=i), i, display) for i in range(7)]
 
 
-def week_exceptions(rules: list[data.Rule], monday: dt.date) -> list[DisplayException]:
+def week_exceptions(rules: list[Rule], monday: dt.date) -> list[DisplayException]:
     """Display-only rules, for the 'All displays' view."""
     found: list[DisplayException] = []
     targeted = [rule for rule in rules if rule.display and rule.enabled]
@@ -311,13 +298,13 @@ def week_exceptions(rules: list[data.Rule], monday: dt.date) -> list[DisplayExce
     return found
 
 
-def seasonal_off(rules: list[data.Rule], monday: dt.date) -> list[data.Rule]:
+def seasonal_off(rules: list[Rule], monday: dt.date) -> list[Rule]:
     """Enabled rules limited to months that this week doesn't touch."""
     months = {(monday + dt.timedelta(days=i)).month - 1 for i in range(7)}
     return [rule for rule in rules if rule.enabled and rule.months and not months & set(rule.months)]
 
 
-def next_week_for(rule: data.Rule, monday: dt.date) -> dt.date:
+def next_week_for(rule: Rule, monday: dt.date) -> dt.date:
     """Monday of the first week, from this one on, in which ``rule``'s months apply."""
     probe = monday
     for _ in range(60):
@@ -328,7 +315,7 @@ def next_week_for(rule: data.Rule, monday: dt.date) -> dt.date:
     return monday
 
 
-def never_wins(rules: list[data.Rule], rule: data.Rule, monday: dt.date, connectors: list[str]) -> bool:
+def never_wins(rules: list[Rule], rule: Rule, monday: dt.date, connectors: list[str]) -> bool:
     """True when the rule applies this week but higher rules cover every minute of it."""
     if not rule.enabled:
         return False
@@ -344,13 +331,13 @@ def never_wins(rules: list[data.Rule], rule: data.Rule, monday: dt.date, connect
     return applies
 
 
-def overlaps(rules: list[data.Rule], rule: data.Rule, monday: dt.date) -> tuple[list[str], list[str]]:
+def overlaps(rules: list[Rule], rule: Rule, monday: dt.date) -> tuple[list[str], list[str]]:
     """(playlists this rule overrides, playlists that override it) during a week it applies."""
     if rule.months and seasonal_off([rule], monday):
         monday = next_week_for(rule, monday)
     beats: list[str] = []
     beaten: list[str] = []
-    probe = data.Rule(rule.id, rule.playlist, rule.days, rule.start, rule.end, rule.months, rule.display, True)
+    probe = Rule(rule.id, rule.playlist, rule.days, rule.start, rule.end, rule.months, rule.display, True)
     listing = [probe if r is rule else r for r in rules]
     if rule not in rules:
         listing.append(probe)
@@ -370,9 +357,9 @@ def overlaps(rules: list[data.Rule], rule: data.Rule, monday: dt.date) -> tuple[
     return beats, beaten
 
 
-def coverage(rule: data.Rule) -> list[list[tuple[int, int]]]:
+def coverage(rule: Rule) -> list[list[tuple[int, int]]]:
     """Per weekday, the minutes this rule covers on its own (months and display ignored)."""
-    probe = data.Rule(rule.id, rule.playlist, rule.days, rule.start, rule.end, [], "", True)
+    probe = Rule(rule.id, rule.playlist, rule.days, rule.start, rule.end, [], "", True)
     monday = dt.date(2026, 9, 28)
     result = []
     for column in range(7):
@@ -386,7 +373,7 @@ def coverage(rule: data.Rule) -> list[list[tuple[int, int]]]:
 # ---------------------------------------------------------------------------
 
 
-def reason(rule: data.Rule, at: dt.datetime, display: str | None, winner: data.Rule | None) -> tuple[str, str]:
+def reason(rule: Rule, at: dt.datetime, display: str | None, winner: Rule | None) -> tuple[str, str]:
     """(short reason, kind) where kind is playing | overridden | idle | off."""
     if not rule.enabled:
         return "Off", "off"

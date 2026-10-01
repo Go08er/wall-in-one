@@ -16,6 +16,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .. import data, ui
+from ..models import StoreItem, Wallpaper
 from . import Page
 from . import store_catalog as catalog
 from .store_widgets import CSS, ColorDot, StoreCard, StorePreview, color_button
@@ -79,7 +80,7 @@ class StorePage(Page):
         self._quiet = False  # suppress refreshes while several options change at once
         self._instant = False  # screenshots: skip the pretend network delay
 
-        self._results: list[data.StoreItem] = []
+        self._results: list[StoreItem] = []
         self._shown = 0
         self._cards: dict[str, StoreCard] = {}
         self._progress: dict[str, float] = {}
@@ -409,7 +410,7 @@ class StorePage(Page):
         self._quiet = False
         self._refresh(instant=True)
 
-    def _show_demo_item(self, item_id: str) -> data.StoreItem:
+    def _show_demo_item(self, item_id: str) -> StoreItem:
         item = catalog.by_id(item_id) or self._results[0]
         if item.provider != self._provider:
             self._providers.set_active_name(item.provider)
@@ -463,7 +464,7 @@ class StorePage(Page):
         radio("genre", "all", lambda v: self._changed("_genre", v))
         radio("quality", "any", lambda v: self._changed("_quality", v))
 
-        def find(item_id: str) -> data.StoreItem:
+        def find(item_id: str) -> StoreItem:
             return catalog.by_id(item_id)
 
         simple("preview", lambda v: self.preview(find(v)))
@@ -1004,20 +1005,20 @@ class StorePage(Page):
         self._instant = instant
 
     # -- controller API used by cards and the preview dialog ----------------------------------------
-    def progress_of(self, item: data.StoreItem) -> float | None:
+    def progress_of(self, item: StoreItem) -> float | None:
         return self._progress.get(item.id)
 
-    def quality_of(self, item: data.StoreItem) -> str | None:
+    def quality_of(self, item: StoreItem) -> str | None:
         """The MotionBGS quality being downloaded (None = the best available)."""
         return self._qualities.get(item.id)
 
-    def open_item(self, item: data.StoreItem) -> None:
+    def open_item(self, item: StoreItem) -> None:
         if self._select_mode:
             self._toggle_pick(item)
         else:
             self.preview(item)
 
-    def preview(self, item: data.StoreItem) -> None:
+    def preview(self, item: StoreItem) -> None:
         items = self._results[: self._shown] if any(i.id == item.id for i in self._results) else [item]
         if self._dialog:
             self._dialog.show_item(item)
@@ -1029,9 +1030,7 @@ class StorePage(Page):
         if self._dialog is dialog:
             self._dialog = None
 
-    def download(
-        self, item: data.StoreItem, apply: bool = False, quality: str | None = None, batch: bool = False
-    ) -> None:
+    def download(self, item: StoreItem, apply: bool = False, quality: str | None = None, batch: bool = False) -> None:
         if item.in_library:
             if apply:
                 self.apply_item(item)
@@ -1047,7 +1046,7 @@ class StorePage(Page):
         self._timers[item.id] = GLib.timeout_add(40, self._tick, item)
         self._update_item(item)
 
-    def _tick(self, item: data.StoreItem) -> bool:
+    def _tick(self, item: StoreItem) -> bool:
         # ~1.7–2.4 s, a little uneven like a real transfer.
         step = 0.016 + (item.seed % 5) * 0.0015 + (0.006 if int(self._progress[item.id] * 40) % 3 else 0)
         self._progress[item.id] = min(1.0, self._progress[item.id] + step)
@@ -1058,7 +1057,7 @@ class StorePage(Page):
         self._update_item(item)
         return True
 
-    def _finish(self, item: data.StoreItem) -> None:
+    def _finish(self, item: StoreItem) -> None:
         self._progress.pop(item.id, None)
         item.in_library = True
         wid = self._ensure_wallpaper(item, fresh=True)
@@ -1076,7 +1075,7 @@ class StorePage(Page):
         else:
             self._toast_with_action(f"“{item.title}” saved to Library", "Apply", lambda: self.apply_item(item))
 
-    def cancel(self, item: data.StoreItem | None) -> None:
+    def cancel(self, item: StoreItem | None) -> None:
         if item is None:
             return
         timer = self._timers.pop(item.id, None)
@@ -1087,16 +1086,16 @@ class StorePage(Page):
         self._batch.discard(item.id)
         self._update_item(item)
 
-    def apply_item(self, item: data.StoreItem) -> None:
+    def apply_item(self, item: StoreItem) -> None:
         if not item.in_library:
             self.download(item, apply=True)
             return
         self.state.apply(self._ensure_wallpaper(item, fresh=False), self.state.scope)
 
-    def show_in_library(self, item: data.StoreItem) -> None:
+    def show_in_library(self, item: StoreItem) -> None:
         self.state.navigate(f"library:{self._ensure_wallpaper(item, fresh=False)}")
 
-    def open_site(self, item: data.StoreItem) -> None:
+    def open_site(self, item: StoreItem) -> None:
         self.state.toast(f"Would open {catalog.url(item)} in your browser")
 
     def search_for(self, text: str) -> None:
@@ -1104,7 +1103,7 @@ class StorePage(Page):
             self._dialog.close()
         self._set_query(text)
 
-    def more_like(self, item: data.StoreItem) -> None:
+    def more_like(self, item: StoreItem) -> None:
         if item.provider != self._provider:
             self._providers.set_active_name(item.provider)
         if item.provider == "Wallhaven":
@@ -1143,7 +1142,7 @@ class StorePage(Page):
         popover.popup()
 
     # -- helpers ------------------------------------------------------------------------------------
-    def _update_item(self, item: data.StoreItem) -> None:
+    def _update_item(self, item: StoreItem) -> None:
         card = self._cards.get(item.id)
         if card:
             card.update()
@@ -1152,7 +1151,7 @@ class StorePage(Page):
         if self._select_mode:
             self._update_selection_bar()
 
-    def _ensure_wallpaper(self, item: data.StoreItem, fresh: bool) -> str:
+    def _ensure_wallpaper(self, item: StoreItem, fresh: bool) -> str:
         """The Library entry for a downloaded Store item (created on first use)."""
         wid = f"store-{item.id}"
         if wid in data.BY_ID:
@@ -1160,7 +1159,7 @@ class StorePage(Page):
         moving = item.provider == "MotionBGS"
         quality = self._qualities.get(item.id)
         width, height = (1920, 1080) if moving and quality == "hd" else catalog.size(item)
-        wallpaper = data.Wallpaper(
+        wallpaper = Wallpaper(
             id=wid,
             name=item.title,
             kind="video" if moving else "still",
@@ -1217,7 +1216,7 @@ class StorePage(Page):
                 card.set_checked(True)
         self._update_selection_bar()
 
-    def _toggle_pick(self, item: data.StoreItem) -> None:
+    def _toggle_pick(self, item: StoreItem) -> None:
         if item.in_library or item.id in self._progress:
             return
         if item.id in self._picked:

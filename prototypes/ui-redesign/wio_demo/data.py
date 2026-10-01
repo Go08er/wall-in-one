@@ -9,57 +9,13 @@ displays may share one rotation or run their own.
 from __future__ import annotations
 
 import colorsys
-from dataclasses import dataclass, field
 
 from . import art
+from .models import Display, Playlist, Rule, StoreItem, Wallpaper
 
 # ---------------------------------------------------------------------------
 # Wallpapers
 # ---------------------------------------------------------------------------
-
-KIND_LABEL = {"still": "Image", "video": "Video", "scene": "Scene"}
-KIND_ICON = {
-    "still": "image-x-generic-symbolic",
-    "video": "video-x-generic-symbolic",
-    "scene": "applications-games-symbolic",
-}
-
-
-@dataclass
-class Wallpaper:
-    id: str
-    name: str
-    kind: str  # still | video | scene
-    style: str
-    seed: int
-    night: bool
-    source: str  # Local | Wallhaven | MotionBGS | Workshop
-    folder: str
-    resolution: str
-    size: str
-    added: str
-    duration: str = ""
-    favorite: bool = False
-    # Color policy: "adaptive" (generated from the still), "palette" (a named
-    # Noctalia palette) or "keep" (leave the desktop colors alone).
-    color_mode: str = "adaptive"
-    scheme: str | None = None  # None = app default
-    palette: str | None = None
-    theme_mode: str = "auto"  # auto | dark | light | keep
-    still_note: str = ""
-    problem: str = ""  # a renderer failure the runtime reported, if any
-    tags: tuple[str, ...] = ()
-
-    @property
-    def key(self) -> tuple[str, int, bool]:
-        return (self.style, self.seed, self.night)
-
-    def thumb(self, width: int = 480, height: int = 270):
-        return art.texture(self.style, self.seed, self.night, width, height)
-
-    @property
-    def is_moving(self) -> bool:
-        return self.kind != "still"
 
 
 def _w(id_, name, kind, style, seed, night, source="Local", **kw) -> Wallpaper:
@@ -352,38 +308,17 @@ def wallpaper_swatches(wallpaper: Wallpaper, dark: bool = True) -> list[str]:
 # Playlists
 # ---------------------------------------------------------------------------
 
-INTERVALS = [
-    (0, "Don't change"),
-    (5, "Every 5 minutes"),
-    (15, "Every 15 minutes"),
-    (30, "Every 30 minutes"),
-    (60, "Every hour"),
-    (120, "Every 2 hours"),
-    (360, "Every 6 hours"),
-    (1440, "Once a day"),
-]
 
-
-@dataclass
-class Playlist:
-    id: str
-    name: str
-    entries: list[str]
-    interval: int = 30
-    shuffle: bool = False
-    automatic: str = ""  # "" for user playlists; otherwise why it is automatic
-    icon: str = ""
-
-    @property
-    def cover_keys(self) -> tuple[tuple[str, int, bool], ...]:
-        seen: list[tuple[str, int, bool]] = []
-        for entry in self.entries:
-            key = BY_ID[entry].key
-            if key not in seen:
-                seen.append(key)
-            if len(seen) == 4:
-                break
-        return tuple(seen)
+def cover_keys(playlist: Playlist) -> tuple[tuple[str, int, bool], ...]:
+    """The pictures of a playlist's cover: its first four different wallpapers."""
+    seen: list[tuple[str, int, bool]] = []
+    for entry in playlist.entries:
+        key = BY_ID[entry].key
+        if key not in seen:
+            seen.append(key)
+        if len(seen) == 4:
+            break
+    return tuple(seen)
 
 
 PLAYLISTS: list[Playlist] = [
@@ -434,22 +369,6 @@ PLAYLIST_BY_ID = {playlist.id: playlist for playlist in PLAYLISTS}
 # Schedule
 # ---------------------------------------------------------------------------
 
-DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-
-@dataclass
-class Rule:
-    id: str
-    playlist: str
-    days: list[int] = field(default_factory=list)  # empty = every day
-    start: str | None = None  # None/None = all day
-    end: str | None = None
-    months: list[int] = field(default_factory=list)  # empty = every month
-    display: str = ""  # "" = all displays
-    enabled: bool = True
-
-
 # Order matters: a later rule wins where rules overlap (the real semantics).
 RULES: list[Rule] = [
     Rule("daytime", "frog-day", start="07:00", end="18:00"),
@@ -468,19 +387,6 @@ FALLBACK_PLAYLIST = "all-media"
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class Display:
-    connector: str
-    model: str
-    mode: str
-    scale: float
-    x: int
-    y: int
-    width: int  # logical
-    height: int
-    primary: bool = False
-
-
 DISPLAYS: list[Display] = [
     Display("DP-1", "Dell U2723QE", "3840 × 2160 @ 60 Hz", 1.5, 0, 0, 2560, 1440, primary=True),
     Display("HDMI-A-1", "LG 24GL600F", "1920 × 1080 @ 144 Hz", 1.0, 2560, 200, 1920, 1080),
@@ -489,20 +395,6 @@ DISPLAYS: list[Display] = [
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class StoreItem:
-    id: str
-    title: str
-    provider: str
-    style: str
-    seed: int
-    night: bool
-    resolution: str
-    detail: str
-    tags: tuple[str, ...]
-    in_library: bool = False
 
 
 def _store(provider: str, count: int, start: int) -> list[StoreItem]:

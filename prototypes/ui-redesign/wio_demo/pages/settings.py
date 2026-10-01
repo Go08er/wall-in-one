@@ -21,6 +21,7 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 
 from .. import data, ui
+from ..catalog import INTERVALS
 from . import Page
 from .settings_palettes import PalettesDialog, PaletteStore
 from .settings_widgets import LogView, SchemeDialog
@@ -80,7 +81,7 @@ ALIASES = {
     "scheme": "colors.scheme",
 }
 
-INTERVAL_LABELS = [label for _minutes, label in data.INTERVALS]
+INTERVAL_LABELS = [label for _minutes, label in INTERVALS]
 COVERED = [("pause", "Pause"), ("stop", "Stop and free memory"), ("play", "Keep playing")]
 DECODING = [("auto", "Auto"), ("off", "Off (software)")]
 SMOOTHING = [("off", "Off"), ("oversample", "Oversample"), ("linear", "Linear (may ghost)")]
@@ -634,7 +635,7 @@ class SettingsPage(Page):
     def _build_playback(self) -> None:
         section = self._section("playback")
         group = self._group(section, "Playback & power", keywords="playback power play")
-        minutes = [m for m, _label in data.INTERVALS]
+        minutes = [m for m, _label in INTERVALS]
         self._interval = Adw.ComboRow(title="Change wallpaper", subtitle="Default for new playlists")
         self._interval.set_model(Gtk.StringList.new(INTERVAL_LABELS))
         self._interval.connect("notify::selected", lambda r, _p: self._set_interval(minutes[r.get_selected()]))
@@ -1519,7 +1520,7 @@ class SettingsPage(Page):
         """Reflect shared state in the widgets without feeding changes back."""
         self._syncing = True
         state = self.state
-        minutes = [m for m, _label in data.INTERVALS]
+        minutes = [m for m, _label in INTERVALS]
         if state.default_interval in minutes:
             self._interval.set_selected(minutes.index(state.default_interval))
         self._battery.set_active(state.stop_on_battery)

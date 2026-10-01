@@ -17,7 +17,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk
 
-from .. import art, data, ui
+from .. import art, ui
+from ..models import StoreItem
 from . import store_catalog as catalog
 
 CSS = """
@@ -92,7 +93,7 @@ def owned_pill() -> Gtk.Widget:
     return badge
 
 
-def detail_text(item: data.StoreItem) -> tuple[str, str, str]:
+def detail_text(item: StoreItem) -> tuple[str, str, str]:
     """(icon, text, tooltip) for the dim line under a card."""
     if item.provider == "MotionBGS":
         return ("media-playlist-repeat-symbolic", catalog.duration(item), f"A {catalog.duration(item)} loop")
@@ -143,7 +144,7 @@ class StoreCard(Gtk.Box):
     covers the picture.
     """
 
-    def __init__(self, item: data.StoreItem, controller, width: int = 220) -> None:
+    def __init__(self, item: StoreItem, controller, width: int = 220) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.item = item
         self._controller = controller
@@ -340,7 +341,7 @@ class StorePreview(Adw.Dialog):
     Left/Right step through the results without closing the dialog.
     """
 
-    def __init__(self, controller, items: list[data.StoreItem], item: data.StoreItem) -> None:
+    def __init__(self, controller, items: list[StoreItem], item: StoreItem) -> None:
         super().__init__(content_width=800, width_request=360, height_request=320)
         self._controller = controller
         self._items = items
@@ -429,7 +430,7 @@ class StorePreview(Adw.Dialog):
         self._site_content.set_label("" if narrow else f"Open on {catalog.PROVIDERS[self.item.provider].site}")
 
     # -- content ------------------------------------------------------------------
-    def show_item(self, item: data.StoreItem) -> None:
+    def show_item(self, item: StoreItem) -> None:
         self._stop_motion()
         self.item = item
         self._quality = "4k" if catalog.has_4k(item) else "hd"
@@ -471,7 +472,7 @@ class StorePreview(Adw.Dialog):
         self._mode = None  # new badge and button boxes: build them from scratch
         self.refresh()
 
-    def _picture(self, item: data.StoreItem) -> Gtk.Widget:
+    def _picture(self, item: StoreItem) -> Gtk.Widget:
         overlay = Gtk.Overlay()
         # Nominal 320 × 180 (the narrowest it gets); fill=True scales it up to the space given.
         overlay.set_child(
@@ -521,7 +522,7 @@ class StorePreview(Adw.Dialog):
         if not keep_bar:
             self._motion_fraction = 0.0
 
-    def _tags(self, item: data.StoreItem) -> Gtk.Widget:
+    def _tags(self, item: StoreItem) -> Gtk.Widget:
         wrap = Adw.WrapBox(child_spacing=6, line_spacing=6)
         for tag in catalog.tags(item):
             button = Gtk.Button(label=tag)
@@ -539,7 +540,7 @@ class StorePreview(Adw.Dialog):
         wrap.append(more)
         return wrap
 
-    def _colors(self, item: data.StoreItem) -> Gtk.Widget:
+    def _colors(self, item: StoreItem) -> Gtk.Widget:
         row = Gtk.Box(spacing=8)
         for color in catalog.colors(item):
             nearest = catalog.nearest_palette_color(color)
@@ -548,7 +549,7 @@ class StorePreview(Adw.Dialog):
             row.append(button)
         return row
 
-    def _qualities(self, item: data.StoreItem) -> Gtk.Widget:
+    def _qualities(self, item: StoreItem) -> Gtk.Widget:
         if not catalog.has_4k(item):
             return ui.dim(f"HD only · {catalog.megabytes(item, 'hd'):.0f} MB", wrap=False)
         group = Adw.ToggleGroup(halign=Gtk.Align.START)
@@ -561,7 +562,7 @@ class StorePreview(Adw.Dialog):
         group.connect("notify::active-name", lambda g, _p: setattr(self, "_quality", g.get_active_name()))
         return group
 
-    def _facts(self, item: data.StoreItem) -> Gtk.Widget:
+    def _facts(self, item: StoreItem) -> Gtk.Widget:
         if item.provider == "Wallhaven":
             facts = [
                 ("Resolution", f"{item.resolution} · {catalog.ratio(item)}"),

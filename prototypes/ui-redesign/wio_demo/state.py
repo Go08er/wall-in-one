@@ -17,12 +17,13 @@ from typing import ClassVar
 from gi.repository import GObject
 
 from . import data
+from .models import Playlist, Rule, Wallpaper
 
 
 @dataclass
 class Resolution:
     playlist: str
-    rule: data.Rule | None  # None = fallback
+    rule: Rule | None  # None = fallback
     until: str  # human "18:00" or ""
     next_playlist: str
     next_at: str
@@ -33,7 +34,7 @@ def _minutes(text: str) -> int:
     return int(hours) * 60 + int(minutes)
 
 
-def rule_matches(rule: data.Rule, at: dt.datetime, display: str | None) -> bool:
+def rule_matches(rule: Rule, at: dt.datetime, display: str | None) -> bool:
     """Same semantics as the Rust runtime: end exclusive, wraps midnight, the
     after-midnight tail belongs to the day the window started."""
     if not rule.enabled:
@@ -61,7 +62,7 @@ def rule_matches(rule: data.Rule, at: dt.datetime, display: str | None) -> bool:
     return not rule.days or calendar.weekday() in rule.days
 
 
-def resolve(rules: list[data.Rule], at: dt.datetime, display: str | None = None) -> data.Rule | None:
+def resolve(rules: list[Rule], at: dt.datetime, display: str | None = None) -> Rule | None:
     chosen = None
     for rule in rules:
         if rule_matches(rule, at, display):
@@ -168,7 +169,7 @@ class AppState(GObject.Object):
         chosen = self.color_display
         return chosen if self.display_mode == "independent" and chosen in self.current else lead
 
-    def color_wallpaper(self) -> data.Wallpaper:
+    def color_wallpaper(self) -> Wallpaper:
         return self.wallpaper(self.current[self.color_connector()])
 
     def palette_override(self):
@@ -224,7 +225,7 @@ class AppState(GObject.Object):
         source = self._desktop_source
         if source is None:
             return []
-        if isinstance(source, data.Wallpaper):
+        if isinstance(source, Wallpaper):
             return data.wallpaper_swatches(source, self.dark)
         return source.strip(self.dark)
 
@@ -242,10 +243,10 @@ class AppState(GObject.Object):
     def navigate(self, page: str) -> None:
         self.emit("navigate", page)
 
-    def wallpaper(self, wid: str) -> data.Wallpaper:
+    def wallpaper(self, wid: str) -> Wallpaper:
         return data.BY_ID[wid]
 
-    def playlist(self, pid: str) -> data.Playlist:
+    def playlist(self, pid: str) -> Playlist:
         return data.PLAYLIST_BY_ID[pid]
 
     def connectors(self) -> list[str]:
@@ -372,7 +373,7 @@ class AppState(GObject.Object):
         playlist_id = self.effective_playlist(connector)
         return playlist_id in data.PLAYLIST_BY_ID and self.playlist(playlist_id).shuffle
 
-    def remove_wallpapers(self, chosen: list[data.Wallpaper]) -> Callable[[], None]:
+    def remove_wallpapers(self, chosen: list[Wallpaper]) -> Callable[[], None]:
         """Take wallpapers out of the library; returns an undo that puts them back in place."""
         library = self.wallpapers
         spots = [(library.index(w), w) for w in chosen if w in library]

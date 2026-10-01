@@ -10,7 +10,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
-from . import art, glass
+from . import art, data, glass
+from .models import Playlist
 from .pages import Page, Placeholder
 from .playerbar import PlayerBar
 
@@ -180,7 +181,7 @@ class MainWindow(Adw.ApplicationWindow):
                     lists,
                     f"playlist:{playlist.id}",
                     playlist.name,
-                    paintable=art.mosaic(playlist.cover_keys, 64),
+                    paintable=art.mosaic(data.cover_keys(playlist), 64),
                     count=str(len(playlist.entries)),
                 )
         add(lists, "new-playlist", "New playlist", "list-add-symbolic")
@@ -307,11 +308,9 @@ class MainWindow(Adw.ApplicationWindow):
             if response != "create":
                 self._build_sidebar(self._current.name if self._current else None)
                 return
-            from . import data
-
             name = entry.get_text().strip() or "Untitled playlist"
             pid = name.lower().replace(" ", "-")
-            playlist = data.Playlist(pid, name, [])
+            playlist = Playlist(pid, name, [])
             self.state.playlists.insert(len([p for p in self.state.playlists if not p.automatic]), playlist)
             data.PLAYLIST_BY_ID[pid] = playlist
             self._build_sidebar()
@@ -322,8 +321,6 @@ class MainWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _welcome(self) -> Gtk.Widget:
-        from . import data
-
         status = Adw.StatusPage(
             paintable=art.mosaic(
                 tuple(data.BY_ID[w].key for w in ("alpine", "lily-pond", "northern-lights", "golden-coast")), 160

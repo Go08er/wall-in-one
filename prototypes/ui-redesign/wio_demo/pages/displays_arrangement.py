@@ -19,7 +19,8 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, Graphene, Gsk, Gtk
 
-from .. import data, ui
+from .. import ui
+from ..models import Display
 
 CSS = """
 .arrangement {
@@ -120,7 +121,7 @@ class TileInfo:
 
 
 class MonitorTile(Gtk.ToggleButton):
-    def __init__(self, display: data.Display, number: int) -> None:
+    def __init__(self, display: Display, number: int) -> None:
         super().__init__()
         self.display = display
         self.add_css_class("monitor-tile")
@@ -215,13 +216,13 @@ class Arrangement(Gtk.Widget):
         self._on_select = on_select
         self._on_menu = on_menu
         self.tiles: dict[str, MonitorTile] = {}
-        self._displays: list[data.Display] = []
+        self._displays: list[Display] = []
         self._links: list[tuple[Gtk.Widget, float, float]] = []
         self._linked = False
         self._selecting = False
 
     # -- content -------------------------------------------------------------------
-    def set_displays(self, displays: list[data.Display]) -> None:
+    def set_displays(self, displays: list[Display]) -> None:
         for tile in self.tiles.values():
             tile.unparent()
         self.tiles = {}
@@ -354,7 +355,7 @@ class Arrangement(Gtk.Widget):
         Gtk.Widget.do_dispose(self)
 
 
-def _junctions(displays: list[data.Display]) -> list[tuple[float, float]]:
+def _junctions(displays: list[Display]) -> list[tuple[float, float]]:
     """Midpoints of the shared edges between touching monitors (logical px).
     Two monitors that don't touch get a badge halfway between their centers."""
     points: list[tuple[float, float]] = []

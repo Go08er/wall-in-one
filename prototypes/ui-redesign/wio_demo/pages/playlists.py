@@ -17,23 +17,10 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango
 
 from .. import art, data, reorder, ui
+from ..catalog import DAYS, INTERVALS, KIND_LABEL, MONTHS, MONTHS_LONG
+from ..models import Playlist, Rule, Wallpaper
 from . import Page
 from .playlists_picker import PICKER_CSS, CardGrid, PlaylistPicker
-
-MONTHS_LONG = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-]
 
 CSS = """
 .pl-cover { border-radius: 16px; box-shadow: 0 1px 3px alpha(black, 0.20), 0 8px 20px alpha(black, 0.16); }
@@ -100,8 +87,8 @@ def _days_text(days: list[int]) -> str:
     if days == [5, 6]:
         return "Weekends"
     if len(days) >= 3 and days == list(range(days[0], days[-1] + 1)):
-        return f"{data.DAYS[days[0]]}–{data.DAYS[days[-1]]}"
-    return ", ".join(data.DAYS[day] for day in days)
+        return f"{DAYS[days[0]]}–{DAYS[days[-1]]}"
+    return ", ".join(DAYS[day] for day in days)
 
 
 def _months_text(months: list[int]) -> str:
@@ -109,11 +96,11 @@ def _months_text(months: list[int]) -> str:
     if len(months) == 1:
         return MONTHS_LONG[months[0]]
     if months == list(range(months[0], months[-1] + 1)):
-        return f"{data.MONTHS[months[0]]}–{data.MONTHS[months[-1]]}"
-    return ", ".join(data.MONTHS[month] for month in months)
+        return f"{MONTHS[months[0]]}–{MONTHS[months[-1]]}"
+    return ", ".join(MONTHS[month] for month in months)
 
 
-def describe_rule(rule: data.Rule) -> str:
+def describe_rule(rule: Rule) -> str:
     """“Every day 07:00–18:00”, “Weekends 09:00–19:00”, “All of December”."""
     timed = bool(rule.start and rule.end and rule.start != rule.end)
     if timed:
@@ -131,7 +118,7 @@ def describe_rule(rule: data.Rule) -> str:
     return text
 
 
-def summary(playlist: data.Playlist) -> str:
+def summary(playlist: Playlist) -> str:
     """The hero's subtitle: just the count; the Playback card beside it says how it changes."""
     count = len(playlist.entries)
     return "No wallpapers yet" if not count else "1 wallpaper" if count == 1 else f"{count} wallpapers"
@@ -184,7 +171,7 @@ class EntryRow(Adw.ActionRow):
         self.menu_button: Gtk.MenuButton | None = None
         self.check: Gtk.CheckButton | None = None
         self.set_title(wallpaper.name)
-        bits = [data.KIND_LABEL[wallpaper.kind]]
+        bits = [KIND_LABEL[wallpaper.kind]]
         if wallpaper.duration:
             bits.append(wallpaper.duration)
         if repeats:
@@ -482,7 +469,7 @@ class PlaylistPage(Page):
             GLib.idle_add(lambda: (adjustment.set_value(0), False)[1])
 
     @property
-    def playlist(self) -> data.Playlist:
+    def playlist(self) -> Playlist:
         return data.PLAYLIST_BY_ID[self._pid]
 
     def _alive(self) -> bool:
@@ -546,7 +533,7 @@ class PlaylistPage(Page):
         settings.append(label)
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
-        self._interval = Adw.ComboRow(title="Change", model=Gtk.StringList.new([text for _, text in data.INTERVALS]))
+        self._interval = Adw.ComboRow(title="Change", model=Gtk.StringList.new([text for _, text in INTERVALS]))
         self._interval.set_tooltip_text("How often the next wallpaper comes on")
         self._interval.connect("notify::selected", self._on_interval)
         group.append(self._interval)
@@ -699,7 +686,7 @@ class PlaylistPage(Page):
         self.set_title(playlist.name, "Automatic playlist" if automatic else "Playlist")
         size = 96 if self._narrow else 128
         if playlist.entries:
-            cover = ui.Thumb(art.mosaic(playlist.cover_keys, 256), size, size, radius=16)
+            cover = ui.Thumb(art.mosaic(data.cover_keys(playlist), 256), size, size, radius=16)
             cover.add_css_class("pl-cover")
         else:
             cover = Gtk.Image.new_from_icon_name("view-list-symbolic")
@@ -717,7 +704,7 @@ class PlaylistPage(Page):
         self._summary.set_label(summary(playlist))
 
         self._building = True
-        values = [minutes for minutes, _ in data.INTERVALS]
+        values = [minutes for minutes, _ in INTERVALS]
         index = values.index(playlist.interval) if playlist.interval in values else values.index(30)
         if self._interval.get_selected() != index:
             self._interval.set_selected(index)
@@ -991,7 +978,7 @@ class PlaylistPage(Page):
     def _on_interval(self, row: Adw.ComboRow, _param) -> None:
         if self._building or not self._alive():
             return
-        self.playlist.interval = data.INTERVALS[row.get_selected()][0]
+        self.playlist.interval = INTERVALS[row.get_selected()][0]
         self._summary.set_label(summary(self.playlist))
         self.state.emit_changed("playlists", "playback")
 
@@ -1065,7 +1052,7 @@ class PlaylistPage(Page):
         pid, number = f"{source.id}-copy", 2
         while pid in data.PLAYLIST_BY_ID:
             pid, number = f"{source.id}-copy-{number}", number + 1
-        copy = data.Playlist(pid, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
+        copy = Playlist(pid, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
         user_count = len([p for p in playlists if not p.automatic])
         position = playlists.index(source) + 1 if not source.automatic else user_count
         playlists.insert(position, copy)
@@ -1321,7 +1308,7 @@ class PlaylistPage(Page):
         self._end_drop_feedback()
 
     @staticmethod
-    def _drag_card(wallpaper: data.Wallpaper) -> Gtk.Widget:
+    def _drag_card(wallpaper: Wallpaper) -> Gtk.Widget:
         card = Gtk.Box(spacing=10)
         card.add_css_class("pl-drag-icon")
         card.append(ui.thumbnail(wallpaper, 64, 36, 6))
@@ -1472,7 +1459,7 @@ class PlaylistPage(Page):
     def _demo_empty(self, name: str) -> None:
         pid = name.lower().replace(" ", "-")
         if pid not in data.PLAYLIST_BY_ID:
-            playlist = data.Playlist(pid, name, [])
+            playlist = Playlist(pid, name, [])
             self.state.playlists.insert(len([p for p in self.state.playlists if not p.automatic]), playlist)
             data.PLAYLIST_BY_ID[pid] = playlist
             self.state.emit_changed("playlists")

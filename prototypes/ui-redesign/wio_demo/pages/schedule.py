@@ -21,6 +21,8 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gtk
 
 from .. import art, data, reorder, ui
+from ..catalog import DAYS_LONG, MONTHS
+from ..models import Rule
 from . import Page
 from . import schedule_model as model
 from .schedule_calendar import WeekCalendar
@@ -109,8 +111,8 @@ class Hatch(Gtk.DrawingArea):
         cr.stroke()
 
 
-def _copy(rule: data.Rule) -> data.Rule:
-    return data.Rule(
+def _copy(rule: Rule) -> Rule:
+    return Rule(
         rule.id, rule.playlist, list(rule.days), rule.start, rule.end, list(rule.months), rule.display, rule.enabled
     )
 
@@ -126,7 +128,7 @@ def cover(pid: str, size: int) -> Gtk.Widget:
     image.add_css_class("schedule-cover")
     image.set_valign(Gtk.Align.CENTER)
     if playlist and not playlist.automatic:
-        image.set_from_paintable(art.mosaic(playlist.cover_keys, 96))
+        image.set_from_paintable(art.mosaic(data.cover_keys(playlist), 96))
     else:
         image.set_from_icon_name(playlist.icon if playlist and playlist.icon else "view-grid-symbolic")
         image.add_css_class("schedule-cover-icon")
@@ -493,9 +495,9 @@ class SchedulePage(Page):
         monday = self._monday()
         end = monday + dt.timedelta(days=6)
         span_text = (
-            f"{monday.day} {data.MONTHS[monday.month - 1]} – {end.day} {data.MONTHS[end.month - 1]}"
+            f"{monday.day} {MONTHS[monday.month - 1]} – {end.day} {MONTHS[end.month - 1]}"
             if monday.month != end.month
-            else f"{monday.day}–{end.day} {data.MONTHS[end.month - 1]}"
+            else f"{monday.day}–{end.day} {MONTHS[end.month - 1]}"
         )
         if self._week == 0:
             self._title.set_subtitle(f"This week · {span_text}")
@@ -732,7 +734,7 @@ class SchedulePage(Page):
         title = Gtk.Label(label=heading, xalign=0, wrap=True)
         title.add_css_class("title-4")
         content.append(title)
-        content.append(ui.dim(f"{model.DAY_LONG[at.weekday()]} {at.strftime('%H:%M')} · top rule wins", wrap=False))
+        content.append(ui.dim(f"{DAYS_LONG[at.weekday()]} {at.strftime('%H:%M')} · top rule wins", wrap=False))
         in_play: set[str] = set()
         for connectors, kind, payload, _pid in groups:
             if len(groups) > 1:
@@ -796,7 +798,7 @@ class SchedulePage(Page):
         row.set_child(inner)
         return row
 
-    def _why_row(self, rule: data.Rule, reason: str, kind: str, compact: bool = False) -> Gtk.ListBoxRow:
+    def _why_row(self, rule: Rule, reason: str, kind: str, compact: bool = False) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow(activatable=True)
         row.rule = rule
         row.set_tooltip_text("Edit this rule")
@@ -857,7 +859,7 @@ class SchedulePage(Page):
         if focused:
             GLib.idle_add(self._focus_rule, focused[0], focused[1])
 
-    def _focused_rule(self) -> tuple[data.Rule, bool] | None:
+    def _focused_rule(self) -> tuple[Rule, bool] | None:
         """The rule whose row (or its switch) has keyboard focus, to restore after a rebuild."""
         root = self.widget.get_root()
         widget = root.get_focus() if root else None
@@ -868,7 +870,7 @@ class SchedulePage(Page):
             widget = widget.get_parent()
         return None
 
-    def _rule_row(self, rule: data.Rule, seasonal: bool, monday: dt.date) -> Gtk.ListBoxRow:
+    def _rule_row(self, rule: Rule, seasonal: bool, monday: dt.date) -> Gtk.ListBoxRow:
         state = self.state
         row = Gtk.ListBoxRow(activatable=True)
         row.rule = rule
@@ -961,7 +963,7 @@ class SchedulePage(Page):
         row.add_controller(keys)
         return row
 
-    def _row_key(self, _ctrl, keyval: int, _code: int, modifiers: Gdk.ModifierType, rule: data.Rule) -> bool:
+    def _row_key(self, _ctrl, keyval: int, _code: int, modifiers: Gdk.ModifierType, rule: Rule) -> bool:
         if modifiers & Gdk.ModifierType.CONTROL_MASK and keyval in (Gdk.KEY_Up, Gdk.KEY_Down):
             self.move_rule(rule, 1 if keyval == Gdk.KEY_Up else -1)
             GLib.idle_add(self._focus_rule, rule, False)
@@ -971,7 +973,7 @@ class SchedulePage(Page):
             return True
         return False
 
-    def _focus_rule(self, rule: data.Rule, on_switch: bool = False) -> bool:
+    def _focus_rule(self, rule: Rule, on_switch: bool = False) -> bool:
         for row in self._rule_rows:
             if row.rule is rule:
                 (row.switch if on_switch else row).grab_focus()
@@ -981,7 +983,7 @@ class SchedulePage(Page):
     def _install_actions(self) -> None:
         group = Gio.SimpleActionGroup()
 
-        def find(rule_id: str) -> data.Rule | None:
+        def find(rule_id: str) -> Rule | None:
             return next((r for r in self.state.rules if r.id == rule_id), None)
 
         def add(name: str, callback) -> None:
@@ -1018,7 +1020,7 @@ class SchedulePage(Page):
             if entries and state.current.get(connector) not in entries:
                 state.current[connector] = entries[0]
 
-    def _toggle(self, rule: data.Rule, value: bool) -> None:
+    def _toggle(self, rule: Rule, value: bool) -> None:
         if rule.enabled == value:
             return
         rule.enabled = value
@@ -1039,7 +1041,7 @@ class SchedulePage(Page):
         editor.connect("closed", lambda dialog: setattr(self, "_editor", None) if self._editor is dialog else None)
         editor.present(self.widget)
 
-    def edit_rule(self, rule: data.Rule) -> None:
+    def edit_rule(self, rule: Rule) -> None:
         self._present(RuleEditor(self.state, rule, on_save=self._save, on_delete=self.delete_rule))
 
     def new_rule(self, prefill: dict | None = None) -> None:
@@ -1060,10 +1062,10 @@ class SchedulePage(Page):
     def _create_from_calendar(self, days: list[int], start: int, end: int) -> None:
         self.new_rule({"days": days, "start": model.hhmm(start), "end": model.hhmm(end)})
 
-    def _save(self, draft: data.Rule, original: data.Rule | None) -> None:
+    def _save(self, draft: Rule, original: Rule | None) -> None:
         rules = self.state.rules
         if original is None:
-            rule = data.Rule(
+            rule = Rule(
                 self._new_id(),
                 draft.playlist,
                 draft.days,
@@ -1121,7 +1123,7 @@ class SchedulePage(Page):
         put(after)
         self.state.toast("Rule saved", lambda: put(before))
 
-    def delete_rule(self, rule: data.Rule) -> None:
+    def delete_rule(self, rule: Rule) -> None:
         rules = self.state.rules
         if rule not in rules:
             return
@@ -1135,9 +1137,9 @@ class SchedulePage(Page):
 
         self.state.toast(f"Deleted “{model.playlist_name(rule.playlist)}” rule", undo)
 
-    def duplicate_rule(self, rule: data.Rule) -> None:
+    def duplicate_rule(self, rule: Rule) -> None:
         rules = self.state.rules
-        copy = data.Rule(
+        copy = Rule(
             self._new_id(),
             rule.playlist,
             list(rule.days),
@@ -1158,7 +1160,7 @@ class SchedulePage(Page):
         self.state.toast("Rule duplicated", undo)
         self.edit_rule(copy)
 
-    def move_rule(self, rule: data.Rule, step: int) -> None:
+    def move_rule(self, rule: Rule, step: int) -> None:
         """step +1 = higher priority (later in the stored order).
 
         A rule on screen rolls into place first and is committed once it settles.
@@ -1176,7 +1178,7 @@ class SchedulePage(Page):
         rules.insert(target, rules.pop(index))
         self._reorder(rules, rule)
 
-    def _reorder(self, order: list[data.Rule], moved: data.Rule) -> None:
+    def _reorder(self, order: list[Rule], moved: Rule) -> None:
         rules = self.state.rules
         before = list(rules)
         if before == order:

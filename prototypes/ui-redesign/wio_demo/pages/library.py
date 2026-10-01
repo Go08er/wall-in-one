@@ -8,7 +8,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
-from .. import data, ui
+from .. import data, thumbs, ui
+from ..catalog import KIND_LABEL
+from ..models import Wallpaper
 from . import Page
 from .inspector import Inspector
 
@@ -284,7 +286,7 @@ class LibraryPage(Page):
         # The inspector lives inside this page; header widgets live in the shell.
         self.widget.insert_action_group("lib", group)
 
-    def _card_menu(self, wallpaper: data.Wallpaper) -> Gtk.PopoverMenu:
+    def _card_menu(self, wallpaper: Wallpaper) -> Gtk.PopoverMenu:
         menu = Gio.Menu()
         apply = Gio.Menu()
         apply.append("Apply to all displays", f"lib.apply::{wallpaper.id}|all")
@@ -356,7 +358,7 @@ class LibraryPage(Page):
         self._notice.set_revealed(bool(problems))
         self._update_count()
 
-    def _attach_drag(self, card: ui.WallpaperCard, wallpaper: data.Wallpaper) -> None:
+    def _attach_drag(self, card: ui.WallpaperCard, wallpaper: Wallpaper) -> None:
         source = Gtk.DragSource(actions=Gdk.DragAction.COPY)
 
         def prepare(_source, _x, _y):
@@ -364,13 +366,13 @@ class LibraryPage(Page):
             return Gdk.ContentProvider.new_for_value(value)
 
         def begin(drag_source, _drag) -> None:
-            drag_source.set_icon(wallpaper.thumb(160, 90), 80, 45)
+            drag_source.set_icon(thumbs.texture(wallpaper, 160, 90), 80, 45)
 
         source.connect("prepare", prepare)
         source.connect("drag-begin", begin)
         card.frame.add_controller(source)
 
-    def _visible(self, wallpaper: data.Wallpaper) -> bool:
+    def _visible(self, wallpaper: Wallpaper) -> bool:
         if self._kind != "all" and wallpaper.kind != self._kind:
             return False
         if self._favorites and not wallpaper.favorite:
@@ -383,7 +385,7 @@ class LibraryPage(Page):
                     wallpaper.source,
                     " ".join(wallpaper.tags),
                     wallpaper.style,
-                    data.KIND_LABEL[wallpaper.kind],
+                    KIND_LABEL[wallpaper.kind],
                 )
             )
             return all(word in haystack.lower() for word in self._query.lower().split())
@@ -395,7 +397,7 @@ class LibraryPage(Page):
         self.flow.queue_resize()
         self._update_count()
 
-    def _sort_key(self, wallpaper: data.Wallpaper):
+    def _sort_key(self, wallpaper: Wallpaper):
         if self._sort == "name":
             return wallpaper.name.lower()
         if self._sort == "kind":
@@ -480,13 +482,13 @@ class LibraryPage(Page):
         self.flow._min = self._card_width
         self._rebuild()
 
-    def _on_card(self, wallpaper: data.Wallpaper) -> None:
+    def _on_card(self, wallpaper: Wallpaper) -> None:
         if self._select_mode:
             self._toggle_selected(wallpaper.id)
             return
         self.inspect(wallpaper)
 
-    def inspect(self, wallpaper: data.Wallpaper) -> None:
+    def inspect(self, wallpaper: Wallpaper) -> None:
         if self._select_mode:
             self._select.set_active(False)
         previous = self._inspected
@@ -572,7 +574,7 @@ class LibraryPage(Page):
         dialog.connect("response", lambda _d, response: response == "remove" and self._remove(chosen))
         dialog.present(self.widget.get_root())
 
-    def _remove(self, chosen: list[data.Wallpaper]) -> None:
+    def _remove(self, chosen: list[Wallpaper]) -> None:
         self._select.set_active(False)
         undo = self.state.remove_wallpapers(chosen)
         count = len(chosen)

@@ -17,6 +17,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 from .. import data, ui
+from ..catalog import KIND_LABEL
+from ..models import Playlist, Wallpaper
 from ..ui import CardGrid
 
 PICKER_CSS = """
@@ -39,7 +41,7 @@ def _inert(widget: Gtk.Widget) -> None:
 
 
 class PlaylistPicker(Adw.Dialog):
-    def __init__(self, state, playlist: data.Playlist, on_add: Callable[[list[str]], None]) -> None:
+    def __init__(self, state, playlist: Playlist, on_add: Callable[[list[str]], None]) -> None:
         super().__init__(content_width=940, content_height=700, width_request=360, height_request=420)
         self.state, self.playlist, self._on_add = state, playlist, on_add
         self._picked: list[str] = []
@@ -142,7 +144,7 @@ class PlaylistPicker(Adw.Dialog):
         self._update()
 
     # -- cards ---------------------------------------------------------------------
-    def _card(self, wallpaper: data.Wallpaper, already: int) -> ui.WallpaperCard:
+    def _card(self, wallpaper: Wallpaper, already: int) -> ui.WallpaperCard:
         card = ui.WallpaperCard(wallpaper, width=184, on_open=lambda w: self.toggle(w.id))
         _inert(card.frame)
         if already:
@@ -208,7 +210,7 @@ class PlaylistPicker(Adw.Dialog):
         self._update_count()
 
     # -- filtering -----------------------------------------------------------------
-    def _visible(self, wallpaper: data.Wallpaper) -> bool:
+    def _visible(self, wallpaper: Wallpaper) -> bool:
         if self._kind != "all" and wallpaper.kind != self._kind:
             return False
         if self._query:
@@ -219,7 +221,7 @@ class PlaylistPicker(Adw.Dialog):
                     wallpaper.source,
                     " ".join(wallpaper.tags),
                     wallpaper.style,
-                    data.KIND_LABEL[wallpaper.kind],
+                    KIND_LABEL[wallpaper.kind],
                 )
             ).lower()
             return all(word in haystack for word in self._query.lower().split())

@@ -12,6 +12,7 @@ import random
 from dataclasses import dataclass
 
 from .. import art, data
+from ..models import StoreItem
 
 # ---------------------------------------------------------------------------
 # Providers and their options
@@ -255,11 +256,11 @@ POOL = 96
 # Items
 # ---------------------------------------------------------------------------
 
-_extra_items: dict[str, list[data.StoreItem]] = {}
-_by_id: dict[str, data.StoreItem] = {}
+_extra_items: dict[str, list[StoreItem]] = {}
+_by_id: dict[str, StoreItem] = {}
 
 
-def _generate(provider: str, n: int) -> data.StoreItem:
+def _generate(provider: str, n: int) -> StoreItem:
     r = random.Random(n * 977 + (0 if provider == "Wallhaven" else 5))
     k = n - len(data.STORE[provider])
     style = _STYLE_ORDER[(k + (0 if provider == "Wallhaven" else 3)) % len(_STYLE_ORDER)]
@@ -298,7 +299,7 @@ def _generate(provider: str, n: int) -> data.StoreItem:
             )[0]
         )
         detail = f"{r.randint(14, 1400)} favorites"
-    return data.StoreItem(
+    return StoreItem(
         id=f"{provider.lower()}-{n}",
         title=title,
         provider=provider,
@@ -311,7 +312,7 @@ def _generate(provider: str, n: int) -> data.StoreItem:
     )
 
 
-def item_at(provider: str, n: int) -> data.StoreItem:
+def item_at(provider: str, n: int) -> StoreItem:
     base = data.STORE[provider]
     if n < len(base):
         item = base[n]
@@ -324,11 +325,11 @@ def item_at(provider: str, n: int) -> data.StoreItem:
     return item
 
 
-def pool(provider: str) -> list[data.StoreItem]:
+def pool(provider: str) -> list[StoreItem]:
     return [item_at(provider, n) for n in range(POOL)]
 
 
-def by_id(item_id: str) -> data.StoreItem | None:
+def by_id(item_id: str) -> StoreItem | None:
     if item_id not in _by_id:
         for provider in PROVIDERS:
             pool(provider)
@@ -340,37 +341,37 @@ def by_id(item_id: str) -> data.StoreItem | None:
 # ---------------------------------------------------------------------------
 
 
-def _rng(item: data.StoreItem) -> random.Random:
+def _rng(item: StoreItem) -> random.Random:
     return random.Random(item.seed * 31 + len(item.title))
 
 
-def site_id(item: data.StoreItem) -> str:
+def site_id(item: StoreItem) -> str:
     if item.provider == "MotionBGS":
         return item.title.lower().replace(" ", "-")
     return "".join(_rng(item).choices("abcdefghijklmnopqrstuvwxyz0123456789", k=6))
 
 
-def url(item: data.StoreItem) -> str:
+def url(item: StoreItem) -> str:
     if item.provider == "MotionBGS":
         return f"motionbgs.com/{site_id(item)}"
     return f"wallhaven.cc/w/{site_id(item)}"
 
 
-def size(item: data.StoreItem) -> tuple[int, int]:
+def size(item: StoreItem) -> tuple[int, int]:
     width, height = item.resolution.replace(" ", "").split("×")
     if item.provider == "MotionBGS":
         return (3840, 2160) if has_4k(item) else (1920, 1080)
     return int(width), int(height)
 
 
-def has_4k(item: data.StoreItem) -> bool:
+def has_4k(item: StoreItem) -> bool:
     """MotionBGS offers HD and, for most loops, 4K."""
     if item.provider != "MotionBGS":
         return False
     return item.resolution.startswith("3840") or (item.resolution.startswith("2560") and item.seed % 3 != 0)
 
 
-def ratio(item: data.StoreItem) -> str:
+def ratio(item: StoreItem) -> str:
     width, height = size(item)
     if height > width:
         return "Portrait"
@@ -381,7 +382,7 @@ def ratio(item: data.StoreItem) -> str:
     return f"{width}:{height}"
 
 
-def short_resolution(item: data.StoreItem) -> str:
+def short_resolution(item: StoreItem) -> str:
     """The badge on a card: 5K, 4K, 1440p … plus the ratio when it isn't 16:9."""
     width, height = size(item)
     if item.provider == "MotionBGS":
@@ -392,21 +393,21 @@ def short_resolution(item: data.StoreItem) -> str:
     return label if shape == "16:9" else f"{label} · {shape}"
 
 
-def favorites(item: data.StoreItem) -> int:
+def favorites(item: StoreItem) -> int:
     if item.provider == "MotionBGS":
         return 0
     return int(item.detail.split()[0])
 
 
-def views(item: data.StoreItem) -> int:
+def views(item: StoreItem) -> int:
     return favorites(item) * 23 + _rng(item).randint(200, 4000)
 
 
-def duration(item: data.StoreItem) -> str:
+def duration(item: StoreItem) -> str:
     return item.detail.split(" ")[0] if item.provider == "MotionBGS" else ""
 
 
-def megabytes(item: data.StoreItem, quality: str | None = None) -> float:
+def megabytes(item: StoreItem, quality: str | None = None) -> float:
     r = _rng(item)
     if item.provider == "MotionBGS":
         seconds = int(duration(item).split(":")[1]) + 60 * int(duration(item).split(":")[0])
@@ -416,13 +417,13 @@ def megabytes(item: data.StoreItem, quality: str | None = None) -> float:
     return round(width * height / 1_000_000 * r.uniform(0.6, 1.1), 1)
 
 
-def file_type(item: data.StoreItem) -> str:
+def file_type(item: StoreItem) -> str:
     if item.provider == "MotionBGS":
         return "MP4 video"
     return "PNG" if _rng(item).random() < 0.3 else "JPEG"
 
 
-def category(item: data.StoreItem) -> str:
+def category(item: StoreItem) -> str:
     """Wallhaven category or MotionBGS genre key."""
     if item.provider == "MotionBGS":
         return {
@@ -442,31 +443,31 @@ def category(item: data.StoreItem) -> str:
     return "General"
 
 
-def category_label(item: data.StoreItem) -> str:
+def category_label(item: StoreItem) -> str:
     value = category(item)
     return dict(MOTION_CATEGORIES).get(value, value)
 
 
-def source(item: data.StoreItem) -> str:
+def source(item: StoreItem) -> str:
     """Where the uploader says the picture comes from (Wallhaven's "Source")."""
     if item.provider == "MotionBGS":
         return "motionbgs.com"
     return ["artstation.com", "deviantart.com", "pixiv.net", "Not given", "unsplash.com"][item.seed % 5]
 
 
-def uploader(item: data.StoreItem) -> str:
+def uploader(item: StoreItem) -> str:
     return _rng(item).choice(UPLOADERS)
 
 
-def added(item: data.StoreItem) -> str:
+def added(item: StoreItem) -> str:
     return ADDED[(item.seed // 7) % len(ADDED)]
 
 
-def age_rank(item: data.StoreItem) -> int:
+def age_rank(item: StoreItem) -> int:
     return (item.seed // 7) % len(ADDED)
 
 
-def tags(item: data.StoreItem) -> list[str]:
+def tags(item: StoreItem) -> list[str]:
     seen: list[str] = []
     for tag in (*STYLE_TAGS.get(item.style, ()), *item.tags):
         if tag not in seen and tag not in ("4k", "live", "day"):
@@ -474,7 +475,7 @@ def tags(item: data.StoreItem) -> list[str]:
     return seen
 
 
-def colors(item: data.StoreItem) -> list[str]:
+def colors(item: StoreItem) -> list[str]:
     look = art.look_for(item.style, item.seed, item.night)
     return [art.to_hex(c) for c in (look.sky_top, look.sky_low, look.accent, look.land)]
 
@@ -490,7 +491,7 @@ def nearest_palette_color(hex_color: str) -> str:
     return min(COLORS, key=lambda c: sum((a - b) ** 2 for a, b in zip(rgb(c), target, strict=True)))
 
 
-def matches_color(item: data.StoreItem, hex_color: str) -> bool:
+def matches_color(item: StoreItem, hex_color: str) -> bool:
     value = hex_color.lstrip("#")
     r, g, b = (int(value[i : i + 2], 16) / 255 for i in (0, 2, 4))
     hue, light, sat = colorsys.rgb_to_hls(r, g, b)
@@ -527,7 +528,7 @@ class Query:
     quality: str = "any"
 
 
-def like_source(text: str) -> data.StoreItem | None:
+def like_source(text: str) -> StoreItem | None:
     """The item a Wallhaven ``like:<id>`` query refers to."""
     wanted = text.strip()[5:]
     for provider in PROVIDERS:
@@ -537,12 +538,12 @@ def like_source(text: str) -> data.StoreItem | None:
     return None
 
 
-def _matches_text(item: data.StoreItem, text: str) -> bool:
+def _matches_text(item: StoreItem, text: str) -> bool:
     haystack = " ".join((item.title, " ".join(tags(item)), item.style, category_label(item))).lower()
     return all(word in haystack for word in text.lower().split())
 
 
-def search(query: Query) -> list[data.StoreItem]:
+def search(query: Query) -> list[StoreItem]:
     items = pool(query.provider)
     text = query.text.strip()
     if text.startswith("like:"):

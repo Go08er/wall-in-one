@@ -19,7 +19,8 @@ gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gtk
 
-from .. import art, data, ui
+from .. import art, data, thumbs, ui
+from ..models import Display, Rule, Wallpaper
 from ..state import rule_matches
 from . import Page
 from .displays_arrangement import CSS as ARRANGEMENT_CSS
@@ -97,7 +98,7 @@ class DisplaysPage(Page):
         self._menu: Gtk.PopoverMenu | None = None
         self._dialog: Adw.AlertDialog | None = None
         self._plays_checks: dict[int, Gtk.Image] = {}
-        self._demo_rules: list[data.Rule] | None = None  # the real list while a scene hides some
+        self._demo_rules: list[Rule] | None = None  # the real list while a scene hides some
         self._initial = self._snapshot()
 
         # -- header ----------------------------------------------------------------
@@ -250,7 +251,7 @@ class DisplaysPage(Page):
                 return display.connector
         return self.state.connectors()[0]
 
-    def _display(self, connector: str) -> data.Display:
+    def _display(self, connector: str) -> Display:
         return next(d for d in self.state.displays if d.connector == connector)
 
     def _mirrored(self) -> bool:
@@ -263,7 +264,7 @@ class DisplaysPage(Page):
     def _scope(self, connector: str) -> str:
         return "all" if self._mirrored() else connector
 
-    def _shown(self, connector: str) -> data.Wallpaper:
+    def _shown(self, connector: str) -> Wallpaper:
         return self.state.wallpaper(self.state.current[self._key(connector)])
 
     def _color_display(self) -> str:
@@ -457,7 +458,7 @@ class DisplaysPage(Page):
         group.add_css_class("boxed-list")
 
         row = Gtk.Box(spacing=12, margin_top=10, margin_bottom=10, margin_start=10, margin_end=12)
-        self._now_thumb = ui.Thumb(self._shown(self._selected).thumb(320, 180), 128, 72, radius=8)
+        self._now_thumb = ui.Thumb(thumbs.texture(self._shown(self._selected), 320, 180), 128, 72, radius=8)
         thumb_button = Gtk.Button(valign=Gtk.Align.CENTER)
         thumb_button.add_css_class("flat")
         thumb_button.add_css_class("now-thumb")
@@ -661,7 +662,7 @@ class DisplaysPage(Page):
                     image.set_from_icon_name(playlist.icon or "view-grid-symbolic")
                     image.set_pixel_size(20)
                 else:
-                    image.set_from_paintable(art.mosaic(playlist.cover_keys, 64))
+                    image.set_from_paintable(art.mosaic(data.cover_keys(playlist), 64))
                     image.set_pixel_size(28)
                 title.set_label(playlist.name)
                 count = len(playlist.entries)
@@ -710,7 +711,7 @@ class DisplaysPage(Page):
             status, icon, paused = self._status(item.connector)
             self.arrangement.tiles[item.connector].update(
                 TileInfo(
-                    texture=wallpaper.thumb(640, 360),
+                    texture=thumbs.texture(wallpaper, 640, 360),
                     wallpaper=wallpaper.name,
                     source=self._source(item.connector),
                     status=status,
@@ -728,7 +729,7 @@ class DisplaysPage(Page):
 
         # Now showing
         wallpaper = self._shown(connector)
-        self._now_thumb.set_paintable(wallpaper.thumb(320, 180))
+        self._now_thumb.set_paintable(thumbs.texture(wallpaper, 320, 180))
         self._now_name.set_label(wallpaper.name)
         self._now_why.set_label(self._why(connector))
         status, _icon, _paused = self._status(connector)

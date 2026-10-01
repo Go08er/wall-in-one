@@ -20,7 +20,8 @@ gi.require_version("Adw", "1")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Adw, Gdk, Gtk, Pango, PangoCairo
 
-from .. import data
+from ..catalog import DAYS, DAYS_LONG, MONTHS
+from ..models import Rule
 from . import schedule_model as model
 
 SNAP = 15  # minutes
@@ -73,7 +74,7 @@ class Block:
     day: int
     start: int
     end: int
-    rule: data.Rule | None
+    rule: Rule | None
 
 
 @dataclass
@@ -83,17 +84,17 @@ class Hit:
     x1: float
     y1: float
     kind: str  # block | fallback | loser | exception
-    rule: data.Rule | None
+    rule: Rule | None
     day: int
     start: int
     end: int
-    over: list[data.Rule]  # what the block overrides (block) or what overrides it (loser)
+    over: list[Rule]  # what the block overrides (block) or what overrides it (loser)
 
 
 class WeekCalendar(Gtk.DrawingArea):
     """Mon–Sun columns × 24 hours. Feed it with ``update(...)``."""
 
-    def __init__(self, on_edit: Callable[[data.Rule], None], on_create: Callable[[list[int], int, int], None]) -> None:
+    def __init__(self, on_edit: Callable[[Rule], None], on_create: Callable[[list[int], int, int], None]) -> None:
         super().__init__()
         self.add_css_class("week-calendar")
         self.set_content_height(470)
@@ -278,7 +279,7 @@ class WeekCalendar(Gtk.DrawingArea):
             day = self.monday + dt.timedelta(days=column)
             cx = gutter + column * col_w + col_w / 2
             is_today = column == self.today
-            name = data.DAYS[column] if col_w >= 44 else data.DAYS[column][:2]
+            name = DAYS[column] if col_w >= 44 else DAYS[column][:2]
             self._text(
                 cr,
                 name.upper(),
@@ -299,7 +300,7 @@ class WeekCalendar(Gtk.DrawingArea):
             else:
                 self._text(cr, number, cx, 21, fg, 0.9, 9.5, bold=True, align="center")
             if day.day == 1:  # a new month starts inside this week
-                self._text(cr, data.MONTHS[day.month - 1], cx + 13, 23, fg, 0.5, 7, align="left")
+                self._text(cr, MONTHS[day.month - 1], cx + 13, 23, fg, 0.5, 7, align="left")
 
         # Blocks.
         for column, spans in enumerate(self.spans):
@@ -400,7 +401,7 @@ class WeekCalendar(Gtk.DrawingArea):
             cr.fill()
             # Overridden rules show as a hatched edge in their own color.
             inset = 0
-            beaten: list[data.Rule] = []
+            beaten: list[Rule] = []
             for span in spans:
                 if span.rule is not rule or span.end <= block.start or span.start >= block.end:
                     continue
@@ -430,7 +431,7 @@ class WeekCalendar(Gtk.DrawingArea):
         self._hits.sort(key=lambda hit: hit.kind == "loser")
 
     def _label_block(
-        self, cr, rule: data.Rule, block: Block, x0, x1, y0, y1, fg, narrow, column: int, tail: bool, continues: bool
+        self, cr, rule: Rule, block: Block, x0, x1, y0, y1, fg, narrow, column: int, tail: bool, continues: bool
     ) -> None:
         height = y1 - y0
         if height < 13:
@@ -634,7 +635,7 @@ class WeekCalendar(Gtk.DrawingArea):
         hit = self._hit(x, y)
         if not hit:
             return False
-        day = model.DAY_LONG[hit.day]
+        day = DAYS_LONG[hit.day]
         when = f"{day} {model.hhmm(hit.start)}–{model.hhmm(hit.end)}"
         if hit.kind == "fallback":
             tooltip.set_markup(
@@ -676,7 +677,7 @@ class WeekPreview(Gtk.DrawingArea):
         self._valid = True
         self.set_draw_func(self._draw)
 
-    def set_rule(self, rule: data.Rule, color: str, valid: bool = True) -> None:
+    def set_rule(self, rule: Rule, color: str, valid: bool = True) -> None:
         self._coverage = model.coverage(rule) if valid else [[] for _ in range(7)]
         self._color, self._valid = color, valid
         self.queue_draw()
@@ -690,7 +691,7 @@ class WeekPreview(Gtk.DrawingArea):
         track_w = width - label_w - 4
         for column in range(7):
             y = column * 11
-            layout = self.create_pango_layout(data.DAYS[column])
+            layout = self.create_pango_layout(DAYS[column])
             desc = self.get_pango_context().get_font_description().copy()
             desc.set_size(int(7 * Pango.SCALE))
             layout.set_font_description(desc)

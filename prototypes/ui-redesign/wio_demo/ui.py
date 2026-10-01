@@ -14,7 +14,9 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk
 
-from . import data
+from . import data, thumbs
+from .catalog import KIND_ICON, KIND_LABEL
+from .models import Wallpaper
 
 _EXTRA: list[Gtk.CssProvider] = []
 
@@ -107,9 +109,10 @@ class Thumb(Gtk.Widget):
         snapshot.pop()
 
 
-def thumbnail(wallpaper: data.Wallpaper, width: int, height: int, radius: float = 10) -> Thumb:
+def thumbnail(wallpaper: Wallpaper, width: int, height: int, radius: float = 10) -> Thumb:
     """A rounded, cropped picture of a wallpaper at an exact size."""
-    return Thumb(wallpaper.thumb(max(320, width * 2), max(180, round(width * 2 * 9 / 16))), width, height, radius)
+    texture = thumbs.texture(wallpaper, max(320, width * 2), max(180, round(width * 2 * 9 / 16)))
+    return Thumb(texture, width, height, radius)
 
 
 def texture_picture(texture: Gdk.Texture, width: int, height: int, radius: float = 10) -> Thumb:
@@ -236,11 +239,11 @@ def icon_button(
     return button
 
 
-def kind_badge(wallpaper: data.Wallpaper) -> Gtk.Widget:
-    text = data.KIND_LABEL[wallpaper.kind]
+def kind_badge(wallpaper: Wallpaper) -> Gtk.Widget:
+    text = KIND_LABEL[wallpaper.kind]
     if wallpaper.kind == "video" and wallpaper.duration:
         text = f"{text} · {wallpaper.duration}"
-    return pill(text, data.KIND_ICON[wallpaper.kind], "on-image")
+    return pill(text, KIND_ICON[wallpaper.kind], "on-image")
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +260,13 @@ class WallpaperCard(Gtk.Box):
 
     def __init__(
         self,
-        wallpaper: data.Wallpaper,
+        wallpaper: Wallpaper,
         *,
         width: int = 220,
         playing_on: list[str] | None = None,
-        on_open: Callable[[data.Wallpaper], None] | None = None,
-        on_apply: Callable[[data.Wallpaper], None] | None = None,
-        on_favorite: Callable[[data.Wallpaper], None] | None = None,
+        on_open: Callable[[Wallpaper], None] | None = None,
+        on_apply: Callable[[Wallpaper], None] | None = None,
+        on_favorite: Callable[[Wallpaper], None] | None = None,
         menu: Gtk.PopoverMenu | None = None,
         show_name: bool = True,
         selectable: bool = False,
@@ -279,7 +282,7 @@ class WallpaperCard(Gtk.Box):
         overlay.add_css_class("wp-frame")
         overlay.set_overflow(Gtk.Overflow.HIDDEN)
         # Fill the grid cell at 16:9 so outlines and badges always hug the picture.
-        overlay.set_child(Thumb(wallpaper.thumb(), width, height, radius=12, fill=True))
+        overlay.set_child(Thumb(thumbs.texture(wallpaper), width, height, radius=12, fill=True))
 
         top = Gtk.Box(spacing=4, margin_top=8, margin_start=8, margin_end=8)
         top.set_valign(Gtk.Align.START)
@@ -522,7 +525,7 @@ class CardGrid(Gtk.Widget):
         return True
 
 
-def _color_tooltip(wallpaper: data.Wallpaper) -> str:
+def _color_tooltip(wallpaper: Wallpaper) -> str:
     if wallpaper.color_mode == "palette":
         return f"Colors: {wallpaper.palette} palette"
     if wallpaper.color_mode == "keep":
@@ -531,7 +534,7 @@ def _color_tooltip(wallpaper: data.Wallpaper) -> str:
     return f"Colors: from wallpaper · {scheme}" + ("" if wallpaper.scheme else " (default)")
 
 
-def color_summary(wallpaper: data.Wallpaper) -> str:
+def color_summary(wallpaper: Wallpaper) -> str:
     return _color_tooltip(wallpaper).removeprefix("Colors: ").capitalize()
 
 

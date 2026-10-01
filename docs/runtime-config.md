@@ -348,6 +348,50 @@ behavior. If an observation is lost after confirmed battery, the runtime
 retains inhibition until confirmed AC or the option is disabled. See
 [the user-facing settings guide](settings.md#battery-animation-control).
 
+## Route and rotation timing
+
+Status stays version 2. From 0.2.0 every display row also says when its
+wallpaper next changes on its own. All six fields are appended after the
+released ones, every one is `null` when there is nothing to report, and an
+older service simply omits them.
+
+| Field | Meaning |
+| --- | --- |
+| `route_change_at` | Local wall-clock time, `YYYY-MM-DDTHH:MM:SS`, of the next schedule boundary that changes this display's automatic playlist or `route_source`. |
+| `route_change_in_s` | Whole seconds until then, rounded up. |
+| `next_cycle_at` | Local wall-clock time the rotation next advances. |
+| `next_cycle_in_s` | Whole seconds until then, rounded up; `0` when it is due. |
+| `until` | `route_change_at` as local `HH:MM`, only when it is less than a day away. |
+| `next_change_in_s` | The same value as `next_cycle_in_s`. |
+
+`until` and `next_change_in_s` are the names the Noctalia companion reads from
+`wall-in-one ctl status`; the companion shows "Not changing" whenever
+`cycle_enabled` is false, whatever `next_change_in_s` says.
+
+The route change uses the same winner status reports in `route_source`: in
+mirrored mode the last matching global rule, else the display's assignment,
+else the default playlist; in independent mode the display's own precedence,
+including `beats_global_rules`. It is reported while the route is paused,
+because the schedule still moves a paused route, and is `null`:
+
+- while a manual `playlist-use` holds (the schedule is not consulted until
+  `schedule-follow`);
+- for a configured display that is not connected;
+- when no boundary within eight days changes the winner. A handover between
+  two rules choosing the same playlist with the same source is not a change.
+  Only midnight and each enabled rule's start and end minute are examined.
+  One status reply spends at most two million rule checks on these searches;
+  hundreds of rules on dozens of displays can exhaust that, and the displays
+  left over report `null`.
+
+The cycle deadline is `null` when the route is paused, does not cycle, or is
+not connected. Stopped routes keep rotating stills, so they keep a deadline.
+Mirrored mode has one timer, so every mirrored row carries the same deadline.
+A successful rotation, schedule change or explicit command restarts it.
+
+Both clocks are naive local time. Seconds across a daylight-saving change
+can be an hour off; the wall-clock fields are the authority.
+
 ## Per-playlist rotation and display precedence (`runtime-overrides.toml`)
 
 A playlist's own interval and shuffle, and a display whose own playlist beats

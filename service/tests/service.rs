@@ -7224,7 +7224,14 @@ fn the_file_watcher_reloads_when_only_the_overrides_file_changes() {
 /// Display-row keys added after the shape fixture was recorded. They are
 /// removed from a fresh status before it is compared byte for byte, so every
 /// older field must keep its exact name, order, value and encoding.
-const ADDED_DISPLAY_KEYS: &[&str] = &[];
+const ADDED_DISPLAY_KEYS: &[&str] = &[
+    "route_change_at",
+    "route_change_in_s",
+    "next_cycle_at",
+    "next_cycle_in_s",
+    "until",
+    "next_change_in_s",
+];
 
 /// `"key":"value"` with the value replaced, for fields that differ per process
 /// or per build. A missing key is left alone; a `null` value is kept.
@@ -7338,6 +7345,19 @@ fn older_status_fields_stay_byte_identical() {
     if std::env::var_os("WALL_IN_ONE_BLESS_STATUS_SHAPE").is_some() {
         fs::write(&fixture, &rendered).unwrap();
     }
+    for (label, text) in status_shape_samples() {
+        let rows = serde_json::from_str::<serde_json::Value>(&text).unwrap()["displays"]
+            .as_array()
+            .unwrap()
+            .len();
+        for key in ADDED_DISPLAY_KEYS {
+            assert_eq!(
+                text.matches(&format!(",\"{key}\":")).count(),
+                rows,
+                "{label}: every display row carries {key}"
+            );
+        }
+    }
     let recorded = fs::read_to_string(&fixture).unwrap();
     for (expected, actual) in recorded.lines().zip(rendered.lines()) {
         assert_eq!(
@@ -7346,4 +7366,354 @@ fn older_status_fields_stay_byte_identical() {
         );
     }
     assert_eq!(rendered, recorded);
+}
+
+// -- status timing: when the route and the rotation next change ------------
+
+fn at_time(day: u32, hour: u32, minute: u32) -> chrono::NaiveDateTime {
+    NaiveDate::from_ymd_opt(2026, 8, day)
+        .unwrap()
+        .and_hms_opt(hour, minute, 0)
+        .unwrap()
+}
+
+/// A global rule for the night playlist, 12:00 to 18:00.
+const AFTERNOON: &str = "\n[[schedules]]\nid = \"afternoon\"\nplaylist = \"night\"\n\
+                         start = \"12:00\"\nend = \"18:00\"\n";
+
+/// The mirrored fixture with rotation on and `extra` appended.
+fn mirrored_cycling(extra: &str) -> String {
+    format!(
+        "{}{extra}",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+            .replace("cycle_enabled = false", "cycle_enabled = true")
+    )
+}
+
+fn assert_cycle_within(row: &serde_json::Value, interval: u64) {
+    let seconds = row["next_cycle_in_s"].as_u64().unwrap();
+    assert!(
+        (interval - 1..=interval).contains(&seconds),
+        "{seconds} s left of a {interval} s rotation: {row}"
+    );
+    assert_eq!(row["next_change_in_s"], row["next_cycle_in_s"]);
+    assert!(row["next_cycle_at"].is_string());
+}
+
+fn assert_no_route_change(row: &serde_json::Value) {
+    assert!(row["route_change_at"].is_null(), "{row}");
+    assert!(row["route_change_in_s"].is_null(), "{row}");
+    assert!(row["until"].is_null(), "{row}");
+}
+
+fn assert_no_cycle(row: &serde_json::Value) {
+    assert!(row["next_cycle_at"].is_null(), "{row}");
+    assert!(row["next_cycle_in_s"].is_null(), "{row}");
+    assert!(row["next_change_in_s"].is_null(), "{row}");
+}
+
+#[test]
+fn status_reports_the_next_rule_boundary_and_the_cycle_deadline() {
+    let at = at_time(3, 17, 0);
+    let (mut runtime, _) = started_runtime(loaded(&mirrored_cycling(AFTERNOON), &[]), at);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["route_source"], "schedule");
+    assert_eq!(row["route_change_at"], "2026-08-03T18:00:00");
+    assert_eq!(row["route_change_in_s"], 3600);
+    assert_eq!(row["until"], "18:00");
+    assert_cycle_within(&row, 300);
+
+    // Half a minute before the boundary rounds to the boundary minute.
+    let almost = at_time(3, 17, 59) + chrono::Duration::seconds(30);
+    let row = route(&status(&mut runtime, almost), "ALL");
+    assert_eq!(row["route_change_in_s"], 30);
+    assert_eq!(row["until"], "18:00");
+
+    // After the window the default plays until tomorrow's window opens.
+    let evening = at_time(3, 19, 0);
+    let row = route(&status(&mut runtime, evening), "ALL");
+    assert_eq!(row["route_source"], "default");
+    assert_eq!(row["route_change_at"], "2026-08-04T12:00:00");
+    assert_eq!(row["route_change_in_s"], 17 * 3600);
+    assert_eq!(row["until"], "12:00");
+}
+
+#[test]
+fn a_rotation_restarts_the_cycle_deadline_from_the_tick_that_advanced_it() {
+    let at = at_time(3, 9, 0);
+    let (mut runtime, state) = started_runtime(loaded(&mirrored_cycling(""), &[]), at);
+    let applies = state.lock().unwrap().applies.len();
+    let advanced = Instant::now() + Duration::from_secs(301);
+    runtime.tick(at, advanced);
+    assert!(
+        state.lock().unwrap().applies.len() > applies,
+        "the rotation ran"
+    );
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["next_cycle_in_s"], 300);
+    assert_eq!(row["next_cycle_at"], "2026-08-03T09:05:00");
+    assert_eq!(row["next_change_in_s"], 300);
+    // No enabled rule: the route never changes on its own.
+    assert_no_route_change(&row);
+}
+
+#[test]
+fn route_changes_cross_midnight_for_weekday_and_wrapped_rules() {
+    // 2026-08-03 is a Monday.
+    let monday = "\n[[schedules]]\nid = \"monday\"\nplaylist = \"night\"\nweekdays = [0]\n";
+    let at = at_time(3, 23, 0);
+    let (mut runtime, _) = started_runtime(loaded(&mirrored_cycling(monday), &[]), at);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["route_change_at"], "2026-08-04T00:00:00");
+    assert_eq!(row["route_change_in_s"], 3600);
+    assert_eq!(row["until"], "00:00");
+
+    let wrapped = "\n[[schedules]]\nid = \"late\"\nplaylist = \"night\"\n\
+                   start = \"22:00\"\nend = \"06:00\"\n";
+    let (mut runtime, _) = started_runtime(loaded(&mirrored_cycling(wrapped), &[]), at);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["route_source"], "schedule");
+    assert_eq!(row["route_change_at"], "2026-08-04T06:00:00");
+    assert_eq!(row["until"], "06:00");
+
+    // Outside the wrapped window, the next change is tonight's 22:00.
+    let tuesday = at_time(4, 9, 0);
+    let row = route(&status(&mut runtime, tuesday), "ALL");
+    assert_eq!(row["route_change_at"], "2026-08-04T22:00:00");
+
+    // A change more than a day away keeps its time but has no "until".
+    let (mut runtime, _) = started_runtime(loaded(&mirrored_cycling(monday), &[]), tuesday);
+    let weekly = route(&status(&mut runtime, tuesday), "ALL");
+    assert_eq!(weekly["route_change_at"], "2026-08-10T00:00:00");
+    assert_eq!(weekly["route_change_in_s"], 5 * 86400 + 15 * 3600);
+    assert!(weekly["until"].is_null());
+}
+
+#[test]
+fn a_manual_pick_holds_the_route_but_not_the_rotation() {
+    let at = at_time(3, 17, 0);
+    let (mut runtime, _) = started_runtime(loaded(&mirrored_cycling(AFTERNOON), &[]), at);
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("day")).ok);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["route_source"], "manual");
+    assert_no_route_change(&row);
+    assert_cycle_within(&row, 300);
+
+    assert!(runtime_command(&mut runtime, at, "schedule-follow", None).ok);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["until"], "18:00");
+}
+
+#[test]
+fn a_paused_display_has_no_cycle_deadline_but_keeps_its_schedule() {
+    let at = at_time(3, 17, 0);
+    let (mut runtime, _) = started_runtime(loaded(&mirrored_cycling(AFTERNOON), &[]), at);
+    assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["playback_state"], "paused");
+    assert_no_cycle(&row);
+    // The schedule still moves a paused route.
+    assert_eq!(row["until"], "18:00");
+
+    // Stop keeps rotating stills, so it keeps its deadline.
+    assert!(runtime_command(&mut runtime, at, "stop", None).ok);
+    let row = route(&status(&mut runtime, at), "ALL");
+    assert_eq!(row["playback_state"], "stopped");
+    assert!(row["next_cycle_in_s"].is_u64());
+
+    assert!(runtime_command(&mut runtime, at, "cycle", Some("off")).ok);
+    assert_no_cycle(&route(&status(&mut runtime, at), "ALL"));
+}
+
+#[test]
+fn mirrored_rows_share_one_timer_and_ignore_a_dormant_opt_in() {
+    let assigned = mirrored_cycling(&format!(
+        "{AFTERNOON}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"day\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"night\"\n\
+         [[displays]]\nconnector = \"DETACHED-1\"\nplaylist = \"day\"\n"
+    ));
+    let at = at_time(3, 17, 0);
+    // The opt-in is dormant in mirrored mode: the global rule still applies.
+    let (mut runtime, _) = started_runtime(loaded(&assigned, &[beats("DP-1")]), at);
+    let snapshot = status(&mut runtime, at);
+    let dp = route(&snapshot, "DP-1");
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(dp["beats_global_rules"], false);
+    // DP-1 returns to its own playlist at 18:00; HDMI-A-1 keeps the night
+    // playlist, but its reason changes from the schedule to its assignment.
+    assert_eq!(dp["until"], "18:00");
+    assert_eq!(hdmi["until"], "18:00");
+    assert_eq!(dp["next_cycle_at"], hdmi["next_cycle_at"]);
+    assert_cycle_within(&dp, 300);
+    let detached = route(&snapshot, "DETACHED-1");
+    assert_eq!(detached["connected"], false);
+    assert_no_route_change(&detached);
+    assert_no_cycle(&detached);
+}
+
+/// DP-1's own evening rule (19:00 to 23:00) authored before the global
+/// afternoon rule (12:00 to 20:00) for the night playlist.
+const OPT_IN_RULES: &str = "\n[[schedules]]\nid = \"dp-evening\"\nplaylist = \"evening\"\n\
+                            connector = \"DP-1\"\nstart = \"19:00\"\nend = \"23:00\"\n\
+                            [[schedules]]\nid = \"afternoon\"\nplaylist = \"night\"\n\
+                            start = \"12:00\"\nend = \"20:00\"\n";
+
+#[test]
+fn independent_route_changes_follow_the_displays_own_precedence() {
+    let document = independent_with_evening(OPT_IN_RULES)
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let at = at_time(3, 13, 0);
+
+    // Without the opt-in the later global rule wins DP-1 until 20:00.
+    let (mut plain, _) = started_runtime(loaded(&document, &[]), at);
+    let dp = route(&status(&mut plain, at), "DP-1");
+    assert_eq!(dp["playlist_id"], "night");
+    assert_eq!(dp["route_change_at"], "2026-08-03T20:00:00");
+    assert_eq!(dp["until"], "20:00");
+
+    // With it, DP-1 plays its own playlist until its own rule at 19:00.
+    let (mut runtime, _) = started_runtime(
+        loaded(
+            &document,
+            &[
+                beats("DP-1"),
+                rotation("night", "cycle_interval_seconds = 45"),
+            ],
+        ),
+        at,
+    );
+    let snapshot = status(&mut runtime, at);
+    let dp = route(&snapshot, "DP-1");
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(dp["route_source"], "assignment");
+    assert_eq!(dp["route_change_at"], "2026-08-03T19:00:00");
+    assert_eq!(dp["until"], "19:00");
+    assert_cycle_within(&dp, 300);
+    // HDMI-A-1 follows the global rule, with the night playlist's interval.
+    assert_eq!(hdmi["route_source"], "schedule");
+    assert_eq!(hdmi["until"], "20:00");
+    assert_cycle_within(&hdmi, 45);
+
+    // A pick on one display holds only that display's route; a pause stops
+    // only that display's rotation.
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 playlist-use day")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 pause")).ok);
+    let snapshot = status(&mut runtime, at);
+    let dp = route(&snapshot, "DP-1");
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_no_route_change(&hdmi);
+    assert_cycle_within(&hdmi, 300);
+    assert_eq!(dp["until"], "19:00");
+    assert_no_cycle(&dp);
+}
+
+#[test]
+fn companion_status_fields_keep_their_wire_names_and_types() {
+    // The Noctalia companion reads `until` (local HH:MM, shown for every
+    // reason but a pick) and `next_change_in_s` (whole seconds, aged between
+    // polls) from each display row of `wall-in-one ctl status`.
+    let document = independent_with_evening(OPT_IN_RULES)
+        .replace("cycle_enabled = false", "cycle_enabled = true");
+    let at = at_time(3, 13, 0);
+    let (mut runtime, _) = started_runtime(loaded(&document, &[]), at);
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 playlist-use day")).ok);
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 cycle off")).ok);
+    let mut samples = vec![status(&mut runtime, at)];
+    let (mut mirrored, _) = started_runtime(loaded(&mirrored_cycling(AFTERNOON), &[]), at);
+    samples.push(status(&mut mirrored, at));
+    let mut seen_until = false;
+    let mut seen_countdown = false;
+    for snapshot in &samples {
+        for row in snapshot["displays"].as_array().unwrap() {
+            let object = row.as_object().unwrap();
+            assert!(object.contains_key("until") && object.contains_key("next_change_in_s"));
+            match &row["until"] {
+                serde_json::Value::Null => {}
+                serde_json::Value::String(text) => {
+                    let bytes = text.as_bytes();
+                    assert!(
+                        bytes.len() == 5
+                            && bytes[2] == b':'
+                            && [0, 1, 3, 4].iter().all(|i| bytes[*i].is_ascii_digit()),
+                        "until must be local HH:MM: {text:?}"
+                    );
+                    assert_ne!(row["route_source"], "manual");
+                    seen_until = true;
+                }
+                other => panic!("until must be a string or null: {other}"),
+            }
+            match &row["next_change_in_s"] {
+                serde_json::Value::Null => {}
+                value => {
+                    assert!(value.is_u64(), "next_change_in_s must be whole seconds");
+                    assert_eq!(row["cycle_enabled"], true);
+                    seen_countdown = true;
+                }
+            }
+        }
+    }
+    assert!(seen_until && seen_countdown);
+    let hdmi = route(&samples[0], "HDMI-A-1");
+    assert_eq!(hdmi["route_source"], "manual");
+    assert!(hdmi["until"].is_null());
+    let dp = route(&samples[0], "DP-1");
+    assert_eq!(dp["cycle_enabled"], false);
+    assert!(dp["next_change_in_s"].is_null());
+}
+
+#[test]
+fn hundreds_of_rules_on_many_displays_cannot_stall_status() {
+    // Every rule has its own window, and the last one always wins, so no
+    // display's route ever changes: each search would scan its whole horizon.
+    let mut parsed: Config = toml::from_str(&independent_config()).unwrap();
+    parsed.schedules = (0..511)
+        .map(|index| wall_in_one_service::config::ScheduleRule {
+            id: format!("rule-{index}"),
+            playlist: "night".into(),
+            connector: String::new(),
+            months: vec![],
+            weekdays: vec![],
+            start: Some(format!("{:02}:{:02}", index / 60 % 24, index % 60)),
+            end: Some(format!("{:02}:{:02}", (index / 60 + 3) % 24, index % 60)),
+            enabled: true,
+        })
+        .chain(std::iter::once(wall_in_one_service::config::ScheduleRule {
+            id: "always".into(),
+            playlist: "day".into(),
+            connector: String::new(),
+            months: vec![],
+            weekdays: vec![],
+            start: None,
+            end: None,
+            enabled: true,
+        }))
+        .collect();
+    parsed.validate().unwrap();
+    let outputs: Vec<String> = (0..64).map(|index| format!("LIVE-{index:02}")).collect();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(outputs),
+        ..RuntimeDriverState::default()
+    }));
+    let at = noon();
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let started = Instant::now();
+    let snapshot = status(&mut runtime, at);
+    let rows = snapshot["displays"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().filter(|row| row["connected"] == true).count(),
+        64
+    );
+    assert!(rows.iter().all(|row| row["route_change_at"].is_null()));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "status took {:?}",
+        started.elapsed()
+    );
 }

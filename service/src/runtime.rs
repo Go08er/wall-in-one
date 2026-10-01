@@ -1,6 +1,6 @@
 use crate::config::{
-    Config, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES, Playlist, SUPPORTED_OVERRIDE_SCHEMAS,
-    SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
+    Config, DisplayAssignment, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES, Playlist,
+    SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
 };
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response};
@@ -25,6 +25,11 @@ const MAX_RETAINED_DISPLAY_ROUTES: usize = 64;
 const MAX_STATUS_DISPLAY_ROWS: usize = MAX_LIVE_DISPLAY_ROUTES + MAX_RETAINED_DISPLAY_ROUTES;
 const MAX_DISPLAY_ERROR_BYTES: usize = MAX_DISPLAY_DIAGNOSTIC_TOTAL_BYTES / MAX_STATUS_DISPLAY_ROWS;
 const TRUNCATION_MARKER: &str = " ... [truncated] ... ";
+/// Rule checks one status reply may spend finding every display's next
+/// schedule boundary (`schedule::next_change`). A profile with a few dozen
+/// rules on a few displays needs well under a tenth of it; only hundreds of
+/// rules on dozens of displays reach it, and the rest then report no change.
+const ROUTE_CHANGE_RULE_CHECKS: usize = 2_000_000;
 
 fn clean_error(value: &str) -> String {
     value
@@ -245,6 +250,75 @@ pub struct DisplayStatus<'a> {
     pub renderer_failed: bool,
     pub last_error: String,
     pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
+    /// When and why this display's wallpaper next changes on its own.
+    #[serde(flatten)]
+    pub timing: DisplayTiming,
+}
+
+/// When a display's automatic route and rotation next move. Appended to each
+/// display row; every field is `null` when there is nothing to report.
+#[derive(Debug, Default, Serialize)]
+pub struct DisplayTiming {
+    /// Local wall-clock time (`YYYY-MM-DDTHH:MM:SS`) of the next schedule
+    /// boundary that changes this display's automatic playlist or route
+    /// source, at most `schedule::CHANGE_HORIZON_DAYS` ahead. `null` while a
+    /// manual pick holds, for a detached display, or with no change in range.
+    pub route_change_at: Option<String>,
+    pub route_change_in_s: Option<u64>,
+    /// Local wall-clock time the rotation next advances. `null` when the route
+    /// is paused, does not cycle, or is detached. Due now reads as 0 seconds.
+    pub next_cycle_at: Option<String>,
+    pub next_cycle_in_s: Option<u64>,
+    /// The companion's names: `route_change_at` as local `HH:MM`, only when it
+    /// is less than a day away, and `next_cycle_in_s`.
+    pub until: Option<String>,
+    pub next_change_in_s: Option<u64>,
+}
+
+const WALL_CLOCK_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+impl DisplayTiming {
+    fn new(
+        at: NaiveDateTime,
+        route_change: Option<NaiveDateTime>,
+        cycle_in: Option<Duration>,
+    ) -> Self {
+        let route_change_in_s = route_change.map(|change| seconds_between(at, change));
+        let next_cycle_in_s =
+            cycle_in.map(|remaining| remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0));
+        let next_cycle_at = next_cycle_in_s.and_then(|seconds| {
+            let seconds = i64::try_from(seconds).ok()?;
+            let due = at.checked_add_signed(chrono::TimeDelta::try_seconds(seconds)?)?;
+            Some(due.format(WALL_CLOCK_FORMAT).to_string())
+        });
+        Self {
+            route_change_at: route_change
+                .map(|change| change.format(WALL_CLOCK_FORMAT).to_string()),
+            route_change_in_s,
+            next_cycle_at,
+            next_cycle_in_s,
+            until: route_change
+                .zip(route_change_in_s)
+                .filter(|(_, seconds)| *seconds < SECONDS_PER_DAY)
+                .map(|(change, _)| change.format("%H:%M").to_string()),
+            next_change_in_s: next_cycle_in_s,
+        }
+    }
+}
+
+/// Whole seconds from `from` to `to`, rounded up; 0 once `to` has passed.
+/// Both are naive local times, so a daylight-saving change in between is not
+/// accounted for; the wall-clock field is the authority.
+fn seconds_between(from: NaiveDateTime, to: NaiveDateTime) -> u64 {
+    let delta = to - from;
+    let seconds = delta.num_seconds();
+    let rounded = if delta.subsec_nanos() > 0 {
+        seconds + 1
+    } else {
+        seconds
+    };
+    u64::try_from(rounded).unwrap_or(0)
 }
 
 #[derive(Clone, Debug)]
@@ -491,6 +565,10 @@ pub struct Runtime<D: WallpaperDriver> {
     routes: HashMap<String, DisplayRoute>,
     route_generation: u64,
     current_time: NaiveDateTime,
+    /// The latest monotonic instant `tick` was handed. Status measures cycle
+    /// deadlines from it or the real clock, whichever is later, so a caller
+    /// driving time by hand gets the same answers as the service loop.
+    observed_instant: Instant,
     runtime_instance: String,
     runtime_executable: Option<String>,
     config_epoch: u64,
@@ -576,6 +654,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             routes: HashMap::new(),
             route_generation: 0,
             current_time: at,
+            observed_instant: Instant::now(),
             runtime_instance: new_runtime_instance(),
             runtime_executable: std::env::current_exe()
                 .ok()
@@ -976,6 +1055,7 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     pub fn tick(&mut self, at: NaiveDateTime, now: Instant) {
         self.current_time = at;
+        self.observed_instant = now;
         let mut failures = self.driver.poll_failures();
         if let Some(palette_failure) = self.reapply_palette_after_renderer_failure(&failures) {
             failures.push(palette_failure);
@@ -4439,10 +4519,104 @@ impl<D: WallpaperDriver> Runtime<D> {
         Err(error)
     }
 
+    /// The instant status measures cycle deadlines from: the real clock, or a
+    /// later instant `tick` was handed.
+    fn status_instant(&self) -> Instant {
+        self.observed_instant.max(Instant::now())
+    }
+
+    fn playlist_id(&self, reference: &str) -> Option<&str> {
+        self.config
+            .playlist(reference)
+            .map(|playlist| playlist.id.as_str())
+    }
+
+    /// The automatic route a mirrored row reports at `at`: the playlist and
+    /// `route_source` its status would show, ignoring a manual pick. The
+    /// all-output row has no assignment and falls back to the default.
+    fn mirrored_route_key(
+        &self,
+        explicit: Option<&DisplayAssignment>,
+        at: NaiveDateTime,
+    ) -> Result<(Option<&str>, &'static str), String> {
+        let rule = schedule::resolve_rule(&self.config.schedules, at)
+            .map_err(|error| error.to_string())?;
+        Ok(match (rule, explicit) {
+            (Some(rule), _) => (self.playlist_id(&rule.playlist), "schedule"),
+            (None, Some(assignment)) => (self.playlist_id(&assignment.playlist), "assignment"),
+            (None, None) => (self.playlist_id(&self.config.default_playlist), "default"),
+        })
+    }
+
+    /// One mirrored row's timing. Mirrored mode has one rotation timer, and
+    /// its schedule is not consulted while a manual pick holds.
+    fn mirrored_timing(
+        &self,
+        explicit: Option<&DisplayAssignment>,
+        connected: bool,
+        at: NaiveDateTime,
+        now: Instant,
+        budget: &mut usize,
+    ) -> DisplayTiming {
+        if !connected {
+            return DisplayTiming::default();
+        }
+        let route_change = if self.manual_playlist.is_some() {
+            None
+        } else {
+            schedule::next_change(&self.config.schedules, at, budget, |instant| {
+                self.mirrored_route_key(explicit, instant)
+            })
+            .ok()
+            .flatten()
+        };
+        let cycle = (self.playback_state != PlaybackState::Paused && self.cycle_enabled())
+            .then(|| cycle_remaining(self.last_cycle, self.mirrored_cycle_interval_seconds(), now));
+        DisplayTiming::new(at, route_change, cycle)
+    }
+
+    /// One independent route's timing: its own calendar winner (with the
+    /// display's opt-in, through `automatic_route`) and its own timer.
+    fn route_timing(
+        &self,
+        connector: &str,
+        route: &DisplayRoute,
+        connected: bool,
+        at: NaiveDateTime,
+        now: Instant,
+        budget: &mut usize,
+    ) -> DisplayTiming {
+        if !connected {
+            return DisplayTiming::default();
+        }
+        let route_change = if route.manual_playlist.is_some() {
+            None
+        } else {
+            schedule::next_change(&self.config.schedules, at, budget, |instant| {
+                self.automatic_route(connector, instant)
+                    .map(|(playlist, source, _rule)| (self.playlist_id(&playlist), source))
+            })
+            .ok()
+            .flatten()
+        };
+        let cycle = (route.playback_state != PlaybackState::Paused
+            && route.cycle_enabled(self.config.settings.cycle_enabled))
+        .then(|| {
+            cycle_remaining(
+                route.last_cycle,
+                self.playlist_cycle_interval_seconds(&route.active_playlist),
+                now,
+            )
+        });
+        DisplayTiming::new(at, route_change, cycle)
+    }
+
     fn status_json(&self, at: NaiveDateTime) -> Result<String, String> {
         if self.is_independent() {
             return self.status_json_independent(at);
         }
+        let now = self.status_instant();
+        let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let active_playlist = self.playlist()?;
         let effective_ids = self.effective_playlist_ids();
         let summary_playlist = if self.manual_playlist.is_some()
@@ -4572,6 +4746,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             reason: pending.reason,
                         }
                     }),
+                    timing: self.mirrored_timing(None, true, at, now, &mut budget),
                 });
             }
         } else {
@@ -4671,6 +4846,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                                 reason: pending.reason,
                             }
                         }),
+                        timing: self.mirrored_timing(
+                            explicit,
+                            self.target_outputs.iter().any(|target| target == output),
+                            at,
+                            now,
+                            &mut budget,
+                        ),
                     });
                 }
             }
@@ -4768,6 +4950,8 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn status_json_independent(&self, at: NaiveDateTime) -> Result<String, String> {
+        let now = self.status_instant();
+        let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let live_targets = self.current_targets(&self.target_outputs);
         if live_targets.is_empty() {
             return Err("active display playlists are empty".into());
@@ -4974,6 +5158,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                         reason: pending.reason,
                     }
                 }),
+                timing: self.route_timing(
+                    &target.output,
+                    route,
+                    self.target_outputs.contains(&target.output),
+                    at,
+                    now,
+                    &mut budget,
+                ),
             });
         }
         let route_states: Vec<&DisplayRoute> = self
@@ -5158,6 +5350,13 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 }
 
+/// Time left on a rotation timer started at `last_cycle`; zero once due.
+fn cycle_remaining(last_cycle: Instant, interval_seconds: u64, now: Instant) -> Duration {
+    last_cycle
+        .checked_add(Duration::from_secs(interval_seconds))
+        .map_or(Duration::ZERO, |due| due.saturating_duration_since(now))
+}
+
 fn entry_kind(kind: crate::config::EntryKind) -> &'static str {
     match kind {
         crate::config::EntryKind::Still => "still",
@@ -5308,9 +5507,59 @@ fn _is_absolute(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EntryKey, MAX_TABOO_STATUS_ENTRIES, PLAYBACK_HISTORY_LIMIT, promote_taboo_status_key,
-        push_bounded,
+        DisplayTiming, EntryKey, MAX_TABOO_STATUS_ENTRIES, PLAYBACK_HISTORY_LIMIT, cycle_remaining,
+        promote_taboo_status_key, push_bounded, seconds_between,
     };
+    use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
+    use std::time::{Duration, Instant};
+
+    fn at(hour: u32, minute: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 8, 3)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn timing_rounds_up_to_whole_seconds_and_never_goes_negative() {
+        let half = at(17, 59) + TimeDelta::milliseconds(30_500);
+        assert_eq!(seconds_between(half, at(18, 0)), 30);
+        assert_eq!(seconds_between(at(17, 0), at(18, 0)), 3600);
+        assert_eq!(seconds_between(at(18, 1), at(18, 0)), 0);
+
+        let start = Instant::now();
+        let later = start + Duration::from_millis(100_250);
+        assert_eq!(
+            cycle_remaining(start, 300, later),
+            Duration::from_millis(199_750)
+        );
+        assert_eq!(
+            cycle_remaining(start, 300, start + Duration::from_secs(900)),
+            Duration::ZERO
+        );
+        let timing = DisplayTiming::new(at(9, 0), None, Some(Duration::from_millis(199_750)));
+        assert_eq!(timing.next_cycle_in_s, Some(200));
+        assert_eq!(timing.next_change_in_s, Some(200));
+        assert_eq!(timing.next_cycle_at.as_deref(), Some("2026-08-03T09:03:20"));
+        let due = DisplayTiming::new(at(9, 0), None, Some(Duration::ZERO));
+        assert_eq!(due.next_cycle_in_s, Some(0));
+        assert_eq!(due.next_cycle_at.as_deref(), Some("2026-08-03T09:00:00"));
+    }
+
+    #[test]
+    fn until_is_given_only_for_a_change_less_than_a_day_away() {
+        let soon = DisplayTiming::new(at(9, 0), Some(at(18, 0)), None);
+        assert_eq!(soon.until.as_deref(), Some("18:00"));
+        assert_eq!(soon.route_change_at.as_deref(), Some("2026-08-03T18:00:00"));
+        assert_eq!(soon.route_change_in_s, Some(9 * 3600));
+        assert_eq!(soon.next_change_in_s, None);
+        let almost_a_day = DisplayTiming::new(at(9, 1), Some(at(9, 0) + TimeDelta::days(1)), None);
+        assert_eq!(almost_a_day.until.as_deref(), Some("09:00"));
+        let a_day = DisplayTiming::new(at(9, 0), Some(at(9, 0) + TimeDelta::days(1)), None);
+        assert_eq!(a_day.until, None);
+        assert_eq!(a_day.route_change_in_s, Some(86_400));
+        assert_eq!(DisplayTiming::new(at(9, 0), None, None).until, None);
+    }
 
     #[test]
     fn playback_history_has_a_hard_memory_bound() {

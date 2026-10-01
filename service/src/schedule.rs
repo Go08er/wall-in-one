@@ -94,16 +94,29 @@ pub const CHANGE_HORIZON_DAYS: u64 = 8;
 /// A rule's match only changes at midnight (a new weekday or month) and at its
 /// own start and end minutes; a wrapped window's after-midnight tail belongs
 /// to its start day, so midnight is no edge for it. `decide` is therefore
-/// asked only at those instants, which keeps this cheap enough for every
-/// status reply. Without an enabled rule nothing can change.
+/// asked only at those instants. Without an enabled rule nothing can change.
+///
+/// Each `decide` is charged `rules.len()` against `budget`, the rule checks a
+/// caller allows for all its searches together. When the budget runs out the
+/// search stops and reports no change, so hundreds of rules on dozens of
+/// displays cannot stall a status reply.
 pub fn next_change<T: PartialEq, E>(
     rules: &[ScheduleRule],
     at: NaiveDateTime,
+    budget: &mut usize,
     mut decide: impl FnMut(NaiveDateTime) -> Result<T, E>,
 ) -> Result<Option<NaiveDateTime>, E> {
     if !rules.iter().any(|rule| rule.enabled) {
         return Ok(None);
     }
+    let cost = rules.len();
+    let mut decide = move |instant: NaiveDateTime| -> Result<Option<T>, E> {
+        if *budget < cost {
+            return Ok(None);
+        }
+        *budget -= cost;
+        decide(instant).map(Some)
+    };
     let mut minutes = vec![0u16];
     for rule in rules.iter().filter(|rule| rule.enabled) {
         for time in [&rule.start, &rule.end].into_iter().flatten() {
@@ -114,7 +127,9 @@ pub fn next_change<T: PartialEq, E>(
     }
     minutes.sort_unstable();
     minutes.dedup();
-    let current = decide(at)?;
+    let Some(current) = decide(at)? else {
+        return Ok(None);
+    };
     let horizon = at
         .checked_add_days(Days::new(CHANGE_HORIZON_DAYS))
         .unwrap_or(NaiveDateTime::MAX);
@@ -134,8 +149,10 @@ pub fn next_change<T: PartialEq, E>(
             if candidate > horizon {
                 return Ok(None);
             }
-            if decide(candidate)? != current {
-                return Ok(Some(candidate));
+            match decide(candidate)? {
+                None => return Ok(None),
+                Some(answer) if answer != current => return Ok(Some(candidate)),
+                Some(_) => {}
             }
         }
     }
@@ -260,7 +277,40 @@ mod tests {
     }
 
     fn next_winner(rules: &[ScheduleRule], from: NaiveDateTime) -> Option<NaiveDateTime> {
-        next_change(rules, from, |instant| resolve(rules, "d", instant)).unwrap()
+        let mut unlimited = usize::MAX;
+        next_change(rules, from, &mut unlimited, |instant| {
+            resolve(rules, "d", instant)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn next_change_stops_when_its_budget_runs_out() {
+        let r = vec![
+            rule("am", Some("06:00"), Some("12:00")),
+            rule("pm", Some("12:00"), Some("18:00")),
+        ];
+        let from = at(2026, 8, 3, 19, 0);
+        let mut calls = 0;
+        let mut count = |instant| {
+            calls += 1;
+            resolve(&r, "d", instant)
+        };
+        // 19:00 now, midnight, then 06:00 tomorrow: three decisions of two
+        // rules each.
+        let mut budget = 6;
+        assert_eq!(
+            next_change(&r, from, &mut budget, &mut count).unwrap(),
+            Some(at(2026, 8, 4, 6, 0))
+        );
+        assert_eq!(budget, 0);
+        let mut budget = 5;
+        assert_eq!(
+            next_change(&r, from, &mut budget, &mut count).unwrap(),
+            None
+        );
+        assert_eq!(budget, 1);
+        assert_eq!(calls, 5);
     }
 
     #[test]

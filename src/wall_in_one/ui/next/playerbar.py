@@ -129,7 +129,8 @@ class PlayerBar(Gtk.Box):
             button: button.get_tooltip_text() or ""
             for button in (self._shuffle, self._previous, self._next, self._rotate, self._resume)
         }
-        self._spinner = Adw.Spinner()
+        self._spinner = Adw.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        self._spinner.set_size_request(24, 24)
         bar.set_center_widget(controls)
 
         # -- right: timing, scope, more -------------------------------------

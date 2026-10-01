@@ -19,7 +19,7 @@ from wall_in_one.library import manage, pairings
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem, RepresentativeStillError
 from wall_in_one.session import RemovalResult, Session
 from wall_in_one.theme import palettes, source
-from wall_in_one.ui import runtime_truth
+from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.browse_dialog import BrowsePage
 from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.pairings_page import PairingsPage
@@ -377,15 +377,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_page("media")
             self.report("Open the wallpaper with playback disabled to see its removal options")
             return
-        verb = (
-            "play"
-            if self._renderer_failed
-            else "toggle"
-            if self._playback_state == "mixed"
-            else "pause"
-            if self._playback_state == "playing"
-            else "play"
-        )
+        verb = playback_verbs.play_verb(self._playback_state, renderer_failed=self._renderer_failed)
         self._run_runtime_action(verb)
 
     def _on_runtime_switch(self, switch: Gtk.Switch, _property: object, verb: str) -> None:
@@ -785,18 +777,11 @@ class MainWindow(Adw.ApplicationWindow):
         """Show service-owned truth rather than only the last authored choice."""
         playlist = status.get("playlist")
         source = status.get("source")
-        paused = status.get("paused")
         if not isinstance(playlist, str) or not isinstance(source, str):
             return
         self._runtime_media_status = status
         power = runtime_truth.power_from_status(status)
-        reported_state = status.get("playback_state")
-        state = (
-            reported_state
-            if isinstance(reported_state, str)
-            and reported_state in ("playing", "paused", "stopped", "mixed")
-            else ("paused" if paused is True else "playing")
-        )
+        state = playback_verbs.playback_state(status)
         self._playback_state = state
         self._renderer_failed = status.get("renderer_failed") is True
         self._renderer_taboo = runtime_truth.current_renderer_failure_is_taboo(status)

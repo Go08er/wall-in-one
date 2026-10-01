@@ -15,7 +15,7 @@ from gi.repository import Adw, Gdk, Gtk
 
 from wall_in_one import config
 from wall_in_one.library import schedules
-from wall_in_one.ui import runtime_truth
+from wall_in_one.ui import playback_verbs, runtime_truth
 
 if TYPE_CHECKING:
     from wall_in_one.session import Session
@@ -426,11 +426,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         choices: tuple[Any, ...],
         truth: runtime_truth.RuntimeTruth,
     ) -> None:
-        taboo = display.entry_taboo or runtime_truth.entry_is_taboo(
-            getattr(self._app, "runtime_status", None),
-            display.playlist_id,
-            display.entry_id,
-        )
+        taboo = playback_verbs.display_is_taboo(getattr(self._app, "runtime_status", None), display)
         description = self._display_playback_description(
             display, truth, taboo=taboo, rule_names=self._rule_names(self._session)
         )
@@ -1133,17 +1129,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
             display = truth.display(connector) if truth is not None else None
             if display is None:
                 return
-            if display.entry_taboo or runtime_truth.entry_is_taboo(
-                getattr(self._app, "runtime_status", None),
-                display.playlist_id,
-                display.entry_id,
-            ):
+            if playback_verbs.display_is_taboo(getattr(self._app, "runtime_status", None), display):
                 self._app.present_page("media")
                 return
-            verb = (
-                "pause"
-                if display.playback_state == "playing" and not display.renderer_failed
-                else "play"
+            verb = playback_verbs.play_verb(
+                display.playback_state, renderer_failed=display.renderer_failed
             )
             self._app.runtime_action_on_async(connector, verb)
 

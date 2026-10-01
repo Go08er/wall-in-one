@@ -20,6 +20,7 @@ from wall_in_one.library import pairings, playlists
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
 from wall_in_one.theme import css
+from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_state import RealAppState, human_size, scheme_name, wallpaper_view
 from wall_in_one.ui.next.state import AppState, Reason, reason_text
@@ -540,3 +541,45 @@ def test_a_ui_toml_from_a_newer_version_is_never_written(backend: FakeApplicatio
     keeper.close(wait=True)
     assert target.read_text() == document
     assert keeper.saves == 0 and len(backend.reports) == 2
+
+
+# -- Play's verb: one rule for every window ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("state", "renderer_failed", "verb"),
+    [
+        ("playing", False, "pause"),
+        ("paused", False, "play"),
+        ("stopped", False, "play"),
+        ("mixed", False, "toggle"),
+        ("playing", True, "play"),
+        ("mixed", True, "play"),
+    ],
+)
+def test_play_pauses_plays_synchronizes_or_retries(
+    state: str, renderer_failed: bool, verb: str
+) -> None:
+    assert playback_verbs.play_verb(state, renderer_failed=renderer_failed) == verb
+
+
+def test_the_overall_state_falls_back_to_an_older_runtimes_paused_flag() -> None:
+    assert playback_verbs.playback_state(two_display_status("mixed")) == "mixed"
+    assert playback_verbs.playback_state({"paused": True}) == "paused"
+    assert playback_verbs.playback_state({"playback_state": "sideways"}) == "playing"
+
+
+def test_a_display_is_taboo_by_its_flag_or_the_runtimes_inventory() -> None:
+    status = two_display_status()
+    truth = runtime_truth.from_status(status)
+    assert truth is not None
+    display = truth.displays[0]
+    assert not playback_verbs.display_is_taboo(status, display)
+    listed = {**status, "taboo_entries": [{"playlist_id": "evening", "entry_id": "entry-1"}]}
+    assert playback_verbs.display_is_taboo(listed, display)
+    flagged = two_display_status()
+    records = flagged["displays"]
+    assert isinstance(records, list)
+    records[0]["entry_taboo"] = True
+    truth = runtime_truth.from_status(flagged)
+    assert truth is not None and playback_verbs.display_is_taboo(flagged, truth.displays[0])

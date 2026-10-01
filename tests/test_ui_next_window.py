@@ -116,6 +116,11 @@ class FakeRuntime:
 @pytest.fixture
 def runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeRuntime:
     """A sandboxed profile with a two-wallpaper library, a fake runtime, no Noctalia."""
+    return sandboxed_runtime(monkeypatch, tmp_path)
+
+
+def sandboxed_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeRuntime:
+    """The `runtime` fixture's body, for other files that drive the whole application."""
     fake = FakeRuntime()
     monkeypatch.setattr(client, "send_runtime", fake.send_runtime)
 

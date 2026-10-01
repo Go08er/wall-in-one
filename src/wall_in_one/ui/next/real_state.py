@@ -9,17 +9,19 @@ default), its playlist and its entry, resolved to a library item by
 `runtime_truth.media_playback`. Nothing here resolves a schedule: "until"
 stays empty because the runtime does not report when a reason ends.
 
-**Writes.** Apply and Favorite, and nothing else. Apply is the classic
-window's Quick choice (`play_item_async`, or `play_item_on_async` for one
-display); Favorite is the classic star, on the authoring lane. Both report
-their failures through the application; neither changes what the window
-shows until the store or the runtime says so (the favourite comes back
-through `reload`, what plays through the next status). There is no undo.
+**Writes.** Apply, Favorite and the player bar's playback controls, and
+nothing else. Apply is the classic window's Quick choice (`play_item_async`,
+or `play_item_on_async` for one display); Favorite is the classic star, on
+the authoring lane; the playback controls are the classic runtime verbs
+(`real_controls.RuntimeControls`). All of them report their failures through
+the application; none changes what the window shows until the store or the
+runtime says so (the favourite comes back through `reload`, what plays
+through the next status). There is no undo.
 
-**Read-only states.** A store saved by a newer version turns Apply and
-Favorite off (the runtime configuration cannot be compiled while one exists,
-so no change could reach the wallpaper service), and unknown settings keys
-are named in the notice; see `read_only_notice`.
+**Read-only states.** A store saved by a newer version turns Apply, Favorite
+and the playback controls off (the runtime configuration cannot be compiled
+while one exists, so no change could reach the wallpaper service), and
+unknown settings keys are named in the notice; see `read_only_notice`.
 
 **The look.** The window style, opacity dials, frost and thumbnail size live
 in ``ui.toml`` (`UiPrefsKeeper`); the glass dials are handed to the
@@ -52,6 +54,7 @@ from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next import status_line
 from wall_in_one.ui.next.library_thumbnails import StillSource
 from wall_in_one.ui.next.prefs import DIAL_SAVE_DELAY_MS, UiPrefsKeeper
+from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
 from wall_in_one.ui.next.state import (
     Banner,
     LibraryEditing,
@@ -80,7 +83,7 @@ _ROUTES: Final[dict[str, Route]] = {
 }
 
 
-class Backend(Protocol):
+class Backend(RuntimeBackend, Protocol):
     """What the adapter uses of `wall_in_one.ui.app.Application`."""
 
     @property
@@ -265,6 +268,7 @@ class RealAppState(GObject.Object):
         self._player = Player()
         self._banner: Banner | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        self._controls = RuntimeControls(backend, self, self._authoring_blocked)
         self.reload()
         self.listen()
 
@@ -378,7 +382,7 @@ class RealAppState(GObject.Object):
         if current != self._current:
             self._current = current
             topics.append("now")
-        player = self._read_player(view, truth)
+        player = self._controls.annotate(self._read_player(view, truth), view)
         if player != self._player:
             self._player = player
             topics.append("playback")
@@ -626,8 +630,9 @@ class RealAppState(GObject.Object):
         if newer:
             verb, pronoun = ("was", "it") if len(newer) == 1 else ("were", "them")
             parts.append(
-                f"{_listed(newer)} {verb} saved by a newer version of Wall-in-One, so Apply "
-                f"and favorites are off here. Open that version to change {pronoun}."
+                f"{_listed(newer)} {verb} saved by a newer version of Wall-in-One, so Apply, "
+                f"favorites and playback controls are off here. Open that version to change "
+                f"{pronoun}."
             )
         unknown = self._backend.settings_unknown_keys
         if unknown:
@@ -781,10 +786,10 @@ class RealAppState(GObject.Object):
     def appearance_blocked(self) -> str:
         return self._prefs.read_only
 
-    # -- optional parts: none in this slice --------------------------------------------
+    # -- optional parts: the playback controls; no editing yet --------------------------
     @property
     def controls(self) -> PlaybackControls | None:
-        return None
+        return self._controls
 
     @property
     def editing(self) -> LibraryEditing | None:

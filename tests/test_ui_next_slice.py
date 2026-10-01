@@ -338,8 +338,8 @@ def test_a_newer_playlists_file_turns_apply_and_favorite_off_with_the_notice(
         )
         assert window.notice.get_revealed()
         assert window.notice.get_title().startswith(
-            "playlists.json was saved by a newer version of Wall-in-One, so Apply and favorites "
-            "are off here."
+            "playlists.json was saved by a newer version of Wall-in-One, so Apply, favorites "
+            "and playback controls are off here."
         )
         card = page._cards[wid]
         assert card.apply_button is not None and not card.apply_button.get_sensitive()

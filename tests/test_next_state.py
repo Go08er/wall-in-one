@@ -22,6 +22,7 @@ from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
 from wall_in_one.theme import css
 from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
+from wall_in_one.ui.next.real_controls import NO_SERVICE_START
 from wall_in_one.ui.next.real_state import RealAppState, human_size, scheme_name, wallpaper_view
 from wall_in_one.ui.next.state import AppState, Reason, reason_text
 from wall_in_one.ui.status_model import RuntimeStatusModel
@@ -59,6 +60,8 @@ class FakeApplication:
         self._model = RuntimeStatusModel()
         self.unknown_keys: tuple[str, ...] = ()
         self.played: list[tuple[Path, str | None]] = []
+        #: Runtime commands: (connector or None for every display, verb, argument).
+        self.sent: list[tuple[str | None, str, str | None]] = []
         self.reports: list[str] = []
         self.glass: list[css.Glass | None] = []
         self.published = 0
@@ -87,6 +90,24 @@ class FakeApplication:
 
     def play_item_on_async(self, item: MediaItem, connector: str) -> bool:
         self.played.append((item.path, connector))
+        return True
+
+    def runtime_action_async(self, verb: str, argument: str | None = None) -> bool:
+        self.sent.append((None, verb, argument))
+        return True
+
+    def runtime_action_on_async(
+        self, connector: str, verb: str, argument: str | None = None
+    ) -> bool:
+        self.sent.append((connector, verb, argument))
+        return True
+
+    def resume_schedule_async(self) -> bool:
+        self.sent.append((None, "schedule-follow", None))
+        return True
+
+    def resume_schedule_on_async(self, connector: str) -> bool:
+        self.sent.append((connector, "schedule-follow", None))
         return True
 
     def authoring_action_async(
@@ -177,9 +198,11 @@ def _topics(adapter: RealAppState) -> list[str]:
     return seen
 
 
-def _status(still: dict[str, Path], **routes: str) -> dict[str, object]:
-    """``two_display_status`` with each display's still and route source."""
-    status = two_display_status()
+def _status(
+    still: dict[str, Path], *, playback: str = "playing", **routes: str
+) -> dict[str, object]:
+    """``two_display_status(playback)`` with each display's still and route source."""
+    status = two_display_status(playback)
     displays = status["displays"]
     assert isinstance(displays, list)
     for record in displays:
@@ -465,7 +488,7 @@ def test_a_newer_playlists_file_turns_apply_and_favorite_off(
         assert "playlists.json" in adapter.favorite_blocked()
         notice = adapter.read_only_notice()
         assert "playlists.json was saved by a newer version of Wall-in-One" in notice
-        assert "Apply and favorites are off" in notice
+        assert "Apply, favorites and playback controls are off" in notice
 
         adapter.apply(wid)
         adapter.toggle_favorite(wid)
@@ -583,3 +606,203 @@ def test_a_display_is_taboo_by_its_flag_or_the_runtimes_inventory() -> None:
     records[0]["entry_taboo"] = True
     truth = runtime_truth.from_status(flagged)
     assert truth is not None and playback_verbs.display_is_taboo(flagged, truth.displays[0])
+
+
+# -- the playback controls -------------------------------------------------------------
+
+
+def _press_every_control(adapter: RealAppState) -> None:
+    """What the player bar's controls call, in the bar's scope."""
+    controls = adapter.controls
+    assert controls is not None
+    controls.toggle_play()
+    controls.stop()
+    controls.step(1, adapter.scope)
+    controls.step(-1, adapter.scope)
+    controls.random(adapter.scope)
+    controls.resume_schedule(adapter.scope)
+    controls.set_shuffle(True, adapter.scope)
+    controls.set_rotate(False)
+
+
+def _verbs(connector: str | None) -> list[tuple[str | None, str, str | None]]:
+    return [
+        (connector, "pause", None),
+        (connector, "stop", None),
+        (connector, "next", None),
+        (connector, "previous", None),
+        (connector, "random", None),
+        (connector, "schedule-follow", None),
+        (connector, "shuffle", "on"),
+        (connector, "cycle", "off"),
+    ]
+
+
+def test_every_control_sends_the_classic_verb_to_the_bars_scope(
+    backend: FakeApplication,
+) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    backend.status_model.adopt(_status({"DP-1": items[1].path, "HDMI-A-1": items[0].path}))
+    before = adapter.player()
+    assert before.controls_off == "" and not before.busy
+
+    _press_every_control(adapter)
+    assert backend.sent == _verbs(None), "All displays: the global verbs"
+    assert adapter.player() == before, "nothing changes until the runtime says so"
+
+    backend.sent.clear()
+    adapter.set_scope("HDMI-A-1")
+    _press_every_control(adapter)
+    assert backend.sent == _verbs("HDMI-A-1"), "one display: the same verbs, for it only"
+
+    backend.sent.clear()
+    controls = adapter.controls
+    assert controls is not None
+    controls.step(1, "all")
+    controls.resume_schedule("DP-1")
+    assert backend.sent == [(None, "next", None), ("DP-1", "schedule-follow", None)]
+    assert backend.reports == []
+
+
+def test_mirrored_displays_take_only_the_global_verbs(backend: FakeApplication) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    status = _status({"DP-1": items[1].path, "HDMI-A-1": items[1].path})
+    status["display_mode"] = "mirrored"
+    backend.status_model.adopt(status)
+    adapter.set_scope("HDMI-A-1")
+    assert adapter.scope_label() == "All displays"
+    _press_every_control(adapter)
+    assert backend.sent == _verbs(None)
+
+
+@pytest.mark.parametrize(
+    ("state", "verb"), [("paused", "play"), ("stopped", "play"), ("mixed", "toggle")]
+)
+def test_play_resumes_or_brings_the_displays_together(
+    backend: FakeApplication, state: str, verb: str
+) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    backend.status_model.adopt(
+        _status({"DP-1": items[1].path, "HDMI-A-1": items[0].path}, playback=state)
+    )
+    controls = adapter.controls
+    assert controls is not None
+    controls.toggle_play()
+    adapter.set_scope("HDMI-A-1")  # paused (or stopped) on its own, in every case
+    controls.toggle_play()
+    assert backend.sent == [(None, verb, None), ("HDMI-A-1", "play", None)]
+
+
+def test_play_retries_a_stopped_renderer(backend: FakeApplication) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    status = _status({"DP-1": items[1].path, "HDMI-A-1": items[0].path})
+    displays = status["displays"]
+    assert isinstance(displays, list)
+    displays[1]["renderer_failed"] = True
+    displays[1]["last_error"] = "mpvpaper exited with status 1"
+    status["renderer_failed"] = True
+    backend.status_model.adopt(status)
+    assert adapter.player().retry, "Play retries, though the runtime still says playing"
+    controls = adapter.controls
+    assert controls is not None
+    controls.toggle_play()
+    adapter.set_scope("DP-1")
+    assert not adapter.player().retry, "DP-1's renderer is fine"
+    controls.toggle_play()
+    adapter.set_scope("HDMI-A-1")
+    assert adapter.player().retry
+    controls.toggle_play()
+    assert backend.sent == [
+        (None, "play", None),
+        ("DP-1", "pause", None),
+        ("HDMI-A-1", "play", None),
+    ]
+
+
+def test_a_skipped_wallpaper_is_never_sent_play_and_is_opened_in_the_library(
+    backend: FakeApplication,
+) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    status = _status({"DP-1": items[1].path, "HDMI-A-1": items[3].path})
+    displays = status["displays"]
+    assert isinstance(displays, list)
+    displays[1]["entry_taboo"] = True
+    displays[1]["renderer_failed"] = True
+    status["entry_taboo"] = True
+    backend.status_model.adopt(status)
+    pages: list[str] = []
+    adapter.connect("navigate", lambda _state, page: pages.append(page))
+    refusal = "Playback unavailable for rain; see Library for details and removal options"
+    assert adapter.player().play_refused == refusal
+
+    controls = adapter.controls
+    assert controls is not None
+    controls.toggle_play()
+    adapter.set_scope("HDMI-A-1")
+    controls.toggle_play()
+    assert backend.sent == [], "the runtime refuses Play for a taboo entry"
+    assert pages == [f"library:{items[3].path}"] * 2
+    assert backend.reports == [refusal] * 2
+
+    adapter.set_scope("DP-1")
+    assert adapter.player().play_refused == ""
+    controls.toggle_play()
+    controls.step(1)
+    assert backend.sent == [("DP-1", "pause", None), ("DP-1", "next", None)]
+
+
+def test_the_bar_is_busy_while_a_command_is_in_flight(backend: FakeApplication) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    backend.status_model.adopt(_status({"DP-1": items[1].path, "HDMI-A-1": items[0].path}))
+    seen = _topics(adapter)
+    backend.status_model.set_busy(True)
+    assert adapter.player().busy and seen == ["playback"]
+    assert "sending a playback command\u2026" in adapter.player().notes
+    backend.status_model.set_busy(False)
+    assert not adapter.player().busy and seen == ["playback", "playback"]
+
+
+def test_the_controls_are_off_until_the_service_answers_and_while_it_is_down(
+    backend: FakeApplication,
+) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    assert adapter.player().controls_off == "Checking the wallpaper service\u2026"
+    backend.status_model.mark_unavailable(forget=True)
+    off = "The wallpaper service isn\u2019t running"
+    assert adapter.player().controls_off == off
+    _press_every_control(adapter)
+    assert backend.sent == [] and backend.reports == [off] * 8
+
+    backend.status_model.adopt(_status({"DP-1": items[1].path, "HDMI-A-1": items[0].path}))
+    assert adapter.player().controls_off == ""
+    backend.reports.clear()
+    controls = adapter.controls
+    assert controls is not None
+    controls.start_service()
+    assert backend.reports == [NO_SERVICE_START], "the app never starts the service"
+
+
+def test_a_newer_store_turns_the_playback_controls_off(library: tuple[MediaItem, ...]) -> None:
+    target = paths.app_state_dir() / playlists.STATE_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"version": 99, "playlists": []}\n')
+    session = _session(library)
+    try:
+        backend = FakeApplication(session)
+        adapter, _keeper = _adapter(backend)
+        backend.status_model.adopt(_status({"DP-1": library[1].path, "HDMI-A-1": library[0].path}))
+        off = (
+            "Playback controls are off while playlists.json is from a newer version of Wall-in-One"
+        )
+        assert adapter.player().controls_off == off
+        _press_every_control(adapter)
+        assert backend.sent == [] and backend.reports == [off] * 8
+    finally:
+        session.shutdown()

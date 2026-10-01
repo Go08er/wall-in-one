@@ -25,8 +25,8 @@ notices), ``scope`` (the player bar's display scope), ``settings``,
 Protocols an adapter offers through ``controls`` and ``editing``, or not at
 all (``None``). Widgets hide or disable what an adapter does not offer, so
 the real adapter never has to pretend: in this slice its only writes are
-Apply and Favorite. Undo exists only on the editing paths, so it never shows
-under an adapter without them.
+Apply, Favorite and the playback controls. Undo exists only on the editing
+paths, so it never shows under an adapter without them.
 
 GTK-free: annotations only.
 """
@@ -218,6 +218,16 @@ class Player:
     timing: str = ""
     #: Freshness marks such as "status delayed", shown after the reason.
     notes: tuple[str, ...] = ()
+    #: A playback command is in flight; the controls wait for its answer.
+    busy: bool = False
+    #: Why the playback controls are off right now (the service is not
+    #: running, a file is from a newer version), or empty when they work.
+    controls_off: str = ""
+    #: A renderer stopped on a display in scope; Play retries it.
+    retry: bool = False
+    #: Why Play cannot restart what is on screen (playback skips it this
+    #: session), or empty. Play then leads to the wallpaper instead.
+    play_refused: str = ""
 
 
 def reason_text(reason: Reason) -> str:
@@ -251,21 +261,38 @@ class Banner:
 
 
 class PlaybackControls(Protocol):
-    """The runtime's transport verbs. Absent: the player bar's controls are off."""
+    """The runtime's transport verbs. Absent: the player bar's controls are off.
 
-    def toggle_play(self) -> None: ...
+    Each acts on the player bar's displays: ``scope`` is ``all`` or a
+    connector, and None (or no ``scope`` parameter at all) means
+    `AppState.scope`. None of them changes what `AppState.player` says by
+    itself; the adapter's next reading of the runtime does. While
+    `Player.controls_off` gives a reason, the bar calls none of them.
+    """
 
-    def stop(self) -> None: ...
+    def toggle_play(self) -> None:
+        """Pause what plays, or play what is paused or stopped (or retry a stopped renderer)."""
+        ...
 
-    def step(self, direction: int, scope: str | None = None) -> None: ...
+    def stop(self) -> None:
+        """Stop the animation and keep its still on screen."""
+        ...
+
+    def step(self, direction: int, scope: str | None = None) -> None:
+        """The next (1) or previous (-1) wallpaper."""
+        ...
 
     def random(self, scope: str | None = None) -> None: ...
 
-    def resume_schedule(self, scope: str = "all") -> None: ...
+    def resume_schedule(self, scope: str = "all") -> None:
+        """Drop a pick by hand and follow the schedule again."""
+        ...
 
     def set_shuffle(self, value: bool, scope: str | None = None) -> None: ...
 
-    def set_rotate(self, value: bool) -> None: ...
+    def set_rotate(self, value: bool) -> None:
+        """Change wallpaper automatically (the runtime's cycle), or not."""
+        ...
 
     def start_service(self) -> None: ...
 

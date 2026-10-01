@@ -348,6 +348,10 @@
                   "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
 
                 export GDK_BACKEND=x11
+                # The sandbox has no GPU driver and falls back to cairo. A local
+                # run that finds one picks Vulkan, which under Xvfb is slow
+                # enough to starve plain idles. Name the renderer so both agree.
+                export GSK_RENDERER=cairo
                 export GSETTINGS_BACKEND=memory
                 export GI_TYPELIB_PATH="${
                   pkgs.lib.makeSearchPath "lib/girepository-1.0" [

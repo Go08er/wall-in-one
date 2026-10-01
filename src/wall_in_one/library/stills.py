@@ -23,10 +23,12 @@ palette generated from it is grey.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import stat
 import subprocess
@@ -149,6 +151,10 @@ class _ImageTemporary:
 
     def mark_published(self) -> None:
         self.published = True
+
+    def publishable(self) -> _ImageTemporary:
+        """This output, already named beside the target (see `_UnnamedImage`)."""
+        return self
 
     def close(self) -> None:
         """Release only the exact output inode created by ``mkstemp``."""
@@ -764,6 +770,126 @@ def _private_image_temporary(
         raise
 
 
+#: How many random names to try when linking a rendered output into place.
+_OUTPUT_NAME_ATTEMPTS: Final = 100
+
+#: What ``open(O_TMPFILE)`` fails with where the filesystem or kernel lacks it.
+_NO_TMPFILE: Final = frozenset({errno.EOPNOTSUPP, errno.EISDIR, errno.EINVAL, errno.ENOSYS})
+
+
+@dataclass(slots=True)
+class _UnnamedImage:
+    """ffmpeg's output inode, which has no name until it is published.
+
+    ``open(O_TMPFILE)`` creates the inode in the pinned target directory with
+    no directory entry at all. ffmpeg writes it through ``/proc/<pid>/fd/<n>``
+    (``-f image2 -c:v png`` name the format, so the path needs no extension),
+    and it is linked to a private name only once there is a frame to publish.
+    Until then an ffmpeg that cannot be started, fails on the video, or times
+    out, and a source that changed meanwhile, leave nothing on disk: closing
+    the descriptor frees the inode. A named temporary, by contrast, can only
+    be withdrawn through `file_io`'s claim-and-retain, which leaves residue by
+    design.
+
+    Not for scenes: linux-wallpaperengine picks its format from the path's
+    extension, so it needs a name (see `_engine_output_path`).
+    """
+
+    target: Path
+    context: file_io.PinnedDirectoryContext = field(repr=False)
+    descriptor: int = field(repr=False)
+    named: _ImageTemporary | None = field(default=None, repr=False)
+
+    @property
+    def writer_path(self) -> Path:
+        if self.named is not None:
+            return self.named.writer_path
+        if self.descriptor < 0:
+            raise OSError(f"the unnamed still output for {self.target} is closed")
+        return Path("/proc") / str(os.getpid()) / "fd" / str(self.descriptor)
+
+    def publishable(self) -> _ImageTemporary:
+        """Link the rendered inode to a fresh private name beside the target."""
+        if self.named is not None:
+            return self.named
+        if self.descriptor < 0:
+            raise OSError(f"the unnamed still output for {self.target} is closed")
+        source = Path("/proc/self/fd") / str(self.descriptor)
+        for _attempt in range(_OUTPUT_NAME_ATTEMPTS):
+            name = f".{self.target.name}.{secrets.token_hex(8)}.tmp.png"
+            try:
+                # linkat(AT_SYMLINK_FOLLOW) through /proc: the unprivileged way
+                # to give an O_TMPFILE inode a name. Never replaces an entry.
+                os.link(
+                    source,
+                    name,
+                    dst_dir_fd=self.context.directory_descriptor,
+                    follow_symlinks=True,
+                )
+            except FileExistsError:
+                continue
+            break
+        else:
+            raise OSError(f"could not name the still output beside {self.target}")
+        access_path = self.context.child(name)
+        descriptor, self.descriptor = self.descriptor, -1
+        pin = file_io.PinnedPath(access_path, descriptor, stat.S_IFREG)
+        try:
+            named_output = access_path.lstat()
+            if not file_io._same_pinned_entry(pin.status(), named_output, stat.S_IFREG):
+                raise file_io.PathChangedError(
+                    f"the private still output {access_path} changed after it was named"
+                )
+        except BaseException:
+            # The name is not proven to be ours; only the exact inode may go.
+            try:
+                with contextlib.suppress(OSError, ValueError):
+                    file_io.discard_regular_if_same(
+                        access_path,
+                        expected_identity=pin.identity,
+                        expected_fingerprint=pin.fingerprint,
+                        pinned_source=pin,
+                        retained_parent=access_path.parent,
+                        logical_retained_parent=self.context.directory,
+                    )
+            finally:
+                pin.close()
+            raise
+        self.named = _ImageTemporary(
+            path=access_path,
+            logical_path=self.context.directory / name,
+            pin=pin,
+        )
+        return self.named
+
+    def close(self) -> None:
+        if self.named is not None:
+            self.named.close()
+            return
+        descriptor, self.descriptor = self.descriptor, -1
+        if descriptor >= 0:
+            _close_descriptor_preserving_error(descriptor, "the unnamed still output")
+
+
+def _render_output(
+    target: Path,
+    target_context: file_io.PinnedDirectoryContext,
+) -> _UnnamedImage | _ImageTemporary:
+    """An empty output inode for ffmpeg: unnamed where the filesystem allows."""
+    try:
+        descriptor = os.open(
+            ".",
+            os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC,
+            0o600,
+            dir_fd=target_context.directory_descriptor,
+        )
+    except OSError as error:
+        if error.errno not in _NO_TMPFILE:
+            raise
+        return _private_image_temporary(target, target_context)
+    return _UnnamedImage(target, target_context, descriptor)
+
+
 def _engine_output_path(
     temporary: _ImageTemporary,
     target_context: file_io.PinnedDirectoryContext,
@@ -1100,7 +1226,7 @@ def _generate_from_source(
         # A half-written still is worse than none: `pairing` would find it, and
         # the user would get a torn frame as their wallpaper.
         try:
-            temporary = _private_image_temporary(target, target_context)
+            output = _render_output(target, target_context)
         except OSError as error:
             if existing is not None:
                 existing.close()
@@ -1110,7 +1236,7 @@ def _generate_from_source(
         try:
             complaint = _run(
                 source.writer_path,
-                temporary.writer_path,
+                output.writer_path,
                 SEEK_SECONDS,
                 processes=processes,
             )
@@ -1120,7 +1246,7 @@ def _generate_from_source(
                 # clip that short.
                 complaint = _run(
                     source.writer_path,
-                    temporary.writer_path,
+                    output.writer_path,
                     FALLBACK_SEEK_SECONDS,
                     processes=processes,
                 )
@@ -1131,7 +1257,7 @@ def _generate_from_source(
             with _source_lifecycle_lock(video, Kind.VIDEO):
                 _require_unchanged_source(video, Kind.VIDEO, source)
                 image_publication = _publish_image(
-                    temporary,
+                    output.publishable(),
                     target,
                     target_access,
                     target_context,
@@ -1169,7 +1295,7 @@ def _generate_from_source(
         except OSError as error:
             raise StillError(f"could not write {target}: {error.strerror or error}") from error
         finally:
-            temporary.close()
+            output.close()
             if existing is not None:
                 existing.close()
         return target

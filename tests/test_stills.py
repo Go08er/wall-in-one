@@ -173,13 +173,8 @@ def test_a_file_that_is_not_a_video_leaves_no_torn_still(root: Path, tmp_path: P
         stills.generate(impostor, root)
     directory = pairing.still_directory(root)
     assert not stills.destination(impostor, root).exists()
-    assert not any(path.name.endswith(".tmp.png") for path in directory.iterdir())
-    assert not any(path.name.startswith(".wall-in-one-capture-") for path in directory.iterdir())
-    retained = tuple((directory / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
-    tombstones = tuple(path for path in retained if path.is_file())
-    assert len(tombstones) == 1 and tombstones[0].stat().st_size == 0
-    directories = tuple(path for path in retained if path.is_dir())
-    assert len(directories) == 1 and tuple(directories[0].iterdir()) == ()
+    # ffmpeg wrote into an unnamed inode, so there is nothing to retain either.
+    assert list(directory.iterdir()) == []
 
 
 def test_a_video_mutated_in_place_during_capture_cannot_publish(
@@ -209,15 +204,8 @@ def test_a_video_mutated_in_place_during_capture_cannot_publish(
         stills.generate(video, root)
 
     assert not target.exists()
-    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
-    assert not any(
-        path.name.startswith(".wall-in-one-capture-") for path in target.parent.iterdir()
-    )
-    retained = tuple((target.parent / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
-    tombstones = tuple(path for path in retained if path.is_file())
-    assert len(tombstones) == 1 and tombstones[0].stat().st_size == 0
-    directories = tuple(path for path in retained if path.is_dir())
-    assert len(directories) == 1 and tuple(directories[0].iterdir()) == ()
+    # Refused before the rendered inode was named: nothing to retain.
+    assert list(target.parent.iterdir()) == []
 
 
 def test_a_late_nonlocking_still_target_wins_without_being_overwritten(
@@ -381,12 +369,7 @@ def test_unrelated_still_directory_entries_are_preserved_during_capture_cleanup(
     still_directory = pairing.still_directory(root)
     unrecognised = still_directory / "unrecognised"
     assert unrecognised.read_bytes() == b"keep"
-    retained = tuple((still_directory / file_io.RETAINED_ENTRY_DIRECTORY).iterdir())
-    retained_directories = tuple(path for path in retained if path.is_dir())
-    assert len(retained_directories) == 1
-    assert tuple(retained_directories[0].iterdir()) == ()
-    tombstones = tuple(path for path in retained if path.is_file())
-    assert len(tombstones) == 1 and tombstones[0].stat().st_size == 0
+    assert list(still_directory.iterdir()) == [unrecognised]
 
 
 def test_capture_cleanup_stays_in_the_pinned_target_directory_generation(
@@ -518,6 +501,107 @@ def test_target_directory_replacement_cannot_redirect_video_publication(
     assert target.read_bytes() == sentinel
     assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
     assert (saved_directory / file_io.RETAINED_ENTRY_DIRECTORY).is_dir()
+
+
+def _png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
+    """Every chunk of a PNG, each CRC checked; fails on anything torn."""
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    chunks: list[tuple[bytes, bytes]] = []
+    offset = 8
+    while offset < len(data):
+        length = int.from_bytes(data[offset : offset + 4], "big")
+        kind = data[offset + 4 : offset + 8]
+        body = data[offset + 8 : offset + 8 + length]
+        crc = int.from_bytes(data[offset + 8 + length : offset + 12 + length], "big")
+        assert len(body) == length and crc == zlib.crc32(kind + body) & 0xFFFFFFFF, kind
+        chunks.append((kind, body))
+        offset += 12 + length
+    assert chunks[0][0] == b"IHDR" and chunks[-1] == (b"IEND", b"")
+    return chunks
+
+
+def test_real_ffmpeg_writes_an_unnamed_inode_and_a_whole_png_is_published(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The video half's contract, with the real ffmpeg binary.
+
+    ffmpeg is given ``/proc/<pid>/fd/<n>`` of an O_TMPFILE inode -- no name,
+    no extension -- with ``-f image2 -c:v png`` naming the format. This module
+    is skipped where ffmpeg is absent.
+    """
+    video = make_video(tmp_path / "clip.mp4")
+    real_run = stills._run
+    handed: list[tuple[str, int]] = []
+
+    def observe(video_path: Path, target: Path, seek: float, **keywords: Any) -> str:
+        handed.append((str(target), os.stat(target).st_nlink))
+        return real_run(video_path, target, seek, **keywords)
+
+    monkeypatch.setattr(stills, "_run", observe)
+
+    still = stills.generate(video, root)
+
+    assert handed and all(
+        re.fullmatch(rf"/proc/{os.getpid()}/fd/\d+", path) and links == 0 for path, links in handed
+    ), handed
+    assert still == stills.destination(video, root)
+    chunks = _png_chunks(still.read_bytes())
+    header = chunks[0][1]
+    width, height = int.from_bytes(header[0:4], "big"), int.from_bytes(header[4:8], "big")
+    assert (width, height) == (320, 180)
+    bit_depth, colour_type = header[8], header[9]
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}[colour_type]
+    pixels = zlib.decompress(b"".join(body for kind, body in chunks if kind == b"IDAT"))
+    assert bit_depth == 8 and len(pixels) == height * (1 + width * channels)
+    assert list(still.parent.iterdir()) == [still]
+
+
+def _refuse_processes(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    started: list[object] = []
+
+    def refused(arguments: object, *_args: object, **_kwargs: object) -> None:
+        started.append(arguments)
+        raise PermissionError(13, "process start refused")
+
+    monkeypatch.setattr(subprocess, "Popen", refused)
+    return started
+
+
+def test_an_ffmpeg_that_cannot_be_started_leaves_nothing(
+    monkeypatch: pytest.MonkeyPatch, root: Path, tmp_path: Path
+) -> None:
+    video = make_video(tmp_path / "clip.mp4")
+    started = _refuse_processes(monkeypatch)
+
+    with pytest.raises(stills.StillError, match="cannot run ffmpeg"):
+        stills.generate(video, root)
+
+    assert started
+    assert list(pairing.still_directory(root).iterdir()) == []
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()
+
+
+def test_without_o_tmpfile_a_video_still_falls_back_to_a_named_temporary(
+    monkeypatch: pytest.MonkeyPatch, root: Path, tmp_path: Path
+) -> None:
+    """A filesystem without O_TMPFILE still gets its still, the old way."""
+    video = make_video(tmp_path / "clip.mp4")
+    real_open = os.open
+    refused: list[int] = []
+
+    def no_tmpfile(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if flags & os.O_TMPFILE == os.O_TMPFILE:
+            refused.append(flags)
+            raise OSError(95, "Operation not supported")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", no_tmpfile)
+
+    still = stills.generate(video, root)
+
+    assert refused
+    assert _png_chunks(still.read_bytes())
+    assert list(still.parent.iterdir()) == [still]
 
 
 # -- pairing the two -----------------------------------------------------

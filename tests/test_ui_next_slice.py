@@ -16,7 +16,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -54,7 +54,8 @@ from wall_in_one.ui.grid import MEDIA_PAGE_SIZE  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
 from wall_in_one.ui.next.shell import GlassDialog  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
-from wall_in_one.ui.stills import StillMaker  # noqa: E402
+from wall_in_one.ui.stills import Callback, StillMaker  # noqa: E402
+from wall_in_one.wallpaper import outputs, scenes  # noqa: E402
 
 #: More than one page of cards: two placeholder files from the shared
 #: sandbox (not decodable) and this many valid pictures.
@@ -502,20 +503,34 @@ def test_opening_idling_and_closing_the_golden_profile_writes_only_the_whitelist
     # ffmpeg would, so the thumbnailer does not leave the temporary file it
     # made for the refused ffmpeg behind (a sandbox artefact, not a write).
     monkeypatch.setattr(thumbnail_cache, "generate", no_ffmpeg)
-    # The application's automatic-still maker is not the window's: it runs
-    # for every interface after a scan, and on this profile it may replace
-    # the scene's automatic still depending on which renderers are on PATH.
-    # Its writes have their own tests; this one is about the window.
+    # The application's automatic-still maker runs for real (it runs for every
+    # interface after a scan). The PATH is pinned to the nix check's -- no
+    # linux-wallpaperengine, no niri -- so a developer's machine with niri on
+    # PATH idles the same way rather than tripping the sandbox's process
+    # refusal on the still worker. Other machine shapes are in
+    # test_golden_still_maker.
+    monkeypatch.setattr(scenes, "is_available", lambda: False)
+    monkeypatch.setattr(outputs, "is_available", lambda: False)
     stills_asked: list[Path] = []
+    request = StillMaker.request
 
-    def no_stills(_maker: StillMaker, _items: object, root: Path, _callback: object) -> None:
+    def spy(maker: StillMaker, items: Iterable[MediaItem], root: Path, callback: Callback) -> None:
         stills_asked.append(root)
+        request(maker, items, root, callback)
 
-    monkeypatch.setattr(StillMaker, "request", no_stills)
+    monkeypatch.setattr(StillMaker, "request", spy)
     profile = golden.profile
     before = harness.snapshot(profile.home)
     application = Application(ui="next")
     lanes: list[object] = []
+
+    def stills_idle() -> bool:
+        # The still maker is not among `settled`'s lanes, and shutdown
+        # cancels it without waiting: wait for its batch, or the run could
+        # end before it wrote anything.
+        maker = application._stills
+        with maker._lock:
+            return bool(stills_asked) and not maker._pending
 
     def scenario() -> Iterator[Step]:
         window = application._window
@@ -528,12 +543,15 @@ def test_opening_idling_and_closing_the_golden_profile_writes_only_the_whitelist
                 and application.status_model.view.service == "running"
             ),
         )
+        yield "the still maker's batch", stills_idle
         opened = time.monotonic()
         yield "an idle window", lambda: time.monotonic() > opened + IDLE_SECONDS
         assert window.playerbar.title_text, "the player bar shows the runtime's answer"
+        yield "the still maker to rest", stills_idle
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
+    assert stills_asked, "the still maker was asked for this library"
     allowed = [
         *first_start_writes(profile, None),
         Allowance(

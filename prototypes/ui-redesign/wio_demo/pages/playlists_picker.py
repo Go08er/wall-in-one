@@ -145,7 +145,9 @@ class PlaylistPicker(Adw.Dialog):
 
     # -- cards ---------------------------------------------------------------------
     def _card(self, wallpaper: Wallpaper, already: int) -> ui.WallpaperCard:
-        card = ui.WallpaperCard(wallpaper, width=184, on_open=lambda w: self.toggle(w.id))
+        card = ui.WallpaperCard(
+            wallpaper, width=184, on_open=lambda w: self.toggle(w.id), **ui.card_colors(self.state, wallpaper)
+        )
         _inert(card.frame)
         if already:
             text = "In playlist" if already == 1 else f"In playlist ×{already}"

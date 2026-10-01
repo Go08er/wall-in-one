@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk
 
-from .. import art, data, ui
+from .. import art, ui
 from ..catalog import KIND_LABEL
 from ..models import Wallpaper
 
@@ -283,8 +283,7 @@ class Inspector(Gtk.Box):
         return card
 
     def _retry(self, wallpaper: Wallpaper) -> None:
-        wallpaper.problem = ""
-        self.state.emit_changed("library")
+        self.state.retry_wallpaper(wallpaper.id)
         self.show(wallpaper)
         self.state.toast(f"“{wallpaper.name}” will be tried again")
 
@@ -392,7 +391,7 @@ class Inspector(Gtk.Box):
 
     def _colors(self, wallpaper: Wallpaper) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        preview = DesktopPreview(wallpaper, data.wallpaper_swatches(wallpaper, self.state.dark))
+        preview = DesktopPreview(wallpaper, self.state.wallpaper_swatches(wallpaper, self.state.dark))
         box.append(preview)
 
         # Sized to its labels: "From wallpaper" and "Don't change" ellipsize in equal thirds.
@@ -415,7 +414,7 @@ class Inspector(Gtk.Box):
             while child:
                 detail.remove(child)
                 child = detail.get_first_child()
-            preview.update(data.wallpaper_swatches(wallpaper, self.state.dark))
+            preview.update(self.state.wallpaper_swatches(wallpaper, self.state.dark))
             if wallpaper.color_mode == "adaptive":
                 detail.append(self._scheme_grid(wallpaper, refresh_detail))
             elif wallpaper.color_mode == "palette":
@@ -424,11 +423,8 @@ class Inspector(Gtk.Box):
                 detail.append(ui.dim("When this wallpaper shows, your desktop keeps its current colors."))
 
         def on_mode(group: Adw.ToggleGroup, _param) -> None:
-            wallpaper.color_mode = group.get_active_name()
-            if wallpaper.color_mode == "palette" and not wallpaper.palette:
-                wallpaper.palette = "Catppuccin"
+            self.state.set_wallpaper_colors(wallpaper.id, mode=group.get_active_name())
             refresh_detail()
-            self.state.emit_changed("library")
 
         mode.connect("notify::active-name", on_mode)
         refresh_detail()
@@ -447,7 +443,10 @@ class Inspector(Gtk.Box):
                 toggle.set_tooltip(tooltip)
             theme.add(toggle)
         theme.set_active_name(wallpaper.theme_mode)
-        theme.connect("notify::active-name", lambda g, _p: setattr(wallpaper, "theme_mode", g.get_active_name()))
+        theme.connect(
+            "notify::active-name",
+            lambda g, _p: self.state.set_wallpaper_colors(wallpaper.id, theme_mode=g.get_active_name()),
+        )
         theme_row.append(theme)
         box.append(theme_row)
         return self._section("Colors", box)
@@ -462,9 +461,9 @@ class Inspector(Gtk.Box):
             row_spacing=8,
         )
         options: list[tuple[str | None, str, str]] = [
-            (None, "Default", f"{data.SCHEME_NAME[self.state.default_scheme]} · from Settings")
+            (None, "Default", f"{self.state.scheme_name(self.state.default_scheme)} · from Settings")
         ]
-        options += [(key, name, description) for key, name, description in data.SCHEMES]
+        options += self.state.schemes()
         for key, name, description in options:
             button = Gtk.Button()
             button.add_css_class("choice-card")
@@ -474,7 +473,8 @@ class Inspector(Gtk.Box):
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             content.append(
                 ui.Swatches(
-                    data.scheme_swatches(wallpaper, key or self.state.default_scheme, self.state.dark)[:5], size=14
+                    self.state.scheme_swatches(wallpaper, key or self.state.default_scheme, self.state.dark)[:5],
+                    size=14,
                 )
             )
             label = Gtk.Label(label=name, xalign=0)
@@ -490,9 +490,8 @@ class Inspector(Gtk.Box):
             )
 
             def choose(_button, scheme=key) -> None:
-                wallpaper.scheme = scheme
+                self.state.set_wallpaper_colors(wallpaper.id, scheme=scheme)
                 refresh()
-                self.state.emit_changed("library")
 
             button.connect("clicked", choose)
             flow.append(button)
@@ -501,24 +500,24 @@ class Inspector(Gtk.Box):
     def _palette_list(self, wallpaper: Wallpaper, refresh: Callable[[], None]) -> Gtk.Widget:
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
-        for name, colors in data.PALETTES.items():
+        for palette in self.state.palettes("builtin"):
+            name = palette.name
             row = Adw.ActionRow(title=name, activatable=True)
-            row.add_prefix(ui.Swatches(colors, size=14, overlap=True))
+            row.add_prefix(ui.Swatches(palette.strip(True), size=14, overlap=True))
             if wallpaper.palette == name:
                 check = Gtk.Image.new_from_icon_name("object-select-symbolic")
                 check.add_css_class("accent")
                 row.add_suffix(check)
 
             def choose(_row, palette=name) -> None:
-                wallpaper.palette = palette
+                self.state.set_wallpaper_colors(wallpaper.id, palette=palette)
                 refresh()
-                self.state.emit_changed("library")
 
             row.connect("activated", choose)
             group.append(row)
         community = Adw.ExpanderRow(title="Community palettes", subtitle="From Noctalia's online catalog")
-        for name in data.COMMUNITY_PALETTES:
-            community.add_row(Adw.ActionRow(title=name, activatable=True))
+        for palette in self.state.palettes("community"):
+            community.add_row(Adw.ActionRow(title=palette.name, activatable=True))
         group.append(community)
         return group
 
@@ -585,7 +584,7 @@ class Inspector(Gtk.Box):
         def done(_dialog, response: str) -> None:
             if response == "cancel":
                 return
-            undo = self.state.remove_wallpapers([wallpaper])
+            undo = self.state.remove_wallpapers([wallpaper.id])
             self._on_close()
             where = "moved to the Trash" if response == "trash" else "hidden from the library"
             self.state.toast(f"“{wallpaper.name}” {where}", undo)

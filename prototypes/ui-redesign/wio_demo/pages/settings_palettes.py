@@ -6,11 +6,8 @@ instead of stacking another dialog on top, which the current app does.
 
 from __future__ import annotations
 
-import colorsys
-import hashlib
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
 
 import gi
 
@@ -18,7 +15,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk
 
-from .. import data, ui
+from .. import ui
+from ..models import Palette
 from .settings_widgets import rounded
 
 # The 14 core keys of a Noctalia palette, in the order the editor shows them.
@@ -44,131 +42,6 @@ ORIGINS = [
     ("builtin", "Built-in", "Come with Noctalia · read-only"),
     ("community", "Community", "From Noctalia's catalog · cached yesterday"),
 ]
-
-
-# ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
-
-
-def _hls(value: str) -> tuple[float, float, float]:
-    value = value.lstrip("#")
-    r, g, b = (int(value[i : i + 2], 16) / 255 for i in (0, 2, 4))
-    return colorsys.rgb_to_hls(r, g, b)
-
-
-def _hex(h: float, l: float, s: float) -> str:  # noqa: E741
-    r, g, b = colorsys.hls_to_rgb(h % 1.0, max(0.0, min(1.0, l)), max(0.0, min(1.0, s)))
-    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
-
-
-def _on(color: str) -> str:
-    """A readable foreground for a fill: near-black or near-white in the same hue."""
-    hue, lightness, saturation = _hls(color)
-    if lightness > 0.55:
-        return _hex(hue, 0.12, min(saturation, 0.5))
-    return _hex(hue, 0.96, min(saturation, 0.3))
-
-
-def derive(five: list[str]) -> tuple[dict[str, str], dict[str, str]]:
-    """Full light and dark key sets from [surface, primary, secondary, tertiary, error]."""
-    surface, primary, secondary, tertiary, error = five
-    sh, _sl, ss = _hls(surface)
-    dark = {"surface": surface, "primary": primary, "secondary": secondary, "tertiary": tertiary, "error": error}
-    dark["surface_variant"] = _hex(sh, _hls(surface)[1] + 0.08, ss)
-    dark["on_surface"] = _hex(sh, 0.90, min(ss, 0.18))
-    dark["on_surface_variant"] = _hex(sh, 0.72, min(ss, 0.14))
-    dark["outline"] = _hex(sh, 0.42, min(ss, 0.12))
-    dark["shadow"] = "#000000"
-    light: dict[str, str] = {}
-    for key, value in (("primary", primary), ("secondary", secondary), ("tertiary", tertiary), ("error", error)):
-        h, _l, s = _hls(value)
-        light[key] = _hex(h, 0.40, max(s, 0.35))
-    ph = _hls(primary)[0]
-    light["surface"] = _hex(ph, 0.97, 0.30)
-    light["surface_variant"] = _hex(ph, 0.90, 0.22)
-    light["on_surface"] = _hex(ph, 0.12, 0.15)
-    light["on_surface_variant"] = _hex(ph, 0.32, 0.12)
-    light["outline"] = _hex(ph, 0.55, 0.08)
-    light["shadow"] = "#000000"
-    for variant in (dark, light):
-        for key in ("primary", "secondary", "tertiary", "error"):
-            variant[f"on_{key}"] = _on(variant[key])
-    return light, dark
-
-
-def _community_colors(name: str) -> list[str]:
-    seed = int(hashlib.sha1(name.encode()).hexdigest()[:8], 16)
-    hue = (seed % 360) / 360
-    return [
-        _hex(hue, 0.11, 0.18),
-        _hex(hue, 0.72, 0.55),
-        _hex(hue + 0.12, 0.70, 0.45),
-        _hex(hue + 0.45, 0.72, 0.50),
-        _hex(0.99, 0.66, 0.70),
-    ]
-
-
-@dataclass
-class Palette:
-    name: str
-    origin: str  # custom | builtin | community
-    light: dict[str, str] = field(default_factory=dict)
-    dark: dict[str, str] = field(default_factory=dict)
-
-    def strip(self, dark: bool) -> list[str]:
-        values = self.dark if dark else self.light
-        return [values[key] for key in ("surface", "primary", "secondary", "tertiary", "error")]
-
-    @property
-    def editable(self) -> bool:
-        return self.origin == "custom"
-
-
-def _make(name: str, origin: str, five: list[str]) -> Palette:
-    light, dark = derive(five)
-    return Palette(name, origin, light, dark)
-
-
-class PaletteStore:
-    """Every palette the prototype knows about, plus which one was applied by hand."""
-
-    def __init__(self, state) -> None:
-        self.state = state
-        self.palettes: list[Palette] = [
-            _make("Lily pad", "custom", ["#10201a", "#7fd6a4", "#a8c8b4", "#f2b5d4", "#ffb4ab"]),
-        ]
-        self.palettes += [_make(name, "builtin", colors) for name, colors in data.PALETTES.items()]
-        self.palettes += [_make(name, "community", _community_colors(name)) for name in data.COMMUNITY_PALETTES]
-
-    @property
-    def applied(self) -> str | None:
-        """The palette applied by hand. AppState owns it, so it ends when the wallpaper changes."""
-        palette = self.state.palette_override()
-        return palette.name if palette else None
-
-    @applied.setter
-    def applied(self, name: str | None) -> None:
-        self.state.apply_palette(self.find(name) if name else None)
-
-    def of(self, origin: str) -> list[Palette]:
-        return [palette for palette in self.palettes if palette.origin == origin]
-
-    def find(self, name: str) -> Palette | None:
-        return next((palette for palette in self.palettes if palette.name == name), None)
-
-    def unique(self, base: str) -> str:
-        names = {palette.name for palette in self.palettes}
-        if base not in names:
-            return base
-        index = 2
-        while f"{base} {index}" in names:
-            index += 1
-        return f"{base} {index}"
-
-    def summary(self) -> str:
-        counts = {origin: len(self.of(origin)) for origin, _t, _d in ORIGINS}
-        return f"{counts['builtin']} built-in · {counts['community']} community · {counts['custom']} yours"
 
 
 # ---------------------------------------------------------------------------
@@ -269,16 +142,10 @@ class PalettePreview(Gtk.DrawingArea):
 
 
 class PalettesDialog(Adw.Dialog):
-    def __init__(self, state, store: PaletteStore, on_changed: Callable[[], None]) -> None:
+    def __init__(self, state, on_changed: Callable[[], None]) -> None:
         super().__init__(title="Palettes", content_width=600, content_height=720)
         self.state = state
-        self.store = store
-
-        def changed() -> None:
-            on_changed()
-            state.emit_changed("settings")
-
-        self._on_changed = changed
+        self._on_changed = on_changed  # the palette actions emit "settings" themselves
         self._query = ""
         self._rows: list[tuple[Adw.ActionRow, Palette]] = []
         self._row_origin: dict[Adw.ActionRow, str] = {}
@@ -338,7 +205,7 @@ class PalettesDialog(Adw.Dialog):
         self._row_origin: dict[Adw.ActionRow, str] = {}
         for origin, _title, _description in ORIGINS:
             group = self._groups[origin]
-            for palette in self.store.of(origin):
+            for palette in self.state.palettes(origin):
                 row = self._row(palette)
                 group.add(row)
                 self._rows.append((row, palette))
@@ -350,7 +217,8 @@ class PalettesDialog(Adw.Dialog):
         swatches = ui.Swatches(palette.strip(self.state.dark), size=14)
         swatches.set_tooltip_text("Surface, primary, secondary, tertiary, error")
         row.add_prefix(swatches)
-        if self.store.applied == palette.name:
+        applied = self.state.applied_palette()
+        if applied is not None and applied.name == palette.name:
             on = ui.pill("On desktop", "object-select-symbolic", "accent")
             on.set_valign(Gtk.Align.CENTER)
             row.add_suffix(on)
@@ -395,29 +263,26 @@ class PalettesDialog(Adw.Dialog):
 
     # -- actions -------------------------------------------------------------
     def _apply(self, palette: Palette) -> None:
-        before = self.store.applied
-        self.store.applied = palette.name
+        restore = self.state.apply_palette(palette.name)
         self.rebuild()
         self._on_changed()
 
         def undo() -> None:
-            self.store.applied = before
+            restore()
             self.rebuild()
             self._on_changed()
 
         self.state.toast(f"“{palette.name}” is on the desktop until the wallpaper changes", undo)
 
     def _duplicate(self, palette: Palette) -> None:
-        copy = Palette(self.store.unique(f"{palette.name} copy"), "custom", dict(palette.light), dict(palette.dark))
-        index = len(self.store.of("custom"))
-        self.store.palettes.insert(index, copy)
+        copy, remove = self.state.duplicate_palette(palette.name)
         self.rebuild()
         self._on_changed()
         GLib.idle_add(lambda: (self._scroller.get_vadjustment().set_value(0), False)[1])
 
         def undo() -> None:
-            if copy in self.store.palettes:
-                self.store.palettes.remove(copy)
+            if copy in self.state.palettes("custom"):
+                remove()
                 self.rebuild()
                 self._on_changed()
 
@@ -427,18 +292,12 @@ class PalettesDialog(Adw.Dialog):
         self.nav.push(PaletteEditor(self, palette))
 
     def delete(self, palette: Palette) -> None:
-        index = self.store.palettes.index(palette)
-        self.store.palettes.remove(palette)
-        was_applied = self.store.applied == palette.name
-        if was_applied:
-            self.store.applied = None
+        restore = self.state.delete_palette(palette.name)
         self.rebuild()
         self._on_changed()
 
         def undo() -> None:
-            self.store.palettes.insert(index, palette)
-            if was_applied:
-                self.store.applied = palette.name
+            restore()
             self.rebuild()
             self._on_changed()
 
@@ -556,14 +415,12 @@ class PaletteEditor(Adw.NavigationPage):
 
     def _save(self, *_args) -> None:
         name = self._name.get_text().strip()
-        clash = self.owner.store.find(name)
+        clash = self.owner.state.find_palette(name)
         if not name or (clash is not None and clash is not self.palette):
             self._name.add_css_class("error")
             self.owner.state.toast("Choose a name no other palette uses")
             return
-        self.palette.name = name
-        self.palette.light = dict(self._light)
-        self.palette.dark = dict(self._dark)
+        self.owner.state.save_palette(self.palette.name, name, self._light, self._dark)
         self.owner.nav.pop()
         self.owner.saved(self.palette)
 

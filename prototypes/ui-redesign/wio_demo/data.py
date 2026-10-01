@@ -9,9 +9,10 @@ displays may share one rotation or run their own.
 from __future__ import annotations
 
 import colorsys
+import hashlib
 
 from . import art
-from .models import Display, Playlist, Rule, StoreItem, Wallpaper
+from .models import Display, Palette, Playlist, Rule, StoreItem, Wallpaper
 
 # ---------------------------------------------------------------------------
 # Wallpapers
@@ -302,6 +303,69 @@ def wallpaper_swatches(wallpaper: Wallpaper, dark: bool = True) -> list[str]:
     if wallpaper.color_mode == "keep":
         return []
     return scheme_swatches(wallpaper, wallpaper.scheme, dark)
+
+
+# Noctalia palettes: full light and dark key sets, derived from five colors.
+
+
+def _on(color: str) -> str:
+    """A readable foreground for a fill: near-black or near-white in the same hue."""
+    hue, lightness, saturation = hls_of(color)
+    if lightness > 0.55:
+        return _hex(hue, 0.12, min(saturation, 0.5))
+    return _hex(hue, 0.96, min(saturation, 0.3))
+
+
+def derive(five: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Full light and dark key sets from [surface, primary, secondary, tertiary, error]."""
+    surface, primary, secondary, tertiary, error = five
+    sh, _sl, ss = hls_of(surface)
+    dark = {"surface": surface, "primary": primary, "secondary": secondary, "tertiary": tertiary, "error": error}
+    dark["surface_variant"] = _hex(sh, hls_of(surface)[1] + 0.08, ss)
+    dark["on_surface"] = _hex(sh, 0.90, min(ss, 0.18))
+    dark["on_surface_variant"] = _hex(sh, 0.72, min(ss, 0.14))
+    dark["outline"] = _hex(sh, 0.42, min(ss, 0.12))
+    dark["shadow"] = "#000000"
+    light: dict[str, str] = {}
+    for key, value in (("primary", primary), ("secondary", secondary), ("tertiary", tertiary), ("error", error)):
+        h, _l, s = hls_of(value)
+        light[key] = _hex(h, 0.40, max(s, 0.35))
+    ph = hls_of(primary)[0]
+    light["surface"] = _hex(ph, 0.97, 0.30)
+    light["surface_variant"] = _hex(ph, 0.90, 0.22)
+    light["on_surface"] = _hex(ph, 0.12, 0.15)
+    light["on_surface_variant"] = _hex(ph, 0.32, 0.12)
+    light["outline"] = _hex(ph, 0.55, 0.08)
+    light["shadow"] = "#000000"
+    for variant in (dark, light):
+        for key in ("primary", "secondary", "tertiary", "error"):
+            variant[f"on_{key}"] = _on(variant[key])
+    return light, dark
+
+
+def _community_colors(name: str) -> list[str]:
+    seed = int(hashlib.sha1(name.encode()).hexdigest()[:8], 16)
+    hue = (seed % 360) / 360
+    return [
+        _hex(hue, 0.11, 0.18),
+        _hex(hue, 0.72, 0.55),
+        _hex(hue + 0.12, 0.70, 0.45),
+        _hex(hue + 0.45, 0.72, 0.50),
+        _hex(0.99, 0.66, 0.70),
+    ]
+
+
+def make_palette(name: str, origin: str, five: list[str]) -> Palette:
+    light, dark = derive(five)
+    return Palette(name, origin, light, dark)
+
+
+def make_palettes() -> list[Palette]:
+    """Every palette the demo knows: one of yours, the built-ins, the community catalog."""
+    palettes = [make_palette("Lily pad", "custom", ["#10201a", "#7fd6a4", "#a8c8b4", "#f2b5d4", "#ffb4ab"])]
+    palettes += [make_palette(name, "builtin", colors) for name, colors in PALETTES.items()]
+    palettes += [make_palette(name, "community", _community_colors(name)) for name in COMMUNITY_PALETTES]
+    return palettes
 
 
 # ---------------------------------------------------------------------------

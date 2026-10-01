@@ -8,7 +8,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
-from .. import data, thumbs, ui
+from .. import thumbs, ui
 from ..catalog import KIND_LABEL
 from ..models import Wallpaper
 from . import Page
@@ -222,8 +222,8 @@ class LibraryPage(Page):
         return True
 
     def activate(self, argument: str | None) -> None:
-        if argument and argument in data.BY_ID:
-            self.inspect(data.BY_ID[argument])
+        if argument and self.state.has_wallpaper(argument):
+            self.inspect(self.state.wallpaper(argument))
 
     def demo(self, scene: str) -> None:
         # Start every scene from a clean page.
@@ -235,7 +235,7 @@ class LibraryPage(Page):
         what, _, arg = scene.partition(":")
         if what == "inspector":
             wid, _, section = arg.partition("/")
-            self.inspect(data.BY_ID[wid])
+            self.inspect(self.state.wallpaper(wid))
             if section:
                 self.inspector.scroll_to(section)
         elif what == "select":
@@ -276,9 +276,15 @@ class LibraryPage(Page):
         add("apply", apply)
         add("add", add_to)
         add("fav", lambda wid: self.state.toggle_favorite(wid))
-        add("edit", lambda wid: self.inspect(data.BY_ID[wid]))
+        add("edit", lambda wid: self.inspect(self.state.wallpaper(wid)))
         add("files", lambda wid: self.state.toast("Would open the folder in Files"))
-        add("remove", lambda wid: (self.inspect(data.BY_ID[wid]), self.inspector._confirm_remove(data.BY_ID[wid])))
+        add(
+            "remove",
+            lambda wid: (
+                self.inspect(self.state.wallpaper(wid)),
+                self.inspector._confirm_remove(self.state.wallpaper(wid)),
+            ),
+        )
         add("sort", self._set_sort)
         add("size", self._set_size)
         add("bulk-add", self._bulk_add)
@@ -339,6 +345,7 @@ class LibraryPage(Page):
                 apply_tooltip=self._apply_target,
                 on_favorite=lambda w: self.state.toggle_favorite(w.id),
                 menu=menu,
+                **ui.card_colors(self.state, wallpaper),
             )
             card.set_selected(wallpaper.id == self._inspected)
             if self._select_mode:
@@ -550,9 +557,7 @@ class LibraryPage(Page):
             self._select.set_active(False)
 
     def _bulk_favorite(self) -> None:
-        for wid in self._selected:
-            data.BY_ID[wid].favorite = True
-        self.state.emit_changed("library")
+        self.state.favorite_wallpapers(sorted(self._selected))
         self.state.toast(f"Added {len(self._selected)} wallpapers to favorites")
         self._select.set_active(False)
 
@@ -576,7 +581,7 @@ class LibraryPage(Page):
 
     def _remove(self, chosen: list[Wallpaper]) -> None:
         self._select.set_active(False)
-        undo = self.state.remove_wallpapers(chosen)
+        undo = self.state.remove_wallpapers([wallpaper.id for wallpaper in chosen])
         count = len(chosen)
         self.state.toast(f"Removed {count} wallpaper{'s' if count != 1 else ''} from the library", undo)
 

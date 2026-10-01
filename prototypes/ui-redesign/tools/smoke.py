@@ -75,6 +75,51 @@ def check_thumbnails_off_main_thread(library) -> None:
     assert not blank, f"cards still showing placeholders: {blank}"
 
 
+def inspector_colors(state, library) -> None:
+    library.inspect(state.wallpaper("alpine"))
+    state.set_wallpaper_colors("alpine", scheme="vibrant")
+    assert state.wallpaper("alpine").scheme == "vibrant"
+    state.set_wallpaper_colors("alpine", mode="palette", palette="Nord")
+    state.set_wallpaper_colors("alpine", theme_mode="dark")
+    wallpaper = state.wallpaper("alpine")
+    assert (wallpaper.color_mode, wallpaper.palette, wallpaper.theme_mode) == ("palette", "Nord", "dark")
+    state.set_wallpaper_colors("alpine", mode="adaptive", scheme=None, theme_mode="auto")
+    assert state.wallpaper("alpine").scheme is None
+
+
+def inspector_retry(state, library) -> None:
+    library.inspect(state.wallpaper("neon-rain"))
+    library.inspector._retry(state.wallpaper("neon-rain"))
+    assert state.wallpaper("neon-rain").problem == ""
+
+
+def library_bulk_favorite(state, library) -> None:
+    library.demo("select")
+    library._bulk_favorite()
+    assert all(state.wallpaper(wid).favorite for wid in ("lily-pond", "golden-coast", "misty-pines"))
+
+
+def palette_actions(state, settings) -> None:
+    dialog = settings._open_palettes()
+    dialog._duplicate(state.find_palette("Nord"))
+    copy = state.find_palette("Nord copy")
+    assert copy is not None and copy.editable
+    state.save_palette("Nord copy", "Nord mine", copy.light, copy.dark)
+    dialog._apply(state.find_palette("Nord mine"))
+    assert state.applied_palette().name == "Nord mine"
+    dialog.delete(state.find_palette("Nord mine"))
+    assert state.applied_palette() is None and state.find_palette("Nord mine") is None
+    copy, undo = state.duplicate_palette("Dracula")
+    undo()
+    assert state.find_palette(copy.name) is None
+    undo = state.delete_palette("Ayu")
+    undo()
+    assert state.find_palette("Ayu") is not None
+    undo = state.apply_palette("Gruvbox")
+    undo()
+    dialog.force_close()
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -90,12 +135,13 @@ def build_steps(app, holder):
     for mode in ("palette", "keep", "adaptive"):
 
         def color(m=mode):
-            wp = data.BY_ID["alpine"]
-            wp.color_mode = m
-            lib().inspector.show(wp)
-            s().emit_changed("library")
+            s().set_wallpaper_colors("alpine", mode=m)
+            lib().inspector.show(s().wallpaper("alpine"))
 
         steps.append((f"color mode {mode}", color))
+    steps.append(("inspector colors", lambda: inspector_colors(s(), lib())))
+    steps.append(("inspector retry", lambda: inspector_retry(s(), lib())))
+    steps.append(("library bulk favorite", lambda: library_bulk_favorite(s(), lib())))
     for key in ("still", "video", "scene", "all"):
         steps.append((f"filter {key}", lambda k=key: lib()._kinds.set_active_name(k)))
     for key in ("name", "kind", "color", "added"):
@@ -221,7 +267,10 @@ def build_steps(app, holder):
         )
     )
     steps.append(
-        ("library remove two", lambda: w().pages["library"]._remove([data.BY_ID["dune-sea"], data.BY_ID["alpine"]]))
+        (
+            "library remove two",
+            lambda: w().pages["library"]._remove([s().wallpaper("dune-sea"), s().wallpaper("alpine")]),
+        )
     )
     steps.append(("library select off", lambda: w().pages["library"]._select.set_active(False)))
     steps.append(
@@ -269,10 +318,9 @@ def build_steps(app, holder):
         w().navigate("settings")
         return w().pages["settings"]
 
-    steps.append(
-        ("palette apply", lambda: (setattr(settings_page().palettes, "applied", "Nord"), s().emit_changed("settings")))
-    )
+    steps.append(("palette apply", lambda: (settings_page(), s().apply_palette("Nord"))))
     steps.append(("palette dialog", lambda: settings_page().demo("palettes")))
+    steps.append(("palette actions", lambda: palette_actions(s(), settings_page())))
     steps.append(
         (
             "desktop colors off",
@@ -289,7 +337,7 @@ def build_steps(app, holder):
     steps.append(
         (
             "keep wallpaper",
-            lambda: (setattr(data.BY_ID["dune-sea"], "color_mode", "keep"), s().apply("dune-sea", "all")),
+            lambda: (s().set_wallpaper_colors("dune-sea", mode="keep"), s().apply("dune-sea", "all")),
         )
     )
     steps.append(
@@ -337,7 +385,7 @@ def build_steps(app, holder):
     for key in ("library", "store", "playlist:frog-day", "schedule", "displays", "settings"):
         steps.append((f"narrow {key}", lambda k=key: w().navigate(k)))
     steps.append(
-        ("narrow inspector", lambda: (w().navigate("library"), w().pages["library"].inspect(data.BY_ID["alpine"])))
+        ("narrow inspector", lambda: (w().navigate("library"), w().pages["library"].inspect(s().wallpaper("alpine"))))
     )
     return steps
 

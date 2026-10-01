@@ -17,7 +17,12 @@ from typing import ClassVar
 from gi.repository import GObject
 
 from . import data
-from .models import Playlist, Rule, Wallpaper
+from .models import Palette, Playlist, Rule, Wallpaper
+
+#: An Undo callback, as returned by the actions that pages offer Undo for.
+Undo = Callable[[], None]
+#: "Leave this field alone" for keyword arguments where None is a real value.
+UNCHANGED = object()
 
 
 @dataclass
@@ -107,7 +112,8 @@ class AppState(GObject.Object):
         # whatever the desktop shows, see desktop_swatches().
         self.desktop_colors = True
         self.template_ok = True
-        self._override: tuple[object, str] | None = None  # (palette applied by hand, wallpaper id it covers)
+        self._override: tuple[Palette, str] | None = None  # (palette applied by hand, wallpaper id it covers)
+        self._palettes: list[Palette] = data.make_palettes()
         self._desktop_source: object | None = None  # what last set the desktop's colors
         # The real Noctalia, read-only (see noctalia_live). When it is attached
         # and use_live_colors is on, the app's colors come from the real desktop
@@ -172,14 +178,11 @@ class AppState(GObject.Object):
     def color_wallpaper(self) -> Wallpaper:
         return self.wallpaper(self.current[self.color_connector()])
 
-    def palette_override(self):
+    def palette_override(self) -> Palette | None:
         """The palette applied by hand in Settings, until the wallpaper changes."""
         if self._override and self._override[1] != self.color_wallpaper().id:
             self._override = None
         return self._override[0] if self._override else None
-
-    def apply_palette(self, palette) -> None:
-        self._override = (palette, self.color_wallpaper().id) if palette else None
 
     def attach_live(self, live, follow: bool = True) -> None:
         """Follow the real Noctalia: its palette, its light/dark mode and its wallpaper."""
@@ -373,9 +376,65 @@ class AppState(GObject.Object):
         playlist_id = self.effective_playlist(connector)
         return playlist_id in data.PLAYLIST_BY_ID and self.playlist(playlist_id).shuffle
 
-    def remove_wallpapers(self, chosen: list[Wallpaper]) -> Callable[[], None]:
+    # -- library: queries ------------------------------------------------------
+    def has_wallpaper(self, wid: str) -> bool:
+        return wid in data.BY_ID
+
+    def schemes(self) -> list[tuple[str, str, str]]:
+        """Noctalia's color schemes: (key, name, description)."""
+        return list(data.SCHEMES)
+
+    def scheme_name(self, key: str) -> str:
+        return data.SCHEME_NAME.get(key, "")
+
+    def scheme_swatches(self, wallpaper: Wallpaper, scheme: str | None, dark: bool = True) -> list[str]:
+        """[surface, primary, secondary, tertiary, error] for ``wallpaper`` under ``scheme``
+        (None = the default scheme)."""
+        return data.scheme_swatches(wallpaper, scheme, dark)
+
+    def wallpaper_swatches(self, wallpaper: Wallpaper, dark: bool = True) -> list[str]:
+        """The colors ``wallpaper`` puts on the desktop; empty when it keeps them."""
+        return data.wallpaper_swatches(wallpaper, dark)
+
+    # -- library: actions -------------------------------------------------------
+    def toggle_favorite(self, wid: str) -> None:
+        wallpaper = self.wallpaper(wid)
+        wallpaper.favorite = not wallpaper.favorite
+        self.emit_changed("library")
+
+    def favorite_wallpapers(self, wids: list[str]) -> None:
+        for wid in wids:
+            self.wallpaper(wid).favorite = True
+        self.emit_changed("library")
+
+    def retry_wallpaper(self, wid: str) -> None:
+        """Forget a playback problem so the runtime tries the wallpaper again."""
+        self.wallpaper(wid).problem = ""
+        self.emit_changed("library")
+
+    def set_wallpaper_colors(
+        self, wid: str, *, mode: str | None = None, scheme=UNCHANGED, palette: str | None = None, theme_mode=None
+    ) -> None:
+        """Change how a wallpaper colors the desktop: ``mode`` (adaptive, palette or
+        keep), its ``scheme`` (None = the default), its ``palette`` and its light or
+        dark ``theme_mode``. Choosing "palette" without one picks Catppuccin."""
+        wallpaper = self.wallpaper(wid)
+        if mode is not None:
+            wallpaper.color_mode = mode
+            if mode == "palette" and not wallpaper.palette:
+                wallpaper.palette = "Catppuccin"
+        if scheme is not UNCHANGED:
+            wallpaper.scheme = scheme
+        if palette is not None:
+            wallpaper.palette = palette
+        if theme_mode is not None:
+            wallpaper.theme_mode = theme_mode
+        self.emit_changed("library")
+
+    def remove_wallpapers(self, wids: list[str]) -> Undo:
         """Take wallpapers out of the library; returns an undo that puts them back in place."""
         library = self.wallpapers
+        chosen = [self.wallpaper(wid) for wid in wids]
         spots = [(library.index(w), w) for w in chosen if w in library]
         for _index, wallpaper in spots:
             library.remove(wallpaper)
@@ -389,10 +448,81 @@ class AppState(GObject.Object):
 
         return undo
 
-    def toggle_favorite(self, wid: str) -> None:
-        wallpaper = self.wallpaper(wid)
-        wallpaper.favorite = not wallpaper.favorite
-        self.emit_changed("library")
+    # -- palettes ---------------------------------------------------------------
+    def palettes(self, origin: str | None = None) -> list[Palette]:
+        """Noctalia's palettes, optionally of one origin (custom, builtin, community)."""
+        return [palette for palette in self._palettes if origin is None or palette.origin == origin]
+
+    def find_palette(self, name: str) -> Palette | None:
+        return next((palette for palette in self._palettes if palette.name == name), None)
+
+    def applied_palette(self) -> Palette | None:
+        """The palette applied by hand, until the wallpaper changes."""
+        return self.palette_override()
+
+    def apply_palette(self, name: str | None) -> Undo:
+        """Put a palette on the desktop until the wallpaper changes (None = stop)."""
+        before = self.applied_palette()
+        palette = self.find_palette(name) if name else None
+        self._override = (palette, self.color_wallpaper().id) if palette else None
+        self.emit_changed("settings")
+
+        def undo() -> None:
+            self._override = (before, self.color_wallpaper().id) if before else None
+            self.emit_changed("settings")
+
+        return undo
+
+    def duplicate_palette(self, name: str) -> tuple[Palette, Undo]:
+        """Copy a palette into "Yours", where it can be edited."""
+        source = self.find_palette(name)
+        copy = Palette(
+            self._unique_palette_name(f"{source.name} copy"), "custom", dict(source.light), dict(source.dark)
+        )
+        self._palettes.insert(len(self.palettes("custom")), copy)
+        self.emit_changed("settings")
+
+        def undo() -> None:
+            if copy in self._palettes:
+                self._palettes.remove(copy)
+                self.emit_changed("settings")
+
+        return copy, undo
+
+    def save_palette(self, name: str, new_name: str, light: dict[str, str], dark: dict[str, str]) -> None:
+        """Store an edited custom palette under ``new_name``."""
+        palette = self.find_palette(name)
+        palette.name = new_name
+        palette.light = dict(light)
+        palette.dark = dict(dark)
+        self.emit_changed("settings")
+
+    def delete_palette(self, name: str) -> Undo:
+        palette = self.find_palette(name)
+        index = self._palettes.index(palette)
+        self._palettes.remove(palette)
+        applied = self.applied_palette()
+        was_applied = applied is not None and applied.name == name
+        if was_applied:
+            self._override = None
+        self.emit_changed("settings")
+
+        def undo() -> None:
+            self._palettes.insert(index, palette)
+            if was_applied:
+                self._override = (palette, self.color_wallpaper().id)
+            self.emit_changed("settings")
+
+        return undo
+
+    def _unique_palette_name(self, base: str) -> str:
+        names = {palette.name for palette in self._palettes}
+        if base not in names:
+            return base
+        index = 2
+        while f"{base} {index}" in names:
+            index += 1
+        return f"{base} {index}"
 
     def add_to_playlist(self, pid: str, wids: list[str]) -> None:
         playlist = self.playlist(pid)

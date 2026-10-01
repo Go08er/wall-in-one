@@ -14,7 +14,7 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk
 
-from . import data, thumbs
+from . import thumbs
 from .catalog import KIND_ICON, KIND_LABEL
 from .models import Wallpaper
 
@@ -319,6 +319,8 @@ class WallpaperCard(Gtk.Box):
         show_name: bool = True,
         selectable: bool = False,
         apply_tooltip: Callable[[], str] | None = None,
+        swatches: list[str] | None = None,
+        swatch_tooltip: str = "",
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.wallpaper = wallpaper
@@ -408,11 +410,11 @@ class WallpaperCard(Gtk.Box):
             name = Gtk.Label(label=wallpaper.name, xalign=0, hexpand=True, ellipsize=3)  # Pango.EllipsizeMode.END
             name.add_css_class("wp-name")
             row.append(name)
-            swatch_colors = data.wallpaper_swatches(wallpaper)[:4]
-            if swatch_colors:
-                swatches = Swatches(swatch_colors[1:4], size=11, overlap=True)
-                swatches.set_tooltip_text(_color_tooltip(wallpaper))
-                row.append(swatches)
+            # The colors it puts on the desktop (card_colors): primary, secondary, tertiary.
+            if swatches:
+                dots = Swatches(swatches[1:4], size=11, overlap=True)
+                dots.set_tooltip_text(swatch_tooltip)
+                row.append(dots)
             self.append(row)
 
         if on_open:
@@ -573,17 +575,22 @@ class CardGrid(Gtk.Widget):
         return True
 
 
-def _color_tooltip(wallpaper: Wallpaper) -> str:
+def color_tooltip(state, wallpaper: Wallpaper) -> str:
     if wallpaper.color_mode == "palette":
         return f"Colors: {wallpaper.palette} palette"
     if wallpaper.color_mode == "keep":
         return "Colors: don't change"
-    scheme = data.SCHEME_NAME.get(wallpaper.scheme or data.DEFAULT_SCHEME, "")
+    scheme = state.scheme_name(wallpaper.scheme or state.default_scheme)
     return f"Colors: from wallpaper · {scheme}" + ("" if wallpaper.scheme else " (default)")
 
 
-def color_summary(wallpaper: Wallpaper) -> str:
-    return _color_tooltip(wallpaper).removeprefix("Colors: ").capitalize()
+def color_summary(state, wallpaper: Wallpaper) -> str:
+    return color_tooltip(state, wallpaper).removeprefix("Colors: ").capitalize()
+
+
+def card_colors(state, wallpaper: Wallpaper) -> dict:
+    """The swatches a WallpaperCard shows under its picture (always the dark variant)."""
+    return {"swatches": state.wallpaper_swatches(wallpaper)[:4], "swatch_tooltip": color_tooltip(state, wallpaper)}
 
 
 def menu_from(sections: list[list[tuple[str, str]]]) -> Gtk.PopoverMenu:

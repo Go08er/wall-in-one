@@ -901,6 +901,7 @@ class PlaylistPage(Page):
                 on_open=lambda w: self.state.navigate(f"library:{w.id}"),
                 on_apply=lambda w: self.state.apply(w.id, self.state.scope),
                 on_favorite=lambda w: self.state.toggle_favorite(w.id),
+                **ui.card_colors(self.state, data.BY_ID[wid]),
             )
             screens = playing.get(wid)
             if screens:

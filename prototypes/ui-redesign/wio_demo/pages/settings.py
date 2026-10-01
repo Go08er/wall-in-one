@@ -23,7 +23,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 from .. import data, ui
 from ..catalog import INTERVALS
 from . import Page
-from .settings_palettes import PalettesDialog, PaletteStore
+from .settings_palettes import PalettesDialog
 from .settings_widgets import LogView, SchemeDialog
 
 VERSION = "0.1.4"
@@ -193,7 +193,6 @@ class SettingsPage(Page):
             "hide_paths": True,
             "template": "working",
         }
-        self.palettes = PaletteStore(state)
 
         # -- header ------------------------------------------------------------
         self.search = Gtk.SearchEntry(placeholder_text="Search settings", hexpand=True)
@@ -291,7 +290,7 @@ class SettingsPage(Page):
             self._open_palettes()
         elif what == "palette-edit":
             dialog = self._open_palettes()
-            dialog.edit(self.palettes.of("custom")[0])
+            dialog.edit(self.state.palettes("custom")[0])
         elif what == "no-key":
             self._forget_key(toast=False)
             self.scroll_to("online", flash=False)
@@ -797,7 +796,7 @@ class SettingsPage(Page):
         source_connector = state.color_connector()
         wallpaper = state.color_wallpaper()
         self._follow_display.set_title(f"Colors come from {source_connector}")
-        applied = self.palettes.find(self.palettes.applied) if self.palettes.applied else None
+        applied = state.applied_palette()
         if not on:
             text, swatches = "Off · desktop colors stay as they are", []
         elif self.values["template"] != "working":
@@ -816,7 +815,10 @@ class SettingsPage(Page):
         self._source.set_subtitle(text)
         # An empty, dashed dot when nothing is being generated.
         self._source_swatches.set_colors(swatches[1:4] if swatches else [])
-        self._palettes_row.set_subtitle(self.palettes.summary())
+        counts = {origin: len(state.palettes(origin)) for origin in ("builtin", "community", "custom")}
+        self._palettes_row.set_subtitle(
+            f"{counts['builtin']} built-in · {counts['community']} community · {counts['custom']} yours"
+        )
 
         # Default scheme, previewed on the wallpaper that is on screen now.
         child = self._scheme_thumb.get_first_child()
@@ -940,7 +942,7 @@ class SettingsPage(Page):
         return dialog
 
     def _open_palettes(self) -> PalettesDialog:
-        dialog = PalettesDialog(self.state, self.palettes, self._refresh_colors)
+        dialog = PalettesDialog(self.state, self._refresh_colors)
         self._present(dialog)
         return dialog
 

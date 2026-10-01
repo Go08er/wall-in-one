@@ -7218,3 +7218,132 @@ fn the_file_watcher_reloads_when_only_the_overrides_file_changes() {
     stop(&mut child, &socket);
     fs::remove_dir_all(root).unwrap();
 }
+
+// -- status shape: older fields stay byte-identical -------------------------
+
+/// Display-row keys added after the shape fixture was recorded. They are
+/// removed from a fresh status before it is compared byte for byte, so every
+/// older field must keep its exact name, order, value and encoding.
+const ADDED_DISPLAY_KEYS: &[&str] = &[];
+
+/// `"key":"value"` with the value replaced, for fields that differ per process
+/// or per build. A missing key is left alone; a `null` value is kept.
+fn mask_string_value(text: &str, key: &str) -> String {
+    let marker = format!("\"{key}\":\"");
+    let Some(start) = text.find(&marker) else {
+        return text.to_string();
+    };
+    let value_start = start + marker.len();
+    let value_end = value_start + text[value_start..].find('"').unwrap();
+    format!("{}<masked>{}", &text[..value_start], &text[value_end..])
+}
+
+/// Remove `,"key":value` for every key in `ADDED_DISPLAY_KEYS`. The added
+/// values are `null`, integers or strings without commas, quotes or braces.
+fn without_added_keys(text: &str) -> String {
+    let mut text = text.to_string();
+    for key in ADDED_DISPLAY_KEYS {
+        let marker = format!(",\"{key}\":");
+        while let Some(start) = text.find(&marker) {
+            let value_start = start + marker.len();
+            let rest = &text[value_start..];
+            let value_end = if let Some(quoted) = rest.strip_prefix('"') {
+                value_start + 1 + quoted.find('"').unwrap() + 1
+            } else {
+                value_start + rest.find([',', '}']).unwrap()
+            };
+            text.replace_range(start..value_end, "");
+        }
+    }
+    text
+}
+
+fn raw_status<D: WallpaperDriver>(runtime: &mut Runtime<D>, at: chrono::NaiveDateTime) -> String {
+    let response = runtime_command(runtime, at, "status", None);
+    assert!(response.ok, "{}", response.message);
+    let mut text = response.message;
+    for key in ["runtime_instance", "runtime_executable", "runtime_version"] {
+        text = mask_string_value(&text, key);
+    }
+    text
+}
+
+/// One status per shape the runtime can produce: mirrored to all outputs,
+/// mirrored with assignments, and independent with overrides, a schedule in
+/// force, a manual pick and a paused display.
+fn status_shape_samples() -> Vec<(&'static str, String)> {
+    let at = noon();
+    let afternoon = "\n[[schedules]]\nid = \"afternoon\"\nplaylist = \"night\"\n\
+                     start = \"12:00\"\nend = \"18:00\"\n";
+    let cycling =
+        |document: String| document.replace("cycle_enabled = false", "cycle_enabled = true");
+    let base = cycling(config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ));
+
+    let (mut all, _) = started_runtime(loaded(&format!("{base}{afternoon}"), &[]), at);
+    let mirrored_all = raw_status(&mut all, at);
+
+    let assigned = format!(
+        "{base}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"day\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"night\"\n"
+    );
+    let (mut mirrored, _) = started_runtime(loaded(&assigned, &[]), at);
+    assert!(runtime_command(&mut mirrored, at, "pause", None).ok);
+    let mirrored_assigned = raw_status(&mut mirrored, at);
+
+    let targeted = "\n[[schedules]]\nid = \"dp-evening\"\nplaylist = \"evening\"\n\
+                    connector = \"DP-1\"\nstart = \"18:00\"\nend = \"23:00\"\n";
+    let document = cycling(independent_with_evening(&format!("{afternoon}{targeted}")));
+    let (mut independent, _) = started_runtime(
+        loaded(
+            &document,
+            &[
+                beats("DP-1"),
+                rotation("night", "cycle_interval_seconds = 45"),
+            ],
+        ),
+        at,
+    );
+    assert!(runtime_command(&mut independent, at, "on", Some("HDMI-A-1 pause")).ok);
+    let independent_paused = raw_status(&mut independent, at);
+    assert!(
+        runtime_command(
+            &mut independent,
+            at,
+            "on",
+            Some("HDMI-A-1 playlist-use evening")
+        )
+        .ok
+    );
+    let independent_manual = raw_status(&mut independent, at);
+
+    vec![
+        ("mirrored-all", mirrored_all),
+        ("mirrored-assigned", mirrored_assigned),
+        ("independent-paused", independent_paused),
+        ("independent-manual", independent_manual),
+    ]
+}
+
+#[test]
+fn older_status_fields_stay_byte_identical() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/status-shape-v2.txt");
+    let rendered: String = status_shape_samples()
+        .into_iter()
+        .map(|(label, text)| format!("{label}\n{}\n", without_added_keys(&text)))
+        .collect();
+    if std::env::var_os("WALL_IN_ONE_BLESS_STATUS_SHAPE").is_some() {
+        fs::write(&fixture, &rendered).unwrap();
+    }
+    let recorded = fs::read_to_string(&fixture).unwrap();
+    for (expected, actual) in recorded.lines().zip(rendered.lines()) {
+        assert_eq!(
+            actual, expected,
+            "a released status field changed its bytes"
+        );
+    }
+    assert_eq!(rendered, recorded);
+}

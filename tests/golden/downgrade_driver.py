@@ -192,6 +192,15 @@ def main(arguments: list[str]) -> int:
         # per-playlist rotation and the display opt-in.
         "playlists_format": playlists.FORMAT_VERSION,
         "displays_format": displays.FORMAT_VERSION,
+        # The newest version of every store file it understands, so a test
+        # can write one that is newer *for this build*, whichever it is.
+        "formats": {
+            "playlists.json": playlists.FORMAT_VERSION,
+            "schedules.json": schedules.FORMAT_VERSION,
+            "pairings.json": pairings.FORMAT_VERSION,
+            "displays.json": displays.FORMAT_VERSION,
+            "favourites.json": favourites.FORMAT_VERSION,
+        },
     }
     if arguments[:1] == ["edit"]:
         chosen = arguments[1:] or list(EDITS)

@@ -115,6 +115,8 @@ class OldBuild:
     #: The newest playlists.json and displays.json versions it understands.
     playlists_format: int
     displays_format: int
+    #: The newest version of each store file it understands, by file name.
+    formats: dict[str, int]
 
 
 @pytest.fixture(scope="session")
@@ -130,6 +132,7 @@ def old_build(tmp_path_factory: pytest.TempPathFactory) -> OldBuild:
         int(report["schedules_format"]),
         int(report["playlists_format"]),
         int(report["displays_format"]),
+        {str(name): int(version) for name, version in report["formats"].items()},
     )
 
 
@@ -245,9 +248,15 @@ def _unknown_keys_left(target: Path, decorated: set[str]) -> tuple[list[str], in
     return lost, kept
 
 
-def _bump_version(target: Path) -> tuple[bytes, int]:
+def _bump_version(target: Path, old: OldBuild) -> tuple[bytes, int]:
+    """Make ``target`` one version newer than the *old* build understands.
+
+    Derived from the old build's own FORMAT_VERSION, not the file's: an old
+    build that already reads the next version (a later Release 1 snapshot
+    with named rules, say) must still be handed something newer than itself.
+    """
     document = read_json(target)
-    document["version"] = int(document["version"]) + 1
+    document["version"] = old.formats[target.name] + 1
     return write_json(target, document), int(document["version"])
 
 
@@ -278,7 +287,7 @@ def test_downgrade_guarded_build_refuses_a_newer_version(
     golden, old = downgrade
     _require(old, guard=True)
     target = golden.profile.app_state / filename
-    original, _version = _bump_version(target)
+    original, _version = _bump_version(target, old)
 
     report = _run_old(golden.profile, "edit", filename)
 
@@ -323,7 +332,7 @@ def test_downgrade_pre_guard_build_rewrites_a_newer_version(
     golden, old = downgrade
     _require(old, guard=False)
     target = golden.profile.app_state / filename
-    original, version = _bump_version(target)
+    original, version = _bump_version(target, old)
 
     report = _run_old(golden.profile, "edit", filename)
 

@@ -5,6 +5,12 @@ dashboard: one line of truth plus the controls you reach for most. Everything
 it says comes from `AppState.player`, which an adapter builds from what the
 runtime reported; nothing here works out a schedule. Without
 `AppState.controls` the transport buttons are shown but off.
+
+The controls never change what the bar shows: a press goes to
+`AppState.controls`, and the bar follows the next `Player`. A toggle that
+GTK flipped on the click is put back at once, until the runtime agrees.
+While `Player.busy` the controls wait (Play shows a spinner), and while
+`Player.controls_off` gives a reason they are off and say it.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.state import AppState, OnScreen, Player, reason_text
@@ -26,6 +32,8 @@ TOPICS = frozenset(
 )
 #: Said on the transport controls when the adapter offers none.
 NO_CONTROLS = "Playback controls are not in the new interface yet"
+#: Said on the transport controls while a command is in flight.
+SENDING = "Sending a playback command\u2026"
 
 
 class PlayerBar(Gtk.Box):
@@ -116,6 +124,12 @@ class PlayerBar(Gtk.Box):
             controls.append(widget)
         self.compact_hidden += [shuffle_box, rotate_box, self._resume_box]
         self._controls = controls
+        #: Each control's own tooltip, said whenever it is not off for a reason.
+        self._tips: dict[Gtk.Widget, str] = {
+            button: button.get_tooltip_text() or ""
+            for button in (self._shuffle, self._previous, self._next, self._rotate, self._resume)
+        }
+        self._spinner = Adw.Spinner()
         bar.set_center_widget(controls)
 
         # -- right: timing, scope, more -------------------------------------
@@ -177,18 +191,19 @@ class PlayerBar(Gtk.Box):
         controls = self.state.controls
         if controls is None:
             return
-        if self.state.player().service == "stopped":
+        player = self.state.player()
+        if player.service == "stopped" and not player.controls_off:
             controls.start_service()
             return
         controls.toggle_play()
 
     def _step(self, direction: int) -> None:
         if self.state.controls is not None:
-            self.state.controls.step(direction)
+            self.state.controls.step(direction, self.state.scope)
 
     def _random(self) -> None:
         if self.state.controls is not None:
-            self.state.controls.random()
+            self.state.controls.random(self.state.scope)
 
     def _stop(self) -> None:
         if self.state.controls is not None:
@@ -200,11 +215,13 @@ class PlayerBar(Gtk.Box):
 
     def _on_shuffle(self, button: Gtk.ToggleButton) -> None:
         if not self._building and self.state.controls is not None:
-            self.state.controls.set_shuffle(button.get_active())
+            self.state.controls.set_shuffle(button.get_active(), self.state.scope)
+            self.refresh()  # back to what the runtime says until it says otherwise
 
     def _on_rotate(self, button: Gtk.ToggleButton) -> None:
         if not self._building and self.state.controls is not None:
             self.state.controls.set_rotate(button.get_active())
+            self.refresh()  # back to what the runtime says until it says otherwise
 
     def _on_scope(self, action: Gio.SimpleAction, value: GLib.Variant | None) -> None:
         if value is None:
@@ -292,20 +309,23 @@ class PlayerBar(Gtk.Box):
             or None
         )
 
-        controls = state.controls
+        # Why every control is off now, if it is: no controls, the adapter's
+        # reason (service down, a newer file), or a command in flight.
+        off = NO_CONTROLS if state.controls is None else player.controls_off
+        waiting = off or (SENDING if player.busy else "")
+        usable = running and not waiting
         manual = running and not player.following_schedule
         self._resume.set_visible(manual)
-        self._resume.set_sensitive(controls is not None)
-        self._resume.set_tooltip_text(
-            "Go back to what the schedule says should play now" if controls else NO_CONTROLS
-        )
+        for button, tip in self._tips.items():
+            button.set_sensitive(usable)
+            button.set_tooltip_text(waiting or tip)
         resume = self._actions.lookup_action("resume")
         if isinstance(resume, Gio.SimpleAction):
-            resume.set_enabled(manual and controls is not None)
+            resume.set_enabled(manual and usable)
         for name in ("random", "stop"):
             found = self._actions.lookup_action(name)
             if isinstance(found, Gio.SimpleAction):
-                found.set_enabled(running and controls is not None)
+                found.set_enabled(usable)
 
         for css in ("paused", "stopped"):
             self._dot.remove_css_class(css)
@@ -314,21 +334,7 @@ class PlayerBar(Gtk.Box):
         elif player.playback == "paused":
             self._dot.add_css_class("paused")
 
-        if player.service == "stopped":
-            self._play.set_icon_name("media-playback-start-symbolic")
-            self._play.set_tooltip_text("Start the wallpaper service")
-        elif player.playback == "playing":
-            self._play.set_icon_name("media-playback-pause-symbolic")
-            self._play.set_tooltip_text("Pause animation")
-        else:
-            self._play.set_icon_name("media-playback-start-symbolic")
-            self._play.set_tooltip_text("Resume animation")
-        self._play.set_sensitive(controls is not None and player.service != "checking")
-        for button in (self._shuffle, self._rotate, self._previous, self._next):
-            button.set_sensitive(running and controls is not None)
-        if controls is None:
-            for button in (self._play, self._shuffle, self._rotate, self._previous, self._next):
-                button.set_tooltip_text(NO_CONTROLS)
+        self._render_play(player, off)
         self._shuffle.set_active(player.shuffle)
         self._rotate.set_active(player.rotate)
 
@@ -347,6 +353,43 @@ class PlayerBar(Gtk.Box):
         scope = self._actions.lookup_action("scope")
         if isinstance(scope, Gio.SimpleAction):
             scope.set_state(GLib.Variant("s", state.scope))
+
+    def _render_play(self, player: Player, off: str) -> None:
+        """Play's face: a spinner while busy, else what a press would do (or why not)."""
+        play = self._play
+        if player.busy:
+            if play.get_child() is not self._spinner:
+                play.set_child(self._spinner)
+            play.set_sensitive(False)
+            play.set_tooltip_text(SENDING)
+            return
+        playing = player.service == "running" and player.playback == "playing"
+        if off:
+            icon, tip = "media-playback-pause-symbolic" if playing else "", off
+        elif player.service == "stopped":
+            icon, tip = "", "Start the wallpaper service"
+        elif player.service == "checking":
+            icon, tip = "", "Checking the wallpaper service\u2026"
+        elif player.play_refused:
+            icon, tip = "dialog-warning-symbolic", player.play_refused
+        elif player.retry:
+            icon, tip = "", "Retry the animation: its renderer stopped"
+        elif playing:
+            icon, tip = "media-playback-pause-symbolic", "Pause animation"
+        else:
+            icon, tip = "", "Resume animation"
+        play.set_icon_name(icon or "media-playback-start-symbolic")
+        play.set_tooltip_text(tip)
+        play.set_sensitive(not off and player.service != "checking")
+
+    @property
+    def play_button(self) -> Gtk.Button:
+        return self._play
+
+    @property
+    def busy_shown(self) -> bool:
+        """Whether Play shows the spinner of a command in flight."""
+        return self._play.get_child() is self._spinner
 
     def _render_thumbs(self, screens: tuple[OnScreen, ...]) -> None:
         child = self._thumbs.get_first_child()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
 import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -52,6 +53,7 @@ from wall_in_one.theme import css  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
+from wall_in_one.ui.next.playerbar import SENDING, PlayerBar  # noqa: E402
 from wall_in_one.ui.next.shell import GlassDialog  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.stills import Callback, StillMaker  # noqa: E402
@@ -73,11 +75,16 @@ def toolkit() -> None:
 
 
 class Recorder:
-    """Every runtime request the application sent, with its argument."""
+    """Every runtime request the application sent, with its argument.
+
+    `hold` keeps one verb on the wire (the runtime worker waits) until the
+    test releases it, so a test can watch a command in flight.
+    """
 
     def __init__(self, fake: FakeRuntime, monkeypatch: pytest.MonkeyPatch) -> None:
         self.sent: list[tuple[str, str | None]] = []
         self._fake = fake
+        self._held: dict[str, threading.Event] = {}
 
         def send_runtime(
             verb: str,
@@ -87,6 +94,9 @@ class Recorder:
             cancellation: client.Cancellation | None = None,
         ) -> Response:
             self.sent.append((verb, argument))
+            gate = self._held.get(verb)
+            if gate is not None:
+                gate.wait(timeout=30)  # bounded: a forgotten release cannot hang the suite
             return fake.send_runtime(verb, argument, timeout=timeout, cancellation=cancellation)
 
         monkeypatch.setattr(client, "send_runtime", send_runtime)
@@ -96,6 +106,17 @@ class Recorder:
 
     def requested(self, verb: str) -> list[str | None]:
         return [argument for sent, argument in self.sent if sent == verb]
+
+    def commands(self) -> list[tuple[str, str | None]]:
+        """Every request but the status polls and configuration reloads."""
+        return [
+            (verb, argument) for verb, argument in self.sent if verb not in ("status", "reload")
+        ]
+
+    def hold(self, verb: str) -> threading.Event:
+        """Keep ``verb`` on the wire until the returned event is set."""
+        gate = self._held[verb] = threading.Event()
+        return gate
 
 
 @pytest.fixture
@@ -114,9 +135,11 @@ def picture(tmp_path: Path, index: int) -> str:
     return str(tmp_path / "wallpapers" / f"picture-{index:02d}.png")
 
 
-def status(stills: dict[str, str], routes: dict[str, str] | None = None) -> dict[str, object]:
+def status(
+    stills: dict[str, str], routes: dict[str, str] | None = None, *, state: str = "playing"
+) -> dict[str, object]:
     """Two displays (DP-1, HDMI-A-1) showing ``stills`` for ``routes`` (default: schedule)."""
-    document = two_display_status()
+    document = two_display_status(state)
     records = document["displays"]
     assert isinstance(records, list)
     for record in records:
@@ -152,6 +175,33 @@ def settled_after_a_refused_publication(application: Application) -> bool:
         and not application._theme_draining
         and not application._runtime_compile_pending
     )
+
+
+def transport(bar: PlayerBar) -> list[Gtk.Widget]:
+    """The player bar's transport buttons."""
+    return [bar._shuffle, bar._previous, bar.play_button, bar._next, bar._rotate]
+
+
+def press(bar: PlayerBar, control: str) -> None:
+    """What a click on one of the bar's controls (or its ⋯ menu's) does."""
+    if control == "play":
+        bar.play_button.emit("clicked")
+    elif control == "previous":
+        bar._previous.emit("clicked")
+    elif control == "next":
+        bar._next.emit("clicked")
+    elif control in ("shuffle", "rotate"):
+        toggle = bar._shuffle if control == "shuffle" else bar._rotate
+        toggle.set_active(not toggle.get_active())
+    elif control == "resume":
+        bar._resume.emit("clicked")
+    else:  # the ⋯ menu's "random" and "stop"
+        bar._actions.activate_action(control, None)
+
+
+def choose_scope(bar: PlayerBar, scope: str) -> None:
+    """Pick ``scope`` in the bar's display menu."""
+    bar._actions.activate_action("scope", GLib.Variant("s", scope))
 
 
 def library_page(window: NextWindow) -> LibraryPage:
@@ -314,6 +364,195 @@ def test_favorite_persists_and_the_star_follows_the_store(
     run(application, scenario(), lanes)
 
 
+#: The bar's controls in the order a test presses them, and what each sends to
+#: every display while the runtime says Evening plays, unshuffled and cycling.
+CONTROLS: tuple[tuple[str, str, str | None], ...] = (
+    ("play", "pause", None),
+    ("previous", "previous", None),
+    ("next", "next", None),
+    ("shuffle", "shuffle", "on"),
+    ("rotate", "cycle", "off"),
+    ("random", "random", None),
+    ("stop", "stop", None),
+)
+
+
+def test_each_transport_control_sends_its_classic_verb_in_both_scopes(
+    runtime: Recorder, tmp_path: Path
+) -> None:
+    application = Application(ui="next")
+    lanes: list[object] = []
+    stills = {"DP-1": picture(tmp_path, 1), "HDMI-A-1": picture(tmp_path, 2)}
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        bar = window.playerbar
+        yield (
+            "the first scan",
+            lambda: settled(application) and window.library_text == "80 wallpapers in the library",
+        )
+        runtime.answer(status(stills))
+        application.refresh_runtime_status_async()
+        yield (
+            "the runtime's answer in the player bar",
+            lambda: bar.reason_text == "Evening · from schedule",
+        )
+        assert all(button.get_sensitive() for button in transport(bar))
+        assert bar.play_button.get_icon_name() == "media-playback-pause-symbolic"
+        assert not bar._shuffle.get_active() and bar._rotate.get_active()
+
+        # -- All displays: the global verbs, and the bar waits for the runtime ----------
+        for control, _verb, _argument in CONTROLS:
+            press(bar, control)
+            assert not bar._shuffle.get_active() and bar._rotate.get_active(), (
+                f"{control}: the toggles stay on the runtime's word"
+            )
+            yield f"{control} to be sent", lambda: settled(application) and not bar.busy_shown
+        assert runtime.commands() == [(verb, argument) for _c, verb, argument in CONTROLS]
+        assert bar.reason_text == "Evening · from schedule"
+        assert bar.title_text == "picture-01 and picture-02"
+        assert bar.play_button.get_icon_name() == "media-playback-pause-symbolic"
+
+        # -- one display: the same verbs, for it alone ----------------------------------
+        runtime.sent.clear()
+        choose_scope(bar, "HDMI-A-1")
+        assert window.state.scope == "HDMI-A-1"
+        for control, _verb, _argument in CONTROLS:
+            press(bar, control)
+            yield f"{control} on HDMI-A-1 to be sent", lambda: settled(application)
+        assert runtime.commands() == [
+            ("on", " ".join(part for part in ("HDMI-A-1", verb, argument) if part))
+            for _c, verb, argument in CONTROLS
+        ]
+
+        # -- Resume schedule, offered once the runtime reports a pick --------------------
+        manual = {"DP-1": "manual", "HDMI-A-1": "manual"}
+        runtime.answer(status(stills, manual))
+        application.refresh_runtime_status_async()
+        yield "the pick in the player bar", lambda: bar.reason_text == "Your pick"
+        assert bar._resume.get_visible() and bar._resume.get_sensitive()
+        runtime.sent.clear()
+        press(bar, "resume")
+        yield "HDMI-A-1's resume to be sent", lambda: settled(application)
+        choose_scope(bar, "all")
+        press(bar, "resume")
+        yield "the global resume to be sent", lambda: settled(application)
+        assert runtime.commands() == [("on", "HDMI-A-1 schedule-follow"), ("schedule-follow", None)]
+        assert bar.reason_text == "Your pick", "nothing changes until the runtime says so"
+
+        # -- the runtime's next word moves the bar -------------------------------------------
+        paused = status(stills, state="paused")
+        records = paused["displays"]
+        assert isinstance(records, list)
+        for record in records:
+            record["shuffle"] = True
+        runtime.answer(paused)
+        application.refresh_runtime_status_async()
+        yield "the pause in the player bar", lambda: bar.reason_text.startswith("Paused · ")
+        assert bar.play_button.get_icon_name() == "media-playback-start-symbolic"
+        assert bar.play_button.get_tooltip_text() == "Resume animation"
+        assert bar._shuffle.get_active()
+        runtime.sent.clear()
+        press(bar, "play")
+        yield "the play to be sent", lambda: settled(application)
+        assert runtime.commands() == [("play", None)]
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_the_transport_waits_refuses_a_skipped_wallpaper_and_is_off_without_the_service(
+    runtime: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = Application(ui="next")
+    lanes: list[object] = []
+    reports: list[str] = []
+    stills = {"DP-1": picture(tmp_path, 1), "HDMI-A-1": picture(tmp_path, 2)}
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        bar = window.playerbar
+        controls = window.state.controls
+        assert controls is not None
+        shown = window.report
+
+        def report(message: str) -> None:
+            reports.append(message)
+            shown(message)
+
+        monkeypatch.setattr(window, "report", report)
+        yield (
+            "the first scan",
+            lambda: settled(application) and window.library_text == "80 wallpapers in the library",
+        )
+        runtime.answer(status(stills))
+        application.refresh_runtime_status_async()
+        yield "the runtime's answer", lambda: bar.reason_text == "Evening · from schedule"
+
+        # -- busy: one command at a time, shown on the bar --------------------------------
+        gate = runtime.hold("next")
+        press(bar, "next")
+        yield "the command in flight", lambda: bar.busy_shown
+        assert not any(button.get_sensitive() for button in transport(bar))
+        assert bar.play_button.get_tooltip_text() == SENDING
+        assert bar._next.get_tooltip_text() == SENDING
+        assert bar.reason_text.endswith("sending a playback command\u2026")
+        controls.step(1)  # asked again anyway: the application's single lane refuses
+        assert reports[-1] == "A playback command is already in progress"
+        gate.set()
+        yield "the command to finish", lambda: settled(application) and not bar.busy_shown
+        assert all(button.get_sensitive() for button in transport(bar))
+        assert bar._next.get_tooltip_text() == "Next wallpaper"
+        assert bar.play_button.get_icon_name() == "media-playback-pause-symbolic"
+        assert runtime.commands() == [("next", None)]
+
+        # -- a wallpaper playback skips: Play leads to it instead ------------------------
+        skipped = status(stills)
+        records = skipped["displays"]
+        assert isinstance(records, list)
+        records[1]["entry_taboo"] = True
+        records[1]["renderer_failed"] = True
+        records[1]["last_error"] = "the renderer exited three times"
+        runtime.answer(skipped)
+        application.refresh_runtime_status_async()
+        yield (
+            "the refusal on Play",
+            lambda: bar.play_button.get_icon_name() == "dialog-warning-symbolic",
+        )
+        refusal = "Playback unavailable for picture-02; see Library for details and removal options"
+        assert bar.play_button.get_tooltip_text() == refusal
+        press(bar, "play")
+        yield "the refusal to settle", lambda: settled(application)
+        assert runtime.commands() == [("next", None)], "Play is never sent for a skipped one"
+        assert reports[-1] == refusal
+        inspector = library_page(window).inspector
+        assert inspector.wallpaper is not None and inspector.wallpaper.id == stills["HDMI-A-1"]
+        choose_scope(bar, "DP-1")  # its own wallpaper still plays
+        assert bar.play_button.get_icon_name() == "media-playback-pause-symbolic"
+        press(bar, "play")
+        yield "DP-1's pause to be sent", lambda: settled(application)
+        assert runtime.commands()[-1] == ("on", "DP-1 pause")
+
+        # -- no service: everything off, and saying why ---------------------------------
+        runtime.answer(None)
+        application.refresh_runtime_status_async()
+        yield "the service to be gone", lambda: window.state.player().service == "stopped"
+        off = "The wallpaper service isn\u2019t running"
+        assert not any(button.get_sensitive() for button in transport(bar))
+        assert [button.get_tooltip_text() for button in transport(bar)] == [off] * 5
+        assert not bar._actions.get_action_enabled("random")
+        assert not bar._actions.get_action_enabled("stop")
+        before = runtime.commands()
+        controls.step(1)
+        controls.toggle_play()
+        assert runtime.commands() == before and reports[-2:] == [off, off]
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
 def test_a_newer_playlists_file_turns_apply_and_favorite_off_with_the_notice(
     runtime: Recorder, tmp_path: Path
 ) -> None:
@@ -351,11 +590,27 @@ def test_a_newer_playlists_file_turns_apply_and_favorite_off_with_the_notice(
         assert apply_button is not None and not apply_button.get_sensitive()
         assert star is not None and not star.get_sensitive()
 
+        # The playback controls are off too: each command would first fail to compile.
+        bar = window.playerbar
+        runtime.answer(status({"DP-1": wid, "HDMI-A-1": wid}))
+        application.refresh_runtime_status_async()
+        yield "the runtime's answer", lambda: bar.reason_text == "Evening · from schedule"
+        off = (
+            "Playback controls are off while playlists.json is from a newer version of Wall-in-One"
+        )
+        assert not any(button.get_sensitive() for button in transport(bar))
+        assert [button.get_tooltip_text() for button in transport(bar)] == [off] * 5
+
         # Even when asked directly, nothing is written or sent.
         window.state.apply(wid)
         window.state.toggle_favorite(wid)
+        controls = window.state.controls
+        assert controls is not None
+        controls.toggle_play()
+        controls.step(1)
         yield "the refusals to settle", lambda: settled_after_a_refused_publication(application)
         assert runtime.requested("playlist-use") == [] and runtime.requested("on") == []
+        assert runtime.commands() == []
         assert newer.read_bytes() == document
         assert Path(wid) not in favourites.Store.open().paths
         yield "every tail to settle", lambda: settled_after_a_refused_publication(application)

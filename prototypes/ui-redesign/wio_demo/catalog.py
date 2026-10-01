@@ -4,13 +4,10 @@ comes through ``AppState``)."""
 
 from __future__ import annotations
 
-#: A wallpaper's kind, as a word and as an icon.
-KIND_LABEL = {"still": "Image", "video": "Video", "scene": "Scene"}
-KIND_ICON = {
-    "still": "image-x-generic-symbolic",
-    "video": "video-x-generic-symbolic",
-    "scene": "applications-games-symbolic",
-}
+#: A wallpaper's kind, as a word and as an icon: the app's own words.
+from wall_in_one.ui.next.catalog import KIND_ICON, KIND_LABEL
+
+__all__ = ["DAYS", "DAYS_LONG", "INTERVALS", "KIND_ICON", "KIND_LABEL", "MONTHS", "MONTHS_LONG"]
 
 #: Weekdays and months, short and long, indexed the way rules store them (Mon = 0, Jan = 0).
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]

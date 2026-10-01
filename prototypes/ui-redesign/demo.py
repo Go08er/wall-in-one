@@ -25,7 +25,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+# The demo runs the widgets the app ships: import them from this checkout's src.
+sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE))
 
 import gi
 

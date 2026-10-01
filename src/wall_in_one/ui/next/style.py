@@ -1,11 +1,23 @@
-/* Wall-in-One UI prototype — shared styles. Pages may add their own via ui.add_css(). */
+"""The new interface's widget styles: shapes, spacing and badges, no palette.
 
-/* ---------- thumbnails & cards ---------- */
-.thumb { background-color: alpha(currentColor, 0.08); }
-.rounded { border-radius: 12px; }
-.rounded-small { border-radius: 8px; }
-.rounded-large { border-radius: 16px; }
+Colours come from the application's own stylesheet (`wall_in_one.theme.css`,
+at USER + 1), so these rules only use libadwaita's variables. This sits at
+APPLICATION priority, below it, once per display.
+"""
 
+from __future__ import annotations
+
+from typing import Final
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+
+from gi.repository import Gdk, Gtk
+
+STYLE: Final = """
+/* ---------- cards ---------- */
 .wp-card { padding: 4px; border-radius: 16px; }
 .wp-frame {
   border-radius: 12px;
@@ -19,7 +31,7 @@
   box-shadow: 0 0 0 3px var(--accent-bg-color), 0 6px 16px alpha(black, 0.25);
 }
 
-/* Round pick badge (selection mode, the playlist picker): ring → filled tick or number. */
+/* Round pick badge (selection mode, pickers): ring, then a filled tick or number. */
 .wio-pick-badge {
   min-width: 26px; min-height: 26px; border-radius: 999px;
   font-weight: 800; font-size: 0.9em; font-feature-settings: "tnum";
@@ -45,9 +57,9 @@ button.on-image:hover { background-color: alpha(black, 0.65); }
 button.fav { color: #ffd54a; }
 button.apply-button { padding: 4px 14px; font-weight: 700; }
 
-/* ---------- pills / badges ----------
-   ui.pill() badges are boxes. Scoped to box.pill so libadwaita's button.pill
-   (Play now, Apply, Download & apply…) keeps normal button text. */
+/* ---------- pills and badges ----------
+   pill() badges are boxes. Scoped to box.pill so libadwaita's button.pill
+   keeps normal button text. */
 box.pill {
   border-radius: 999px;
   padding: 2px 8px;
@@ -84,13 +96,26 @@ box.pill.success { background-color: alpha(#26a269, 0.18); color: #26a269; }
 .status-dot { min-width: 8px; min-height: 8px; border-radius: 999px; background-color: #26a269; }
 .status-dot.paused { background-color: #e5a50a; }
 .status-dot.stopped { background-color: alpha(currentColor, 0.4); }
+.stacked-thumb {
+  box-shadow: 0 0 0 2px var(--headerbar-bg-color), 0 2px 6px alpha(black, 0.35);
+  border-radius: 7px;
+}
 
 /* ---------- inspector ---------- */
 .inspector { background-color: var(--sidebar-bg-color); }
 .inspector-title { font-size: 1.35em; font-weight: 800; }
+.inspector-preview-badges { margin: 10px; }
 .section-label {
   font-size: 0.78em; font-weight: 800; letter-spacing: 0.06em;
   opacity: 0.6;
+}
+.inspector-section { margin-top: 6px; }
+.scheme-name { font-weight: 700; }
+.frame-time { font-feature-settings: "tnum"; }
+.problem-card {
+  border-radius: 12px; padding: 12px;
+  background-color: alpha(#e5a50a, 0.14);
+  border: 1px solid alpha(#e5a50a, 0.45);
 }
 .choice-card {
   padding: 8px; border-radius: 12px;
@@ -106,12 +131,21 @@ box.pill.success { background-color: alpha(#26a269, 0.18); color: #26a269; }
 
 /* ---------- sidebar ---------- */
 .sidebar-count { font-size: 0.85em; opacity: 0.55; font-feature-settings: "tnum"; }
+"""
 
-.stacked-thumb { box-shadow: 0 0 0 2px var(--headerbar-bg-color), 0 2px 6px alpha(black, 0.35); border-radius: 7px; }
+_installed: set[int] = set()
+_providers: list[Gtk.CssProvider] = []
 
-/* ---------- misc ---------- */
-.big-number { font-size: 2em; font-weight: 800; }
-.monospace-log { font-family: monospace; font-size: 0.9em; }
-.drop-highlight { box-shadow: inset 0 0 0 2px var(--accent-bg-color); border-radius: 12px; }
-.toolbar-row { padding: 6px 12px; }
-.card-padded { padding: 12px; }
+
+def install(display: Gdk.Display | None = None) -> None:
+    """Load `STYLE` for ``display`` (the default one) once."""
+    target = display or Gdk.Display.get_default()
+    if target is None or hash(target) in _installed:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_string(STYLE)
+    Gtk.StyleContext.add_provider_for_display(
+        target, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+    _installed.add(hash(target))
+    _providers.append(provider)

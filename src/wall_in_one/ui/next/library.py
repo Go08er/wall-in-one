@@ -1,62 +1,89 @@
-"""Library: every wallpaper on this computer, with details beside the grid."""
+"""Library: every wallpaper on this computer, with details beside the grid.
+
+Matching and ordering cover the whole library (the adapter answers
+`AppState.library_query`); only a page of it becomes cards, like the classic
+grid (`wall_in_one.ui.grid.MEDIA_PAGE_SIZE`), plus the wallpapers on screen
+and the one whose details are open, wherever they sort. Selection mode,
+adding to playlists, removing and the folder button exist only when the
+adapter offers `AppState.editing`.
+"""
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Final
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+gi.require_version("Pango", "1.0")
 
-from .. import art, thumbs, ui
-from ..catalog import KIND_LABEL
-from ..models import Wallpaper
-from . import Page
-from .inspector import Inspector
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
-SORTS = [("added", "Recently added"), ("name", "Name"), ("kind", "Type"), ("color", "Color")]
-#: Cards are built a page at a time, like the real app's grid (MEDIA_PAGE_SIZE in
-#: ui/grid.py), so a library of thousands builds 72 cards, not thousands.
-PAGE_SIZE = 72
+from wall_in_one.ui.grid import MEDIA_PAGE_SIZE
+from wall_in_one.ui.next import thumbs, widgets
+from wall_in_one.ui.next.catalog import quoted
+from wall_in_one.ui.next.inspector import Inspector
+from wall_in_one.ui.next.page import Page
+from wall_in_one.ui.next.state import AppState, LibraryEditing, WallpaperView
+
+#: Cards are built a page at a time, like the classic grid, so a library of
+#: thousands builds 72 cards, not thousands.
+PAGE_SIZE: Final = MEDIA_PAGE_SIZE
+#: The kind filter: (``library_query`` kind, label).
+KINDS: Final = (("all", "All"), ("still", "Images"), ("video", "Videos"), ("scene", "Scenes"))
+#: Card widths for the two thumbnail sizes (ui.toml's ``thumbnail_size``).
+CARD_WIDTHS: Final = {"large": 208, "small": 156}
 
 
 class LibraryPage(Page):
     name = "library"
     title = "Library"
 
-    def __init__(self, state) -> None:
+    def __init__(self, state: AppState) -> None:
         super().__init__(state)
+        self._editing: LibraryEditing | None = state.editing
         self._kind = "all"
         self._favorites = False
         self._query = ""
-        self._sort = "added"
-        self._card_width = 208
+        sorts = list(state.library_sorts())
+        self._sorts = dict(sorts)
+        self._sort = sorts[0][0] if sorts else ""
+        self._card_width = CARD_WIDTHS.get(state.thumbnail_size, CARD_WIDTHS["large"])
         self._select_mode = False
         self._selected: set[str] = set()
-        self._cards: dict[str, ui.WallpaperCard] = {}  # only the wallpapers with a card now
+        self._cards: dict[str, widgets.WallpaperCard] = {}  # only the wallpapers with a card now
         self._inspected: str | None = None
         self._limit = PAGE_SIZE  # how many of the matching wallpapers get a card
         self._matching = 0
+        self._matched: set[str] = set()
 
         # -- header ------------------------------------------------------------
         self.search = Gtk.SearchEntry(placeholder_text="Search wallpapers, tags, folders")
         self.search.set_hexpand(True)
         self.search.connect("search-changed", self._on_search)
-        clamp = Adw.Clamp(maximum_size=460, child=self.search)
-        self._title_box = clamp
+        self._title_box = Adw.Clamp(maximum_size=460, child=self.search)
 
         self._add = Gtk.Button(icon_name="list-add-symbolic")
         self._add.set_tooltip_text("Add a folder")
         self._add.update_property([Gtk.AccessibleProperty.LABEL], ["Add a folder"])
         self._add.connect("clicked", lambda *_: self._choose_folder())
-        self._select = ui.select_toggle()
+        self._select = widgets.select_toggle()
         self._select.connect("toggled", self._on_select_mode)
 
         # -- filter bar ------------------------------------------------------------
         # The right end stays free for the Select pill hanging over the grid's corner.
-        filters = Gtk.Box(spacing=8, margin_start=18, margin_end=ui.CORNER_RESERVE, margin_top=10, margin_bottom=10)
-        self._kinds = Adw.ToggleGroup(can_shrink=False)  # the row scrolls instead of eliding "Images"
-        for key, label in (("all", "All"), ("still", "Images"), ("video", "Videos"), ("scene", "Scenes")):
+        filters = Gtk.Box(
+            spacing=8,
+            margin_start=18,
+            margin_end=widgets.CORNER_RESERVE if self._editing else 18,
+            margin_top=10,
+            margin_bottom=10,
+        )
+        # can_shrink off: the row scrolls instead of eliding "Images".
+        self._kinds = Adw.ToggleGroup(can_shrink=False)
+        for key, label in KINDS:
             self._kinds.add(Adw.Toggle(name=key, label=label))
         self._kinds.set_active_name("all")
         self._kinds.connect("notify::active-name", self._on_kind)
@@ -74,14 +101,16 @@ class LibraryPage(Page):
         self._count.add_css_class("numeric")
         filters.append(self._count)
         sort_menu = Gio.Menu()
-        for key, label in SORTS:
+        for key, label in sorts:
             sort_menu.append(label, f"lib.sort::{key}")
         size_section = Gio.Menu()
         size_section.append("Large thumbnails", "lib.size::large")
         size_section.append("Small thumbnails", "lib.size::small")
         sort_menu.append_section(None, size_section)
         self._sort_button = Gtk.MenuButton(menu_model=sort_menu)
-        self._sort_content = Adw.ButtonContent(icon_name="view-sort-descending-symbolic", label="Recently added")
+        self._sort_content = Adw.ButtonContent(
+            icon_name="view-sort-descending-symbolic", label=self._sorts.get(self._sort, "")
+        )
         self._sort_button.set_child(self._sort_content)
         self._narrow = False
         self._sort_button.add_css_class("flat")
@@ -95,8 +124,8 @@ class LibraryPage(Page):
 
         # -- grid ------------------------------------------------------------------
         # Equal columns: FlowBox hands some columns an extra pixel, which upsets
-        # height-for-width cards. ui.CardGrid gives every card its measured width.
-        self.flow = ui.CardGrid(
+        # height-for-width cards. CardGrid gives every card its measured width.
+        self.flow = widgets.CardGrid(
             min_width=self._card_width,
             max_columns=10,
             valign=Gtk.Align.START,
@@ -142,37 +171,30 @@ class LibraryPage(Page):
         # Labeled buttons with icons; narrow windows keep just the icons (_set_narrow).
         self._action_bar = Gtk.ActionBar(revealed=False)
         self._bar_labels: list[tuple[Adw.ButtonContent, str]] = []
-
-        def bar_button(icon: str, label: str, tooltip: str, button: Gtk.Widget | None = None) -> Gtk.Widget:
-            content = Adw.ButtonContent(icon_name=icon, label=label)
-            button = button or Gtk.Button()
-            button.set_child(content)
-            button.set_tooltip_text(tooltip)
-            self._bar_labels.append((content, label))
-            return button
-
-        select_all = bar_button("edit-select-all-symbolic", "Select all", "Select every wallpaper shown")
+        select_all = Gtk.Button()
+        self._label_bar_button(select_all, "edit-select-all-symbolic", "Select all")
+        select_all.set_tooltip_text("Select every wallpaper shown")
         select_all.add_css_class("flat")
         select_all.connect("clicked", lambda *_: self.select_all())
         self._action_bar.pack_start(select_all)
-        self._selection_label = Gtk.Label()
+        self._selection_label = Gtk.Label(ellipsize=Pango.EllipsizeMode.END)
         self._action_bar.pack_start(self._selection_label)
-        add_to = bar_button(
-            "list-add-symbolic",
-            "Add to playlist",
-            "Add the selected wallpapers to a playlist",
-            Gtk.MenuButton(menu_model=self._bulk_playlist_menu(), always_show_arrow=True),
-        )
+        add_to = Gtk.MenuButton(menu_model=self._bulk_playlist_menu(), always_show_arrow=True)
+        self._label_bar_button(add_to, "list-add-symbolic", "Add to playlist")
+        add_to.set_tooltip_text("Add the selected wallpapers to a playlist")
         add_to.add_css_class("suggested-action")
-        fav_all = bar_button("starred-symbolic", "Favorite", "Add the selected wallpapers to favorites")
+        fav_all = Gtk.Button()
+        self._label_bar_button(fav_all, "starred-symbolic", "Favorite")
+        fav_all.set_tooltip_text("Add the selected wallpapers to favorites")
         fav_all.connect("clicked", lambda *_: self._bulk_favorite())
-        remove_all = bar_button("user-trash-symbolic", "Remove…", "Remove the selected wallpapers from the library")
-        remove_all.add_css_class("destructive-action")
-        remove_all.connect("clicked", lambda *_: self._confirm_remove_selected())
-        self._remove_all = remove_all
+        self._remove_all = Gtk.Button()
+        self._label_bar_button(self._remove_all, "user-trash-symbolic", "Remove…")
+        self._remove_all.set_tooltip_text("Remove the selected wallpapers from the library")
+        self._remove_all.add_css_class("destructive-action")
+        self._remove_all.connect("clicked", lambda *_: self._confirm_remove_selected())
         self._action_bar.pack_end(add_to)
         self._action_bar.pack_end(fav_all)
-        self._action_bar.pack_end(remove_all)
+        self._action_bar.pack_end(self._remove_all)
 
         # The chip row scrolls sideways on narrow windows instead of forcing width.
         filter_scroller = Gtk.ScrolledWindow(
@@ -181,7 +203,6 @@ class LibraryPage(Page):
             propagate_natural_height=True,
         )
         filter_scroller.set_child(filters)
-        self._selection_label.set_ellipsize(3)
 
         # Banners sit right under the header, as in libadwaita; the Select pill
         # then hangs between the filter row and the grid without covering anything.
@@ -189,7 +210,8 @@ class LibraryPage(Page):
         listing.append(filter_scroller)
         listing.append(self._grid_stack)
         hanging = Gtk.Overlay(child=listing)
-        ui.hang_on_corner(hanging, self._grid_stack, self._select)
+        if self._editing is not None:
+            widgets.hang_on_corner(hanging, self._grid_stack, self._select)
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         content.append(self._notice)
         content.append(hanging)
@@ -221,12 +243,17 @@ class LibraryPage(Page):
         state.connect("changed", self._on_changed)
         self._rebuild()
 
+    def _label_bar_button(self, button: Gtk.Button | Gtk.MenuButton, icon: str, label: str) -> None:
+        content = Adw.ButtonContent(icon_name=icon, label=label)
+        button.set_child(content)
+        self._bar_labels.append((content, label))
+
     # -- Page API ------------------------------------------------------------------
     def title_widget(self) -> Gtk.Widget:
         return self._title_box
 
     def header_start(self) -> list[Gtk.Widget]:
-        return [self._add]
+        return [self._add] if self._editing is not None else []
 
     def header_end(self) -> list[Gtk.Widget]:
         return []
@@ -260,7 +287,12 @@ class LibraryPage(Page):
             self._cards[arg].add_css_class("force-hover")
         elif what == "menu":
             card = self._cards[arg]
-            GLib.timeout_add(300, lambda: (card._popup(None, 1, 120, 60, card._menu), False)[1])
+
+            def open_menu() -> bool:
+                card.popup_menu(120, 60)
+                return GLib.SOURCE_REMOVE
+
+            GLib.timeout_add(300, open_menu)
         elif what == "filter":
             self._kinds.set_active_name(arg)
         elif what == "search":
@@ -273,78 +305,110 @@ class LibraryPage(Page):
     # -- actions -------------------------------------------------------------------
     def _install_actions(self) -> None:
         group = Gio.SimpleActionGroup()
+        self._action_group = group
 
-        def add(name: str, callback, parameter: str | None = "s") -> None:
-            action = Gio.SimpleAction.new(name, GLib.VariantType.new(parameter) if parameter else None)
-            action.connect("activate", lambda _a, value: callback(value.get_string() if value else None))
+        def add(name: str, callback: Callable[[str], None]) -> None:
+            action = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
+            action.connect(
+                "activate",
+                lambda _a, value: callback(value.get_string()) if value is not None else None,
+            )
             group.add_action(action)
 
         def apply(value: str) -> None:
-            wid, scope = value.split("|")
-            self.state.apply(wid, scope)
-
-        def add_to(value: str) -> None:
-            wid, pid = value.split("|")
-            self.state.add_to_playlist(pid, [wid])
+            wid, _, scope = value.partition("|")
+            if not self.state.apply_blocked(wid):
+                self.state.apply(wid, scope or "all")
 
         add("apply", apply)
-        add("add", add_to)
-        add("fav", lambda wid: self.state.toggle_favorite(wid))
+        add("fav", self._favorite)
         add("edit", lambda wid: self.inspect(self.state.wallpaper(wid)))
-        add("files", lambda wid: self.state.toast("Would open the folder in Files"))
-        add(
-            "remove",
-            lambda wid: (
-                self.inspect(self.state.wallpaper(wid)),
-                self.inspector._confirm_remove(self.state.wallpaper(wid)),
-            ),
-        )
         add("sort", self._set_sort)
         add("size", self._set_size)
-        add("bulk-add", self._bulk_add)
-        add("store", lambda _v: self.state.navigate("store"), None)
+        editing = self._editing
+        if editing is not None:
+
+            def add_to(value: str) -> None:
+                wid, _, pid = value.partition("|")
+                editing.add_to_playlist(pid, [wid])
+
+            def remove(wid: str) -> None:
+                wallpaper = self.state.wallpaper(wid)
+                self.inspect(wallpaper)
+                self.inspector.confirm_remove(wallpaper)
+
+            add("add", add_to)
+            add("files", lambda _wid: self.state.toast("Would open the folder in Files"))
+            add("remove", remove)
+            add("bulk-add", self._bulk_add)
+        store = Gio.SimpleAction.new("store", None)
+        store.connect("activate", lambda *_: self.state.navigate("store"))
+        group.add_action(store)
         # The inspector lives inside this page; header widgets live in the shell.
         self.widget.insert_action_group("lib", group)
+        self._refresh_action_states()
 
-    def _card_menu(self, wallpaper: Wallpaper) -> Gtk.PopoverMenu:
+    def _refresh_action_states(self) -> None:
+        favorites = self._action_group.lookup_action("fav")
+        if isinstance(favorites, Gio.SimpleAction):
+            favorites.set_enabled(not self.state.favorite_blocked())
+        sizes = self._action_group.lookup_action("size")
+        if isinstance(sizes, Gio.SimpleAction):
+            sizes.set_enabled(not self.state.appearance_blocked())
+
+    def _favorite(self, wid: str) -> None:
+        if not self.state.favorite_blocked():
+            self.state.toggle_favorite(wid)
+
+    def _card_menu(self, wallpaper: WallpaperView) -> Gtk.PopoverMenu:
         menu = Gio.Menu()
         apply = Gio.Menu()
-        apply.append("Apply to all displays", f"lib.apply::{wallpaper.id}|all")
-        for display in self.state.displays:
-            apply.append(f"Apply to {display.connector} only", f"lib.apply::{wallpaper.id}|{display.connector}")
+        blocked = self.state.apply_blocked(wallpaper.id)
+        if blocked:
+            apply.append(blocked if len(blocked) < 60 else "Apply is off here", None)
+        else:
+            apply.append("Apply to all displays", f"lib.apply::{wallpaper.id}|all")
+            for display in self.state.displays:
+                apply.append(
+                    f"Apply to {display.connector} only",
+                    f"lib.apply::{wallpaper.id}|{display.connector}",
+                )
         menu.append_section(None, apply)
         organize = Gio.Menu()
-        organize.append("Edit details", f"lib.edit::{wallpaper.id}")
-        playlists = Gio.Menu()
-        for playlist in self.state.playlists:
-            if not playlist.automatic:
-                playlists.append(playlist.name, f"lib.add::{wallpaper.id}|{playlist.id}")
-        organize.append_submenu("Add to playlist", playlists)
+        organize.append("Edit details" if self._editing else "Details", f"lib.edit::{wallpaper.id}")
+        if self._editing is not None:
+            playlists = Gio.Menu()
+            for playlist in self.state.playlists:
+                if not playlist.automatic:
+                    playlists.append(playlist.name, f"lib.add::{wallpaper.id}|{playlist.id}")
+            organize.append_submenu("Add to playlist", playlists)
         organize.append(
-            "Remove from favorites" if wallpaper.favorite else "Add to favorites", f"lib.fav::{wallpaper.id}"
+            "Remove from favorites" if wallpaper.favorite else "Add to favorites",
+            f"lib.fav::{wallpaper.id}",
         )
         menu.append_section(None, organize)
-        files = Gio.Menu()
-        files.append("Show in Files", f"lib.files::{wallpaper.id}")
-        files.append("Remove from library…", f"lib.remove::{wallpaper.id}")
-        menu.append_section(None, files)
-        popover = Gtk.PopoverMenu.new_from_model(menu)
-        return popover
+        if self._editing is not None:
+            files = Gio.Menu()
+            files.append("Show in Files", f"lib.files::{wallpaper.id}")
+            files.append("Remove from library…", f"lib.remove::{wallpaper.id}")
+            menu.append_section(None, files)
+        return Gtk.PopoverMenu.new_from_model(menu)
 
     def _bulk_playlist_menu(self) -> Gio.Menu:
         menu = Gio.Menu()
-        for playlist in self.state.playlists:
-            if not playlist.automatic:
-                menu.append(playlist.name, f"lib.bulk-add::{playlist.id}")
+        if self._editing is not None:
+            for playlist in self.state.playlists:
+                if not playlist.automatic:
+                    menu.append(playlist.name, f"lib.bulk-add::{playlist.id}")
         return menu
 
     # -- building ----------------------------------------------------------------------
     def _rebuild(self) -> None:
         """The state changed: drop every card and build the current pages again
-        (how many pages are shown survives, as in the real app)."""
+        (how many pages are shown survives, as in the classic grid)."""
         for card in self._cards.values():
-            if card._menu is not None:
-                card._menu.unparent()
+            if card.menu is not None:
+                card.menu.unparent()
         self.flow.remove_all()
         self._cards = {}
         self._materialize()
@@ -355,25 +419,29 @@ class LibraryPage(Page):
             else f"{len(problems)} wallpapers are being skipped after playback problems"
         )
         self._notice.set_revealed(bool(problems))
+        self._refresh_action_states()
 
-    def _matches(self) -> list[Wallpaper]:
+    def _matches(self) -> list[WallpaperView]:
         """Every wallpaper that passes the filters, in the chosen order."""
-        order = {wallpaper.id: index for index, wallpaper in enumerate(self.state.wallpapers)}
-        matching = [wallpaper for wallpaper in self.state.wallpapers if self._visible(wallpaper)]
-        return sorted(matching, key=lambda wallpaper: self._sort_key(wallpaper, order))
+        return list(
+            self.state.library_query(
+                kind=self._kind, favorites=self._favorites, text=self._query, sort=self._sort
+            )
+        )
 
     def _materialize(self) -> None:
         """Give cards to the first ``self._limit`` matches, plus the wallpapers on
-        screen and the one whose details are open wherever they sort (the real
-        app keeps current tiles past page one too). Cards that still fit are kept."""
+        screen and the one whose details are open wherever they sort (the classic
+        grid keeps current tiles past page one too). Cards that still fit are kept."""
         matches = self._matches()
+        self._matched = {wallpaper.id for wallpaper in matches}
         keep = set(self.state.current.values()) | {self._inspected}
         wanted = [w for index, w in enumerate(matches) if index < self._limit or w.id in keep]
         wanted_ids = {wallpaper.id for wallpaper in wanted}
         for wid in [wid for wid in self._cards if wid not in wanted_ids]:
             card = self._cards.pop(wid)
-            if card._menu is not None:
-                card._menu.unparent()
+            if card.menu is not None:
+                card.menu.unparent()
         self.flow.remove_all()
         for wallpaper in wanted:
             card = self._cards.get(wallpaper.id) or self._card(wallpaper)
@@ -382,24 +450,27 @@ class LibraryPage(Page):
         self._matching = len(matches)
         self._update_count()
 
-    def _card(self, wallpaper: Wallpaper) -> ui.WallpaperCard:
-        playing = [connector for connector, wid in self.state.current.items() if wid == wallpaper.id]
-        card = ui.WallpaperCard(
+    def _card(self, wallpaper: WallpaperView) -> widgets.WallpaperCard:
+        playing = [c for c, wid in self.state.current.items() if wid == wallpaper.id]
+        card = widgets.WallpaperCard(
             wallpaper,
             width=self._card_width,
             playing_on=playing or None,
             on_open=self._on_card,
             on_apply=lambda w: self.state.apply(w.id, self.state.scope),
             apply_tooltip=self._apply_target,
-            on_favorite=lambda w: self.state.toggle_favorite(w.id),
+            apply_blocked=self.state.apply_blocked(wallpaper.id),
+            on_favorite=lambda w: self._favorite(w.id),
+            favorite_blocked=self.state.favorite_blocked(),
             menu=self._card_menu(wallpaper),
-            **ui.card_colors(self.state, wallpaper),
+            **widgets.card_colors(self.state, wallpaper),
         )
         card.set_selected(wallpaper.id == self._inspected)
         if self._select_mode:
             card.set_selectable(True)
             card.set_checked(wallpaper.id in self._selected)
-        self._attach_drag(card, wallpaper)
+        if self._editing is not None:
+            self._attach_drag(card, wallpaper)
         return card
 
     def _show_more(self) -> None:
@@ -412,69 +483,59 @@ class LibraryPage(Page):
         self._limit = PAGE_SIZE
         self._materialize()
 
-    def _attach_drag(self, card: ui.WallpaperCard, wallpaper: Wallpaper) -> None:
+    def _attach_drag(self, card: widgets.WallpaperCard, wallpaper: WallpaperView) -> None:
         source = Gtk.DragSource(actions=Gdk.DragAction.COPY)
 
-        def prepare(_source, _x, _y):
-            value = GObject.Value(GObject.TYPE_STRING, wallpaper.id)
+        def prepare(_source: Gtk.DragSource, _x: float, _y: float) -> Gdk.ContentProvider:
+            value = GObject.Value()
+            value.init(GObject.TYPE_STRING)
+            value.set_string(wallpaper.id)
             return Gdk.ContentProvider.new_for_value(value)
 
-        def begin(drag_source, _drag) -> None:
-            drag_source.set_icon(thumbs.texture(wallpaper, 160, 90), 80, 45)
+        def begin(drag_source: Gtk.DragSource, _drag: Gdk.Drag) -> None:
+            texture = thumbs.provider().cached(wallpaper, 480, 270)
+            if texture is not None:
+                drag_source.set_icon(texture, 80, 45)
 
         source.connect("prepare", prepare)
         source.connect("drag-begin", begin)
         card.frame.add_controller(source)
 
-    def _visible(self, wallpaper: Wallpaper) -> bool:
-        if self._kind != "all" and wallpaper.kind != self._kind:
-            return False
-        if self._favorites and not wallpaper.favorite:
-            return False
-        if self._query:
-            haystack = " ".join(
-                (
-                    wallpaper.name,
-                    wallpaper.folder,
-                    wallpaper.source,
-                    " ".join(wallpaper.tags),
-                    wallpaper.style,
-                    KIND_LABEL[wallpaper.kind],
-                )
-            )
-            return all(word in haystack.lower() for word in self._query.lower().split())
-        return True
-
-    def _sort_key(self, wallpaper: Wallpaper, order: dict[str, int]):
-        if self._sort == "name":
-            return wallpaper.name.lower()
-        if self._sort == "kind":
-            return (wallpaper.kind, wallpaper.name.lower())
-        if self._sort == "color":
-            return art.look_for(*wallpaper.key).hue
-        return order[wallpaper.id]
-
     def _update_count(self) -> None:
         shown = self._matching
         total = len(self.state.wallpapers)
-        self._count.set_label(f"{shown} of {total}" if shown != total else f"{total} wallpapers")
+        text = f"{shown} of {total}" if shown != total else f"{total} wallpapers"
+        if total == 1 and shown == total:
+            text = "1 wallpaper"
+        if self.state.library_scanning:
+            text += " · scanning…"
+        self._count.set_label(text)
         self._grid_stack.set_visible_child_name("grid" if shown else "empty")
         remaining = shown - len(self._cards)
         self._more.set_visible(remaining > 0)
         if remaining > 0:
-            self._more.set_label(f"Show {min(PAGE_SIZE, remaining)} more · {len(self._cards)} of {shown} shown")
+            self._more.set_label(
+                f"Show {min(PAGE_SIZE, remaining)} more · {len(self._cards)} of {shown} shown"
+            )
+
+    @property
+    def count_text(self) -> str:
+        """The "N wallpapers" label, as shown."""
+        return self._count.get_label()
 
     # -- callbacks ------------------------------------------------------------------------
-    def _on_changed(self, _state, topic: str) -> None:
+    def _on_changed(self, _state: AppState, topic: str) -> None:
         if topic in ("library", "now", "playlists"):
             self._rebuild()
+        elif topic == "system":
+            self._update_count()
 
     def _on_search(self, entry: Gtk.SearchEntry) -> None:
         self._query = entry.get_text().strip()
         self._refilter()
 
-    def _on_kind(self, group: Adw.ToggleGroup, _param) -> None:
-        self._kind = group.get_active_name()
+    def _on_kind(self, group: Adw.ToggleGroup, _param: object) -> None:
+        self._kind = group.get_active_name() or "all"
         self._refilter()
 
     def _on_fav(self, button: Gtk.ToggleButton) -> None:
@@ -487,22 +548,30 @@ class LibraryPage(Page):
         self._fav_toggle.set_active(False)
 
     def _set_sort(self, key: str) -> None:
+        if key not in self._sorts:
+            return
         self._sort = key
-        self._sort_content.set_label("" if self._narrow else dict(SORTS)[key])
-        self._sort_button.set_tooltip_text(f"Sorted by {dict(SORTS)[key].lower()} · sort and size")
+        self._sort_content.set_label("" if self._narrow else self._sorts[key])
+        self._sort_button.set_tooltip_text(f"Sorted by {self._sorts[key].lower()} · sort and size")
         self._refilter()
 
     def _set_narrow(self, narrow: bool) -> None:
         """Narrow windows: Favorites and Sort keep their icons, lose their words."""
         self._narrow = narrow
         self._fav_content.set_label("" if narrow else "Favorites")
-        self._sort_content.set_label("" if narrow else dict(SORTS)[self._sort])
+        self._sort_content.set_label("" if narrow else self._sorts.get(self._sort, ""))
         for content, label in self._bar_labels:
             content.set_label("" if narrow else label)
 
-    def _on_collapsed(self, split: Adw.OverlaySplitView, _param) -> None:
+    def _on_collapsed(self, split: Adw.OverlaySplitView, _param: object) -> None:
         if split.get_collapsed() and self._inspected is not None:
-            GLib.idle_add(lambda: (self._inspected is not None and split.set_show_sidebar(True), False)[1])
+
+            def reopen() -> bool:
+                if self._inspected is not None:
+                    split.set_show_sidebar(True)
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(reopen)
 
     def _apply_target(self) -> str:
         label = self.state.scope_label()
@@ -510,36 +579,42 @@ class LibraryPage(Page):
 
     def _choose_folder(self) -> None:
         dialog = Gtk.FileDialog(title="Add a wallpaper folder", modal=True)
+        root = self.widget.get_root()
+        parent = root if isinstance(root, Gtk.Window) else None
 
-        def done(source: Gtk.FileDialog, result) -> None:
+        def done(source: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
             try:
                 folder = source.select_folder_finish(result)
             except GLib.Error:
                 return  # canceled
             if folder is not None:
-                self.state.toast(f"Added folder “{folder.get_basename()}” · scanning (demo)")
+                self.state.toast(f"Added folder {quoted(folder.get_basename() or '')} (demo)")
 
-        dialog.select_folder(self.widget.get_root(), None, done)
+        dialog.select_folder(parent, None, done)
 
     def _set_size(self, size: str) -> None:
-        self._card_width = 208 if size == "large" else 156
-        self.flow._min = self._card_width
+        if size not in CARD_WIDTHS or self.state.appearance_blocked():
+            return
+        self._card_width = CARD_WIDTHS[size]
+        self.flow.min_width = self._card_width
+        if size != self.state.thumbnail_size:
+            self.state.set_thumbnail_size(size)
         self._rebuild()
 
-    def _on_card(self, wallpaper: Wallpaper) -> None:
+    def _on_card(self, wallpaper: WallpaperView) -> None:
         if self._select_mode:
             self._toggle_selected(wallpaper.id)
             return
         self.inspect(wallpaper)
 
-    def inspect(self, wallpaper: Wallpaper) -> None:
+    def inspect(self, wallpaper: WallpaperView) -> None:
         if self._select_mode:
             self._select.set_active(False)
         previous = self._inspected
         self._inspected = wallpaper.id
-        if previous in self._cards:
+        if previous is not None and previous in self._cards:
             self._cards[previous].set_selected(False)
-        if wallpaper.id not in self._cards and self._visible(wallpaper):
+        if wallpaper.id not in self._cards and wallpaper.id in self._matched:
             self._materialize()  # past the pages shown: give it a card so it is outlined
         if wallpaper.id in self._cards:  # it may have been removed from the library
             self._cards[wallpaper.id].set_selected(True)
@@ -547,12 +622,12 @@ class LibraryPage(Page):
         self.split.set_show_sidebar(True)
 
     def close_inspector(self) -> None:
-        if self._inspected in self._cards:
+        if self._inspected is not None and self._inspected in self._cards:
             self._cards[self._inspected].set_selected(False)
         self._inspected = None
         self.split.set_show_sidebar(False)
 
-    def _review_problem(self, _banner) -> None:
+    def _review_problem(self, _banner: Adw.Banner) -> None:
         for wallpaper in self.state.wallpapers:
             if wallpaper.problem:
                 self.inspect(wallpaper)
@@ -560,7 +635,7 @@ class LibraryPage(Page):
 
     # -- selection mode ----------------------------------------------------------------------
     def _on_select_mode(self, button: Gtk.ToggleButton) -> None:
-        self._select_mode = button.get_active()
+        self._select_mode = button.get_active() and self._editing is not None
         if self._select_mode:
             self.close_inspector()  # one thing at a time: picking, not details
         else:
@@ -587,17 +662,21 @@ class LibraryPage(Page):
 
     def _update_selection_bar(self) -> None:
         count = len(self._selected)
-        self._selection_label.set_label("Click wallpapers to select them" if not count else f"{count} selected")
+        self._selection_label.set_label(
+            "Click wallpapers to select them" if not count else f"{count} selected"
+        )
         self._remove_all.set_sensitive(bool(count))
         self._action_bar.set_revealed(self._select_mode)
 
     def _bulk_add(self, pid: str) -> None:
-        if self._selected:
-            self.state.add_to_playlist(pid, sorted(self._selected))
+        if self._editing is not None and self._selected:
+            self._editing.add_to_playlist(pid, sorted(self._selected))
             self._select.set_active(False)
 
     def _bulk_favorite(self) -> None:
-        self.state.favorite_wallpapers(sorted(self._selected))
+        if self._editing is None:
+            return
+        self._editing.favorite_wallpapers(sorted(self._selected))
         self.state.toast(f"Added {len(self._selected)} wallpapers to favorites")
         self._select.set_active(False)
 
@@ -606,7 +685,7 @@ class LibraryPage(Page):
         if not chosen:
             return
         count = len(chosen)
-        what = f"“{chosen[0].name}”" if count == 1 else f"{count} wallpapers"
+        what = quoted(chosen[0].name) if count == 1 else f"{count} wallpapers"
         dialog = Adw.AlertDialog(
             heading=f"Remove {what} from the library?",
             body="The files stay on disk. You can add them back by scanning the folder again.",
@@ -616,15 +695,25 @@ class LibraryPage(Page):
         dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
-        dialog.connect("response", lambda _d, response: response == "remove" and self._remove(chosen))
-        dialog.present(self.widget.get_root())
 
-    def _remove(self, chosen: list[Wallpaper]) -> None:
+        def respond(_dialog: Adw.AlertDialog, response: str) -> None:
+            if response == "remove":
+                self._remove(chosen)
+
+        dialog.connect("response", respond)
+        root = self.widget.get_root()
+        dialog.present(root if isinstance(root, Gtk.Widget) else None)
+
+    def _remove(self, chosen: list[WallpaperView]) -> None:
+        if self._editing is None:
+            return
         self._select.set_active(False)
-        undo = self.state.remove_wallpapers([wallpaper.id for wallpaper in chosen])
+        undo = self._editing.remove_wallpapers([wallpaper.id for wallpaper in chosen])
         count = len(chosen)
-        self.state.toast(f"Removed {count} wallpaper{'s' if count != 1 else ''} from the library", undo)
+        self.state.toast(
+            f"Removed {count} wallpaper{'s' if count != 1 else ''} from the library", undo
+        )
 
 
-def create(state) -> Page:
+def create(state: AppState) -> Page:
     return LibraryPage(state)

@@ -8,7 +8,10 @@ import time
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+HERE = Path(__file__).resolve().parent.parent
+# Drive the widgets the app ships, from this checkout's src.
+sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE))
 
 import gi
 
@@ -17,9 +20,10 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib
 from wio_demo import art, data, store_catalog, thumbs, ui
 from wio_demo.models import Rule, Wallpaper
-from wio_demo.pages import library as library_page
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
+
+from wall_in_one.ui.next import library as library_page
 
 failures: list[str] = []
 steps_run = 0

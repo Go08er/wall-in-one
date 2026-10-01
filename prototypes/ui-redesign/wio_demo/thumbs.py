@@ -1,6 +1,9 @@
-"""Thumbnails: the one place pages and widgets get pictures of wallpapers and
-Store items from. The demo draws procedural art; a real-app adapter would
-decode files here instead (the real app's ui/thumbnails.ThumbnailLoader).
+"""The demo's thumbnail provider: procedural art, drawn on worker threads.
+
+The widgets the app ships ask ``wall_in_one.ui.next.thumbs.provider()`` for
+pictures. The app installs one over its real thumbnail pipeline; the demo
+installs `LOADER` (``install()``), which draws the dummy wallpapers' and Store
+items' art. ``art.render`` stays here: it is demo-only.
 
 Card and row pictures load off the main thread: a worker draws the pixels
 (``art.render``), ``GLib.idle_add`` hands them back at ``PRIORITY_HIGH_IDLE``
@@ -21,6 +24,8 @@ import gi
 
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib
+
+from wall_in_one.ui.next import thumbs as provider
 
 from . import art
 
@@ -58,6 +63,13 @@ class Loader:
         self._waiting: dict[Key, list[Callable[[Gdk.Texture | None], None]]] = {}
         #: How many pictures were drawn off the main thread (checked by the smoke test).
         self.drawn_in_workers = 0
+
+    def key(self, source, width: int, height: int) -> Key:
+        """One request's identity: the art and its size."""
+        return (*source.key, width, height)
+
+    def placeholder(self, source) -> Gdk.RGBA:
+        return placeholder(source)
 
     def cached(self, source, width: int, height: int) -> Gdk.Texture | None:
         key = (*source.key, width, height)
@@ -118,5 +130,13 @@ class Loader:
         return GLib.SOURCE_REMOVE
 
 
-#: The loader every ui.Thumb uses.
+#: The loader every ui.Thumb uses in the demo.
 LOADER = Loader()
+
+
+def install() -> None:
+    """Make the demo's art the pictures every shipped widget shows."""
+    provider.install(LOADER)
+
+
+install()

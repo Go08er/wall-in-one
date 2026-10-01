@@ -9,6 +9,8 @@ trap 'rm -rf "$ISO"' EXIT
 mkdir -p "$ISO"/{home,config,state,cache,data,run}
 chmod 700 "$ISO/run"
 cd "$REPO"
+# The demo's AppState must still implement the app's Protocols (mypy).
+"$HERE/tools/typecheck.sh"
 ICONS="$(nix build --inputs-from . nixpkgs#adwaita-icon-theme --no-link --print-out-paths)/share"
 OUT="$ISO/smoke.out"
 nix develop --command env -u DBUS_SESSION_BUS_ADDRESS -u WAYLAND_DISPLAY -u LD_LIBRARY_PATH \

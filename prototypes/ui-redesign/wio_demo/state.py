@@ -12,6 +12,11 @@ pictures come from ``thumbs``.
 Nothing here talks to a real runtime: the demo's data is shared module state
 (``data``), and "now" is simulated (resolution(), advance()).
 
+It implements the app's ``wall_in_one.ui.next.state.AppState`` Protocol (and
+its optional ``PlaybackControls`` and ``LibraryEditing``), so the shell,
+player bar, Library and inspector the app ships run over it unchanged; the
+app's own adapter is ``wall_in_one.ui.next.real_state.RealAppState``.
+
 Pages observe ``changed(topic)`` and repaint. Topics: now, playback, library,
 playlists, schedule, displays, settings, system (battery/service banners),
 theme, appearance (window style and dials), scope (the player bar's display
@@ -33,13 +38,17 @@ import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
+from wall_in_one.ui.next.state import UNCHANGED, Banner, OnScreen, Player, Reason, WallpaperView
+
 from . import art, data, store_catalog
+from .catalog import KIND_LABEL
 from .models import Display, Folder, Palette, Playlist, RememberedDisplay, Rule, StoreItem, Wallpaper
 
 #: An Undo callback, as returned by the actions that pages offer Undo for.
 Undo = Callable[[], None]
-#: "Leave this field alone" for keyword arguments where None is a real value.
-UNCHANGED = object()
+#: The Library's orders: (key, label).
+LIBRARY_SORTS = [("added", "Recently added"), ("name", "Name"), ("kind", "Type"), ("color", "Color")]
+__all__ = ["UNCHANGED", "AppState", "Resolution", "Undo", "resolve", "rule_matches"]
 
 
 @dataclass
@@ -177,6 +186,8 @@ class AppState(GObject.Object):
         self.panel_opacity = {"translucent": 0.80, "frosted": 0.60}
         self.frost = 0.5  # in-app blur strength for the frosted style, 0 (clear) – 1
         self.scope = "all"  # player-bar scope: "all" or a connector
+        self.thumbnail_size = "large"  # the Library's cards: "large" or "small"
+        self.library_scanning = False
         self._rng = random.Random(4)
         self._rule_serial = 0
 
@@ -289,6 +300,80 @@ class AppState(GObject.Object):
         """Paused everywhere, or (each display separately) paused on its own."""
         return self.playback == "paused" or (self.display_mode != "mirrored" and connector in self._held)
 
+    def reason(self, connector: str) -> Reason:
+        """Why this display shows what it shows (the simulation's answer)."""
+        playlist_id = self.effective_playlist(connector)
+        if connector in self.manual:
+            return Reason("pick", "" if playlist_id == "quick" else self.playlist(playlist_id).name)
+        resolution = self.resolution(connector)
+        name = self.playlist(playlist_id).name
+        if resolution.rule is not None:
+            route = "schedule"
+        elif self.assigned.get(connector) == playlist_id:
+            route = "display"
+        else:
+            route = "default"
+        return Reason(route, name, resolution.until)
+
+    def player(self) -> Player:
+        """What the player bar shows for its scope."""
+        if not self.service_running:
+            return Player(service="stopped", playback=self.playback)
+        targets = self.targets()
+        screens = tuple(
+            OnScreen(
+                connector, self.current[connector], self.wallpaper(self.current[connector]).name, self.reason(connector)
+            )
+            for connector in targets
+        )
+        playlist_id = self.effective_playlist(targets[0])
+        if playlist_id == "quick":
+            timing = ""
+        elif self.rotate:
+            timing = f"Next in {self.next_change_minutes} min"
+        else:
+            timing = "Not changing"
+        return Player(
+            service="running",
+            screens=screens,
+            playback=self.playback,
+            following_schedule=self.following_schedule(self.scope if self.scope != "all" else None),
+            shuffle=self.shuffle_on(),
+            rotate=self.rotate,
+            timing=timing,
+        )
+
+    def backdrop(self):
+        """What the frosted style blurs: the real desktop's wallpaper, or the demo's."""
+        live = self.live if self.live_colors() else None
+        if live is not None and live.wallpaper is not None:
+            return live.wallpaper
+        return self.color_wallpaper()
+
+    @property
+    def controls(self) -> AppState:
+        return self
+
+    @property
+    def editing(self) -> AppState:
+        return self
+
+    def banner(self) -> Banner | None:
+        if not self.service_running:
+            return Banner("The wallpaper service isn't running, so nothing changes on schedule", "Start", "start")
+        if self.on_battery and self.stop_on_battery:
+            return Banner("On battery: animations are paused and stills stay on screen", "Battery settings", "settings")
+        return None
+
+    def banner_activated(self, action: str) -> None:
+        if action == "start":
+            self.start_service()
+        else:
+            self.navigate("settings:playback")
+
+    def read_only_notice(self) -> str:
+        return ""
+
     # -- playback -------------------------------------------------------------
     # The runtime's verbs (play, pause, next, …) and the demo clock.
     def apply(self, wid: str, scope: str = "all") -> None:
@@ -375,6 +460,10 @@ class AppState(GObject.Object):
         self.scope = scope
         self.emit_changed("scope")
 
+    def start_service(self) -> None:
+        self.set_service_running(True)
+        self.toast("Wallpaper service started")
+
     def set_battery(self, value: bool) -> None:
         self.on_battery = value
         self.emit_changed("system", "playback")
@@ -429,6 +518,53 @@ class AppState(GObject.Object):
         """Forget a playback problem so the runtime tries the wallpaper again."""
         self.wallpaper(wid).problem = ""
         self.emit_changed("library")
+
+    def library_sorts(self) -> list[tuple[str, str]]:
+        return list(LIBRARY_SORTS)
+
+    def library_query(self, *, kind: str, favorites: bool, text: str, sort: str) -> list[Wallpaper]:
+        """Every wallpaper that passes the Library's filters, in ``sort`` order.
+
+        Words match anywhere in the name, folder, source, tags, style or kind.
+        """
+        words = text.lower().split()
+
+        def visible(wallpaper: Wallpaper) -> bool:
+            if kind != "all" and wallpaper.kind != kind:
+                return False
+            if favorites and not wallpaper.favorite:
+                return False
+            haystack = " ".join(
+                (
+                    wallpaper.name,
+                    wallpaper.folder,
+                    wallpaper.source,
+                    " ".join(wallpaper.tags),
+                    wallpaper.style,
+                    KIND_LABEL[wallpaper.kind],
+                )
+            ).lower()
+            return all(word in haystack for word in words)
+
+        order = {wallpaper.id: index for index, wallpaper in enumerate(self.wallpapers)}
+
+        def key(wallpaper: Wallpaper):
+            if sort == "name":
+                return wallpaper.name.lower()
+            if sort == "kind":
+                return (wallpaper.kind, wallpaper.name.lower())
+            if sort == "color":
+                return art.look_for(*wallpaper.key).hue
+            return order[wallpaper.id]
+
+        return sorted((w for w in self.wallpapers if visible(w)), key=key)
+
+    def apply_blocked(self, wid: str) -> str:
+        """The demo never refuses Apply (a skipped wallpaper says so on its own)."""
+        return ""
+
+    def favorite_blocked(self) -> str:
+        return ""
 
     def set_wallpaper_colors(
         self, wid: str, *, mode: str | None = None, scheme=UNCHANGED, palette: str | None = None, theme_mode=None
@@ -526,14 +662,14 @@ class AppState(GObject.Object):
     def scheme_name(self, key: str) -> str:
         return data.SCHEME_NAME.get(key, "")
 
-    def scheme_swatches(self, wallpaper: Wallpaper, scheme: str | None, dark: bool = True) -> list[str]:
+    def scheme_swatches(self, wallpaper: WallpaperView, scheme: str | None, dark: bool = True) -> list[str]:
         """[surface, primary, secondary, tertiary, error] for ``wallpaper`` under ``scheme``
         (None = the default scheme)."""
-        return data.scheme_swatches(wallpaper, scheme, dark)
+        return data.scheme_swatches(self.wallpaper(wallpaper.id), scheme, dark)
 
-    def wallpaper_swatches(self, wallpaper: Wallpaper, dark: bool = True) -> list[str]:
+    def wallpaper_swatches(self, wallpaper: WallpaperView, dark: bool = True) -> list[str]:
         """The colors ``wallpaper`` puts on the desktop; empty when it keeps them."""
-        return data.wallpaper_swatches(wallpaper, dark)
+        return data.wallpaper_swatches(self.wallpaper(wallpaper.id), dark)
 
     def color_connector(self) -> str:
         """The display whose wallpaper drives the desktop palette."""
@@ -1248,6 +1384,13 @@ class AppState(GObject.Object):
         """How strongly the frosted style blurs the wallpaper, 0 (clear) – 1."""
         self.frost = value
         self.emit_changed("appearance")
+
+    def set_thumbnail_size(self, size: str) -> None:
+        """The Library's card size ("large" or "small"); the page rebuilds itself."""
+        self.thumbnail_size = size
+
+    def appearance_blocked(self) -> str:
+        return ""
 
     # -- library folders ------------------------------------------------------
     def add_library_folder(self, path: str) -> Undo:

@@ -1,0 +1,11 @@
+# The prototype follows the app's lint rules, with wider lines and deliberate
+# typographic punctuation (“ ” ’ …) in user-facing strings.
+extend = "../../pyproject.toml"
+line-length = 120
+
+[lint]
+extend-ignore = ["RUF001", "RUF002", "RUF003"]
+
+[lint.per-file-ignores]
+# GTK needs gi.require_version() before importing from gi.repository.
+"**/*.py" = ["E402"]

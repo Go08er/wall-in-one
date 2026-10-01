@@ -291,6 +291,61 @@ def test_real_palette_replacement_changes_css_and_adwaita_mode(
         manager.set_color_scheme(original_mode)
 
 
+def test_palette_render_repaints_while_expensive_frames_animate(
+    application: Application,
+) -> None:
+    from tests.test_theme_source import _registration
+
+    _registration()
+    target = paths.palette_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    colours = {key: value.hex for key, value in source.fallback_palette().colours.items()}
+    colours["surface"] = "#401028"
+
+    display = Gdk.Display.get_default()
+    assert display is not None
+    Gtk.StyleContext.add_provider_for_display(
+        display, application._provider, APPLICATION_STYLE_PRIORITY
+    )
+    manager = Adw.StyleManager.get_default()
+    original_mode = manager.get_color_scheme()
+    window = Gtk.Window()
+    window.set_child(Gtk.Label(label="Palette colour"))
+    window.present()
+
+    # A spinner or the entry cursor fade whose frames cost more than a 60 Hz
+    # refresh interval: GTK then paints back to back, and work queued with a
+    # plain idle_add never runs until the animation stops.
+    def expensive_frame(_widget: Gtk.Widget, _clock: Gdk.FrameClock) -> bool:
+        deadline = time.monotonic() + 0.025
+        while time.monotonic() < deadline:
+            pass
+        return GLib.SOURCE_CONTINUE
+
+    tick = window.add_tick_callback(expensive_frame)
+    try:
+        application._start_palette_monitor()
+        _replace(target, json.dumps({"mode": "dark", "colors": colours}))
+
+        def repainted() -> bool:
+            resolved = application.resolved_palette
+            found, colour = window.get_style_context().lookup_color("window_bg_color")
+            return (
+                resolved is not None
+                and resolved.origin is source.Origin.TEMPLATE
+                and resolved.palette["surface"].hex == "#401028"
+                and found
+                and colour.to_string() == "rgb(64,16,40)"
+            )
+
+        assert _spin_until(repainted), application.resolved_palette
+    finally:
+        window.remove_tick_callback(tick)
+        window.destroy()
+        Gtk.StyleContext.remove_provider_for_display(display, application._provider)
+        manager.set_color_scheme(original_mode)
+
+
 def test_unrenderable_palette_preserves_last_good_state_and_answers_callbacks(
     application: Application, monkeypatch: pytest.MonkeyPatch
 ) -> None:

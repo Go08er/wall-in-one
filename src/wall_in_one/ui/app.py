@@ -85,6 +85,13 @@ PACKAGE_SOURCE: Final = str(Path(__file__).resolve().parent.parent)
 # this provider is refreshed after every palette render. Both carry the same
 # palette, so the copy we can guarantee is current must win inside this process.
 APPLICATION_STYLE_PRIORITY: Final = Gtk.STYLE_PROVIDER_PRIORITY_USER + 1
+# A plain ``GLib.idle_add`` waits below GTK's redraw priority. While anything
+# animates with frames that cost a refresh interval (a spinner, the entry
+# cursor fade), GTK paints back to back and that idle never runs: the worker
+# had the new palette but the window kept its old colours until the animation
+# stopped. HIGH_IDLE is GLib's slot for work which must precede the next
+# resize and redraw. One priority for the whole theme lane keeps its order.
+THEME_DELIVERY_PRIORITY: Final = GLib.PRIORITY_HIGH_IDLE
 _RuntimeResult = TypeVar("_RuntimeResult")
 _AuthoringResult = TypeVar("_AuthoringResult")
 _LibrarySources = tuple[tuple[Path, ...], bool]
@@ -1494,7 +1501,7 @@ class Application(Adw.Application):
                     # The worker boundary must turn even an unexpected wrapper
                     # bug into a visible failure, never an unobserved Future.
                     error = str(caught) or caught.__class__.__name__
-                GLib.idle_add(
+                self._deliver_theme_result(
                     self._finish_theme_action,
                     _ThemeActionResult(action.generation, error),
                 )
@@ -1514,7 +1521,7 @@ class Application(Adw.Application):
                         None,
                         str(caught) or caught.__class__.__name__,
                     )
-                GLib.idle_add(self._finish_wallpaper_query, wallpaper_result)
+                self._deliver_theme_result(self._finish_wallpaper_query, wallpaper_result)
                 continue
 
             assert request is not None
@@ -1534,7 +1541,13 @@ class Application(Adw.Application):
                     None,
                     str(caught) or caught.__class__.__name__,
                 )
-            GLib.idle_add(self._finish_palette_resolution, result)
+            self._deliver_theme_result(self._finish_palette_resolution, result)
+
+    @staticmethod
+    def _deliver_theme_result(callback: Callable[..., bool], *data: object) -> None:
+        """Hand one theme-lane result to GTK ahead of its next redraw."""
+        # PyGObject's idle_add override accepts priority=; its stubs omit it.
+        GLib.idle_add(callback, *data, priority=THEME_DELIVERY_PRIORITY)  # type: ignore[call-arg]
 
     def _finish_theme_action(self, result: _ThemeActionResult) -> bool:
         """Deliver only the latest explicit selection on GTK's thread."""

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Run the golden-profile downgrade tests against an older Wall-in-One build.
+# Run the golden-profile downgrade tests against v0.1.4.
 #
 #   tools/golden-downgrade.sh [REV] [PYTEST ARGS...]
 #
-# REV defaults to dbfbaa0 (v0.1.4, the packaged release before the
-# forward-compatibility guard). The old source is checked out with
-# `git worktree add --detach` into a temporary directory, the tests in
-# tests/golden/test_downgrade.py run with WIO_OLD_SRC pointing at it, and the
-# worktree is removed again on exit.
+# There is no 0.1.5: v0.1.4 is the only release anyone rolls back to from
+# 0.2.0, and it has no forward-compatibility guard. REV defaults to dbfbaa0,
+# the commit tagged v0.1.4; it exists only to name that commit another way
+# (`v0.1.4`), and the tests fail for any other build. The old source is
+# checked out with `git worktree add --detach` into a temporary directory, the
+# tests in tests/golden/test_downgrade.py run with WIO_OLD_SRC pointing at it,
+# and the worktree is removed again on exit.
 #
 # Run it from the dev shell (`nix develop --command tools/golden-downgrade.sh`).
 # Every test builds its own sandbox home; the old build only ever sees that

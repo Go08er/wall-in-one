@@ -1,21 +1,23 @@
-"""Typical edits made by an *older* build, run as a child process.
+"""Typical edits made by v0.1.4, the only rollback target, run as a child process.
 
-``tests/test_golden_profile.py`` runs this with ``PYTHONPATH`` set to an older
-checkout's ``src`` and every XDG variable pointed at a golden sandbox. It must
-therefore import nothing from this checkout and use only Store APIs that
-v0.1.4 (``dbfbaa0``) already had.
+``tests/golden/test_downgrade.py`` runs this with ``PYTHONPATH`` set to a
+v0.1.4 (``dbfbaa0``) checkout's ``src`` and every XDG variable pointed at a
+golden sandbox. It must therefore import nothing from this checkout and use
+only APIs that v0.1.4 already had.
 
 Usage: ``downgrade_driver.py version``, ``downgrade_driver.py edit [FILE...]``,
 ``downgrade_driver.py same-schedule-edit``, ``downgrade_driver.py compile`` or
 ``downgrade_driver.py prepare``. Prints one JSON object: the module and
 version that ran, which records each edit touched, and any edit that was
 refused (by message); ``compile`` reports what the old build's runtime
-publication did, and ``prepare`` the exit status of its service unit's
-``--service-startup-prepare``.
+publication did, and ``prepare`` the exit status and output of its service
+unit's ``--service-startup-prepare``.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 from collections.abc import Callable
@@ -156,16 +158,22 @@ def _seal_processes() -> None:
     subprocess.Popen = no_processes  # type: ignore[assignment,misc]
 
 
-def prepare_service_start() -> int:
+def prepare_service_start() -> dict[str, object]:
     """What the old service unit runs first after a rollback, before the old service.
 
     ``--service-startup-prepare`` publishes runtime.toml (or keeps the last
-    good one); the unit's next step is the old service's own loader.
+    good one); the unit's next step is the old service's own loader. Its
+    output is captured: a publication prints to stdout, which is this
+    driver's report, and only stderr tells a real compile from a refusal
+    softened to exit 0.
     """
     from wall_in_one import cli
 
     _seal_processes()
-    return cli.main(["--service-startup-prepare"])
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        status = cli.main(["--service-startup-prepare"])
+    return {"status": status, "stdout": out.getvalue(), "stderr": err.getvalue()}
 
 
 EDITS: dict[str, Callable[[], list[str]]] = {
@@ -184,16 +192,11 @@ def main(arguments: list[str]) -> int:
     report: dict[str, object] = {
         "module": wall_in_one.__file__,
         "version": getattr(wall_in_one, "__version__", "unknown"),
-        # Release 1's forward-compatibility guard introduced this constant.
-        "has_guard": hasattr(state_file, "NEWER_VERSION"),
-        # The newest schedules.json it understands; 3 added rule names.
-        "schedules_format": schedules.FORMAT_VERSION,
-        # The newest playlists.json / displays.json it understands; 2 added
-        # per-playlist rotation and the display opt-in.
-        "playlists_format": playlists.FORMAT_VERSION,
-        "displays_format": displays.FORMAT_VERSION,
-        # The newest version of every store file it understands, so a test
-        # can write one that is newer *for this build*, whichever it is.
+        # 0.2.0's forward-compatibility guard introduced this constant, so a
+        # build that has it is not v0.1.4 (an unreleased interim commit).
+        "store_guard": hasattr(state_file, "NEWER_VERSION"),
+        # The newest version of every store file it understands: with the
+        # two above, what identifies v0.1.4.
         "formats": {
             "playlists.json": playlists.FORMAT_VERSION,
             "schedules.json": schedules.FORMAT_VERSION,

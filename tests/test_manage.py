@@ -918,6 +918,10 @@ def test_workshop_delete_that_wins_during_scene_capture_prevents_late_publicatio
         return temporary
 
     monkeypatch.setattr("wall_in_one.wallpaper.scenes.screenshot", held_capture)
+    # A capture needs the engine and a measured display before it writes
+    # anything; say both are there rather than ask this machine's PATH and niri.
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.is_available", lambda: True)
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.measured_capture_size", lambda: (2560, 1600))
     target = pairing.still_directory(root) / f"{scene_id}.png"
 
     with ThreadPoolExecutor(max_workers=1) as pool:

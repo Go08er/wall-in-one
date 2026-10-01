@@ -489,12 +489,21 @@ def scene_capture_required(
     root: Path,
     *,
     size: tuple[int, int] | None = None,
+    automatic: bool = False,
 ) -> bool:
     """Whether an automatic scene still is absent, undersized, or wrong-shaped.
 
     Only the managed automatic filename is eligible. A custom still selected
     from the library may intentionally have another shape and must never be
     overwritten by this maintenance path.
+
+    An existing still is only ever judged against a display niri actually
+    measured (``size``, or `scenes.measured_capture_size`); with nothing
+    measured it is kept. ``automatic`` is the unattended pass that runs after
+    every scan: there a still is recaptured only when it is smaller than the
+    display in both directions -- the old portrait captures -- and never for
+    its shape alone, so plugging in a monitor of another shape does not
+    recapture every scene. Without ``automatic`` the shape counts too.
     """
     if item.kind is not Kind.SCENE or not item.scene:
         return False
@@ -503,10 +512,16 @@ def scene_capture_required(
         return False
     actual = _png_size(target)
     if actual is None:
+        # Nothing to judge. Whether a capture can actually be made is
+        # `capture_scene`'s question, and it writes nothing when it cannot.
         return True
-    wanted = size or scenes.capture_size()
+    wanted = size or scenes.measured_capture_size()
+    if wanted is None:
+        return False
     width, height = actual
     wanted_width, wanted_height = wanted
+    if automatic:
+        return width < wanted_width and height < wanted_height
     aspect_error = abs(width / height - wanted_width / wanted_height)
     return aspect_error > ASPECT_TOLERANCE or width < wanted_width or height < wanted_height
 
@@ -1197,6 +1212,7 @@ def capture_scene(
     *,
     force: bool = False,
     processes: worker_processes.Cancellation | None = None,
+    size: tuple[int, int] | None = None,
 ) -> Path:
     """Take a still from a Wallpaper Engine scene, through the engine itself.
 
@@ -1207,12 +1223,23 @@ def capture_scene(
 
     The still is named by the Workshop id rather than by the directory, so a
     reinstall that moves the directory still finds it.
+
+    Without ``force`` this is the automatic pass (see `scene_capture_required`).
+    ``size`` is a display size the caller already measured; otherwise niri is
+    asked. Nothing is written -- no directory, no temporary -- unless a display
+    was measured and the engine is installed.
     """
     if item.kind is not Kind.SCENE or not item.scene:
         raise StillError(f"{item.name} is not a Wallpaper Engine scene")
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
-    size = scenes.capture_size()
-    if not force and not scene_capture_required(item, root, size=size):
+    measured = size or scenes.measured_capture_size()
+    if measured is None:
+        # The 2560x1440 fallback is a guess, and a still captured at a guessed
+        # shape would only be judged wrong again once niri answers.
+        raise StillError(
+            f"no display size could be measured, so no still was taken for {item.name}"
+        )
+    if not force and not scene_capture_required(item, root, size=measured, automatic=True):
         return target
     source = _snapshot_source(item.path, Kind.SCENE)
     try:
@@ -1220,7 +1247,7 @@ def capture_scene(
             item,
             root=root,
             target=target,
-            size=size,
+            size=measured,
             processes=processes,
             source=source,
         )
@@ -1238,6 +1265,10 @@ def _capture_scene_from_source(
     source: _SourceSnapshot,
 ) -> Path:
     """Render and publish a scene while retaining its opened directory identity."""
+    if not scenes.is_available():
+        # Before any directory or temporary exists: a temporary made for a
+        # renderer that is not there is still a file to clean up afterwards.
+        raise StillError(f"linux-wallpaperengine is not installed, so no still for {item.name}")
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
@@ -1311,22 +1342,24 @@ def ensure(
     root: Path,
     *,
     processes: worker_processes.Cancellation | None = None,
+    size: tuple[int, int] | None = None,
 ) -> Path | None:
     """The still for ``item``, making one if it has none. ``None`` if it needs none.
 
     The forgiving entry point, for callers that want a still if one can be had
     and can carry on without: a still that cannot be made is not a reason to
-    refuse to play the wallpaper.
+    refuse to play the wallpaper. For a scene this is the automatic pass;
+    ``size`` is a display size the caller already measured.
     """
     if not item.is_moving:
         return None
     if item.kind is Kind.SCENE:
-        if not scene_capture_required(item, root):
+        if not scene_capture_required(item, root, size=size, automatic=True):
             return item.paired_still or (
                 pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
             )
         try:
-            return capture_scene(item, root, processes=processes)
+            return capture_scene(item, root, processes=processes, size=size)
         except StillError:
             return None
     if item.paired_still is not None:

@@ -376,21 +376,34 @@ def screenshot(
     return destination
 
 
-def capture_size(
+def measured_capture_size(
     output: str = "", found: tuple[outputs.Output, ...] | None = None
-) -> tuple[int, int]:
-    """Physical capture geometry for ``output``, with a safe landscape fallback."""
+) -> tuple[int, int] | None:
+    """Physical geometry of ``output`` as niri reports it, or ``None`` if unknown.
+
+    ``None`` when niri cannot be asked, the output is not connected, or it
+    reports no size. That is not the same answer as a 2560x1440 screen, and
+    `library.stills` must be able to tell the two apart: a still judged
+    against a guess would be recaptured for a display nobody has.
+    """
     screens = outputs.discover() if found is None else found
     selected = next((screen for screen in screens if screen.name == output), None)
     if selected is None and not output and screens:
         selected = screens[0]
     if selected is None:
-        return DEFAULT_CAPTURE_SIZE
+        return None
     if selected.physical_width > 0 and selected.physical_height > 0:
         return selected.physical_width, selected.physical_height
     if selected.width > 0 and selected.height > 0:
         return round(selected.width * selected.scale), round(selected.height * selected.scale)
-    return DEFAULT_CAPTURE_SIZE
+    return None
+
+
+def capture_size(
+    output: str = "", found: tuple[outputs.Output, ...] | None = None
+) -> tuple[int, int]:
+    """Physical capture geometry for ``output``, with a safe landscape fallback."""
+    return measured_capture_size(output, found) or DEFAULT_CAPTURE_SIZE
 
 
 def _wait_for(

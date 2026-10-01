@@ -1079,6 +1079,69 @@ def test_a_custom_scene_still_is_never_replaced_by_maintenance(root: Path) -> No
     assert not stills.scene_capture_required(_scene("1647046763", custom), root)
 
 
+def test_the_automatic_pass_recaptures_only_a_still_smaller_both_ways(root: Path) -> None:
+    """A monitor of another shape must not recapture every scene at idle."""
+    target = pairing.still_directory(root) / "1647046763.png"
+    scene = _scene("1647046763", target)
+    cases = {
+        # still, display: automatic, explicit
+        ((1270, 1537), (2560, 1600)): (True, True),  # the old portrait capture
+        ((1920, 1200), (2560, 1600)): (True, True),
+        ((3840, 2400), (1920, 1080)): (False, True),  # a 16:9 monitor plugged in
+        ((2560, 1080), (2560, 1600)): (False, True),  # short in one direction only
+        ((3840, 2400), (2560, 1600)): (False, False),
+    }
+    for (still, display), (automatic, explicit) in cases.items():
+        _png_header(target, *still)
+        assert (
+            stills.scene_capture_required(scene, root, size=display, automatic=True) is automatic
+        ), (still, display)
+        assert stills.scene_capture_required(scene, root, size=display) is explicit, (
+            still,
+            display,
+        )
+
+
+def test_an_existing_scene_still_is_never_judged_against_a_guess(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """niri unreachable: the 2560x1440 capture fallback is not a display."""
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: None)
+    target = pairing.still_directory(root) / "1647046763.png"
+    scene = _scene("1647046763", target)
+    _png_header(target, 2, 2)
+
+    assert not stills.scene_capture_required(scene, root)
+    assert not stills.scene_capture_required(scene, root, automatic=True)
+    target.unlink()
+    assert stills.scene_capture_required(scene, root), "a missing still is still missing"
+
+
+@pytest.mark.parametrize("cause", ["no-renderer", "no-display"])
+def test_a_scene_capture_that_cannot_be_made_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, root: Path, cause: str
+) -> None:
+    installation = root.parent / "steam" / "workshop" / "content" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", directory=installation)
+    monkeypatch.setattr(
+        scenes, "measured_capture_size", lambda: None if cause == "no-display" else (2560, 1600)
+    )
+    monkeypatch.setattr(scenes, "is_available", lambda: cause != "no-renderer")
+
+    def never(*_arguments: object, **_keywords: object) -> Path:
+        raise AssertionError("the engine was asked for a still it could not make")
+
+    monkeypatch.setattr(scenes, "screenshot", never)
+
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(scene, root)
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(scene, root, force=True)
+    assert stills.ensure(scene, root) is None
+    assert not root.exists(), "not even the Automatic Stills directory"
+
+
 def test_scene_capture_replaces_the_managed_still_atomically(
     monkeypatch: pytest.MonkeyPatch, root: Path
 ) -> None:
@@ -1087,7 +1150,8 @@ def test_scene_capture_replaces_the_managed_still_atomically(
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
     installation.mkdir(parents=True)
     scene = _scene("1647046763", target, directory=installation)
-    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
 
     def capture(
         _scene_id: str,
@@ -1116,7 +1180,8 @@ def test_scene_capture_never_overwrites_a_late_target(
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
     installation.mkdir(parents=True)
     scene = _scene("1647046763", directory=installation)
-    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
     late = b"late non-participating scene still"
 
     def capture(
@@ -1148,7 +1213,8 @@ def test_scene_target_directory_replacement_cannot_redirect_publication(
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
     installation.mkdir(parents=True)
     scene = _scene("1647046763", directory=installation)
-    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
     saved_directory = target.parent.with_name("saved-scene-stills")
     sentinel = b"replacement scene target"
 
@@ -1185,7 +1251,8 @@ def test_scene_source_change_after_publication_restores_the_prior_still(
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
     installation.mkdir(parents=True)
     scene = _scene("1647046763", target, directory=installation)
-    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
 
     def capture(
         _scene_id: str,
@@ -1236,7 +1303,8 @@ def test_scene_capture_preserves_an_in_place_target_mutation(
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
     installation.mkdir(parents=True)
     scene = _scene("1647046763", target, directory=installation)
-    monkeypatch.setattr(scenes, "capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
     mutated = b"changed through an open writer"
 
     def capture(

@@ -126,6 +126,17 @@ def test_capture_size_can_derive_pixels_or_fall_back() -> None:
     assert scenes.capture_size("missing", (scaled,)) == scenes.DEFAULT_CAPTURE_SIZE
 
 
+def test_a_measured_capture_size_is_never_a_guess() -> None:
+    """The fallback is for a capture window; it must not pass for a display."""
+    scaled = outputs.Output("DP-1", width=1280, height=720, scale=2.0)
+    assert scenes.measured_capture_size("DP-1", (scaled,)) == (2560, 1440)
+    assert scenes.measured_capture_size("", (scaled,)) == (2560, 1440), "the first screen"
+    assert scenes.measured_capture_size("missing", (scaled,)) is None
+    assert scenes.measured_capture_size("", ()) is None, "niri could not be asked"
+    assert scenes.measured_capture_size("DP-1", (outputs.Output("DP-1"),)) is None
+    assert scenes.capture_size("", ()) == scenes.DEFAULT_CAPTURE_SIZE
+
+
 def test_a_prepared_screenshot_output_is_kept_and_written_in_place(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

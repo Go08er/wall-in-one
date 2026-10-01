@@ -8,7 +8,7 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use wall_in_one_service::config::Config;
+use wall_in_one_service::config::{Config, Overrides};
 use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
 use wall_in_one_service::renderer::{RendererFailure, SystemDriver, WallpaperDriver};
 use wall_in_one_service::runtime::Runtime;
@@ -6583,5 +6583,307 @@ fn exhausted_startup_readiness_is_fatal_for_systemd_recovery() {
     assert!(stderr.contains("readiness deadline expired after 8 seconds"));
     assert!(stderr.contains("desktop stayed unavailable"));
     assert!(!socket.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+// -- runtime-overrides.toml: per-playlist rotation --------------------------
+
+/// A third, two-still playlist so rule winners and cycling are observable.
+const EVENING_PLAYLIST: &str = "\n[[playlists]]\nid = \"evening\"\nname = \"Evening\"\n\
+[[playlists.entries]]\nid = \"evening-one\"\nkind = \"still\"\nstill = \"/tmp/evening-one.png\"\n\
+palette = { kind = \"keep\", mode = \"keep\" }\n\
+[[playlists.entries]]\nid = \"evening-two\"\nkind = \"still\"\nstill = \"/tmp/evening-two.png\"\n\
+palette = { kind = \"keep\", mode = \"keep\" }\n";
+
+/// The independent fixture with the evening playlist and `extra` appended.
+fn independent_with_evening(extra: &str) -> String {
+    format!("{}{EVENING_PLAYLIST}{extra}", independent_config())
+}
+
+/// One playlist's own rotation, as a `runtime-overrides.toml` fragment.
+fn rotation(id: &str, fields: &str) -> String {
+    format!("[[playlists]]\nid = \"{id}\"\n{fields}\n")
+}
+
+/// A complete `runtime-overrides.toml` from fragments.
+fn overrides(fragments: &[String]) -> String {
+    format!("schema_version = 1\n{}", fragments.concat())
+}
+
+/// `runtime.toml` text plus optional overrides, applied as `Config::load` does.
+fn loaded(document: &str, fragments: &[String]) -> Config {
+    let mut parsed: Config = toml::from_str(document).unwrap();
+    parsed.validate().unwrap();
+    if !fragments.is_empty() {
+        let applied = Overrides::from_bytes(overrides(fragments).as_bytes()).unwrap();
+        assert_eq!(parsed.apply_overrides(&applied), Vec::<String>::new());
+    }
+    parsed
+}
+
+fn noon() -> chrono::NaiveDateTime {
+    NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+}
+
+fn started_runtime(
+    config: Config,
+    at: chrono::NaiveDateTime,
+) -> (Runtime<RuntimeDriver>, Arc<Mutex<RuntimeDriverState>>) {
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        config,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    (runtime, state)
+}
+
+fn route(snapshot: &serde_json::Value, connector: &str) -> serde_json::Value {
+    snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == connector)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn playlist_rotation_overrides_drive_each_independent_route() {
+    let document = independent_with_evening("")
+        .replace("cycle_enabled = false", "cycle_enabled = true")
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"day\"\n",
+            "connector = \"HDMI-A-1\"\nplaylist = \"evening\"\n",
+        );
+    let config = loaded(
+        &document,
+        &[rotation(
+            "day",
+            "cycle_interval_seconds = 60\nshuffle = true",
+        )],
+    );
+    let at = noon();
+    let (mut runtime, _) = started_runtime(config, at);
+    let start = Instant::now();
+    let snapshot = status(&mut runtime, at);
+    let dp = route(&snapshot, "DP-1");
+    assert_eq!(dp["cycle_interval_seconds"], 60);
+    assert_eq!(
+        (
+            &dp["shuffle"],
+            &dp["shuffle_default"],
+            &dp["shuffle_source"]
+        ),
+        (&true.into(), &true.into(), &"config".into())
+    );
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(hdmi["cycle_interval_seconds"], 300);
+    assert_eq!(
+        (&hdmi["shuffle"], &hdmi["shuffle_default"]),
+        (&false.into(), &false.into())
+    );
+    assert!(
+        snapshot["cycle_interval_seconds"].is_null(),
+        "routes disagree"
+    );
+    assert_eq!(snapshot["shuffle_default"], false);
+
+    let dp_entry = dp["entry_id"].clone();
+    let hdmi_entry = hdmi["entry_id"].clone();
+    runtime.tick(at, start + Duration::from_secs(61));
+    let snapshot = status(&mut runtime, at);
+    assert_ne!(
+        route(&snapshot, "DP-1")["entry_id"],
+        dp_entry,
+        "60 s playlist"
+    );
+    assert_eq!(
+        route(&snapshot, "HDMI-A-1")["entry_id"],
+        hdmi_entry,
+        "global 300 s"
+    );
+    runtime.tick(at, start + Duration::from_secs(301));
+    assert_ne!(
+        route(&status(&mut runtime, at), "HDMI-A-1")["entry_id"],
+        hdmi_entry
+    );
+
+    // A live override still beats the playlist's saved default, and
+    // `default` returns to the playlist's value rather than the global one.
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 shuffle off")).ok);
+    let dp = route(&status(&mut runtime, at), "DP-1");
+    assert_eq!(
+        (
+            &dp["shuffle"],
+            &dp["shuffle_default"],
+            &dp["shuffle_source"]
+        ),
+        (&false.into(), &true.into(), &"manual".into())
+    );
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 shuffle default")).ok);
+    let dp = route(&status(&mut runtime, at), "DP-1");
+    assert_eq!(
+        (&dp["shuffle"], &dp["shuffle_source"]),
+        (&true.into(), &"config".into())
+    );
+
+    // Switching a route's playlist adopts that playlist's own settings.
+    assert!(runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 playlist-use day")).ok);
+    let snapshot = status(&mut runtime, at);
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(hdmi["cycle_interval_seconds"], 60);
+    assert_eq!(
+        (&hdmi["shuffle"], &hdmi["shuffle_default"]),
+        (&true.into(), &true.into())
+    );
+    assert_eq!(snapshot["cycle_interval_seconds"], 60);
+    assert_eq!(snapshot["shuffle_default"], true);
+}
+
+#[test]
+fn playlist_rotation_overrides_drive_the_mirrored_timer_and_shuffle() {
+    let document = format!(
+        "{}{EVENING_PLAYLIST}",
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+            .replace("cycle_enabled = false", "cycle_enabled = true")
+    );
+    let config = loaded(
+        &document,
+        &[rotation(
+            "day",
+            "cycle_interval_seconds = 60\nshuffle = true",
+        )],
+    );
+    let at = noon();
+    let (mut runtime, _) = started_runtime(config, at);
+    let start = Instant::now();
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["cycle_interval_seconds"], 60);
+    assert_eq!(
+        (
+            &snapshot["shuffle"],
+            &snapshot["shuffle_default"],
+            &snapshot["shuffle_source"]
+        ),
+        (&true.into(), &true.into(), &"config".into())
+    );
+    let all = route(&snapshot, "ALL");
+    assert_eq!(
+        (
+            &all["shuffle"],
+            &all["shuffle_default"],
+            &all["cycle_interval_seconds"]
+        ),
+        (&true.into(), &true.into(), &60.into())
+    );
+    let entry = snapshot["entry_id"].clone();
+    runtime.tick(at, start + Duration::from_secs(61));
+    assert_ne!(status(&mut runtime, at)["entry_id"], entry);
+
+    assert!(runtime_command(&mut runtime, at, "shuffle", Some("off")).ok);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(
+        (
+            &snapshot["shuffle"],
+            &snapshot["shuffle_default"],
+            &snapshot["shuffle_source"]
+        ),
+        (&false.into(), &true.into(), &"manual".into())
+    );
+    assert!(runtime_command(&mut runtime, at, "shuffle", Some("default")).ok);
+    assert!(runtime_command(&mut runtime, at, "playlist-use", Some("evening")).ok);
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["playlist_id"], "evening");
+    assert_eq!(snapshot["cycle_interval_seconds"], 300);
+    assert_eq!(
+        (&snapshot["shuffle"], &snapshot["shuffle_default"]),
+        (&false.into(), &false.into())
+    );
+}
+
+#[test]
+fn rotation_status_without_overrides_reports_the_global_settings() {
+    let at = noon();
+    for document in [
+        independent_config(),
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false),
+    ] {
+        let (mut runtime, _) = started_runtime(loaded(&document, &[]), at);
+        let snapshot = status(&mut runtime, at);
+        assert_eq!(snapshot["cycle_interval_seconds"], 300);
+        assert_eq!(snapshot["shuffle_default"], false);
+        for row in snapshot["displays"].as_array().unwrap() {
+            assert_eq!(row["cycle_interval_seconds"], 300);
+            assert_eq!(row["shuffle_default"], false);
+        }
+    }
+}
+
+#[test]
+fn the_file_watcher_reloads_when_only_the_overrides_file_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("overrides-watch");
+    let config_path = root.join("runtime.toml");
+    let sidecar = root.join(wall_in_one_service::config::OVERRIDES_FILENAME);
+    let socket = root.join("runtime.sock");
+    let harmless = root.join("harmless");
+    fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    let loaded_overrides = || -> serde_json::Value {
+        let reply = request(&socket, "status", None);
+        let status: serde_json::Value =
+            serde_json::from_str(reply["message"].as_str().unwrap()).unwrap();
+        status["loaded_overrides_sha256"].clone()
+    };
+    let wait_for = |wanted: &dyn Fn(&serde_json::Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let value = loaded_overrides();
+            if wanted(&value) {
+                return value;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the watcher never reloaded: {value}"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    assert!(loaded_overrides().is_null());
+
+    fs::write(
+        &sidecar,
+        overrides(&[rotation("day", "cycle_interval_seconds = 45")]),
+    )
+    .unwrap();
+    let first = wait_for(&|value| value.is_string());
+    fs::write(
+        &sidecar,
+        overrides(&[rotation("day", "cycle_interval_seconds = 90")]),
+    )
+    .unwrap();
+    wait_for(&|value| value.is_string() && *value != first);
+    fs::remove_file(&sidecar).unwrap();
+    wait_for(&|value| value.is_null());
+
+    stop(&mut child, &socket);
     fs::remove_dir_all(root).unwrap();
 }

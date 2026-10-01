@@ -129,6 +129,9 @@ pub struct Status<'a> {
     pub cycle_enabled: bool,
     pub cycle_default: bool,
     pub cycle_source: &'a str,
+    /// Effective rotation interval for the summary route. `None` only when
+    /// independent routes disagree; their display rows are authoritative.
+    pub cycle_interval_seconds: Option<u64>,
     pub last_error: &'a str,
     pub output_discovery_error: &'a str,
     pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
@@ -227,6 +230,9 @@ pub struct DisplayStatus<'a> {
     pub cycle_enabled: bool,
     pub cycle_default: bool,
     pub cycle_source: &'a str,
+    /// Effective rotation interval for this route's playlist: its own
+    /// override, otherwise the global setting.
+    pub cycle_interval_seconds: u64,
     pub renderer_failed: bool,
     pub last_error: String,
     pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
@@ -1077,7 +1083,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             && self.playback_state != PlaybackState::Paused
             && self.cycle_enabled()
             && now.duration_since(self.last_cycle)
-                >= Duration::from_secs(self.config.settings.cycle_interval_seconds)
+                >= Duration::from_secs(self.mirrored_cycle_interval_seconds())
         {
             self.start_automatic_move(now);
         }
@@ -1272,7 +1278,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             if route.playback_state != PlaybackState::Paused
                 && route.cycle_enabled(self.config.settings.cycle_enabled)
                 && now.duration_since(route.last_cycle)
-                    >= Duration::from_secs(self.config.settings.cycle_interval_seconds)
+                    >= Duration::from_secs(
+                        self.playlist_cycle_interval_seconds(&route.active_playlist),
+                    )
             {
                 if self.move_route_forward(connector) {
                     let candidate = self.routes[connector].clone();
@@ -1896,6 +1904,69 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.config.settings.display_mode == DisplayMode::Independent
     }
 
+    /// A playlist's saved shuffle default: its own override, otherwise
+    /// the global setting. A live `shuffle on|off` override still wins.
+    fn playlist_shuffle_default(&self, reference: &str) -> bool {
+        self.config
+            .playlist(reference)
+            .and_then(|playlist| playlist.shuffle)
+            .unwrap_or(self.config.settings.shuffle)
+    }
+
+    /// A playlist's rotation interval: its own override, otherwise the
+    /// global setting.
+    fn playlist_cycle_interval_seconds(&self, reference: &str) -> u64 {
+        self.config
+            .playlist(reference)
+            .and_then(|playlist| playlist.cycle_interval_seconds)
+            .unwrap_or(self.config.settings.cycle_interval_seconds)
+    }
+
+    /// Effective shuffle for one independent route's current playlist.
+    fn route_shuffle(&self, route: &DisplayRoute) -> bool {
+        route.shuffle_enabled(self.playlist_shuffle_default(&route.active_playlist))
+    }
+
+    /// Effective mirrored shuffle for one playlist's cursor.
+    fn mirrored_shuffle(&self, reference: &str) -> bool {
+        self.shuffle_override
+            .unwrap_or_else(|| self.playlist_shuffle_default(reference))
+    }
+
+    /// The one value every effective mirrored playlist agrees on, else the
+    /// global fallback. Mirrored mode advances every output on one timer;
+    /// with several effective playlists (Rust-authored display assignments
+    /// beneath no schedule) a per-playlist value applies only when they all
+    /// share it. The app compiles no mirrored assignments, so it always has
+    /// exactly one effective playlist here.
+    fn mirrored_common<T: PartialEq + Copy>(&self, value: impl Fn(&str) -> T, fallback: T) -> T {
+        let effective = self.effective_playlist_ids();
+        let mut values = effective.iter().map(|playlist| value(playlist));
+        match values.next() {
+            Some(first) if values.all(|other| other == first) => first,
+            _ => fallback,
+        }
+    }
+
+    fn mirrored_cycle_interval_seconds(&self) -> u64 {
+        self.mirrored_common(
+            |playlist| self.playlist_cycle_interval_seconds(playlist),
+            self.config.settings.cycle_interval_seconds,
+        )
+    }
+
+    fn mirrored_shuffle_default(&self) -> bool {
+        self.mirrored_common(
+            |playlist| self.playlist_shuffle_default(playlist),
+            self.config.settings.shuffle,
+        )
+    }
+
+    fn shuffle_enabled(&self) -> bool {
+        self.shuffle_override
+            .unwrap_or_else(|| self.mirrored_shuffle_default())
+    }
+
     fn route_decision(
         &self,
         connector: &str,
@@ -1986,12 +2057,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .get(connector)
             .is_none_or(|route| route.active_playlist != wanted);
         let new_cursor = if changed {
+            let default = self.playlist_shuffle_default(&wanted);
             let shuffle = self
                 .routes
                 .get(connector)
-                .map_or(self.config.settings.shuffle, |route| {
-                    route.shuffle_enabled(self.config.settings.shuffle)
-                });
+                .map_or(default, |route| route.shuffle_enabled(default));
             Some(self.new_route_cursor(&wanted, None, shuffle, automatic)?)
         } else {
             None
@@ -2029,8 +2099,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 let (playlist, source, schedule_rule_id) =
                     self.route_decision(connector, None, self.current_time)?;
-                let cursor =
-                    self.new_route_cursor(&playlist, None, self.config.settings.shuffle, true)?;
+                let shuffle = self.playlist_shuffle_default(&playlist);
+                let cursor = self.new_route_cursor(&playlist, None, shuffle, true)?;
                 self.routes.insert(
                     connector.clone(),
                     DisplayRoute {
@@ -2092,7 +2162,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             let current = previous_entries
                 .get(&connector)
                 .and_then(|(previous, entry)| (previous == &playlist).then_some(entry.as_str()));
-            let shuffle = self.routes[&connector].shuffle_enabled(self.config.settings.shuffle);
+            let shuffle =
+                self.routes[&connector].shuffle_enabled(self.playlist_shuffle_default(&playlist));
             let cursor = self.new_route_cursor(&playlist, current, shuffle, false)?;
             let route = self
                 .routes
@@ -2798,7 +2869,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .routes
                         .get(connector)
                         .ok_or_else(|| format!("display route {connector:?} is missing"))?
-                        .shuffle_enabled(self.config.settings.shuffle);
+                        .shuffle_enabled(self.playlist_shuffle_default(&playlist_id));
                     let cursor = self.new_route_cursor(&playlist_id, None, shuffle, true)?;
                     let route = self.routes.get_mut(connector).expect("route was checked");
                     route.manual_playlist = Some(playlist_id.clone());
@@ -2861,7 +2932,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         }
                         continue;
                     }
-                    let shuffle = route.shuffle_enabled(self.config.settings.shuffle);
+                    let shuffle = route.shuffle_enabled(self.playlist_shuffle_default(&wanted));
                     let cursor = self.new_route_cursor(&wanted, None, shuffle, true)?;
                     let route = self
                         .routes
@@ -2956,14 +3027,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                     let current = self
                         .route_current_entry(connector)
                         .map(|entry| entry.id.clone());
-                    let before =
-                        self.routes[connector].shuffle_enabled(self.config.settings.shuffle);
+                    let before = self.route_shuffle(&self.routes[connector]);
                     self.routes
                         .get_mut(connector)
                         .expect("route exists")
                         .shuffle_override = override_value;
-                    let after =
-                        self.routes[connector].shuffle_enabled(self.config.settings.shuffle);
+                    let after = self.route_shuffle(&self.routes[connector]);
                     if before != after {
                         let playlist = self.routes[connector].active_playlist.clone();
                         let cursor =
@@ -3176,7 +3245,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .iter()
             .map(|entry| !self.is_taboo(&playlist_id, entry))
             .collect();
-        let shuffle = route.shuffle_enabled(self.config.settings.shuffle);
+        let shuffle = self.route_shuffle(route);
         let route = self.routes.get_mut(connector).expect("route exists");
         let cursor = &mut route.cursor;
         let Some(&current) = cursor.order.get(cursor.position) else {
@@ -3290,7 +3359,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .enumerate()
             .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
             .collect();
-        let shuffle = route.shuffle_enabled(self.config.settings.shuffle);
+        let shuffle = self.route_shuffle(route);
         let route = self.routes.get_mut(connector).expect("route exists");
         let cursor = &mut route.cursor;
         let Some(&current) = cursor.order.get(cursor.position) else {
@@ -3440,8 +3509,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         result
     }
 
+    /// Every playlist's effective mirrored shuffle, in configured order.
+    fn mirrored_shuffles(&self) -> Vec<bool> {
+        self.config
+            .playlists
+            .iter()
+            .map(|playlist| self.mirrored_shuffle(&playlist.id))
+            .collect()
+    }
+
     fn set_shuffle(&mut self, value: Option<&str>) -> Result<String, String> {
-        let before = self.shuffle_enabled();
+        let before = self.mirrored_shuffles();
         self.shuffle_override = match value
             .ok_or("usage: shuffle on|off|default")?
             .trim()
@@ -3454,7 +3532,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             _ => return Err("usage: shuffle on|off|default".into()),
         };
         let enabled = self.shuffle_enabled();
-        if enabled != before {
+        if self.mirrored_shuffles() != before {
             let current = self.current_entry_ids();
             self.rebuild_cursors(&current)?;
         }
@@ -3467,11 +3545,6 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "config"
             }
         ))
-    }
-
-    fn shuffle_enabled(&self) -> bool {
-        self.shuffle_override
-            .unwrap_or(self.config.settings.shuffle)
     }
 
     fn cycle_enabled(&self) -> bool {
@@ -4031,12 +4104,17 @@ impl<D: WallpaperDriver> Runtime<D> {
                             .position(|entry| &entry.id == wanted)
                     })
                     .unwrap_or(0);
-                (playlist.id.clone(), playlist.entries.len(), current)
+                (
+                    playlist.id.clone(),
+                    playlist.entries.len(),
+                    current,
+                    self.mirrored_shuffle(&playlist.id),
+                )
             })
             .collect();
         let mut cursors = HashMap::new();
-        for (id, entries, current) in specifications {
-            let (order, position) = if self.shuffle_enabled() && entries > 0 {
+        for (id, entries, current, shuffle) in specifications {
+            let (order, position) = if shuffle && entries > 0 {
                 let mut rest: Vec<usize> = (0..entries).filter(|index| *index != current).collect();
                 self.rng.shuffle(&mut rest);
                 let mut order = Vec::with_capacity(entries);
@@ -4098,10 +4176,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             .iter()
             .map(|entry| entry.id.clone())
             .collect();
+        let shuffle_enabled = self.mirrored_shuffle(&playlist_id);
         let taboo = &self.taboo;
-        let shuffle_enabled = self
-            .shuffle_override
-            .unwrap_or(self.config.settings.shuffle);
         let eligible = |index: usize| {
             !taboo.contains_key(&EntryKey {
                 playlist_id: playlist_id.clone(),
@@ -4220,16 +4296,14 @@ impl<D: WallpaperDriver> Runtime<D> {
             .enumerate()
             .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
             .collect();
+        let shuffle = self.mirrored_shuffle(&playlist_id);
         let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
             return false;
         };
         let Some(&current) = cursor.order.get(cursor.position) else {
             return false;
         };
-        if self
-            .shuffle_override
-            .unwrap_or(self.config.settings.shuffle)
-        {
+        if shuffle {
             let remaining_positions: Vec<usize> = ((cursor.position + 1)..cursor.order.len())
                 .filter(|position| eligible.contains(&cursor.order[*position]))
                 .collect();
@@ -4430,8 +4504,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                     playback_state: playback_state(self.playback_state),
                     paused: self.playback_state == PlaybackState::Paused,
                     stopped: self.playback_state == PlaybackState::Stopped,
-                    shuffle: self.shuffle_enabled(),
-                    shuffle_default: self.config.settings.shuffle,
+                    shuffle: self.mirrored_shuffle(&active_playlist.id),
+                    shuffle_default: self.playlist_shuffle_default(&active_playlist.id),
                     shuffle_source: if self.shuffle_override.is_some() {
                         "manual"
                     } else {
@@ -4444,6 +4518,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     } else {
                         "config"
                     },
+                    cycle_interval_seconds: self.mirrored_cycle_interval_seconds(),
                     renderer_failed: self.renderer_failed,
                     last_error: truncate_middle(&self.last_error, MAX_DISPLAY_ERROR_BYTES),
                     automatic_retry: self.pending_automatic.as_ref().map(|pending| {
@@ -4527,8 +4602,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                         playback_state: playback_state(self.playback_state),
                         paused: self.playback_state == PlaybackState::Paused,
                         stopped: self.playback_state == PlaybackState::Stopped,
-                        shuffle: self.shuffle_enabled(),
-                        shuffle_default: self.config.settings.shuffle,
+                        shuffle: self.mirrored_shuffle(&effective.id),
+                        shuffle_default: self.playlist_shuffle_default(&effective.id),
                         shuffle_source: if self.shuffle_override.is_some() {
                             "manual"
                         } else {
@@ -4541,6 +4616,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         } else {
                             "config"
                         },
+                        cycle_interval_seconds: self.mirrored_cycle_interval_seconds(),
                         renderer_failed: self.renderer_failed,
                         last_error: truncate_middle(&self.last_error, MAX_DISPLAY_ERROR_BYTES),
                         automatic_retry: self.pending_automatic.as_ref().map(|pending| {
@@ -4606,7 +4682,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             paused: self.playback_state == PlaybackState::Paused,
             stopped: self.playback_state == PlaybackState::Stopped,
             shuffle: self.shuffle_enabled(),
-            shuffle_default: self.config.settings.shuffle,
+            shuffle_default: self.mirrored_shuffle_default(),
             shuffle_source: if self.shuffle_override.is_some() {
                 "manual"
             } else {
@@ -4619,6 +4695,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 "config"
             },
+            cycle_interval_seconds: Some(self.mirrored_cycle_interval_seconds()),
             last_error: &self.last_error,
             output_discovery_error: &self.output_discovery_error,
             automatic_retry: self
@@ -4840,8 +4917,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 playback_state: playback_state(route.playback_state),
                 paused: route.playback_state == PlaybackState::Paused,
                 stopped: route.playback_state == PlaybackState::Stopped,
-                shuffle: route.shuffle_enabled(self.config.settings.shuffle),
-                shuffle_default: self.config.settings.shuffle,
+                shuffle: self.route_shuffle(route),
+                shuffle_default: self.playlist_shuffle_default(&route.active_playlist),
                 shuffle_source: if route.shuffle_override.is_some() {
                     "manual"
                 } else {
@@ -4854,6 +4931,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 } else {
                     "config"
                 },
+                cycle_interval_seconds: self
+                    .playlist_cycle_interval_seconds(&route.active_playlist),
                 renderer_failed: route.renderer_failed,
                 last_error: truncate_middle(&route.last_error, MAX_DISPLAY_ERROR_BYTES),
                 automatic_retry: self.pending_routes.get(&target.output).map(|pending| {
@@ -4877,12 +4956,31 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .then_some(first.playback_state)
         });
         let common_shuffle = route_states.first().and_then(|first| {
-            let value = first.shuffle_enabled(self.config.settings.shuffle);
+            let value = self.route_shuffle(first);
             route_states
                 .iter()
-                .all(|route| route.shuffle_enabled(self.config.settings.shuffle) == value)
+                .all(|route| self.route_shuffle(route) == value)
                 .then_some(value)
         });
+        let common_shuffle_default = route_states.first().and_then(|first| {
+            let value = self.playlist_shuffle_default(&first.active_playlist);
+            route_states
+                .iter()
+                .all(|route| self.playlist_shuffle_default(&route.active_playlist) == value)
+                .then_some(value)
+        });
+        let common_interval = match route_states.first() {
+            None => Some(self.config.settings.cycle_interval_seconds),
+            Some(first) => {
+                let value = self.playlist_cycle_interval_seconds(&first.active_playlist);
+                route_states
+                    .iter()
+                    .all(|route| {
+                        self.playlist_cycle_interval_seconds(&route.active_playlist) == value
+                    })
+                    .then_some(value)
+            }
+        };
         let common_cycle = route_states.first().and_then(|first| {
             let value = first.cycle_enabled(self.config.settings.cycle_enabled);
             route_states
@@ -4952,7 +5050,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             paused: common_state == Some(PlaybackState::Paused),
             stopped: common_state == Some(PlaybackState::Stopped),
             shuffle: common_shuffle.unwrap_or(false),
-            shuffle_default: self.config.settings.shuffle,
+            shuffle_default: common_shuffle_default.unwrap_or(self.config.settings.shuffle),
             shuffle_source: if route_states
                 .iter()
                 .all(|route| route.shuffle_override.is_none())
@@ -4975,6 +5073,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 "mixed"
             },
+            cycle_interval_seconds: common_interval,
             last_error: &self.last_error,
             output_discovery_error: &self.output_discovery_error,
             automatic_retry: pending_summary.map(|pending| AutomaticRetryStatus {

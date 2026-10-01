@@ -127,15 +127,17 @@ entry. The complete retry and persistence contract is in
 `open` validates the page name, presents the requested workflow in an existing
 app process, or requests a GUI launch when only the Rust service is running.
 The detached launch reply deliberately says **launch requested** rather than
-claiming a window was observed. In a running app `open` only presents and
+claiming a window was observed. With a window open, `open` only presents and
 navigates: it never reloads the palette or rescans the library, so a panel link
-can call it as often as it likes. A window it builds after the last one was
-closed shows the library and palette the process already holds; F5 rescans.
-The `displays` spelling is an alias for the Display schedules page, so a shell
-or panel integration does not have to know that both concepts share one screen.
-An app started with the in-progress `--ui=next` interface still presents its
-window. Until that page is ported it answers with kind `not-in-new-ui` and exit
-status 1.
+can call it as often as it likes. When the last window was closed, the window
+`open` builds shows the library and palette the process already holds at once,
+then rescans the library once in the background, because nothing watches the
+library folders and files may have been added meanwhile. F5 rescans an open
+window. The `displays` spelling is an alias for the Display schedules page, so
+a shell or panel integration does not have to know that both concepts share one
+screen. An app started with the in-progress `--ui=next` interface still
+presents its window. Until that page is ported it answers with kind
+`not-in-new-ui` and exit status 1.
 
 `providers`, `search` and `download` reach the same provider code the Store
 tab uses, so a wallpaper can be found and pulled into the library without

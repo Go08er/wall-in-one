@@ -2997,9 +2997,18 @@ class Application(Adw.Application):
     def _post_runtime_completion(
         future: Future[_RuntimeResult],
         callback: Callable[[Future[_RuntimeResult]], bool],
+        *,
+        priority: int = GLib.PRIORITY_DEFAULT_IDLE,
     ) -> None:
-        """Marshal one worker completion back onto GTK's main context."""
-        GLib.idle_add(callback, future)
+        """Marshal one worker completion back onto GTK's main context.
+
+        A completion that ends a visible busy state passes
+        ``GLib.PRIORITY_DEFAULT``: at the default idle priority (200) it
+        waits below GTK's redraw (120), and an animating spinner can starve
+        the very result that would stop it.
+        """
+        # PyGObject's idle_add override accepts priority=; its stubs omit it.
+        GLib.idle_add(callback, future, priority=priority)  # type: ignore[call-arg]
 
     def _ensure_runtime_compile_queued(self) -> None:
         """Start at most one coalescing compiler job for the latest request."""
@@ -3888,7 +3897,8 @@ class Application(Adw.Application):
                     on_complete,
                 )
 
-            self._post_runtime_completion(done, deliver)
+            # It ends the busy state (the new player bar's spinner): above redraw.
+            self._post_runtime_completion(done, deliver, priority=GLib.PRIORITY_DEFAULT)
 
         future.add_done_callback(completed)
         return True

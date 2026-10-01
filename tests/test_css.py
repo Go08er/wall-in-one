@@ -94,3 +94,50 @@ def _named_colour(stylesheet: str, name: str) -> str:
     match = re.search(rf"@define-color {re.escape(name)} ([^;]+);", stylesheet)
     assert match is not None, f"{name} is not defined"
     return match.group(1).strip()
+
+
+# -- the new window's glass layers ------------------------------------------------
+
+
+def test_without_glass_the_stylesheet_is_the_classic_one() -> None:
+    palette = fallback_palette()
+    classic = css.render(palette, opacity=0.4)
+    assert css.render(palette, opacity=0.4, glass=None) == classic
+    assert "wio-glass" not in classic
+
+
+def test_glass_is_scoped_to_the_new_window_and_cut_from_the_palette() -> None:
+    palette = fallback_palette()
+    stylesheet = css.render(palette, glass=css.Glass(background=0.3, panel=0.6))
+    glass = stylesheet.split("window.wio-glass,", 1)[1]
+    # Everything after the classic rules is scoped to the new window's class.
+    for line in glass.splitlines():
+        if line.rstrip().endswith(("{", ",")) and not line.startswith(" "):
+            assert line.startswith("window.wio-glass"), line
+    surface = palette["surface"]
+    assert f"rgba({surface.red}, {surface.green}, {surface.blue}, 0.300)" in glass
+    sidebar = palette.get("surface_container_low", "surface")
+    assert (
+        f"--sidebar-bg-color: rgba({sidebar.red}, {sidebar.green}, {sidebar.blue}, 0.600)" in glass
+    )
+    # Cards sit on the page: 0.3 under (0.6 - 0.3) / 0.7 shows 0.6 in total.
+    card = palette.get("surface_container", "surface_variant")
+    assert f"--card-bg-color: rgba({card.red}, {card.green}, {card.blue}, 0.429)" in glass
+    # Dialogs and popovers float above the glass and stay solid.
+    assert f"--card-bg-color: {card.hex}" in glass
+
+
+def test_an_element_never_adds_paint_below_the_page_it_sits_on() -> None:
+    assert css.on_background(0.2, 0.8) == 0.0
+    assert css.on_background(0.8, 0.8) == 0.0
+    assert css.on_background(1.0, 0.5) == 1.0
+    stacked = 0.3 + (1 - 0.3) * css.on_background(0.75, 0.3)
+    assert abs(stacked - 0.75) < 1e-9
+
+
+def test_glass_dials_are_clamped() -> None:
+    surfaces = css.glass_surfaces(fallback_palette())
+    assert set(surfaces) == set(css.GLASS_SURFACES)
+    layers = css.glass_layers(surfaces, background=-1.0, panel=7.0)
+    assert ", 0.000)" in layers and ", 1.000)" in layers
+    assert "nan" not in layers

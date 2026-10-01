@@ -10,11 +10,17 @@ Two layers come out of this:
 Translucency is applied only to the window background. Making every surface
 translucent stacks alpha and turns text muddy -- one translucent plane with the
 compositor blurring behind it is what actually looks right.
+
+The new interface (``--ui=next``) has its own see-through styles instead,
+chosen in ``ui.toml``: a page-background dial and a panel dial. `render` adds
+them as one extra section, scoped to ``window.wio-glass``, so the classic
+window never matches it; see `glass_layers`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Final
 
 from wall_in_one.theme.palette import Colour, Palette
@@ -221,17 +227,174 @@ window.background.csd {{
 """.strip()
 
 
-def render(palette: Palette, *, opacity: float = 1.0) -> str:
-    """Build the full stylesheet for ``palette`` at the given window opacity."""
+@dataclass(frozen=True, slots=True)
+class Glass:
+    """The new window's two opacity dials, each from 0 (clear) to 1 (solid).
+
+    ``background`` is the page behind lists and grids; ``panel`` is what sits
+    on it or beside it: the sidebar, header, player bar, inspector and cards.
+    """
+
+    background: float
+    panel: float
+
+
+#: The libadwaita surfaces `glass_layers` paints, as `adwaita_definitions`
+#: resolves them from the palette.
+GLASS_SURFACES: Final[tuple[str, ...]] = (
+    "window",
+    "view",
+    "headerbar",
+    "sidebar",
+    "secondary-sidebar",
+    "card",
+)
+
+
+def glass_surfaces(palette: Palette) -> dict[str, str]:
+    """The opaque surface colours glass is cut from, keyed as in `GLASS_SURFACES`."""
+    tokens = {name: (token, fallback) for name, token, fallback in _ADWAITA_MAPPING}
+    return {
+        surface: palette.get(*tokens[f"{surface.replace('-', '_')}_bg_color"]).hex
+        for surface in GLASS_SURFACES
+    }
+
+
+def _unit(value: float) -> float:
+    return min(1.0, max(0.0, value))
+
+
+def on_background(panel: float, background: float) -> float:
+    """CSS alpha for an element on the page background, so the two layers show ``panel``.
+
+    An element cannot be clearer than the page under it, so below
+    ``background`` it adds nothing at all.
+    """
+    if panel <= background:
+        return 0.0
+    return (panel - background) / (1.0 - background) if background < 1.0 else 1.0
+
+
+def _rgba(hex_colour: str, alpha: float) -> str:
+    value = hex_colour.lstrip("#")
+    red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
+    return f"rgba({red}, {green}, {blue}, {alpha:.3f})"
+
+
+def glass_layers(surfaces: Mapping[str, str], background: float, panel: float) -> str:
+    """One painted layer per region of the new window, so each dial shows what it says.
+
+    The window itself is clear. Regions straight on the desktop (or on the
+    frosted backdrop) paint once: the sidebar, the content header and the
+    player bar at ``panel``; the page under the content at ``background``.
+    Elements on the page (cards, lists, the inspector) are solved with
+    `on_background`, so the stack still shows ``panel``. Stacking layers at
+    the same alpha is what makes 75% look solid: 0.75 over 0.75 is 0.94.
+
+    ``surfaces`` maps every name in `GLASS_SURFACES` to an opaque ``#rrggbb``.
+    Every rule is scoped to ``window.wio-glass``, which only the new window
+    sets, and only in its translucent and frosted styles. Dialogs and
+    popovers float above everything and go back to solid surfaces.
+    """
+    background, panel = _unit(background), _unit(panel)
+    on_page = on_background(panel, background)
+    sidebar = _rgba(surfaces["sidebar"], panel)
+    header = _rgba(surfaces["headerbar"], panel)
+    page = _rgba(surfaces["window"], background)
+    values = [
+        f"--window-bg-color: {page}",
+        f"--view-bg-color: {_rgba(surfaces['view'], on_page)}",
+        f"--headerbar-bg-color: {header}",
+        f"--headerbar-backdrop-color: {header}",
+        f"--sidebar-bg-color: {sidebar}",
+        f"--sidebar-backdrop-color: {sidebar}",
+        f"--secondary-sidebar-bg-color: {_rgba(surfaces['secondary-sidebar'], on_page)}",
+        f"--card-bg-color: {_rgba(surfaces['card'], on_page)}",
+    ]
+    solid = [
+        f"--{name}-bg-color: {surfaces[name]}"
+        for name in ("window", "view", "card", "headerbar", "sidebar", "secondary-sidebar")
+    ]
+    solid += [
+        f"--headerbar-backdrop-color: {surfaces['headerbar']}",
+        f"--sidebar-backdrop-color: {surfaces['sidebar']}",
+    ]
+    content = "window.wio-glass navigation-view-page.wio-content-page > toolbarview"
+    inspector = _rgba(surfaces["secondary-sidebar"], on_page)
+    return f"""
+window.wio-glass,
+window.wio-glass.background,
+window.wio-glass.background.csd {{
+    background-color: transparent;
+}}
+
+window.wio-glass {{
+    {"; ".join(values)};
+}}
+
+/* Straight on the desktop: one layer each. Both shell pages are tagged, so
+   this holds side by side and when the split view collapses into a
+   navigation view, which would otherwise paint its own page backgrounds. */
+window.wio-glass navigation-split-view > widget.sidebar-pane,
+window.wio-glass navigation-split-view > widget.content-pane,
+window.wio-glass navigation-split-view navigation-view-page {{
+    background-color: transparent;
+}}
+
+window.wio-glass navigation-view-page.wio-sidebar-page {{
+    background-color: {sidebar};
+}}
+
+{content} > revealer.top-bar {{
+    background-color: {header};
+}}
+
+{content} > stack {{
+    background-color: {page};
+}}
+
+/* On the page: the inspector pane paints once and its contents stay clear.
+   Floating over the grid in a narrow window it is solid, like a popover. */
+window.wio-glass overlay-split-view > widget.sidebar-pane {{
+    background-color: {inspector};
+}}
+
+window.wio-glass overlay-split-view > widget.background {{
+    background-color: {surfaces["secondary-sidebar"]};
+}}
+
+window.wio-glass .inspector {{
+    background-color: transparent;
+}}
+
+window.wio-glass banner > revealer > widget {{
+    background-color: alpha(currentColor, 0.07);
+}}
+
+window.wio-glass dialog,
+window.wio-glass popover {{
+    {"; ".join(solid)};
+}}
+""".strip()
+
+
+def render(palette: Palette, *, opacity: float = 1.0, glass: Glass | None = None) -> str:
+    """Build the full stylesheet for ``palette`` at the given window opacity.
+
+    ``glass`` adds the new window's glass layers (see `glass_layers`). Without
+    it the stylesheet is exactly what the classic window has always had.
+    """
     clamped = min(1.0, max(0.0, opacity))
-    sections = (
+    sections = [
         "/* generated by wall-in-one -- do not edit */",
         f"/* mode: {palette.mode}  tokens: {len(palette.colours)}  opacity: {clamped:.2f} */",
         "\n".join(token_definitions(palette)),
         "\n".join(adwaita_definitions(palette, clamped)),
         "\n".join(adwaita_variables()),
         _structural_rules(palette, clamped),
-    )
+    ]
+    if glass is not None:
+        sections.append(glass_layers(glass_surfaces(palette), glass.background, glass.panel))
     return "\n\n".join(sections) + "\n"
 
 

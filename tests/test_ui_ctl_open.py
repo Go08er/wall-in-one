@@ -270,7 +270,10 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         for page in ("settings", "media", "settings"):
             opened = control(requests, "open", page)
             yield f"ctl open {page}", opened.done
-            not_in_new_ui(opened.result(), page)
+            if page == "media":  # the Library is in the new interface
+                assert opened.result() == Response.success("opened media")
+            else:
+                not_in_new_ui(opened.result(), page)
             assert application._window is first
         yield "the open window to settle", lambda: settled(application)
         assert calls == Counter(), "ctl open on the open window re-ran first-activation work"

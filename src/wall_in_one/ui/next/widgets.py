@@ -702,7 +702,8 @@ def color_tooltip(state: AppState, wallpaper: WallpaperView) -> str:
 
 
 def color_summary(state: AppState, wallpaper: WallpaperView) -> str:
-    return color_tooltip(state, wallpaper).removeprefix("Colors: ").capitalize()
+    text = color_tooltip(state, wallpaper).removeprefix("Colors: ")
+    return text[:1].upper() + text[1:]
 
 
 def card_colors(state: AppState, wallpaper: WallpaperView) -> dict[str, Any]:

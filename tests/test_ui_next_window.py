@@ -457,8 +457,10 @@ def test_next_window_renders_from_the_model_not_the_forwarded_calls(
         assert window.status_text == "2 displays · playing Evening"
         application.status_model.set_busy(True)
         assert window.status_text.endswith("sending a playback command…")
-        assert window.show_page("media") is False
-        assert window.note_text.startswith("Library is not in the new interface yet")
+        assert window.show_page("settings") is False
+        assert window.note_text.startswith("Settings is not in the new interface yet")
+        assert window.show_page("media") is True, "the Library is ported"
+        assert window.note_text == ""
     finally:
         window.destroy()
         application._stills.shutdown()

@@ -33,14 +33,19 @@ def describe(view: RuntimeStatusView) -> str:
         )
     else:
         headline = _playing(view, view.status)
-    marks: list[str] = []
+    return " · ".join((headline, *marks(view)))
+
+
+def marks(view: RuntimeStatusView) -> tuple[str, ...]:
+    """How fresh the snapshot is, and whether a playback command is in flight."""
+    found: list[str] = []
     if view.delayed:
-        marks.append("status delayed")
+        found.append("status delayed")
     if view.protocol_error and view.status is not None and view.service != "unavailable":
-        marks.append("invalid status reply")
+        found.append("invalid status reply")
     if view.busy:
-        marks.append("sending a playback command…")
-    return " · ".join((headline, *marks))
+        found.append("sending a playback command…")
+    return tuple(found)
 
 
 def _playing(view: RuntimeStatusView, status: dict[str, object]) -> str:

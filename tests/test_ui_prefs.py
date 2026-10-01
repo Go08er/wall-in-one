@@ -363,9 +363,15 @@ def test_the_writer_refuses_a_document_it_could_not_read_back() -> None:
 
 
 def test_todays_ui_never_reads_or_writes_ui_toml() -> None:
-    """ui.toml is infrastructure for the new UI; nothing else may use it yet."""
+    """ui.toml belongs to the new UI (``ui/next``); nothing else may use it.
+
+    The classic window, the application, the command line and the service
+    never read or write it, so an idle classic run stays write-free. In the
+    new UI only its preferences keeper touches the file.
+    """
     use = re.compile(
         r"from\s+wall_in_one\s+import[^\n]*\bui_prefs\b"
+        r"|from\s+wall_in_one\.ui_prefs\s+import"
         r"|import\s+wall_in_one\.ui_prefs|\bui_prefs\.\w|ui_prefs_path\("
     )
     package = Path(ui_prefs.__file__).parent
@@ -374,4 +380,10 @@ def test_todays_ui_never_reads_or_writes_ui_toml() -> None:
         for source in package.rglob("*.py")
         if use.search(source.read_text(encoding="utf-8"))
     )
-    assert users == ["paths.py", "ui_prefs.py"]
+    assert users == ["paths.py", "ui/next/prefs.py", "ui/next/real_state.py", "ui_prefs.py"]
+    writers = [
+        user
+        for user in users
+        if re.search(r"ui_prefs\.(save|update|mutate)\b", (package / user).read_text())
+    ]
+    assert writers == ["ui/next/prefs.py"], "only the new UI's keeper writes ui.toml"

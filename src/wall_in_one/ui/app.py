@@ -390,6 +390,8 @@ class Application(Adw.Application):
         self._first_activation_done = False
         self._newer_version_notice_shown = False
         self._provider = Gtk.CssProvider()
+        # The new window's glass dials; None keeps the classic stylesheet.
+        self._window_glass: css.Glass | None = None
         self._control: server.SocketServer | None = None
         self._resolved: source.ResolvedPalette | None = None
         self._session = Session(self._settings, owns_playback=self._service_start)
@@ -1917,8 +1919,22 @@ class Application(Adw.Application):
         if jobs is not None:
             jobs.shutdown(wait=wait, cancel_futures=True)
 
+    def set_window_glass(self, glass: css.Glass | None) -> None:
+        """The new window's glass dials (``ui.toml``), rendered into the stylesheet.
+
+        ``None`` (the classic window) keeps settings.toml's window opacity. Any
+        other value replaces it, since the new window's look lives in ui.toml.
+        """
+        if glass == self._window_glass:
+            return
+        self._window_glass = glass
+        if self._resolved is not None:
+            self._apply_stylesheet(self._resolved)
+
     def _apply_stylesheet(self, resolved: source.ResolvedPalette) -> None:
-        stylesheet = css.render(resolved.palette, opacity=self._settings.opacity)
+        glass = self._window_glass
+        opacity = self._settings.opacity if glass is None else 1.0
+        stylesheet = css.render(resolved.palette, opacity=opacity, glass=glass)
         self._provider.load_from_string(stylesheet)
         # Match the palette's own mode so libadwaita's built-in rules agree
         # with the colours we just handed it. This also settles the argument

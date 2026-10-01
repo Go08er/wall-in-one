@@ -6,17 +6,19 @@ golden sandbox. It must therefore import nothing from this checkout and use
 only APIs that v0.1.4 already had.
 
 Usage: ``downgrade_driver.py version``, ``downgrade_driver.py edit [FILE...]``,
-``downgrade_driver.py same-schedule-edit``, ``downgrade_driver.py compile`` or
-``downgrade_driver.py prepare``. Prints one JSON object: the module and
-version that ran, which records each edit touched, and any edit that was
-refused (by message); ``compile`` reports what the old build's runtime
-publication did, and ``prepare`` the exit status and output of its service
-unit's ``--service-startup-prepare``.
+``downgrade_driver.py same-schedule-edit``, ``downgrade_driver.py compile``,
+``downgrade_driver.py prepare`` or ``downgrade_driver.py settings [PATH...]``.
+Prints one JSON object: the module and version that ran, which records each
+edit touched, and any edit that was refused (by message); ``compile`` reports
+what the old build's runtime publication did, ``prepare`` the exit status
+and output of its service unit's ``--service-startup-prepare``, and
+``settings`` what its strict settings loader makes of each file.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import sys
@@ -176,6 +178,27 @@ def prepare_service_start() -> dict[str, object]:
     return {"status": status, "stdout": out.getvalue(), "stderr": err.getvalue()}
 
 
+def read_settings(files: list[str]) -> dict[str, object]:
+    """What the old build's strict loader makes of each settings file.
+
+    The loader the old service unit's start depends on: an error is reported
+    by message, a success by every value it read (``roots`` as strings).
+    """
+    results: dict[str, object] = {}
+    for name in files or [str(paths.settings_path())]:
+        try:
+            settings = config.load_strict(Path(name))
+        except config.ConfigError as error:
+            results[name] = {"error": str(error)}
+            continue
+        values: dict[str, object] = {
+            field.name: getattr(settings, field.name) for field in dataclasses.fields(settings)
+        }
+        values["roots"] = [str(root) for root in settings.roots]
+        results[name] = {"settings": values}
+    return results
+
+
 EDITS: dict[str, Callable[[], list[str]]] = {
     "playlists.json": edit_playlists,
     "schedules.json": edit_schedules,
@@ -223,6 +246,8 @@ def main(arguments: list[str]) -> int:
         report["compile"] = compile_runtime()
     elif arguments[:1] == ["prepare"]:
         report["prepare"] = prepare_service_start()
+    elif arguments[:1] == ["settings"]:
+        report["settings"] = read_settings(arguments[1:])
     elif arguments[:1] != ["version"]:
         print(__doc__, file=sys.stderr)
         return 2

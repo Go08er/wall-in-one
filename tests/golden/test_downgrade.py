@@ -11,7 +11,10 @@ session instead of being half-tested. v0.1.4 runs in a child process
 (``downgrade_driver.py``) against the same sandbox, with a fake runtime
 answering on a real socket, as its service would after a rollback.
 
-* Same-version files lose nothing with v0.1.4's edits.
+* Same-version files lose nothing with v0.1.4's edits. ``settings.toml`` as
+  this build writes it, every value away from its default, is one v0.1.4's
+  strict loader reads back exactly and its service unit compiles from; with
+  one key more, v0.1.4 cannot use the file at all.
 * What a newer format adds, unknown keys or a version bump, v0.1.4 narrows on
   its next edit of that file: keys it does not model are dropped, and a newer
   version is moved aside as ``.broken`` and rewritten as its own.
@@ -37,7 +40,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -54,10 +57,14 @@ from tests.golden.sandbox import (
     pairing_item,
     playlist_ids,
     read_json,
+    runtime_document,
     write_json,
 )
 from wall_in_one import cli, config, paths, runtime_config
 from wall_in_one.library import displays, favourites, pairings, playlists, schedules
+from wall_in_one.session import QUICK_CHOICE_ID
+from wall_in_one.theme.noctalia import ALL_SCHEMES
+from wall_in_one.wallpaper import renderer, scenes
 
 pytestmark = pytest.mark.downgrade
 
@@ -82,6 +89,11 @@ V0_1_4_FORMATS: Final = {
     "displays.json": 1,
     "favourites.json": 1,
 }
+
+#: The exit status (``EX_CONFIG``) of v0.1.4's ``--service-startup-prepare``
+#: when its startup check refuses the profile; systemd then never starts the
+#: service.
+V0_1_4_EXIT_CONFIG: Final = 78
 
 
 def _old_source() -> Path:
@@ -218,6 +230,175 @@ def test_downgrade_v0_1_4_edits_lose_nothing(downgrade: Golden) -> None:
         assert store.Store.open().fault is None, store.__name__
     config.load_strict()
     assert sorted(profile.app_state.glob("*.broken*")) == []
+
+
+# -- settings.toml: every value this build writes, read by v0.1.4 -----------------------
+
+
+def _other(choices: tuple[str, ...], default: str) -> str:
+    return next(choice for choice in reversed(choices) if choice != default)
+
+
+def _every_setting_away_from_its_default(profile: Profile) -> config.Settings:
+    """Change every setting through this build's own writer; return what it saved.
+
+    Without the Workshop scan the fixture's Quick choice, one Workshop video,
+    has nothing left to play and no build would compile it; a picture keeps
+    it playable, so the start below is a real compile.
+    """
+    elsewhere = profile.home / "Pictures" / "Elsewhere"
+    elsewhere.mkdir(parents=True, exist_ok=True)
+    pictures = sorted(profile.home.glob("Pictures/Wallpapers/*.png"))
+    playlists.Store.open().add(QUICK_CHOICE_ID, pictures[0])
+    defaults = config.Settings()
+    other_default = next(
+        playlist["id"]
+        for playlist in read_json(profile.app_state / "playlists.json")["playlists"]
+        if playlist["entries"]
+        and playlist["id"] not in (QUICK_CHOICE_ID, config.load().active_playlist)
+    )
+    written = config.update(
+        {
+            "opacity": 0.45,
+            "preview_scheme": _other(ALL_SCHEMES, defaults.preview_scheme),
+            "follow_noctalia_palette": False,
+            "cycle_interval": 4321,
+            "cycle_enabled": True,
+            "shuffle": True,
+            "dynamics_enabled": False,
+            "stop_animations_on_battery": True,
+            "video_muted": False,
+            "video_volume": 37,
+            "video_when_hidden": _other(renderer.WHEN_HIDDEN_CHOICES, defaults.video_when_hidden),
+            "video_interpolation": _other(
+                renderer.INTERPOLATION_CHOICES, defaults.video_interpolation
+            ),
+            "video_hardware_decode": False,
+            "scene_fps": 24,
+            "scene_scaling": _other(scenes.SCALING_CHOICES, defaults.scene_scaling),
+            "scene_clamp": _other(scenes.CLAMP_CHOICES, defaults.scene_clamp),
+            "display_mode": config.DISPLAY_MODE_INDEPENDENT,
+            "theme_source_connector": "DP-1",
+            "output": "DP-1",
+            "own_scene_renderer": False,
+            "scan_workshop": False,
+            "active_playlist": other_default,
+            "cycle_favourites_only": True,
+            "roots": (*config.load().roots, elsewhere),
+        }
+    )
+    # A field added later fails here until this test sets it as well.
+    for field in fields(config.Settings):
+        assert getattr(written, field.name) != getattr(defaults, field.name), field.name
+    return written
+
+
+def _as_reported(settings: config.Settings) -> dict[str, Any]:
+    """The values the driver reports for a file, from this build's reading of it."""
+    values: dict[str, Any] = {
+        field.name: getattr(settings, field.name) for field in fields(settings)
+    }
+    values["roots"] = [str(root) for root in settings.roots]
+    return values
+
+
+def _variants(written: config.Settings, folder: Path) -> list[Path]:
+    """One file per value of every enumerated setting and every range's ends.
+
+    Saved with this build's writer, beside the profile rather than over it.
+    """
+    values: dict[str, tuple[Any, ...]] = {
+        "preview_scheme": ALL_SCHEMES,
+        "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES,
+        "video_interpolation": renderer.INTERPOLATION_CHOICES,
+        "scene_scaling": scenes.SCALING_CHOICES,
+        "scene_clamp": scenes.CLAMP_CHOICES,
+        "display_mode": config.DISPLAY_MODES,
+        "opacity": (config.MIN_OPACITY, 1.0),
+        "cycle_interval": (5, 24 * 60 * 60),
+        "video_volume": (0, renderer.MAX_VOLUME),
+        "scene_fps": (scenes.MIN_FPS, scenes.MAX_FPS),
+        "stop_animations_on_battery": (False, True),
+    }
+    folder.mkdir()
+    made = []
+    for key, choices in values.items():
+        for index, value in enumerate(choices):
+            made.append(config.save(replace(written, **{key: value}), folder / f"{key}-{index}"))
+    return made
+
+
+def test_downgrade_v0_1_4_reads_every_setting_this_build_writes(downgrade: Golden) -> None:
+    """v0.1.4's strict loader accepts every settings.toml this build can write.
+
+    0.1.4 refuses a key it does not know, and its service then does not
+    start. This build writes the same keys (``tests/test_settings_v0_1_4_keys``
+    pins that without an old build); here v0.1.4 itself reads the file with
+    every setting away from its default, plus one file per enumerated value
+    and range end, and must read back exactly what this build saved. Its
+    service unit's start then compiles for real from those settings.
+    """
+    profile = downgrade.profile
+    written = _every_setting_away_from_its_default(profile)
+    variants = _variants(written, profile.root / "settings-variants")
+    target = paths.settings_path()
+
+    read = _run_old(profile, "settings", str(target), *map(str, variants))["settings"]
+
+    for path in (target, *variants):
+        assert "error" not in read[str(path)], read[str(path)]
+        assert read[str(path)]["settings"] == _as_reported(config.load_strict(path)), path.name
+    assert read[str(target)]["settings"] == _as_reported(written)
+
+    prepared = _run_old(profile, "prepare")["prepare"]
+
+    assert prepared["status"] == 0, prepared
+    assert "could not be compiled" not in prepared["stderr"], prepared["stderr"]
+    assert prepared["stdout"].startswith("wrote: "), prepared
+    assert runtime_document(profile)["settings"]["cycle_interval_seconds"] == 4321
+    assert target.read_bytes() == written.to_toml().encode()
+
+
+#: What marks a profile whose deployed upgrade (from the old schema-2 app) has
+#: completed: v0.1.4's startup then never reads settings.toml to classify it.
+UPGRADE_MARKERS: Final = ("deployed-upgrade-v1.json", "deployed-capture-adoption-v1.json")
+
+
+@pytest.mark.parametrize("profile_kind", ["upgraded", "never-upgraded"])
+def test_downgrade_v0_1_4_cannot_use_settings_with_a_key_it_does_not_know(
+    downgrade: Golden, profile_kind: str
+) -> None:
+    """Why the pin above matters: v0.1.4's service cannot use such a file.
+
+    Its strict loader refuses the key. On a profile that never went through
+    the deployed upgrade, its startup check classifies the profile as corrupt
+    and the unit exits 78, so the wallpaper service does not start. On one
+    that did (like the fixture), the start is softened to the last
+    runtime.toml and nothing new is ever published. Either way, no 0.2.0
+    writer may add a key to settings.toml.
+    """
+    profile = downgrade.profile
+    if profile_kind == "never-upgraded":
+        for name in UPGRADE_MARKERS:
+            (profile.app_state / name).unlink()
+    control = _run_old(profile, "prepare")["prepare"]
+    assert (control["status"], control["stdout"][:7]) == (0, "wrote: "), control
+    target = paths.settings_path()
+    target.write_bytes(target.read_bytes() + b"ui_glass_frost = 0.3\n")
+    runtime = profile.app_state / "runtime.toml"
+    published = runtime.read_bytes()
+
+    read = _run_old(profile, "settings", str(target))["settings"][str(target)]
+    prepared = _run_old(profile, "prepare")["prepare"]
+
+    assert "unknown setting(s): ui_glass_frost" in read.get("error", ""), read
+    if profile_kind == "never-upgraded":
+        assert prepared["status"] == V0_1_4_EXIT_CONFIG, prepared
+    else:
+        assert prepared["status"] == 0, prepared
+        assert "could not be compiled" in prepared["stderr"], prepared
+    assert "ui_glass_frost" in prepared["stderr"], prepared
+    assert runtime.read_bytes() == published
 
 
 # -- what a newer format adds, edited by v0.1.4 ------------------------------------------

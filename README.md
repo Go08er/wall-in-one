@@ -436,10 +436,22 @@ state across threads.
 ```console
 $ nix develop
 $ python -m wall_in_one
-$ pytest tests -q
+$ pytest tests -q -m "not gui"
+$ GSK_RENDERER=cairo GDK_BACKEND=x11 xvfb-run -a pytest tests -q -m gui
 $ mypy --strict src tests
 $ ruff check src tests && ruff format --check src tests
 ```
+
+The GUI line runs the display-backed tests the way the `gui-tests` check does:
+on a private Xvfb server rather than your desktop, with the cairo renderer.
+Without `GSK_RENDERER=cairo`, GTK picks Vulkan when it finds a GPU, and under
+Xvfb that renders slowly enough to change the timing the tests see.
+
+If your login session exports `LD_LIBRARY_PATH`, `nix develop` inherits it. It
+can point the flake's ffmpeg at a library built against a newer glibc. ffmpeg
+then fails with an error such as `GLIBC_2.43 not found`, and about a dozen GUI
+tests fail with it. Run the suite with the variable unset:
+`env -u LD_LIBRARY_PATH pytest ...`.
 
 `nix flake check` is the complete local gate: it runs the packaged Python and
 Rust tests, all display-backed GTK tests under an isolated Xvfb server, ruff,

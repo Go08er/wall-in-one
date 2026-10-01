@@ -696,7 +696,7 @@ class FakeRuntime:
     Its status always reports the generation of the ``runtime.toml`` on disk,
     i.e. a service that has loaded whatever was last published. By default it
     is this release's service, which also applies ``runtime-overrides.toml``;
-    ``supported_override_schemas = None`` makes it Release 1's, which never
+    ``supported_override_schemas = None`` makes it 0.1.4's, which never
     mentions (or reads) that file.
     """
 

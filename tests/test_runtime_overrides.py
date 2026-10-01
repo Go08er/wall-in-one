@@ -1,4 +1,4 @@
-"""Release 2's runtime-backed features, from authoring to the runtime files.
+"""0.2.0's runtime-backed features, from authoring to the runtime files.
 
 Per-playlist interval and shuffle live in ``playlists.json`` version 2; a
 display's opt-in to beat global schedule rules lives in ``displays.json``
@@ -38,7 +38,7 @@ from wall_in_one.library import displays, playlists
 from wall_in_one.library.playlists import KEEP, PlaylistError
 from wall_in_one.session import Session
 
-RELEASE_ONE_SERVICE = {"status_version": 2, "supported_config_schemas": [4, 5]}
+V0_1_4_SERVICE = {"status_version": 2, "supported_config_schemas": [4, 5]}
 THIS_SERVICE = {
     "status_version": 2,
     "supported_config_schemas": [4, 5],
@@ -102,7 +102,7 @@ def test_edits_that_use_no_new_field_keep_version_one_byte_for_byte(
     assert document["version"] == 1
     for playlist in document["playlists"]:
         assert set(playlist) == {"id", "name", "entries"}
-    # Exactly what Release 1 writes for the same playlists: key order included.
+    # Exactly what 0.1.4 writes for the same playlists: key order included.
     expected = {
         "version": 1,
         "playlists": [
@@ -382,7 +382,7 @@ def test_saving_never_consults_the_running_service(
 def test_status_says_whether_the_running_service_applies_overrides() -> None:
     assert runtime_config.runtime_applies_overrides(THIS_SERVICE)
     older: tuple[object, ...] = (
-        RELEASE_ONE_SERVICE,
+        V0_1_4_SERVICE,
         {"status_version": 2},
         None,
         [],
@@ -570,13 +570,13 @@ def test_a_refused_runtime_publication_writes_neither_file(
     session.shutdown()
 
 
-def test_a_release_one_service_still_gets_both_files_and_ignores_the_overrides(
+def test_a_v0_1_4_service_still_gets_both_files_and_ignores_the_overrides(
     library: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = config.Settings(
         roots=(library,), scan_workshop=False, stop_animations_on_battery=True
     )
-    _service(monkeypatch, RELEASE_ONE_SERVICE)
+    _service(monkeypatch, V0_1_4_SERVICE)
     config.save(settings)
     session = Session(settings)
     session.refresh()
@@ -586,7 +586,7 @@ def test_a_release_one_service_still_gets_both_files_and_ignores_the_overrides(
     target = runtime_config.write(settings, session)
     assert tomllib.loads(target.read_text())["schema_version"] == 5
     assert runtime_config.overrides_path(target).is_file()
-    assert not runtime_config.runtime_applies_overrides(RELEASE_ONE_SERVICE)
+    assert not runtime_config.runtime_applies_overrides(V0_1_4_SERVICE)
     session.shutdown()
 
 

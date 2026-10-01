@@ -38,8 +38,8 @@ STATE_FILENAME: Final = "schedules.json"
 #: Versions 1 to 3 are read. Version 1 is rewritten as version 2 on the next
 #: edit, as it always was. Version 3 adds an optional ``name`` per rule and is
 #: written only when a rule has one (format-change guard 1, lazy bump on use):
-#: a schedule without names stays version 2, byte for byte what 0.1.4 and
-#: 0.1.5 write. The first save that moves a file to version 3 first keeps the
+#: a schedule without names stays version 2, byte for byte what 0.1.4
+#: writes. The first save that moves a file to version 3 first keeps the
 #: old bytes as ``schedules.json.v<old>-backup`` (guard 2). A file stays at
 #: version 3 once there, even after its last name is cleared. A newer version
 #: is shown but never compiled or rewritten: every mutation is refused (kind

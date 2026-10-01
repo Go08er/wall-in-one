@@ -783,7 +783,7 @@ def test_a_rule_describes_itself_in_the_words_it_was_written_in(store: Store) ->
 
 # -- rule names: format version 3, written only when used ---------------------------
 
-#: A version-2 file exactly as 0.1.4 and 0.1.5 write it.
+#: A version-2 file exactly as 0.1.4 writes it.
 V2_RULES: list[dict[str, Any]] = [
     {"id": "quiet", "playlist": "quick-choice", "enabled": False},
     {"id": "night", "playlist": "Night", "start": "21:00", "end": "04:00"},
@@ -845,7 +845,7 @@ def test_a_name_is_bounded_like_a_playlist_name() -> None:
 
 
 def test_unnamed_edits_keep_version_two_byte_for_byte(tmp_path: Path) -> None:
-    """Guard 1: without a name the file is exactly what 0.1.4 and 0.1.5 write."""
+    """Guard 1: without a name the file is exactly what 0.1.4 writes."""
     target, _original = _v2_file(tmp_path)
     store = Store.open(target)
 

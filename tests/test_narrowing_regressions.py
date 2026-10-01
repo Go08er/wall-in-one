@@ -9,7 +9,7 @@ from the 2026-09-30 compatibility survey). Before the store guard:
    ``description``, with no fault and no backup;
 3. editing schedules.json silently dropped a rule's unknown ``name``.
 
-Since Release 2 a rule ``name`` is a modeled field of schedules version 3, so
+Since 0.2.0 a rule ``name`` is a modeled field of schedules version 3, so
 probe three now proves the name is read as one and kept, the file moves to
 version 3, and the version-2 bytes are kept beside it first.
 """

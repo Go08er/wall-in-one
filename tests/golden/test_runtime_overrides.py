@@ -4,14 +4,14 @@ The transition rule: nothing changes what plays after an upgrade until the
 person sets something. On the golden profile that means:
 
 * an edit that uses no new field keeps ``playlists.json`` and
-  ``displays.json`` at version 1, byte for byte what Release 1 writes, and no
+  ``displays.json`` at version 1, byte for byte what 0.1.4 writes, and no
   ``runtime-overrides.toml`` ever appears;
 * the first per-playlist interval or shuffle, and the first display opt-in,
   bump their store once, after exactly one ``<file>.v1-backup`` of the
   released bytes;
 * ``runtime.toml`` never changes because of them. The overrides go to
   ``runtime-overrides.toml``, which exists only while one is in use;
-* a running Release 1 service never blocks saving them;
+* a running 0.1.4 service never blocks saving them;
 * idle with them in use writes only the unchanged first-start whitelist;
 * an overrides file from a newer release (a schema this build does not know)
   neither stops the service unit's start nor is touched by this build.
@@ -267,7 +267,7 @@ def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routin
     assert (profile.app_state / "displays.json.v1-backup").read_bytes() == released
 
 
-def test_a_release_one_service_never_blocks_saving_them(
+def test_a_v0_1_4_service_never_blocks_saving_them(
     golden: Golden, capsys: pytest.CaptureFixture[str]
 ) -> None:
     profile = golden.profile

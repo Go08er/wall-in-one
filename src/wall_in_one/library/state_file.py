@@ -451,7 +451,7 @@ class Reading[T]:
 
 # -- format-change guards ------------------------------------------------------
 #
-# Owner-approved for every Release 2 format change (2026-10-01):
+# Owner-approved for every 0.2.0 format change (2026-10-01):
 #
 # 1. Lazy bump on use. A file moves to a newer version only when the data
 #    being saved needs it; every other edit keeps writing the version the

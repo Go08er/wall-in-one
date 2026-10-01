@@ -1,7 +1,7 @@
-"""Release 2's format-change guards on a whole profile, starting with rule names.
+"""0.2.0's format-change guards on a whole profile, starting with rule names.
 
 Guard 1, lazy bump on use: an edit that uses no new field writes the version
-the file already has, byte for byte what 0.1.4 and 0.1.5 write, so most
+the file already has, byte for byte what 0.1.4 writes, so most
 profiles never leave the formats older builds read. Guard 2, one-time backup:
 the first save that does use one keeps the old bytes beside the file as
 ``<file>.v<old>-backup``, once, and without it the save is refused.
@@ -9,7 +9,7 @@ the first save that does use one keeps the old bytes beside the file as
 Every check diffs the whole sandbox home, so a stray backup, temporary or
 ``.broken`` copy fails as an unexpected write. Idle never bumps or backs up
 anything, and names never reach ``runtime.toml``. What older builds do with a
-version-3 file (0.1.5 refuses it, 0.1.4 narrows it) is in ``test_downgrade``.
+version-3 file (0.1.4 narrows it on its next edit) is in ``test_downgrade``.
 """
 
 from __future__ import annotations

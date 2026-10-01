@@ -14,7 +14,7 @@ for:
     A store file from a newer build is never rewritten, unknown keys survive
     edits, and ``settings.toml`` fails safe.
 ``test_schema_guards``
-    Release 2's format-change guards: an unnamed edit keeps schedules.json at
+    0.2.0's format-change guards: an unnamed edit keeps schedules.json at
     version 2 byte for byte, the first rule name bumps it to 3 after exactly
     one backup, idle never bumps, and names never reach ``runtime.toml``.
 ``test_runtime_overrides``

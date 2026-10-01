@@ -214,7 +214,7 @@ def test_no_allowance_may_touch_evidence() -> None:
 
 
 def _decorate_every_store(profile: Profile) -> None:
-    """What Release 2 will write: unknown keys at the top and on every record."""
+    """What a newer release would write: unknown keys at the top and on every record."""
     for name in STORE_FILES:
         target = profile.app_state / name
         if target.is_file():
@@ -273,7 +273,7 @@ STORE_MODULES: Final[dict[str, Any]] = {
 def test_idle_with_a_newer_store_file_writes_nothing_at_all(
     golden: Golden, filename: str, scenario: str
 ) -> None:
-    """Release 2's version bump, opened by this build: reported, compiled from
+    """A newer release's version bump, opened by this build: reported, compiled from
     nothing, written to never. Not even the first-start runtime.toml rebase:
     compilation refuses a newer store, so the last-known-good document stays.
     """
@@ -316,7 +316,7 @@ def test_idle_with_an_unknown_settings_key_never_writes_settings(
 
     runtime.toml may be (re)compiled, but only to exactly what the known keys
     produce: removing the unknown key afterwards must leave it current. No
-    ui.toml appears either; Release 1 never creates it.
+    ui.toml appears either; idle never creates it.
     """
     profile = golden.profile
     settings = profile.app_config / "settings.toml"

@@ -336,6 +336,32 @@ def test_dynamics_back_on_restores_them(applied_paths: list[Path]) -> None:
     assert len(session.playlist) == 1
 
 
+@pytest.mark.parametrize("dynamics_before", [True, False], ids=["pausing", "resuming"])
+def test_a_session_without_playback_only_rederives_the_rotation_on_dynamics(
+    dynamics_before: bool,
+) -> None:
+    """The authoring GUI's Session never re-applies when Dynamics changes.
+
+    The Rust runtime owns the wallpaper there. No ``applied_paths`` fixture on
+    purpose: ``conftest`` refuses every Noctalia mutator this could reach.
+    """
+    settings = replace(config.Settings(), dynamics_enabled=dynamics_before).validated()
+    library = Library(roots=(Path("/w"),), items=(_still("a"), _video("lonely", paired=False)))
+    session = Session(
+        settings,
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        scanner=lambda roots: library,
+        rng=random.Random(11),
+        owns_playback=False,
+    )
+    session.refresh()
+
+    session.update_settings(replace(session.settings, dynamics_enabled=not dynamics_before))
+
+    assert session.current is None
+    assert len(session.playlist) == (1 if dynamics_before else 2)
+
+
 def test_pausing_dynamics_swaps_a_playing_video_for_its_still(
     applied_paths: list[Path],
 ) -> None:

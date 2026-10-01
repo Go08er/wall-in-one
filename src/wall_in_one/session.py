@@ -582,8 +582,13 @@ class Session:
         display_store: displays.Store | None = None,
         removal_store: removals.Store | None = None,
         clock: Callable[[], datetime] | None = None,
+        owns_playback: bool = True,
     ) -> None:
         self._settings = settings
+        #: False for the authoring GUI. The Rust runtime owns the wallpaper
+        #: there, so a settings change only re-derives what is playable and
+        #: never re-applies through the Python applier from GTK's thread.
+        self._owns_playback = owns_playback
         # Only when we build the renderer ourselves: an applier handed in has
         # been configured by whoever handed it in, and reaching into it would
         # overwrite that.
@@ -1625,7 +1630,12 @@ class Session:
             self._applier.scenes.scaling = settings.scene_scaling
             self._applier.scenes.clamp = settings.scene_clamp
 
-        if settings.dynamics_enabled != previous.dynamics_enabled:
+        if settings.dynamics_enabled != previous.dynamics_enabled and not self._owns_playback:
+            # The playable set still changes with dynamics. Putting a wallpaper
+            # up does not happen here: the runtime reloads the compiled config
+            # and reapplies its own entry.
+            self._rebuild_playlist()
+        elif settings.dynamics_enabled != previous.dynamics_enabled:
             # Pausing a video with no still used to mean jumping to an unrelated
             # wallpaper. Take a still from it first: a third of a second of
             # ffmpeg, once per video, against the thing the user is watching

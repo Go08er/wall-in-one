@@ -371,7 +371,7 @@ class Application(Adw.Application):
         self._provider = Gtk.CssProvider()
         self._control: server.SocketServer | None = None
         self._resolved: source.ResolvedPalette | None = None
-        self._session = Session(self._settings)
+        self._session = Session(self._settings, owns_playback=self._service_start)
         self._cycle_source: int = 0
         self._schedule_source: int = 0
         self._runtime_status_source: int = 0
@@ -1186,7 +1186,7 @@ class Application(Adw.Application):
         previous = self._session
         self._settings = settings
         self._settings_requested = settings
-        self._session = Session(settings)
+        self._session = Session(settings, owns_playback=self._service_start)
         previous.shutdown()
         if self._window is not None:
             self._window.apply_settings(settings)

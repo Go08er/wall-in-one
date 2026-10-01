@@ -47,6 +47,7 @@ from wall_in_one.ui.app import (  # noqa: E402
     _RuntimeHealthResult,
 )
 from wall_in_one.ui.window import MainWindow  # noqa: E402
+from wall_in_one.wallpaper import renderer  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -2903,4 +2904,72 @@ def test_action_cannot_overtake_a_trailing_configuration_reload(
         assert calls[:3] == ["reload", "reload", "pause"]
     finally:
         release_first.set()
+        _close(application)
+
+
+@pytest.mark.parametrize("dynamics_before", [True, False], ids=["pausing", "resuming"])
+def test_gui_dynamics_toggle_leaves_the_wallpaper_to_the_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dynamics_before: bool
+) -> None:
+    """Toggling Dynamics in the GUI must not put a wallpaper up from Python.
+
+    The Rust runtime owns the wallpaper and reapplies from the recompiled
+    config. The authoring Session used to re-apply its own cursor through the
+    Python applier on GTK's thread: ``wallpaper-set`` plus the palette, in
+    either direction, because the GUI's applier never has a current item.
+    ``conftest`` refuses those calls, so this needs only a playable library.
+    """
+    root = tmp_path / "library"
+    root.mkdir()
+    still = root / "a.png"
+    still.write_bytes(b"\x89PNG\r\n\x1a\n")
+    video = root / "clip.mp4"
+    video.write_bytes(b"\0")
+    config.save(
+        replace(
+            config.Settings(),
+            roots=(root,),
+            scan_workshop=False,
+            dynamics_enabled=dynamics_before,
+        )
+    )
+
+    def refuse_renderer(*_arguments: object, **_keywords: object) -> None:
+        raise AssertionError("the GUI started a Python video renderer")
+
+    monkeypatch.setattr(renderer.Renderer, "start", refuse_renderer)
+    application = _application(tmp_path, monkeypatch)
+    published: list[bool] = []
+
+    def publish() -> bool:
+        published.append(True)
+        return True
+
+    monkeypatch.setattr(application, "_publish_runtime_for_context", publish)
+    try:
+        assert application.settings.dynamics_enabled is dynamics_before
+        application.session.adopt_library(
+            Library(
+                (root,),
+                (
+                    MediaItem(path=still, kind=Kind.STILL, size=8, mtime=0),
+                    # Unpaired, so it is playable only while Dynamics is on.
+                    MediaItem(path=video, kind=Kind.VIDEO, size=1, mtime=0),
+                ),
+            ),
+            reconcile_workshop=False,
+        )
+        playing_before = {item.path for item in application.session.playlist.items}
+        assert playing_before == ({still, video} if dynamics_before else {still})
+
+        application.update_settings(dynamics_enabled=not dynamics_before)
+
+        assert application.settings.dynamics_enabled is not dynamics_before
+        assert published, "the runtime was not given the new document"
+        assert application.session.current is None
+        # The playable set still follows the setting; only playback is the
+        # runtime's.
+        playing_after = {item.path for item in application.session.playlist.items}
+        assert playing_after == ({still} if dynamics_before else {still, video})
+    finally:
         _close(application)

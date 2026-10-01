@@ -55,6 +55,7 @@ testpaths = ["tests"]
 markers = [
     "gui: needs a display and the GTK stack",
     "noctalia: needs the noctalia binary on PATH",
+    "downgrade: needs WIO_OLD_SRC pointing at an older checkout's src (tools/golden-downgrade.sh)",
 ]
 
 [tool.ruff]

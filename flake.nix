@@ -8,6 +8,10 @@
       url = "github:Go08er/goober-noctalia-plugins-v5";
       flake = false;
     };
+    # The last shipped release, the one build every user can roll back to.
+    # Deliberately no `follows`: its own flake.lock is part of what shipped,
+    # so the upgrade-rollback VM installs exactly that build.
+    wio-v0-1-4.url = "github:Go08er/wall-in-one/v0.1.4";
   };
 
   outputs =

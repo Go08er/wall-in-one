@@ -214,6 +214,10 @@ def test_an_old_portrait_scene_still_is_still_recaptured_at_idle(
     "screens",
     [
         pytest.param((), id="niri-not-reachable"),
+        pytest.param(
+            (outputs.Output("DP-1", physical_width=1920, physical_height=1080), LAPTOP),
+            id="a-16:9-monitor-listed-first",
+        ),
     ],
 )
 def test_idle_maintenance_never_recaptures_an_existing_scene_still(

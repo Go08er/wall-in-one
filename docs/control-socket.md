@@ -195,11 +195,13 @@ choice.
 to be plain videos, which play through mpvpaper like any other; only true
 `scene` wallpapers need `linux-wallpaperengine`, and their stills are captured
 through it in a window without anything appearing on screen. The capture window
-uses the target display's physical mode (or a 2560x1440 fallback), because the
-engine's default window produces a small portrait screenshot. Managed scene
-stills with the old portrait/wrong-resolution shape are regenerated
-automatically and atomically; custom still choices are never overwritten. A
-manual **Regenerate** control is also available in a scene's pairing editor.
+uses the display's physical mode as niri reports it, because the engine's
+default window produces a small portrait screenshot; when niri cannot be asked,
+no scene still is taken. A managed scene still smaller than the display in both
+directions (the old portrait captures) is regenerated automatically and
+atomically; one that is merely another shape, say after plugging in a 16:9
+monitor, is kept. Custom still choices are never overwritten. A manual
+**Regenerate** control is also available in a scene's pairing editor.
 
 **Play Wallpaper Engine scenes** is on by default and is visible under
 **Settings -> Playback**. The engine is single-instance per output and other

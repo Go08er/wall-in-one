@@ -14,15 +14,34 @@ attempted set were not remembered.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from wall_in_one import worker_processes
+from wall_in_one.library import pairing
 from wall_in_one.library import stills as still_backend
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.ui.stills import StillMaker
+from wall_in_one.wallpaper import scenes
+
+#: What niri reports for the display in these tests, unless a test says otherwise.
+DISPLAY = (2560, 1600)
+
+
+@pytest.fixture(autouse=True)
+def measured_display(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """No real `niri msg`: a measured display, and the threads that asked for it."""
+    asked: list[str] = []
+
+    def measure() -> tuple[int, int]:
+        asked.append(threading.current_thread().name)
+        return DISPLAY
+
+    monkeypatch.setattr(scenes, "measured_capture_size", measure)
+    return asked
 
 
 def item(name: str, kind: Kind, still: Path | None = None) -> MediaItem:
@@ -66,8 +85,9 @@ def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
         _root: Path,
         *,
         processes: object | None = None,
+        size: object | None = None,
     ) -> Path | None:
-        del processes
+        del processes, size
         made.asked.append(target.path)
         return None
 
@@ -83,8 +103,9 @@ def maker(monkeypatch: pytest.MonkeyPatch) -> Recording:
         root: Path,
         *,
         processes: object | None = None,
+        size: object | None = None,
     ) -> Path | None:
-        del processes
+        del processes, size
         made.asked.append(target.path)
         return root / f"{target.path.stem}.png" if made._succeeds else None
 
@@ -192,19 +213,114 @@ def test_a_scene_that_already_has_a_still_is_left_alone(maker: Recording) -> Non
     assert maker.asked == []
 
 
+def _managed_scene(root: Path, workshop_id: str = "1647046763") -> MediaItem:
+    """A scene paired with its own automatic still under ``root``."""
+    return MediaItem(
+        path=Path(f"/w/{workshop_id}"),
+        kind=Kind.SCENE,
+        size=1,
+        mtime=0,
+        scene=workshop_id,
+        paired_still=pairing.still_directory(root) / f"{workshop_id}.png",
+    )
+
+
 def test_a_stale_automatic_scene_still_is_queued_again(
     maker: Recording, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    scene = item("1647046763", Kind.SCENE, still=Path("/w/scene-still.png"))
-    monkeypatch.setattr(
-        "wall_in_one.ui.stills.stills.scene_capture_required",
-        lambda candidate, _root: candidate.path == scene.path,
-    )
+    scene = _managed_scene(Path("/w"))
+    judged: list[dict[str, object]] = []
+
+    def stale(candidate: MediaItem, _root: Path, **keywords: object) -> bool:
+        judged.append(keywords)
+        return candidate.path == scene.path
+
+    monkeypatch.setattr("wall_in_one.ui.stills.stills.scene_capture_required", stale)
 
     maker.request((scene,), Path("/w"), maker.batches.append)
     maker.drain()
 
     assert maker.asked == [scene.path]
+    assert judged == [{"size": DISPLAY, "automatic": True}], "the unattended rule"
+
+
+def _png_header(path: Path, width: int, height: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+    )
+
+
+def test_a_full_size_managed_scene_still_is_kept_and_asks_for_no_rescan(
+    maker: Recording, tmp_path: Path
+) -> None:
+    """Of another shape than the display, but not smaller: not touched at idle."""
+    scene = _managed_scene(tmp_path)
+    assert scene.paired_still is not None
+    _png_header(scene.paired_still, 3840, 2160)
+
+    maker.request((scene,), tmp_path, maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == []
+    assert maker.batches == []
+
+
+def test_an_undersized_managed_scene_still_is_recaptured(maker: Recording, tmp_path: Path) -> None:
+    scene = _managed_scene(tmp_path)
+    assert scene.paired_still is not None
+    _png_header(scene.paired_still, 1270, 1537)
+
+    maker.request((scene,), tmp_path, maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == [scene.path]
+
+
+def test_no_scene_is_touched_without_a_measured_display(
+    maker: Recording, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: None)
+    scene = _managed_scene(tmp_path)
+    assert scene.paired_still is not None
+    _png_header(scene.paired_still, 2, 2)
+    items = (scene, item("1647046763-new", Kind.SCENE), item("clip.mp4", Kind.VIDEO))
+
+    maker.request(items, tmp_path, maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == [Path("/w/clip.mp4")], "videos go on regardless"
+
+
+def test_the_display_is_measured_on_the_worker_once_per_batch(
+    maker: Recording, measured_display: list[str], tmp_path: Path
+) -> None:
+    """`niri msg` is a child process; the end of a scan must not wait for one."""
+    items = (
+        _managed_scene(tmp_path, "1"),
+        _managed_scene(tmp_path, "2"),
+        item("3", Kind.SCENE),
+        item("clip.mp4", Kind.VIDEO),
+    )
+
+    maker.request(items, tmp_path, maker.batches.append)
+    maker.drain()
+
+    assert len(measured_display) == 1
+    assert measured_display[0].startswith("still"), "on the pool, not the calling thread"
+    assert set(maker.asked) == {Path("/w/1"), Path("/w/2"), Path("/w/3"), Path("/w/clip.mp4")}
+
+
+def test_a_video_only_batch_asks_niri_nothing(
+    maker: Recording, measured_display: list[str]
+) -> None:
+    maker.request((item("clip.mp4", Kind.VIDEO),), Path("/w"), maker.batches.append)
+    maker.drain()
+
+    assert measured_display == []
 
 
 def test_stills_are_left_out_of_the_batch(maker: Recording) -> None:
@@ -288,7 +404,9 @@ def test_shutdown_terminates_the_active_still_child_within_budget(
         _root: Path,
         *,
         processes: worker_processes.Cancellation | None = None,
+        size: object | None = None,
     ) -> Path | None:
+        del size
         assert processes is not None
         try:
             processes.run(

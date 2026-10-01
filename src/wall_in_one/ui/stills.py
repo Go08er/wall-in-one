@@ -37,6 +37,7 @@ from gi.repository import GLib
 from wall_in_one import worker_processes
 from wall_in_one.library import stills
 from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.wallpaper import scenes
 
 #: Deliberately one. See the module docstring.
 MAX_WORKERS: Final = 1
@@ -88,10 +89,18 @@ class StillMaker:
             # to. Under the pairing model every item is a pairing, and a scene
             # with no still has nothing to show when dynamics are off and
             # nothing for an adaptive palette to be generated from.
+            #
+            # A scene whose still is the managed one is handed over too, so
+            # the worker can see whether it is an old undersized capture. That
+            # needs the still's header and niri's answer, and this runs on the
+            # main thread at the end of every scan: only path arithmetic here.
             if item.kind.moves
             and (
                 item.paired_still is None
-                or (item.kind is Kind.SCENE and stills.scene_capture_required(item, root))
+                or (
+                    item.kind is Kind.SCENE
+                    and item.paired_still == stills.automatic_destination(item, root)
+                )
             )
             and item.path not in self._attempted
         ]
@@ -160,13 +169,29 @@ class StillMaker:
 
     def _run(self, items: tuple[MediaItem, ...], root: Path, callback: Callback) -> None:
         made = 0
+        # Asked once per batch, here on the worker: `niri msg` is a child
+        # process, and neither the main thread nor every scene should wait on
+        # one. With no display measured no scene still can be taken, and an
+        # existing one is never judged against a guess.
+        display = (
+            scenes.measured_capture_size() if any(i.kind is Kind.SCENE for i in items) else None
+        )
         for item in items:
             if self._processes.cancelled():
                 return
+            if item.kind is Kind.SCENE and (
+                display is None
+                or (
+                    item.paired_still is not None
+                    and not stills.scene_capture_required(item, root, size=display, automatic=True)
+                )
+            ):
+                # Kept as it is. Not counted: a rescan would change nothing.
+                continue
             # `ensure` swallows its own failures: a still that cannot be made
             # is not a reason to stop making the others, and the video still
             # plays either way.
-            if stills.ensure(item, root, processes=self._processes) is not None:
+            if stills.ensure(item, root, processes=self._processes, size=display) is not None:
                 made += 1
         if made == 0 or self._processes.cancelled():
             return

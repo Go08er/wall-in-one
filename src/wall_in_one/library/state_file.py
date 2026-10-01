@@ -461,28 +461,42 @@ class Reading[T]:
 #    ``<file>.v<old>-backup``; that copy is never overwritten or deleted, and
 #    without it the save is refused.
 #
-# A store adopts both in four steps; schedules.py is the worked example.
+# A store adopts both in five steps; schedules.py is the worked example
+# (FORMATS, required_version, _read, save and Store._mutate there).
 #
-# * Declare its versions once::
+# * Declare its versions once. For schedules: v1 is read, v2 is what every
+#   supported older build reads and writes, v3 adds rule names::
 #
 #       FORMATS = state_file.FormatVersions(oldest=1, floor=2, current=3)
 #
-# * Say which version the data needs, as a pure function of the value::
+#   A store whose current version is also its floor today (playlists.json
+#   at 1) declares ``FormatVersions(oldest=1, floor=1, current=2)`` when it
+#   adds version 2.
+# * Say which version the data needs -- "the minimum version that can
+#   represent this data" -- as a pure function of the value::
 #
 #       def required_version(rules: Sequence[Rule]) -> int:
-#           return NAMED_RULES_VERSION if any(rule.name for rule in rules) else FORMATS.floor
+#           if any(rule.name is not None for rule in rules):
+#               return 3
+#           return FORMATS.floor
 #
+#   Add the new field to the store's :class:`Shape` so it is modeled rather
+#   than carried, and serialize it only when it is used.
 # * Record the declared version when reading:
 #   ``Reading(..., version=FORMATS.declared(document))``.
 # * In the locked mutation, after the change and before anything is moved
 #   or written::
 #
 #       version = FORMATS.to_write(reading.version, required_version(value))
-#       if FORMATS.is_bump(reading.version, version):
+#       if reading.version is not None and FORMATS.is_bump(reading.version, version):
 #           state_file.backup_before_bump(path, observed=observed, replaced=reading.version)
 #       ...  # then preserve_faulted() if faulted, then save at ``version``
 #
-#   and turn an ``OSError`` from the backup into the store's own refusal.
+#   and turn an ``OSError`` from the backup into the store's own refusal,
+#   saying that nothing was changed.
+# * Write ``version`` into the saved document instead of a constant, and
+#   check every other writer of the file (an importer, a migration) does the
+#   same with ``FORMATS.to_write(None, required_version(value))``.
 
 
 @dataclass(frozen=True, slots=True)

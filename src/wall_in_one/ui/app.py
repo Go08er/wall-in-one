@@ -52,6 +52,7 @@ from wall_in_one.session import (
 from wall_in_one.theme import css, noctalia, source
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
+from wall_in_one.ui.window_services import WindowServices
 from wall_in_one.wallpaper import outputs
 from wall_in_one.wallpaper.applier import Applied, ApplyError
 
@@ -331,7 +332,9 @@ class Application(Adw.Application):
         # settings: Preferences shows why and every write path refuses. This
         # is the startup snapshot; config's writers re-check the file itself.
         self._settings_unknown_keys = loaded_settings.unknown_keys
-        self._window: MainWindow | None = None
+        # Typed by what the application uses, not by the classic window's
+        # class, so any window implementing WindowServices can stand here.
+        self._window: WindowServices | None = None
         # An unresolved first run is asked once per graphical process. A real
         # choice persists naturally as the first configured root; dismissing
         # does not invent a durable "asked" bit and is offered again next run.
@@ -747,6 +750,8 @@ class Application(Adw.Application):
     def do_activate(self) -> None:
         if self._window is None:
             window = MainWindow(self, self._settings)
+            # Connected on the concrete GTK class: the signal is not part of
+            # what the application asks of a window once it is stored.
             window.connect("close-request", self._on_close_request)
             self._window = window
             self._window_generation += 1
@@ -881,7 +886,7 @@ class Application(Adw.Application):
         dialog.set_close_response("later")
         dialog.connect("response", self._on_legacy_migration_response, found)
         self._legacy_migration_prompt = dialog
-        dialog.present(self._window)
+        dialog.present(self._dialog_parent())
 
     def _show_legacy_migration_progress(self, heading: str, body: str) -> None:
         """Show a modal progress state which cannot start another operation."""
@@ -895,7 +900,7 @@ class Application(Adw.Application):
         dialog.set_response_enabled("working", False)
         dialog.set_can_close(False)
         self._legacy_migration_prompt = dialog
-        dialog.present(self._window)
+        dialog.present(self._dialog_parent())
 
     def _close_legacy_migration_dialog(self) -> None:
         dialog = self._legacy_migration_prompt
@@ -1119,7 +1124,7 @@ class Application(Adw.Application):
         dialog.set_close_response("later")
         dialog.connect("response", self._on_legacy_probe_failure_response)
         self._legacy_migration_prompt = dialog
-        dialog.present(self._window)
+        dialog.present(self._dialog_parent())
 
     def _on_legacy_probe_failure_response(
         self,
@@ -1236,7 +1241,7 @@ class Application(Adw.Application):
         dialog.set_close_response("later")
         dialog.connect("response", self._on_library_root_response, suggested)
         self._library_root_prompt = dialog
-        dialog.present(self._window)
+        dialog.present(self._dialog_parent())
 
     def _on_library_root_response(
         self,
@@ -1254,7 +1259,7 @@ class Application(Adw.Application):
         if self._window is None:
             return
         chooser = Gtk.FileDialog(title="Choose your wallpaper folder", modal=True)
-        chooser.select_folder(self._window, None, self._on_initial_library_root_chosen)
+        chooser.select_folder(self._dialog_parent(), None, self._on_initial_library_root_chosen)
 
     def _on_initial_library_root_chosen(
         self,
@@ -1332,7 +1337,10 @@ class Application(Adw.Application):
         # in-memory recovery defaults here used to overwrite a malformed file,
         # and even a valid future document lost unknown keys merely because an
         # older app was opened and closed without an edit.
-        if self._window is window:
+        # The stored reference is typed as WindowServices, which says nothing
+        # about GTK, so compare identities as plain objects.
+        closing: object = window
+        if self._window is closing:
             # The default handler destroys the window after this callback.
             # Drop our reference now so a later activation builds a fresh one
             # instead of trying to present a destroyed GTK object.
@@ -1845,6 +1853,15 @@ class Application(Adw.Application):
         """Put a management-page result in the window's toast overlay."""
         if self._window is not None:
             self._window.report(message)
+
+    def _dialog_parent(self) -> Gtk.Window | None:
+        """The window as a dialog parent, when it is a real GTK window.
+
+        Real application windows always are. `WindowServices` cannot say so; the
+        narrowing keeps that GTK detail out of the Protocol.
+        """
+        window: object = self._window
+        return window if isinstance(window, Gtk.Window) else None
 
     # -- library ---------------------------------------------------------
 
@@ -3350,7 +3367,7 @@ class Application(Adw.Application):
     def _finish_runtime_status(
         self,
         future: Future[_RuntimeStatusReply],
-        window: MainWindow,
+        window: WindowServices,
         generation: int,
     ) -> bool:
         """Render a status result only into the window that requested it."""
@@ -3444,7 +3461,7 @@ class Application(Adw.Application):
     def _adopt_runtime_status(
         self,
         status: dict[str, object],
-        window: MainWindow | None,
+        window: WindowServices | None,
         *,
         health_document: str | None = None,
     ) -> None:
@@ -3779,7 +3796,7 @@ class Application(Adw.Application):
     def _finish_gui_runtime_call(
         self,
         future: Future[tuple[Response, bool]],
-        window: MainWindow | None,
+        window: WindowServices | None,
         generation: int,
         on_success: Callable[[bool], None] | None,
         on_complete: Callable[[Response, bool], None] | None,

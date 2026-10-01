@@ -480,11 +480,13 @@ class RealAppState(GObject.Object):
             reason = Reason(route, "" if picked_one else truth.playlist)
             screens.append(OnScreen("Display", wid, name, reason))
             following = not truth.is_manual
+        # The runtime's `toggle` (what Play sends to displays that disagree)
+        # pauses everything if any display plays and plays everything
+        # otherwise, so "playing" means that one does. A paused-and-stopped
+        # mix plays nothing: it reads as paused, and Play offers Play.
         playback: PlaybackState = "playing"
-        if states and all(state == "paused" for state in states):
-            playback = "paused"
-        elif states and all(state == "stopped" for state in states):
-            playback = "stopped"
+        if states and "playing" not in states:
+            playback = "stopped" if all(state == "stopped" for state in states) else "paused"
         return Player(
             service="running",
             screens=tuple(screens),

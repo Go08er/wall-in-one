@@ -743,6 +743,37 @@ def test_play_resumes_or_brings_the_displays_together(
     assert backend.sent == [(None, verb, None), ("HDMI-A-1", "play", None)]
 
 
+@pytest.mark.parametrize(
+    ("states", "shown", "verb"),
+    [
+        (("paused", "stopped"), "paused", "toggle"),
+        (("stopped", "stopped"), "stopped", "play"),
+        (("playing", "stopped"), "playing", "toggle"),
+        (("playing", "paused"), "playing", "toggle"),
+    ],
+)
+def test_play_shows_what_a_press_would_do_over_a_mix_of_displays(
+    backend: FakeApplication, states: tuple[str, str], shown: str, verb: str
+) -> None:
+    # `toggle` pauses everything when any display plays, else plays them all:
+    # a paused-and-stopped mix plays nothing, so Play must not show Pause.
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    overall = states[0] if states[0] == states[1] else "mixed"
+    status = _status({"DP-1": items[1].path, "HDMI-A-1": items[0].path}, playback=overall)
+    displays = status["displays"]
+    assert isinstance(displays, list)
+    for record, state in zip(displays, states, strict=True):
+        record.update(playback_state=state, paused=state == "paused", stopped=state == "stopped")
+    backend.status_model.adopt(status)
+
+    assert adapter.player().playback == shown
+    controls = adapter.controls
+    assert controls is not None
+    controls.toggle_play()
+    assert backend.sent == [(None, verb, None)]
+
+
 def test_play_retries_a_stopped_renderer(backend: FakeApplication) -> None:
     items = backend.session.library.items
     adapter, _keeper = _adapter(backend)

@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import colorsys
 import datetime as dt
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import pairwise
 
-from .. import art, data
+from .. import art
 from ..catalog import DAYS, MONTHS, MONTHS_LONG
 from ..models import Playlist, Rule
 from ..state import rule_matches
@@ -126,11 +127,6 @@ def summary(rule: Rule, display: bool = True, overnight: bool = True) -> str:
     return " · ".join(parts)
 
 
-def playlist_name(pid: str) -> str:
-    playlist = data.PLAYLIST_BY_ID.get(pid)
-    return playlist.name if playlist else "Missing playlist"
-
-
 # ---------------------------------------------------------------------------
 # Colors: one per playlist, taken from its pictures, kept distinct.
 # ---------------------------------------------------------------------------
@@ -155,12 +151,13 @@ def _hue(hex_color: str) -> float:
     return colorsys.rgb_to_hls(r, g, b)[0]
 
 
-def _mood_hue(playlist: Playlist) -> float:
+def _mood_hue(state, playlist: Playlist) -> float:
     """Day playlists are colored by their land, night playlists by their sky."""
     if not playlist.entries:
         return 0.6
-    look = art.look_for(*data.BY_ID[playlist.entries[0]].key)
-    if data.BY_ID[playlist.entries[0]].night:
+    first = state.wallpaper(playlist.entries[0])
+    look = art.look_for(*first.key)
+    if first.night:
         return colorsys.rgb_to_hls(*look.sky_top)[0]
     return look.hue
 
@@ -168,7 +165,8 @@ def _mood_hue(playlist: Playlist) -> float:
 _COLORS: dict[tuple[str, ...], dict[str, str]] = {}
 
 
-def playlist_colors(playlists: list[Playlist]) -> dict[str, str]:
+def playlist_colors(state) -> dict[str, str]:
+    playlists = state.playlists
     key = tuple(p.id for p in playlists)
     if key not in _COLORS:
         taken: dict[str, str] = {}
@@ -179,7 +177,7 @@ def playlist_colors(playlists: list[Playlist]) -> dict[str, str]:
                 continue
             if not free:
                 free = dict(PALETTE)
-            hue = _mood_hue(playlist)
+            hue = _mood_hue(state, playlist)
             name = min(free, key=lambda n: min(abs(_hue(free[n]) - hue), 1 - abs(_hue(free[n]) - hue)))
             taken[playlist.id] = free.pop(name)
         _COLORS[key] = taken
@@ -187,7 +185,7 @@ def playlist_colors(playlists: list[Playlist]) -> dict[str, str]:
 
 
 def color_for(state, pid: str) -> str:
-    return playlist_colors(state.playlists).get(pid, FALLBACK_COLOR)
+    return playlist_colors(state).get(pid, FALLBACK_COLOR)
 
 
 def rgb(hex_color: str) -> tuple[float, float, float]:
@@ -331,8 +329,11 @@ def never_wins(rules: list[Rule], rule: Rule, monday: dt.date, connectors: list[
     return applies
 
 
-def overlaps(rules: list[Rule], rule: Rule, monday: dt.date) -> tuple[list[str], list[str]]:
-    """(playlists this rule overrides, playlists that override it) during a week it applies."""
+def overlaps(
+    rules: list[Rule], rule: Rule, monday: dt.date, name_of: Callable[[str], str]
+) -> tuple[list[str], list[str]]:
+    """(names of the playlists this rule overrides, of those that override it) during a
+    week it applies. ``name_of`` turns a playlist id into its name (state.playlist_name)."""
     if rule.months and seasonal_off([rule], monday):
         monday = next_week_for(rule, monday)
     beats: list[str] = []
@@ -350,7 +351,7 @@ def overlaps(rules: list[Rule], rule: Rule, monday: dt.date) -> tuple[list[str],
             for other in active:
                 if other is probe or other.playlist == probe.playlist:
                     continue
-                name = playlist_name(other.playlist)
+                name = name_of(other.playlist)
                 bucket = beats if listing.index(other) < index else beaten
                 if name not in bucket:
                     bucket.append(name)

@@ -1,6 +1,7 @@
 """End-to-end smoke test of the prototype (headless): drives every page and demo scene,
 reports exceptions. Run with tools/smoke.sh."""
 
+import copy
 import sys
 import threading
 import time
@@ -15,6 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib
 from wio_demo import art, data, thumbs, ui
+from wio_demo.models import Rule
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
 
@@ -155,6 +157,7 @@ def playlist_actions(state, window) -> None:
     page.duplicate()
     copy = page._pid
     assert copy == f"{twin}-copy", copy
+    assert window._nav_keys[window.sidebar.get_selected()] == f"playlist:{copy}", "the sidebar should follow"
     page._delete()
     assert not state.has_playlist(copy)
     restore = state.delete_playlist(twin)
@@ -214,6 +217,55 @@ def display_actions(state, window) -> None:
     assert "HDMI-A-1" not in state.manual and state.current["HDMI-A-1"] == state.playlist("cozy-rain").entries[0]
     page.demo("select:DP-1")
     assert state.assigned == {"DP-1": "", "HDMI-A-1": ""} and state.color_display == "DP-1"
+
+
+def schedule_actions(state, window) -> None:
+    window.navigate("schedule")
+    page = window.pages["schedule"]
+    page.demo("")  # the demo rules
+    page._save(Rule("draft", "mc-night", [2], "10:00", "11:00"), None)
+    rule = state.rules[-1]
+    assert rule.playlist == "mc-night" and rule.id.startswith("rule-"), rule
+    edited = copy.deepcopy(rule)
+    edited.playlist = "cozy-rain"
+    page._save(edited, rule)
+    assert state.rule(rule.id).playlist == "cozy-rain"
+    assert state.update_rule(rule.id, edited) is None  # nothing changed
+    other = copy.deepcopy(edited)
+    other.days = [5, 6]
+    undo = state.update_rule(rule.id, other)
+    assert state.rule(rule.id).days == [5, 6]
+    undo()
+    assert state.rule(rule.id).days == [2]
+    page.duplicate_rule(rule)
+    page._editor.force_close()
+    twin = state.rules[state.rules.index(rule) + 1]
+    assert twin.playlist == rule.playlist and twin.id != rule.id
+    page.move_rule(twin, -1)  # rolls in the list, then commits
+    page._list.flush()
+    assert state.rules.index(twin) < state.rules.index(rule)
+    order = [r.id for r in state.rules]
+    undo = state.reorder_rules(list(reversed(order)))
+    assert [r.id for r in state.rules] == list(reversed(order))
+    undo()
+    assert [r.id for r in state.rules] == order
+    assert state.reorder_rules(order) is None
+    page._toggle(rule, False)
+    settle(lambda: not state.rule(rule.id).enabled)
+    assert not state.rule(rule.id).enabled
+    state.set_rule_enabled(rule.id, True)
+    page._fallback.set_selected(page._fallback_ids.index("mc-day"))
+    assert state.fallback == "mc-day"
+    undo = state.set_fallback("frog-night")
+    undo()
+    assert state.fallback == "mc-day" and state.set_fallback("mc-day") is None
+    page.delete_rule(twin)
+    undo = state.delete_rule(rule.id)
+    undo()
+    page.delete_rule(rule)
+    assert state.rule(rule.id) is None and state.delete_rule(rule.id) is None
+    page.demo("")
+    assert state.fallback == "all-media" and state.rules[0].id == "daytime"
 
 
 def build_steps(app, holder):
@@ -294,7 +346,22 @@ def build_steps(app, holder):
             "drag",
             "select",
         ],
-        "schedule": ["edit:weekend-days", "new", "why", "drag", "december", "rules", "pick", "reorder"],
+        "schedule": [
+            "edit:weekend-days",
+            "new",
+            "why",
+            "drag",
+            "december",
+            "rules",
+            "pick",
+            "reorder",
+            "enable",
+            "disable:daytime",
+            "assign:HDMI-A-1=cozy-rain",
+            "move:evening",
+            "delete:december",
+            "",
+        ],
         "displays": [
             "select:HDMI-A-1",
             "advanced",
@@ -369,6 +436,7 @@ def build_steps(app, holder):
     steps.append(("library select off", lambda: w().pages["library"]._select.set_active(False)))
     steps.append(("playlist actions", lambda: playlist_actions(s(), w())))
     steps.append(("display actions", lambda: display_actions(s(), w())))
+    steps.append(("schedule actions", lambda: schedule_actions(s(), w())))
     steps.append(
         (
             "store select all",

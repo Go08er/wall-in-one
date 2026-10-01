@@ -14,7 +14,6 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
-from .. import art, data
 from ..catalog import DAYS, DAYS_LONG, MONTHS, MONTHS_LONG
 from ..models import Rule
 from . import schedule_model as model
@@ -23,7 +22,7 @@ from .schedule_calendar import WeekPreview
 TIMES = [model.hhmm(m) for m in range(0, model.DAY_MINUTES, 15)]
 
 
-def playlist_factory(size: int = 26) -> Gtk.SignalListItemFactory:
+def playlist_factory(state, size: int = 26) -> Gtk.SignalListItemFactory:
     """List items for a model of playlist ids: mosaic cover + name."""
     factory = Gtk.SignalListItemFactory()
 
@@ -39,7 +38,7 @@ def playlist_factory(size: int = 26) -> Gtk.SignalListItemFactory:
 
     def bind(_factory, item) -> None:
         pid = item.get_item().get_string()
-        playlist = data.PLAYLIST_BY_ID.get(pid)
+        playlist = state.playlist(pid) if state.has_playlist(pid) else None
         box = item.get_child()
         image, label = box.get_first_child(), box.get_last_child()
         if playlist is None:
@@ -51,7 +50,7 @@ def playlist_factory(size: int = 26) -> Gtk.SignalListItemFactory:
             image.set_from_icon_name(playlist.icon or "view-grid-symbolic")
             image.add_css_class("schedule-cover-icon")
         else:
-            image.set_from_paintable(art.mosaic(data.cover_keys(playlist), 64))
+            image.set_from_paintable(state.playlist_cover(pid, 64))
             image.remove_css_class("schedule-cover-icon")
 
     factory.connect("setup", setup)
@@ -190,7 +189,7 @@ class RuleEditor(Adw.Dialog):
             self._playlist_ids.append(self.draft.playlist)
         self._playlist = Adw.ComboRow(title="Playlist")
         self._playlist.set_model(Gtk.StringList.new(self._playlist_ids))
-        self._playlist.set_factory(playlist_factory())
+        self._playlist.set_factory(playlist_factory(self.state))
         self._playlist.set_selected(self._playlist_ids.index(self.draft.playlist))
         self._playlist.connect("notify::selected", lambda *_: self._changed())
         group.add(self._playlist)
@@ -308,10 +307,10 @@ class RuleEditor(Adw.Dialog):
             self._no_days = False
             self._no_months = False
         draft = self.draft
-        playlist = data.PLAYLIST_BY_ID.get(draft.playlist)
-        self._name.set_label(model.playlist_name(draft.playlist))
+        playlist = self.state.playlist(draft.playlist) if self.state.has_playlist(draft.playlist) else None
+        self._name.set_label(self.state.playlist_name(draft.playlist))
         if playlist and not playlist.automatic:
-            self._cover.set_from_paintable(art.mosaic(data.cover_keys(playlist), 96))
+            self._cover.set_from_paintable(self.state.playlist_cover(playlist.id, 96))
         else:
             self._cover.set_from_icon_name("view-grid-symbolic")
         problem = "Pick at least one day" if self._no_days else ("Pick at least one month" if self._no_months else "")
@@ -355,7 +354,7 @@ class RuleEditor(Adw.Dialog):
         if self.original is None:
             listing.append(draft)
         monday = model.week_start(self.state.now.date())
-        beats, beaten = model.overlaps(listing, draft, monday)
+        beats, beaten = model.overlaps(listing, draft, monday, self.state.playlist_name)
         for icon, prefix, names, css in (
             ("go-up-symbolic", "Overrides", beats, "success"),
             ("go-down-symbolic", "Overridden by", beaten, "dimmed"),

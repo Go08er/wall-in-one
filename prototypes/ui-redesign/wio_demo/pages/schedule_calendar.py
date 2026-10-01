@@ -94,8 +94,14 @@ class Hit:
 class WeekCalendar(Gtk.DrawingArea):
     """Mon–Sun columns × 24 hours. Feed it with ``update(...)``."""
 
-    def __init__(self, on_edit: Callable[[Rule], None], on_create: Callable[[list[int], int, int], None]) -> None:
+    def __init__(
+        self,
+        on_edit: Callable[[Rule], None],
+        on_create: Callable[[list[int], int, int], None],
+        name_of: Callable[[str], str],
+    ) -> None:
         super().__init__()
+        self._name_of = name_of  # playlist id -> name (state.playlist_name)
         self.add_css_class("week-calendar")
         self.set_content_height(470)
         self.set_content_width(300)
@@ -442,7 +448,7 @@ class WeekCalendar(Gtk.DrawingArea):
                 limit = min(limit, self._exception_x(column)[0] - 2)
         width = limit - x0 - 6
         size = 7.5 if narrow else 8.5
-        name = model.playlist_name(rule.playlist)
+        name = self._name_of(rule.playlist)
         lines = 2 if narrow and height >= 26 else 1
         _w, h = self._text(cr, name, x0 + 4, y0 + 2, fg, 0.95, size, bold=True, width=width, lines=lines)
         if rule.display and height >= 44:
@@ -497,7 +503,7 @@ class WeekCalendar(Gtk.DrawingArea):
         if y1 - y0 >= 14 and width > 18:
             _w, h = self._text(
                 cr,
-                model.playlist_name(rule.playlist),
+                self._name_of(rule.playlist),
                 x0 + 6,
                 y0 + 2,
                 fg,
@@ -642,16 +648,15 @@ class WeekCalendar(Gtk.DrawingArea):
                 f"<b>Nothing scheduled</b>\n{when} · {escape(self.fallback_tip)}\nClick or drag to add a rule"
             )
         elif hit.kind == "loser":
-            winner = escape(model.playlist_name(hit.over[0].playlist))
+            winner = escape(self._name_of(hit.over[0].playlist))
             tooltip.set_markup(
-                f"<b>{escape(model.playlist_name(hit.rule.playlist))}</b> · overridden\n"
-                f"{when} · {winner} wins (higher rule)"
+                f"<b>{escape(self._name_of(hit.rule.playlist))}</b> · overridden\n{when} · {winner} wins (higher rule)"
             )
         else:
             rule = hit.rule
-            lines = [f"<b>{escape(model.playlist_name(rule.playlist))}</b>", escape(model.summary(rule))]
+            lines = [f"<b>{escape(self._name_of(rule.playlist))}</b>", escape(model.summary(rule))]
             if hit.over:
-                names = ", ".join(dict.fromkeys(model.playlist_name(r.playlist) for r in hit.over))
+                names = ", ".join(dict.fromkeys(self._name_of(r.playlist) for r in hit.over))
                 lines.append(f"Overrides {escape(names)}")
             if hit.kind == "exception":
                 lines.append(f"Only on {escape(rule.display)}")

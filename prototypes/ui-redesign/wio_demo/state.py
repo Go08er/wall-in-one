@@ -79,6 +79,11 @@ def resolve(rules: list[Rule], at: dt.datetime, display: str | None = None) -> R
     return chosen
 
 
+# Demo scenes start the schedule from the original rules, copied at import
+# before anything can edit them (data.RULES is shared by every AppState).
+_SEED_RULES = [copy.deepcopy(rule) for rule in data.RULES]
+
+
 class AppState(GObject.Object):
     __gsignals__: ClassVar[dict] = {
         "changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -144,6 +149,7 @@ class AppState(GObject.Object):
         self.frost = 0.5  # in-app blur strength for the frosted style, 0 (clear) – 1
         self.scope = "all"  # player-bar scope: "all" or a connector
         self._rng = random.Random(4)
+        self._rule_serial = 0
 
     # -- helpers ------------------------------------------------------------
     @property
@@ -305,6 +311,150 @@ class AppState(GObject.Object):
     def following_schedule(self, connector: str | None = None) -> bool:
         targets = self.targets(connector) if connector else self.connectors()
         return not any(target in self.manual for target in targets)
+
+    def rule(self, rule_id: str) -> Rule | None:
+        return next((rule for rule in self.rules if rule.id == rule_id), None)
+
+    # -- schedule: actions ------------------------------------------------------
+    # Every change lets displays that follow the schedule switch playlist, as the
+    # runtime would, then emits "schedule" and "now".
+    def _schedule_changed(self) -> None:
+        for connector in self.connectors():
+            if connector in self.manual:
+                continue
+            pid = self.resolution(connector).playlist
+            entries = self.playlist(pid).entries if pid in data.PLAYLIST_BY_ID else []
+            if entries and self.current.get(connector) not in entries:
+                self.current[connector] = entries[0]
+        self.emit_changed("schedule", "now")
+
+    def _new_rule_id(self) -> str:
+        existing = {rule.id for rule in self.rules}
+        while True:
+            self._rule_serial += 1
+            candidate = f"rule-{self._rule_serial}"
+            if candidate not in existing:
+                return candidate
+
+    def add_rule(self, draft: Rule) -> tuple[Rule, Undo]:
+        """Add a rule at the top of the priority list (it wins where rules overlap)."""
+        rule = Rule(
+            self._new_rule_id(),
+            draft.playlist,
+            draft.days,
+            draft.start,
+            draft.end,
+            draft.months,
+            draft.display,
+            draft.enabled,
+        )
+        self.rules.append(rule)
+        self._schedule_changed()
+
+        def undo() -> None:
+            if rule in self.rules:
+                self.rules.remove(rule)
+                self._schedule_changed()
+
+        return rule, undo
+
+    def update_rule(self, rule_id: str, draft: Rule) -> Undo | None:
+        """Give a rule the draft's playlist, days, times, months, display and on/off,
+        keeping its place. None when nothing changed."""
+        rule = self.rule(rule_id)
+
+        def values(source: Rule) -> tuple:
+            return (
+                source.playlist,
+                list(source.days),
+                source.start,
+                source.end,
+                list(source.months),
+                source.display,
+                source.enabled,
+            )
+
+        before, after = values(rule), values(draft)
+        if before == after:
+            return None
+
+        def put(fields: tuple) -> None:
+            (rule.playlist, rule.days, rule.start, rule.end, rule.months, rule.display, rule.enabled) = fields
+            self._schedule_changed()
+
+        put(after)
+        return lambda: put(before)
+
+    def delete_rule(self, rule_id: str) -> Undo | None:
+        rule = self.rule(rule_id)
+        if rule is None:
+            return None
+        index = self.rules.index(rule)
+        self.rules.remove(rule)
+        self._schedule_changed()
+
+        def undo() -> None:
+            self.rules.insert(min(index, len(self.rules)), rule)
+            self._schedule_changed()
+
+        return undo
+
+    def duplicate_rule(self, rule_id: str) -> tuple[Rule, Undo]:
+        """A copy just above the rule (one step higher priority)."""
+        rule = self.rule(rule_id)
+        copy = Rule(
+            self._new_rule_id(),
+            rule.playlist,
+            list(rule.days),
+            rule.start,
+            rule.end,
+            list(rule.months),
+            rule.display,
+            rule.enabled,
+        )
+        self.rules.insert(self.rules.index(rule) + 1, copy)
+        self._schedule_changed()
+
+        def undo() -> None:
+            if copy in self.rules:
+                self.rules.remove(copy)
+                self._schedule_changed()
+
+        return copy, undo
+
+    def reorder_rules(self, rule_ids: list[str]) -> Undo | None:
+        """Store a new priority order, lowest first (a later rule wins). None when
+        the order is unchanged."""
+        before = list(self.rules)
+        order = [self.rule(rule_id) for rule_id in rule_ids]
+        if before == order:
+            return None
+        self.rules[:] = order
+        self._schedule_changed()
+
+        def undo() -> None:
+            self.rules[:] = before
+            self._schedule_changed()
+
+        return undo
+
+    def set_rule_enabled(self, rule_id: str, enabled: bool) -> None:
+        self.rule(rule_id).enabled = enabled
+        self._schedule_changed()
+
+    def set_fallback(self, pid: str) -> Undo | None:
+        """What plays when no rule applies and a display has no playlist of its own."""
+        before = self.fallback
+        if pid == before:
+            return None
+        self.fallback = pid
+        self._schedule_changed()
+
+        def undo() -> None:
+            self.fallback = before
+            self._schedule_changed()
+
+        return undo
 
     # -- actions --------------------------------------------------------------
     def apply(self, wid: str, scope: str = "all") -> None:
@@ -964,3 +1114,14 @@ class AppState(GObject.Object):
         if mode == "mirrored":
             self._link_displays()
         self.emit_changed("schedule", "displays", "now", "playback")
+
+    def demo_reset_schedule(self, clear_manual: bool, unassign: list[str]) -> None:
+        """The schedule as the demo data has it: the original rules and default, and
+        without the picks and display playlists earlier scenes set."""
+        self.rules[:] = [copy.deepcopy(rule) for rule in _SEED_RULES]
+        self.fallback = data.FALLBACK_PLAYLIST
+        if clear_manual:
+            self.manual.clear()
+        for connector in unassign:
+            self.assigned[connector] = ""
+        self._schedule_changed()

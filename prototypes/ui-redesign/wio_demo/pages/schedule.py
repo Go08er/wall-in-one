@@ -20,7 +20,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gtk
 
-from .. import art, data, reorder, ui
+from .. import reorder, ui
 from ..catalog import DAYS_LONG, MONTHS
 from ..models import Rule
 from . import Page
@@ -111,24 +111,14 @@ class Hatch(Gtk.DrawingArea):
         cr.stroke()
 
 
-def _copy(rule: Rule) -> Rule:
-    return Rule(
-        rule.id, rule.playlist, list(rule.days), rule.start, rule.end, list(rule.months), rule.display, rule.enabled
-    )
-
-
-# Demo scenes start from the original data. Taken at import, before anything edits it.
-_SEED_RULES = [_copy(rule) for rule in data.RULES]
-
-
-def cover(pid: str, size: int) -> Gtk.Widget:
-    playlist = data.PLAYLIST_BY_ID.get(pid)
+def cover(state, pid: str, size: int) -> Gtk.Widget:
+    playlist = state.playlist(pid) if state.has_playlist(pid) else None
     image = Gtk.Image(pixel_size=size)
     image.set_overflow(Gtk.Overflow.HIDDEN)
     image.add_css_class("schedule-cover")
     image.set_valign(Gtk.Align.CENTER)
     if playlist and not playlist.automatic:
-        image.set_from_paintable(art.mosaic(data.cover_keys(playlist), 96))
+        image.set_from_paintable(state.playlist_cover(pid, 96))
     else:
         image.set_from_icon_name(playlist.icon if playlist and playlist.icon else "view-grid-symbolic")
         image.add_css_class("schedule-cover-icon")
@@ -145,7 +135,6 @@ class SchedulePage(Page):
         self._week = 0  # weeks from the current one
         self._view = "all"  # "all" or a connector
         self._rule_rows: list[Gtk.ListBoxRow] = []
-        self._serial = 0
         self._building = False
         self._editor: RuleEditor | None = None
         self._demo_assigned: list[str] = []
@@ -220,7 +209,9 @@ class SchedulePage(Page):
         self._seasonal.set_valign(Gtk.Align.CENTER)
         self._seasonal.connect("clicked", lambda *_: self._show_seasonal())
         toolbar.append(self._seasonal)
-        self.calendar = WeekCalendar(on_edit=self.edit_rule, on_create=self._create_from_calendar)
+        self.calendar = WeekCalendar(
+            on_edit=self.edit_rule, on_create=self._create_from_calendar, name_of=state.playlist_name
+        )
         calendar_card = Gtk.Box(vexpand=True)
         calendar_card.add_css_class("schedule-calendar-card")
         calendar_card.append(self.calendar)
@@ -264,7 +255,7 @@ class SchedulePage(Page):
         self._fallback_ids = [p.id for p in state.playlists]
         self._fallback = Adw.ComboRow(title="When nothing is scheduled", model=Gtk.StringList.new(self._fallback_ids))
         self._fallback.set_title_lines(2)
-        self._fallback.set_factory(playlist_factory(22))
+        self._fallback.set_factory(playlist_factory(state, 22))
         self._fallback.connect("notify::selected", self._on_fallback)
         fallback_list.append(self._fallback)
         rules.append(fallback_list)
@@ -344,17 +335,12 @@ class SchedulePage(Page):
             self._editor.force_close()
         self._why_popover.popdown()
         self.calendar.clear_selection()
-        self.state.rules[:] = [_copy(rule) for rule in _SEED_RULES]
-        self.state.fallback = data.FALLBACK_PLAYLIST
-        if self._demo_pick:
-            self.state.manual.clear()
-            self._demo_pick = False
-        for connector in self._demo_assigned:
-            self.state.assigned[connector] = ""
+        self.state.demo_reset_schedule(clear_manual=self._demo_pick, unassign=self._demo_assigned)
+        self._demo_pick = False
         self._demo_assigned = []
         self._week = 0
         self._views.set_active_name("all")
-        self._emit()
+        self.refresh()
         for part in scene.split(","):
             self._demo_one(part)
 
@@ -377,11 +363,11 @@ class SchedulePage(Page):
         elif what == "drag":
             self.calendar.show_selection(0, 4, 12 * 60, 14 * 60)
         elif what == "enable":
-            rules[arg or "work-screen"].enabled = True
-            self._emit()
+            self.state.set_rule_enabled(arg or "work-screen", True)
+            self.refresh()
         elif what == "disable":
-            rules[arg].enabled = False
-            self._emit()
+            self.state.set_rule_enabled(arg, False)
+            self.refresh()
         elif what == "display":
             self._views.set_active_name(arg)
         elif what == "december":
@@ -402,9 +388,9 @@ class SchedulePage(Page):
             GLib.timeout_add(300, self._scroll_to_rules)
         elif what == "assign":  # assign:HDMI-A-1=cozy-rain — a display's own playlist
             connector, _, pid = arg.partition("=")
-            self.state.assigned[connector] = pid or "cozy-rain"
+            self.state.set_display_playlist(connector, pid or "cozy-rain")
             self._demo_assigned.append(connector)
-            self._emit()
+            self.refresh()
         elif what == "pick":
             self._demo_pick = True
             self.state.play_playlist("mc-night")
@@ -520,22 +506,22 @@ class SchedulePage(Page):
 
     def _rebuild(self, monday: dt.date, view: str, independent: bool) -> None:
         state = self.state
-        colors = model.playlist_colors(state.playlists)
+        colors = model.playlist_colors(state)
         if view == "all":
             spans = model.week_spans(state.rules, monday, None)
             exceptions = model.week_exceptions(state.rules, monday) if independent else []
             targets = state.connectors() if independent else state.connectors()[:1]
             unscheduled = {c: state.unscheduled_playlist(c) for c in targets}
             if len(set(unscheduled.values())) == 1:
-                label = model.playlist_name(next(iter(unscheduled.values())))
+                label = self.state.playlist_name(next(iter(unscheduled.values())))
                 tip = f"{label} plays"
             else:
                 label = "Per display"
-                tip = " · ".join(f"{c}: {model.playlist_name(p)}" for c, p in unscheduled.items())
+                tip = " · ".join(f"{c}: {self.state.playlist_name(p)}" for c, p in unscheduled.items())
         else:
             spans = model.week_spans(state.rules, monday, view)
             exceptions = []
-            label = model.playlist_name(state.unscheduled_playlist(view))
+            label = self.state.playlist_name(state.unscheduled_playlist(view))
             tip = f"{label} plays on {view}"
         self.calendar.update(spans, exceptions, monday, colors, label, tip, "" if view == "all" else view)
 
@@ -556,7 +542,7 @@ class SchedulePage(Page):
         if state.fallback in self._fallback_ids:
             self._fallback.set_selected(self._fallback_ids.index(state.fallback))
         own = [(c, p) for c, p in sorted(state.assigned.items()) if p and independent]
-        self._fallback.set_subtitle(" · ".join(f"{c} uses {model.playlist_name(p)}" for c, p in own))
+        self._fallback.set_subtitle(" · ".join(f"{c} uses {self.state.playlist_name(p)}" for c, p in own))
         self._building = False
 
     def _build_view_toggles(self) -> None:
@@ -640,7 +626,7 @@ class SchedulePage(Page):
                 child = box.get_first_child()
         first_pid = groups[0][3]
         self._now_cover.append(
-            cover(first_pid, 48)
+            cover(self.state, first_pid, 48)
             if first_pid != "quick"
             else ui.thumbnail(state.wallpaper(state.current[groups[0][0][0]]), 48, 48, 8)
         )
@@ -652,14 +638,15 @@ class SchedulePage(Page):
                 tag.set_valign(Gtk.Align.CENTER)
                 tag.add_css_class("now-display")
                 line.append(tag)
-            name = "Your pick" if pid == "quick" else model.playlist_name(pid)
+            name = "Your pick" if pid == "quick" else self.state.playlist_name(pid)
             title = Gtk.Label(xalign=0, wrap=True)
             title.add_css_class("now-name")
             if kind == "schedule":
                 resolution = payload
                 markup = f"<span weight='800'>{escape(name)}</span>"
                 if resolution.next_at:
-                    rest = f"until {resolution.next_at} · then {escape(model.playlist_name(resolution.next_playlist))}"
+                    then = escape(state.playlist_name(resolution.next_playlist))
+                    rest = f"until {resolution.next_at} · then {then}"
                     markup += f"<span weight='400' alpha='70%'>  {rest}</span>"
                 title.set_markup(markup)
                 line.append(title)
@@ -687,7 +674,7 @@ class SchedulePage(Page):
                 if not multi:
                     resolution = state.resolution(connectors[0])
                     self._now_lines.append(
-                        ui.dim(f"The schedule says {model.playlist_name(resolution.playlist)}", wrap=False)
+                        ui.dim(f"The schedule says {self.state.playlist_name(resolution.playlist)}", wrap=False)
                     )
         self._resume.set_visible(any(kind == "pick" for _c, kind, _p, _pid in groups))
         if self._why_popover.get_visible():
@@ -728,7 +715,7 @@ class SchedulePage(Page):
         at = state.now
         first = groups[0]
         if len(groups) == 1:
-            heading = f"Why {('your pick' if first[3] == 'quick' else model.playlist_name(first[3]))}?"
+            heading = f"Why {('your pick' if first[3] == 'quick' else self.state.playlist_name(first[3]))}?"
         else:
             heading = "Why these playlists?"
         title = Gtk.Label(label=heading, xalign=0, wrap=True)
@@ -779,9 +766,9 @@ class SchedulePage(Page):
         inner = Gtk.Box(spacing=10)
         inner.add_css_class("why-row")
         inner.add_css_class("winner")
-        inner.append(cover(unscheduled, 28))
+        inner.append(cover(self.state, unscheduled, 28))
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
-        name = Gtk.Label(label=model.playlist_name(unscheduled), xalign=0)
+        name = Gtk.Label(label=self.state.playlist_name(unscheduled), xalign=0)
         name.add_css_class("rule-title")
         texts.append(name)
         sub = Gtk.Label(
@@ -809,9 +796,9 @@ class SchedulePage(Page):
         if compact:
             inner.append(Dot(model.color_for(self.state, rule.playlist), 10, ring=False))
         else:
-            inner.append(cover(rule.playlist, 28))
+            inner.append(cover(self.state, rule.playlist, 28))
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
-        name = Gtk.Label(label=model.playlist_name(rule.playlist), xalign=0, ellipsize=3)
+        name = Gtk.Label(label=self.state.playlist_name(rule.playlist), xalign=0, ellipsize=3)
         if not compact:
             name.add_css_class("rule-title")
         texts.append(name)
@@ -851,9 +838,9 @@ class SchedulePage(Page):
         self._list.remove_all()
         self._rule_rows = []
         monday = self._monday()
-        seasonal = {id(rule) for rule in model.seasonal_off(state.rules, monday)}
+        seasonal = {rule.id for rule in model.seasonal_off(state.rules, monday)}
         for rule in reversed(state.rules):
-            row = self._rule_row(rule, id(rule) in seasonal, monday)
+            row = self._rule_row(rule, rule.id in seasonal, monday)
             self._list.append(row, row.handle)
             self._rule_rows.append(row)
         if focused:
@@ -883,13 +870,13 @@ class SchedulePage(Page):
         handle = Gtk.Image.new_from_icon_name("list-drag-handle-symbolic")
         handle.add_css_class("rule-handle")
         handle.set_tooltip_text("Drag up or down to change priority (Ctrl+↑ / Ctrl+↓)")
-        handle.update_property([Gtk.AccessibleProperty.LABEL], [f"Reorder {model.playlist_name(rule.playlist)}"])
+        handle.update_property([Gtk.AccessibleProperty.LABEL], [f"Reorder {self.state.playlist_name(rule.playlist)}"])
         body.append(handle)
         row.handle = handle
 
         art_box = Gtk.Overlay(valign=Gtk.Align.CENTER)
         frame = Gtk.Box(width_request=42, height_request=42)
-        picture = cover(rule.playlist, 38)
+        picture = cover(self.state, rule.playlist, 38)
         picture.set_halign(Gtk.Align.START)
         picture.set_valign(Gtk.Align.START)
         frame.append(picture)
@@ -904,7 +891,7 @@ class SchedulePage(Page):
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
         texts.add_css_class("rule-dim")
         top = Gtk.Box(spacing=6)
-        title = Gtk.Label(label=model.playlist_name(rule.playlist), xalign=0, ellipsize=3)
+        title = Gtk.Label(label=self.state.playlist_name(rule.playlist), xalign=0, ellipsize=3)
         title.add_css_class("rule-title")
         top.append(title)
         pill = ui.pill("Now", "media-playback-start-symbolic", "accent")
@@ -931,7 +918,9 @@ class SchedulePage(Page):
 
         switch = Gtk.Switch(active=rule.enabled, valign=Gtk.Align.CENTER)
         switch.set_tooltip_text("Rule on" if rule.enabled else "Rule off")
-        switch.update_property([Gtk.AccessibleProperty.LABEL], [f"Use rule for {model.playlist_name(rule.playlist)}"])
+        switch.update_property(
+            [Gtk.AccessibleProperty.LABEL], [f"Use rule for {self.state.playlist_name(rule.playlist)}"]
+        )
         switch.connect("notify::active", lambda s, _p, r=rule: self._toggle(r, s.get_active()))
         body.append(switch)
         row.switch = switch
@@ -975,7 +964,7 @@ class SchedulePage(Page):
 
     def _focus_rule(self, rule: Rule, on_switch: bool = False) -> bool:
         for row in self._rule_rows:
-            if row.rule is rule:
+            if row.rule.id == rule.id:
                 (row.switch if on_switch else row).grab_focus()
         return False
 
@@ -1004,35 +993,15 @@ class SchedulePage(Page):
         add("delete", self.delete_rule)
         self.widget.insert_action_group("sched", group)
 
-    def _emit(self) -> None:
-        self._sync_current()
-        self.state.emit_changed("schedule", "now")
-        self.refresh()
-
-    def _sync_current(self) -> None:
-        """Simulate the runtime: a display following the schedule switches playlist."""
-        state = self.state
-        for connector in state.connectors():
-            if connector in state.manual:
-                continue
-            pid = state.resolution(connector).playlist
-            entries = state.playlist(pid).entries if pid in data.PLAYLIST_BY_ID else []
-            if entries and state.current.get(connector) not in entries:
-                state.current[connector] = entries[0]
-
     def _toggle(self, rule: Rule, value: bool) -> None:
         if rule.enabled == value:
             return
-        rule.enabled = value
-        GLib.idle_add(lambda: (self._emit(), False)[1])
+        # After the switch has finished toggling: the list is rebuilt around it.
+        GLib.idle_add(lambda: (self.state.set_rule_enabled(rule.id, value), self.refresh(), False)[-1])
 
-    def _new_id(self) -> str:
-        existing = {rule.id for rule in self.state.rules}
-        while True:
-            self._serial += 1
-            candidate = f"rule-{self._serial}"
-            if candidate not in existing:
-                return candidate
+    def _undo(self, undo) -> object:
+        """An Undo that also redraws this page at once."""
+        return lambda: (undo(), self.refresh())
 
     def _present(self, editor: RuleEditor) -> None:
         if self._editor is not None:
@@ -1063,101 +1032,31 @@ class SchedulePage(Page):
         self.new_rule({"days": days, "start": model.hhmm(start), "end": model.hhmm(end)})
 
     def _save(self, draft: Rule, original: Rule | None) -> None:
-        rules = self.state.rules
         if original is None:
-            rule = Rule(
-                self._new_id(),
-                draft.playlist,
-                draft.days,
-                draft.start,
-                draft.end,
-                draft.months,
-                draft.display,
-                draft.enabled,
-            )
-            rules.append(rule)
-            self._emit()
-
-            def undo_add() -> None:
-                if rule in rules:
-                    rules.remove(rule)
-                    self._emit()
-
+            rule, undo = self.state.add_rule(draft)
+            self.refresh()
             self.state.toast(
-                f"Added “{model.playlist_name(rule.playlist)}” · {model.summary(rule, overnight=False)}", undo_add
+                f"Added “{self.state.playlist_name(rule.playlist)}” · {model.summary(rule, overnight=False)}",
+                self._undo(undo),
             )
             return
-        before = (
-            original.playlist,
-            list(original.days),
-            original.start,
-            original.end,
-            list(original.months),
-            original.display,
-            original.enabled,
-        )
-        after = (
-            draft.playlist,
-            list(draft.days),
-            draft.start,
-            draft.end,
-            list(draft.months),
-            draft.display,
-            draft.enabled,
-        )
-        if before == after:
+        undo = self.state.update_rule(original.id, draft)
+        if undo is None:
             return
-
-        def put(values) -> None:
-            (
-                original.playlist,
-                original.days,
-                original.start,
-                original.end,
-                original.months,
-                original.display,
-                original.enabled,
-            ) = values
-            self._emit()
-
-        put(after)
-        self.state.toast("Rule saved", lambda: put(before))
+        self.refresh()
+        self.state.toast("Rule saved", self._undo(undo))
 
     def delete_rule(self, rule: Rule) -> None:
-        rules = self.state.rules
-        if rule not in rules:
+        undo = self.state.delete_rule(rule.id)
+        if undo is None:
             return
-        index = rules.index(rule)
-        rules.remove(rule)
-        self._emit()
-
-        def undo() -> None:
-            rules.insert(min(index, len(rules)), rule)
-            self._emit()
-
-        self.state.toast(f"Deleted “{model.playlist_name(rule.playlist)}” rule", undo)
+        self.refresh()
+        self.state.toast(f"Deleted “{self.state.playlist_name(rule.playlist)}” rule", self._undo(undo))
 
     def duplicate_rule(self, rule: Rule) -> None:
-        rules = self.state.rules
-        copy = Rule(
-            self._new_id(),
-            rule.playlist,
-            list(rule.days),
-            rule.start,
-            rule.end,
-            list(rule.months),
-            rule.display,
-            rule.enabled,
-        )
-        rules.insert(rules.index(rule) + 1, copy)
-        self._emit()
-
-        def undo() -> None:
-            if copy in rules:
-                rules.remove(copy)
-                self._emit()
-
-        self.state.toast("Rule duplicated", undo)
+        copy, undo = self.state.duplicate_rule(rule.id)
+        self.refresh()
+        self.state.toast("Rule duplicated", self._undo(undo))
         self.edit_rule(copy)
 
     def move_rule(self, rule: Rule, step: int) -> None:
@@ -1166,7 +1065,7 @@ class SchedulePage(Page):
         A rule on screen rolls into place first and is committed once it settles.
         """
         rows = self._list.get_rows()
-        row = next((r for r in rows if r.rule is rule), None)
+        row = next((r for r in rows if r.rule.id == rule.id), None)
         if row is not None and not self._list.dragging:
             self._list.move(row, rows.index(row) - step)  # the list shows the top priority first
             return
@@ -1179,19 +1078,16 @@ class SchedulePage(Page):
         self._reorder(rules, rule)
 
     def _reorder(self, order: list[Rule], moved: Rule) -> None:
-        rules = self.state.rules
-        before = list(rules)
-        if before == order:
+        before = [rule.id for rule in self.state.rules]
+        after = [rule.id for rule in order]
+        undo = self.state.reorder_rules(after)
+        if undo is None:
             return
-        rules[:] = order
-
-        def undo() -> None:
-            rules[:] = before
-            self._emit()
-
-        self._emit()
-        higher = before.index(moved) < order.index(moved)
-        self.state.toast(f"“{model.playlist_name(moved.playlist)}” moved {'up' if higher else 'down'}", undo)
+        self.refresh()
+        higher = before.index(moved.id) < after.index(moved.id)
+        self.state.toast(
+            f"“{self.state.playlist_name(moved.playlist)}” moved {'up' if higher else 'down'}", self._undo(undo)
+        )
 
     def _on_rules_reordered(self, _list, row: Gtk.ListBoxRow) -> None:
         """A drag or keyboard move settled: store the new priority once, with Undo."""
@@ -1206,17 +1102,11 @@ class SchedulePage(Page):
         if self._building:
             return
         pid = self._fallback_ids[row.get_selected()]
-        before = self.state.fallback
-        if pid == before:
+        undo = self.state.set_fallback(pid)
+        if undo is None:
             return
-        self.state.fallback = pid
-        self._emit()
-
-        def undo() -> None:
-            self.state.fallback = before
-            self._emit()
-
-        self.state.toast(f"“{model.playlist_name(pid)}” plays when nothing is scheduled", undo)
+        self.refresh()
+        self.state.toast(f"“{self.state.playlist_name(pid)}” plays when nothing is scheduled", self._undo(undo))
 
     # -- calendar ---------------------------------------------------------------------------
     def _on_view(self, group: Adw.ToggleGroup, _param) -> None:

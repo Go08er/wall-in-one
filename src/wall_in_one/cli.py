@@ -358,19 +358,29 @@ def _run_graphical_startup_upgrade(
     *, require_legacy_safe: bool, retry: Callable[[str], bool] | None = None
 ) -> int | None:
     """Finish an exact deployed upgrade before GTK reads configuration."""
-    from wall_in_one import deployed_upgrade_transaction, legacy_migration
+    from wall_in_one import config, deployed_upgrade_transaction, legacy_migration
     from wall_in_one.library import capture_upgrade
 
     while True:
         try:
             with legacy_migration.profile_transaction():
                 outcome = deployed_upgrade_transaction.ensure()
+                # GTK loads settings forgivingly, so a document the strict
+                # loader refuses must stop here, for the recovery window.
+                # ensure() parses settings only while it classifies a
+                # profile; once an upgrade has completed, its marker answers
+                # instead, and the app would otherwise start on defaults or
+                # silently clamped values. Unknown keys still pass.
+                config.load_strict_document()
                 if require_legacy_safe:
                     legacy_migration.require_unattended_safe_locked()
                 capture_upgrade.prepare()
             break
         except deployed_upgrade_transaction.TransactionError as error:
             result, detail = _deployed_upgrade_error(error), str(error)
+        except config.ConfigError as error:
+            print(f"error: {error}", file=sys.stderr)
+            result, detail = EXIT_CONFIG, str(error)
         except legacy_migration.MigrationError as error:
             print(f"error: {error}", file=sys.stderr)
             result, detail = 1, str(error)
@@ -417,7 +427,14 @@ def _write_runtime_config() -> int:
             # First-run defaults are suitable for the GUI, not for publishing
             # a runtime without its owning settings. Such an orphan makes the
             # next migration probe correctly refuse to assume a fresh install.
-            loaded = config.load_strict_document(require_present=True)
+            # A missing, malformed or invalid document is a configuration
+            # error, never the ordinary compiler failure that service
+            # preparation softens into keeping the last-known-good runtime.
+            try:
+                loaded = config.load_strict_document(require_present=True)
+            except config.ConfigError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return EXIT_CONFIG
             _warn_unknown_settings(loaded.unknown_keys)
             settings = loaded.settings
             session = Session(settings)
@@ -432,9 +449,6 @@ def _write_runtime_config() -> int:
                 changed = runtime_config.update(settings, session)
             finally:
                 session.shutdown()
-    except config.MissingSettingsError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return EXIT_CONFIG
     except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -446,10 +460,10 @@ def _write_runtime_config() -> int:
 def _prepare_service_start() -> int:
     """Cross migration boundaries, then publish or retain a runtime candidate.
 
-    Migration and legacy-boundary errors keep their actionable non-zero exit.
-    Only an ordinary authoring/compiler failure is softened: the next systemd
-    preflight asks Rust itself whether the untouched last-known-good document
-    is safe to consume.
+    Migration, legacy-boundary and settings.toml errors keep their actionable
+    non-zero exit. Only an ordinary authoring/compiler failure is softened:
+    the next systemd preflight asks Rust itself whether the untouched
+    last-known-good document is safe to consume.
     """
 
     def publish_or_retain() -> int:

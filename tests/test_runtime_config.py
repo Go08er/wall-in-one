@@ -74,7 +74,8 @@ def test_write_config_takes_the_compiler_lock_before_reading_authoring_state(
     monkeypatch.setattr(runtime_config, "compiler_lock", ObservedLock)
     monkeypatch.setattr(config, "load_strict_document", load_under_lock)
 
-    assert cli.main(["--write-config"]) == 1
+    # Settings that cannot be read as written are a configuration error.
+    assert cli.main(["--write-config"]) == cli.EXIT_CONFIG
     assert "authoring fixture stops here" in capsys.readouterr().err
     assert not entered
 

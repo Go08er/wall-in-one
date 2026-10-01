@@ -571,7 +571,7 @@ class LibraryPage(Page):
                     split.set_show_sidebar(True)
                 return GLib.SOURCE_REMOVE
 
-            GLib.idle_add(reopen)
+            GLib.idle_add(reopen, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def _apply_target(self) -> str:
         label = self.state.scope_label()

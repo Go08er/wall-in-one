@@ -205,7 +205,9 @@ class Inspector(Gtk.Box):
                 self._scroller.get_vadjustment().set_value(scroll)
                 return GLib.SOURCE_REMOVE
 
-            GLib.idle_add(restore)
+            # After the new content's first layout, which a higher priority
+            # would run ahead of. Nothing waits on it: no spinner ends here.
+            GLib.idle_add(restore, priority=GLib.PRIORITY_DEFAULT_IDLE)  # type: ignore[call-arg]
         box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=14,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
@@ -339,3 +340,33 @@ def test_idle_with_an_unknown_settings_key_never_writes_settings(
     assert cli.main(["--write-config"]) == 0
     assert "already current" in capsys.readouterr().out
     assert (profile.app_state / "runtime.toml").read_bytes() == compiled
+
+
+# -- damaged settings.toml on a profile with a completed upgrade ---------------------------
+
+DAMAGED_SETTINGS: Final[dict[str, Callable[[str], str]]] = {
+    "malformed": lambda text: text + "opacity = [\n",
+    "invalid": lambda text: text.replace("opacity = 0.40", "opacity = 7.5"),
+}
+
+
+@pytest.mark.parametrize("damage", DAMAGED_SETTINGS, ids=list(DAMAGED_SETTINGS))
+def test_damaged_settings_refuse_to_start_and_write_nothing(golden: Golden, damage: str) -> None:
+    """The fixture carries a completed deployed-upgrade marker, which once let a
+    damaged settings.toml through silently. Now the pre-GTK gate and both
+    headless writers stop with EX_CONFIG, and not one byte changes."""
+    profile = golden.profile
+    settings = profile.app_config / "settings.toml"
+    original = settings.read_text()
+    damaged = DAMAGED_SETTINGS[damage](original)
+    assert damaged != original
+    settings.write_text(damaged)
+    before = harness.snapshot(profile.home)
+
+    gate = cli._run_graphical_startup_upgrade(require_legacy_safe=False, retry=None)
+    service = cli.main(["--service-startup-prepare"])
+    write = cli.main(["--write-config"])
+
+    assert (gate, service, write) == (cli.EXIT_CONFIG,) * 3
+    harness.check_changes(harness.diff(before, harness.snapshot(profile.home)), ())
+    assert golden.processes == []

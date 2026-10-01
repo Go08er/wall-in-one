@@ -590,6 +590,40 @@ def test_a_release_one_service_still_gets_both_files_and_ignores_the_overrides(
     session.shutdown()
 
 
+NEWER_OVERRIDES = (
+    'schema_version = 2\n[[playlists]]\nid = "x"\nweighting = "recent"\n[[wallpapers]]\n'
+)
+
+
+def test_an_overrides_file_from_a_newer_build_is_never_rewritten_or_removed(
+    library: Path,
+) -> None:
+    """After a rollback, this build's compiler leaves the newer release's file as it was."""
+    settings = config.Settings(roots=(library,), scan_workshop=False)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    target = runtime_config.write(settings, session)
+    sidecar = runtime_config.overrides_path(target)
+    sidecar.write_text(NEWER_OVERRIDES, encoding="utf-8")
+    assert runtime_config.overrides_from_a_newer_build(NEWER_OVERRIDES)
+
+    # Nothing in use: no removal. In use: no replacement. runtime.toml is
+    # still published as usual.
+    assert runtime_config.update(settings, session) is False
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, shuffle=True)
+    assert runtime_config.update(settings, session) is True
+    assert tomllib.loads(target.read_text())["playlists"][-1]["id"] == made.id
+    runtime_config.write(settings, session)
+    assert sidecar.read_text(encoding="utf-8") == NEWER_OVERRIDES
+
+    for ours in ("schema_version = 1\n", "not toml [", 'schema_version = "2"\n', None):
+        assert not runtime_config.overrides_from_a_newer_build(ours)
+    session.shutdown()
+
+
 def test_the_constants_name_one_contract() -> None:
     assert runtime_config.OVERRIDES_FILENAME == "runtime-overrides.toml"
     assert runtime_config.OVERRIDES_SCHEMA_VERSION == 1
@@ -645,3 +679,9 @@ def test_the_rust_service_loads_what_the_compiler_writes(library: Path, tmp_path
     refused = check()
     assert refused.returncode != 0
     assert "runtime-overrides.toml" in refused.stderr
+    # A newer release's schema is not this service's to judge: it starts
+    # without it and says so.
+    sidecar.write_text(NEWER_OVERRIDES, encoding="utf-8")
+    newer = check()
+    assert newer.returncode == 0, newer.stderr
+    assert "not applied: unsupported schema_version 2" in newer.stderr

@@ -299,6 +299,7 @@
                   "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
                 export PYTHONDONTWRITEBYTECODE=1
                 export WIO_GOLDEN_EXPECT_PACKAGE=1
+                export WALL_IN_ONE_SERVICE_BINARY=${wall-in-one-service}/bin/wall-in-one-service
                 cd ${./.}
                 pytest tests/golden -q -ra -p no:cacheprovider
                 touch $out

@@ -882,13 +882,40 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
     return document, _overrides_document(rotations, beating)
 
 
+def _read_overrides(target: Path) -> str | None:
+    sidecar = overrides_path(target)
+    try:
+        return file_io.read_regular_text(sidecar, MAX_RUNTIME_OVERRIDES_BYTES)
+    except (OSError, UnicodeDecodeError) as error:
+        raise RuntimeConfigError(f"cannot read {sidecar}: {error}") from error
+
+
+def overrides_from_a_newer_build(text: str | None) -> bool:
+    """Whether an overrides file declares a schema newer than this build writes.
+
+    A newer release owns such a file: this build's service ignores it, and
+    this build's compiler never rewrites or removes it, so rolling forward
+    again finds it as that release left it. A file this build cannot parse
+    is its own damaged output and is simply replaced.
+    """
+    if text is None:
+        return False
+    try:
+        declared = tomllib.loads(text).get("schema_version")
+    except tomllib.TOMLDecodeError, RecursionError:
+        return False
+    return type(declared) is int and declared > OVERRIDES_SCHEMA_VERSION
+
+
 def write(settings: config.Settings, session: Session, path: Path | None = None) -> Path:
     """Compile and install both documents atomically, overrides first."""
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
         document, overrides = _compile(settings, session)
+        keep_newer = overrides_from_a_newer_build(_read_overrides(target))
         _require_publishable(document, target)
-        _publish_overrides(overrides, target)
+        if not keep_newer:
+            _publish_overrides(overrides, target)
         _install(document, target)
     return target
 
@@ -900,22 +927,21 @@ def update(settings: config.Settings, session: Session, path: Path | None = None
     the same library must therefore not rewrite the generated files and
     restart a video or scene for no configuration change. ``runtime.toml``
     and ``runtime-overrides.toml`` are compared separately, and a change to
-    either, including the overrides file appearing or going, counts.
+    either, including the overrides file appearing or going, counts. An
+    overrides file from a newer build is left exactly as it is.
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
         document, overrides = _compile(settings, session)
-        sidecar = overrides_path(target)
         try:
             current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
         except (OSError, UnicodeDecodeError) as error:
             raise RuntimeConfigError(f"cannot read {target}: {error}") from error
-        try:
-            current_overrides = file_io.read_regular_text(sidecar, MAX_RUNTIME_OVERRIDES_BYTES)
-        except (OSError, UnicodeDecodeError) as error:
-            raise RuntimeConfigError(f"cannot read {sidecar}: {error}") from error
+        current_overrides = _read_overrides(target)
         document_changed = current != document
-        overrides_changed = current_overrides != overrides
+        overrides_changed = current_overrides != overrides and not overrides_from_a_newer_build(
+            current_overrides
+        )
         if not (document_changed or overrides_changed):
             return False
         if document_changed:

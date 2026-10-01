@@ -12,7 +12,9 @@ person sets something. On the golden profile that means:
 * ``runtime.toml`` never changes because of them. The overrides go to
   ``runtime-overrides.toml``, which exists only while one is in use;
 * a running Release 1 service never blocks saving them;
-* idle with them in use writes only the unchanged first-start whitelist.
+* idle with them in use writes only the unchanged first-start whitelist;
+* an overrides file from a newer release (a schema this build does not know)
+  neither stops the service unit's start nor is touched by this build.
 
 Every check diffs the whole sandbox home. What older builds make of these
 files after a rollback is in ``test_downgrade``.
@@ -21,13 +23,16 @@ files after a rollback is in ``test_downgrade``.
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
 import tomllib
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
 
-from tests.golden import harness
+from tests.golden import harness, sandbox
 from tests.golden.harness import Allowance, Change, Profile
 from tests.golden.sandbox import STATE, Golden, playlist_ids, read_json
 from tests.golden.test_idle import first_start_writes
@@ -307,3 +312,64 @@ def test_idle_with_overrides_in_use_writes_only_the_whitelist(
     assert sorted(path.name for path in profile.app_state.glob("*-backup")) == backups
     assert sidecar.read_bytes() == overrides
     assert _schema(profile) <= runtime_config.BATTERY_SCHEMA_VERSION
+
+
+NEWER_OVERRIDES: Final = (
+    "# Written by a later release.\n"
+    "schema_version = 2\n"
+    "[[playlists]]\n"
+    'id = "79e68864b167b9d6"\n'
+    'weighting = "recent"\n'
+    "[[wallpapers]]\n"
+    'id = "x"\n'
+)
+
+
+def _newer_overrides_beside_runtime(profile: Profile) -> Path:
+    sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
+    sidecar.write_text(NEWER_OVERRIDES, encoding="utf-8")
+    return sidecar
+
+
+def test_a_newer_overrides_file_never_stops_the_service_start_and_is_left_alone(
+    golden: Golden,
+) -> None:
+    """After a rollback from a later release, this build's unit still starts."""
+    profile = golden.profile
+    sidecar = _newer_overrides_beside_runtime(profile)
+    before = harness.snapshot(profile.home)
+
+    assert cli.main(["--service-startup-prepare"]) == 0
+    second = cli.main(["--service-startup-prepare"])
+
+    harness.check_changes(
+        harness.diff(before, harness.snapshot(profile.home)), first_start_writes(profile, None)
+    )
+    assert second == 0
+    assert sidecar.read_text(encoding="utf-8") == NEWER_OVERRIDES
+    assert _schema(profile) <= runtime_config.BATTERY_SCHEMA_VERSION
+
+
+def test_the_service_check_passes_beside_a_newer_overrides_file(
+    golden: Golden, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unit's second preflight, this build's own loader, starts without it."""
+    binary = os.environ.get("WALL_IN_ONE_SERVICE_BINARY", "")
+    if not binary:
+        pytest.skip("set WALL_IN_ONE_SERVICE_BINARY to run this build's --check-config")
+    profile = golden.profile
+    sidecar = _newer_overrides_beside_runtime(profile)
+    assert cli.main(["--service-startup-prepare"]) == 0
+    monkeypatch.setattr(subprocess, "Popen", sandbox.REAL_POPEN)
+
+    checked = subprocess.run(
+        [binary, "--config", str(profile.app_state / "runtime.toml"), "--check-config"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert checked.returncode == 0, checked.stderr
+    assert "not applied: unsupported schema_version 2" in checked.stderr
+    assert sidecar.read_text(encoding="utf-8") == NEWER_OVERRIDES

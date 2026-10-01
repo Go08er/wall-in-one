@@ -1949,6 +1949,10 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// share it. The app compiles no mirrored assignments, so it always has
     /// exactly one effective playlist here.
     fn mirrored_common<T: PartialEq + Copy>(&self, value: impl Fn(&str) -> T, fallback: T) -> T {
+        if !self.config.has_rotation_overrides {
+            // Every playlist uses the global value: skip the per-tick lookup.
+            return fallback;
+        }
         let effective = self.effective_playlist_ids();
         let mut values = effective.iter().map(|playlist| value(playlist));
         match values.next() {

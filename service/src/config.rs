@@ -86,6 +86,10 @@ pub struct Config {
     /// service does not know, written by a newer release.
     #[serde(skip)]
     pub overrides_ignored: Option<String>,
+    /// Whether any playlist carries its own interval or shuffle, decided once
+    /// per load so the per-tick rotation check stays allocation-free without.
+    #[serde(skip)]
+    pub has_rotation_overrides: bool,
     pub schema_version: u32,
     pub config_generation: String,
     pub default_playlist: String,
@@ -523,6 +527,8 @@ impl Config {
                 Some(playlist) => {
                     playlist.cycle_interval_seconds = wanted.cycle_interval_seconds;
                     playlist.shuffle = wanted.shuffle;
+                    self.has_rotation_overrides |=
+                        wanted.cycle_interval_seconds.is_some() || wanted.shuffle.is_some();
                 }
                 None => skipped.push(format!(
                     "ignoring rotation for playlist {:?}, which this runtime.toml does not have",

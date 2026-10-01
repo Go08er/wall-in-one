@@ -15,6 +15,12 @@ Rule names are the first real bump (schedules.json version 3). An unnamed
 edit writes the same bytes in every build, so it stays safe everywhere; a
 named schedule is refused read-only by Release 1 and narrowed by v0.1.4,
 which is what backs the release note "install 0.1.5 before 0.2.0".
+
+Per-playlist rotation and the display opt-in bump playlists.json and
+displays.json to version 2 and add runtime-overrides.toml beside an unchanged
+runtime.toml. Every older build's service unit still starts on that
+runtime.toml; Release 1 refuses both stores read-only, and v0.1.4 narrows
+them on its next edit.
 """
 
 from __future__ import annotations
@@ -44,7 +50,7 @@ from tests.golden.sandbox import (
     read_json,
     write_json,
 )
-from wall_in_one import config, paths
+from wall_in_one import cli, config, paths, runtime_config
 from wall_in_one.library import displays, favourites, pairings, playlists, schedules
 
 pytestmark = pytest.mark.downgrade
@@ -106,6 +112,9 @@ class OldBuild:
     has_guard: bool
     #: The newest schedules.json version the old build understands.
     schedules_format: int
+    #: The newest playlists.json and displays.json versions it understands.
+    playlists_format: int
+    displays_format: int
 
 
 @pytest.fixture(scope="session")
@@ -116,7 +125,11 @@ def old_build(tmp_path_factory: pytest.TempPathFactory) -> OldBuild:
         Path(path).mkdir(parents=True, exist_ok=True)
     report = _run_old(probe, "version")
     return OldBuild(
-        str(report["version"]), bool(report["has_guard"]), int(report["schedules_format"])
+        str(report["version"]),
+        bool(report["has_guard"]),
+        int(report["schedules_format"]),
+        int(report["playlists_format"]),
+        int(report["displays_format"]),
     )
 
 
@@ -413,3 +426,196 @@ def test_downgrade_pre_guard_build_narrows_a_named_schedule(
     assert read_json(target)["version"] == 3
     assert backup.read_bytes() == released
     assert sorted(path.name for path in target.parent.glob("*-backup")) == [backup.name]
+
+
+# -- per-playlist rotation and the display opt-in ----------------------------------------
+
+OVERRIDE_STORES: Final = ("playlists.json", "displays.json")
+
+
+def _require_before_overrides(old: OldBuild) -> None:
+    if old.playlists_format >= playlists.ROTATION_VERSION or (
+        old.displays_format >= displays.PRECEDENCE_VERSION
+    ):
+        pytest.skip(f"old build {old.text} already understands per-playlist rotation")
+
+
+@dataclass(frozen=True, slots=True)
+class InUse:
+    """This build's files once both features are in use."""
+
+    #: runtime.toml as compiled with neither feature in use.
+    cleared_runtime: bytes
+    #: Per store: the released version-1 bytes and the version-2 ones.
+    stores: dict[str, tuple[bytes, bytes]]
+    overrides: bytes
+
+
+def _use_overrides(profile: Profile, *, independent: bool) -> InUse:
+    """Compile with nothing in use, then give a playlist its own rotation and
+    opt DP-1 in, and compile again.
+
+    With ``independent`` the displays route on their own, so the opt-in
+    reaches the overrides file too; mirrored, it stays dormant in the store.
+    """
+    runtime = profile.app_state / "runtime.toml"
+    sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
+    if independent:
+        config.update({"display_mode": "independent", "theme_source_connector": "DP-1"})
+    assert cli.main(["--write-config"]) == 0
+    cleared = runtime.read_bytes()
+    targets = {name: profile.app_state / name for name in OVERRIDE_STORES}
+    released = {name: target.read_bytes() for name, target in targets.items()}
+    # A playlist that reaches the wire: an empty one (the current build's own
+    # edit made one) is not compiled, so its rotation would go nowhere.
+    playable = next(
+        playlist["id"]
+        for playlist in read_json(targets["playlists.json"])["playlists"]
+        if playlist["entries"]
+    )
+    playlists.Store.open().set_rotation(playable, cycle_interval=120, shuffle=True)
+    displays.Store.open().set_beats_global_rules("DP-1", True)
+    assert cli.main(["--write-config"]) == 0
+
+    assert runtime.read_bytes() == cleared, "runtime.toml changed for the overrides"
+    overrides = tomllib.loads(sidecar.read_text())
+    assert overrides["playlists"] == [
+        {"id": playable, "cycle_interval_seconds": 120, "shuffle": True}
+    ]
+    expected_displays = [{"connector": "DP-1", "beats_global_rules": True}] if independent else None
+    assert overrides.get("displays") == expected_displays
+    stores: dict[str, tuple[bytes, bytes]] = {}
+    for name, target in targets.items():
+        assert read_json(target)["version"] == 2, name
+        assert target.with_name(f"{name}.v1-backup").read_bytes() == released[name], name
+        stores[name] = (released[name], target.read_bytes())
+    return InUse(cleared, stores, sidecar.read_bytes())
+
+
+def _runtime_schema(profile: Profile) -> int:
+    value = tomllib.loads((profile.app_state / "runtime.toml").read_text())["schema_version"]
+    assert isinstance(value, int)
+    return value
+
+
+def test_downgrade_service_start_keeps_runtime_toml_and_the_overrides(
+    downgrade: tuple[Golden, OldBuild], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rollback keeps the wallpaper running: the old unit starts cleanly.
+
+    The old build's ``--service-startup-prepare`` succeeds and leaves
+    runtime.toml as this build wrote it -- byte for byte the compile with
+    neither feature in use, at a schema the old service loads -- and never
+    touches ``runtime-overrides.toml``, which its service never opens. Back
+    on this build, both features still apply.
+    """
+    golden, old = downgrade
+    _require_before_overrides(old)
+    profile = golden.profile
+    in_use = _use_overrides(profile, independent=True)
+    runtime = profile.app_state / "runtime.toml"
+    sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
+
+    report = _run_old(profile, "prepare")
+
+    assert report["prepare"] == 0, report
+    assert runtime.read_bytes() == in_use.cleared_runtime
+    assert _runtime_schema(profile) <= runtime_config.BATTERY_SCHEMA_VERSION
+    assert sidecar.read_bytes() == in_use.overrides
+    for name, (released, written) in in_use.stores.items():
+        target = profile.app_state / name
+        assert target.read_bytes() == written, name
+        assert broken_copies(target) == [], name
+        assert target.with_name(f"{name}.v1-backup").read_bytes() == released, name
+
+    capsys.readouterr()
+    assert cli.main(["--write-config"]) == 0
+    assert "already current" in capsys.readouterr().out
+    assert sidecar.read_bytes() == in_use.overrides
+    assert any(playlist.has_rotation_override for playlist in playlists.Store.open().all())
+    assert displays.Store.open().beats_global_rules("DP-1")
+
+
+def test_downgrade_guarded_build_opens_both_stores_read_only(
+    downgrade: tuple[Golden, OldBuild],
+) -> None:
+    """Release 1 refuses edits to both version-2 stores and will not recompile from them."""
+    golden, old = downgrade
+    _require(old, guard=True)
+    _require_before_overrides(old)
+    profile = golden.profile
+    in_use = _use_overrides(profile, independent=True)
+    runtime = profile.app_state / "runtime.toml"
+    sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
+
+    report = _run_old(profile, "edit", *OVERRIDE_STORES)
+    compiled_by_old = _run_old(profile, "compile")["compile"]
+
+    for name, (released, written) in in_use.stores.items():
+        target = profile.app_state / name
+        assert "newer-version" in report["errors"].get(name, ""), report
+        assert target.read_bytes() == written, name
+        assert broken_copies(target) == [], name
+        assert target.with_name(f"{name}.v1-backup").read_bytes() == released, name
+    assert compiled_by_old.startswith("refused:"), compiled_by_old
+    assert "newer version" in compiled_by_old
+    assert runtime.read_bytes() == in_use.cleared_runtime
+    assert sidecar.read_bytes() == in_use.overrides
+
+
+def test_downgrade_pre_guard_build_narrows_both_stores(
+    downgrade: tuple[Golden, OldBuild],
+) -> None:
+    """v0.1.4 cannot safely edit this build's version 2: pinned, not merely expected.
+
+    Its next edit moves each version-2 file aside as ``.broken`` and rewrites
+    it as version 1 without the new fields, reporting success; it then
+    compiles runtime.toml from what is left. The wallpaper keeps running
+    throughout. Nothing is lost outright (the fields are in ``.broken``, the
+    released bytes in ``.v1-backup``), but the settings stop applying, which
+    is why 0.2.0's release notes say to install 0.1.5 first. The overrides
+    file it never knew about stays until this build's next compile finds
+    nothing in use and removes it; using a field again then bumps again and
+    never overwrites the first backup.
+    """
+    golden, old = downgrade
+    _require(old, guard=False)
+    _require_before_overrides(old)
+    profile = golden.profile
+    # Mirrored: the old driver's own display edit may name an empty playlist,
+    # which only independent routing would refuse to compile.
+    in_use = _use_overrides(profile, independent=False)
+    runtime = profile.app_state / "runtime.toml"
+    sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
+
+    report = _run_old(profile, "edit", *OVERRIDE_STORES)
+    assert report["errors"] == {}, report["errors"]
+    for name, (released, written) in in_use.stores.items():
+        target = profile.app_state / name
+        (broken,) = broken_copies(target)
+        assert broken.read_bytes() == written, name
+        narrowed = read_json(target)
+        assert narrowed["version"] == 1, name
+        assert "beats_global_rules" not in narrowed
+        assert not any(
+            key in playlist
+            for playlist in narrowed.get("playlists", [])
+            for key in ("cycle_interval", "shuffle")
+        )
+        assert target.with_name(f"{name}.v1-backup").read_bytes() == released, name
+
+    assert _run_old(profile, "compile")["compile"] == "changed"
+    assert _runtime_schema(profile) <= runtime_config.BATTERY_SCHEMA_VERSION
+    assert sidecar.read_bytes() == in_use.overrides, "the old build never knew it"
+
+    assert cli.main(["--write-config"]) == 0
+    assert not sidecar.exists()
+    assert runtime.read_bytes() != b""
+
+    playlists.Store.open().set_rotation(playlist_ids(profile)[0], shuffle=False)
+    target = profile.app_state / "playlists.json"
+    assert read_json(target)["version"] == 2
+    assert (
+        target.with_name("playlists.json.v1-backup").read_bytes()
+        == in_use.stores["playlists.json"][0]
+    )

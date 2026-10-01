@@ -17,6 +17,11 @@ for:
     Release 2's format-change guards: an unnamed edit keeps schedules.json at
     version 2 byte for byte, the first rule name bumps it to 3 after exactly
     one backup, idle never bumps, and names never reach ``runtime.toml``.
+``test_runtime_overrides``
+    The same guards for per-playlist rotation (playlists.json 2) and the
+    display opt-in (displays.json 2); runtime.toml never changes for them,
+    runtime-overrides.toml exists only while one is used, and idle with them
+    in use writes only the whitelist.
 ``test_downgrade`` (``-m downgrade``, needs ``WIO_OLD_SRC``)
     An older build edits what this build wrote; ``tools/golden-downgrade.sh``.
 ``test_sanitizer``

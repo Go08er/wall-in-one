@@ -694,11 +694,15 @@ class FakeRuntime:
     """Answers ``status``/``reload`` the way a healthy Rust service would.
 
     Its status always reports the generation of the ``runtime.toml`` on disk,
-    i.e. a service that has loaded whatever was last published.
+    i.e. a service that has loaded whatever was last published. By default it
+    is this release's service, which also applies ``runtime-overrides.toml``;
+    ``supported_override_schemas = None`` makes it Release 1's, which never
+    mentions (or reads) that file.
     """
 
     taboo: list[dict[str, object]] = field(default_factory=list)
     verbs: list[str] = field(default_factory=list)
+    supported_override_schemas: list[int] | None = field(default_factory=lambda: [1])
 
     def status(self) -> dict[str, object]:
         from wall_in_one import paths, runtime_config, runtime_health
@@ -719,6 +723,11 @@ class FakeRuntime:
             "source": "schedule",
             "taboo_entries": [dict(report) for report in self.taboo],
             "taboo_entries_omitted": 0,
+            **(
+                {}
+                if self.supported_override_schemas is None
+                else {"supported_override_schemas": list(self.supported_override_schemas)}
+            ),
         }
 
     def send_runtime(

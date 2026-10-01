@@ -5,10 +5,13 @@ checkout's ``src`` and every XDG variable pointed at a golden sandbox. It must
 therefore import nothing from this checkout and use only Store APIs that
 v0.1.4 (``dbfbaa0``) already had.
 
-Usage: ``downgrade_driver.py version``, ``downgrade_driver.py edit [FILE...]``
-or ``downgrade_driver.py same-schedule-edit``. Prints one JSON object: the
-module and version that ran, which records each edit touched, and any edit
-that was refused (by message).
+Usage: ``downgrade_driver.py version``, ``downgrade_driver.py edit [FILE...]``,
+``downgrade_driver.py same-schedule-edit``, ``downgrade_driver.py compile`` or
+``downgrade_driver.py prepare``. Prints one JSON object: the module and
+version that ran, which records each edit touched, and any edit that was
+refused (by message); ``compile`` reports what the old build's runtime
+publication did, and ``prepare`` the exit status of its service unit's
+``--service-startup-prepare``.
 """
 
 from __future__ import annotations
@@ -118,6 +121,53 @@ def edit_settings() -> list[str]:
     return ["opacity"]
 
 
+def compile_runtime() -> str:
+    """Publish ``runtime.toml`` the way the old GUI does after a rollback.
+
+    The same calls in every build since v0.1.4: strict settings, a Session,
+    one library scan, then ``runtime_config.update``. No child process may
+    start (the scan and the compiler never need one), so the old build's own
+    compile is all this exercises. Returns ``changed``, ``unchanged`` or
+    ``refused: <why>``.
+    """
+    from wall_in_one import runtime_config
+    from wall_in_one.session import Session
+
+    _seal_processes()
+    settings = config.load_strict()
+    session = Session(settings)
+    try:
+        session.adopt_library_refresh(session.prepare_library_refresh().run())
+        changed = runtime_config.update(settings, session)
+    except runtime_config.RuntimeConfigError as error:
+        return f"refused: {error}"
+    finally:
+        session.shutdown()
+    return "changed" if changed else "unchanged"
+
+
+def _seal_processes() -> None:
+    """Neither the scan nor the compiler needs a child process; fail if one starts."""
+    import subprocess
+
+    def no_processes(*arguments: object, **_keywords: object) -> None:
+        raise AssertionError(f"the old build tried to start {arguments!r}")
+
+    subprocess.Popen = no_processes  # type: ignore[assignment,misc]
+
+
+def prepare_service_start() -> int:
+    """What the old service unit runs first after a rollback, before the old service.
+
+    ``--service-startup-prepare`` publishes runtime.toml (or keeps the last
+    good one); the unit's next step is the old service's own loader.
+    """
+    from wall_in_one import cli
+
+    _seal_processes()
+    return cli.main(["--service-startup-prepare"])
+
+
 EDITS: dict[str, Callable[[], list[str]]] = {
     "playlists.json": edit_playlists,
     "schedules.json": edit_schedules,
@@ -138,6 +188,10 @@ def main(arguments: list[str]) -> int:
         "has_guard": hasattr(state_file, "NEWER_VERSION"),
         # The newest schedules.json it understands; 3 added rule names.
         "schedules_format": schedules.FORMAT_VERSION,
+        # The newest playlists.json / displays.json it understands; 2 added
+        # per-playlist rotation and the display opt-in (runtime schema 6).
+        "playlists_format": playlists.FORMAT_VERSION,
+        "displays_format": displays.FORMAT_VERSION,
     }
     if arguments[:1] == ["edit"]:
         chosen = arguments[1:] or list(EDITS)
@@ -153,6 +207,10 @@ def main(arguments: list[str]) -> int:
     elif arguments[:1] == ["same-schedule-edit"]:
         report["touched"] = {"schedules.json": same_schedule_edit()}
         report["errors"] = {}
+    elif arguments[:1] == ["compile"]:
+        report["compile"] = compile_runtime()
+    elif arguments[:1] == ["prepare"]:
+        report["prepare"] = prepare_service_start()
     elif arguments[:1] != ["version"]:
         print(__doc__, file=sys.stderr)
         return 2

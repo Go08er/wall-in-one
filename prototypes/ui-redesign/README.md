@@ -166,15 +166,16 @@ The pain points come from the inventory of the current app
 
 ## Status
 
-- **Wiring:** none. The pages call an in-memory `AppState`
-  (`wio_demo/state.py`), the only boundary between them and the dummy data:
-  they read it and change anything only through its named methods, so wiring
-  replaces that one class with the app's stores and the runtime's status. A
-  review noted the schedule resolution should then come from runtime status
-  rather than be recomputed in Python.
+- **Wiring:** the first slice is in the app. The shell, sidebar, player bar,
+  Library, cards, card grid and details pane are the app's own modules
+  (`src/wall_in_one/ui/next/`); this demo runs them over its in-memory
+  `AppState` (`wio_demo/state.py`), and `wall-in-one --ui=next` runs them over
+  the app's stores and the runtime's status. Both sides implement the
+  `AppState` Protocol (`ui/next/state.py`); `tools/typecheck.sh` checks this
+  side. The other pages are still the demo's.
 - **Checks:**
   - an end-to-end headless smoke test of 222 steps passes with no exceptions
     (`tools/smoke.sh`), including a 2,000-wallpaper Library and thumbnails drawn
-    off the main thread;
+    off the main thread, through the widgets the app ships;
   - every page has been checked in dark, light and narrow (420 px) layouts;
   - ruff is clean.

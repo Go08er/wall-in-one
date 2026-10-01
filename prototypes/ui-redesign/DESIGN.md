@@ -1,9 +1,17 @@
 # Wall-in-One UI prototype — design guide
 
-This is an **unwired** GTK4/libadwaita prototype of a more intuitive Wall-in-One
-UI. Everything runs on dummy data (`wio_demo/data.py`) and an in-memory state
-object (`wio_demo/state.py`). Nothing touches the real app, runtime, Noctalia,
-files or settings.
+This is a GTK4/libadwaita prototype of a more intuitive Wall-in-One UI. It runs
+on dummy data (`wio_demo/data.py`) and an in-memory state object
+(`wio_demo/state.py`). Nothing touches the real app, runtime, Noctalia, files or
+settings.
+
+**The first slice ships.** The shell, sidebar, player bar, Library page, card
+grid, details pane and shared widgets now live in the app, under
+`src/wall_in_one/ui/next/`, and this prototype runs those same modules over its
+dummy `AppState`. The app runs them over `ui/next/real_state.py` behind
+`--ui=next`. Both implement the `AppState` Protocol in `ui/next/state.py`, and
+mypy checks both (`tools/typecheck.sh`, run by `tools/smoke.sh`). Change a
+shipped widget in `src/`, never a copy here.
 
 ## Run it
 
@@ -32,27 +40,36 @@ Look at them (they are the only way to review the design) and iterate.
 ## Architecture
 
 ```
-demo.py                 entry point + screenshot runner
+demo.py                 entry point + screenshot runner (imports wall_in_one from ../../src)
 wio_demo/
   art.py                procedural wallpaper art: render() pixels (any thread) → texture() (cached)
   data.py               dummy domain data (wallpapers, playlists, rules, displays, folders, palettes)
-  models.py             view-model types pages read: Wallpaper, Playlist, Rule, Display, Folder, Palette…
-  catalog.py            fixed words and choices (kind labels, day and month names, interval presets)
-  state.py              AppState(GObject): the only boundary between pages and data (see below)
-  thumbs.py             thumbnails: drawn on worker threads, delivered to the main thread
+  models.py             the demo's view-model records: Wallpaper, Playlist, Rule, Display, Folder, Palette…
+  catalog.py            fixed words and choices (kind labels re-exported from the app)
+  state.py              AppState(GObject): the demo's adapter for the app's AppState Protocol
+  thumbs.py             the demo's ThumbnailProvider: procedural art drawn on worker threads
   store_catalog.py      dummy Store providers (the real app's Browser): options, item facts, search
-  ui.py                 shared widgets: Thumb, WallpaperCard, Swatches, pill(), heading(), dim(), add_css()
-  style.css             shared styles
-  shell.py              window: Adw.Sidebar navigation, ONE shared header bar, banner, toasts, demo menu
-  playerbar.py          persistent bottom bar: what's on screen, why, controls
-  pages/__init__.py     Page contract
-  pages/library.py      Library grid + filters + selection + drag to playlists
-  pages/inspector.py    wallpaper details: still, motion, colors (pairing editor)
+  ui.py                 re-exports the app's widgets (wall_in_one.ui.next.widgets) + load_css()
+  shell.py              MainWindow: the app's ShellWindow + Demo menu, welcome screen, glass.Look
+  glass.py              the demo's colors (simulated or read-only live Noctalia); glass layers are the app's
+  pages/__init__.py     re-exports the app's Page contract
   pages/store.py        Store (online providers); store_widgets.py
   pages/playlists.py    one playlist (sidebar lists them); playlists_picker.py
   pages/schedule.py     week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
   pages/displays.py     monitor arrangement + per-display assignment; displays_arrangement.py
   pages/settings.py     grouped settings + runtime log; settings_widgets.py, settings_palettes.py
+src/wall_in_one/ui/next/   (the app's; shared with this prototype)
+  state.py              the AppState Protocol, PlaybackControls, LibraryEditing, view types
+  widgets.py            Thumb, WallpaperCard, CardGrid, Swatches, pill(), heading(), dim(), add_css()
+  style.py              shared styles (was style.css)
+  thumbs.py             the ThumbnailProvider seam every picture goes through
+  page.py               Page contract, Placeholder
+  shell.py              ShellWindow: Adw.Sidebar, ONE shared header bar, banners, toasts, glass
+  playerbar.py          persistent bottom bar: what's on screen, why, controls
+  library.py            Library grid + filters + selection + drag to playlists
+  inspector.py          wallpaper details: still, motion, colors (pairing editor)
+  backdrop.py           the frosted style's blurred wallpaper
+tools/smoke.sh          headless smoke test; tools/typecheck.sh the Protocol check
 run.sh                  launch the interactive demo
 screenshots.sh          re-render screenshots/ (headless, isolated)
 ruff.toml               lint settings for the prototype
@@ -66,7 +83,7 @@ Route precedence in `state.py` matches the Rust runtime's `route_decision`:
 your pick → a matching schedule rule (global or this display's) → the display's
 own playlist → the app default.
 
-### Page contract (`pages/__init__.py`)
+### Page contract (`wall_in_one/ui/next/page.py`)
 
 A page module exposes `create(state) -> Page`. A `Page` has:
 - `name`, `title`, `widget` (the body, placed in the shell's stack);
@@ -86,8 +103,14 @@ Pages never import each other. They talk through `state`:
   `displays`, `settings`, `system`, `theme`, `appearance`, `scope`, `clock`,
   `folders`, `preferences`, `display-settings`.
 
-`AppState` is the only boundary between pages and data, so a real-app adapter
-can replace it without touching the pages:
+`AppState` is the only boundary between pages and data, so the real-app
+adapter (`ui/next/real_state.py`) replaces it without touching the shipped
+widgets. They use only what the Protocol in `ui/next/state.py` names; what an
+adapter can't do it leaves out (`controls` and `editing` may be `None`), and
+the widgets hide or disable those controls. The player bar reads
+`state.player()` (each display's wallpaper and the runtime's reason) rather
+than resolving rules, and the Library asks `state.library_query(...)` for
+matching and order. The demo's pages may use more of the demo `AppState`:
 - **Reads** go through its lists, lookups and queries: `state.wallpapers`,
   `state.playlists`, `state.rules`, `state.displays`, `state.wallpaper(id)`,
   `state.playlist(id)`, `state.playlist_name(id)`, `state.playlist_cover(id, size)`,
@@ -110,7 +133,8 @@ Useful state: `state.display_mode` (`mirrored`/`independent`), `state.current`
 `state.play_playlist()`, `state.resume_schedule()`, `state.add_to_playlist()`,
 `state.dark`, `state.on_battery`, `state.service_running`.
 
-Shared look: use `ui.add_css(...)` for page CSS; don't edit `style.css`.
+Shared look: use `ui.add_css(...)` for page CSS; the shared styles are the
+app's `ui/next/style.py`.
 
 ## Visual language
 
@@ -131,9 +155,10 @@ Shared look: use `ui.add_css(...)` for page CSS; don't edit `style.css`.
   with `ui.hang_on_corner(overlay, list, toggle)`; leave `ui.CORNER_RESERVE`
   free at the right of the row above. Not in the header bar.
 - Badges: `ui.pill(text, icon, "accent"|"subtle"|"warning"|"on-image"|"success")`.
-- Colors: the app tints itself with the desktop's current palette, both the
-  accent and the libadwaita surfaces. `glass.Look` is the only place that
-  writes them: it rebuilds one stylesheet from `AppState.desktop_swatches()` on
+- Colors: the demo tints itself with the desktop's current palette, both the
+  accent and the libadwaita surfaces (in the app, its own palette resolution and
+  stylesheet do this; only the glass layering, `theme/css.glass_layers`, is
+  shared). `glass.Look` is the only place in the demo that writes them: it rebuilds one stylesheet from `AppState.desktop_swatches()` on
   the now, library, settings, displays, theme and appearance topics, before the
   next frame. With the real Noctalia attached (`noctalia_live`, read-only) it
   maps `palette.json` tokens exactly like the real app's `theme/css.py`. Its

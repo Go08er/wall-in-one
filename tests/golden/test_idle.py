@@ -314,7 +314,8 @@ def test_idle_with_an_unknown_settings_key_never_writes_settings(
     """Read-only settings: the service starts on the known keys, the file stays.
 
     runtime.toml may be (re)compiled, but only to exactly what the known keys
-    produce: removing the unknown key afterwards must leave it current.
+    produce: removing the unknown key afterwards must leave it current. No
+    ui.toml appears either; Release 1 never creates it.
     """
     profile = golden.profile
     settings = profile.app_config / "settings.toml"
@@ -322,15 +323,11 @@ def test_idle_with_an_unknown_settings_key_never_writes_settings(
     before = harness.snapshot(profile.home)
 
     run = harness.run_idle()
-    allowed = [
-        *first_start_writes(profile, None),
-        Allowance(
-            ".config/wall-in-one/.settings.toml.mutation.lock",
-            frozenset({"created", "rewritten"}),
-            "a refused settings write still takes the settings lock (created if absent)",
-        ),
-    ]
-    harness.check_changes(harness.diff(before, harness.snapshot(profile.home)), allowed)
+    # Idle attempts no settings write at all, so not even the settings lock
+    # (which a refused write would take) may be touched.
+    harness.check_changes(
+        harness.diff(before, harness.snapshot(profile.home)), first_start_writes(profile, None)
+    )
     assert run.unknown_settings == ("ui_glass_frost",)
     assert run.service_prepare == 0
     assert run.gui_compile in ("changed", "unchanged"), run.gui_compile

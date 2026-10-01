@@ -1,9 +1,11 @@
 """A newer build's files survive this one: one store at a time, then settings.
 
 Release 1's guard: a store file whose version is newer than this build knows
-is refused, never rewritten or moved aside; unknown keys, top-level and per
-record, are carried through every save. ``settings.toml`` is frozen and fails
-safe. Each case is its own test so a merge shows exactly which flipped.
+is refused with ``kind == "newer-version"``, never rewritten or moved aside;
+unknown keys, top-level and per record, are carried through every save.
+``settings.toml`` is frozen and fails safe: with a key this build does not
+know, every write is refused and the headless path compiles the known keys.
+Each case is its own test, so a regression names the store and the aspect.
 """
 
 from __future__ import annotations
@@ -29,14 +31,16 @@ from tests.golden.sandbox import (
     write_json,
 )
 from wall_in_one import cli, config
-from wall_in_one.library import displays, favourites, pairings, playlists, removals, schedules
+from wall_in_one.library import (
+    displays,
+    favourites,
+    pairings,
+    playlists,
+    removals,
+    schedules,
+    state_file,
+)
 from wall_in_one.library.model import Kind, MediaItem
-
-GUARD: Final = "needs r1-store-guard"
-UI_PREFS: Final = "needs r1-ui-prefs"
-#: Strict, and only for a failed assertion: an error in the harness itself
-#: must fail loudly instead of hiding behind an expected failure.
-XFAIL_GUARD: Final = pytest.mark.xfail(strict=True, raises=AssertionError, reason=GUARD)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,13 +110,8 @@ STORES: Final = (
 RECORD_STORES: Final = tuple(case for case in STORES if case.untouched_record is not None)
 
 
-def _cases(cases: Iterable[StoreCase], *, holds_today: Iterable[str] = ()) -> list[Any]:
-    """One param per store; strict xfail unless today's code already holds."""
-    exempt = set(holds_today)
-    return [
-        pytest.param(case, id=case.name, marks=() if case.name in exempt else XFAIL_GUARD)
-        for case in cases
-    ]
+def _cases(cases: Iterable[StoreCase]) -> list[Any]:
+    return [pytest.param(case, id=case.name) for case in cases]
 
 
 def _attempt(edit: Callable[[Profile], object], profile: Profile) -> BaseException | None:
@@ -131,9 +130,9 @@ def _ensure_one_removal(profile: Profile) -> None:
     _record_scene_removal(profile, "2910000099")
 
 
-# pending-removals already refuses to touch a journal it cannot read.
-@pytest.mark.parametrize("case", _cases(STORES, holds_today={"pending-removals"}))
+@pytest.mark.parametrize("case", _cases(STORES))
 def test_a_newer_store_file_is_never_rewritten(golden: Golden, case: StoreCase) -> None:
+    """The typical edit is refused, saying why; the file keeps every byte."""
     profile = golden.profile
     target = profile.app_state / case.filename
     document = read_json(target)
@@ -146,10 +145,13 @@ def test_a_newer_store_file_is_never_rewritten(golden: Golden, case: StoreCase) 
                 record[UNKNOWN_RECORD] = "kept by the newer build"
     original = write_json(target, document)
 
-    _attempt(case.edit, profile)
+    refusal = _attempt(case.edit, profile)
 
     assert target.read_bytes() == original, "a newer-version file was rewritten"
     assert broken_copies(target) == [], "a newer-version file was moved aside"
+    assert refusal is not None, "the edit of a newer-version file was not refused"
+    assert getattr(refusal, "kind", None) == state_file.NEWER_VERSION, repr(refusal)
+    assert state_file.newer_version_refusal(target) in str(refusal)
 
 
 def _unknown_keys_case(profile: Profile, case: StoreCase) -> tuple[Path, dict[str, Any]]:
@@ -208,7 +210,6 @@ def test_unknown_keys_on_the_edited_record_survive_its_edit(
     assert edited.get(UNKNOWN_RECORD) == "a description from a newer build"
 
 
-@XFAIL_GUARD
 def test_unknown_keys_on_playlist_entries_survive_an_edit(golden: Golden) -> None:
     target = golden.profile.app_state / "playlists.json"
     document = read_json(target)
@@ -237,18 +238,19 @@ SETTINGS_ATTEMPTS: Final[dict[str, Callable[[], object]]] = {
 
 @pytest.mark.parametrize("attempt", SETTINGS_ATTEMPTS, ids=list(SETTINGS_ATTEMPTS))
 def test_a_settings_change_never_rewrites_unknown_keys(golden: Golden, attempt: str) -> None:
-    """Today's strict loader refuses the edit. Whatever replaces it must not narrow."""
+    """Every writer refuses, read-only, and the file keeps every byte."""
     target = golden.profile.app_config / "settings.toml"
     original = target.read_bytes() + b"ui_glass_frost = 0.3\n"
     target.write_bytes(original)
 
-    _attempt(lambda _profile: SETTINGS_ATTEMPTS[attempt](), golden.profile)
+    refusal = _attempt(lambda _profile: SETTINGS_ATTEMPTS[attempt](), golden.profile)
 
     assert target.read_bytes() == original
     assert list(target.parent.glob("settings.toml.broken*")) == []
+    assert isinstance(refusal, config.SettingsReadOnlyError), repr(refusal)
+    assert refusal.unknown_keys == ("ui_glass_frost",)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=UI_PREFS)
 def test_headless_publication_runs_on_the_settings_it_knows(golden: Golden) -> None:
     """A newer settings key must not stop the service from compiling the rest."""
     target = golden.profile.app_config / "settings.toml"

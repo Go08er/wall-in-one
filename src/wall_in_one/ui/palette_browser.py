@@ -211,7 +211,8 @@ class SchemePreviewLoader:
             callback(preview)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # Ends the preview spinner. Plain idle (200) sits below redraw (120) and starves.
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def shutdown(self) -> None:
         self._closed = True

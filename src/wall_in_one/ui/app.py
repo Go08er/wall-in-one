@@ -724,7 +724,10 @@ class Application(Adw.Application):
             return
         self._legacy_migration_future = future
         future.add_done_callback(
-            lambda done: GLib.idle_add(self._finish_legacy_migration_job, request, done)
+            # Ends the progress spinner; plain idle (200) starves below GTK's redraw (120).
+            lambda done: GLib.idle_add(  # type: ignore[call-arg]
+                self._finish_legacy_migration_job, request, done, priority=GLib.PRIORITY_DEFAULT
+            )
         )
 
     def _install_accelerators(self) -> None:
@@ -942,7 +945,10 @@ class Application(Adw.Application):
         # below restores ``decision`` before another mutation can be admitted.
         self._authoring_gate_state = "checking"
         future.add_done_callback(
-            lambda done: GLib.idle_add(self._finish_legacy_migration_job, request, done)
+            # Ends the progress spinner; plain idle (200) starves below GTK's redraw (120).
+            lambda done: GLib.idle_add(  # type: ignore[call-arg]
+                self._finish_legacy_migration_job, request, done, priority=GLib.PRIORITY_DEFAULT
+            )
         )
         return True
 

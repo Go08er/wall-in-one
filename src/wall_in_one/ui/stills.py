@@ -155,7 +155,8 @@ class StillMaker:
                         LOGGER.warning("%s", message)
                 return GLib.SOURCE_REMOVE
 
-            GLib.idle_add(deliver)
+            # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
+            GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def _run(self, items: tuple[MediaItem, ...], root: Path, callback: Callback) -> None:
         made = 0
@@ -175,7 +176,8 @@ class StillMaker:
                 callback(made)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def regenerate_scene(self, item: MediaItem, root: Path, callback: Callback) -> None:
         """Force one managed scene still to be replaced, off the UI thread."""
@@ -191,7 +193,8 @@ class StillMaker:
                     callback(1)
                     return GLib.SOURCE_REMOVE
 
-                GLib.idle_add(deliver)
+                # Plain idle (200) sits below redraw (120) and starves while tiles spin.
+                GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
         self._submit(
             run,

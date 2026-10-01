@@ -241,7 +241,7 @@ def test_unexpected_batch_failure_is_observed_and_reported(
     made = StillMaker(report=messages.append)
     monkeypatch.setattr(
         "wall_in_one.ui.stills.GLib.idle_add",
-        lambda callback, *arguments: callback(*arguments),
+        lambda callback, *arguments, **_keywords: callback(*arguments),
     )
     monkeypatch.setattr(
         "wall_in_one.ui.stills.stills.ensure",
@@ -263,7 +263,7 @@ def test_explicit_scene_regeneration_reports_failure(
     scene = item("1647046763", Kind.SCENE)
     monkeypatch.setattr(
         "wall_in_one.ui.stills.GLib.idle_add",
-        lambda callback, *arguments: callback(*arguments),
+        lambda callback, *arguments, **_keywords: callback(*arguments),
     )
 
     def fail(*_arguments: object, **_keywords: object) -> Path:

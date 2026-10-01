@@ -61,6 +61,11 @@ def _discover(cancelled: palettes.CancelCheck) -> palettes.Discovery:
     return palettes.discover(cancelled=cancelled)
 
 
+def _dispatch_on_gtk(deliver: Callable[[], bool]) -> object:
+    # Ends the catalogue spinner. Plain idle (200) sits below redraw (120) and starves.
+    return GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
+
+
 class PaletteCatalog:
     """Discover palettes off-thread and publish only the newest generation.
 
@@ -73,7 +78,7 @@ class PaletteCatalog:
         self,
         *,
         discover: Discover = _discover,
-        dispatcher: Dispatcher = GLib.idle_add,
+        dispatcher: Dispatcher = _dispatch_on_gtk,
         initial: palettes.Discovery | None = None,
     ) -> None:
         self._discover = discover

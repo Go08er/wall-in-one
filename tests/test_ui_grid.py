@@ -839,7 +839,9 @@ def test_one_thumbnail_request_delivers_to_every_visible_card(
         return texture
 
     monkeypatch.setattr(Loader, "_texture_for", staticmethod(load))
-    monkeypatch.setattr("wall_in_one.ui.thumbnails.GLib.idle_add", lambda callback: callback())
+    monkeypatch.setattr(
+        "wall_in_one.ui.thumbnails.GLib.idle_add", lambda callback, **_keywords: callback()
+    )
     loader = Loader(max_workers=1)
     wallpaper = item("shared")
     delivered: list[object | None] = []

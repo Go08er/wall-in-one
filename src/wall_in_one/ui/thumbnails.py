@@ -145,7 +145,8 @@ class ThumbnailLoader:
                     callback(item, result)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # Ends the tile spinner. Plain idle (200) sits below GTK's redraw (120) and starves.
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def shutdown(self) -> None:
         """Stop delivery, cancel queued work, and terminate owned children."""

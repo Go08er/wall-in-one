@@ -259,7 +259,8 @@ class PreviewLoader:
                 callback(candidate, data)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # Plain idle (200) sits below GTK's redraw (120); the entry cursor fade starves it.
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def shutdown(self) -> None:
         with self._lock:
@@ -1217,7 +1218,8 @@ class BrowseDialog(Adw.Dialog):
                 )
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # Ends Searching. Plain idle (200) sits below redraw (120); the cursor fade starves it.
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def _show_failure(self, message: str, append: bool = False) -> None:
         if append:
@@ -1560,7 +1562,8 @@ class BrowseDialog(Adw.Dialog):
                 self._app.refresh_library()
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # Ends Downloading. Plain idle (200) sits below redraw (120); animations starve it.
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     # -- housekeeping ------------------------------------------------------
 

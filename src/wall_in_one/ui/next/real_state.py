@@ -430,8 +430,11 @@ class RealAppState(GObject.Object):
         notes = status_line.marks(view)
         if view.service == "checking":
             return Player(service="checking", notes=notes)
-        if view.service == "unavailable" or truth is None:
+        if view.service == "unavailable":
             return Player(service="stopped", notes=notes)
+        if truth is None:
+            # Running, but this snapshot says nothing this build can show.
+            return Player(service="running", notes=notes)
         targets = set(self.targets())
         screens: list[OnScreen] = []
         states: list[str] = []

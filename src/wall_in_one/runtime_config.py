@@ -577,7 +577,8 @@ def render(settings: config.Settings, session: Session) -> str:
         details = "; ".join(f"{name}: {fault}" for name, fault in faults)
         raise RuntimeConfigError(
             "cannot compile runtime configuration because authoring state is "
-            f"unreadable ({details}). Repair or restore the named file; the "
+            f"unreadable or was saved by a newer version of Wall-in-One ({details}). "
+            "Repair or restore the named file, or use the version that saved it; the "
             "existing runtime configuration was left untouched."
         )
     known = {item.path: item for item in session.library.items}

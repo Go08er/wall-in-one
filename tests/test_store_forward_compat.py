@@ -666,8 +666,8 @@ def test_a_refused_edit_never_lets_a_newer_file_reach_the_runtime_compiler(
 
     assert cli.main(["--write-config"]) == 1
     error = capsys.readouterr().err
-    assert case.filename in error
-    assert "newer version" in error
+    assert "authoring state is unreadable or was saved by a newer version" in error
+    assert f"{case.filename} was saved by a newer version" in error
     assert "left untouched" in error
     assert runtime.read_bytes() == last_good
     assert target.read_bytes() == original

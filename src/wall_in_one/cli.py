@@ -511,7 +511,8 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                 details = "; ".join(f"{name}: {fault}" for name, fault in faults)
                 raise runtime_config.RuntimeConfigError(
                     "cannot sync runtime health because authoring state is "
-                    f"unreadable ({details}); no health marker was written"
+                    "unreadable or was saved by a newer version of Wall-in-One "
+                    f"({details}); no health marker was written"
                 )
             expected_path = paths.runtime_config_path().absolute()
             status_path = status.get("config_path")

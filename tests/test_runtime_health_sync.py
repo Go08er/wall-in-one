@@ -446,6 +446,37 @@ def test_faulted_pairings_are_never_replaced_by_unattended_health_sync(
     assert "authoring state is unreadable" in capsys.readouterr().err
 
 
+def test_newer_pairings_are_never_narrowed_by_unattended_health_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The 30-second health sync must not rewrite a file a newer build saved."""
+    item = _media(tmp_path)
+    _write_runtime_config()
+    target = pairings.state_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        json.dumps(
+            {
+                "version": 3,
+                "pairings": [{"identity": f"still:{item.path}", "palette": "keep", "x": 1}],
+            }
+        )
+        + "\n"
+    ).encode()
+    target.write_bytes(original)
+    monkeypatch.setattr(client, "send_runtime", lambda _verb: _snapshot(item))
+
+    assert cli.main(["--sync-runtime-health"]) == 1
+    assert target.read_bytes() == original
+    assert not target.with_name(target.name + pairings.BROKEN_SUFFIX).exists()
+    error = capsys.readouterr().err
+    assert "unreadable or was saved by a newer version of Wall-in-One" in error
+    assert "pairings.json was saved by a newer version" in error
+    assert "no health marker was written" in error
+
+
 def test_stale_snapshot_cannot_undo_a_user_clearing_health(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

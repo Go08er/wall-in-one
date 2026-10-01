@@ -189,7 +189,7 @@ def main(arguments: list[str]) -> int:
         # The newest schedules.json it understands; 3 added rule names.
         "schedules_format": schedules.FORMAT_VERSION,
         # The newest playlists.json / displays.json it understands; 2 added
-        # per-playlist rotation and the display opt-in (runtime schema 6).
+        # per-playlist rotation and the display opt-in.
         "playlists_format": playlists.FORMAT_VERSION,
         "displays_format": displays.FORMAT_VERSION,
     }

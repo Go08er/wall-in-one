@@ -385,7 +385,8 @@ class Application(Adw.Application):
         # Process work, done once: the first window to pass the migration gate
         # resolves the live palette and loads the library. Every later
         # activation only presents a window; one built later is shown what
-        # the application already has (see `do_activate`).
+        # the application already has and rescans the library once (see
+        # `do_activate`).
         self._first_activation_done = False
         self._newer_version_notice_shown = False
         self._provider = Gtk.CssProvider()
@@ -777,7 +778,8 @@ class Application(Adw.Application):
         activation does. Only a new window does more: it is shown what the
         application already has, it asks the migration question while that
         is still open, and the process's first window resolves the palette
-        and loads the library.
+        and loads the library. A window rebuilt after the last one closed
+        rescans the library once instead.
         """
         created = self._window is None
         if created:
@@ -809,6 +811,14 @@ class Application(Adw.Application):
             # `ctl open` cost a shell round trip and a library walk.
             return
         self._replay_application_state(self._window)
+        if self._first_activation_done:
+            # Rebuilt after the last window closed. Nothing watches the library
+            # folders, so files added meanwhile need one scan; it runs off GTK
+            # and replaces the held library shown above. The palette monitor
+            # kept the colours current and the migration gate is still open.
+            if self._settings.roots:
+                self.refresh_library()
+            return
         # Once authoring is open the predecessor has its disposition, and
         # the gate never closes again: a new window has nothing to ask.
         if not self._authoring_migration_ready and self._prompt_for_legacy_migration():
@@ -818,10 +828,10 @@ class Application(Adw.Application):
     def _replay_application_state(self, window: WindowServices) -> None:
         """Show a newly built window the palette and library the process holds.
 
-        Both are application state, kept current without a window: the
-        palette by its monitor and the post-hook, the library by every path
-        that changes it. A window built after the first activation therefore
-        needs them shown, not resolved and scanned again.
+        The palette is application state that its monitor and the post-hook
+        keep current without a window, so a new window is only shown it. The
+        held library is shown at once, so a rebuilt window is not empty while
+        `do_activate`'s fresh scan runs.
         """
         if self._resolved is not None:
             window.show_palette(self._resolved)
@@ -830,9 +840,6 @@ class Application(Adw.Application):
         if not self._first_activation_done or not self._settings.roots:
             return
         window.show_library(self._session)
-        if self._library_scan_future is not None:
-            # The scan a closed window started lands on this one and clears it.
-            window.show_library_scanning(True)
 
     def _build_window(self) -> MainWindow | NextWindow:
         """The window this process was started with: classic unless ``--ui=next``."""

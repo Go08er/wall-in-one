@@ -783,7 +783,7 @@ class MotionBgs:
         rate_limiter: http.RateLimiter | None = None,
         max_download_bytes: int = MAX_DOWNLOAD_BYTES,
     ) -> None:
-        self._client: http.Client = client if client is not None else http.UrllibClient()
+        self._client: http.Client = client if client is not None else http.default_client()
         self._rate = (
             rate_limiter
             if rate_limiter is not None
@@ -835,6 +835,8 @@ class MotionBgs:
                 if tag:
                     source_url = browse_url("genre", "", tag, page)
             return _to_result(cached, source_url, cached_flag=True)
+        # Boot the parsing interpreter while the request is in flight.
+        backend.warm_up(backend_workers.warm)
         parse_mode, parse_query, parse_genre = mode, text, genre
         markup: str
         effective: str

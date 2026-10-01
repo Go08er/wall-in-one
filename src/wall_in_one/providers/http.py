@@ -26,20 +26,24 @@ process could read it. There is no `argv` now, so the key is a plain string.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import os
+import select
 import socket
+import ssl
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from email.message import Message as HTTPMessage
 from pathlib import Path
 from types import TracebackType
 from typing import IO, BinaryIO, Final, Protocol, cast
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from wall_in_one import file_io
 from wall_in_one.providers import download as download_files
@@ -69,6 +73,21 @@ STAGING_PREFIX: Final = download_files.MEDIA_STAGING_PREFIX
 # needs its own honest bound rather than inheriting a five-minute download
 # timeout.
 CONNECT_TIMEOUT_SECONDS: Final = 5.0
+
+#: Idle keep-alive connections retained per host. Equal to the preview worker
+#: count, so a page of thumbnails reuses connections rather than paying a TCP
+#: and TLS handshake for every card.
+MAX_IDLE_PER_HOST: Final = 4
+
+#: An idle connection older than this is closed instead of reused. Inside
+#: nginx's 75-second default, and shorter than a browser keeps one (Firefox:
+#: 115 s). A connection the server closed sooner is caught by the liveness
+#: probe on checkout, or at worst by the single retry in `KeepAliveClient`.
+IDLE_TIMEOUT_SECONDS: Final = 60.0
+
+#: A redirect or error body no larger than this is read to its end so the
+#: connection can carry the next request. Anything bigger closes it instead.
+DRAIN_BYTES: Final = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +216,7 @@ class Transfer:
 
 
 class Client(Protocol):
-    """The seam. Tests implement this; in production only `UrllibClient` does."""
+    """The seam. Tests implement this; in production `KeepAliveClient` does."""
 
     def fetch(self, request: Request) -> Response: ...
 
@@ -256,6 +275,11 @@ class _Opened:
     location: str
     declared_length: int
     stream: BinaryIO
+    content_encoding: str = ""
+    #: The pooled connection carrying ``stream``; ``None`` on the urllib path.
+    connection: http.client.HTTPConnection | None = None
+    #: The pool key ``connection`` returns to.
+    origin: str = ""
 
 
 class UrllibClient:
@@ -298,7 +322,8 @@ class UrllibClient:
 
     # -- transport -------------------------------------------------------
 
-    def _open(self, request: Request) -> _Opened:
+    def _open(self, request: Request, *, compressed: bool = False) -> _Opened:
+        del compressed  # urllib always asks for an identity body
         url = require_https(request.url)
         if self.cancelled():
             raise ProviderError("cancelled", "request cancelled during shutdown")
@@ -344,15 +369,12 @@ class UrllibClient:
             raise
 
     def fetch(self, request: Request) -> Response:
-        opened = self._open(request)
+        opened = self._open(request, compressed=True)
         try:
             _refuse_declared_overflow(opened, request.max_bytes)
-            body = read_bounded(opened.stream, request.max_bytes)
+            body = _read_body(opened, request.max_bytes)
         finally:
-            try:
-                self._unregister(opened.stream)
-            finally:
-                _close_stream_preserving_error(opened.stream)
+            self._finish(opened)
         return Response(
             url=opened.url,
             status=opened.status,
@@ -450,10 +472,282 @@ class UrllibClient:
                                     f"{cleanup_error}"
                                 )
         finally:
+            self._finish(opened)
+
+    def _finish(self, opened: _Opened) -> None:
+        """Hand a finished response back. urllib's connections never outlive one."""
+        try:
+            self._unregister(opened.stream)
+        finally:
+            _close_stream_preserving_error(opened.stream)
+
+
+class KeepAliveClient(UrllibClient):
+    """`UrllibClient`'s guarantees over persistent HTTPS connections.
+
+    urllib sends ``Connection: close`` and builds a new TCP and TLS session for
+    every request, so a page of 24 thumbnails cost 24 handshakes -- two or
+    three round trips each before the first byte -- and the site 24 times the
+    connection set-up work. This keeps a few idle connections per host, the
+    way a browser does, and is otherwise the same transport:
+
+    * :func:`require_https` still runs before any socket is touched, and only
+      port 443 is ever dialled;
+    * redirects are still returned, never followed -- http.client has no
+      redirect logic at all;
+    * bodies are read through the same bounded readers, and a connection is
+      only reused when its previous response was read to the end;
+    * certificate and hostname verification use the default context, exactly
+      as urllib's ``HTTPSHandler`` does;
+    * a configured HTTPS proxy routes the request through the urllib path, so
+      proxy behaviour is unchanged.
+
+    `fetch` additionally advertises gzip. Downloads never do: their byte
+    counts are checked against the provider's metadata.
+    """
+
+    def __init__(
+        self,
+        *,
+        compress: bool = True,
+        clock: Callable[[], float] = time.monotonic,
+        connect: Connector | None = None,
+        opener: urllib.request.OpenerDirector | None = None,
+    ) -> None:
+        super().__init__(opener=opener)
+        self._compress = compress
+        self._clock = clock
+        self._connect = connect if connect is not None else _https_connection
+        self._idle: dict[str, list[tuple[float, http.client.HTTPConnection]]] = {}
+        self._busy: set[http.client.HTTPConnection] = set()
+        #: Connections opened, for benchmarks and tests; never a decision input.
+        self.connections_opened = 0
+
+    def close(self) -> None:
+        super().close()
+        with self._lock:
+            idle = [connection for pool in self._idle.values() for _, connection in pool]
+            self._idle.clear()
+            busy = tuple(self._busy)
+        for connection in idle:
+            _close_connection(connection)
+        # A request still waiting for its status line has no registered body
+        # stream yet; shutting its socket down is what wakes it.
+        for connection in busy:
+            _interrupt_connection(connection)
+
+    # -- the pool --------------------------------------------------------
+
+    def _checkout(self, host: str, timeout: float) -> tuple[http.client.HTTPConnection, bool]:
+        now = self._clock()
+        stale: list[http.client.HTTPConnection] = []
+        chosen: http.client.HTTPConnection | None = None
+        with self._lock:
+            if self._closed:
+                raise ProviderError("cancelled", "request cancelled during shutdown")
+            pool = self._idle.get(host, [])
+            while pool and chosen is None:
+                parked_at, candidate = pool.pop()
+                if now - parked_at <= IDLE_TIMEOUT_SECONDS and _idle_connection_usable(candidate):
+                    chosen = candidate
+                else:
+                    stale.append(candidate)
+            if chosen is not None:
+                self._busy.add(chosen)
+        for connection in stale:
+            _close_connection(connection)
+        if chosen is not None:
+            if chosen.sock is not None:
+                with contextlib.suppress(OSError):
+                    chosen.sock.settimeout(timeout)
+            return chosen, True
+        connection = self._connect(host, timeout)
+        with self._lock:
+            if self._closed:
+                raise ProviderError("cancelled", "request cancelled during shutdown")
+            self._busy.add(connection)
+            self.connections_opened += 1
+        try:
+            connection.connect()
+        except BaseException:
+            self._drop(connection)
+            raise
+        return connection, False
+
+    def _checkin(self, host: str, connection: http.client.HTTPConnection) -> None:
+        with self._lock:
+            self._busy.discard(connection)
+            if not self._closed and connection.sock is not None:
+                pool = self._idle.setdefault(host, [])
+                if len(pool) < MAX_IDLE_PER_HOST:
+                    pool.append((self._clock(), connection))
+                    return
+        _close_connection(connection)
+
+    def _drop(self, connection: http.client.HTTPConnection) -> None:
+        with self._lock:
+            self._busy.discard(connection)
+        _close_connection(connection)
+
+    # -- transport -------------------------------------------------------
+
+    def _open(self, request: Request, *, compressed: bool = False) -> _Opened:
+        url = require_https(request.url)
+        if self.cancelled():
+            raise ProviderError("cancelled", "request cancelled during shutdown")
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if _proxied(host):
+            return super()._open(request)
+        target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        headers = {
+            # Explicit, as urllib does, rather than derived from whatever the
+            # connector dialled.
+            "Host": parsed.netloc,
+            "Accept": request.accept,
+            "Accept-Language": "en-US,en;q=0.8",
+            "User-Agent": request.user_agent,
+            **dict(request.headers),
+        }
+        if compressed and self._compress:
+            headers["Accept-Encoding"] = "gzip"
+        connect_timeout = min(request.timeout, CONNECT_TIMEOUT_SECONDS)
+        for attempt in range(2):
             try:
-                self._unregister(opened.stream)
-            finally:
-                _close_stream_preserving_error(opened.stream)
+                connection, reused = self._checkout(host, connect_timeout)
+            except TimeoutError as error:
+                raise ProviderError("timeout", f"request to {url} timed out") from error
+            except OSError as error:
+                raise ProviderError("transport", f"could not reach {url}: {error}") from error
+            try:
+                connection.request("GET", target, headers=headers)
+                response = connection.getresponse()
+            except (ConnectionError, http.client.BadStatusLine) as error:
+                # A reused connection the server had already closed fails here,
+                # before any response arrived. GET is idempotent, so one retry
+                # on a fresh connection is safe; a fresh one failing is real.
+                self._drop(connection)
+                if reused and attempt == 0 and not self.cancelled():
+                    continue
+                if self.cancelled():
+                    raise ProviderError("cancelled", "request cancelled during shutdown") from error
+                raise ProviderError("transport", f"could not reach {url}: {error}") from error
+            except TimeoutError as error:
+                self._drop(connection)
+                raise ProviderError("timeout", f"request to {url} timed out") from error
+            except (OSError, http.client.HTTPException) as error:
+                self._drop(connection)
+                if self.cancelled():
+                    raise ProviderError("cancelled", "request cancelled during shutdown") from error
+                raise ProviderError("transport", f"could not reach {url}: {error}") from error
+            break
+        try:
+            opened = _describe(cast("BinaryIO", response), url)
+            opened.connection = connection
+            opened.origin = host
+            _set_stream_timeout(opened.stream, request.timeout)
+            if connection.sock is not None:
+                with contextlib.suppress(OSError):
+                    connection.sock.settimeout(request.timeout)
+            if not self._register(opened.stream):
+                raise ProviderError("cancelled", "request cancelled during shutdown")
+            return opened
+        except BaseException:
+            _interrupt_stream(cast("BinaryIO", response))
+            self._drop(connection)
+            raise
+
+    def _finish(self, opened: _Opened) -> None:
+        connection = opened.connection
+        if connection is None:
+            super()._finish(opened)
+            return
+        response = cast("http.client.HTTPResponse", opened.stream)
+        reusable = False
+        try:
+            self._unregister(opened.stream)
+            if sys.exception() is None and not response.isclosed():
+                _drain(response, connection)
+            reusable = (
+                sys.exception() is None
+                and response.isclosed()
+                and not response.will_close
+                and connection.sock is not None
+            )
+        except Exception:
+            reusable = False
+        finally:
+            if reusable:
+                self._checkin(opened.origin, connection)
+            else:
+                try:
+                    _close_stream_preserving_error(opened.stream)
+                finally:
+                    self._drop(connection)
+
+
+#: Opens (but does not yet connect) a connection to ``host``:443. The seam the
+#: keep-alive tests replace, since nothing unprivileged can listen on 443.
+type Connector = Callable[[str, float], http.client.HTTPConnection]
+
+_TLS_CONTEXT: ssl.SSLContext | None = None
+_TLS_CONTEXT_LOCK = threading.Lock()
+
+
+def _https_connection(host: str, timeout: float) -> http.client.HTTPConnection:
+    """What urllib's ``HTTPSHandler`` builds: default verification, port 443."""
+    global _TLS_CONTEXT
+    with _TLS_CONTEXT_LOCK:
+        if _TLS_CONTEXT is None:
+            _TLS_CONTEXT = ssl.create_default_context()
+            _TLS_CONTEXT.set_alpn_protocols(["http/1.1"])
+        context = _TLS_CONTEXT
+    return http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
+
+
+def default_client() -> UrllibClient:
+    """The transport production code builds when none is injected."""
+    return KeepAliveClient()
+
+
+def _proxied(host: str) -> bool:
+    """Whether urllib would send a request for ``host`` through a proxy."""
+    proxies = urllib.request.getproxies()
+    return "https" in proxies and not urllib.request.proxy_bypass(host)
+
+
+def _idle_connection_usable(connection: http.client.HTTPConnection) -> bool:
+    """An idle connection must be silent: readable means EOF, an alert, or junk."""
+    sock = connection.sock
+    if sock is None:
+        return False
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except OSError, ValueError:
+        return False
+    return not readable
+
+
+def _drain(response: http.client.HTTPResponse, connection: http.client.HTTPConnection) -> None:
+    """Read a small unread body (a redirect, an error page) so the socket survives."""
+    if response.length is None or response.length > DRAIN_BYTES:
+        return
+    if connection.sock is not None:
+        connection.sock.settimeout(CONNECT_TIMEOUT_SECONDS)
+    response.read(DRAIN_BYTES + 1)
+
+
+def _close_connection(connection: http.client.HTTPConnection) -> None:
+    with contextlib.suppress(Exception):
+        connection.close()
+
+
+def _interrupt_connection(connection: http.client.HTTPConnection) -> None:
+    sock = connection.sock
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+    _close_connection(connection)
 
 
 def _stream_socket(stream: BinaryIO) -> socket.socket | None:
@@ -513,9 +807,11 @@ def _describe(raw: BinaryIO, requested: str) -> _Opened:
     header_source = getattr(raw, "headers", None)
     content_type = ""
     location = ""
+    encoding = ""
     declared = -1
     if header_source is not None:
         content_type = str(header_source.get("Content-Type", "") or "")
+        encoding = str(header_source.get("Content-Encoding", "") or "").strip().lower()
         location = str(header_source.get("Location", "") or "")
         raw_length = str(header_source.get("Content-Length", "") or "").strip()
         if raw_length.isdigit():
@@ -529,6 +825,7 @@ def _describe(raw: BinaryIO, requested: str) -> _Opened:
         location=location.strip(),
         declared_length=declared,
         stream=raw,
+        content_encoding=encoding,
     )
 
 
@@ -547,8 +844,59 @@ def _read_chunk(stream: BinaryIO, remaining: int) -> bytes:
         return stream.read(min(CHUNK_BYTES, max(remaining, 0) + 1))
     except TimeoutError as error:
         raise ProviderError("timeout", "the response stalled mid-body") from error
-    except OSError as error:
+    except (OSError, http.client.HTTPException) as error:
         raise ProviderError("transport", f"the response failed mid-body: {error}") from error
+
+
+def _read_body(opened: _Opened, maximum: int) -> bytes:
+    """The response body, decoded when it arrived gzip-compressed."""
+    if opened.content_encoding in {"", "identity"}:
+        return read_bounded(opened.stream, maximum)
+    if opened.content_encoding in {"gzip", "x-gzip"}:
+        return read_bounded_gzip(opened.stream, maximum)
+    raise ProviderError(
+        "response", f"unsupported content encoding {opened.content_encoding[:32]!r}"
+    )
+
+
+def read_bounded_gzip(stream: BinaryIO, maximum: int) -> bytes:
+    """Inflate a gzip body, refusing once either side passes ``maximum``.
+
+    The compressed bytes are bounded like any other body, and the inflated
+    output is bounded *while inflating*, so a small bomb cannot expand past
+    the ceiling in memory before the check runs.
+    """
+    inflater = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+    chunks: list[bytes] = []
+    received = 0
+    produced = 0
+    try:
+        while True:
+            chunk = _read_chunk(stream, maximum - received)
+            if not chunk:
+                break
+            received += len(chunk)
+            if received > maximum:
+                raise ProviderError("size-limit", f"response exceeded its {maximum} byte ceiling")
+            pending = chunk
+            while pending:
+                if inflater.eof:
+                    raise ProviderError("response", "gzip body has trailing data")
+                output = inflater.decompress(pending, maximum - produced + 1)
+                produced += len(output)
+                if produced > maximum:
+                    raise ProviderError(
+                        "size-limit", f"decoded response exceeded its {maximum} byte ceiling"
+                    )
+                chunks.append(output)
+                # Input past the gzip trailer lands in `unused_data`; feeding it
+                # round again is what turns it into the trailing-data refusal.
+                pending = inflater.unconsumed_tail or inflater.unused_data
+    except zlib.error as error:
+        raise ProviderError("response", f"invalid gzip body: {error}") from error
+    if not inflater.eof:
+        raise ProviderError("response", "gzip body ended before its trailer")
+    return b"".join(chunks)
 
 
 def read_bounded(stream: BinaryIO, maximum: int) -> bytes:

@@ -67,6 +67,11 @@ def motionbgs_detail(markup: str, slug: str) -> MotionBgsDetail | ProviderFailur
         return _failure(error)
 
 
+def warm() -> None:
+    """Import the parsers in a worker before the first page needs them."""
+    import wall_in_one.providers.motionbgs  # noqa: F401
+
+
 def value[T](result: T | ProviderFailure) -> T:
     """Reconstruct an expected provider failure in the calling interpreter."""
     if isinstance(result, ProviderFailure):

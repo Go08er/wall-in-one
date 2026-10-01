@@ -13,6 +13,7 @@ picklable data and must always observe ``Future.result()``.
 
 from __future__ import annotations
 
+import logging
 import os
 import site
 import threading
@@ -34,6 +35,8 @@ _PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _lock = threading.Lock()
 _executor: InterpreterPoolExecutor | None = None
+_warmed: set[str] = set()
+LOGGER = logging.getLogger(__name__)
 
 
 def executor() -> InterpreterPoolExecutor:
@@ -60,10 +63,40 @@ def run[**P, R](function: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) 
     return submit(function, *args, **kwargs).result()
 
 
+def warm_up(function: Callable[[], object], /) -> None:
+    """Start ``function`` on the pool once per pool lifetime, without waiting.
+
+    A worker interpreter is created on first use and then imports the provider
+    modules: about 170 ms measured, which the first parse otherwise pays
+    *after* the network answer it needed has already arrived. Callers start
+    this as they start that request so the two overlap. Failures are only
+    logged; the real call will surface them.
+    """
+    key = f"{function.__module__}.{function.__qualname__}"
+    with _lock:
+        if key in _warmed:
+            return
+        _warmed.add(key)
+    try:
+        future = submit(function)
+    except RuntimeError:
+        return
+    future.add_done_callback(_observe_warm_up)
+
+
+def _observe_warm_up(future: Future[object]) -> None:
+    if future.cancelled():
+        return
+    error = future.exception()
+    if error is not None:
+        LOGGER.debug("backend warm-up failed: %s", error)
+
+
 def shutdown(*, wait: bool = True) -> None:
     """Release the shared pool, primarily for deterministic test teardown."""
     global _executor
     with _lock:
         current, _executor = _executor, None
+        _warmed.clear()
     if current is not None:
         current.shutdown(wait=wait, cancel_futures=True)

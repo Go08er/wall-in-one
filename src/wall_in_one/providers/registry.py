@@ -263,5 +263,5 @@ def build(name: str, *, client: http.Client | None = None, api_key: str = "") ->
 
 def build_all(*, client: http.Client | None = None, api_key: str = "") -> tuple[Provider, ...]:
     """Every provider, over one shared transport."""
-    shared = client if client is not None else http.UrllibClient()
+    shared = client if client is not None else http.default_client()
     return tuple(build(name, client=shared, api_key=api_key) for name in names())

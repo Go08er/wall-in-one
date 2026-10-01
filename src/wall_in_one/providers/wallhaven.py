@@ -770,7 +770,7 @@ class Wallhaven:
         api_key: str = "",
         rate_limiter: http.RateLimiter | None = None,
     ) -> None:
-        self._client: http.Client = client if client is not None else http.UrllibClient()
+        self._client: http.Client = client if client is not None else http.default_client()
         self._api_key = normalise_api_key(api_key)
         self._rate = (
             rate_limiter if rate_limiter is not None else http.RateLimiter(MIN_API_INTERVAL_SECONDS)

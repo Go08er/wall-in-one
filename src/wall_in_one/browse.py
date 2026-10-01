@@ -317,7 +317,7 @@ class Browser:
     ) -> None:
         # One transport for every provider: connection reuse, and one seam for
         # a test to replace.
-        self._client = client if client is not None else http.UrllibClient()
+        self._client = client if client is not None else http.default_client()
         self._root = root
         # A caller which only supplies the download destination still expects
         # repeat-download protection in that destination.  The GUI passes all

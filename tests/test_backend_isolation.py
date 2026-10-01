@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from concurrent import interpreters
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -173,3 +174,33 @@ print("late package path reached every isolated MotionBGS worker")
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "late package path reached every isolated MotionBGS worker"
+
+
+def test_warm_up_is_submitted_once_per_pool_and_failures_stay_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submitted: list[object] = []
+
+    def submit(function: object) -> Future[object]:
+        submitted.append(function)
+        done: Future[object] = Future()
+        done.set_exception(RuntimeError("a failed warm-up is only logged"))
+        return done
+
+    monkeypatch.setattr(backend, "submit", submit)
+    backend.warm_up(backend_workers.warm)
+    backend.warm_up(backend_workers.warm)
+    assert submitted == [backend_workers.warm]
+
+    # A new pool needs warming again.
+    backend.shutdown()
+    backend.warm_up(backend_workers.warm)
+    assert submitted == [backend_workers.warm, backend_workers.warm]
+
+
+def test_the_warm_up_target_runs_in_a_real_worker() -> None:
+    # `warm_up` only logs failures, so prove the target itself is importable
+    # and completes inside a subinterpreter.
+    assert backend.run(backend_workers.warm) is None
+    marker, _worker_id = backend.run(backend_workers._probe, "after-warm-up")
+    assert marker == "after-warm-up"

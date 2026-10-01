@@ -388,10 +388,10 @@ if an editor installs a valid document before or during that boundary, the
 manual repair remains canonical and the app reports its own mutation as
 failed. The same rule applies to an in-place repair of the original inode.
 
-A file saved by a newer version of Wall-in-One is not unreadable, and it is
-never moved aside or rewritten. The app shows what it understands of it and
-says once which files are affected; every edit to such a file is refused with
-the reason `newer-version` ("… was saved by a newer version of Wall-in-One;
+From 0.2.0, a file saved by a newer version of Wall-in-One is not unreadable,
+and it is never moved aside or rewritten. The app shows what it understands of
+it and says once which files are affected; every edit to such a file is refused
+with the reason `newer-version` ("… was saved by a newer version of Wall-in-One;
 open that version to change it. Nothing was changed."), and the runtime keeps
 its last-known-good configuration. The pending-removals journal is never acted
 on at all in that case.
@@ -400,13 +400,18 @@ Fields the app does not know, for example ones a newer version added, are kept
 through every save of a file it does understand: at the top level and on each
 playlist, playlist entry, schedule rule, pairing and removal intent.
 
+0.1.4 has neither guard. It reports a newer file as unreadable, moves it aside
+as `.broken` on its next edit and saves it in its own version, and it drops
+fields it does not know. See
+[Rolling back from 0.2.0 to 0.1.4](updating.md#rolling-back-from-020-to-014).
+
 ### Format versions and their backups
 
 A file moves to a newer format only when you first use what that format adds.
 Every other edit keeps writing the version the file already has, so a profile
 that never uses a new feature stays readable by older releases. The first rule
 name is the first such change: `schedules.json` stays at version 2, exactly as
-0.1.4 and 0.1.5 write it, until a rule has a name, and is version 3 from then on.
+0.1.4 writes it, until a rule has a name, and is version 3 from then on.
 Likewise `playlists.json` stays at version 1 until a playlist has its own
 interval or shuffle, and `displays.json` until a display's own playlist is set
 to beat global schedule rules; each is version 2 from then on. Those settings

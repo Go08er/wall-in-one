@@ -388,6 +388,18 @@ if an editor installs a valid document before or during that boundary, the
 manual repair remains canonical and the app reports its own mutation as
 failed. The same rule applies to an in-place repair of the original inode.
 
+A file saved by a newer version of Wall-in-One is not unreadable, and it is
+never moved aside or rewritten. The app shows what it understands of it and
+says once which files are affected; every edit to such a file is refused with
+the reason `newer-version` ("… was saved by a newer version of Wall-in-One;
+open that version to change it. Nothing was changed."), and the runtime keeps
+its last-known-good configuration. The pending-removals journal is never acted
+on at all in that case.
+
+Fields the app does not know, for example ones a newer version added, are kept
+through every save of a file it does understand: at the top level and on each
+playlist, playlist entry, schedule rule, pairing and removal intent.
+
 ## Where things live
 
 | path | what |

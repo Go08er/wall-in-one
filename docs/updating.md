@@ -96,5 +96,8 @@ runtime or replace settings with defaults merely to silence an error.
 Package rollback does not roll back application data. An older release can
 reject newer settings—for example, battery control's schema 5. Keep or restore
 the compatible newer package to repair the configuration; there is no automatic
-data downgrade. Preserve current files before restoring any backup, since a
+data downgrade. Favourites, Pairings, playlists, schedules and display
+assignments saved by a newer version open read-only in an older release that
+has the store guard: edits are refused and the files are left byte-for-byte
+as they were (see [State-file recovery](library.md#state-file-recovery)). Preserve current files before restoring any backup, since a
 whole-folder restore would discard changes made after that backup.

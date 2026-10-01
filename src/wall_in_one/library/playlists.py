@@ -39,12 +39,23 @@ from wall_in_one.library.model import MediaItem
 #: The file, under `paths.app_state_dir()`, beside the favourites and pairings.
 STATE_FILENAME: Final = "playlists.json"
 
-#: Bumped only if the shape changes. A newer document is recovered for the UI
-#: but faulted, so this build never compiles it, and every mutation is refused
-#: (kind ``newer-version``) so the file is left byte-identical, with no
-#: ``.broken`` copy. Unknown keys in a same-version document are carried
-#: through every save; see `DOCUMENT_SHAPE`.
-FORMAT_VERSION: Final = 1
+#: The newest version this build understands. A newer document is recovered
+#: for the UI but faulted, so this build never compiles it, and every mutation
+#: is refused (kind ``newer-version``) so the file is left byte-identical, with
+#: no ``.broken`` copy. Unknown keys in a known version are carried through
+#: every save; see `DOCUMENT_SHAPE`.
+#:
+#: Version 2 adds a playlist's own ``cycle_interval`` and ``shuffle``. It is
+#: written only once one of them is used (lazy bump), after the version-1
+#: bytes are kept as ``playlists.json.v1-backup``; until then every save stays
+#: version 1, which every older build reads.
+FORMAT_VERSION: Final = 2
+ROTATION_VERSION: Final = 2
+FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=FORMAT_VERSION)
+
+#: A playlist's own interval uses the same bounds as the global setting.
+MIN_CYCLE_INTERVAL: Final = 5
+MAX_CYCLE_INTERVAL: Final = 24 * 60 * 60
 
 #: Ceilings, so a file that grew a zero cannot be read forever. People retain
 #: the existing 512 authored-list budget; generated playback sources have
@@ -76,6 +87,17 @@ MAX_DISPLAY_CONNECTOR_BYTES: Final = 256
 
 _MutationResult = TypeVar("_MutationResult")
 
+
+class _Keep:
+    """The type of :data:`KEEP`: leave a field as it is."""
+
+    def __repr__(self) -> str:
+        return "KEEP"
+
+
+#: Passed for a field that :meth:`Store.set_rotation` should leave unchanged.
+KEEP: Final = _Keep()
+
 #: Where a file we could not parse is moved before it would be overwritten.
 BROKEN_SUFFIX: Final = ".broken"
 
@@ -84,7 +106,8 @@ class PlaylistError(Exception):
     """A playlist could not be changed, with a machine-readable reason.
 
     Kinds in use: ``local-io``, ``no-such-playlist``, ``no-such-entry``,
-    ``invalid-name``, ``identity-conflict``, ``full``, ``newer-version``.
+    ``invalid-name``, ``identity-conflict``, ``full``, ``newer-version``,
+    ``no-backup``, ``validation``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -422,11 +445,23 @@ class Entry:
 
 @dataclass(frozen=True, slots=True)
 class Playlist:
-    """A named, ordered list of wallpapers."""
+    """A named, ordered list of wallpapers.
+
+    ``cycle_interval`` (seconds) and ``shuffle`` are this playlist's own
+    rotation settings. ``None`` means "use the global setting", which is what
+    every playlist does until somebody chooses otherwise.
+    """
 
     id: str
     name: str
     entries: tuple[Entry, ...] = ()
+    cycle_interval: int | None = None
+    shuffle: bool | None = None
+
+    @property
+    def has_rotation_override(self) -> bool:
+        """Whether this playlist uses a version-2 field."""
+        return self.cycle_interval is not None or self.shuffle is not None
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -476,11 +511,29 @@ class Playlist:
         return tuple(entry.source for entry in self.entries if entry.source not in known)
 
     def to_json(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "entries": [{"id": entry.id, "source": entry.source} for entry in self.entries],
-        }
+        document: dict[str, Any] = {"id": self.id, "name": self.name}
+        # Omitted rather than null when unused, so a version-1 document is
+        # byte-identical to what every earlier build wrote.
+        if self.cycle_interval is not None:
+            document["cycle_interval"] = self.cycle_interval
+        if self.shuffle is not None:
+            document["shuffle"] = self.shuffle
+        document["entries"] = [{"id": entry.id, "source": entry.source} for entry in self.entries]
+        return document
+
+
+def valid_cycle_interval(value: object) -> bool:
+    """Whether ``value`` is a usable per-playlist interval in seconds."""
+    return type(value) is int and MIN_CYCLE_INTERVAL <= value <= MAX_CYCLE_INTERVAL
+
+
+def required_version(playlists: Iterable[Playlist]) -> int:
+    """The oldest format that can hold ``playlists`` (lazy bump on use)."""
+    return (
+        ROTATION_VERSION
+        if any(playlist.has_rotation_override for playlist in playlists)
+        else FORMATS.floor
+    )
 
 
 def _entry(raw: object) -> Entry | None:
@@ -515,7 +568,26 @@ def _playlist(raw: object) -> Playlist | None:
             entry = _entry(item)
             if entry is not None:
                 entries.append(entry)
-    return Playlist(id=identifier.strip(), name=name.strip(), entries=tuple(entries))
+    # An unusable rotation value costs only itself: the playlist keeps the
+    # global setting and `_parse` reports the damage.
+    interval = raw.get("cycle_interval")
+    shuffle = raw.get("shuffle")
+    return Playlist(
+        id=identifier.strip(),
+        name=name.strip(),
+        entries=tuple(entries),
+        cycle_interval=interval if valid_cycle_interval(interval) else None,
+        shuffle=shuffle if type(shuffle) is bool else None,
+    )
+
+
+def _invalid_rotation(raw: dict[str, Any]) -> int:
+    """How many rotation fields of one stored playlist are present but unusable."""
+    interval = raw.get("cycle_interval")
+    shuffle = raw.get("shuffle")
+    return int(interval is not None and not valid_cycle_interval(interval)) + int(
+        shuffle is not None and type(shuffle) is not bool
+    )
 
 
 #: What this build models; everything else in the file is carried, not dropped.
@@ -523,7 +595,7 @@ DOCUMENT_SHAPE: Final = state_file.Shape(
     known=frozenset({"version"}),
     records={
         "playlists": state_file.Shape(
-            known=frozenset({"id", "name"}),
+            known=frozenset({"id", "name", "cycle_interval", "shuffle"}),
             identity="id",
             strip_identity=True,
             records={
@@ -554,13 +626,16 @@ def _read(path: Path) -> state_file.Reading[dict[str, Playlist]]:
     newer = state_file.newer_version_fault(path, payload, FORMAT_VERSION)
     if newer is not None:
         return state_file.Reading(found, newer, newer_version=True, unknown=unknown)
-    return state_file.Reading(found, fault, unknown=unknown)
+    return state_file.Reading(found, fault, unknown=unknown, version=FORMATS.declared(payload))
 
 
 def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Playlist], str | None]:
-    faults = [
-        found for found in (state_file.version_fault(path, payload, FORMAT_VERSION),) if found
-    ]
+    faults: list[str] = []
+    if FORMATS.declared(payload) is None:
+        faults.append(
+            f"{path.name} has unsupported version {payload.get('version')!r}; "
+            f"expected {FORMATS.oldest} to {FORMATS.current}"
+        )
     stored = payload.get("playlists")
     if not isinstance(stored, list):
         return {}, f"{path.name} has no playlists in it"
@@ -570,6 +645,7 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Playlist], st
 
     found: dict[str, Playlist] = {}
     malformed = 0
+    invalid_rotation = 0
     duplicate_playlists = 0
     duplicate_entries = 0
     for raw in stored[:MAX_PLAYLISTS]:
@@ -578,6 +654,7 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Playlist], st
             malformed += 1
             continue
         assert isinstance(raw, dict)
+        invalid_rotation += _invalid_rotation(raw)
         raw_entries = raw.get("entries")
         if not isinstance(raw_entries, list):
             malformed += 1
@@ -595,6 +672,8 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Playlist], st
         found[playlist.id] = playlist
     if malformed:
         faults.append(f"{path.name} has {malformed} malformed playlist records")
+    if invalid_rotation:
+        faults.append(f"{path.name} has {invalid_rotation} invalid playlist rotation settings")
     if duplicate_playlists:
         faults.append(f"{path.name} has {duplicate_playlists} duplicate playlist ids")
     if duplicate_entries:
@@ -613,13 +692,22 @@ def save(
     *,
     replace_existing: bool = True,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+    version: int | None = None,
 ) -> Path:
     """Write them atomically, and return where they went.
 
     ``unknown`` is what the previous document carried beyond this build's
     model; it is merged back so a newer field survives an older build's edit.
+    ``version`` defaults to the oldest format that holds ``playlists`` (see
+    `required_version`), so playlists without their own rotation are written
+    as version 1. Keeping a file's newer version, and the backup before a
+    bump, belong to `Store`, which knows what is on disk.
     """
     target = path if path is not None else state_path()
+    wanted = required_version(playlists.values())
+    written = version if version is not None else FORMATS.to_write(None, wanted)
+    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
+        raise ValueError(f"playlists cannot be saved as version {written}; they need {wanted}")
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
@@ -629,7 +717,7 @@ def save(
 
     payload = state_file.merge_unknown(
         {
-            "version": FORMAT_VERSION,
+            "version": written,
             "playlists": [playlists[key].to_json() for key in sorted(playlists)],
         },
         unknown,
@@ -927,7 +1015,11 @@ class Store:
                 generated=True,
             )
             entry = Entry(id=entry_id or new_id(), source=str(source))
-            playlist = Playlist(id=identifier, name=tidy, entries=(entry,))
+            playlist = (
+                Playlist(id=identifier, name=tidy, entries=(entry,))
+                if existing is None
+                else replace(existing, name=tidy, entries=(entry,))
+            )
             authored[playlist.id] = playlist
             return playlist, True
 
@@ -977,11 +1069,56 @@ class Store:
                 generated_display=True,
             )
             entry = Entry(id=entry_id or new_id(), source=str(source))
-            playlist = Playlist(id=identifier, name=name, entries=(entry,))
+            playlist = (
+                Playlist(id=identifier, name=name, entries=(entry,))
+                if existing is None
+                else replace(existing, entries=(entry,))
+            )
             authored[playlist.id] = playlist
             return playlist, True
 
         return self._mutate(set_display)
+
+    def set_rotation(
+        self,
+        identifier: str,
+        *,
+        cycle_interval: int | _Keep | None = KEEP,
+        shuffle: bool | _Keep | None = KEEP,
+    ) -> Playlist:
+        """Give one playlist its own interval and/or shuffle, or clear them.
+
+        ``None`` means "use the global setting" again; :data:`KEEP` leaves that
+        field as it is. Using either field moves ``playlists.json`` to version
+        2 on this save (once, after keeping the version-1 bytes). The runtime
+        reads these from ``runtime-overrides.toml``, which a running service
+        that predates it ignores until it restarts. Nothing is written when
+        the playlist already has these values.
+        """
+        if not isinstance(cycle_interval, _Keep) and not (
+            cycle_interval is None or valid_cycle_interval(cycle_interval)
+        ):
+            raise PlaylistError(
+                "validation",
+                f"a playlist interval must be whole seconds from {MIN_CYCLE_INTERVAL} "
+                f"to {MAX_CYCLE_INTERVAL}",
+            )
+        if not isinstance(shuffle, _Keep) and shuffle is not None and type(shuffle) is not bool:
+            raise PlaylistError("validation", "a playlist shuffle must be on, off or the default")
+
+        def set_rotation(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            playlist = self._find_in(authored, identifier)
+            updated = replace(
+                playlist,
+                cycle_interval=(
+                    playlist.cycle_interval if isinstance(cycle_interval, _Keep) else cycle_interval
+                ),
+                shuffle=playlist.shuffle if isinstance(shuffle, _Keep) else shuffle,
+            )
+            authored[updated.id] = updated
+            return updated, updated != playlist
+
+        return self._mutate(set_rotation)
 
     def remove_entry(self, identifier: str, entry: str) -> Playlist:
         def remove(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
@@ -1105,6 +1242,9 @@ class Store:
                 authored = dict(current) if present or self._loaded else dict(self._playlists)
                 result, changed = change(authored)
                 if changed:
+                    version = FORMATS.to_write(reading.version, required_version(authored.values()))
+                    if reading.version is not None and FORMATS.is_bump(reading.version, version):
+                        _back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:
                         try:
                             state_file.preserve_faulted(target, observed=observed)
@@ -1119,9 +1259,10 @@ class Store:
                             target,
                             replace_existing=False,
                             unknown=reading.unknown,
+                            version=version,
                         )
                     else:
-                        save(authored, target, unknown=reading.unknown)
+                        save(authored, target, unknown=reading.unknown, version=version)
                     fault = None
 
                 # Adopt memory only after the durable write, so an exception
@@ -1138,6 +1279,25 @@ class Store:
                 "local-io",
                 f"could not safely update playlists at {target}: {error.strerror or error}",
             ) from error
+
+
+def _back_up_before_bump(
+    target: Path,
+    observed: state_file.StateFileObservation,
+    replaced: int,
+    version: int,
+) -> None:
+    """Guard 2, or refuse: never bump a file without its old bytes kept."""
+    try:
+        state_file.backup_before_bump(target, observed=observed, replaced=replaced)
+    except OSError as error:
+        backup = state_file.version_backup_path(target, replaced)
+        raise PlaylistError(
+            "no-backup",
+            f"could not keep a copy of {target.name} (version {replaced}) as {backup.name} "
+            f"before saving it as version {version}: {error.strerror or error}. "
+            "Nothing was changed.",
+        ) from error
 
 
 def rotation(

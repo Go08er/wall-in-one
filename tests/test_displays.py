@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from collections.abc import Iterable
 from multiprocessing.connection import Connection
 from pathlib import Path
 
@@ -275,11 +276,20 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         *,
         replace_existing: bool = True,
         unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+        beats_global_rules: Iterable[str] = (),
+        version: int | None = None,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save(manual, target)
-        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
+        return save(
+            updated,
+            target,
+            replace_existing=replace_existing,
+            unknown=unknown,
+            beats_global_rules=beats_global_rules,
+            version=version,
+        )
 
     monkeypatch.setattr(displays, "save", repair_then_save)
 

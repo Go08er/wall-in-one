@@ -1890,8 +1890,13 @@ def _targets(source: _LegacySource, converted: _Converted, created_at: str) -> t
         "version": pairings.FORMAT_VERSION,
         "pairings": [converted.pairings[key].to_json() for key in sorted(converted.pairings)],
     }
+    # Imports are first writes at the oldest format that holds them (lazy
+    # bump): the retired plugin had no per-playlist rotation or display
+    # opt-ins, so these stay at the versions every older build reads.
     playlists_payload = {
-        "version": playlists.FORMAT_VERSION,
+        "version": playlists.FORMATS.to_write(
+            None, playlists.required_version(converted.playlists.values())
+        ),
         "playlists": [converted.playlists[key].to_json() for key in sorted(converted.playlists)],
     }
     schedules_payload = {
@@ -1902,7 +1907,10 @@ def _targets(source: _LegacySource, converted: _Converted, created_at: str) -> t
         ),
         "rules": [rule.to_json() for rule in converted.schedules],
     }
-    displays_payload = {"version": displays.FORMAT_VERSION, "displays": converted.displays}
+    displays_payload = {
+        "version": displays.FORMATS.to_write(None, displays.required_version(())),
+        "displays": converted.displays,
+    }
     favourites_payload = {"version": favourites.FORMAT_VERSION, "paths": []}
     report = _report(source, converted, created_at)
     targets = [

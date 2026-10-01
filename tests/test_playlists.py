@@ -634,11 +634,14 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         *,
         replace_existing: bool = True,
         unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+        version: int | None = None,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save({manual.id: manual}, target)
-        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
+        return save(
+            updated, target, replace_existing=replace_existing, unknown=unknown, version=version
+        )
 
     monkeypatch.setattr(playlists, "save", repair_then_save)
 

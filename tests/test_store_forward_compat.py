@@ -70,7 +70,7 @@ CASES = (
         open=playlists.Store.open,
         error=playlists.PlaylistError,
         newer={
-            "version": 2,
+            "version": playlists.FORMAT_VERSION + 1,
             "playlists": [
                 {
                     "id": "x",
@@ -168,7 +168,11 @@ CASES = (
         filename="displays.json",
         open=displays.Store.open,
         error=displays.DisplayError,
-        newer={"version": 2, "displays": {"DP-1": "X"}, "precedence": "display"},
+        newer={
+            "version": displays.FORMAT_VERSION + 1,
+            "displays": {"DP-1": "X"},
+            "precedence": "display",
+        },
         readable=lambda store: store.playlist_for("DP-1") == "X",
         current={"version": 1, "displays": {"DP-1": "X"}},
         mutations=(

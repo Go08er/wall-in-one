@@ -1913,7 +1913,12 @@ def test_startup_repair_skips_a_newer_playlists_file_instead_of_pausing_authorin
     displays.Store.open().assign("DP-1", "evening")
     newer = playlists.state_path()
     newer.write_text(
-        json.dumps({"version": 2, "lists": [{"id": "evening", "name": "Evening"}]}),
+        json.dumps(
+            {
+                "version": playlists.FORMAT_VERSION + 1,
+                "lists": [{"id": "evening", "name": "Evening"}],
+            }
+        ),
         encoding="utf-8",
     )
     original = newer.read_bytes()
@@ -1975,7 +1980,9 @@ def test_files_from_a_newer_version_are_reported_once_without_blocking(
     config.save(config.Settings())
     state = playlists.state_path().parent
     state.mkdir(parents=True, exist_ok=True)
-    playlists.state_path().write_text(json.dumps({"version": 2, "playlists": []}))
+    playlists.state_path().write_text(
+        json.dumps({"version": playlists.FORMAT_VERSION + 1, "playlists": []})
+    )
     favourites.state_path().write_text(json.dumps({"version": 2, "paths": []}))
     application = _application(tmp_path, monkeypatch)
     window = FakeWindow()

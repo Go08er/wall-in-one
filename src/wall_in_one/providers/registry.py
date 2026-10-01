@@ -34,6 +34,8 @@ from wall_in_one.providers.wallhaven import Wallhaven, normalise_api_key
 
 #: Read when no key is passed explicitly.
 API_KEY_VARIABLE: Final = "WALLHAVEN_API_KEY"
+#: The provider whose behavior depends on the stored API key.
+WALLHAVEN: Final = Wallhaven.name
 
 #: Fallback to a file, so the key need not sit in the environment of every
 #: process the user starts. One line, nothing else.

@@ -327,6 +327,9 @@ class Browser:
         self._owned_generation = 0
         self._roots_lock = threading.RLock()
         self._providers: dict[str, Provider] = {}
+        # A fingerprint of the credential each provider was built with, never
+        # the credential itself, so a key saved later can be noticed.
+        self._provider_credentials: dict[str, str] = {}
         self._owned: owned.Index | None = None
 
     # -- what we already have ----------------------------------------------
@@ -396,12 +399,20 @@ class Browser:
         return registry.describe()
 
     def provider(self, name: str) -> Provider:
-        """Build ``name`` once and keep it, so its search cache survives."""
+        """Build ``name`` once and keep it, so its search cache survives.
+
+        It is rebuilt when its credential changes: the Store keeps one Browser
+        for the whole session, and a Wallhaven key saved (or cleared) in
+        Settings has to take effect without a restart.
+        """
+        key = registry.usable_api_key()[0] if name == registry.WALLHAVEN else ""
+        fingerprint = hashlib.sha256(key.encode()).hexdigest() if key else ""
         existing = self._providers.get(name)
-        if existing is not None:
+        if existing is not None and self._provider_credentials.get(name) == fingerprint:
             return existing
-        built = registry.build(name, client=self._client)
+        built = registry.build(name, client=self._client, api_key=key)
         self._providers[name] = built
+        self._provider_credentials[name] = fingerprint
         return built
 
     def clear_caches(self) -> None:

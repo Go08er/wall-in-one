@@ -60,6 +60,30 @@ def test_a_provider_is_built_once_and_kept() -> None:
     assert engine.provider("wallhaven") is engine.provider("wallhaven")
 
 
+def test_a_key_saved_later_reaches_the_kept_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the Store keeps one Browser for the session, so a Wallhaven
+    key saved in Settings was ignored until restart."""
+    from wall_in_one.providers import credentials
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("WALLHAVEN_API_KEY", raising=False)
+    engine = browser()
+    before = engine.provider("wallhaven")
+    assert before is engine.provider("wallhaven")
+    assert not before.authenticated  # type: ignore[attr-defined]
+
+    credentials.save_key("a" * 32)
+    after = engine.provider("wallhaven")
+    assert after is not before
+    assert after.authenticated  # type: ignore[attr-defined]
+    assert after is engine.provider("wallhaven")
+
+    credentials.clear_key()
+    assert not engine.provider("wallhaven").authenticated  # type: ignore[attr-defined]
+
+
 def test_an_unknown_provider_is_refused() -> None:
     with pytest.raises(ProviderError) as caught:
         browser().provider("nowhere")

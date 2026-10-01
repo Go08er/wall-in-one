@@ -83,6 +83,65 @@ pub fn resolve_targeted_rule<'a>(
     Ok(chosen)
 }
 
+/// How far ahead `next_change` looks. Eight days covers every weekday
+/// pattern; a change that only a month rule brings, further away than that,
+/// is reported as none.
+pub const CHANGE_HORIZON_DAYS: u64 = 8;
+
+/// The first whole minute after `at`, at most `CHANGE_HORIZON_DAYS` ahead, at
+/// which `decide` gives something other than what it gives at `at`.
+///
+/// A rule's match only changes at midnight (a new weekday or month) and at its
+/// own start and end minutes; a wrapped window's after-midnight tail belongs
+/// to its start day, so midnight is no edge for it. `decide` is therefore
+/// asked only at those instants, which keeps this cheap enough for every
+/// status reply. Without an enabled rule nothing can change.
+pub fn next_change<T: PartialEq, E>(
+    rules: &[ScheduleRule],
+    at: NaiveDateTime,
+    mut decide: impl FnMut(NaiveDateTime) -> Result<T, E>,
+) -> Result<Option<NaiveDateTime>, E> {
+    if !rules.iter().any(|rule| rule.enabled) {
+        return Ok(None);
+    }
+    let mut minutes = vec![0u16];
+    for rule in rules.iter().filter(|rule| rule.enabled) {
+        for time in [&rule.start, &rule.end].into_iter().flatten() {
+            if let Ok(minute) = parse_time(time) {
+                minutes.push(minute);
+            }
+        }
+    }
+    minutes.sort_unstable();
+    minutes.dedup();
+    let current = decide(at)?;
+    let horizon = at
+        .checked_add_days(Days::new(CHANGE_HORIZON_DAYS))
+        .unwrap_or(NaiveDateTime::MAX);
+    for offset in 0..=CHANGE_HORIZON_DAYS {
+        let Some(day) = at.date().checked_add_days(Days::new(offset)) else {
+            break;
+        };
+        for minute in &minutes {
+            let Some(candidate) =
+                day.and_hms_opt(u32::from(*minute / 60), u32::from(*minute % 60), 0)
+            else {
+                continue;
+            };
+            if candidate <= at {
+                continue;
+            }
+            if candidate > horizon {
+                return Ok(None);
+            }
+            if decide(candidate)? != current {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub fn matches(rule: &ScheduleRule, at: NaiveDateTime) -> Result<bool, ConfigError> {
     if !rule.enabled {
         return Ok(false);
@@ -198,6 +257,94 @@ mod tests {
         }
         let c = Fixed(at(2030, 12, 25, 3, 15));
         assert_eq!(c.now(), at(2030, 12, 25, 3, 15));
+    }
+
+    fn next_winner(rules: &[ScheduleRule], from: NaiveDateTime) -> Option<NaiveDateTime> {
+        next_change(rules, from, |instant| resolve(rules, "d", instant)).unwrap()
+    }
+
+    #[test]
+    fn next_change_is_the_rule_boundary_that_changes_the_winner() {
+        let r = vec![
+            rule("am", Some("06:00"), Some("12:00")),
+            rule("pm", Some("12:00"), Some("18:00")),
+        ];
+        assert_eq!(
+            next_winner(&r, at(2026, 8, 3, 10, 0)),
+            Some(at(2026, 8, 3, 12, 0))
+        );
+        assert_eq!(
+            next_winner(&r, at(2026, 8, 3, 12, 0)),
+            Some(at(2026, 8, 3, 18, 0))
+        );
+        // After the last window the next change is tomorrow's first one.
+        assert_eq!(
+            next_winner(&r, at(2026, 8, 3, 19, 0)),
+            Some(at(2026, 8, 4, 6, 0))
+        );
+        // Seconds before a boundary still name the boundary minute.
+        let almost = at(2026, 8, 3, 17, 59) + chrono::Duration::seconds(30);
+        assert_eq!(next_winner(&r, almost), Some(at(2026, 8, 3, 18, 0)));
+    }
+
+    #[test]
+    fn next_change_skips_a_handover_to_the_same_answer() {
+        // Two windows choosing the same playlist meet at 12:00: nothing a
+        // caller compares changes there, so the next change is 18:00.
+        let mut late = rule("pm", Some("12:00"), Some("18:00"));
+        late.playlist = "am".into();
+        let r = vec![rule("am", Some("06:00"), Some("12:00")), late];
+        assert_eq!(
+            next_winner(&r, at(2026, 8, 3, 10, 0)),
+            Some(at(2026, 8, 3, 18, 0))
+        );
+    }
+
+    #[test]
+    fn next_change_crosses_midnight_for_weekday_and_wrapped_rules() {
+        let mut monday = rule("monday", None, None);
+        monday.weekdays = vec![0];
+        // 2026-08-03 is a Monday: the all-day rule ends at midnight.
+        assert_eq!(
+            next_winner(&[monday.clone()], at(2026, 8, 3, 23, 0)),
+            Some(at(2026, 8, 4, 0, 0))
+        );
+        // On Tuesday the next change is the following Monday's midnight.
+        assert_eq!(
+            next_winner(&[monday], at(2026, 8, 4, 9, 0)),
+            Some(at(2026, 8, 10, 0, 0))
+        );
+        // A wrapped window is no edge at midnight; it ends at 06:00.
+        let night = vec![rule("night", Some("22:00"), Some("06:00"))];
+        assert_eq!(
+            next_winner(&night, at(2026, 8, 3, 23, 0)),
+            Some(at(2026, 8, 4, 6, 0))
+        );
+        assert_eq!(
+            next_winner(&night, at(2026, 8, 4, 7, 0)),
+            Some(at(2026, 8, 4, 22, 0))
+        );
+    }
+
+    #[test]
+    fn next_change_is_bounded_and_needs_an_enabled_rule() {
+        let mut december = rule("december", None, None);
+        december.months = vec![12];
+        // Months away: beyond the horizon, so none.
+        assert_eq!(next_winner(&[december.clone()], at(2026, 8, 3, 9, 0)), None);
+        // Inside the horizon: the first of the month.
+        assert_eq!(
+            next_winner(&[december.clone()], at(2026, 11, 28, 9, 0)),
+            Some(at(2026, 12, 1, 0, 0))
+        );
+        december.enabled = false;
+        assert_eq!(next_winner(&[december], at(2026, 11, 28, 9, 0)), None);
+        assert_eq!(next_winner(&[], at(2026, 11, 28, 9, 0)), None);
+        // A rule that always matches never changes.
+        assert_eq!(
+            next_winner(&[rule("always", None, None)], at(2026, 8, 3, 9, 0)),
+            None
+        );
     }
 
     #[test]

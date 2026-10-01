@@ -35,6 +35,7 @@ jobs:
           .#checks.x86_64-linux.wall-in-one-service
           .#checks.x86_64-linux.companion-plugin-contract
           .#checks.x86_64-linux.runtime-socket-fallback
+          .#checks.x86_64-linux.golden-profile
           .#checks.x86_64-linux.service-rss
           .#checks.x86_64-linux.gui-tests
           .#checks.x86_64-linux.mypy

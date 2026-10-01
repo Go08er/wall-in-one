@@ -268,6 +268,39 @@
                 touch $out
               '';
 
+          # The golden-profile gate against the installed artifact rather than
+          # this checkout's src: the same tests, but `wall_in_one` comes from
+          # the package's own site-packages (a test asserts that), so a module
+          # or data file the wheel forgot fails here and not on a desktop.
+          # The fixture profile is materialized below $TMPDIR; no renderer is
+          # on PATH, which the first-start whitelist already allows for. The
+          # opt-in downgrade and local-profile modes skip without their inputs.
+          golden-profile =
+            pkgs.runCommand "wall-in-one-golden-profile"
+              {
+                nativeBuildInputs = [
+                  (python.withPackages (ps: [
+                    ps.pytest
+                    (ps.toPythonModule wall-in-one)
+                  ]))
+                ];
+              }
+              ''
+                export HOME="$TMPDIR/home"
+                export XDG_CONFIG_HOME="$TMPDIR/config"
+                export XDG_STATE_HOME="$TMPDIR/state"
+                export XDG_CACHE_HOME="$TMPDIR/cache"
+                export XDG_DATA_HOME="$TMPDIR/data"
+                export XDG_RUNTIME_DIR="$TMPDIR/run"
+                mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
+                  "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
+                export PYTHONDONTWRITEBYTECODE=1
+                export WIO_GOLDEN_EXPECT_PACKAGE=1
+                cd ${./.}
+                pytest tests/golden -q -ra -p no:cacheprovider
+                touch $out
+              '';
+
           # Keep the always-on Rust half honest as independent display state
           # grows.  This is a process measurement, not a struct-size estimate:
           # three fresh one-display runs must stay within 5 MiB RSS and three

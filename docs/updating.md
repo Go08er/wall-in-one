@@ -101,3 +101,7 @@ assignments saved by a newer version open read-only in an older release that
 has the store guard: edits are refused and the files are left byte-for-byte
 as they were (see [State-file recovery](library.md#state-file-recovery)). Preserve current files before restoring any backup, since a
 whole-folder restore would discard changes made after that backup.
+
+From 0.1.5, a release that finds a `settings.toml` key it doesn't know keeps
+running on the keys it knows and makes Settings read-only instead of failing.
+See [Unknown keys](settings.md#unknown-keys).

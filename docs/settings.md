@@ -15,10 +15,10 @@ If it becomes invalid while the app is open, the attempted edit fails without
 replacing it; repair the file before retrying the change.
 
 The unattended `wall-in-one --write-config` compiler is also strict. A present
-known key with the wrong type, a non-finite or out-of-range number, an unknown
-key, or an invalid enumerated value is reported and leaves the last resolved
-runtime document untouched. It never substitutes defaults for invalid saved
-settings.
+known key with the wrong type, a non-finite or out-of-range number, or an
+invalid enumerated value is reported and leaves the last resolved runtime
+document untouched. It never substitutes defaults for invalid saved settings.
+A key it doesn't know is different: see [Unknown keys](#unknown-keys).
 
 ## Repairing an invalid settings file
 
@@ -36,12 +36,57 @@ settings.
    Settings change that failed. If another error is reported, address it before
    continuing.
 
-If the error mentions an interrupted migration, conflicting upgrade state or
-settings from a newer app, follow the [migration guide](migrating.md) first.
-An unknown key after a downgrade may be a version mismatch, not a typo. Do not
-remove migration journals or discard newer settings to force an older build
-to accept them. `--write-config` publishes a runtime document when successful;
-it is not a read-only settings checker.
+If the error mentions an interrupted migration or conflicting upgrade state,
+follow the [migration guide](migrating.md) first. Do not remove migration
+journals to force an older build to start. `--write-config` publishes a
+runtime document when successful; it is not a read-only settings checker.
+
+## Unknown keys
+
+`settings.toml` has no version number, so Wall-in-One can't tell a key from a
+newer release apart from a typo. Since 0.1.5, a key this version doesn't know
+never stops anything. Instead:
+
+- Every reader uses the keys it knows. The unknown ones are ignored, never
+  removed.
+- Settings become read-only. The Settings page shows a banner naming the keys
+  and its controls are disabled. Any other way of changing a saved setting
+  (the default-playlist pickers, the first-run folder choice, `ctl dynamics`
+  and `ctl cycle-interval`, deleting the playlist that is the saved default)
+  is refused with the same message. Wall-in-One doesn't write the file while
+  the keys are there, because writing it would drop them. Temporary playback
+  overrides such as `ctl shuffle` still work.
+- The wallpaper service still starts. Its startup check and `--write-config`
+  print a warning naming the keys and compile the runtime document from the
+  known ones. That document is exactly the one the file would produce without
+  the unknown keys, so regenerating it loses nothing, and other library,
+  playlist and schedule changes keep reaching the service.
+
+To edit settings in the app again, correct a typo in the file and reopen
+Wall-in-One. If a newer release added the key, keep it and change settings
+with that release instead: removing the key throws away what it saved.
+
+None of this applies to a file that isn't valid TOML. That is still damage,
+handled as described above, because its list of keys can't be trusted.
+
+## The settings.toml freeze and ui.toml
+
+`settings.toml` is frozen. No release adds a key to it, or a new value to an
+existing key, ever again; an older release would read either one as a typo.
+
+- New preferences for the window itself (glass style, opacity, frost,
+  thumbnail size, the page to reopen) go in `ui.toml`, beside
+  `settings.toml`. Today's interface never reads or writes it; it is there
+  for the new interface.
+- New wallpaper behavior goes in a versioned authoring store, with a version
+  bump.
+
+`ui.toml` carries a `version`. A release that finds a newer version uses the
+preferences it understands and never writes the file. Keys it doesn't know are
+kept through every save, an invalid value falls back to that preference's
+default, and a missing file means defaults. An unreadable or malformed
+`ui.toml` also means defaults, but is left exactly as it is until you fix or
+delete it. The file never affects the wallpaper service.
 
 ## Settings reference
 

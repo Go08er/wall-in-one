@@ -105,3 +105,12 @@ whole-folder restore would discard changes made after that backup.
 From 0.1.5, a release that finds a `settings.toml` key it doesn't know keeps
 running on the keys it knows and makes Settings read-only instead of failing.
 See [Unknown keys](settings.md#unknown-keys).
+
+Install 0.1.5 before 0.2.0. Once you name a schedule rule, 0.2.0 saves
+`schedules.json` as version 3, after keeping the version-2 file as
+`schedules.json.v2-backup`. 0.1.5 opens a version-3 file read-only, so a
+rollback to it loses nothing. 0.1.4 cannot safely edit it: its next schedule
+edit moves the file aside as `schedules.json.broken` and saves it as
+version 2 without the names. Schedules without names stay at version 2 and
+remain editable by every release. See
+[Format versions and their backups](library.md#format-versions-and-their-backups).

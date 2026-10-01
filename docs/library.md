@@ -400,6 +400,24 @@ Fields the app does not know, for example ones a newer version added, are kept
 through every save of a file it does understand: at the top level and on each
 playlist, playlist entry, schedule rule, pairing and removal intent.
 
+### Format versions and their backups
+
+A file moves to a newer format only when you first use what that format adds.
+Every other edit keeps writing the version the file already has, so a profile
+that never uses a new feature stays readable by older releases. The first rule
+name is the first such change: `schedules.json` stays at version 2, exactly as
+0.1.4 and 0.1.5 write it, until a rule has a name, and is version 3 from then on.
+
+Just before a file is first saved in a newer format, its previous bytes are
+copied beside it as `<file>.v<old>-backup`, for example
+`schedules.json.v2-backup`, with the same permissions. That copy is made once
+and never overwritten, even if the file is bumped again later; the app never
+deletes it. If the copy cannot be made, the edit is refused with the reason
+`no-backup` and nothing is changed. A file stays in its newer format after
+you stop using the feature, for example after clearing the last rule name, so
+it does not switch formats back and forth and the backup always holds the
+file as it was before its first bump.
+
 ## Where things live
 
 | path | what |

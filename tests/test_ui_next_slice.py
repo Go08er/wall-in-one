@@ -52,6 +52,7 @@ from wall_in_one.theme import css  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
+from wall_in_one.ui.next.shell import GlassDialog  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.stills import StillMaker  # noqa: E402
 
@@ -406,6 +407,40 @@ def test_the_thumbnail_size_is_a_saved_preference(runtime: Recorder) -> None:
         yield "the size to be saved", lambda: target.exists() and not window.preferences.busy
         window.preferences.close(wait=True)
         assert ui_prefs.load().prefs.thumbnail_size == "small"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_the_opacity_dialog_saves_a_dial_once_it_rests(runtime: Recorder) -> None:
+    application = Application(ui="next")
+    lanes: list[object] = []
+    target = paths.ui_prefs_path()
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield (
+            "the first scan",
+            lambda: settled(application) and window.library_text == "80 wallpapers in the library",
+        )
+        window.activate_action("win.style", GLib.Variant("s", "translucent"))
+        yield "the style to be saved", lambda: target.exists() and not window.preferences.busy
+        window.activate_action("win.glass-settings", None)
+        dialog = window.get_visible_dialog()
+        assert isinstance(dialog, GlassDialog)
+        assert dialog._panel.get_sensitive() and not dialog._frost.get_sensitive()
+        for value in (70, 74, 77):  # a drag: three values, one save
+            dialog._panel.set_value(value)
+        assert application._window_glass == css.Glass(background=0.55, panel=0.77)
+        assert window.preferences.busy, "a moving dial is saved once it rests"
+        yield "the dial to be saved", lambda: not window.preferences.busy
+        window.preferences.close(wait=True)
+        saved = ui_prefs.load().prefs
+        assert saved.panel_opacity.translucent == 0.77
+        assert saved.panel_opacity.frosted == ui_prefs.DEFAULT_PANEL_OPACITY.frosted
+        assert window.preferences.saves == 2, "the style, then the dial: one write each"
+        dialog.force_close()
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)

@@ -16,7 +16,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango
 
-from .. import art, data, reorder, ui
+from .. import reorder, ui
 from ..catalog import DAYS, INTERVALS, KIND_LABEL, MONTHS, MONTHS_LONG
 from ..models import Playlist, Rule, Wallpaper
 from . import Page
@@ -167,7 +167,7 @@ class EntryRow(Adw.ActionRow):
     ) -> None:
         super().__init__(use_markup=False, title_lines=1, subtitle_lines=1)
         self.page, self.index, self.wid = page, index, wid
-        self.wallpaper = wallpaper = data.BY_ID[wid]
+        self.wallpaper = wallpaper = page.state.wallpaper(wid)
         self.menu_button: Gtk.MenuButton | None = None
         self.check: Gtk.CheckButton | None = None
         self.set_title(wallpaper.name)
@@ -446,8 +446,8 @@ class PlaylistPage(Page):
         return [self._menu]
 
     def activate(self, argument: str | None) -> None:
-        pid = argument if argument in data.PLAYLIST_BY_ID else self._pid
-        if pid not in data.PLAYLIST_BY_ID:
+        pid = argument if argument and self.state.has_playlist(argument) else self._pid
+        if pid is None or not self.state.has_playlist(pid):
             pid = self.state.playlists[0].id
         for dialog in (self._picker, self._dialog):
             if dialog is not None and dialog.get_parent() is not None:
@@ -470,10 +470,10 @@ class PlaylistPage(Page):
 
     @property
     def playlist(self) -> Playlist:
-        return data.PLAYLIST_BY_ID[self._pid]
+        return self.state.playlist(self._pid)
 
     def _alive(self) -> bool:
-        return self._pid in data.PLAYLIST_BY_ID
+        return self._pid is not None and self.state.has_playlist(self._pid)
 
     # -- building: hero ----------------------------------------------------------
     def _build_hero(self) -> Gtk.Widget:
@@ -686,7 +686,7 @@ class PlaylistPage(Page):
         self.set_title(playlist.name, "Automatic playlist" if automatic else "Playlist")
         size = 96 if self._narrow else 128
         if playlist.entries:
-            cover = ui.Thumb(art.mosaic(data.cover_keys(playlist), 256), size, size, radius=16)
+            cover = ui.Thumb(self.state.playlist_cover(playlist.id, 256), size, size, radius=16)
             cover.add_css_class("pl-cover")
         else:
             cover = Gtk.Image.new_from_icon_name("view-list-symbolic")
@@ -856,7 +856,7 @@ class PlaylistPage(Page):
             positions.setdefault(wid, []).append(index)
         badge_done: set[str] = set()
         for index, wid in enumerate(playlist.entries):
-            if wid not in data.BY_ID:
+            if not state.has_wallpaper(wid):
                 continue
             screens = on_screen.get(wid, []) if wid not in badge_done else []
             badge_done.add(wid)
@@ -895,13 +895,14 @@ class PlaylistPage(Page):
         for connector, wid in state.current.items():
             playing.setdefault(wid, []).append(connector)
         for wid in playlist.entries:
+            wallpaper = state.wallpaper(wid)
             card = ui.WallpaperCard(
-                data.BY_ID[wid],
+                wallpaper,
                 width=168,
                 on_open=lambda w: self.state.navigate(f"library:{w.id}"),
                 on_apply=lambda w: self.state.apply(w.id, self.state.scope),
                 on_favorite=lambda w: self.state.toggle_favorite(w.id),
-                **ui.card_colors(self.state, data.BY_ID[wid]),
+                **ui.card_colors(state, wallpaper),
             )
             screens = playing.get(wid)
             if screens:
@@ -911,7 +912,7 @@ class PlaylistPage(Page):
                 badge.set_margin_start(8)
                 badge.set_margin_bottom(8)
                 card.frame.add_overlay(badge)
-            card.set_tooltip_text(f"{data.BY_ID[wid].name} — open in the Library")
+            card.set_tooltip_text(f"{wallpaper.name} — open in the Library")
             self._grid.append(card)
 
     def _apply_pending(self) -> None:
@@ -966,7 +967,7 @@ class PlaylistPage(Page):
 
     def _sync_header_add(self) -> None:
         """The header "+" stands in for "Add wallpapers…" only while that is scrolled away."""
-        if self._pid not in data.PLAYLIST_BY_ID or self.playlist.automatic:
+        if not self._alive() or self.playlist.automatic:
             self._add_header.set_visible(False)
             return
         # Measure in content coordinates: they don't move when scrolling, while
@@ -979,16 +980,14 @@ class PlaylistPage(Page):
     def _on_interval(self, row: Adw.ComboRow, _param) -> None:
         if self._building or not self._alive():
             return
-        self.playlist.interval = INTERVALS[row.get_selected()][0]
+        self.state.set_playlist_interval(self._pid, INTERVALS[row.get_selected()][0])
         self._summary.set_label(summary(self.playlist))
-        self.state.emit_changed("playlists", "playback")
 
     def _on_shuffle(self, row: Adw.SwitchRow, _param) -> None:
         if self._building or not self._alive():
             return
-        self.playlist.shuffle = row.get_active()
+        self.state.set_playlist_shuffle(self._pid, row.get_active())
         self._summary.set_label(summary(self.playlist))
-        self.state.emit_changed("playlists", "playback")
 
     def _on_density(self, group: Adw.ToggleGroup, _param) -> None:
         self._compact = group.get_active_name() == "compact"
@@ -1001,11 +1000,7 @@ class PlaylistPage(Page):
             self.state.play_playlist(self._pid)
 
     def play_from(self, index: int) -> None:
-        wid = self.playlist.entries[index]
-        self.state.play_playlist(self._pid)
-        for connector in self.state.targets("all"):
-            self.state.current[connector] = wid
-        self.state.emit_changed("now")
+        self.state.play_playlist(self._pid, start=index)
 
     def start_rename(self) -> None:
         if self._alive() and not self.playlist.automatic:
@@ -1024,51 +1019,27 @@ class PlaylistPage(Page):
             self._editing_pid = self._pid
             return
         pid, self._editing_pid = self._editing_pid or self._pid, None
-        playlist = data.PLAYLIST_BY_ID.get(pid)
-        if playlist is None:
+        if not self.state.has_playlist(pid):
             return
-        new, old = label.get_text().strip(), playlist.name
+        new, old = label.get_text().strip(), self.state.playlist(pid).name
         if not new or new == old:
             if pid == self._pid:
                 label.set_text(old)
             return
-        playlist.name = new
-        self.state.emit_changed("playlists")
-
-        def undo() -> None:
-            playlist.name = old
-            self.state.emit_changed("playlists")
-
+        undo = self.state.rename_playlist(pid, new)
         self.state.toast(f"Renamed to “{new}”", undo)
 
     def duplicate(self) -> None:
         if not self._alive():
             return
-        source, playlists = self.playlist, self.state.playlists
-        base = f"{source.name} (copy)"
-        name, number = base, 2
-        names = {p.name for p in playlists}
-        while name in names:
-            name, number = f"{source.name} (copy {number})", number + 1
-        pid, number = f"{source.id}-copy", 2
-        while pid in data.PLAYLIST_BY_ID:
-            pid, number = f"{source.id}-copy-{number}", number + 1
-        copy = Playlist(pid, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
-        user_count = len([p for p in playlists if not p.automatic])
-        position = playlists.index(source) + 1 if not source.automatic else user_count
-        playlists.insert(position, copy)
-        data.PLAYLIST_BY_ID[pid] = copy
+        source_id = self._pid
+        pid, name, remove = self.state.duplicate_playlist(source_id)
         self.state.navigate(f"playlist:{pid}")
-        self.state.emit_changed("playlists")
-        source_id = source.id
 
         def undo() -> None:
-            if copy in playlists:
-                playlists.remove(copy)
-            data.PLAYLIST_BY_ID.pop(pid, None)
+            remove()
             if self._pid == pid:
                 self.state.navigate(f"playlist:{source_id}")
-            self.state.emit_changed("playlists")
 
         self.state.toast(f"Duplicated as “{name}”", undo)
         GLib.timeout_add(150, lambda: (self._pid == pid and self.start_rename(), False)[1])
@@ -1100,35 +1071,16 @@ class PlaylistPage(Page):
 
     def _delete(self) -> None:
         playlist, state = self.playlist, self.state
-        pid, playlists = playlist.id, state.playlists
-        position = playlists.index(playlist)
-        rules = [(i, rule) for i, rule in enumerate(state.rules) if rule.playlist == pid]
-        assigned, manual = dict(state.assigned), dict(state.manual)
-        for index, _rule in reversed(rules):
-            del state.rules[index]
-        for connector, value in state.assigned.items():
-            if value == pid:
-                state.assigned[connector] = ""
-        for connector in [c for c, p in state.manual.items() if p == pid]:
-            del state.manual[connector]
-        playlists.remove(playlist)
-        data.PLAYLIST_BY_ID.pop(pid, None)
-        users = [p for p in playlists if not p.automatic]
+        pid = playlist.id
+        position = state.playlists.index(playlist)
+        restore = state.delete_playlist(pid)
+        users = [p for p in state.playlists if not p.automatic]
         neighbor = users[min(position, len(users) - 1)] if users else None
         state.navigate(f"playlist:{neighbor.id}" if neighbor else "library")
-        state.emit_changed("playlists", "schedule", "displays", "now", "playback")
 
         def undo() -> None:
-            playlists.insert(min(position, len(playlists)), playlist)
-            data.PLAYLIST_BY_ID[pid] = playlist
-            for index, rule in rules:
-                state.rules.insert(min(index, len(state.rules)), rule)
-            state.assigned.clear()
-            state.assigned.update(assigned)
-            state.manual.clear()
-            state.manual.update(manual)
+            restore()
             state.navigate(f"playlist:{pid}")
-            state.emit_changed("playlists", "schedule", "displays", "now", "playback")
 
         state.toast(f"Deleted “{playlist.name}”", undo)
 
@@ -1156,13 +1108,12 @@ class PlaylistPage(Page):
         if not self._alive():
             return
         rows = self._list.get_rows()
-        self.playlist.entries[:] = [r.wid for r in rows]
         if self._selecting:
             self._selected.clear()
         target = rows.index(row)
         self._pending_focus = target
         self._pending_flash = {target}
-        self.state.emit_changed("playlists")
+        self.state.reorder_entries(self._pid, [r.wid for r in rows])
 
     def _on_settled(self, _list) -> None:
         if self._render_deferred and self._alive():
@@ -1174,48 +1125,37 @@ class PlaylistPage(Page):
         indices = sorted(i for i in set(indices) if 0 <= i < len(playlist.entries))
         if not indices:
             return
-        removed = [(i, playlist.entries[i]) for i in indices]
-        for index, _wid in reversed(removed):
-            del playlist.entries[index]
-        remaining = len(playlist.entries)
+        remaining = len(playlist.entries) - len(indices)
         if remaining:
             self._pending_focus = min(indices[0], remaining - 1)
         self._selected.clear()
+        removed, restore = self.state.remove_entries(playlist.id, indices)
         if self._selecting and remaining:
             self._select.set_active(False)
-        self.state.emit_changed("playlists")
-        what = f"“{data.BY_ID[removed[0][1]].name}”" if len(removed) == 1 else f"{len(removed)} wallpapers"
+        what = f"“{self.state.wallpaper(removed[0][1]).name}”" if len(removed) == 1 else f"{len(removed)} wallpapers"
 
         def undo() -> None:
-            for index, wid in removed:
-                playlist.entries.insert(min(index, len(playlist.entries)), wid)
             if self._pid == playlist.id:
                 self._pending_flash = {index for index, _ in removed}
                 self._pending_scroll = removed[0][0]
-            self.state.emit_changed("playlists")
+            restore()
 
         self.state.toast(f"Removed {what} from “{playlist.name}”", undo)
 
     def insert_entries(self, position: int, wids: list[str]) -> None:
         self._list.flush()
         playlist = self.playlist
-        wids = [wid for wid in wids if wid in data.BY_ID]
+        wids = [wid for wid in wids if self.state.has_wallpaper(wid)]
         if not wids:
             return
         position = max(0, min(len(playlist.entries), position))
         if position == len(playlist.entries):
             self.add_entries(wids)
             return
-        playlist.entries[position:position] = wids
         self._pending_flash = set(range(position, position + len(wids)))
         self._pending_scroll = position
-        self.state.emit_changed("playlists")
-        what = f"“{data.BY_ID[wids[0]].name}”" if len(wids) == 1 else f"{len(wids)} wallpapers"
-
-        def undo() -> None:
-            del playlist.entries[position : position + len(wids)]
-            self.state.emit_changed("playlists")
-
+        undo = self.state.insert_entries(playlist.id, position, wids)
+        what = f"“{self.state.wallpaper(wids[0]).name}”" if len(wids) == 1 else f"{len(wids)} wallpapers"
         self.state.toast(f"Added {what} to “{playlist.name}”", undo)
 
     def add_entries(self, wids: list[str]) -> None:
@@ -1270,17 +1210,13 @@ class PlaylistPage(Page):
 
     def _move_selected_to_top(self) -> None:
         self._list.flush()
-        entries = self.playlist.entries
         chosen = sorted(self._selected)
         if not chosen:
             return
-        picked = [entries[i] for i in chosen]
-        rest = [wid for i, wid in enumerate(entries) if i not in self._selected]
-        entries[:] = picked + rest
-        self._pending_flash = set(range(len(picked)))
+        self._pending_flash = set(range(len(chosen)))
         self._pending_scroll = 0
         self._select.set_active(False)
-        self.state.emit_changed("playlists")
+        self.state.move_entries_to_top(self._pid, chosen)
 
     def _on_escape(self, *_args) -> bool:
         if self._selecting:
@@ -1396,7 +1332,7 @@ class PlaylistPage(Page):
         if self._drag_from is not None:
             return False
         wid = value if isinstance(value, str) else ""
-        if wid not in data.BY_ID:
+        if not self.state.has_wallpaper(wid):
             return False
         self.insert_entries(position, [wid])
         return True
@@ -1404,7 +1340,7 @@ class PlaylistPage(Page):
     def _on_append_drop(self, value) -> bool:
         self._end_drop_feedback()
         wid = value if isinstance(value, str) else ""
-        if wid not in data.BY_ID:
+        if not self.state.has_wallpaper(wid):
             return False
         self.add_entries([wid])
         return True
@@ -1451,19 +1387,15 @@ class PlaylistPage(Page):
         elif what == "scrolled":
             GLib.timeout_add(300, lambda: (self._scroller.get_vadjustment().set_value(int(arg or 400)), False)[1])
         elif what == "long-name":
-            self.playlist.name = arg or "Rainy evenings by the old harbor"
-            self.state.emit_changed("playlists")
+            self.state.rename_playlist(self._pid, arg or "Rainy evenings by the old harbor")
         elif what == "assigned":
             self.state.assigned["HDMI-A-1"] = self._pid
             self.state.emit_changed("displays")
 
     def _demo_empty(self, name: str) -> None:
         pid = name.lower().replace(" ", "-")
-        if pid not in data.PLAYLIST_BY_ID:
-            playlist = Playlist(pid, name, [])
-            self.state.playlists.insert(len([p for p in self.state.playlists if not p.automatic]), playlist)
-            data.PLAYLIST_BY_ID[pid] = playlist
-            self.state.emit_changed("playlists")
+        if not self.state.has_playlist(pid):
+            pid = self.state.create_playlist(name)
         self.state.navigate(f"playlist:{pid}")
 
     def _demo_drag(self, source: int, target: int) -> None:

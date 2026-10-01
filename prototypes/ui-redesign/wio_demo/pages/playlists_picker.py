@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
-from .. import data, ui
+from .. import ui
 from ..catalog import KIND_LABEL
 from ..models import Playlist, Wallpaper
 from ..ui import CardGrid
@@ -202,7 +202,7 @@ class PlaylistPicker(Adw.Dialog):
             self._strip.remove(child)
             child = self._strip.get_first_child()
         for wid in self._picked[:6]:
-            self._strip.append(ui.thumbnail(data.BY_ID[wid], 48, 27, 5))
+            self._strip.append(ui.thumbnail(self.state.wallpaper(wid), 48, 27, 5))
         if count > 6:
             more = Gtk.Label(label=f"+{count - 6}")
             more.add_css_class("pl-tray-more")

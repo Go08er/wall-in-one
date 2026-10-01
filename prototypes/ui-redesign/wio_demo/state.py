@@ -14,9 +14,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
-from gi.repository import GObject
+import gi
 
-from . import data
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GObject
+
+from . import art, data
 from .models import Palette, Playlist, Rule, Wallpaper
 
 #: An Undo callback, as returned by the actions that pages offer Undo for.
@@ -314,14 +317,15 @@ class AppState(GObject.Object):
 
         self.toast(f"“{self.wallpaper(wid).name}” is now on {where}", undo)
 
-    def play_playlist(self, pid: str, scope: str = "all") -> None:
+    def play_playlist(self, pid: str, scope: str = "all", start: int = 0) -> None:
+        """Your pick: play a playlist (from entry ``start``) until you resume the schedule."""
         playlist = self.playlist(pid)
         if not playlist.entries:
             self.toast(f"“{playlist.name}” is empty — add wallpapers first")
             return
         for connector in self.targets(scope):
             self.manual[connector] = pid
-            self.current[connector] = playlist.entries[0]
+            self.current[connector] = playlist.entries[start]
         self.playback = "playing"
         self.emit_changed("now", "playback")
         self.toast(f"Playing “{playlist.name}” until you resume the schedule")
@@ -535,6 +539,156 @@ class AppState(GObject.Object):
             self.emit_changed("playlists")
 
         self.toast(f"Added {noun} to “{playlist.name}”", undo)
+
+    # -- playlists: queries -----------------------------------------------------
+    def has_playlist(self, pid: str) -> bool:
+        return pid in data.PLAYLIST_BY_ID
+
+    def playlist_name(self, pid: str) -> str:
+        return data.PLAYLIST_BY_ID[pid].name if pid in data.PLAYLIST_BY_ID else "Missing playlist"
+
+    def playlist_cover(self, pid: str, size: int) -> Gdk.Texture:
+        """A 2x2 mosaic of the playlist's first four different wallpapers (cached)."""
+        keys: list[tuple[str, int, bool]] = []
+        for wid in self.playlist(pid).entries:
+            key = self.wallpaper(wid).key
+            if key not in keys:
+                keys.append(key)
+            if len(keys) == 4:
+                break
+        return art.mosaic(tuple(keys), size)
+
+    # -- playlists: actions -----------------------------------------------------
+    def create_playlist(self, name: str) -> str:
+        """A new, empty playlist after the user's others; returns its id."""
+        base = name.lower().replace(" ", "-")
+        pid, number = base, 2
+        while pid in data.PLAYLIST_BY_ID:  # a second "Frog day" must not replace the first
+            pid, number = f"{base}-{number}", number + 1
+        playlist = Playlist(pid, name, [])
+        self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
+        data.PLAYLIST_BY_ID[pid] = playlist
+        self.emit_changed("playlists")
+        return pid
+
+    def rename_playlist(self, pid: str, name: str) -> Undo:
+        playlist = self.playlist(pid)
+        old = playlist.name
+        playlist.name = name
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            playlist.name = old
+            self.emit_changed("playlists")
+
+        return undo
+
+    def set_playlist_interval(self, pid: str, minutes: int) -> None:
+        """How often a playlist changes wallpaper (0 = it doesn't)."""
+        self.playlist(pid).interval = minutes
+        self.emit_changed("playlists", "playback")
+
+    def set_playlist_shuffle(self, pid: str, shuffle: bool) -> None:
+        self.playlist(pid).shuffle = shuffle
+        self.emit_changed("playlists", "playback")
+
+    def duplicate_playlist(self, pid: str) -> tuple[str, str, Undo]:
+        """Copy a playlist, just after it (or after the user's own ones for an
+        automatic one). Returns (new id, new name, undo)."""
+        source, playlists = self.playlist(pid), self.playlists
+        base = f"{source.name} (copy)"
+        name, number = base, 2
+        names = {p.name for p in playlists}
+        while name in names:
+            name, number = f"{source.name} (copy {number})", number + 1
+        copy_id, number = f"{source.id}-copy", 2
+        while copy_id in data.PLAYLIST_BY_ID:
+            copy_id, number = f"{source.id}-copy-{number}", number + 1
+        copy = Playlist(copy_id, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
+        user_count = len([p for p in playlists if not p.automatic])
+        playlists.insert(playlists.index(source) + 1 if not source.automatic else user_count, copy)
+        data.PLAYLIST_BY_ID[copy_id] = copy
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            if copy in playlists:
+                playlists.remove(copy)
+            data.PLAYLIST_BY_ID.pop(copy_id, None)
+            self.emit_changed("playlists")
+
+        return copy_id, name, undo
+
+    def delete_playlist(self, pid: str) -> Undo:
+        """Delete a playlist with the rules that use it; displays that played it
+        follow the schedule again, and so does a pick of it."""
+        playlist, playlists = self.playlist(pid), self.playlists
+        position = playlists.index(playlist)
+        rules = [(i, rule) for i, rule in enumerate(self.rules) if rule.playlist == pid]
+        assigned, manual = dict(self.assigned), dict(self.manual)
+        for index, _rule in reversed(rules):
+            del self.rules[index]
+        for connector, value in self.assigned.items():
+            if value == pid:
+                self.assigned[connector] = ""
+        for connector in [c for c, p in self.manual.items() if p == pid]:
+            del self.manual[connector]
+        playlists.remove(playlist)
+        data.PLAYLIST_BY_ID.pop(pid, None)
+        self.emit_changed("playlists", "schedule", "displays", "now", "playback")
+
+        def undo() -> None:
+            playlists.insert(min(position, len(playlists)), playlist)
+            data.PLAYLIST_BY_ID[pid] = playlist
+            for index, rule in rules:
+                self.rules.insert(min(index, len(self.rules)), rule)
+            self.assigned.clear()
+            self.assigned.update(assigned)
+            self.manual.clear()
+            self.manual.update(manual)
+            self.emit_changed("playlists", "schedule", "displays", "now", "playback")
+
+        return undo
+
+    def insert_entries(self, pid: str, position: int, wids: list[str]) -> Undo:
+        """Put wallpapers into a playlist at ``position`` (the drop line)."""
+        entries = self.playlist(pid).entries
+        entries[position:position] = wids
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            del entries[position : position + len(wids)]
+            self.emit_changed("playlists")
+
+        return undo
+
+    def remove_entries(self, pid: str, indices: list[int]) -> tuple[list[tuple[int, str]], Undo]:
+        """Take entries out of a playlist; returns [(index, wallpaper id)] and an undo
+        that puts each back where it was."""
+        entries = self.playlist(pid).entries
+        removed = [(i, entries[i]) for i in sorted(set(indices)) if 0 <= i < len(entries)]
+        for index, _wid in reversed(removed):
+            del entries[index]
+        self.emit_changed("playlists")
+
+        def undo() -> None:
+            for index, wid in removed:
+                entries.insert(min(index, len(entries)), wid)
+            self.emit_changed("playlists")
+
+        return removed, undo
+
+    def reorder_entries(self, pid: str, wids: list[str]) -> None:
+        """Store a playlist's entries in a new order (a finished drag or keyboard move)."""
+        self.playlist(pid).entries[:] = wids
+        self.emit_changed("playlists")
+
+    def move_entries_to_top(self, pid: str, indices: list[int]) -> None:
+        entries = self.playlist(pid).entries
+        chosen = set(indices)
+        picked = [entries[i] for i in sorted(chosen)]
+        rest = [wid for i, wid in enumerate(entries) if i not in chosen]
+        entries[:] = picked + rest
+        self.emit_changed("playlists")
 
     def advance(self, minutes: int) -> None:
         """Demo clock: move time forward, letting the schedule and rotation act."""

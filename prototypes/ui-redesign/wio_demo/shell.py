@@ -10,8 +10,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
-from . import art, data, glass
-from .models import Playlist
+from . import art, glass
 from .pages import Page, Placeholder
 from .playerbar import PlayerBar
 
@@ -181,7 +180,7 @@ class MainWindow(Adw.ApplicationWindow):
                     lists,
                     f"playlist:{playlist.id}",
                     playlist.name,
-                    paintable=art.mosaic(data.cover_keys(playlist), 64),
+                    paintable=state.playlist_cover(playlist.id, 64),
                     count=str(len(playlist.entries)),
                 )
         add(lists, "new-playlist", "New playlist", "list-add-symbolic")
@@ -309,11 +308,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self._build_sidebar(self._current.name if self._current else None)
                 return
             name = entry.get_text().strip() or "Untitled playlist"
-            pid = name.lower().replace(" ", "-")
-            playlist = Playlist(pid, name, [])
-            self.state.playlists.insert(len([p for p in self.state.playlists if not p.automatic]), playlist)
-            data.PLAYLIST_BY_ID[pid] = playlist
-            self._build_sidebar()
+            pid = self.state.create_playlist(name)  # the sidebar rebuilds on "playlists"
             self.navigate(f"playlist:{pid}")
             self.state.toast(f"Created “{name}”")
 
@@ -323,7 +318,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _welcome(self) -> Gtk.Widget:
         status = Adw.StatusPage(
             paintable=art.mosaic(
-                tuple(data.BY_ID[w].key for w in ("alpine", "lily-pond", "northern-lights", "golden-coast")), 160
+                tuple(self.state.wallpaper(w).key for w in ("alpine", "lily-pond", "northern-lights", "golden-coast")),
+                160,
             ),
             title="Welcome to Wall-in-One",
             description="Pick the folder where your wallpapers live. Images, videos and "

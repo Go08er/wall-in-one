@@ -120,6 +120,52 @@ def palette_actions(state, settings) -> None:
     dialog.force_close()
 
 
+def playlist_actions(state, window) -> None:
+    window.navigate("playlist:mc-day")
+    page = window.pages["playlist"]
+    undo = state.rename_playlist("mc-day", "MC days")
+    assert state.playlist("mc-day").name == "MC days"
+    undo()
+    assert state.playlist("mc-day").name == "MC day"
+    page._interval.set_selected(4)  # every hour
+    assert state.playlist("mc-day").interval == 60
+    page._interval.set_selected(2)
+    page._shuffle.set_active(True)
+    assert state.playlist("mc-day").shuffle
+    page._shuffle.set_active(False)
+    page.insert_entries(1, ["alpine"])
+    assert state.playlist("mc-day").entries[1] == "alpine"
+    page.remove_entries([1])
+    page.move_entry(0, 2)
+    page._list.flush()
+    assert state.playlist("mc-day").entries[2] == "blocky-sunrise"
+    page.move_entry(2, 0)
+    page._list.flush()
+    page.demo("select")
+    page._move_selected_to_top()
+    assert state.playlist("mc-day").entries[:2] == ["overworld-noon", "summit-glow"]
+    state.reorder_entries("mc-day", ["blocky-sunrise", "overworld-noon", "alpine", "summit-glow"])
+    page.play_from(2)
+    assert state.current["DP-1"] == "alpine" and state.manual["DP-1"] == "mc-day"
+    state.resume_schedule("all")
+    # A second "Frog day" gets its own id instead of replacing the first.
+    twin = state.create_playlist("Frog day")
+    assert twin != "frog-day" and state.playlist("frog-day").name == "Frog day"
+    window.navigate(f"playlist:{twin}")
+    page.duplicate()
+    copy = page._pid
+    assert copy == f"{twin}-copy", copy
+    page._delete()
+    assert not state.has_playlist(copy)
+    restore = state.delete_playlist(twin)
+    restore()
+    assert state.has_playlist(twin)
+    state.delete_playlist(twin)
+    copy, _name, undo = state.duplicate_playlist("mc-night")
+    undo()
+    assert not state.has_playlist(copy)
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -163,10 +209,7 @@ def build_steps(app, holder):
         (
             "empty playlist play",
             lambda: (
-                s().playlists.insert(0, data.Playlist("empty-x", "Empty X", [])),
-                data.PLAYLIST_BY_ID.__setitem__("empty-x", s().playlists[0]),
-                s().emit_changed("playlists"),
-                w().navigate("playlist:empty-x"),
+                w().navigate(f"playlist:{s().create_playlist('Empty X')}"),
                 s().play_playlist("empty-x"),
             ),
         ),
@@ -273,6 +316,7 @@ def build_steps(app, holder):
         )
     )
     steps.append(("library select off", lambda: w().pages["library"]._select.set_active(False)))
+    steps.append(("playlist actions", lambda: playlist_actions(s(), w())))
     steps.append(
         (
             "store select all",

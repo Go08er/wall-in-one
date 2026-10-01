@@ -5884,6 +5884,29 @@ class _Commands:
             finish,
         )
 
+    def name_schedule_rule(self, value: str | None) -> server.Outcome:
+        """Name a rule by its id, or clear its name when none is given.
+
+        The first name moves schedules.json to version 3 after keeping the
+        old file as ``schedules.json.v2-backup``; see `schedules.Store.set_name`.
+        """
+        session = self._app.session
+        rule_id, name = server.parse_rule_name(value)
+
+        def finish(rule: schedules.Rule) -> Response:
+            self._app.schedule_edited()
+            if rule.name is None:
+                return Response.success(f"rule {rule.id} has no name")
+            return Response.success(f"rule {rule.id} is called {rule.name}")
+
+        if self._app.legacy_service:
+            return finish(self._legacy_authoring(lambda: session.schedules.set_name(rule_id, name)))
+        schedule_store = session.schedules
+        return self._app.authoring_off_thread(
+            lambda: schedule_store.set_name(rule_id, name),
+            finish,
+        )
+
     def add_favourite(self, value: str | None) -> server.Outcome:
         """Star a wallpaper the library knows about.
 

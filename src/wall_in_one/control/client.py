@@ -127,6 +127,7 @@ TIMEOUTS: Final[Mapping[str, float]] = {
     "schedule": TIMEOUT,
     "schedule-add": AUTHORING_TIMEOUT,
     "schedule-remove": AUTHORING_TIMEOUT,
+    "schedule-name": AUTHORING_TIMEOUT,
     "providers": TIMEOUT,
     "search": SEARCH_TIMEOUT,
     "download": DOWNLOAD_TIMEOUT,
@@ -159,6 +160,7 @@ DURABLE_MUTATION_VERBS: Final[frozenset[str]] = frozenset(
         "display-clear",
         "schedule-add",
         "schedule-remove",
+        "schedule-name",
         "download",
     }
 )

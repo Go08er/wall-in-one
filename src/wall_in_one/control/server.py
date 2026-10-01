@@ -126,6 +126,7 @@ class Commands(Protocol):
     def show_schedule(self) -> Response: ...
     def add_schedule_rule(self, value: str | None) -> Outcome: ...
     def drop_schedule_rule(self, value: str | None) -> Outcome: ...
+    def name_schedule_rule(self, value: str | None) -> Outcome: ...
     def list_providers(self) -> Response: ...
     def search(self, value: str | None) -> Outcome: ...
     def download(self, value: str | None) -> Outcome: ...
@@ -166,6 +167,7 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
         "schedule": lambda _: commands.show_schedule(),
         "schedule-add": commands.add_schedule_rule,
         "schedule-remove": commands.drop_schedule_rule,
+        "schedule-name": commands.name_schedule_rule,
         "providers": lambda _: commands.list_providers(),
         "search": commands.search,
         "download": commands.download,
@@ -197,6 +199,7 @@ def build_verb_table(commands: Commands) -> dict[str, Handler]:
             "display-clear",
             "schedule-add",
             "schedule-remove",
+            "schedule-name",
             "download",
         )
         for verb in mutating:
@@ -385,6 +388,20 @@ def parse_rule(value: str | None) -> tuple[str, dict[str, str]]:
             raise ValueError(f"{word!r} is not one of days=, months=, from= or to=")
         options[key] = argument
     return playlist, options
+
+
+def parse_rule_name(value: str | None) -> tuple[str, str | None]:
+    """`<rule-id> [name]`: the rest of the line is the name; none clears it.
+
+    The id comes first because it is one whitespace-free token, the one
+    `schedule` prints in its first column, and the name is free text that
+    may contain spaces, so it needs no quoting at a shell prompt.
+    """
+    text = (value or "").strip()
+    rule_id, _separator, name = text.partition(" ")
+    if not rule_id:
+        raise ValueError("schedule-name needs a rule id, as: schedule-name <rule-id> [name]")
+    return rule_id, name.strip() or None
 
 
 def describe_pairing(item: MediaItem, bundle: pairings.Pairing) -> str:

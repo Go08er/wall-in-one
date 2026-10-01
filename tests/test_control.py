@@ -39,6 +39,7 @@ from wall_in_one.control.server import (
     parse_pair_from_left,
     parse_path,
     parse_rule,
+    parse_rule_name,
     parse_search,
     parse_toggle,
     remove_wallpaper,
@@ -53,6 +54,7 @@ from wall_in_one.library.filter import Kinds, Query
 from wall_in_one.library.manage import ManageError
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.library.playlists import PlaylistError
+from wall_in_one.library.schedules import ScheduleError
 from wall_in_one.providers.base import ProviderError, SearchResult, WallpaperCandidate
 from wall_in_one.providers.registry import ProviderInfo
 from wall_in_one.session import Session
@@ -232,6 +234,9 @@ class _StubCommands:
 
     def drop_schedule_rule(self, value: str | None) -> Response:
         return self._record("schedule-remove", value)
+
+    def name_schedule_rule(self, value: str | None) -> Response:
+        return self._record("schedule-name", value)
 
     def list_providers(self) -> Response:
         return self._record("providers")
@@ -3262,6 +3267,84 @@ def test_removing_a_rule_that_is_not_there_says_so(sandbox: Path, applied: list[
     commands, _app = _commands(sandbox, [_wallpaper("aurora")])
     with pytest.raises(ValueError):
         commands.drop_schedule_rule("nope")
+
+
+@pytest.mark.parametrize(
+    ("value", "parsed"),
+    [
+        ("abc Frog day", ("abc", "Frog day")),
+        ("  abc   Frog   day  ", ("abc", "Frog   day")),
+        ("abc", ("abc", None)),
+        ("abc   ", ("abc", None)),
+    ],
+)
+def test_a_rule_name_follows_its_id(value: str, parsed: tuple[str, str | None]) -> None:
+    """The id is one token; the rest of the line, spaces and all, is the name."""
+    assert parse_rule_name(value) == parsed
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_naming_needs_a_rule_id(value: str | None) -> None:
+    with pytest.raises(ValueError, match="schedule-name <rule-id>"):
+        parse_rule_name(value)
+
+
+def test_a_rule_can_be_named_and_unnamed_by_its_id(sandbox: Path, applied: list[Path]) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    commands.add_schedule_rule("Evening days=sat,sun")
+    rule = app.session.schedules.rules[0]
+    target = paths.app_state_dir() / "schedules.json"
+    unnamed = target.read_bytes()
+    assert json.loads(unnamed)["version"] == 2
+
+    response = _immediate(commands.name_schedule_rule(f"{rule.id} Frog   weekend"))
+
+    assert response.ok
+    assert response.message == f"rule {rule.id} is called Frog weekend"
+    (named,) = app.session.schedules.rules
+    assert named.name == "Frog weekend"
+    assert app.rescheduled == 2
+    listing = commands.show_schedule().message
+    assert listing.splitlines()[-1].split("\t")[-1] == "Frog weekend"
+    assert json.loads(target.read_bytes())["version"] == 3
+    assert target.with_name("schedules.json.v2-backup").read_bytes() == unnamed
+
+    cleared = _immediate(commands.name_schedule_rule(rule.id))
+
+    assert cleared.message == f"rule {rule.id} has no name"
+    (unnamed_again,) = app.session.schedules.rules
+    assert unnamed_again.name is None
+    assert commands.show_schedule().message.splitlines()[-1].endswith("\t-")
+    assert json.loads(target.read_bytes())["version"] == 3
+
+
+def test_naming_a_rule_that_is_not_there_says_so(sandbox: Path, applied: list[Path]) -> None:
+    commands, _app = _commands(sandbox, [_wallpaper("aurora")])
+    with pytest.raises(ScheduleError) as caught:
+        commands.name_schedule_rule("nope Frog")
+    assert caught.value.kind == "no-such-rule"
+
+
+def test_a_refused_schedule_backup_reaches_ctl_as_no_backup(
+    sandbox: Path, applied: list[Path]
+) -> None:
+    commands, app = _commands(sandbox, [_wallpaper("aurora")])
+    commands.make_playlist("Evening")
+    commands.add_schedule_rule("Evening")
+    rule = app.session.schedules.rules[0]
+    target = paths.app_state_dir() / "schedules.json"
+    unnamed = target.read_bytes()
+    target.with_name("schedules.json.v2-backup").mkdir()
+
+    with pytest.raises(ScheduleError) as caught:
+        commands.name_schedule_rule(f"{rule.id} Frog")
+    response = Response.decode(failed(caught.value).encode())
+
+    assert response.kind == "no-backup"
+    assert response.message.endswith("Nothing was changed.")
+    assert target.read_bytes() == unnamed
+    assert app.session.schedules.rules[0].name is None
 
 
 def test_deleting_a_playlist_takes_its_schedule_rules(sandbox: Path, applied: list[Path]) -> None:

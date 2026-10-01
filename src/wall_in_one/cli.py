@@ -87,6 +87,7 @@ CTL_VERBS: Final[tuple[str, ...]] = (
     "schedule",
     "schedule-add",
     "schedule-remove",
+    "schedule-name",
     "providers",
     "search",
     "download",

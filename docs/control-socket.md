@@ -50,6 +50,8 @@ $ wall-in-one ctl schedule
 $ wall-in-one ctl open browse|media|pairings|playlists|schedules|displays|settings
 $ wall-in-one ctl schedule-add Evening days=sat,sun from=22:00 to=06:00
 $ wall-in-one ctl schedule-remove <rule-id>
+$ wall-in-one ctl schedule-name <rule-id> Frog day
+$ wall-in-one ctl schedule-name <rule-id>
 $ wall-in-one ctl quit
 ```
 
@@ -218,6 +220,15 @@ on-demand playlist choice sits above the calendar until **Follow schedule** is
 selected. The Rust runtime evaluates the local-time rules while the GUI is
 closed; the rules themselves have one-minute resolution, and a boundary change
 is applied without waiting for the Python app.
+
+`schedule-name <rule-id> <name>` gives a rule a name of up to 120 characters,
+and `schedule-name <rule-id>` with no name clears it. `schedule` prints the
+name in its last column, `-` for none. A name is a label only: the rule keeps
+its id, and the runtime never sees the name. Naming the first rule moves
+`schedules.json` to version 3, which 0.1.5 opens read-only and 0.1.4 cannot
+safely edit; the version-2 file is kept beside it as
+`schedules.json.v2-backup` first (see
+[State-file recovery](library.md#state-file-recovery)).
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

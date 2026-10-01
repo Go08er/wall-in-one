@@ -432,16 +432,203 @@ class Reading[T]:
     show it. ``fault`` keeps its historical meaning for runtime compilation,
     which refuses any faulted store; ``newer_version`` says the fault is a
     document from a newer build, which no mutation may rewrite.
+    ``version`` is the format the file is in, for a store that uses
+    :class:`FormatVersions` (see :meth:`FormatVersions.declared`): ``None``
+    when there is no file, it is unreadable, or it declares no version this
+    build reads.
     """
 
     value: T
     fault: str | None = None
     newer_version: bool = False
     unknown: Unknown = NOTHING_UNKNOWN
+    version: int | None = None
 
     @property
     def fault_kind(self) -> str | None:
         return fault_kind(self.fault, newer_version=self.newer_version)
+
+
+# -- format-change guards ------------------------------------------------------
+#
+# Owner-approved for every Release 2 format change (2026-10-01):
+#
+# 1. Lazy bump on use. A file moves to a newer version only when the data
+#    being saved needs it; every other edit keeps writing the version the
+#    file already has, so most profiles never leave formats older builds read.
+# 2. One-time backup before the first bump. Just before a store first writes
+#    a newer version than its file holds, the old bytes are copied to
+#    ``<file>.v<old>-backup``; that copy is never overwritten or deleted, and
+#    without it the save is refused.
+#
+# A store adopts both in four steps; schedules.py is the worked example.
+#
+# * Declare its versions once::
+#
+#       FORMATS = state_file.FormatVersions(oldest=1, floor=2, current=3)
+#
+# * Say which version the data needs, as a pure function of the value::
+#
+#       def required_version(rules: Sequence[Rule]) -> int:
+#           return NAMED_RULES_VERSION if any(rule.name for rule in rules) else FORMATS.floor
+#
+# * Record the declared version when reading:
+#   ``Reading(..., version=FORMATS.declared(document))``.
+# * In the locked mutation, after the change and before anything is moved
+#   or written::
+#
+#       version = FORMATS.to_write(reading.version, required_version(value))
+#       if FORMATS.is_bump(reading.version, version):
+#           state_file.backup_before_bump(path, observed=observed, replaced=reading.version)
+#       ...  # then preserve_faulted() if faulted, then save at ``version``
+#
+#   and turn an ``OSError`` from the backup into the store's own refusal.
+
+
+@dataclass(frozen=True, slots=True)
+class FormatVersions:
+    """The versions of one store's file this build reads and writes.
+
+    ``oldest`` is the oldest version this build reads, and the one a file
+    without a ``version`` marker is taken to be. ``floor`` is the oldest it
+    writes: a readable file older than that is brought up to ``floor`` on its
+    next save, as stores always did, because every supported older build reads
+    ``floor`` too. ``current`` is the newest version this build understands;
+    a file declaring a newer one is read-only here (:data:`NEWER_VERSION`).
+
+    Writing a version above both ``floor`` and the file's own is a *bump*: an
+    older supported build may not read the result, so guard 2 keeps a backup
+    first. A file never moves back down. Once bumped and backed up it stays at
+    its version even if its data would fit an older one again, so a file does
+    not flip between formats as it is edited, and "the backup is the bytes
+    before the bump" stays true.
+    """
+
+    oldest: int
+    floor: int
+    current: int
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.oldest <= self.floor <= self.current:
+            raise ValueError(f"inconsistent format versions {self!r}")
+
+    def declared(self, document: Mapping[str, Any]) -> int | None:
+        """The version ``document`` is in, if it is one this build reads.
+
+        A missing marker is :attr:`oldest`. A marker this build does not
+        read -- newer, damaged, or not an integer -- is ``None``: a newer file
+        is never written, and a damaged one is moved aside as ``.broken``
+        (which is its backup) before the store saves what it could parse.
+        """
+        version = document.get("version")
+        if version is None:
+            return self.oldest
+        if type(version) is int and self.oldest <= version <= self.current:
+            return version
+        return None
+
+    def to_write(self, on_disk: int | None, required: int) -> int:
+        """Guard 1: the version the next save writes.
+
+        ``on_disk`` is :attr:`Reading.version`; ``required`` is the minimum
+        version that can represent the data being saved. The result keeps the
+        file's version unless the data needs more, and is never below
+        :attr:`floor`.
+        """
+        if not self.floor <= required <= self.current:
+            raise ValueError(f"required version {required} is outside {self!r}")
+        if on_disk is not None and not self.oldest <= on_disk <= self.current:
+            raise ValueError(f"on-disk version {on_disk} is outside {self!r}")
+        return max(self.floor, required, on_disk if on_disk is not None else self.floor)
+
+    def is_bump(self, on_disk: int | None, writing: int) -> bool:
+        """Whether saving ``writing`` over ``on_disk`` needs guard 2's backup.
+
+        Only a readable file moved above both its own version and
+        :attr:`floor` qualifies. Nothing to replace needs no copy, and an
+        unreadable file is preserved as ``.broken`` instead.
+        """
+        return on_disk is not None and writing > on_disk and writing > self.floor
+
+
+def version_backup_path(path: Path, replaced: int) -> Path:
+    """Where guard 2 keeps ``path`` as it was at version ``replaced``."""
+    return path.with_name(f"{path.name}.v{replaced}-backup")
+
+
+def _kept_backup(backup: Path) -> bool:
+    """Whether ``backup`` already holds a backup; refuse anything else there."""
+    try:
+        found = backup.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISREG(found.st_mode):
+        return True
+    raise OSError(f"{backup} exists but is not a regular file, so no backup can be kept there")
+
+
+def _observed_bytes(observed: StateFileObservation) -> tuple[bytes, int]:
+    """The exact bytes and permission bits of the generation ``observed`` pinned."""
+    path = observed.path
+    expected = observed.expected_fingerprint
+    if not observed.present or observed.expected_file_type != stat.S_IFREG or expected is None:
+        raise file_io.PathChangedError(f"cannot back up {path}: it is not a regular file")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or file_io.file_fingerprint(before) != expected:
+            raise file_io.PathChangedError(
+                f"{path} changed after it was read, so it was not copied"
+            )
+        chunks: list[bytes] = []
+        remaining = before.st_size + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    contents = b"".join(chunks)
+    if len(contents) != before.st_size or file_io.file_fingerprint(after) != expected:
+        raise file_io.PathChangedError(f"{path} changed while it was backed up")
+    return contents, stat.S_IMODE(before.st_mode)
+
+
+def backup_before_bump(path: Path, *, observed: StateFileObservation, replaced: int) -> Path:
+    """Guard 2: keep the bytes a store's first format bump replaces.
+
+    Call it with the store's mutation lock held, before the newer version is
+    written and before a faulted file is moved aside. The generation
+    ``observed`` pinned is copied byte for byte to
+    :func:`version_backup_path` (``<file>.v<replaced>-backup``) in the same
+    directory, with the original's permission bits, published atomically
+    without replacing anything.
+
+    A regular file already at that name is an earlier backup of the same
+    version, kept from the first bump, and is never overwritten; the save
+    goes ahead. Nothing ever deletes a backup. Returns the backup's path.
+
+    Raises :class:`OSError` when no backup can be kept: something other than
+    a regular file holds the name, the file changed since it was observed, or
+    the copy could not be written. The caller must then refuse the save
+    rather than bump without a backup.
+    """
+    backup = version_backup_path(path, replaced)
+    if _kept_backup(backup):
+        return backup
+    contents, permissions = _observed_bytes(observed)
+    try:
+        write_atomic_bytes(backup, contents, replace_existing=False, mode=permissions)
+    except FileExistsError:
+        # Another writer kept one first. The first copy is the one that counts.
+        if _kept_backup(backup):
+            return backup
+        raise
+    return backup
 
 
 def joined_faults(faults: list[str]) -> str | None:
@@ -549,6 +736,25 @@ def write_atomic_text(
     replace_existing: bool = True,
     mode: int | None = None,
 ) -> None:
+    """Durably replace ``path`` with ``contents`` encoded as UTF-8.
+
+    See :func:`write_atomic_bytes`, which does the work.
+    """
+    write_atomic_bytes(
+        path,
+        contents.encode("utf-8"),
+        replace_existing=replace_existing,
+        mode=mode,
+    )
+
+
+def write_atomic_bytes(
+    path: Path,
+    contents: bytes,
+    *,
+    replace_existing: bool = True,
+    mode: int | None = None,
+) -> None:
     """Durably replace ``path`` from a private same-directory temporary.
 
     ``mkstemp`` is important here rather than a name derived from the process
@@ -560,6 +766,8 @@ def write_atomic_text(
     recovery sets ``replace_existing=False`` after moving the unreadable
     generation aside: if a manual repair appears in that newly empty pathname,
     the repair wins instead of being overwritten by the recovered mutation.
+    With ``replace_existing=False`` an existing ``path`` raises
+    :class:`FileExistsError` and is left exactly as it was.
     ``mode`` sets the new file's permission bits before any byte is written;
     without it the file keeps ``mkstemp``'s private 0600.
     """
@@ -577,7 +785,7 @@ def write_atomic_text(
         )
         if mode is not None:
             os.fchmod(descriptor, mode)
-        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        handle = os.fdopen(descriptor, "wb")
         # ``fdopen`` owns the descriptor from this point. Transfer ownership
         # before write/flush/fsync can fail so the outer cleanup never closes a
         # recycled numeric descriptor after the handle has already closed it.
@@ -587,7 +795,7 @@ def write_atomic_text(
             handle.flush()
             os.fsync(handle.fileno())
         temporary_fingerprint = temporary_pin.fingerprint
-        candidate_document = contents.encode("utf-8")
+        candidate_document = contents
         if replace_existing:
             os.replace(temporary, path)
         else:

@@ -815,3 +815,196 @@ def test_a_document_with_nothing_unknown_captures_nothing() -> None:
     assert not unknown
     assert unknown is state_file.NOTHING_UNKNOWN
     assert state_file.merge_unknown({"version": 1}, unknown, _SHAPE) == {"version": 1}
+
+
+# -- format-change guards: lazy bump on use, one backup before the first bump ---------
+
+FORMATS = state_file.FormatVersions(oldest=1, floor=2, current=3)
+
+
+def test_format_versions_must_be_ordered() -> None:
+    for oldest, floor, current in ((0, 1, 1), (2, 1, 3), (1, 3, 2)):
+        with pytest.raises(ValueError):
+            state_file.FormatVersions(oldest=oldest, floor=floor, current=current)
+
+
+@pytest.mark.parametrize(
+    ("document", "declared"),
+    (
+        ({}, 1),
+        ({"version": 1}, 1),
+        ({"version": 2}, 2),
+        ({"version": 3}, 3),
+        ({"version": 4}, None),
+        ({"version": 0}, None),
+        ({"version": "2"}, None),
+        ({"version": True}, None),
+        ({"version": 2.0}, None),
+    ),
+)
+def test_a_declared_version_is_one_this_build_reads_or_none(
+    document: dict[str, object], declared: int | None
+) -> None:
+    assert FORMATS.declared(document) == declared
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "required", "written"),
+    (
+        # No file, or one too damaged to say: the oldest format the data fits.
+        (None, 2, 2),
+        (None, 3, 3),
+        # Lazy bump on use: the file keeps its version unless the data needs more.
+        (2, 2, 2),
+        (2, 3, 3),
+        # The old v1 -> v2 upgrade is unchanged; v1 straight to v3 when needed.
+        (1, 2, 2),
+        (1, 3, 3),
+        # Never back down: a bumped file stays bumped.
+        (3, 2, 3),
+        (3, 3, 3),
+    ),
+)
+def test_the_version_written_keeps_the_files_unless_the_data_needs_more(
+    on_disk: int | None, required: int, written: int
+) -> None:
+    assert FORMATS.to_write(on_disk, required) == written
+
+
+@pytest.mark.parametrize(("on_disk", "required"), ((None, 1), (None, 4), (4, 2), (0, 2)))
+def test_versions_outside_the_declared_range_are_a_programming_error(
+    on_disk: int | None, required: int
+) -> None:
+    with pytest.raises(ValueError):
+        FORMATS.to_write(on_disk, required)
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "writing", "bump"),
+    (
+        (None, 2, False),
+        (None, 3, False),
+        (1, 2, False),
+        (2, 2, False),
+        (3, 3, False),
+        (2, 3, True),
+        (1, 3, True),
+    ),
+)
+def test_only_a_move_above_the_floor_and_the_files_version_is_a_bump(
+    on_disk: int | None, writing: int, bump: bool
+) -> None:
+    assert FORMATS.is_bump(on_disk, writing) is bump
+
+
+def test_the_backup_is_named_after_the_version_it_keeps(tmp_path: Path) -> None:
+    assert state_file.version_backup_path(tmp_path / "schedules.json", 2) == (
+        tmp_path / "schedules.json.v2-backup"
+    )
+
+
+def _back_up(target: Path, replaced: int = 2) -> Path:
+    with state_file.observe(target) as observed:
+        return state_file.backup_before_bump(target, observed=observed, replaced=replaced)
+
+
+def test_a_backup_keeps_the_exact_bytes_and_mode_and_leaves_the_original(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    original = b'{"version": 2,\n  "rules": []}  \n\xc3\xa9'
+    target.write_bytes(original)
+    target.chmod(0o640)
+
+    backup = _back_up(target)
+
+    assert backup == tmp_path / "schedules.json.v2-backup"
+    assert backup.read_bytes() == original
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+    assert target.read_bytes() == original
+    assert backup.stat().st_ino != target.stat().st_ino
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "schedules.json",
+        "schedules.json.v2-backup",
+    ]
+
+
+def test_an_existing_backup_is_never_overwritten(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    backup = tmp_path / "schedules.json.v2-backup"
+    backup.write_bytes(b"the first copy")
+    backup.chmod(0o600)
+    before = backup.stat()
+    target.write_bytes(b"a later generation")
+
+    assert _back_up(target) == backup
+
+    assert backup.read_bytes() == b"the first copy"
+    assert file_io.file_fingerprint(backup.stat()) == file_io.file_fingerprint(before)
+
+
+def test_a_backup_written_by_someone_else_first_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-replace publication loses the race politely: theirs stays."""
+    target = tmp_path / "schedules.json"
+    target.write_bytes(b"ours")
+    backup = tmp_path / "schedules.json.v2-backup"
+    real = state_file.write_atomic_bytes
+
+    def raced(
+        path: Path, contents: bytes, *, replace_existing: bool = True, mode: int | None = None
+    ) -> None:
+        backup.write_bytes(b"theirs")
+        real(path, contents, replace_existing=replace_existing, mode=mode)
+
+    monkeypatch.setattr(state_file, "write_atomic_bytes", raced)
+
+    assert _back_up(target) == backup
+    assert backup.read_bytes() == b"theirs"
+    assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")] == []
+
+
+@pytest.mark.parametrize("occupant", ("directory", "symlink"))
+def test_a_backup_name_taken_by_something_else_refuses(tmp_path: Path, occupant: str) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_bytes(b"{}")
+    backup = tmp_path / "schedules.json.v2-backup"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_bytes(b"not mine")
+    if occupant == "directory":
+        backup.mkdir()
+    else:
+        backup.symlink_to(elsewhere)
+
+    with pytest.raises(OSError, match="not a regular file"):
+        _back_up(target)
+
+    assert elsewhere.read_bytes() == b"not mine"
+    assert target.read_bytes() == b"{}"
+
+
+def test_a_file_changed_since_it_was_observed_is_not_backed_up(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    target.write_bytes(b"what was read")
+    with state_file.observe(target) as observed:
+        target.write_bytes(b"an editor's later save")
+        with pytest.raises(file_io.PathChangedError):
+            state_file.backup_before_bump(target, observed=observed, replaced=2)
+
+    assert not (tmp_path / "schedules.json.v2-backup").exists()
+
+
+def test_an_absent_file_has_nothing_to_back_up(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    with pytest.raises(OSError):
+        _back_up(target)
+    assert not (tmp_path / "schedules.json.v2-backup").exists()
+
+
+def test_bytes_and_text_writers_publish_the_same_file(tmp_path: Path) -> None:
+    text = '{"name": "Frösche"}\n'
+    state_file.write_atomic_text(tmp_path / "a.json", text)
+    state_file.write_atomic_bytes(tmp_path / "b.json", text.encode())
+    assert (tmp_path / "a.json").read_bytes() == (tmp_path / "b.json").read_bytes()
+    with pytest.raises(FileExistsError):
+        state_file.write_atomic_bytes(tmp_path / "a.json", b"x", replace_existing=False)
+    assert (tmp_path / "a.json").read_text() == text

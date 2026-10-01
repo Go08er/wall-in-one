@@ -458,7 +458,7 @@ class DisplaysPage(Page):
         group.add_css_class("boxed-list")
 
         row = Gtk.Box(spacing=12, margin_top=10, margin_bottom=10, margin_start=10, margin_end=12)
-        self._now_thumb = ui.Thumb(thumbs.texture(self._shown(self._selected), 320, 180), 128, 72, radius=8)
+        self._now_thumb = ui.Thumb.of(self._shown(self._selected), 128, 72, radius=8, size=(320, 180))
         thumb_button = Gtk.Button(valign=Gtk.Align.CENTER)
         thumb_button.add_css_class("flat")
         thumb_button.add_css_class("now-thumb")
@@ -729,7 +729,7 @@ class DisplaysPage(Page):
 
         # Now showing
         wallpaper = self._shown(connector)
-        self._now_thumb.set_paintable(thumbs.texture(wallpaper, 320, 180))
+        self._now_thumb.show(wallpaper, 320, 180)
         self._now_name.set_label(wallpaper.name)
         self._now_why.set_label(self._why(connector))
         status, _icon, _paused = self._status(connector)

@@ -2,6 +2,8 @@
 reports exceptions. Run with tools/smoke.sh."""
 
 import sys
+import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -12,7 +14,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib
-from wio_demo import data, ui
+from wio_demo import art, data, thumbs, ui
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
 
@@ -37,6 +39,42 @@ def step(name, fn):
         failures.append(f"{name}: " + traceback.format_exc()[-800:])
 
 
+def settle(until, seconds: float = 5.0) -> None:
+    """Run the main loop until ``until()`` is true (or the time is up)."""
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + seconds
+    while not until() and time.monotonic() < deadline:
+        if not context.iteration(False):
+            time.sleep(0.005)
+
+
+def check_thumbnails_off_main_thread(library) -> None:
+    """Rebuild the Library from a cold cache: card pictures must be drawn by
+    the loader's workers, and every card must have its picture afterwards."""
+    threads: list[str] = []
+    render = art.render
+
+    def recording(*args):
+        if args[3:] == (480, 270):
+            threads.append(threading.current_thread().name)
+        return render(*args)
+
+    art.render = recording
+    try:
+        art.texture.cache_clear()
+        thumbs.LOADER._ready.clear()
+        library._rebuild()
+        settle(lambda: not thumbs.LOADER.pending())
+    finally:
+        art.render = render
+    assert thumbs.LOADER.pending() == 0, "thumbnails still pending"
+    assert threads, "no card thumbnails were drawn"
+    on_main = [name for name in threads if not name.startswith("thumbnails-")]
+    assert not on_main, f"card thumbnails drawn on {set(on_main)}"
+    blank = [card.wallpaper.id for card in library._cards.values() if card.frame.get_child()._paintable is None]
+    assert not blank, f"cards still showing placeholders: {blank}"
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -44,6 +82,9 @@ def build_steps(app, holder):
     for key in ("library", "store", "playlist:frog-day", "playlist:all-media", "schedule", "displays", "settings"):
         steps.append((f"navigate {key}", lambda k=key: w().navigate(k)))
     lib = lambda: w().pages["library"]  # noqa: E731
+    steps.append(
+        ("thumbnails off the main thread", lambda: (w().navigate("library"), check_thumbnails_off_main_thread(lib())))
+    )
     for wallpaper in data.WALLPAPERS:
         steps.append((f"inspect {wallpaper.id}", lambda wp=wallpaper: (w().navigate("library"), lib().inspect(wp))))
     for mode in ("palette", "keep", "adaptive"):

@@ -15,7 +15,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk
 
-from .. import data, thumbs, ui
+from .. import data, ui
 from ..models import Wallpaper
 
 
@@ -109,7 +109,7 @@ class DesktopOverlay(Gtk.DrawingArea):
 
 def desktop_preview(wallpaper: Wallpaper, colors: list[str], radius: float = 14) -> tuple[Gtk.Widget, DesktopOverlay]:
     overlay = Gtk.Overlay()
-    overlay.set_child(ui.Thumb(thumbs.texture(wallpaper, 960, 540), 560, 315, radius=radius, fill=True))
+    overlay.set_child(ui.Thumb.of(wallpaper, 560, 315, radius=radius, fill=True, size=(960, 540)))
     drawing = DesktopOverlay(colors)
     overlay.add_overlay(drawing)
     overlay.set_overflow(Gtk.Overflow.HIDDEN)

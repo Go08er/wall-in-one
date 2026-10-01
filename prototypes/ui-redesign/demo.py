@@ -32,7 +32,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib
-from wio_demo import noctalia_live, ui
+from wio_demo import noctalia_live, thumbs, ui
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
 
@@ -126,7 +126,16 @@ def run_screenshots(app: Adw.Application, window: MainWindow, outdir: Path, scen
         GLib.timeout_add(900, capture, scene)
         return False
 
-    def capture(scene: str) -> bool:
+    def capture(scene: str, waited: int = 0, settled: bool = False) -> bool:
+        # Thumbnails load off the main thread: wait (up to 3 s) until every
+        # requested picture has arrived, then give it a frame to paint.
+        if not settled:
+            if thumbs.LOADER.pending() and waited < 3000:
+                GLib.timeout_add(50, capture, scene, waited + 50)
+                return False
+            if waited:
+                GLib.timeout_add(100, capture, scene, waited, True)
+                return False
         current = holder["window"]
         width, height = current.get_width(), current.get_height()
         name = "".join(c if c.isalnum() or c in "-_" else "_" for c in scene)

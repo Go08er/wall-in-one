@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk
 
-from .. import art, data, thumbs, ui
+from .. import art, data, ui
 from ..catalog import KIND_LABEL
 from ..models import Wallpaper
 
@@ -176,7 +176,7 @@ class Inspector(Gtk.Box):
 
         # Preview with badges
         overlay = Gtk.Overlay()
-        overlay.set_child(ui.Thumb(thumbs.texture(wallpaper, 960, 540), 360, 203, radius=14, fill=True))
+        overlay.set_child(ui.Thumb.of(wallpaper, 360, 203, radius=14, fill=True, size=(960, 540)))
         badges = Gtk.Box(spacing=6, valign=Gtk.Align.START, halign=Gtk.Align.START)
         badges.add_css_class("inspector-preview-badges")
         if wallpaper.is_moving:

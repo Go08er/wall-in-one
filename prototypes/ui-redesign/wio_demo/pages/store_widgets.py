@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk
 
-from .. import art, ui
+from .. import ui
 from ..models import StoreItem
 from . import store_catalog as catalog
 
@@ -156,9 +156,7 @@ class StoreCard(Gtk.Box):
         self.frame = overlay
         overlay.add_css_class("wp-frame")
         overlay.set_overflow(Gtk.Overflow.HIDDEN)
-        overlay.set_child(
-            ui.Thumb(art.texture(item.style, item.seed, item.night, 480, 270), width, height, radius=12, fill=True)
-        )
+        overlay.set_child(ui.Thumb.of(item, width, height, radius=12, fill=True))
 
         self._owned = owned_pill()
         self._owned.set_halign(Gtk.Align.END)
@@ -475,9 +473,7 @@ class StorePreview(Adw.Dialog):
     def _picture(self, item: StoreItem) -> Gtk.Widget:
         overlay = Gtk.Overlay()
         # Nominal 320 × 180 (the narrowest it gets); fill=True scales it up to the space given.
-        overlay.set_child(
-            ui.Thumb(art.texture(item.style, item.seed, item.night, 1280, 720), 320, 180, radius=12, fill=True)
-        )
+        overlay.set_child(ui.Thumb.of(item, 320, 180, radius=12, fill=True, size=(1280, 720)))
         self._badges = Gtk.Box(spacing=6, halign=Gtk.Align.START, valign=Gtk.Align.START)
         self._badges.add_css_class("store-preview-badges")
         overlay.add_overlay(self._badges)

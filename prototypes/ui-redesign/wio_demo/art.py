@@ -419,8 +419,12 @@ def look_for(style: str, seed: int, night: bool) -> Look:
     return _look(style, seed, night)
 
 
-@lru_cache(maxsize=512)
-def texture(style: str, seed: int, night: bool, width: int = 480, height: int = 270) -> Gdk.Texture:
+def render(style: str, seed: int, night: bool, width: int, height: int) -> tuple[bytes, int]:
+    """Draw a picture into memory: (premultiplied BGRA pixels, stride).
+
+    Pure cairo with its own surface and random generator, so it is safe on a
+    worker thread (see thumbs.Loader). Only the main thread makes textures.
+    """
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
     cr = cairo.Context(surface)
     look = _look(style, seed, night)
@@ -433,8 +437,34 @@ def texture(style: str, seed: int, night: bool, width: int = 480, height: int = 
     cr.rectangle(0, 0, width, height)
     cr.fill()
     surface.flush()
-    data = GLib.Bytes.new(bytes(surface.get_data()))
-    return Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED, data, surface.get_stride())
+    return bytes(surface.get_data()), surface.get_stride()
+
+
+# Pixels a worker drew, waiting for texture() to adopt them on the main thread.
+_drawn: dict[tuple[str, int, bool, int, int], tuple[bytes, int]] = {}
+
+
+@lru_cache(maxsize=512)
+def texture(style: str, seed: int, night: bool, width: int = 480, height: int = 270) -> Gdk.Texture:
+    pixels = _drawn.pop((style, seed, night, width, height), None)
+    if pixels is None:
+        pixels = render(style, seed, night, width, height)
+    data, stride = pixels
+    return Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED, GLib.Bytes.new(data), stride)
+
+
+def adopt(style: str, seed: int, night: bool, width: int, height: int, pixels: tuple[bytes, int]) -> Gdk.Texture:
+    """Main thread: the cached texture for pixels that render() drew elsewhere.
+
+    Goes through texture()'s cache, so a later synchronous call for the same
+    picture is a hit and nothing is drawn twice.
+    """
+    key = (style, seed, night, width, height)
+    _drawn[key] = pixels
+    try:
+        return texture(*key)
+    finally:
+        _drawn.pop(key, None)
 
 
 @lru_cache(maxsize=64)

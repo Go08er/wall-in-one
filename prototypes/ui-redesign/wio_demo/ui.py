@@ -55,19 +55,62 @@ class Thumb(Gtk.Widget):
     """A paintable drawn cover-fit inside a rounded rectangle of an exact size.
 
     ``fill=True`` makes it take the available width and keep the aspect ratio
-    of ``width:height`` (used for big previews).
+    of ``width:height`` (used for big previews). ``Thumb.of(source, …)`` loads
+    the picture off the main thread (thumbs.LOADER) and paints a flat
+    placeholder until it arrives.
     """
 
     def __init__(
-        self, paintable: Gdk.Paintable, width: int, height: int, radius: float = 12, fill: bool = False
+        self, paintable: Gdk.Paintable | None, width: int, height: int, radius: float = 12, fill: bool = False
     ) -> None:
         super().__init__()
         self._paintable = paintable
+        self._placeholder: Gdk.RGBA | None = None
+        self._wanted: tuple | None = None  # the picture a pending load is for
         self._width, self._height, self._radius, self._fill = width, height, radius, fill
         self.set_overflow(Gtk.Overflow.HIDDEN)
         if not fill:
             self.set_halign(Gtk.Align.START)
             self.set_valign(Gtk.Align.CENTER)
+
+    @classmethod
+    def of(
+        cls,
+        source,
+        width: int,
+        height: int,
+        radius: float = 12,
+        fill: bool = False,
+        size: tuple[int, int] = (480, 270),
+    ) -> Thumb:
+        """A picture of ``source`` (a wallpaper or Store item), drawn at ``size``."""
+        thumb = cls(None, width, height, radius, fill)
+        thumb.show(source, *size)
+        return thumb
+
+    def show(self, source, width: int = 480, height: int = 270) -> None:
+        """Show ``source``: at once when cached, otherwise after a worker draws it."""
+        key = (*source.key, width, height)
+        if key == self._wanted:
+            return
+        self._wanted = key
+
+        # A strong reference on purpose: PyGObject drops a widget's Python
+        # wrapper (and so any weakref to it) while GTK still holds the widget.
+        # The loader lets go of this callback once the picture is delivered.
+        def deliver(texture: Gdk.Texture | None, thumb: Thumb = self) -> None:
+            if thumb._wanted == key and texture is not None:
+                thumb._wanted = None
+                thumb.set_paintable(texture)
+
+        texture = thumbs.LOADER.request(source, width, height, deliver)
+        if texture is not None:
+            self._wanted = None
+            self.set_paintable(texture)
+        else:
+            self._paintable = None
+            self._placeholder = thumbs.placeholder(source)
+            self.queue_draw()
 
     def set_paintable(self, paintable: Gdk.Paintable) -> None:
         self._paintable = paintable
@@ -96,8 +139,14 @@ class Thumb(Gtk.Widget):
         if width <= 0 or height <= 0:
             return
         rounded = Gsk.RoundedRect()
-        rounded.init_from_rect(Graphene.Rect().init(0, 0, width, height), self._radius)
+        bounds = Graphene.Rect().init(0, 0, width, height)
+        rounded.init_from_rect(bounds, self._radius)
         snapshot.push_rounded_clip(rounded)
+        if self._paintable is None:
+            if self._placeholder is not None:
+                snapshot.append_color(self._placeholder, bounds)
+            snapshot.pop()
+            return
         source_w = self._paintable.get_intrinsic_width() or width
         source_h = self._paintable.get_intrinsic_height() or height
         scale = max(width / source_w, height / source_h)
@@ -110,9 +159,8 @@ class Thumb(Gtk.Widget):
 
 
 def thumbnail(wallpaper: Wallpaper, width: int, height: int, radius: float = 10) -> Thumb:
-    """A rounded, cropped picture of a wallpaper at an exact size."""
-    texture = thumbs.texture(wallpaper, max(320, width * 2), max(180, round(width * 2 * 9 / 16)))
-    return Thumb(texture, width, height, radius)
+    """A rounded, cropped picture of a wallpaper at an exact size (loaded off the main thread)."""
+    return Thumb.of(wallpaper, width, height, radius, size=(max(320, width * 2), max(180, round(width * 2 * 9 / 16))))
 
 
 def texture_picture(texture: Gdk.Texture, width: int, height: int, radius: float = 10) -> Thumb:
@@ -282,7 +330,7 @@ class WallpaperCard(Gtk.Box):
         overlay.add_css_class("wp-frame")
         overlay.set_overflow(Gtk.Overflow.HIDDEN)
         # Fill the grid cell at 16:9 so outlines and badges always hug the picture.
-        overlay.set_child(Thumb(thumbs.texture(wallpaper), width, height, radius=12, fill=True))
+        overlay.set_child(Thumb.of(wallpaper, width, height, radius=12, fill=True))
 
         top = Gtk.Box(spacing=4, margin_top=8, margin_start=8, margin_end=8)
         top.set_valign(Gtk.Align.START)

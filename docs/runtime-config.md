@@ -1,7 +1,9 @@
 # Runtime configuration contract
 
 `wall-in-one-service` reads one input: a fully resolved TOML document written
-by the Python application. Schemas `4` and `5` are intentionally strict. An
+by the Python application, plus, from 0.2.0, an optional sibling
+[`runtime-overrides.toml`](#per-playlist-rotation-and-display-precedence-runtime-overridestoml).
+Schemas `4` and `5` are intentionally strict. An
 unknown version, unknown field, relative path, dangling playlist reference, or
 kind-specific entry missing its motion source makes the service refuse to
 start. It never falls back to the application's database or library files.
@@ -183,7 +185,9 @@ linux-wallpaperengine scene crash becomes taboo immediately.
 
 Display assignments are the baseline when no schedule rule matches. A matching
 schedule rule overrides assignments for its window, and a manual
-`playlist-use` overrides both until `schedule-follow`. Each connector owns its
+`playlist-use` overrides both until `schedule-follow`. From 0.2.0 a display
+may opt in to its own playlist beating global rules; see
+[Per-playlist rotation and display precedence](#per-playlist-rotation-and-display-precedence-runtime-overridestoml). Each connector owns its
 own mpvpaper or linux-wallpaperengine child; switching one does not stop a
 renderer owned for another connector. Noctalia's colour palette is global, so
 one user-selected connector is the colour source. If it is detached, the
@@ -343,3 +347,104 @@ On unavailable initial power information, playback retains its ordinary
 behavior. If an observation is lost after confirmed battery, the runtime
 retains inhibition until confirmed AC or the option is disabled. See
 [the user-facing settings guide](settings.md#battery-animation-control).
+
+## Per-playlist rotation and display precedence (`runtime-overrides.toml`)
+
+A playlist's own interval and shuffle, and a display whose own playlist beats
+global schedule rules, never appear in `runtime.toml`. With them in use,
+`runtime.toml` is byte for byte what the same profile compiles with them
+cleared, so every released service keeps loading it. They live in a sibling
+file in the same directory, found by name and never referenced from
+`runtime.toml`:
+
+```toml
+# runtime-overrides.toml, beside runtime.toml
+schema_version = 1
+
+[[playlists]]
+id = "8f3c2a1b9d4e6f70"          # a playlist id in runtime.toml
+cycle_interval_seconds = 120     # 5..86400, like settings.cycle_interval_seconds
+shuffle = true
+
+[[displays]]
+connector = "DP-1"               # an assignment in runtime.toml
+beats_global_rules = true
+```
+
+Every key is optional except `schema_version`, `id` and `connector`, and the
+file rejects unknown keys like `runtime.toml` does. The app writes it only
+while at least one of these is in use and removes it, durably, when the last
+one is cleared, so a profile that uses neither has exactly the files Release
+1 has. It publishes the overrides before `runtime.toml`, under the same
+compiler lock, and rewrites each file only when its bytes change; a change to
+either is a change, and the app sends `reload`. A refused `runtime.toml`
+publication writes neither file.
+
+The service reads it after `runtime.toml`, at start, on `reload` and when the
+watcher sees either file change, appear or disappear; `--check-config`
+validates both. A missing file is the ordinary case; a malformed one is a
+config error like a malformed `runtime.toml` (a failed reload keeps the
+running configuration). An entry naming a playlist or connector that
+`runtime.toml` lacks is skipped with a journal line rather than refused,
+which covers the moment between the two writes.
+
+The service resolves shuffle as: a live `shuffle on|off` override, else the
+playlist's own `shuffle`, else `settings.shuffle`; `shuffle default` returns
+to the playlist's value. The interval of the playlist a route is playing
+replaces `settings.cycle_interval_seconds` for that route, and a route that
+changes playlist (manual choice, schedule, reload, hot-plug) builds its
+cursor with the new playlist's shuffle. Mirrored mode has one timer: it uses
+the interval every effective playlist agrees on, else the global one. (The
+app compiles one effective playlist in mirrored mode, so this only matters
+for a hand-written mirrored document with display assignments.)
+
+Precedence for one connector's automatic route (a manual `playlist-use`
+always wins first):
+
+| `beats_global_rules` | rule for this connector matches | global rule matches | winner |
+| --- | --- | --- | --- |
+| off (absent) | any | any | last matching rule visible to it (global or its own, in authored order), else its assignment, else `default_playlist` |
+| on | yes | any | the last matching rule aimed at this connector |
+| on | no | yes | its own assignment; the global rule does not apply here |
+| on | no | no | its own assignment |
+
+Rules aimed at a display always beat its playlist; only untargeted (global)
+rules lose to it. Mirrored mode has one route, so an opt-in stays dormant
+there, like the assignment itself; the app leaves it out of the file.
+
+Status stays version 2 and only gains fields. `route_source` keeps its four
+values: a display whose own playlist wins reports `assignment`, as it always
+did. A beaten global rule is not `selected` or `in_force` for that display
+(it still is where another display follows it).
+
+| Field | Where | Meaning |
+| --- | --- | --- |
+| `supported_override_schemas` | top level | `[1]`. A service without this field never reads `runtime-overrides.toml`. |
+| `loaded_overrides_sha256` | top level | SHA-256 of the applied overrides file; `null` without one. |
+| `cycle_interval_seconds` | top level | The summary route's interval; `null` when independent routes disagree. |
+| `cycle_interval_seconds` | each display row | The interval of the playlist the route is playing. |
+| `beats_global_rules` | each display row | The opt-in as it applies to that route; `false` in mirrored mode. |
+
+`shuffle_default` reports the saved default the route would use without a
+manual override: the playlist's own `shuffle` when set, else
+`settings.shuffle`.
+
+The authoring side keeps these in `playlists.json` and `displays.json`
+version 2, written only once one is used (see
+[Format versions and their backups](library.md#format-versions-and-their-backups)).
+
+### An updated app with an older service
+
+Saving one of these never asks the running service anything. A service that
+predates `runtime-overrides.toml` never opens it, so with the new app and the
+old service still running (between an update and the service restart) the
+setting is saved, `runtime.toml` stays loadable, and the setting starts
+applying once the updated service runs; a page can tell from
+`supported_override_schemas` and say so. After a rollback the older service
+starts on the same `runtime.toml` and simply ignores the file.
+
+This is deliberately unlike the battery option, which lives in `runtime.toml`
+itself and so needs schema 5, refused while an older service runs. Putting
+these two in `runtime.toml` would have meant a schema 6 that every released
+service refuses to load, leaving a rolled-back or not-yet-restarted service
+unable to start at all.

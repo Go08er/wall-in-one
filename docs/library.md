@@ -407,6 +407,11 @@ Every other edit keeps writing the version the file already has, so a profile
 that never uses a new feature stays readable by older releases. The first rule
 name is the first such change: `schedules.json` stays at version 2, exactly as
 0.1.4 and 0.1.5 write it, until a rule has a name, and is version 3 from then on.
+Likewise `playlists.json` stays at version 1 until a playlist has its own
+interval or shuffle, and `displays.json` until a display's own playlist is set
+to beat global schedule rules; each is version 2 from then on. Those settings
+reach the service through `runtime-overrides.toml`, never `runtime.toml` (see
+[the runtime contract](runtime-config.md#per-playlist-rotation-and-display-precedence-runtime-overridestoml)).
 
 Just before a file is first saved in a newer format, its previous bytes are
 copied beside it as `<file>.v<old>-backup`, for example

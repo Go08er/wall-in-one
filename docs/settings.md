@@ -100,9 +100,9 @@ delete it. The file never affects the wallpaper service.
 | `preview_scheme` | Default adaptive colour scheme for previews and pairings that inherit it. Explicit pairing schemes take precedence; the app's Noctalia-following UI colours are separate. | `"m3-tonal-spot"` |
 | `follow_noctalia_palette` | Apply Noctalia's palette to the app's own chrome. | `true` |
 | `cycle_enabled` | Change wallpaper on a timer. | `false` |
-| `cycle_interval` | Seconds between automatic changes, 5-86400. | `300` |
+| `cycle_interval` | Seconds between automatic changes, 5-86400. A playlist may set its own. | `300` |
 | `cycle_favourites_only` | Narrow the rotation to starred wallpapers. Ignored while that would leave nothing to rotate through. | `false` |
-| `shuffle` | Visit every wallpaper once before repeating. | `false` |
+| `shuffle` | Visit every wallpaper once before repeating. A playlist may set its own. | `false` |
 | `dynamics_enabled` | Animate videos and Wallpaper Engine scenes. Off releases their renderers and shows paired stills. | `true` |
 | `stop_animations_on_battery` | Temporarily show paired stills on battery without changing manual playback choices. See below. | `false` |
 | `video_muted` | Mute video wallpapers. Takes effect immediately over mpv IPC; Wallpaper Engine scenes remain silent. | `true` |

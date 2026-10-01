@@ -114,3 +114,15 @@ edit moves the file aside as `schedules.json.broken` and saves it as
 version 2 without the names. Schedules without names stay at version 2 and
 remain editable by every release. See
 [Format versions and their backups](library.md#format-versions-and-their-backups).
+
+The same holds for a playlist's own interval or shuffle (`playlists.json`
+version 2, backup `playlists.json.v1-backup`) and for a display whose own
+playlist beats global rules (`displays.json` version 2, backup
+`displays.json.v1-backup`). Rolling back keeps the wallpaper running: both
+settings reach the service through `runtime-overrides.toml`, which older
+services never open, and `runtime.toml` stays in the format they load.
+Per-playlist timing and the display opt-in just stop applying until you
+return to 0.2.0. 0.1.5 opens the two version-2 files read-only; 0.1.4's next
+playlist or display edit moves the file aside as `.broken` and saves version
+1 without those settings. After updating to 0.2.0 they also apply only once
+the updated service is running.

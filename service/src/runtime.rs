@@ -6,7 +6,7 @@ use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response};
 use crate::renderer::{MAX_OUTPUT_NAME_BYTES, RendererFailure, WallpaperDriver};
 use crate::schedule;
-use chrono::{Datelike, NaiveDateTime, Timelike};
+use chrono::NaiveDateTime;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -250,28 +250,22 @@ pub struct DisplayStatus<'a> {
     pub renderer_failed: bool,
     pub last_error: String,
     pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
-    // When this display's wallpaper next changes on its own; appended after
-    // every released field, and `null` when there is nothing to report. See
-    // `DisplayTiming` for each one's meaning.
-    pub route_change_at: Option<String>,
-    pub route_change_in_s: Option<u64>,
-    pub next_cycle_at: Option<String>,
-    pub next_cycle_in_s: Option<u64>,
-    pub until: Option<String>,
-    pub next_change_in_s: Option<u64>,
+    /// When and why this display's wallpaper next changes on its own.
+    #[serde(flatten)]
+    pub timing: DisplayTiming,
 }
 
-/// When a display's automatic route and rotation next move: the six fields
-/// appended to each display row.
-#[derive(Debug, Default)]
+/// When a display's automatic route and rotation next move. Appended to each
+/// display row; every field is `null` when there is nothing to report.
+#[derive(Debug, Default, Serialize)]
 pub struct DisplayTiming {
     /// Local wall-clock time (`YYYY-MM-DDTHH:MM:SS`) of the next schedule
     /// boundary that changes this display's automatic playlist or route
-    /// source, at most `schedule::CHANGE_HORIZON_DAYS` ahead. `None` while a
+    /// source, at most `schedule::CHANGE_HORIZON_DAYS` ahead. `null` while a
     /// manual pick holds, for a detached display, or with no change in range.
     pub route_change_at: Option<String>,
     pub route_change_in_s: Option<u64>,
-    /// Local wall-clock time the rotation next advances. `None` when the route
+    /// Local wall-clock time the rotation next advances. `null` when the route
     /// is paused, does not cycle, or is detached. Due now reads as 0 seconds.
     pub next_cycle_at: Option<String>,
     pub next_cycle_in_s: Option<u64>,
@@ -281,25 +275,8 @@ pub struct DisplayTiming {
     pub next_change_in_s: Option<u64>,
 }
 
+const WALL_CLOCK_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
-
-/// `YYYY-MM-DDTHH:MM:SS`, by hand: chrono's general formatter would add
-/// code pages to a resident daemon for two fixed layouts.
-fn wall_clock(at: NaiveDateTime) -> String {
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        at.year(),
-        at.month(),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second()
-    )
-}
-
-fn clock_time(at: NaiveDateTime) -> String {
-    format!("{:02}:{:02}", at.hour(), at.minute())
-}
 
 impl DisplayTiming {
     fn new(
@@ -313,17 +290,18 @@ impl DisplayTiming {
         let next_cycle_at = next_cycle_in_s.and_then(|seconds| {
             let seconds = i64::try_from(seconds).ok()?;
             let due = at.checked_add_signed(chrono::TimeDelta::try_seconds(seconds)?)?;
-            Some(wall_clock(due))
+            Some(due.format(WALL_CLOCK_FORMAT).to_string())
         });
         Self {
-            route_change_at: route_change.map(wall_clock),
+            route_change_at: route_change
+                .map(|change| change.format(WALL_CLOCK_FORMAT).to_string()),
             route_change_in_s,
             next_cycle_at,
             next_cycle_in_s,
             until: route_change
                 .zip(route_change_in_s)
                 .filter(|(_, seconds)| *seconds < SECONDS_PER_DAY)
-                .map(|(change, _)| clock_time(change)),
+                .map(|(change, _)| change.format("%H:%M").to_string()),
             next_change_in_s: next_cycle_in_s,
         }
     }
@@ -4718,7 +4696,6 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .config
                     .playlist(&self.config.default_playlist)
                     .ok_or("default playlist is missing")?;
-                let timing = self.mirrored_timing(None, true, at, now, &mut budget);
                 displays.push(DisplayStatus {
                     connector: "ALL",
                     connected: true,
@@ -4769,12 +4746,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             reason: pending.reason,
                         }
                     }),
-                    route_change_at: timing.route_change_at,
-                    route_change_in_s: timing.route_change_in_s,
-                    next_cycle_at: timing.next_cycle_at,
-                    next_cycle_in_s: timing.next_cycle_in_s,
-                    until: timing.until,
-                    next_change_in_s: timing.next_change_in_s,
+                    timing: self.mirrored_timing(None, true, at, now, &mut budget),
                 });
             }
         } else {
@@ -4817,13 +4789,6 @@ impl<D: WallpaperDriver> Runtime<D> {
                     if self.target_outputs.iter().any(|target| target == output) {
                         entry_taboo |= display_entry_taboo;
                     }
-                    let timing = self.mirrored_timing(
-                        explicit,
-                        self.target_outputs.iter().any(|target| target == output),
-                        at,
-                        now,
-                        &mut budget,
-                    );
                     displays.push(DisplayStatus {
                         connector: output,
                         connected: self.target_outputs.iter().any(|target| target == output),
@@ -4881,12 +4846,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                                 reason: pending.reason,
                             }
                         }),
-                        route_change_at: timing.route_change_at,
-                        route_change_in_s: timing.route_change_in_s,
-                        next_cycle_at: timing.next_cycle_at,
-                        next_cycle_in_s: timing.next_cycle_in_s,
-                        until: timing.until,
-                        next_change_in_s: timing.next_change_in_s,
+                        timing: self.mirrored_timing(
+                            explicit,
+                            self.target_outputs.iter().any(|target| target == output),
+                            at,
+                            now,
+                            &mut budget,
+                        ),
                     });
                 }
             }
@@ -5142,14 +5108,6 @@ impl<D: WallpaperDriver> Runtime<D> {
                     }),
                 )
                 .ok_or_else(|| format!("display {} assignment is missing", target.output))?;
-            let timing = self.route_timing(
-                &target.output,
-                route,
-                self.target_outputs.contains(&target.output),
-                at,
-                now,
-                &mut budget,
-            );
             displays.push(DisplayStatus {
                 connector: &target.output,
                 connected: self.target_outputs.contains(&target.output),
@@ -5200,12 +5158,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                         reason: pending.reason,
                     }
                 }),
-                route_change_at: timing.route_change_at,
-                route_change_in_s: timing.route_change_in_s,
-                next_cycle_at: timing.next_cycle_at,
-                next_cycle_in_s: timing.next_cycle_in_s,
-                until: timing.until,
-                next_change_in_s: timing.next_change_in_s,
+                timing: self.route_timing(
+                    &target.output,
+                    route,
+                    self.target_outputs.contains(&target.output),
+                    at,
+                    now,
+                    &mut budget,
+                ),
             });
         }
         let route_states: Vec<&DisplayRoute> = self

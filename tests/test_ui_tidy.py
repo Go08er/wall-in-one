@@ -196,3 +196,29 @@ def test_an_unconfirmed_reload_offers_retry_until_noctalia_answers(
 
     assert application.reports[-1] == "Noctalia reloaded its settings."
     assert not switch.retry.get_visible()
+
+
+def test_an_undo_left_unfinished_offers_undo_again_or_keep_archived(
+    section: tuple[TidySection, _Application],
+) -> None:
+    group, application = section
+    folder = _claim_folder(paths.app_state_dir(), "entry-dddddddd")
+    group.refresh()
+    spin_until(lambda: _idle(group) and bool(group.row(tidy.LEFTOVERS)))
+    leftovers = group.row(tidy.LEFTOVERS)
+    assert leftovers is not None and leftovers.plan.ready
+    leftovers.apply.emit("clicked")
+    spin_until(lambda: _idle(group) and leftovers.plan.undo is not None, timeout=10)
+    folder.mkdir(mode=0o700)  # something new takes the archived folder's name
+
+    leftovers.undo.emit("clicked")
+    spin_until(
+        lambda: _idle(group) and leftovers.plan.undo is not None and leftovers.plan.undo.partial,
+        timeout=10,
+    )
+
+    assert "can be tried again" in application.reports[-1]
+    assert leftovers.undo.get_visible() and leftovers.keep.get_visible()
+    leftovers.keep.emit("clicked")
+    spin_until(lambda: _idle(group) and leftovers.plan.undo is None, timeout=10)
+    assert not leftovers.keep.get_visible() and "no longer offered" in application.reports[-1]

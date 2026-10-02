@@ -491,3 +491,89 @@ def test_a_failure_before_the_exchange_is_still_reported_as_nothing_changed(
     (archive,) = tidy.archive_root().iterdir()
     assert json.loads((archive / "manifest.json").read_bytes())["state"] == "abandoned"
     assert tidy.plan(roots=()).action(tidy.PLUGIN_SETTINGS).undo is None
+
+
+# -- partial archive and Undo failures stay recoverable --------------------------------
+
+
+def _manifest(action: str) -> dict[str, object]:
+    (archive,) = (
+        directory for directory in tidy.archive_root().iterdir() if directory.name.endswith(action)
+    )
+    document = json.loads((archive / "manifest.json").read_bytes())
+    assert isinstance(document, dict)
+    return document
+
+
+def test_a_folder_that_fills_up_and_cannot_go_back_is_journaled_as_archived(
+    finished: deployed_upgrade_transaction.FinishedClaims, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's F-4 case A: the moved claim folder gains a file, and its old
+    name is taken again, so it can't be put back. It must be recorded where it
+    really is, reported, and restorable by Undo."""
+    folder = _claim_folder(paths.app_state_dir(), "entry-aaaaaaaa")
+    real_move = tidy._move
+
+    def move_then_write_and_reclaim(source: Path, destination: Path, item: object) -> None:
+        real_move(source, destination, item)  # type: ignore[arg-type]
+        (destination / "live-evidence").write_bytes(b"written by the claim's owner")
+        source.mkdir(mode=0o700)
+
+    monkeypatch.setattr(tidy, "_move", move_then_write_and_reclaim)
+    result = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS))
+    monkeypatch.setattr(tidy, "_move", real_move)
+
+    assert result.changed and "changed while it was being archived" in result.message
+    items = _manifest("leftovers")["items"]
+    assert isinstance(items, list) and len(items) == 1
+    item = items[0]
+    assert item["outcome"] == "moved" and "gained contents" in item["note"]
+    found = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+    assert found.undo is not None
+    folder.rmdir()  # whoever took the name lets it go
+
+    assert tidy.undo(tidy.LEFTOVERS).changed
+    assert (folder / "live-evidence").read_bytes() == b"written by the claim's owner"
+    assert _manifest("leftovers")["state"] == "undone"
+
+
+def test_an_undo_that_cannot_put_everything_back_can_be_tried_again(
+    finished: deployed_upgrade_transaction.FinishedClaims,
+) -> None:
+    """The review's F-4 case B: a new folder holds an archived item's name."""
+    folder = _claim_folder(paths.app_state_dir(), "entry-bbbbbbbb")
+    record = _record(paths.app_state_dir())
+    tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS))
+    folder.mkdir(mode=0o700)
+
+    first = tidy.undo(tidy.LEFTOVERS)
+
+    assert first.changed and "can be tried again" in first.message
+    assert record.is_file() and not any(folder.iterdir())
+    retry = tidy.plan(roots=()).action(tidy.LEFTOVERS).undo
+    assert retry is not None and retry.partial and "Put back 1 item" in retry.detail
+    assert ". An earlier Undo couldn't put these back" in retry.detail
+    assert _manifest("leftovers")["state"] == "applied"
+    folder.rmdir()
+
+    second = tidy.undo(tidy.LEFTOVERS)
+
+    assert second.changed and folder.is_dir()
+    assert _manifest("leftovers")["state"] == "undone"
+    assert tidy.plan(roots=()).action(tidy.LEFTOVERS).undo is None
+
+
+def test_keeping_a_partly_undone_archive_stops_offering_undo(
+    finished: deployed_upgrade_transaction.FinishedClaims,
+) -> None:
+    folder = _claim_folder(paths.app_state_dir(), "entry-cccccccc")
+    tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS))
+    folder.mkdir(mode=0o700)
+    tidy.undo(tidy.LEFTOVERS)
+
+    kept = tidy.keep_archived(tidy.LEFTOVERS)
+
+    assert kept.changed and kept.archive is not None
+    assert tidy.plan(roots=()).action(tidy.LEFTOVERS).undo is None
+    assert _manifest("leftovers")["state"] == "kept"
+    assert any((kept.archive / "items").iterdir()), "the item stays in the archive"

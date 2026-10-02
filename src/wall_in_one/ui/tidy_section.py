@@ -162,7 +162,10 @@ class _ActionRow:
         # A step after a change that hasn't finished yet, such as Noctalia's reload.
         self.retry = Gtk.Button(label="Retry", valign=Gtk.Align.CENTER)
         self.retry.connect("clicked", lambda _button: section.run(self, retry=True))
-        for widget in (self.spinner, self.retry, self.undo, self.apply):
+        # Offered after an Undo that couldn't put everything back: stop retrying.
+        self.keep = Gtk.Button(label="Keep Archived", valign=Gtk.Align.CENTER)
+        self.keep.connect("clicked", lambda _button: section.run(self, keep=True))
+        for widget in (self.spinner, self.retry, self.keep, self.undo, self.apply):
             self.expander.add_suffix(widget)
         self.children: list[Gtk.Widget] = []
         self.show(plan)
@@ -224,6 +227,8 @@ class _ActionRow:
         self.apply.set_sensitive(self.plan.ready and not busy)
         self.undo.set_visible(self.plan.undo is not None)
         self.undo.set_sensitive(not busy)
+        self.keep.set_visible(self.plan.undo is not None and self.plan.undo.partial)
+        self.keep.set_sensitive(not busy)
         self.retry.set_visible(bool(self.plan.retry))
         self.retry.set_label(self.plan.retry or "Retry")
         self.retry.set_sensitive(not busy)
@@ -316,8 +321,10 @@ class TidySection(Adw.PreferencesGroup):
             row.spinner.set_visible(self._running == row.plan.action)
             row.spinner.set_spinning(self._running == row.plan.action)
 
-    def run(self, row: _ActionRow, *, undo: bool = False, retry: bool = False) -> None:
-        """Apply, undo or retry one action, exactly as its preview showed it."""
+    def run(
+        self, row: _ActionRow, *, undo: bool = False, retry: bool = False, keep: bool = False
+    ) -> None:
+        """Apply, undo, retry or keep one action, exactly as its preview showed it."""
         if self.busy:
             return
         ready = getattr(self._app, "require_authoring_ready", None)
@@ -327,6 +334,8 @@ class TidySection(Adw.PreferencesGroup):
         roots = _roots(self._app)
 
         def work() -> tidy.Result:
+            if keep:
+                return tidy.keep_archived(plan.action)
             if retry:
                 return tidy.retry(plan.action)
             if undo:

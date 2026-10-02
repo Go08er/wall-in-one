@@ -199,6 +199,8 @@ class Undo:
     archive: Path
     applied: str
     detail: str
+    #: An earlier Undo put back only some items; :func:`keep_archived` stops offering it.
+    partial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +432,34 @@ def _latest(action: Action, manifests: Sequence[_Manifest]) -> _Manifest | None:
         if manifest.action == action and manifest.state in ("applying", "applied"):
             return manifest
     return None
+
+
+#: Where an archived item can be, as its journal records it.
+_IN_ARCHIVE: Final = ("moved", "planned")
+
+
+def _archived_items(manifest: _Manifest) -> list[dict[str, Any]]:
+    """The items an archive's Undo would still put back."""
+    items = manifest.document.get("items", [])
+    return [item for item in items if isinstance(item, dict) and item.get("outcome") in _IN_ARCHIVE]
+
+
+def _archive_undo(manifest: _Manifest | None) -> Undo | None:
+    if manifest is None:
+        return None
+    count = len(_archived_items(manifest))
+    if manifest.document.get("partly_undone"):
+        note = ". An earlier Undo couldn't put these back; it can be tried again."
+    elif manifest.state == "applying":
+        note = " (it stopped part way)."
+    else:
+        note = "."
+    return Undo(
+        manifest.directory,
+        manifest.created,
+        f"Put back {_plural(count, 'item')} from {manifest.directory}{note}",
+        partial=bool(manifest.document.get("partly_undone")),
+    )
 
 
 # -- action 1: leftovers ---------------------------------------------------------------
@@ -745,20 +775,7 @@ def _plan_leftovers(
     roots: Sequence[Path], now: float, manifests: Sequence[_Manifest]
 ) -> tuple[ActionPlan, list[_Leftover]]:
     survey = _survey(roots, now)
-    latest = _latest(LEFTOVERS, manifests)
-    undo = None
-    if latest is not None:
-        moved = sum(
-            1
-            for item in latest.document.get("items", [])
-            if item.get("outcome") in ("moved", "planned")
-        )
-        partial = " (it stopped part way)" if latest.state == "applying" else ""
-        undo = Undo(
-            latest.directory,
-            latest.created,
-            f"Put back {_plural(moved, 'item')} from {latest.directory}{partial}.",
-        )
+    undo = _archive_undo(_latest(LEFTOVERS, manifests))
     plan = ActionPlan(
         action=LEFTOVERS,
         title="Archive old leftovers",
@@ -837,50 +854,103 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
     }
     _write_manifest(archive, document)
     touched: set[Path] = {archive / "items"}
-    moved = 0
     for record in items:
-        source = Path(record["original"])
-        destination = archive / record["archived"]
-        try:
-            _move(source, destination, record)
-        except (OSError, ValueError) as error:
-            record["outcome"] = f"skipped: {error}"
-            continue
-        touched.add(source.parent)
-        if (
-            record["type"] == "dir"
-            and not record["entry_sha256"]
-            and not _is_empty_directory(destination)
-        ):
-            # Something raced into it: it was not a leftover after all.
-            with contextlib.suppress(OSError, ValueError):
-                file_io.move_directory_no_replace(
-                    destination,
-                    source,
-                    expected_identity=(int(record["identity"][0]), int(record["identity"][1])),
-                )
-            record["outcome"] = "skipped: it was no longer empty"
-            continue
-        record["outcome"] = "moved"
-        moved += 1
+        _move_into_archive(archive, record)
+        touched.add(Path(record["original"]).parent)
     _fsync_all(touched)
     document["state"] = "applied"
     document["finished"] = _now_iso()
     _write_manifest(archive, document)
-    skipped = len(items) - moved
-    message = f"Archived {_plural(moved, 'item')} in {archive}."
+    moved = [record for record in items if record["outcome"] == "moved"]
+    noted = [record for record in moved if record.get("note")]
+    skipped = len(items) - len(moved)
+    message = f"Archived {_plural(len(moved), 'item')} in {archive}."
+    if len(noted) == 1:
+        message += (
+            " One of them changed while it was being archived and is kept there as it "
+            "is now (manifest.json says how); Undo puts it back."
+        )
+    elif noted:
+        message += (
+            f" {len(noted)} of them changed while they were being archived and are kept "
+            "there as they are now (manifest.json says how); Undo puts them back."
+        )
     if skipped:
         message += f" {_plural(skipped, 'item')} changed meanwhile and stayed where it was."
-    return Result(LEFTOVERS, moved > 0, message, archive)
+    return Result(LEFTOVERS, bool(moved), message, archive)
 
 
-def _undo_leftovers(manifest: _Manifest) -> Result:
+def _settle_location(record: dict[str, Any], destination: Path, error: object) -> None:
+    """After a move went wrong, journal where the item actually is.
+
+    Whatever reached the archive is recorded there, with the identity it has
+    there, so Undo can move exactly that back; only an item that never left
+    is recorded as skipped.
+    """
+    found = _lstat(destination)
+    if found is None or isinstance(error, FileExistsError):
+        # Nothing arrived, or the name was taken before the move: it never left.
+        record["outcome"] = f"skipped: {error}"
+        return
+    record["outcome"] = "moved"
+    record["identity"] = [found.st_dev, found.st_ino]
+    record["type"] = "dir" if stat.S_ISDIR(found.st_mode) else "file"
+    record["fingerprint"] = None
+    record["note"] = f"the move didn't finish cleanly ({error}); what reached the archive is kept"
+
+
+def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
+    """Move one journaled item into ``archive`` and record its real outcome."""
+    source = Path(record["original"])
+    destination = archive / record["archived"]
+    try:
+        _move(source, destination, record)
+    except (OSError, ValueError) as error:
+        _settle_location(record, destination, error)
+        return
+    record["outcome"] = "moved"
+    if (
+        record["type"] == "dir"
+        and not record["entry_sha256"]
+        and not _is_empty_directory(destination)
+    ):
+        # Something wrote into it while it moved, so it wasn't a leftover after
+        # all: put it back. If that can't be done (its name was taken again),
+        # it stays archived with its contents and the journal says so.
+        try:
+            file_io.move_directory_no_replace(
+                destination,
+                source,
+                expected_identity=(int(record["identity"][0]), int(record["identity"][1])),
+            )
+        except (OSError, ValueError) as error:
+            if _lstat(destination) is not None:
+                record["note"] = (
+                    "it gained contents while it was being archived and couldn't be put "
+                    f"back ({error}); it's kept in the archive with them"
+                )
+            else:
+                _settle_location(record, destination, error)
+            return
+        record["outcome"] = "skipped: it was no longer empty"
+
+
+def _undo_archive(manifest: _Manifest) -> Result:
+    """Move every archived item of ``manifest`` back; keep what can't be, retryable.
+
+    An item that can't go back (something new has its name, or a move fails)
+    stays recorded in the archive with the reason, and so does the archive:
+    it is marked undone only once nothing in it is left to put back. A later
+    Undo tries again; :func:`keep_archived` is the explicit way to stop.
+    """
+    action = manifest.action
     document = copy.deepcopy(manifest.document)
     restored = 0
+    failed = 0
     missing = 0
     touched: set[Path] = set()
     for record in document.get("items", []):
-        if record.get("outcome") not in ("moved", "planned"):
+        if record.get("outcome") not in _IN_ARCHIVE:
             continue
         original = Path(record["original"])
         archived = manifest.directory / record["archived"]
@@ -890,6 +960,7 @@ def _undo_leftovers(manifest: _Manifest) -> Result:
             at_original = _lstat(original)
             if at_original is not None and (at_original.st_dev, at_original.st_ino) == identity:
                 record["outcome"] = "restored"
+                record.pop("undo_error", None)
                 continue
             record["outcome"] = "missing"
             missing += 1
@@ -901,32 +972,46 @@ def _undo_leftovers(manifest: _Manifest) -> Result:
                 original.parent.mkdir(mode=0o700)
             touched.add(original.parent.parent)
         try:
-            if record["type"] == "dir":
+            if stat.S_ISDIR(at_archive.st_mode):
                 file_io.move_directory_no_replace(archived, original, expected_identity=identity)
             else:
                 file_io.atomic_move_no_replace(archived, original, expected_identity=identity)
         except FileExistsError:
-            record["outcome"] = "kept: something new has its name"
-            missing += 1
+            record["undo_error"] = "something new has its name"
+            failed += 1
             continue
         except (OSError, ValueError) as error:
-            record["outcome"] = f"kept: {error}"
-            missing += 1
+            record["undo_error"] = str(error)
+            failed += 1
             continue
         record["outcome"] = "restored"
+        record.pop("undo_error", None)
         touched.update((original.parent, archived.parent))
         restored += 1
     _fsync_all(touched)
-    document["state"] = "undone"
-    document["undone"] = _now_iso()
+    remaining = [
+        record for record in document.get("items", []) if record.get("outcome") in _IN_ARCHIVE
+    ]
+    if remaining:
+        document["state"] = "applied"
+        document["partly_undone"] = _now_iso()
+    else:
+        document["state"] = "undone"
+        document["undone"] = _now_iso()
+        document.pop("partly_undone", None)
     _write_manifest(manifest.directory, document)
     message = f"Put back {_plural(restored, 'item')}."
+    if failed:
+        message += (
+            f" {_plural(failed, 'item')} couldn't be put back yet (manifest.json in "
+            f"{manifest.directory} says why) and stay archived; Undo can be tried again."
+        )
     if missing:
         message += (
-            f" {_plural(missing, 'item')} couldn't be put back and "
-            f"{'is' if missing == 1 else 'are'} listed in {manifest.directory / MANIFEST}."
+            f" {_plural(missing, 'item')} {'is' if missing == 1 else 'are'} in neither place "
+            "any more."
         )
-    return Result(LEFTOVERS, restored > 0, message, manifest.directory)
+    return Result(action, restored > 0, message, manifest.directory)  # type: ignore[arg-type]
 
 
 # -- Noctalia's settings: reading and line-exact editing -------------------------------
@@ -1615,8 +1700,7 @@ def _plan_old_palette_template(
 ) -> tuple[ActionPlan, os.stat_result | None]:
     title = "Archive the old palette template"
     stale = _stale_template()
-    latest = _latest(OLD_PALETTE_TEMPLATE, manifests)
-    undo = Undo(latest.directory, latest.created, f"Put {stale.name} back.") if latest else None
+    undo = _archive_undo(_latest(OLD_PALETTE_TEMPLATE, manifests))
     found = _lstat(stale)
     if found is None:
         return ActionPlan(
@@ -1737,24 +1821,19 @@ def _apply_old_palette_template(expected: ActionPlan | None) -> Result:
     }
     _write_manifest(archive, document)
     record = document["items"][0]
-    try:
-        file_io.atomic_move_no_replace(
-            stale,
-            archive / record["archived"],
-            expected_identity=fingerprint[:2],
-            expected_fingerprint=fingerprint,
-        )
-    except (OSError, ValueError) as error:
-        document["state"] = "abandoned"
-        record["outcome"] = f"skipped: {error}"
-        _write_manifest(archive, document)
-        raise TidyError(f"The old template file wasn't moved: {error}") from error
-    record["outcome"] = "moved"
+    _move_into_archive(archive, record)
     _fsync_all({stale.parent, archive / "items"})
+    if record["outcome"] != "moved":
+        document["state"] = "abandoned"
+        _write_manifest(archive, document)
+        raise TidyError(
+            f"The old template file wasn't moved: {record['outcome'].removeprefix('skipped: ')}"
+        )
     document["state"] = "applied"
     document["finished"] = _now_iso()
     _write_manifest(archive, document)
-    return Result(OLD_PALETTE_TEMPLATE, True, f"Moved {stale.name} into {archive}.", archive)
+    note = f" {record['note'][:1].upper()}{record['note'][1:]}." if record.get("note") else ""
+    return Result(OLD_PALETTE_TEMPLATE, True, f"Moved {stale.name} into {archive}.{note}", archive)
 
 
 # -- action 3: the retired plugin's settings -------------------------------------------
@@ -2052,6 +2131,30 @@ def undo(action: Action) -> Result:
         if latest is None:
             return Result(action, False, "There's nothing to undo.")
         if action in (LEFTOVERS, OLD_PALETTE_TEMPLATE):
-            result = _undo_leftovers(latest)
-            return Result(action, result.changed, result.message, result.archive)
+            return _undo_archive(latest)
     raise ValueError(f"unknown tidy-up action {action!r}")
+
+
+def keep_archived(action: Action) -> Result:
+    """Stop offering Undo for an archive an earlier Undo couldn't fully put back.
+
+    Nothing moves: the remaining items simply stay in the archive, which
+    keeps its manifest saying where each came from.
+    """
+    if action not in (LEFTOVERS, OLD_PALETTE_TEMPLATE):
+        raise TidyError("Only archived items can be kept.")
+    with _exclusive():
+        latest = _latest(action, _manifests())
+        if latest is None:
+            return Result(action, False, "There's nothing archived to keep.")
+        document = copy.deepcopy(latest.document)
+        document["state"] = "kept"
+        document["kept"] = _now_iso()
+        _write_manifest(latest.directory, document)
+        count = len(_archived_items(latest))
+        return Result(
+            action,
+            True,
+            f"{_plural(count, 'item')} stay in {latest.directory}; Undo is no longer offered.",
+            latest.directory,
+        )

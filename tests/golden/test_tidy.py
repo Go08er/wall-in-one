@@ -501,3 +501,27 @@ def test_a_reload_noctalia_never_confirmed_keeps_the_old_template_until_a_retry(
     assert "Waiting for Noctalia to render" in after_retry.action(tidy.OLD_PALETTE_TEMPLATE).blocked
     _render(golden)
     assert tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE).ready
+
+
+def test_putting_back_the_old_template_waits_for_its_name_to_be_free(
+    golden: Golden, reloads: list[str]
+) -> None:
+    """F-4 also covers the old-template archive, which shares the Undo path."""
+    stale = golden.profile.app_state / "palette.json.tmpl"
+    original = stale.read_bytes()
+    tidy.apply(tidy.PALETTE_TEMPLATE, tidy.plan().action(tidy.PALETTE_TEMPLATE))
+    _render(golden)
+    tidy.apply(tidy.OLD_PALETTE_TEMPLATE, tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE))
+    stale.write_bytes(b"someone else's file")
+
+    first = tidy.undo(tidy.OLD_PALETTE_TEMPLATE)
+
+    assert not first.changed and "can be tried again" in first.message
+    assert stale.read_bytes() == b"someone else's file"
+    pending = tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE).undo
+    assert pending is not None and pending.partial
+    stale.unlink()
+
+    assert tidy.undo(tidy.OLD_PALETTE_TEMPLATE).changed
+    assert stale.read_bytes() == original
+    assert tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE).undo is None

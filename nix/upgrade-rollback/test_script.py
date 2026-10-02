@@ -359,6 +359,13 @@ def keyed_playlists(nodes: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
+def compiled_stills(nodes: dict[str, Any], playlist_id: str) -> list[str]:
+    """The stills runtime.toml compiles for one playlist, in order."""
+    document = tomllib.loads(content(nodes, "runtime.toml").decode())
+    (playlist,) = (entry for entry in document["playlists"] if entry["id"] == playlist_id)
+    return [entry.get("still", "") for entry in playlist.get("entries", [])]
+
+
 def schema(nodes: dict[str, Any]) -> int:
     value = tomllib.loads(content(nodes, "runtime.toml").decode())["schema_version"]
     assert isinstance(value, int)
@@ -454,6 +461,16 @@ with subtest("b: v0.2.0 installed; the mixed window, then its first start and id
     expect(
         "b: the first start writes only the whitelist",
         lambda: harness.check_changes(first_writes, first_start()),
+    )
+    # Directly, not only through the allowance's callback, which runs only if
+    # runtime.toml happened to be rewritten.
+    expect(
+        "b: runtime.toml still means what v0.1.4 compiled",
+        lambda: require(
+            runtime_meaning(content(b_first, "runtime.toml"))
+            == runtime_meaning(content(b_window, "runtime.toml")),
+            "runtime.toml changed meaning",
+        ),
     )
     wait_health_sync(NEW)
     b_idle = snapshot()
@@ -576,6 +593,16 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
     expect(
         "c: exactly the bumps, their backups and the overrides file",
         lambda: harness.check_changes(c_writes, c_allowed),
+    )
+    # check_changes only vets the writes that happened; require all seven, so
+    # every verifier above has run on its file.
+    expect(
+        "c: every bump, backup and the overrides file was written",
+        lambda: require(
+            sorted((change.path, change.kind) for change in c_writes)
+            == sorted((allowance.pattern, next(iter(allowance.kinds))) for allowance in c_allowed),
+            str(sorted((change.path, change.kind) for change in c_writes)),
+        ),
     )
     expect("c: runtime.toml keeps its shape", lambda: unchanged(c_start, c_done, "runtime.toml"))
     assert schema(c_done) <= 5, schema(c_done)
@@ -733,7 +760,6 @@ with subtest("f: v0.2.0 installed again after the rollback"):
     def recompiled(change: Any) -> None:
         value = tomllib.loads(change.after.content.decode())
         assert value["schema_version"] <= 5, value["schema_version"]
-        assert PICTURE in change.after.content.decode(), "v0.1.4's edit is not compiled"
 
     expect(
         "f: runtime.toml recompiled and the stale overrides file removed",
@@ -758,6 +784,19 @@ with subtest("f: v0.2.0 installed again after the rollback"):
     expect(
         "f: the overrides file is gone",
         lambda: require(OVERRIDES_REL not in f_done, "runtime-overrides.toml is still there"),
+    )
+    # The final runtime.toml itself, whether or not the allowance above ran.
+    # Travel's own entries, not the whole file: All media always lists the
+    # picture, so its mere presence proves nothing.
+    expect(
+        "f: runtime.toml was recompiled with v0.1.4's edit",
+        lambda: require(
+            any(change.path == RUNTIME_REL and change.kind == "modified" for change in f_writes)
+            and schema(f_done) <= 5
+            and PICTURE not in compiled_stills(c_done, TRAVEL)
+            and compiled_stills(f_done, TRAVEL)[-1] == PICTURE,
+            f"Travel compiles {compiled_stills(f_done, TRAVEL)}, schema {schema(f_done)}",
+        ),
     )
 
     def nothing_lost() -> None:

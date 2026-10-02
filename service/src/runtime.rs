@@ -5552,7 +5552,7 @@ mod tests {
         promote_taboo_status_key, push_bounded, wall_clock_after, whole_seconds_up,
     };
     use crate::schedule::Change;
-    use crate::schedule::test_zones::Chicago2026;
+    use crate::schedule::test_zones::{Apia2011, Chicago2026, LordHowe2026};
     use chrono::{NaiveDate, NaiveDateTime, TimeDelta, Utc};
     use std::time::{Duration, Instant};
 
@@ -5600,6 +5600,34 @@ mod tests {
         assert_eq!(
             wall_clock_after(day(8, 3, 14, 0).and_utc(), 300, &Chicago2026),
             Some(day(8, 3, 9, 5))
+        );
+    }
+
+    #[test]
+    fn the_cycle_deadline_is_projected_across_half_hour_and_date_line_changes() {
+        let at_utc = |year, month, day, hour, minute| {
+            NaiveDate::from_ymd_opt(year, month, day)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap()
+        };
+        // Lord Howe, first 01:55 on 2026-04-05 (14:55 UTC): ten minutes later
+        // the clock has gone back half an hour to 01:35.
+        assert_eq!(
+            wall_clock_after(at_utc(2026, 4, 4, 14, 55).and_utc(), 600, &LordHowe2026),
+            Some(at_utc(2026, 4, 5, 1, 35))
+        );
+        // Lord Howe, 01:55 on 2026-10-04 (15:25 UTC): ten minutes later the
+        // clock has jumped half an hour to 02:35.
+        assert_eq!(
+            wall_clock_after(at_utc(2026, 10, 3, 15, 25).and_utc(), 600, &LordHowe2026),
+            Some(at_utc(2026, 10, 4, 2, 35))
+        );
+        // Apia, Thursday 2011-12-29 23:55 (09:55 UTC): ten minutes later it is
+        // Saturday 00:05.
+        assert_eq!(
+            wall_clock_after(at_utc(2011, 12, 30, 9, 55).and_utc(), 600, &Apia2011),
+            Some(at_utc(2011, 12, 31, 0, 5))
         );
     }
 

@@ -172,6 +172,15 @@ impl Timeline {
 
     /// `zone`'s clock from `start`, which reads `reading`. Offset changes are
     /// found by sampling every six hours and bisecting to the second.
+    ///
+    /// That assumes a zone changes its UTC offset at most once in any six
+    /// hours: two changes inside one sample interval that end on the first
+    /// offset would go unseen. No real zone comes close. In tzdata 2026d the
+    /// nearest two offset changes in any zone, over all its history and its
+    /// listed future, are a week apart (Brazil in 2000; Gaza's predicted
+    /// changes); Morocco's Ramadan changes are about a month apart. A
+    /// change of offset without a change of reading (a new name for the
+    /// same offset) moves no clock and needs no run.
     pub fn new<Tz: TimeZone>(reading: NaiveDateTime, start: DateTime<Utc>, zone: &Tz) -> Self {
         let offset_at = |instant: NaiveDateTime| {
             TimeDelta::seconds(i64::from(
@@ -581,8 +590,23 @@ mod tests {
         reading: NaiveDateTime,
         utc: NaiveDateTime,
     ) -> Option<(NaiveDateTime, i64)> {
-        use crate::schedule::test_zones::Chicago2026;
-        let timeline = Timeline::new(reading, utc.and_utc(), &Chicago2026);
+        change_in(
+            &crate::schedule::test_zones::Chicago2026,
+            rules,
+            reading,
+            utc,
+        )
+    }
+
+    /// The next change on `zone`'s clock from the real instant `utc` (whose
+    /// local reading is `reading`), as (local reading, real minutes until).
+    fn change_in<Tz: TimeZone>(
+        zone: &Tz,
+        rules: &[ScheduleRule],
+        reading: NaiveDateTime,
+        utc: NaiveDateTime,
+    ) -> Option<(NaiveDateTime, i64)> {
+        let timeline = Timeline::new(reading, utc.and_utc(), zone);
         let mut unlimited = usize::MAX;
         next_change(rules, &timeline, &mut unlimited, |instant| {
             resolve(rules, "d", instant)
@@ -639,6 +663,74 @@ mod tests {
         assert_eq!(
             chicago_change(&lost, at(2026, 3, 8, 1, 0), at(2026, 3, 8, 7, 0)),
             Some((at(2026, 3, 9, 2, 15), 24 * 60 + 15))
+        );
+    }
+
+    #[test]
+    fn a_half_hour_change_is_followed_both_ways() {
+        use crate::schedule::test_zones::LordHowe2026;
+        let lord_howe =
+            |rules: &[ScheduleRule], reading, utc| change_in(&LordHowe2026, rules, reading, utc);
+        // 2026-04-05: at 02:00 (UTC+11, 15:00 UTC) the clock goes back to 01:30.
+        // At the first 01:50 a 01:45-02:30 window matches; ten minutes later
+        // the clock reads 01:30, where it does not.
+        let late = vec![rule("late", Some("01:45"), Some("02:30"))];
+        assert_eq!(
+            lord_howe(&late, at(2026, 4, 5, 1, 50), at(2026, 4, 4, 14, 50)),
+            Some((at(2026, 4, 5, 1, 30), 10))
+        );
+        // A window still matching at 01:30 ends at 03:00, 100 real minutes on.
+        let long = vec![rule("long", Some("01:00"), Some("03:00"))];
+        assert_eq!(
+            lord_howe(&long, at(2026, 4, 5, 1, 50), at(2026, 4, 4, 14, 50)),
+            Some((at(2026, 4, 5, 3, 0), 100))
+        );
+        // The repeated half hour's boundaries come round again.
+        let short = vec![rule("short", Some("01:35"), Some("01:40"))];
+        assert_eq!(
+            lord_howe(&short, at(2026, 4, 5, 1, 50), at(2026, 4, 4, 14, 50)),
+            Some((at(2026, 4, 5, 1, 35), 15))
+        );
+        // 2026-10-04: at 02:00 (UTC+10:30, 15:30 UTC) the clock jumps to 02:30.
+        // A window from 02:15 is first seen at 02:30, ten minutes after 01:50.
+        let gap = vec![rule("gap", Some("02:15"), Some("05:00"))];
+        assert_eq!(
+            lord_howe(&gap, at(2026, 10, 4, 1, 50), at(2026, 10, 3, 15, 20)),
+            Some((at(2026, 10, 4, 2, 30), 10))
+        );
+        // A window wholly inside the skipped half hour never shows that day.
+        let lost = vec![rule("lost", Some("02:05"), Some("02:25"))];
+        assert_eq!(
+            lord_howe(&lost, at(2026, 10, 4, 1, 50), at(2026, 10, 3, 15, 20)),
+            Some((at(2026, 10, 5, 2, 5), 23 * 60 + 45))
+        );
+    }
+
+    #[test]
+    fn a_skipped_local_day_is_never_scheduled() {
+        use crate::schedule::test_zones::Apia2011;
+        // Thursday 2011-12-29 20:00 in Apia (UTC-10, 06:00 UTC on the 30th);
+        // four hours later the clock reads Saturday 31 December 00:00.
+        let (reading, utc) = (at(2011, 12, 29, 20, 0), at(2011, 12, 30, 6, 0));
+        let mut thursday = rule("thursday", None, None);
+        thursday.weekdays = vec![3];
+        assert_eq!(
+            change_in(&Apia2011, &[thursday], reading, utc),
+            Some((at(2011, 12, 31, 0, 0), 4 * 60))
+        );
+        // Friday 30 December never shows: the next Friday is 6 January.
+        let mut friday = rule("friday", None, None);
+        friday.weekdays = vec![4];
+        assert_eq!(
+            change_in(&Apia2011, &[friday], reading, utc),
+            Some((at(2012, 1, 6, 0, 0), (6 * 24 + 4) * 60))
+        );
+        // Nor does any time on it: a window on the 30th's clock is skipped too.
+        let mut december_evening = rule("evening", Some("21:00"), Some("23:00"));
+        december_evening.weekdays = vec![4];
+        assert_eq!(
+            change_in(&Apia2011, &[december_evening], reading, utc),
+            Some((at(2012, 1, 6, 21, 0), (6 * 24 + 25) * 60))
         );
     }
 
@@ -771,67 +863,132 @@ mod tests {
     }
 }
 
-/// A hand-written America/Chicago for 2026, so DST tests need no zone
-/// database or process-wide `TZ`: CST (UTC-6) until 2026-03-08 08:00 UTC, CDT
-/// (UTC-5) until 2026-11-01 07:00 UTC, then CST again.
+/// Hand-written zones, so DST tests need no zone database or process-wide
+/// `TZ`. Each is a starting UTC offset and the instants it changes, and maps
+/// a local reading like chrono's own `Local`: an ambiguous reading lists the
+/// smaller offset (the later instant) first.
 #[cfg(test)]
 pub(crate) mod test_zones {
     use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 
-    #[derive(Clone, Copy, Debug)]
-    pub(crate) struct Chicago2026;
-
-    fn cst() -> FixedOffset {
-        FixedOffset::west_opt(6 * 3600).unwrap()
+    /// A zone's history: its first offset (seconds east of UTC) and each
+    /// change as (UTC instant, new offset), in order.
+    trait History {
+        fn history() -> (i32, Vec<(NaiveDateTime, i32)>);
     }
 
-    fn cdt() -> FixedOffset {
-        FixedOffset::west_opt(5 * 3600).unwrap()
-    }
-
-    fn utc(month: u32, day: u32, hour: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, month, day)
+    fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(year, month, day)
             .unwrap()
-            .and_hms_opt(hour, 0, 0)
+            .and_hms_opt(hour, minute, 0)
             .unwrap()
     }
 
-    impl TimeZone for Chicago2026 {
-        type Offset = FixedOffset;
+    fn offset_at<Z: History>(instant: &NaiveDateTime) -> FixedOffset {
+        let (first, changes) = Z::history();
+        let seconds = changes
+            .iter()
+            .take_while(|(at, _)| at <= instant)
+            .last()
+            .map_or(first, |(_, offset)| *offset);
+        FixedOffset::east_opt(seconds).unwrap()
+    }
 
-        fn from_offset(_offset: &FixedOffset) -> Self {
-            Self
+    fn local_offsets<Z: History>(local: &NaiveDateTime) -> LocalResult<FixedOffset> {
+        let (first, changes) = Z::history();
+        let mut offsets: Vec<i32> = changes.iter().map(|(_, offset)| *offset).collect();
+        offsets.push(first);
+        offsets.sort_unstable();
+        offsets.dedup();
+        // A reading is valid in an offset when the instant it names has it.
+        let valid: Vec<FixedOffset> = offsets
+            .into_iter()
+            .map(|seconds| FixedOffset::east_opt(seconds).unwrap())
+            .filter(|offset| offset_at::<Z>(&(*local - *offset)) == *offset)
+            .collect();
+        match valid.as_slice() {
+            [] => LocalResult::None,
+            [one] => LocalResult::Single(*one),
+            [smaller, larger, ..] => LocalResult::Ambiguous(*smaller, *larger),
         }
+    }
 
-        fn offset_from_utc_datetime(&self, utc_time: &NaiveDateTime) -> FixedOffset {
-            if (utc(3, 8, 8)..utc(11, 1, 7)).contains(utc_time) {
-                cdt()
-            } else {
-                cst()
+    macro_rules! zone {
+        ($name:ident) => {
+            #[derive(Clone, Copy, Debug)]
+            pub(crate) struct $name;
+
+            impl TimeZone for $name {
+                type Offset = FixedOffset;
+
+                fn from_offset(_offset: &FixedOffset) -> Self {
+                    Self
+                }
+
+                fn offset_from_utc_datetime(&self, utc_time: &NaiveDateTime) -> FixedOffset {
+                    offset_at::<Self>(utc_time)
+                }
+
+                fn offset_from_utc_date(&self, utc_date: &NaiveDate) -> FixedOffset {
+                    offset_at::<Self>(&utc_date.and_hms_opt(0, 0, 0).unwrap())
+                }
+
+                fn offset_from_local_datetime(
+                    &self,
+                    local: &NaiveDateTime,
+                ) -> LocalResult<FixedOffset> {
+                    local_offsets::<Self>(local)
+                }
+
+                fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
+                    local_offsets::<Self>(&local.and_hms_opt(12, 0, 0).unwrap())
+                }
             }
-        }
+        };
+    }
 
-        fn offset_from_utc_date(&self, utc_date: &NaiveDate) -> FixedOffset {
-            self.offset_from_utc_datetime(&utc_date.and_hms_opt(0, 0, 0).unwrap())
-        }
+    const HOUR: i32 = 3600;
 
-        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<FixedOffset> {
-            // Each reading is valid when the instant it names has that offset.
-            let valid = |offset: FixedOffset| {
-                let instant = *local - offset;
-                (self.offset_from_utc_datetime(&instant) == offset).then_some(offset)
-            };
-            match (valid(cdt()), valid(cst())) {
-                // Standard time first, as chrono's own `Local` orders it
-                // (by offset, so the later instant comes first).
-                (Some(daylight), Some(standard)) => LocalResult::Ambiguous(standard, daylight),
-                (Some(offset), None) | (None, Some(offset)) => LocalResult::Single(offset),
-                (None, None) => LocalResult::None,
-            }
+    zone!(Chicago2026);
+    /// America/Chicago in 2026: CST (UTC-6), CDT (UTC-5) from 2026-03-08
+    /// 08:00 UTC (02:00 CST becomes 03:00) to 2026-11-01 07:00 UTC (02:00 CDT
+    /// becomes 01:00).
+    impl History for Chicago2026 {
+        fn history() -> (i32, Vec<(NaiveDateTime, i32)>) {
+            (
+                -6 * HOUR,
+                vec![
+                    (utc(2026, 3, 8, 8, 0), -5 * HOUR),
+                    (utc(2026, 11, 1, 7, 0), -6 * HOUR),
+                ],
+            )
         }
+    }
 
-        fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
-            self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+    zone!(LordHowe2026);
+    /// Australia/Lord_Howe in 2026, a half-hour daylight-saving zone: UTC+11
+    /// until 2026-04-04 15:00 UTC (02:00 becomes 01:30), UTC+10:30 until
+    /// 2026-10-03 15:30 UTC (02:00 becomes 02:30), then UTC+11 again.
+    impl History for LordHowe2026 {
+        fn history() -> (i32, Vec<(NaiveDateTime, i32)>) {
+            (
+                11 * HOUR,
+                vec![
+                    (utc(2026, 4, 4, 15, 0), 21 * HOUR / 2),
+                    (utc(2026, 10, 3, 15, 30), 11 * HOUR),
+                ],
+            )
+        }
+    }
+
+    zone!(Apia2011);
+    /// Pacific/Apia at the end of 2011, when Samoa crossed the date line: UTC-10
+    /// until 2011-12-30 10:00 UTC, then UTC+14, so the clock went from
+    /// Thursday 29 December 23:59:59 to Saturday 31 December 00:00 and the
+    /// whole local Friday never showed.
+    impl History for Apia2011 {
+        fn history() -> (i32, Vec<(NaiveDateTime, i32)>) {
+            (-10 * HOUR, vec![(utc(2011, 12, 30, 10, 0), 14 * HOUR)])
         }
     }
 }

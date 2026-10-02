@@ -1640,6 +1640,9 @@ def _begin_publication_transaction(
         swap = Path(candidate_name)
         candidate_status = os.fstat(candidate_descriptor)
         candidate_identity = candidate_status.st_dev, candidate_status.st_ino
+        # Keep Noctalia's own permissions on its file, as the backup does;
+        # mkstemp's 0600 would quietly tighten them on every edit.
+        os.fchmod(candidate_descriptor, stat.S_IMODE(os.fstat(expected.descriptor).st_mode))
         _write_all(candidate_descriptor, candidate_document)
         os.fsync(candidate_descriptor)
         candidate_status = os.fstat(candidate_descriptor)

@@ -2250,6 +2250,7 @@ def test_status_tracks_installation(fake_home: Path) -> None:
 
 def test_edit_settings_backs_up_then_exchanges_and_releases_the_file(fake_home: Path) -> None:
     settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    settings_path.chmod(0o644)
     original = settings_path.read_bytes()
     expected = hashlib.sha256(original).hexdigest()
 
@@ -2263,6 +2264,7 @@ def test_edit_settings_backs_up_then_exchanges_and_releases_the_file(fake_home: 
     assert edit.displaced_path.name == f"{edit.backup_path.name}.original"
     _assert_no_current_transaction(settings_path)
     assert template.read_settings_document() == settings_path.read_bytes()
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o644, "Noctalia's permissions stay"
 
 
 def test_edit_settings_refuses_a_file_rewritten_since_it_was_read(fake_home: Path) -> None:

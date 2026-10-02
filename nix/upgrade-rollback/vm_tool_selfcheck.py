@@ -10,6 +10,7 @@ shell's own field through and fails anything else. Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -45,6 +46,10 @@ def main(profile: Path) -> None:
         settings = home / vm_tool.NOCTALIA_SETTINGS
         settings.parent.mkdir(parents=True)
         settings.write_text(original, encoding="utf-8")
+        settings.chmod(0o600)
+        state = settings.with_name("state.toml")
+        state.write_text("x = 1\n", encoding="utf-8")
+        state.chmod(0o600)
         before = snap(home)
         assert vm_tool.NOCTALIA_SETTINGS in before, "Noctalia's settings are not snapshotted"
 
@@ -102,10 +107,41 @@ def main(profile: Path) -> None:
 
         # Anything else below Noctalia's trees stays for the phase to judge.
         settings.write_text(original, encoding="utf-8")
-        (settings.parent / "settings.toml.bak-wall-in-one-x").write_text(original)
+        settings.chmod(0o600)
+        backup = settings.parent / "settings.toml.bak-wall-in-one-x"
+        backup.write_text(original)
         rest, problems = judge(home, before)
         assert problems == [] and len(rest) == 1 and "bak-wall-in-one-x" in rest[0], rest
-    print("vm_tool self-check: Noctalia settings are accounted for field by field")
+        backup.unlink()
+
+        # A chmod never rides along with an allowed write: not with the
+        # shell's own field ...
+        chmodded = f"mode: {vm_tool.NOCTALIA_SETTINGS} (600 -> 666)"
+        settings.write_text(original.replace(last, 'path = "/elsewhere.png"'), encoding="utf-8")
+        settings.chmod(0o666)
+        assert problem(home, before) == chmodded
+
+        # ... nor with a byte-identical rewrite, which alone is the shell's.
+        def rewrite(mode: int) -> None:
+            replacement = settings.with_name(".settings.toml.tmp")
+            replacement.write_text(original, encoding="utf-8")
+            replacement.chmod(mode)
+            os.replace(replacement, settings)
+
+        rewrite(0o666)
+        assert problem(home, before) == chmodded
+        rewrite(0o600)
+        assert judge(home, before) == ([], []), "the shell's own rewrite was refused"
+
+        # A shell-owned file's writes are set aside; its chmod is not.
+        state.write_text("x = 2\n", encoding="utf-8")
+        assert judge(home, before) == ([], [])
+        state.chmod(0o666)
+        rest, problems = judge(home, before)
+        assert problems == [] and rest == [
+            "mode: .local/state/noctalia/state.toml (600 -> 666)"
+        ], (rest, problems)
+    print("vm_tool self-check: Noctalia settings are accounted for field by field and mode")
 
 
 if __name__ == "__main__":

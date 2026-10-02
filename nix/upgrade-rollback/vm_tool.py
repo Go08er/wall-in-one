@@ -231,6 +231,10 @@ def shell_writes(
     shell's own fields (a key added, removed or changed, the file created,
     deleted or chmodded) is a finding whoever made it. ``first_start`` also
     allows Noctalia's one-time migration of the fixture's settings.
+
+    A chmod is never set aside. :func:`harness.diff` reports it as its own
+    ``mode`` change even beside a content change, so it is a finding on
+    settings.toml and stays for the phase to judge on a shell-owned file.
     """
     rest: list[harness.Change] = []
     problems: list[str] = []
@@ -248,7 +252,9 @@ def shell_writes(
             )
             if unexpected:
                 problems.append(f"{change.path}: changed {', '.join(unexpected)}")
-        elif not any(fnmatchcase(change.path, pattern) for pattern in SHELL_FILES):
+        elif change.kind in ("mode", "type") or not any(
+            fnmatchcase(change.path, pattern) for pattern in SHELL_FILES
+        ):
             rest.append(change)
     return rest, problems
 

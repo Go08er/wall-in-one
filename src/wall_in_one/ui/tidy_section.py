@@ -144,7 +144,7 @@ def _grouped(
 
 
 class _ActionRow:
-    """One action's expander: summary, preview, kept items, Apply and Undo."""
+    """One action's expander: summary, preview, kept items, Apply, Undo and Retry."""
 
     def __init__(self, section: TidySection, plan: tidy.ActionPlan) -> None:
         self.section = section
@@ -159,7 +159,10 @@ class _ActionRow:
         self.apply.connect("clicked", lambda _button: section.run(self, undo=False))
         self.undo = Gtk.Button(label="Undo", valign=Gtk.Align.CENTER)
         self.undo.connect("clicked", lambda _button: section.run(self, undo=True))
-        for widget in (self.spinner, self.undo, self.apply):
+        # A step after a change that hasn't finished yet, such as Noctalia's reload.
+        self.retry = Gtk.Button(label="Retry", valign=Gtk.Align.CENTER)
+        self.retry.connect("clicked", lambda _button: section.run(self, retry=True))
+        for widget in (self.spinner, self.retry, self.undo, self.apply):
             self.expander.add_suffix(widget)
         self.children: list[Gtk.Widget] = []
         self.show(plan)
@@ -221,6 +224,9 @@ class _ActionRow:
         self.apply.set_sensitive(self.plan.ready and not busy)
         self.undo.set_visible(self.plan.undo is not None)
         self.undo.set_sensitive(not busy)
+        self.retry.set_visible(bool(self.plan.retry))
+        self.retry.set_label(self.plan.retry or "Retry")
+        self.retry.set_sensitive(not busy)
 
 
 class TidySection(Adw.PreferencesGroup):
@@ -310,8 +316,8 @@ class TidySection(Adw.PreferencesGroup):
             row.spinner.set_visible(self._running == row.plan.action)
             row.spinner.set_spinning(self._running == row.plan.action)
 
-    def run(self, row: _ActionRow, *, undo: bool) -> None:
-        """Apply (or undo) one action exactly as its preview showed it."""
+    def run(self, row: _ActionRow, *, undo: bool = False, retry: bool = False) -> None:
+        """Apply, undo or retry one action, exactly as its preview showed it."""
         if self.busy:
             return
         ready = getattr(self._app, "require_authoring_ready", None)
@@ -321,6 +327,8 @@ class TidySection(Adw.PreferencesGroup):
         roots = _roots(self._app)
 
         def work() -> tidy.Result:
+            if retry:
+                return tidy.retry(plan.action)
             if undo:
                 return tidy.undo(plan.action)
             return tidy.apply(plan.action, plan, roots=roots)

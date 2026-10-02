@@ -470,3 +470,34 @@ def test_clearing_the_thumbnail_cache_deletes_only_thumbnails(golden: Golden) ->
     with pytest.raises(tidy.TidyError, match="no Undo"):
         tidy.undo(tidy.THUMBNAIL_CACHE)
     assert not ui_prefs.load().raw
+
+
+def test_a_reload_noctalia_never_confirmed_keeps_the_old_template_until_a_retry(
+    golden: Golden, reloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's F-2: with the reload failed, a later palette may come from the
+    running shell's old configuration, so it proves nothing and the old file stays."""
+    stale = golden.profile.app_state / "palette.json.tmpl"
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: False)
+
+    result = tidy.apply(tidy.PALETTE_TEMPLATE, tidy.plan().action(tidy.PALETTE_TEMPLATE))
+
+    assert "didn't confirm" in result.message
+    _render(golden)
+    found = tidy.plan()
+    old = found.action(tidy.OLD_PALETTE_TEMPLATE)
+    assert old.changes and not old.ready and "didn't confirm" in old.blocked
+    with pytest.raises(tidy.TidyError, match="didn't confirm"):
+        tidy.apply(tidy.OLD_PALETTE_TEMPLATE, old)
+    assert stale.exists()
+    switch = found.action(tidy.PALETTE_TEMPLATE)
+    assert switch.retry == "Retry Reload" and "hasn't confirmed" in switch.summary
+    assert not tidy.retry(tidy.PALETTE_TEMPLATE).changed, "still no confirmation"
+
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: True)
+    assert tidy.retry(tidy.PALETTE_TEMPLATE).changed
+    after_retry = tidy.plan()
+    assert not after_retry.action(tidy.PALETTE_TEMPLATE).retry
+    assert "Waiting for Noctalia to render" in after_retry.action(tidy.OLD_PALETTE_TEMPLATE).blocked
+    _render(golden)
+    assert tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE).ready

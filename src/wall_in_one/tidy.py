@@ -86,7 +86,7 @@ import stat
 import time
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -215,6 +215,9 @@ class ActionPlan:
     undo: Undo | None = None
     #: A digest of exactly what this preview showed; :func:`apply` compares it.
     token: str = ""
+    #: Set when a step after the change is still pending and can be retried
+    #: with :func:`retry`; the text is the button's label.
+    retry: str = ""
 
     @property
     def ready(self) -> bool:
@@ -1194,6 +1197,33 @@ def _settings_undo(
     return None
 
 
+def _current_edit(
+    action: Action, manifests: Sequence[_Manifest], current: str | None
+) -> _Manifest | None:
+    """The newest settings edit of ``action`` still in effect (not undone)."""
+    for manifest in manifests:
+        if manifest.action != action:
+            continue
+        state = _effective_state(manifest, current)
+        if state in ("applied", "applying"):
+            return manifest
+        if state == "undone":
+            return None
+    return None
+
+
+def _reload_pending(action: Action, manifests: Sequence[_Manifest], current: str | None) -> bool:
+    """Whether the edit in effect is on disk but Noctalia never confirmed reloading it."""
+    edit = _current_edit(action, manifests, current)
+    return edit is not None and edit.document.get("reloaded") is not True
+
+
+_RELOAD_PENDING_NOTE: Final = (
+    "Noctalia didn't confirm that it reloaded its settings after this change, so the "
+    "running shell may still use its old ones. Retry the reload once Noctalia is running."
+)
+
+
 # -- action 2: the palette template name -----------------------------------------------
 
 
@@ -1229,6 +1259,16 @@ def _plan_palette_template(
     current = entry.get("input_path")
     stale = _stale_template()
     if current == str(target):
+        if _reload_pending(PALETTE_TEMPLATE, manifests, settings.sha256):
+            return ActionPlan(
+                PALETTE_TEMPLATE,
+                title,
+                "Noctalia's settings name the current template, but Noctalia hasn't "
+                "confirmed that it reloaded them.",
+                notes=(_RELOAD_PENDING_NOTE,),
+                undo=undo,
+                retry="Retry Reload",
+            )
         return ActionPlan(
             PALETTE_TEMPLATE, title, "Noctalia already uses the current template.", undo=undo
         )
@@ -1376,13 +1416,23 @@ def _apply_palette_template(expected: ActionPlan | None) -> Result:
             "template_sha256": _sha256(data),
         }
 
-    archive, _document = _apply_settings_edit(
+    archive, document = _apply_settings_edit(
         PALETTE_TEMPLATE,
         settings,
         lambda text: _set_template_input(text, tomllib.loads(text), stale, target),
         {"old_input_path": stale, "new_input_path": target},
         publish,
     )
+    if document.get("reloaded") is not True:
+        return Result(
+            PALETTE_TEMPLATE,
+            True,
+            "Noctalia's settings now name the current palette template, but Noctalia "
+            "didn't confirm that it reloaded them, so the old template file stays in use "
+            "until it does. Use Retry Reload once Noctalia is running. The old settings "
+            f"were backed up beside them and in {archive}.",
+            archive,
+        )
     return Result(
         PALETTE_TEMPLATE,
         True,
@@ -1468,30 +1518,48 @@ def _undo_palette_template(manifest: _Manifest) -> Result:
 # -- action 2b: the old palette template file ------------------------------------------
 
 
-def _rendered_since_switch(settings: _NoctaliaSettings, manifests: Sequence[_Manifest]) -> bool:
+def _not_yet_rendered(settings: _NoctaliaSettings, manifests: Sequence[_Manifest]) -> str:
+    """Why there is no proof yet that Noctalia renders from the new template, or "".
+
+    With Tidy up's own switch in effect the proof is a palette written after
+    Noctalia *confirmed* reloading its settings. A switch whose reload failed
+    is not proof of anything, whatever the palette's time: the running shell
+    may still render from the old file. Only a switch made outside Tidy up
+    (for example by ``--install-theme-template``, which reloads Noctalia
+    itself) falls back to a palette written after the settings were.
+    """
+    waiting = (
+        "Waiting for Noctalia to render your colors from the new template. It does that "
+        "the next time your colors change; then this step becomes available."
+    )
     palette = _lstat(paths.palette_path())
-    if palette is None:
-        return False
-    for manifest in manifests:
-        if manifest.action != PALETTE_TEMPLATE:
-            continue
-        if _effective_state(manifest, settings.sha256) == "undone":
-            break
-        document = manifest.document
+    switch = _current_edit(PALETTE_TEMPLATE, manifests, settings.sha256)
+    if switch is not None:
+        document = switch.document
         reloaded_at = document.get("reloaded_at_ns")
-        baseline = document.get("palette_after_reload")
-        if isinstance(reloaded_at, int) and document.get("reloaded"):
-            current = [
-                palette.st_dev,
-                palette.st_ino,
-                palette.st_size,
-                palette.st_mtime_ns,
-                palette.st_ctime_ns,
-            ]
-            return current != baseline and palette.st_mtime_ns > reloaded_at
-        break
+        if document.get("reloaded") is not True or not isinstance(reloaded_at, int):
+            return (
+                "Noctalia didn't confirm that it reloaded its settings after the template "
+                "fix, so it may still read this file. Choose Retry Reload on \u201cFix the "
+                "palette template name\u201d."
+            )
+        if palette is None:
+            return waiting
+        current = [
+            palette.st_dev,
+            palette.st_ino,
+            palette.st_size,
+            palette.st_mtime_ns,
+            palette.st_ctime_ns,
+        ]
+        rendered = current != document.get("palette_after_reload") and (
+            palette.st_mtime_ns > reloaded_at
+        )
+        return "" if rendered else waiting
     found = _lstat(settings.path)
-    return found is not None and palette.st_mtime_ns > found.st_mtime_ns
+    if palette is None or found is None or palette.st_mtime_ns <= found.st_mtime_ns:
+        return waiting
+    return ""
 
 
 def _plan_old_palette_template(
@@ -1565,11 +1633,8 @@ def _plan_old_palette_template(
     blocked = ""
     if _lstat(target) is None:
         blocked = "The current template file is missing, so the old one stays for now."
-    elif not _rendered_since_switch(settings, manifests):
-        blocked = (
-            "Waiting for Noctalia to render your colors from the new template. It does that "
-            "the next time your colors change; then this step becomes available."
-        )
+    else:
+        blocked = _not_yet_rendered(settings, manifests)
     return (
         ActionPlan(
             OLD_PALETTE_TEMPLATE,
@@ -1748,17 +1813,23 @@ def _apply_plugin_settings(expected: ActionPlan | None) -> Result:
     if plan.blocked:
         raise TidyError(plan.blocked)
     _text, removed = _remove_plugin_keys(settings.text, settings.document, orphaned)
-    archive, _document = _apply_settings_edit(
+    archive, document = _apply_settings_edit(
         PLUGIN_SETTINGS,
         settings,
         lambda text: _remove_plugin_keys(text, tomllib.loads(text), orphaned)[0],
         {"removed_keys": orphaned, "removed_lines": removed},
     )
+    unconfirmed = (
+        " Noctalia didn't confirm that it reloaded them, so the running shell may still "
+        "hold the old values; use Retry Reload once Noctalia is running."
+        if document.get("reloaded") is not True
+        else ""
+    )
     return Result(
         PLUGIN_SETTINGS,
         True,
-        f"Removed {_plural(len(orphaned), 'old plugin setting')}. Noctalia's settings were "
-        f"backed up beside them and in {archive}.",
+        f"Removed {_plural(len(orphaned), 'old plugin setting')}.{unconfirmed} Noctalia's "
+        f"settings were backed up beside them and in {archive}.",
         archive,
     )
 
@@ -1836,6 +1907,9 @@ def plan(*, roots: Sequence[Path] | None = None, now: float | None = None) -> Pl
     )
     old_template, _found = _plan_old_palette_template(settings, manifests)
     plugin, _keys = _plan_plugin_settings(settings, unreadable, manifests)
+    current = settings.sha256 if settings is not None else None
+    if not plugin.changes and _reload_pending(PLUGIN_SETTINGS, manifests, current):
+        plugin = replace(plugin, notes=(*plugin.notes, _RELOAD_PENDING_NOTE), retry="Retry Reload")
     return Plan(
         (
             leftovers,
@@ -1873,6 +1947,35 @@ def apply(
         if action == PLUGIN_SETTINGS:
             return _apply_plugin_settings(expected)
     raise ValueError(f"unknown tidy-up action {action!r}")
+
+
+def retry(action: Action) -> Result:
+    """Ask Noctalia again to reload its settings after an edit it never confirmed.
+
+    Only a confirmed reload is recorded; until then the template switch counts
+    as unfinished and the old template file stays.
+    """
+    if action not in (PALETTE_TEMPLATE, PLUGIN_SETTINGS):
+        raise TidyError("There's nothing to retry for this action.")
+    with _exclusive():
+        settings, _unreadable = _read_noctalia()
+        current = settings.sha256 if settings is not None else None
+        edit = _current_edit(action, _manifests(), current)
+        if edit is None or edit.document.get("reloaded") is True:
+            return Result(action, False, "There's no reload left to retry.")
+        if not _reload_noctalia():
+            return Result(
+                action,
+                False,
+                "Noctalia still didn't confirm a reload. Make sure it's running, then try again.",
+                edit.directory,
+            )
+        document = copy.deepcopy(edit.document)
+        document["reloaded"] = True
+        document["reloaded_at_ns"] = time.time_ns()
+        document["palette_after_reload"] = _palette_fingerprint()
+        _write_manifest(edit.directory, document)
+        return Result(action, True, "Noctalia reloaded its settings.", edit.directory)
 
 
 def undo(action: Action) -> Result:

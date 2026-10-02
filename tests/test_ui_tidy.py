@@ -171,3 +171,28 @@ def test_a_preview_gone_stale_is_refused_and_replaced(
     assert "changed since the preview" in application.reports[-1]
     assert settings.read_bytes() == saved
     assert plugin.plan.ready, "the new preview can be applied"
+
+
+def test_an_unconfirmed_reload_offers_retry_until_noctalia_answers(
+    section: tuple[TidySection, _Application], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    group, application = section
+    _noctalia_settings()
+    answers = [False]
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: answers[0])
+    group.refresh()
+    spin_until(lambda: _idle(group) and group.row(tidy.PALETTE_TEMPLATE) is not None)
+    switch = group.row(tidy.PALETTE_TEMPLATE)
+    assert switch is not None and not switch.retry.get_visible()
+
+    switch.apply.emit("clicked")
+    spin_until(lambda: _idle(group) and switch.plan.retry != "", timeout=10)
+
+    assert "didn't confirm" in application.reports[-1]
+    assert switch.retry.get_visible() and switch.retry.get_label() == "Retry Reload"
+    answers[0] = True
+    switch.retry.emit("clicked")
+    spin_until(lambda: _idle(group) and switch.plan.retry == "", timeout=10)
+
+    assert application.reports[-1] == "Noctalia reloaded its settings."
+    assert not switch.retry.get_visible()

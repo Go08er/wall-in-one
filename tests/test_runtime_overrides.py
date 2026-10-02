@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tomllib
 from collections.abc import Callable
@@ -549,7 +550,12 @@ def test_publication_writes_the_overrides_first_and_removes_them_durably(
 def test_a_refused_runtime_publication_writes_neither_file(
     library: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Error copy matches what was written: the overrides wait for runtime.toml."""
+    """A runtime.toml the service cannot load is refused before either file is written.
+
+    Error copy matches what was written: the overrides wait for runtime.toml.
+    A runtime.toml that fails while being written, after the overrides, is
+    the next test's case.
+    """
     settings = config.Settings(roots=(library,), scan_workshop=False)
     config.save(settings)
     session = Session(settings)
@@ -567,6 +573,108 @@ def test_a_refused_runtime_publication_writes_neither_file(
             writer(battery, session)
         assert target.read_bytes() == before
         assert not runtime_config.overrides_path(target).exists()
+    session.shutdown()
+
+
+INJECTED_FAILURE = "injected runtime.toml write failure (ENOSPC)"
+
+
+@pytest.mark.parametrize("writer", ["write", "update"])
+@pytest.mark.parametrize("sidecar_change", ["changed", "appeared", "removed"])
+def test_a_failed_runtime_install_puts_the_previous_overrides_back(
+    library: Path, monkeypatch: pytest.MonkeyPatch, writer: str, sidecar_change: str
+) -> None:
+    """The overrides are published first; if runtime.toml then cannot be written,
+    the previous pair is what remains, byte for byte, not new overrides beside
+    the old runtime.toml."""
+    settings = config.Settings(roots=(library,), scan_workshop=False)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    if sidecar_change != "appeared":
+        session.playlists.set_rotation(made.id, cycle_interval=60)
+    target = runtime_config.write(settings, session)
+    sidecar = runtime_config.overrides_path(target)
+    previous = (target.read_bytes(), sidecar.read_bytes() if sidecar.exists() else None)
+    assert (previous[1] is None) == (sidecar_change == "appeared")
+
+    # A change to both documents: the global interval and this playlist's own.
+    changed = replace(settings, cycle_interval=600)
+    session.playlists.set_rotation(
+        made.id, cycle_interval=None if sidecar_change == "removed" else 120
+    )
+    published = runtime_config.render_overrides(changed, session)
+    assert (published is None) == (sidecar_change == "removed")
+    seen: list[bytes | None] = []
+
+    def failing(document: str, path: Path) -> None:
+        del document
+        sidecar_now = runtime_config.overrides_path(path)
+        seen.append(sidecar_now.read_bytes() if sidecar_now.exists() else None)
+        raise runtime_config.RuntimeConfigError(INJECTED_FAILURE)
+
+    install = runtime_config._install
+    monkeypatch.setattr(runtime_config, "_install", failing)
+    with pytest.raises(runtime_config.RuntimeConfigError, match=re.escape(INJECTED_FAILURE)):
+        getattr(runtime_config, writer)(changed, session)
+
+    assert seen == [None if published is None else published.encode()], (
+        "the new overrides were published before runtime.toml was attempted"
+    )
+    assert (target.read_bytes(), sidecar.read_bytes() if sidecar.exists() else None) == previous
+    temporaries = [
+        entry.name
+        for entry in target.parent.iterdir()
+        if entry.name.startswith((f".{target.name}.", f".{sidecar.name}."))
+        and not entry.name.endswith(".lock")
+    ]
+    assert temporaries == [], "no temporary of either write is left behind"
+
+    # Nothing is stuck: the next save publishes the new pair. (Only `_install`
+    # is put back: monkeypatch.undo() would also drop conftest's XDG sandbox.)
+    monkeypatch.setattr(runtime_config, "_install", install)
+    assert getattr(runtime_config, writer)(changed, session)
+    assert target.read_bytes() != previous[0]
+    assert (sidecar.read_bytes() if sidecar.exists() else None) == (
+        None if published is None else published.encode()
+    )
+    session.shutdown()
+
+
+def test_a_restore_that_fails_too_says_the_pair_may_disagree(
+    library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = config.Settings(roots=(library,), scan_workshop=False)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, cycle_interval=60)
+    runtime_config.write(settings, session)
+    session.playlists.set_rotation(made.id, cycle_interval=120)
+    publish = runtime_config._publish_overrides
+    calls: list[str | None] = []
+
+    def publish_once(overrides: str | None, target: Path) -> None:
+        calls.append(overrides)
+        if len(calls) > 1:
+            raise runtime_config.RuntimeConfigError("injected restore failure")
+        publish(overrides, target)
+
+    def failing(document: str, path: Path) -> None:
+        raise runtime_config.RuntimeConfigError(INJECTED_FAILURE)
+
+    monkeypatch.setattr(runtime_config, "_publish_overrides", publish_once)
+    monkeypatch.setattr(runtime_config, "_install", failing)
+    with pytest.raises(runtime_config.RuntimeConfigError) as caught:
+        runtime_config.update(replace(settings, cycle_interval=600), session)
+    message = str(caught.value)
+    assert INJECTED_FAILURE in message and "injected restore failure" in message
+    assert "could not be put back" in message and "may not match runtime.toml" in message
+    assert len(calls) == 2, "the restore was attempted with the previous bytes"
     session.shutdown()
 
 

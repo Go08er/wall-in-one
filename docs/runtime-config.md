@@ -440,8 +440,22 @@ while at least one of these is in use and removes it, durably, when the last
 one is cleared, so a profile that uses neither has exactly the files Release
 1 has. It publishes the overrides before `runtime.toml`, under the same
 compiler lock, and rewrites each file only when its bytes change; a change to
-either is a change, and the app sends `reload`. A refused `runtime.toml`
-publication writes neither file.
+either is a change, and the app sends `reload`.
+
+Each file is replaced atomically on its own; the pair is not. What a save
+guarantees:
+
+- A `runtime.toml` the running service could not load is refused before
+  either file is written.
+- If writing `runtime.toml` fails after the overrides were published, the
+  app puts the previous overrides back before it reports the error: the same
+  bytes through a fresh temporary, flushed and renamed, or, when there was
+  none, it removes the new file. The pair on disk is the previous one. If
+  that restore fails too, the error says so: the two files may disagree
+  until the next successful save.
+- Between the two writes, and after a crash between them, the new overrides
+  sit beside the previous `runtime.toml`. The service loads that pair (see
+  below) until `runtime.toml` lands or the next save replaces it.
 
 The service reads it after `runtime.toml`, at start, on `reload` and when the
 watcher sees either file change, appear or disappear; `--check-config`
@@ -466,7 +480,10 @@ file as the newer release left it.
 
 An entry naming a playlist or connector that `runtime.toml` lacks is skipped
 with a journal line rather than refused, which covers the moment between the
-two writes.
+two writes. An entry naming one both documents have applies to the older
+document for that moment: the watcher checks both files once a second, so
+it can reload on the overrides alone and again when `runtime.toml` lands.
+Each reload applies the current entry again.
 
 The service resolves shuffle as: a live `shuffle on|off` override, else the
 playlist's own `shuffle`, else `settings.shuffle`; `shuffle default` returns

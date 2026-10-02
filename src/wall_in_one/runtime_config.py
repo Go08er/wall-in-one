@@ -908,15 +908,24 @@ def overrides_from_a_newer_build(text: str | None) -> bool:
 
 
 def write(settings: config.Settings, session: Session, path: Path | None = None) -> Path:
-    """Compile and install both documents atomically, overrides first."""
+    """Compile and install both documents, overrides first (see :func:`_publish`).
+
+    Each file is replaced atomically on its own; the pair is not. A refused
+    ``runtime.toml`` leaves both files as they were, and so does a failed
+    ``runtime.toml`` install, which puts the previous overrides back.
+    """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
         document, overrides = _compile(settings, session)
-        keep_newer = overrides_from_a_newer_build(_read_overrides(target))
+        previous_overrides = _read_overrides(target)
         _require_publishable(document, target)
-        if not keep_newer:
-            _publish_overrides(overrides, target)
-        _install(document, target)
+        _publish(
+            target,
+            document,
+            overrides,
+            publish_overrides=not overrides_from_a_newer_build(previous_overrides),
+            previous_overrides=previous_overrides,
+        )
     return target
 
 
@@ -928,7 +937,8 @@ def update(settings: config.Settings, session: Session, path: Path | None = None
     restart a video or scene for no configuration change. ``runtime.toml``
     and ``runtime-overrides.toml`` are compared separately, and a change to
     either, including the overrides file appearing or going, counts. An
-    overrides file from a newer build is left exactly as it is.
+    overrides file from a newer build is left exactly as it is. A refused or
+    failed ``runtime.toml`` leaves the previous pair (see :func:`_publish`).
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
@@ -946,11 +956,54 @@ def update(settings: config.Settings, session: Session, path: Path | None = None
             return False
         if document_changed:
             _require_publishable(document, target)
-        if overrides_changed:
-            _publish_overrides(overrides, target)
-        if document_changed:
-            _install(document, target)
+        _publish(
+            target,
+            document if document_changed else None,
+            overrides,
+            publish_overrides=overrides_changed,
+            previous_overrides=current_overrides,
+        )
         return True
+
+
+def _publish(
+    target: Path,
+    document: str | None,
+    overrides: str | None,
+    *,
+    publish_overrides: bool,
+    previous_overrides: str | None,
+) -> None:
+    """Publish the overrides, then ``runtime.toml``, keeping the previous pair on failure.
+
+    ``document`` is None when ``runtime.toml`` does not change. The two files
+    are separate atomic renames, so the guarantee is per file plus this: if
+    ``runtime.toml`` cannot be installed after the overrides were published,
+    the previous overrides are put back -- their exact bytes through the same
+    exclusive temporary, fsync, rename and directory fsync, or an unlink and
+    directory fsync when there were none -- before the error is raised. Only
+    a crash between the two renames, or a restore that fails too (said in the
+    error), leaves the new overrides beside the previous ``runtime.toml``: a
+    pair the service loads, since it skips overrides naming what that
+    document lacks, until the next successful save replaces it.
+    """
+    if publish_overrides:
+        _publish_overrides(overrides, target)
+    if document is None:
+        return
+    try:
+        _install(document, target)
+    except Exception as error:
+        if not publish_overrides:
+            raise
+        try:
+            _publish_overrides(previous_overrides, target)
+        except (RuntimeConfigError, OSError) as restore:
+            raise RuntimeConfigError(
+                f"{error}; the previous {OVERRIDES_FILENAME} could not be put back either "
+                f"({restore}), so it may not match runtime.toml until the next successful save"
+            ) from error
+        raise
 
 
 def _require_publishable(document: str, target: Path) -> None:

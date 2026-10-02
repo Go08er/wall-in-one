@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
+import time
 import zlib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -16,6 +18,9 @@ from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import adopted, capture_upgrade, pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem, Ownership
+
+#: The real frame grabber, before any fixture swaps in a fake one.
+original_run = stills._run
 
 
 @dataclass(frozen=True)
@@ -1331,3 +1336,37 @@ def test_existing_app_snapshot_prevents_startup_cleanup(
     assert capture_upgrade.prepare() == capture_upgrade.Result()
     assert fixture.capture.exists()
     assert cleanup_environment == []
+
+
+def test_a_slow_decoder_cannot_hold_startup_past_the_rebuild_budget(
+    tmp_path: Path, cleanup_environment: list[Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The audit's B-1: one encode that hangs would hold the service's preflight
+    (and the window) for a whole decoder timeout. The pass stops at its budget,
+    kills the decoder, keeps the original bound, and retries at the next start."""
+    fixture = _cleanup_fixture(tmp_path)
+    stills.write_sidecar(fixture.source, fixture.capture)
+    before = fixture.capture.read_bytes()
+    fast_render = stills._run
+    monkeypatch.setattr(stills, "_run", original_run)
+    # A real child that never produces a frame, run through the real ownership.
+    monkeypatch.setattr(
+        stills,
+        "_command",
+        lambda *_arguments: [sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    monkeypatch.setattr(stills, "GENERATE_TIMEOUT", 20.0)
+    monkeypatch.setattr(capture_upgrade, "REBUILD_BUDGET_SECONDS", 1.0, raising=False)
+
+    started = time.monotonic()
+    result = capture_upgrade.prepare()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 6.0, f"startup cleanup took {elapsed:.1f}s"
+    assert result.retained == 1 and result.migrated == 0
+    assert fixture.capture.read_bytes() == before
+    assert pairing.read_sidecar(fixture.source) == fixture.capture
+
+    monkeypatch.setattr(stills, "_run", fast_render)
+    assert capture_upgrade.prepare().migrated == 1, "the next start finishes the rebuild"
+    assert not fixture.capture.exists()

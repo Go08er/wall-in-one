@@ -11,13 +11,21 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from wall_in_one import config, file_io, paths, predecessor_process, runtime_config
+from wall_in_one import (
+    config,
+    file_io,
+    paths,
+    predecessor_process,
+    runtime_config,
+    worker_processes,
+)
 from wall_in_one.control import client
 from wall_in_one.library import (
     adopted,
@@ -35,6 +43,20 @@ from wall_in_one.providers.base import ProviderError
 
 LOGGER = logging.getLogger(__name__)
 RUNTIME_WAIT_SECONDS = 5.0
+#: The most one startup spends rebuilding captures, all of them together.
+#:
+#: This pass sits on the critical path of both the service (``ExecStartPre``)
+#: and the window, and a single ffmpeg run may take up to
+#: :data:`stills.GENERATE_TIMEOUT` (60 s), longer than the companion's whole
+#: direct preflight (55 s) and most of systemd's default 90 s start limit.
+#: 12 s leaves that preflight about 40 s for the rest of this pass (a library
+#: scan, one compile and up to :data:`RUNTIME_WAIT_SECONDS` for the runtime to
+#: confirm the new bytes) and for the deployed-upgrade check before it, and
+#: keeps a slow decoder from holding the window back noticeably; one normal
+#: keyframe grab takes well under a second, so a typical backlog still
+#: finishes in one start. What doesn't fit is deferred to the next start with
+#: its original kept, exactly like a failed rebuild.
+REBUILD_BUDGET_SECONDS = 12.0
 
 
 @dataclass(frozen=True)
@@ -194,7 +216,11 @@ def _has_other_still(entry: adopted.Authority, target: Path) -> bool:
     )
 
 
-def _rebuild(adoption: adopted.Adoption, entry: adopted.Authority) -> None:
+def _rebuild(
+    adoption: adopted.Adoption,
+    entry: adopted.Authority,
+    processes: worker_processes.Cancellation | None = None,
+) -> None:
     source = MediaItem(entry.source_path, Kind.VIDEO, 0, 0)
     target = stills.destination(entry.source_path, adoption.root)
     with stills.source_lifecycle_lock(source), _original(adoption, entry):
@@ -216,7 +242,7 @@ def _rebuild(adoption: adopted.Adoption, entry: adopted.Authority) -> None:
         if removed or not os.path.lexists(target):
             # generate takes its own source lock, uses atomic publication and
             # never overwrites a different source-sidecar choice.
-            stills.generate(entry.source_path, adoption.root)
+            stills.generate(entry.source_path, adoption.root, processes=processes)
         _validate_replacement(target)
     except OSError, ValueError, stills.StillError, ProviderError:
         if removed:
@@ -229,6 +255,47 @@ def _rebuild(adoption: adopted.Adoption, entry: adopted.Authority) -> None:
             except (OSError, ValueError, stills.StillError) as error:
                 LOGGER.warning("Could not restore the old still binding: %s", error)
         raise
+
+
+def _rebuild_within_budget(adoption: adopted.Adoption) -> set[Path]:
+    """Rebuild what fits in :data:`REBUILD_BUDGET_SECONDS`; return what must wait.
+
+    The returned captures (failed, or deferred because the budget ran out) are
+    kept and their old bindings restored, so they are retried at a later
+    start. When the budget expires mid-capture the decoder's whole process
+    group is killed, which a rebuild handles like any other failure.
+    """
+    failed: set[Path] = set()
+    deferred = 0
+    processes = worker_processes.Cancellation()
+    timer = threading.Timer(REBUILD_BUDGET_SECONDS, processes.cancel)
+    timer.daemon = True
+    timer.start()
+    try:
+        for entry in adoption.authorities:
+            if not os.path.lexists(entry.capture_path):
+                continue
+            if processes.cancelled():
+                failed.add(entry.capture_path)
+                deferred += 1
+                continue
+            try:
+                _rebuild(adoption, entry, processes)
+            except (OSError, ValueError, stills.StillError, ProviderError) as error:
+                failed.add(entry.capture_path)
+                LOGGER.warning(
+                    "Could not rebuild automatic still %s: %s", entry.capture_path, error
+                )
+    finally:
+        timer.cancel()
+    if deferred or processes.cancelled():
+        LOGGER.info(
+            "Rebuilding automatic stills took longer than %gs; %d more will be "
+            "rebuilt at the next start",
+            REBUILD_BUDGET_SECONDS,
+            deferred,
+        )
+    return failed
 
 
 def prepare() -> Result:
@@ -263,17 +330,7 @@ def prepare() -> Result:
                     raise OSError(fault)
                 protected.update(_strings(document))
 
-            failed: set[Path] = set()
-            for entry in adoption.authorities:
-                if not os.path.lexists(entry.capture_path):
-                    continue
-                try:
-                    _rebuild(adoption, entry)
-                except (OSError, ValueError, stills.StillError, ProviderError) as error:
-                    failed.add(entry.capture_path)
-                    LOGGER.warning(
-                        "Could not rebuild automatic still %s: %s", entry.capture_path, error
-                    )
+            failed = _rebuild_within_budget(adoption)
 
             session = Session(settings)
             try:

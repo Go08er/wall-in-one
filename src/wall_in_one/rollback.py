@@ -23,7 +23,8 @@ service is running, holds the profile lock for the whole run (the lock the
 companion's keep-alive waits for), copies every file it will change into one
 dated folder under the state directory, and then writes each file with its
 store's own atomic writer. It prints the two commands that put the copies
-back.
+back, also when a write fails part way, together with which files were
+already rewritten.
 """
 
 from __future__ import annotations
@@ -59,6 +60,12 @@ UNCHANGED_FORMATS: Final = (
 )
 BACKUP_PREFIX: Final = "rollback-to-0.1.4-"
 EXIT_REFUSED: Final = 1
+#: A write failed after the backup was made: some files may be rewritten.
+EXIT_INCOMPLETE: Final = 2
+#: How long ``--apply`` waits for the profile lock before refusing. Another
+#: Wall-in-One operation (a migration, an upgrade, a health sync) holds it
+#: only briefly; a person can simply run the tool again.
+PROFILE_LOCK_TIMEOUT_SECONDS: Final = 5.0
 STOP_FIRST: Final = (
     "Close Wall-in-One and stop its service first "
     "(systemctl --user stop wall-in-one.service), then run this again."
@@ -67,6 +74,28 @@ STOP_FIRST: Final = (
 
 class RollbackRefusedError(Exception):
     """The profile cannot be narrowed safely; nothing was written."""
+
+
+class RollbackIncompleteError(Exception):
+    """A write failed after the backup was made.
+
+    ``rewritten`` were written (or removed) before it; ``untouched`` were not.
+    Every one of them is in ``backup`` as it was before the run.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        backup: Path,
+        rewritten: tuple[Path, ...],
+        untouched: tuple[Path, ...],
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.backup = backup
+        self.rewritten = rewritten
+        self.untouched = untouched
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +277,10 @@ def _backup_directory(state: Path, when: datetime) -> Path:
             candidate.mkdir(mode=0o700)
         except FileExistsError:
             continue
+        except OSError as error:
+            raise RollbackRefusedError(
+                f"could not create a backup folder in {state} ({error})"
+            ) from error
         return candidate
     raise RollbackRefusedError(f"could not create a backup folder in {state}")
 
@@ -261,28 +294,45 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def _back_up(files: Sequence[Path], backup: Path) -> None:
-    """Copy each file byte for byte, flushed, before anything is written."""
-    for source in files:
-        destination = backup / source.name
-        shutil.copy2(source, destination)
-        with destination.open("rb") as handle:
-            if handle.read() != source.read_bytes():
-                raise RollbackRefusedError(f"the backup of {source.name} does not match it")
-            os.fsync(handle.fileno())
-    _fsync_directory(backup)
-    _fsync_directory(backup.parent)
+    """Copy each file byte for byte, flushed, before anything is written.
+
+    A failure refuses the run before any file is rewritten. Whatever was
+    already copied stays in the folder: a backup is never deleted.
+    """
+    try:
+        for source in files:
+            destination = backup / source.name
+            shutil.copy2(source, destination)
+            with destination.open("rb") as handle:
+                if handle.read() != source.read_bytes():
+                    raise RollbackRefusedError(
+                        f"the backup of {source.name} in {backup} does not match it; "
+                        "that folder was left as it is"
+                    )
+                os.fsync(handle.fileno())
+        _fsync_directory(backup)
+        _fsync_directory(backup.parent)
+    except OSError as error:
+        raise RollbackRefusedError(
+            f"could not back up the files into {backup} ({error}); that folder was left as it is"
+        ) from error
 
 
 def apply(*, when: datetime | None = None) -> tuple[Plan, Path | None]:
     """Narrow the profile; return the plan carried out and the backup folder.
 
-    The plan is made again under the profile lock, so it is what was on disk
-    then. A plan with nothing to do writes nothing, not even a backup folder.
+    The plan is made again under the profile lock, which is held until the
+    last write, so it is what was on disk then. A plan with nothing to do
+    writes nothing, not even a backup folder. Raises
+    :class:`RollbackRefusedError` before anything is rewritten, and
+    :class:`RollbackIncompleteError` when a write fails after the backup.
     """
     with ExitStack() as stack:
         try:
-            stack.enter_context(legacy_migration.profile_transaction())
-        except (OSError, TimeoutError) as error:
+            stack.enter_context(
+                legacy_migration.profile_transaction(timeout=PROFILE_LOCK_TIMEOUT_SECONDS)
+            )
+        except legacy_migration.MigrationError as error:
             raise RollbackRefusedError(
                 f"another Wall-in-One operation holds the profile ({error}); try again"
             ) from error
@@ -293,12 +343,25 @@ def apply(*, when: datetime | None = None) -> tuple[Plan, Path | None]:
         state = paths.app_state_dir()
         backup = _backup_directory(state, when or datetime.now())
         _back_up(plan.touched(), backup)
-        stack.enter_context(runtime_config.compiler_lock())
-        for step in plan.steps:
-            with state_file.mutation_lock(step.path, description=step.path.stem):
-                step.write()
-        if plan.overrides is not None:
-            runtime_config._publish_overrides(None, paths.runtime_config_path())
+        rewritten: list[Path] = []
+        try:
+            stack.enter_context(runtime_config.compiler_lock())
+            for step in plan.steps:
+                with state_file.mutation_lock(step.path, description=step.path.stem):
+                    step.write()
+                rewritten.append(step.path)
+            if plan.overrides is not None:
+                runtime_config._publish_overrides(None, paths.runtime_config_path())
+                rewritten.append(plan.overrides)
+        except Exception as error:
+            # Whatever failed (a store's local-io refusal, a lock timeout, a
+            # full disk), the person has to learn where the backup is.
+            raise RollbackIncompleteError(
+                str(error) or type(error).__name__,
+                backup=backup,
+                rewritten=tuple(rewritten),
+                untouched=tuple(path for path in plan.touched() if path not in rewritten),
+            ) from error
         return plan, backup
 
 
@@ -335,6 +398,21 @@ def _left_alone() -> list[str]:
     ]
 
 
+def _report_incomplete(error: RollbackIncompleteError) -> None:
+    def names(found: tuple[Path, ...]) -> str:
+        return ", ".join(path.name for path in found) or "none"
+
+    lines = [
+        f"wall-in-one-rollback: stopped part way: {error.reason}",
+        f"Already rewritten: {names(error.rewritten)}.",
+        f"Not rewritten: {names(error.untouched)}.",
+        f"Every one of them, as it was before this run, is in {error.backup}.",
+        "Fix the problem and run this again, or put them back:",
+        *(f"  {command}" for command in _restore_commands(error.backup)),
+    ]
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
@@ -353,6 +431,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except RollbackRefusedError as error:
         print(f"wall-in-one-rollback: refused, nothing was written: {error}", file=sys.stderr)
         return EXIT_REFUSED
+    except RollbackIncompleteError as error:
+        _report_incomplete(error)
+        return EXIT_INCOMPLETE
     if backup is None:
         print("\n".join(plan.describe()))
         return 0

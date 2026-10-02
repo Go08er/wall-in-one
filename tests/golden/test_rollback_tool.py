@@ -10,9 +10,11 @@ v0.1.4 source then opens, edits and compiles the result is
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import select
+import shutil
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -24,7 +26,7 @@ from tests.golden import harness, sandbox
 from tests.golden.harness import Allowance, Change, Profile
 from tests.golden.sandbox import Golden, decorate, read_json, write_json
 from tests.golden.test_downgrade import V0_1_4_FORMATS
-from wall_in_one import cli, config, paths, rollback, runtime_config
+from wall_in_one import cli, config, legacy_migration, paths, rollback, runtime_config
 from wall_in_one.library import displays, favourites, pairings, playlists, removals, schedules
 
 RULE_NAME: Final = "Evening lights"
@@ -351,3 +353,170 @@ def test_refuses_while_the_app_or_the_service_holds_its_lock(
     assert "Close Wall-in-One and stop its service first" in err, err
     assert harness.diff(before, harness.snapshot(golden.profile.home)) == []
     assert not list(golden.profile.app_state.glob(f"{rollback.BACKUP_PREFIX}*"))
+
+
+# -- the profile lock --------------------------------------------------------------------
+
+
+def _profile_lock() -> Path:
+    """The lock companion-rework's keep-alive waits for (its lib/keepalive.luau lockPaths)."""
+    marker = legacy_migration.marker_path()
+    lock = marker.with_name(f".{marker.name}.mutation.lock")
+    assert lock.name == ".legacy-migration-v1.json.mutation.lock"
+    return lock
+
+
+def _held_elsewhere(lock: Path) -> bool:
+    """Whether another process holds ``lock``: a child's non-blocking try fails.
+
+    The child never waits, and a lock it does get goes with it, so asking
+    cannot disturb the holder.
+    """
+    child = sandbox.REAL_POPEN(
+        (
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys\n"
+            "descriptor = os.open(sys.argv[1], os.O_RDWR)\n"
+            "try:\n"
+            "    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except BlockingIOError:\n"
+            "    sys.exit(3)\n",
+            str(lock),
+        ),
+        close_fds=True,
+    )
+    status = child.wait(timeout=10)
+    assert status in (0, 3), status
+    return status == 3
+
+
+def test_the_profile_lock_is_held_from_the_plan_to_the_last_write(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = _profile_lock()
+    held: dict[str, bool] = {}
+
+    def watched(name: str, real: Callable[..., Any]) -> Callable[..., Any]:
+        def call(*arguments: Any, **keywords: Any) -> Any:
+            held[name] = _held_elsewhere(lock)
+            return real(*arguments, **keywords)
+
+        return call
+
+    monkeypatch.setattr(rollback, "make_plan", watched("plan", rollback.make_plan))
+    for module in (playlists, schedules, displays):
+        name = module.__name__.rpartition(".")[2]
+        monkeypatch.setattr(module, "save", watched(name, module.save))
+    monkeypatch.setattr(
+        runtime_config,
+        "_publish_overrides",
+        watched("overrides", runtime_config._publish_overrides),
+    )
+    assert not _held_elsewhere(lock)
+
+    status, _out, err = _run(capsys, "--apply")
+
+    assert (status, err) == (0, "")
+    assert held == dict.fromkeys(("plan", "playlists", "schedules", "displays", "overrides"), True)
+    assert not _held_elsewhere(lock), "released when the run ends"
+
+
+def test_refuses_while_another_operation_holds_the_profile(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden, _playlist = in_use
+    monkeypatch.setattr(rollback, "PROFILE_LOCK_TIMEOUT_SECONDS", 0.2)
+
+    with _held_by_another_process(_profile_lock()):
+        before = harness.snapshot(golden.profile.home)
+        status, _out, err = _run(capsys, "--apply")
+        after = harness.snapshot(golden.profile.home)
+
+    assert status == rollback.EXIT_REFUSED
+    assert "refused, nothing was written" in err, err
+    assert "another Wall-in-One operation holds the profile" in err, err
+    assert harness.diff(before, after) == []
+    assert not list(golden.profile.app_state.glob(f"{rollback.BACKUP_PREFIX}*"))
+
+
+# -- failures part way ---------------------------------------------------------------------
+
+
+def test_a_write_that_fails_after_the_backup_says_what_was_rewritten_and_how_to_undo_it(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden, _playlist = in_use
+    state = golden.profile.app_state
+    touched = (*NARROWED, runtime_config.OVERRIDES_FILENAME)
+    before = {name: (state / name).read_bytes() for name in touched}
+
+    def full_disk(*_arguments: object, **_keywords: object) -> Path:
+        raise schedules.ScheduleError("local-io", "injected: no space left on device")
+
+    monkeypatch.setattr(schedules, "save", full_disk)
+
+    status, out, err = _run(capsys, "--apply")
+
+    assert status == rollback.EXIT_INCOMPLETE, (out, err)
+    (backup,) = state.glob(f"{rollback.BACKUP_PREFIX}*")
+    lines = err.splitlines()
+    assert lines[0] == (
+        "wall-in-one-rollback: stopped part way: local-io: injected: no space left on device"
+    )
+    assert "Already rewritten: playlists.json." in lines
+    assert "Not rewritten: schedules.json, displays.json, runtime-overrides.toml." in lines
+    assert f"Every one of them, as it was before this run, is in {backup}." in lines
+    assert "  systemctl --user stop wall-in-one.service" in lines
+    assert f"  cp -p -- {backup}/* {state}/" in lines
+    assert read_json(state / "playlists.json")["version"] == 1, "the first file was rewritten"
+    assert (state / "schedules.json").read_bytes() == before["schedules.json"]
+    assert {path.name: path.read_bytes() for path in backup.iterdir()} == before
+
+    # What the printed cp does puts the profile back as it was.
+    for copy in backup.iterdir():
+        shutil.copy2(copy, state / copy.name)
+    assert {name: (state / name).read_bytes() for name in touched} == before
+
+
+def test_a_backup_that_fails_refuses_before_anything_is_rewritten(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    golden, _playlist = in_use
+    state = golden.profile.app_state
+    copy = shutil.copy2
+
+    def full_disk(source: Path, destination: Path) -> object:
+        if Path(source).name == "schedules.json":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return copy(source, destination)
+
+    monkeypatch.setattr(shutil, "copy2", full_disk)
+    before = harness.snapshot(golden.profile.home)
+
+    status, _out, err = _run(capsys, "--apply")
+
+    assert status == rollback.EXIT_REFUSED
+    assert "refused, nothing was written: could not back up the files" in err, err
+    assert "No space left on device" in err and "that folder was left as it is" in err, err
+    (backup,) = state.glob(f"{rollback.BACKUP_PREFIX}*")
+    folder = f"{STATE}/{backup.name}"
+    harness.check_changes(
+        harness.diff(before, harness.snapshot(golden.profile.home)),
+        [
+            Allowance(folder, frozenset({"created"}), "the backup folder, never deleted"),
+            Allowance(
+                f"{folder}/playlists.json",
+                frozenset({"created"}),
+                "the one copy made before the failure",
+            ),
+        ],
+    )

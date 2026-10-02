@@ -97,17 +97,12 @@ def _subreaper(enabled: bool) -> None:
         pytest.skip("this kernel can't make the test a child subreaper")
 
 
-def _state(pid: int) -> str:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
-        return ""
-    return stat.rsplit(")", 1)[1].split()[0]
-
-
-def test_cancel_kills_a_group_member_whose_leader_already_exited(tmp_path: Path) -> None:
-    """The audit's B-3: the leader exits first; its same-group child keeps the
-    output pipes. Cancelling must still kill that child."""
+def test_a_group_member_left_holding_the_pipes_by_an_exited_leader_is_ended(
+    tmp_path: Path,
+) -> None:
+    """The audit's B-3: the leader exits first while its same-group child keeps the
+    output pipes. That child used to survive until a cancellation reached it; the
+    leader's exit now ends the run and the group with it, before the reap."""
     _subreaper(True)
     sleeper: int | None = None
     pool = ThreadPoolExecutor(max_workers=1)
@@ -119,28 +114,18 @@ def test_cancel_kills_a_group_member_whose_leader_already_exited(tmp_path: Path)
             [sys.executable, "-c", _LEADER, str(handoff)],
             timeout=60.0,
         )
-        _wait_until_started(cancellation)
-        with cancellation._lock:
-            (leader,) = cancellation._active
-        deadline = time.monotonic() + 5.0
-        while _state(leader) != "Z" or not handoff.exists() or not handoff.read_text():
-            assert time.monotonic() < deadline, "the leader never exited"
-            time.sleep(0.01)
+
+        completed = future.result(timeout=10)
+
+        assert completed.returncode == 0
         sleeper = int(handoff.read_text())
-        assert os.getpgid(sleeper) == leader, "the sleeper stayed in the leader's group"
-        assert _state(sleeper) in ("S", "R")
-
-        cancellation.cancel()
-        with pytest.raises(worker_processes.ProcessCancelledError):
-            future.result(timeout=5)
-
         deadline = time.monotonic() + 3.0
         reaped, status = os.waitpid(sleeper, os.WNOHANG)
         while reaped == 0 and time.monotonic() < deadline:
             time.sleep(0.02)
             reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        assert reaped == sleeper, "the sleeper outlived the cancellation"
-        assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+        assert reaped == sleeper, "the sleeper outlived its leader's run"
+        assert os.WIFSIGNALED(status)
         sleeper = None
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
@@ -197,3 +182,50 @@ def test_a_cancel_that_races_the_reap_never_signals_a_reaped_group(
         f"a group was signalled after its leader was reaped: {signalled}"
     )
     assert process.returncode == 0, "the worker reaped its own child afterwards"
+
+
+#: The leader starts ``sleep`` in its process group with every stdio stream
+#: closed (so nothing holds the captured pipes), records its pid, and exits 0.
+_DETACHED_LEADER: Final = """
+import subprocess, sys
+sleeper = subprocess.Popen(
+    ["sleep", "120"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+with open(sys.argv[1], "w") as handle:
+    handle.write(str(sleeper.pid))
+print("done")
+"""
+
+
+def test_a_successful_run_ends_what_its_leader_left_in_the_group(tmp_path: Path) -> None:
+    """Follow-up to sweep 4: communicate() used to reap the leader the moment its
+    pipes closed, so a same-group child that had let go of them outlived an
+    ordinary, successful run."""
+    _subreaper(True)
+    sleeper: int | None = None
+    handoff = tmp_path / "sleeper.pid"
+    try:
+        completed = worker_processes.Cancellation().run(
+            [sys.executable, "-c", _DETACHED_LEADER, str(handoff)], timeout=10.0
+        )
+
+        assert completed.returncode == 0 and completed.stdout == b"done\n"
+        sleeper = int(handoff.read_text())
+        deadline = time.monotonic() + 3.0
+        reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        while reaped == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+            reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        assert reaped == sleeper, "the leader's child outlived the run"
+        assert os.WIFSIGNALED(status)
+        sleeper = None
+    finally:
+        if sleeper is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(sleeper, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(sleeper, 0)
+        _subreaper(False)

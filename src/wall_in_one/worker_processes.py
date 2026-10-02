@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import selectors
 import signal
 import subprocess
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -140,28 +141,143 @@ def _signal_group(child: OwnedProcess, requested: signal.Signals) -> None:
     child.signal_group(requested)
 
 
-def _collect_after_signal(child: OwnedProcess) -> tuple[bytes, bytes]:
-    """Reap a signalled child without introducing another unbounded wait."""
-    process = child.process
+#: Read/write slice for :func:`exchange`.
+_CHUNK: Final = 65536
+#: How often the leader is checked once every pipe has closed.
+_EXIT_POLL_SECONDS: Final = 0.005
+
+
+def exchange(
+    owned: OwnedProcess,
+    *,
+    input: bytes | None = None,
+    timeout: float,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> subprocess.CompletedProcess[bytes]:
+    """Feed and read an owned child, then end its whole group, then reap it.
+
+    ``Popen.communicate`` reaps the leader as soon as its pipes close, after
+    which its group may no longer be signalled: a descendant that dropped the
+    pipes but stayed in the group would outlive the command. So this reads
+    the pipes itself and treats the leader's exit, observed without reaping
+    (:meth:`OwnedProcess.exited`), as completion: then
+    :meth:`OwnedProcess.end_group` terminates whatever it left in its group
+    and reaps it, and the output still buffered in the pipes is collected.
+
+    ``timeout`` is the whole command's deadline: on expiry the group is ended
+    (TERM, then KILL) and :class:`subprocess.TimeoutExpired` carries what was
+    read. ``cancelled`` is checked at least every :data:`POLL_SECONDS`; when it
+    is set the group is killed and :class:`ProcessCancelledError` raised. Every
+    wait is bounded, and a descendant that escaped the session can't hold the
+    caller: our pipe ends are closed regardless.
+    """
+    process = owned.process
+    selector = selectors.DefaultSelector()
+    chunks: dict[int, list[bytes]] = {}
+    readers: dict[int, str] = {}
+    for name in ("stdout", "stderr"):
+        stream = getattr(process, name)
+        if stream is not None:
+            descriptor = stream.fileno()
+            os.set_blocking(descriptor, False)
+            selector.register(descriptor, selectors.EVENT_READ)
+            chunks[descriptor] = []
+            readers[descriptor] = name
+    pending = memoryview(input if input is not None else b"")
+    written = 0
+    writer: int | None = None
+    if process.stdin is not None:
+        if len(pending):
+            writer = process.stdin.fileno()
+            os.set_blocking(writer, False)
+            selector.register(writer, selectors.EVENT_WRITE)
+        else:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+
+    def stop_writing() -> None:
+        nonlocal writer
+        if writer is not None:
+            selector.unregister(writer)
+            writer = None
+            if process.stdin is not None:
+                with contextlib.suppress(OSError):
+                    process.stdin.close()
+
+    def pump(wait: float) -> None:
+        nonlocal written
+        if not selector.get_map():
+            time.sleep(min(wait, _EXIT_POLL_SECONDS))
+            return
+        for key, _events in selector.select(wait):
+            descriptor = key.fd
+            if descriptor == writer:
+                try:
+                    written += os.write(descriptor, pending[written : written + _CHUNK])
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    stop_writing()  # The child stopped reading; its output still counts.
+                    continue
+                if written >= len(pending):
+                    stop_writing()
+                continue
+            try:
+                data = os.read(descriptor, _CHUNK)
+            except BlockingIOError:
+                continue
+            if data:
+                chunks[descriptor].append(data)
+            else:
+                selector.unregister(descriptor)
+
+    def drain(seconds: float) -> None:
+        stop_writing()
+        end = time.monotonic() + seconds
+        while selector.get_map() and (left := end - time.monotonic()) > 0:
+            pump(min(POLL_SECONDS, left))
+
+    def output(name: str) -> bytes:
+        return b"".join(
+            b"".join(chunks[descriptor]) for descriptor, reader in readers.items() if reader == name
+        )
+
+    deadline = time.monotonic() + timeout
     try:
-        return child.communicate(timeout=TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        _signal_group(child, signal.SIGKILL)
-        try:
-            return child.communicate(timeout=TERMINATE_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            # A descendant which deliberately escaped the session can retain
-            # a pipe, but it must not retain this worker.  Close our pipe ends;
-            # the direct child has already received SIGKILL.
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
-                    with contextlib.suppress(OSError):
-                        stream.close()
-            # Closing retained pipes lets us reap the direct child even when
-            # an escaped descendant kept its duplicate descriptors open.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                child.wait(TERMINATE_GRACE_SECONDS)
-            return b"", b""
+        while True:
+            if cancelled():
+                owned.end_group(immediate=True, grace=TERMINATE_GRACE_SECONDS)
+                raise ProcessCancelledError("worker subprocess was cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                owned.end_group(immediate=False, grace=TERMINATE_GRACE_SECONDS)
+                drain(TERMINATE_GRACE_SECONDS)
+                raise subprocess.TimeoutExpired(
+                    process.args,
+                    timeout,
+                    output=output("stdout"),
+                    stderr=output("stderr"),
+                )
+            if owned.exited():
+                break
+            pump(min(POLL_SECONDS, remaining))
+        # The leader has exited and is still unreaped, so its group id is
+        # still ours: end anything it left there, then reap it.
+        owned.end_group(immediate=False, grace=TERMINATE_GRACE_SECONDS)
+        drain(TERMINATE_GRACE_SECONDS)
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
+    returncode = process.returncode
+    return subprocess.CompletedProcess(
+        process.args,
+        returncode if returncode is not None else -int(signal.SIGKILL),
+        output("stdout"),
+        output("stderr"),
+    )
 
 
 class Cancellation:
@@ -210,7 +326,9 @@ class Cancellation:
 
         ``timeout`` remains the full command deadline.  The short polling
         interval is solely for observing owner cancellation and does not turn
-        a temporarily quiet child into a timeout.
+        a temporarily quiet child into a timeout. The command is done when its
+        leader exits: whatever it left running in its process group is ended
+        before the leader is reaped (see :func:`exchange`).
         """
         command = list(arguments)
         if self.cancelled():
@@ -224,45 +342,17 @@ class Cancellation:
         )
         child = OwnedProcess(process)
         if not self.register(child):
-            _collect_after_signal(child)
+            child.end_group(immediate=True, grace=TERMINATE_GRACE_SECONDS)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    with contextlib.suppress(OSError):
+                        stream.close()
             raise ProcessCancelledError("worker subprocess was cancelled")
-
-        deadline = time.monotonic() + timeout
-        pending_input = input
         try:
-            while True:
-                if self.cancelled():
-                    _signal_group(child, signal.SIGKILL)
-                    _collect_after_signal(child)
-                    raise ProcessCancelledError("worker subprocess was cancelled")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _signal_group(child, signal.SIGTERM)
-                    stdout, stderr = _collect_after_signal(child)
-                    raise subprocess.TimeoutExpired(
-                        command,
-                        timeout,
-                        output=stdout,
-                        stderr=stderr,
-                    )
-                try:
-                    stdout, stderr = child.communicate(
-                        input=pending_input,
-                        timeout=min(POLL_SECONDS, remaining),
-                    )
-                except subprocess.TimeoutExpired:
-                    # ``communicate`` retains a partially-written input buffer
-                    # and permits a follow-up call as long as input is not
-                    # supplied twice.
-                    pending_input = None
-                    continue
-                if self.cancelled():
-                    raise ProcessCancelledError("worker subprocess was cancelled")
-                return subprocess.CompletedProcess(
-                    command,
-                    process.returncode,
-                    stdout,
-                    stderr,
-                )
+            completed = exchange(child, input=input, timeout=timeout, cancelled=self.cancelled)
+            completed.args = command
+            if self.cancelled():
+                raise ProcessCancelledError("worker subprocess was cancelled")
+            return completed
         finally:
             self.unregister(child)

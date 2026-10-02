@@ -5,17 +5,27 @@ conftest's per-test XDG isolation, in a run started from a developer shell.
 Its next compile resolved ``paths.runtime_config_path()`` to the real
 profile. conftest now makes a session-private temporary root the process's
 baseline environment, so every restore lands there.
+
+None of these tests undoes conftest's isolation itself. What a restore
+returns to is the baseline, which a module-scoped fixture sees (it runs
+before the per-test isolation), and a child process started from a stand-in
+developer shell imports conftest and then restores with a fresh
+``MonkeyPatch().undo()`` and a ``MonkeyPatch.context()`` exit.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any, Final
 
 import pytest
 
@@ -35,58 +45,178 @@ RESOLVERS: dict[str, Callable[[], Path]] = {
     "runtime_config_path": paths.runtime_config_path,
     "runtime_socket_path": paths.runtime_socket_path,
 }
+#: Everything the session baseline sets or drops.
+WATCHED: Final = (
+    *conftest.SESSION_LAYOUT,
+    *conftest.SESSION_UNSET,
+    *conftest.SESSION_SET,
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
+)
+_BASELINE: dict[str, Any] = {}
 
 
-def _session_root() -> Path:
-    root = Path(os.environ[conftest.SESSION_ROOT_ENV])
-    assert root == conftest.SESSION_ROOT
-    return root
+@pytest.fixture(scope="module", autouse=True)
+def session_baseline() -> None:
+    """The environment between tests: what undoing a test's isolation returns to.
+
+    Module-scoped, so it runs before conftest's per-test isolation is set up.
+    """
+    _BASELINE["environ"] = {name: os.environ.get(name) for name in WATCHED}
+    _BASELINE["resolved"] = {name: str(resolve()) for name, resolve in RESOLVERS.items()}
 
 
-def _assert_in_the_session_sandbox() -> None:
-    root = _session_root()
-    for name, resolve in RESOLVERS.items():
-        resolved = resolve()
-        assert resolved.is_relative_to(root), (name, resolved)
+def _assert_sandboxed(root: Path, seen: dict[str, Any], *, outside: Path | None = None) -> None:
+    """``seen`` (``environ`` and ``resolved``) is the session sandbox below ``root``."""
+    for name, resolved in seen["resolved"].items():
+        assert Path(resolved).is_relative_to(root), (name, resolved)
         # Not the real home itself: in the Nix sandbox the build user's home is
         # /build, which also holds the temporary directory.
         for guarded in conftest.GUARDED_ROOTS:
-            assert not resolved.is_relative_to(guarded), (name, resolved)
+            assert not Path(resolved).is_relative_to(guarded), (name, resolved)
+        if outside is not None:
+            assert not Path(resolved).is_relative_to(outside), (name, resolved)
+    environ = seen["environ"]
+    for variable, directory in conftest.SESSION_LAYOUT.items():
+        assert environ[variable] == str(root / directory), variable
     for variable in conftest.SESSION_UNSET:
-        assert variable not in os.environ, variable
-    bus = os.environ["DBUS_SESSION_BUS_ADDRESS"]
-    assert bus.startswith("unix:path=")
-    dead = Path(bus.removeprefix("unix:path="))
-    assert dead.is_relative_to(root) and not dead.exists(), "a dead address, never the real bus"
+        assert environ[variable] is None, variable
+    for variable, value in conftest.SESSION_SET.items():
+        assert environ[variable] == value, variable
+    runtime = root / conftest.SESSION_LAYOUT["XDG_RUNTIME_DIR"]
+    for variable, dead in (
+        ("DBUS_SESSION_BUS_ADDRESS", conftest.DEAD_SESSION_BUS),
+        ("DBUS_SYSTEM_BUS_ADDRESS", conftest.DEAD_SYSTEM_BUS),
+    ):
+        assert environ[variable] == f"unix:path={runtime / dead}", "a dead address, never a bus"
+        assert not (runtime / dead).exists(), variable
 
 
-def test_undoing_the_tests_own_monkeypatch_lands_in_the_session_sandbox(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_the_session_baseline_is_the_sandbox() -> None:
+    """What ``monkeypatch.undo()`` would restore, seen without calling it."""
+    root = Path(os.environ[conftest.SESSION_ROOT_ENV])
+    assert root == conftest.SESSION_ROOT
+    _assert_sandboxed(root, _BASELINE)
+
+
+#: A process started from a developer shell: it imports conftest, as pytest
+#: does first, then restores the environment twice and reports what it saw.
+RESTORING_CHILD: Final = """
+import json, os, sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from tests import conftest  # the session baseline is set up here
+
+import pytest
+from wall_in_one import paths
+
+names, watched = json.loads(sys.argv[2]), json.loads(sys.argv[3])
+
+
+def seen():
+    resolved = {name: str(getattr(paths, name)()) for name in names if name != "home"}
+    return {
+        "environ": {name: os.environ.get(name) for name in watched},
+        "resolved": {"home": str(Path.home()), **resolved},
+    }
+
+
+report = {"root": str(conftest.SESSION_ROOT), "baseline": seen()}
+patch = pytest.MonkeyPatch()
+patch.setenv("HOME", "/nonexistent/home")
+patch.setenv("XDG_STATE_HOME", "/nonexistent/state")
+patch.delenv("XDG_CONFIG_HOME")
+patch.delenv("DBUS_SESSION_BUS_ADDRESS")
+patch.undo()
+report["after MonkeyPatch().undo()"] = seen()
+with pytest.MonkeyPatch.context() as context:
+    context.setenv("XDG_RUNTIME_DIR", "/nonexistent/run")
+    context.setenv("WAYLAND_DISPLAY", "wayland-1")
+report["after a MonkeyPatch.context() exit"] = seen()
+print(json.dumps(report))
+"""
+
+
+def test_from_a_developer_shell_every_restore_lands_in_the_session_sandbox(
+    tmp_path: Path,
 ) -> None:
-    """The incident's exact move: it drops conftest's per-test isolation too."""
-    assert paths.app_state_dir().is_relative_to(tmp_path), "per-test isolation is on"
-    monkeypatch.undo()
-    _assert_in_the_session_sandbox()
+    """The incident's setting: a bare pytest from a shell pointing at a real profile.
 
+    The stand-in shell's HOME, XDG directories, buses, Wayland and niri
+    addresses are what a desktop session exports. After conftest's import, a
+    fresh ``MonkeyPatch().undo()`` and a context exit both land in the
+    child's session sandbox, and nothing is written in the stand-in.
+    """
+    shell = tmp_path / "developer"
+    home = shell / "home"
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in (*WATCHED, conftest.SESSION_ROOT_ENV, "WIO_TEST_SESSION_PID")
+    }
+    environment.update(
+        HOME=str(home),
+        XDG_CONFIG_HOME=str(home / ".config"),
+        XDG_STATE_HOME=str(home / ".local" / "state"),
+        XDG_CACHE_HOME=str(home / ".cache"),
+        XDG_DATA_HOME=str(home / ".local" / "share"),
+        XDG_RUNTIME_DIR=str(shell / "run"),
+        DBUS_SESSION_BUS_ADDRESS=f"unix:path={shell / 'run' / 'bus'}",
+        DBUS_SYSTEM_BUS_ADDRESS=f"unix:path={shell / 'system_bus_socket'}",
+        WAYLAND_DISPLAY="wayland-1",
+        NIRI_SOCKET=str(shell / "run" / "niri.sock"),
+    )
+    for variable in (
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        Path(environment[variable]).mkdir(parents=True, exist_ok=True)
+    (shell / "run").mkdir(mode=0o700)
+    repository = Path(conftest.__file__).resolve().parents[1]
 
-def test_a_fresh_monkeypatch_or_context_restores_into_the_session_sandbox(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.undo()  # back to the session baseline first
-    elsewhere = pytest.MonkeyPatch()
-    elsewhere.setenv("XDG_STATE_HOME", "/nonexistent/state")
-    elsewhere.delenv("XDG_CONFIG_HOME")
-    elsewhere.undo()
-    _assert_in_the_session_sandbox()
-    with pytest.MonkeyPatch.context() as context:
-        context.setenv("HOME", "/nonexistent/home")
-    _assert_in_the_session_sandbox()
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            RESTORING_CHILD,
+            str(repository),
+            json.dumps(list(RESOLVERS)),
+            json.dumps(list(WATCHED)),
+        ),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout.splitlines()[-1])
+    root = Path(report.pop("root"))
+    assert root.name.startswith("wio-test-session-") and not root.is_relative_to(shell)
+    assert root != conftest.SESSION_ROOT, "the child's own session, not this one"
+    assert list(report) == [
+        "baseline",
+        "after MonkeyPatch().undo()",
+        "after a MonkeyPatch.context() exit",
+    ]
+    for moment, seen in report.items():
+        try:
+            _assert_sandboxed(root, seen, outside=shell)
+        except AssertionError as error:
+            raise AssertionError(f"{moment}: {error}") from error
+    assert [path for path in shell.rglob("*") if not path.is_dir()] == [], "nothing written there"
+    assert not root.exists(), "the session root goes with its process"
 
 
 def test_the_session_runtime_directory_is_private() -> None:
-    sandbox_runtime = _session_root() / conftest.SESSION_LAYOUT["XDG_RUNTIME_DIR"]
+    sandbox_runtime = conftest.SESSION_ROOT / conftest.SESSION_LAYOUT["XDG_RUNTIME_DIR"]
     assert stat.S_IMODE(sandbox_runtime.stat().st_mode) == 0o700
-    assert stat.S_IMODE(_session_root().stat().st_mode) == 0o700
+    assert stat.S_IMODE(conftest.SESSION_ROOT.stat().st_mode) == 0o700
 
 
 @pytest.fixture

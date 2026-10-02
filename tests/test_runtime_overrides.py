@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from wall_in_one import config, runtime_config
+from wall_in_one import cli, config, paths, runtime_config
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import displays, playlists
@@ -711,6 +711,51 @@ def test_a_folder_sync_failure_after_publication_keeps_the_new_pair(
     assert "may not survive a power loss" in str(caught.value)
     assert runtime_config.update(changed, session) is False, "nothing is left to publish"
     session.shutdown()
+
+
+def test_write_config_adopts_a_pair_published_without_its_folder_sync(
+    library: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The service-start compiler: written, with a warning, not "could not be compiled"."""
+    settings = config.Settings(roots=(library,), scan_workshop=False, cycle_interval=300)
+    config.save(settings)
+    store = playlists.Store.open()
+    made = store.create("Evening")
+    store.add(made.id, library / "one.png")
+    store.set_rotation(made.id, cycle_interval=60)
+    assert cli.main(["--write-config"]) == 0
+    target = paths.runtime_config_path()
+    assert _intervals(target) == (300, 60)
+    config.save(replace(settings, cycle_interval=600))
+    playlists.Store.open().set_rotation(made.id, cycle_interval=120)
+
+    renamed: list[str] = []
+    real_replace, real_fsync = os.replace, os.fsync
+
+    def rename(source: Any, destination: Any) -> None:
+        real_replace(source, destination)
+        renamed.append(Path(destination).name)
+
+    def sync(descriptor: int) -> None:
+        if renamed[-1:] == ["runtime.toml"] and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            renamed.append("(sync refused)")
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "replace", rename)
+    monkeypatch.setattr(os, "fsync", sync)
+    capsys.readouterr()
+    status = cli.main(["--write-config"])
+    monkeypatch.setattr(os, "replace", real_replace)
+    monkeypatch.setattr(os, "fsync", real_fsync)
+
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert "(sync refused)" in renamed
+    assert out == f"wrote: {target}\n"
+    assert err.startswith("warning: runtime.toml was saved, but syncing its folder failed"), err
+    assert "could not be compiled" not in err
+    assert _intervals(target) == (600, 120)
 
 
 def test_a_restore_that_is_put_back_but_not_synced_says_so(

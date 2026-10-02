@@ -27,10 +27,14 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from wall_in_one import __version__, paths
 from wall_in_one.ui.window_services import UI_KINDS
+
+if TYPE_CHECKING:
+    from wall_in_one import config
+    from wall_in_one.session import Session
 
 EXIT_TEMPFAIL: Final = 75
 EXIT_CONFIG: Final = 78
@@ -405,6 +409,22 @@ def _run_graphical_startup_upgrade(
     return None
 
 
+def _update_runtime(settings: config.Settings, session: Session) -> bool:
+    """``runtime_config.update``, adopting a pair published without its folder sync.
+
+    Every reader already sees the new files, so they count as written; that
+    they may not survive a power loss is said as a warning, never as a
+    compile failure that kept the last-known-good document.
+    """
+    from wall_in_one import runtime_config
+
+    try:
+        return runtime_config.update(settings, session)
+    except runtime_config.RuntimeConfigNotDurableError as error:
+        print(f"warning: {error}", file=sys.stderr)
+        return True
+
+
 def _warn_unknown_settings(unknown_keys: Sequence[str]) -> None:
     """Say which settings the headless path skipped, without failing on them.
 
@@ -457,7 +477,7 @@ def _write_runtime_config() -> int:
                 # journal is still present in ``authoring_faults`` below and
                 # therefore fails publication closed.
                 session.refresh(mutate_removals=False)
-                changed = runtime_config.update(settings, session)
+                changed = _update_runtime(settings, session)
             finally:
                 session.shutdown()
     except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
@@ -591,7 +611,7 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                 # Publish that newer authoring truth, but never consume an old
                 # runtime observation: it may be precisely what Clear+retry
                 # was intended to retract.
-                document_changed = runtime_config.update(settings, session)
+                document_changed = _update_runtime(settings, session)
                 reload_needed = True
                 refresh_only = True
             else:
@@ -611,7 +631,7 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                     # Always render, even when every marker was already in the
                     # store. This repairs the split state left by a previous
                     # compiler failure instead of pinning it forever.
-                    document_changed = runtime_config.update(settings, session)
+                    document_changed = _update_runtime(settings, session)
                     reload_needed = document_changed or any(
                         not report.durable for report in inventory.reports
                     )

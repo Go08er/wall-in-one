@@ -6,11 +6,13 @@ import contextlib
 import ctypes
 import os
 import signal
+import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import pytest
 
@@ -149,3 +151,49 @@ def test_cancel_kills_a_group_member_whose_leader_already_exited(tmp_path: Path)
             with contextlib.suppress(ChildProcessError):
                 os.waitpid(sleeper, 0)
         _subreaper(False)
+
+
+def test_a_cancel_that_races_the_reap_never_signals_a_reaped_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep 3 S-6: the canceller passes its ownership check, then is delayed at
+    the signal while the worker finishes communicate() and reaps the leader.
+    Its group id would then name nothing it owns. The signal is dry here and
+    the canceller waits at that boundary until reaping could have won."""
+    cancellation = worker_processes.Cancellation()
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(
+        cancellation.run,
+        [sys.executable, "-c", "import time; time.sleep(0.3)"],
+        timeout=10.0,
+    )
+    _wait_until_started(cancellation)
+    with cancellation._lock:
+        (owned,) = cancellation._active.values()
+    # Before the fix the registry held the Popen itself.
+    held: object = owned
+    process = cast("subprocess.Popen[bytes]", getattr(held, "process", held))
+    canceller = threading.Thread(target=cancellation.cancel)
+    signalled: list[tuple[str, int | None]] = []
+
+    def dry_killpg(_group: int, _signal: int) -> None:
+        if threading.current_thread() is canceller:
+            deadline = time.monotonic() + 1.5
+            while process.returncode is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+        # Never sent: only what the leader's state was at the signal is recorded.
+        signalled.append((threading.current_thread().name, process.returncode))
+
+    monkeypatch.setattr(os, "killpg", dry_killpg)
+    canceller.start()
+    canceller.join(timeout=5)
+    with contextlib.suppress(worker_processes.ProcessCancelledError):
+        future.result(timeout=5)
+    pool.shutdown(wait=True, cancel_futures=True)
+
+    assert not canceller.is_alive()
+    assert signalled, "the cancellation tried to signal the group"
+    assert all(returncode is None for _name, returncode in signalled), (
+        f"a group was signalled after its leader was reaped: {signalled}"
+    )
+    assert process.returncode == 0, "the worker reaped its own child afterwards"

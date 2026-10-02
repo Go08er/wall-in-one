@@ -32,7 +32,6 @@ is how a scene gets a representative without anything appearing on screen.
 from __future__ import annotations
 
 import contextlib
-import os
 import shutil
 import signal
 import stat
@@ -274,28 +273,29 @@ class SceneRenderer:
         self._scene = ""
         if process is None or process.poll() is not None:
             return
-        _end(process)
+        _end(worker_processes.OwnedProcess(process))
 
 
-def _end(process: subprocess.Popen[bytes], *, immediate: bool = False) -> None:
+def _end(owned: worker_processes.OwnedProcess, *, immediate: bool = False) -> None:
     """Ask the process group to stop, then insist.
 
     The group rather than the process: `linux-wallpaperengine` is started in
-    its own session precisely so that whatever it spawned goes with it.
+    its own session precisely so that whatever it spawned goes with it. The
+    group is signalled only while its leader is unreaped (see
+    :meth:`worker_processes.OwnedProcess.signal_group`), so a leader already
+    reaped by ``_wait_for`` never turns its freed id into someone else's group.
     """
     requested = signal.SIGKILL if immediate else signal.SIGTERM
     wait_timeout = CANCEL_WAIT_TIMEOUT if immediate else TERMINATE_TIMEOUT
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(process.pid, requested)
+    owned.signal_group(requested)
     try:
-        process.wait(timeout=wait_timeout)
+        owned.wait(wait_timeout)
         return
     except subprocess.TimeoutExpired:
         pass
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
+    owned.signal_group(signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=wait_timeout)
+        owned.wait(wait_timeout)
 
 
 def screenshot(
@@ -353,21 +353,24 @@ def screenshot(
     except OSError as error:
         raise SceneError(f"cannot start linux-wallpaperengine: {error}") from error
 
-    if processes is not None and not processes.register(process):
-        _end(process, immediate=True)
+    # One owner for the child: the cancellation thread signals through it and
+    # this thread reaps through it, so neither can act on a freed group id.
+    owned = worker_processes.OwnedProcess(process)
+    if processes is not None and not processes.register(owned):
+        _end(owned, immediate=True)
         raise SceneError(f"cancelled screenshot of the scene {scene}")
 
     try:
         _wait_for(
             destination,
-            process,
+            owned,
             timeout,
             cancelled=processes.cancelled if processes is not None else None,
         )
     finally:
         if processes is not None:
-            processes.unregister(process)
-        _end(process, immediate=bool(processes is not None and processes.cancelled()))
+            processes.unregister(owned)
+        _end(owned, immediate=bool(processes is not None and processes.cancelled()))
 
     if not destination.is_file() or destination.stat().st_size == 0:
         if not prepared_output:
@@ -408,7 +411,7 @@ def capture_size(
 
 def _wait_for(
     destination: Path,
-    process: subprocess.Popen[bytes],
+    process: worker_processes.OwnedProcess,
     timeout: float,
     *,
     cancelled: Callable[[], bool] | None = None,

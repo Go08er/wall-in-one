@@ -20,7 +20,8 @@ import subprocess
 import threading
 import time
 from collections.abc import Sequence
-from typing import Final
+from dataclasses import dataclass, field
+from typing import Any, Final
 
 # A normal completion is noticed promptly even without cancellation.  More
 # importantly, this is the fallback cancellation latency if a test double does
@@ -33,35 +34,78 @@ class ProcessCancelledError(Exception):
     """The owner stopped while a child was queued or running."""
 
 
-def _signal_group(process: subprocess.Popen[bytes], requested: signal.Signals) -> None:
-    """Signal the child's whole process group, even if its leader has exited.
+@dataclass(slots=True, eq=False)
+class OwnedProcess:
+    """One owned child and the lock that keeps its group id ours.
 
-    The group is the child's own (``start_new_session``), so its id is the
-    leader's pid. A leader that has exited but has not been reaped is a zombie
-    that still holds that pid, and Linux never hands out a pid while a zombie,
-    or any live group member, still uses it as a pid or group id. So while
-    ``returncode`` is unset (this module has not reaped the leader), the group
-    id can only name this child's group, and ``killpg`` reaches every member
-    still in it, including descendants that outlived the leader and keep its
-    pipes open. That is why this must not call ``poll()``: reaping the leader
-    here is what used to skip the group, and would free the pid for reuse.
-    Once the leader has been reaped, the id may belong to someone else, so the
-    group is left alone; every path below signals before it reaps.
+    Every call that can reap the leader (``poll``, ``wait``, ``communicate``)
+    goes through these methods, which hold ``lock``, and so does the
+    check-and-signal in :meth:`signal_group`. The leader therefore can't be
+    reaped between seeing it unreaped and signalling its group, whichever
+    thread does which.
+
+    A pidfd would not do instead: ``pidfd_send_signal`` reaches the leader
+    only, not its group, and holding a pidfd doesn't keep the numeric id
+    reserved once the leader is reaped. The unreaped leader is the reservation,
+    so reaping and signalling must not overlap.
     """
-    if process.returncode is not None:
-        return
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(process.pid, requested)
+
+    process: subprocess.Popen[bytes]
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    def signal_group(self, requested: signal.Signals) -> None:
+        """Signal the child's whole process group, even if its leader has exited.
+
+        The group is the child's own (``start_new_session``), so its id is the
+        leader's pid. A leader that has exited but has not been reaped is a
+        zombie that still holds that pid, and Linux never hands out a pid while
+        a zombie, or any live group member, still uses it as a pid or group id.
+        So while the leader is unreaped, the group id can only name this
+        child's group, and ``killpg`` reaches every member still in it,
+        including descendants that outlived the leader and keep its pipes open.
+
+        The check and the signal happen under ``lock``, which every reap also
+        holds, so another thread can't reap the leader in between: a canceller
+        delayed after the check still signals a group this module owns. Once
+        the leader has been reaped (``returncode`` set) the id may belong to
+        someone else, and the group is left alone.
+        """
+        with self.lock:
+            if self.process.returncode is not None:
+                return
+            with contextlib.suppress(OSError, ProcessLookupError):
+                os.killpg(self.process.pid, requested)
+
+    def poll(self) -> int | None:
+        with self.lock:
+            return self.process.poll()
+
+    def wait(self, timeout: float) -> int:
+        with self.lock:
+            return self.process.wait(timeout=timeout)
+
+    def communicate(self, **keywords: Any) -> tuple[bytes, bytes]:
+        with self.lock:
+            return self.process.communicate(**keywords)
 
 
-def _collect_after_signal(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+def _signal_group(child: OwnedProcess, requested: signal.Signals) -> None:
+    child.signal_group(requested)
+
+
+def _collect_after_signal(child: OwnedProcess) -> tuple[bytes, bytes]:
     """Reap a signalled child without introducing another unbounded wait."""
+    process = child.process
     try:
-        return process.communicate(timeout=TERMINATE_GRACE_SECONDS)
+        return child.communicate(timeout=TERMINATE_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        _signal_group(process, signal.SIGKILL)
+        _signal_group(child, signal.SIGKILL)
         try:
-            return process.communicate(timeout=TERMINATE_GRACE_SECONDS)
+            return child.communicate(timeout=TERMINATE_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             # A descendant which deliberately escaped the session can retain
             # a pipe, but it must not retain this worker.  Close our pipe ends;
@@ -73,7 +117,7 @@ def _collect_after_signal(process: subprocess.Popen[bytes]) -> tuple[bytes, byte
             # Closing retained pipes lets us reap the direct child even when
             # an escaped descendant kept its duplicate descriptors open.
             with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=TERMINATE_GRACE_SECONDS)
+                child.wait(TERMINATE_GRACE_SECONDS)
             return b"", b""
 
 
@@ -83,34 +127,34 @@ class Cancellation:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
-        self._active: dict[int, subprocess.Popen[bytes]] = {}
+        self._active: dict[int, OwnedProcess] = {}
 
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
-    def register(self, process: subprocess.Popen[bytes]) -> bool:
-        """Track ``process`` unless shutdown won the spawn/register race."""
+    def register(self, child: OwnedProcess) -> bool:
+        """Track ``child`` unless shutdown won the spawn/register race."""
         with self._lock:
             if self._cancelled.is_set():
                 accepted = False
             else:
-                self._active[process.pid] = process
+                self._active[child.process.pid] = child
                 accepted = True
         if not accepted:
-            _signal_group(process, signal.SIGKILL)
+            _signal_group(child, signal.SIGKILL)
         return accepted
 
-    def unregister(self, process: subprocess.Popen[bytes]) -> None:
+    def unregister(self, child: OwnedProcess) -> None:
         with self._lock:
-            self._active.pop(process.pid, None)
+            self._active.pop(child.process.pid, None)
 
     def cancel(self) -> None:
         """Refuse new children and wake every currently running child."""
         self._cancelled.set()
         with self._lock:
             active = tuple(self._active.values())
-        for process in active:
-            _signal_group(process, signal.SIGKILL)
+        for child in active:
+            _signal_group(child, signal.SIGKILL)
 
     def run(
         self,
@@ -135,8 +179,9 @@ class Cancellation:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        if not self.register(process):
-            _collect_after_signal(process)
+        child = OwnedProcess(process)
+        if not self.register(child):
+            _collect_after_signal(child)
             raise ProcessCancelledError("worker subprocess was cancelled")
 
         deadline = time.monotonic() + timeout
@@ -144,13 +189,13 @@ class Cancellation:
         try:
             while True:
                 if self.cancelled():
-                    _signal_group(process, signal.SIGKILL)
-                    _collect_after_signal(process)
+                    _signal_group(child, signal.SIGKILL)
+                    _collect_after_signal(child)
                     raise ProcessCancelledError("worker subprocess was cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    _signal_group(process, signal.SIGTERM)
-                    stdout, stderr = _collect_after_signal(process)
+                    _signal_group(child, signal.SIGTERM)
+                    stdout, stderr = _collect_after_signal(child)
                     raise subprocess.TimeoutExpired(
                         command,
                         timeout,
@@ -158,7 +203,7 @@ class Cancellation:
                         stderr=stderr,
                     )
                 try:
-                    stdout, stderr = process.communicate(
+                    stdout, stderr = child.communicate(
                         input=pending_input,
                         timeout=min(POLL_SECONDS, remaining),
                     )
@@ -177,4 +222,4 @@ class Cancellation:
                     stderr,
                 )
         finally:
-            self.unregister(process)
+            self.unregister(child)

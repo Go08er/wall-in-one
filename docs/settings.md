@@ -79,11 +79,13 @@ and 0.1.4 can't use a file with one at all.
 
 - New preferences for the window itself (glass style, opacity, frost,
   thumbnail size, the page to reopen) go in `ui.toml`, beside
-  `settings.toml`. The classic interface never reads or writes it. The new
-  interface (`--ui=next`) reads it when its window opens and writes it only
-  when you change the window style, an opacity or frost dial, or the
-  thumbnail size: never on start, while idle or on close. It does not save
-  the page to reopen or the window size.
+  `settings.toml`. The classic interface reads it for one thing, whether you
+  dismissed the Tidy up card after an update (`tidy_offer_dismissed`), and
+  writes it only when you do. The new interface (`--ui=next`) reads it when
+  its window opens and writes it only when you change the window style, an
+  opacity or frost dial, or the thumbnail size. Neither writes it on start,
+  while idle or on close, and neither saves the page to reopen or the window
+  size.
 - New wallpaper behavior goes in a versioned authoring store, with a version
   bump.
 

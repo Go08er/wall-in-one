@@ -387,3 +387,16 @@ def test_todays_ui_never_reads_or_writes_ui_toml() -> None:
         if re.search(r"ui_prefs\.(save|update|mutate)\b", (package / user).read_text())
     ]
     assert writers == ["ui/next/prefs.py"], "only the new UI's keeper writes ui.toml"
+
+
+def test_the_tidy_offer_dismissal_is_written_only_once_true() -> None:
+    """Version 1 gained this flag before any release shipped ui.toml."""
+    ui_prefs.save(UiPrefs(frost=0.3))
+    assert "tidy_offer_dismissed" not in tomllib.loads(paths.ui_prefs_path().read_text())
+
+    ui_prefs.update({"tidy_offer_dismissed": True})
+
+    document = tomllib.loads(paths.ui_prefs_path().read_text())
+    assert document["tidy_offer_dismissed"] is True and document["version"] == 1
+    assert ui_prefs.load().prefs == UiPrefs(frost=0.3, tidy_offer_dismissed=True)
+    assert UiPrefs.from_mapping({"tidy_offer_dismissed": "yes"}).tidy_offer_dismissed is False

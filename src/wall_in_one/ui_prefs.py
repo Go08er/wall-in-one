@@ -3,8 +3,10 @@
 ``settings.toml`` is frozen (see :mod:`wall_in_one.config`): it has no version,
 so a new key there would lock older builds out of settings edits. Preferences
 that only the window cares about live here instead, in
-``$XDG_CONFIG_HOME/wall-in-one/ui.toml``. Today's UI never reads or writes this
-file, and nothing in it may ever affect the wallpaper service.
+``$XDG_CONFIG_HOME/wall-in-one/ui.toml``. The classic UI only reads it, and
+writes it for one reason: the user dismissing the one-time Tidy up card.
+Opening or idling never creates it, and nothing in it may ever affect the
+wallpaper service.
 
 The contract every build keeps:
 
@@ -23,6 +25,8 @@ The contract every build keeps:
   keep writing TOML 1.0 so an older build can still parse the file and see
   that its version is newer.
 * Any new field, or new value for an existing field, bumps ``version``.
+  ``tidy_offer_dismissed`` joined version 1 before any release shipped
+  ui.toml (0.2.0 is the first), so no build knows a version 1 without it.
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ _SCALAR_KEYS: Final[tuple[str, ...]] = (
     "frost",
     "thumbnail_size",
     "last_page",
+    "tidy_offer_dismissed",
 )
 KNOWN_KEYS: Final = frozenset((*_SCALAR_KEYS, *_GLASS_TABLES))
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+")
@@ -102,6 +107,10 @@ def _unit(value: object, default: float) -> float:
     return default
 
 
+def _flag(value: object, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
 def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
     return value if isinstance(value, str) and value in choices else default
 
@@ -139,6 +148,8 @@ class UiPrefs:
     thumbnail_size: str = "large"
     #: The page to reopen, as the new UI names it.
     last_page: str = "library"
+    #: The user dismissed the one-time Tidy up card shown after an update.
+    tidy_offer_dismissed: bool = False
 
     def validated(self) -> UiPrefs:
         """Replace each invalid field with its own default."""
@@ -156,6 +167,7 @@ class UiPrefs:
                 "frost": self.frost,
                 "thumbnail_size": self.thumbnail_size,
                 "last_page": self.last_page,
+                "tidy_offer_dismissed": self.tidy_offer_dismissed,
             }
         )
 
@@ -171,6 +183,9 @@ class UiPrefs:
                 raw.get("thumbnail_size"), THUMBNAIL_SIZES, defaults.thumbnail_size
             ),
             last_page=_page(raw.get("last_page"), defaults.last_page),
+            tidy_offer_dismissed=_flag(
+                raw.get("tidy_offer_dismissed"), defaults.tidy_offer_dismissed
+            ),
         )
 
 
@@ -314,6 +329,10 @@ def render(prefs: UiPrefs, raw: Mapping[str, Any] | None = None) -> str:
         "thumbnail_size": prefs.thumbnail_size,
         "last_page": prefs.last_page,
     }
+    if prefs.tidy_offer_dismissed:
+        # Written only once true, like settings.toml's battery key: a window
+        # preference save before any dismissal keeps its familiar shape.
+        scalars["tidy_offer_dismissed"] = True
     tables: dict[str, Mapping[str, Any]] = {}
     for name, glass in (
         ("background_opacity", prefs.background_opacity),

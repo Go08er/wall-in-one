@@ -94,9 +94,9 @@ runtime or replace settings with defaults merely to silence an error.
 ## Returning to an older package
 
 Package rollback does not roll back application data, and there is no
-automatic data downgrade. An older release can reject newer settings, for
-example battery control's schema 5: keep or restore the compatible newer
-package to repair the configuration. Preserve current files before restoring
+automatic data downgrade. An older release can refuse or narrow files that a
+newer one wrote (the table below says what 0.1.4 does with each): keep or
+restore the newer package to repair the configuration. Preserve current files before restoring
 any backup, since a whole-folder restore would discard changes made after that
 backup.
 

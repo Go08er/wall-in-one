@@ -102,7 +102,10 @@ Settings → Tidy up cleans up what older versions left behind. Nothing runs by
 itself or during an update: each action lists exactly what it will change and
 what it keeps (and why), and changes nothing until you choose Apply. If
 anything changed since that list was made, Apply refuses and shows the new
-list instead.
+list instead. Clearing the thumbnail cache is the one deliberate exception:
+thumbnails come and go while you browse, so Clear Cache removes whatever
+thumbnails the cache folder holds when you click it, never anything outside
+that folder.
 
 | Action | What it does | Kept safe by |
 | --- | --- | --- |

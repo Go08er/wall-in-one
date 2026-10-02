@@ -2009,6 +2009,8 @@ def _plan_thumbnails() -> ActionPlan:
         notes=(
             "This is only a cache: thumbnails are made again as you browse. That's why "
             "nothing is archived and there's no Undo.",
+            "Unlike the other actions, this one doesn't wait for an unchanged list: it "
+            "clears whatever thumbnails the cache folder holds when you click it.",
         ),
         token=_digest([usage.entries, usage.total_bytes]),
     )
@@ -2051,7 +2053,13 @@ def plan(*, roots: Sequence[Path] | None = None, now: float | None = None) -> Pl
 def apply(
     action: Action, expected: ActionPlan | None = None, *, roots: Sequence[Path] | None = None
 ) -> Result:
-    """Run one action. With ``expected``, refuse unless it still matches the preview."""
+    """Run one action. With ``expected``, refuse unless it still matches the preview.
+
+    The thumbnail cache is the deliberate exception: thumbnails are added and
+    evicted while the user browses, so clearing removes whatever thumbnails the
+    cache directory holds now (and only there, see :func:`thumbnails.clear`)
+    instead of refusing because the count moved.
+    """
     if expected is not None and expected.action != action:
         raise ValueError("the preview belongs to a different action")
     if action == THUMBNAIL_CACHE:

@@ -577,3 +577,19 @@ def test_keeping_a_partly_undone_archive_stops_offering_undo(
     assert tidy.plan(roots=()).action(tidy.LEFTOVERS).undo is None
     assert _manifest("leftovers")["state"] == "kept"
     assert any((kept.archive / "items").iterdir()), "the item stays in the archive"
+
+
+def test_clearing_the_cache_takes_what_is_there_now_not_what_was_previewed() -> None:
+    """Review Q2: the cache is the documented exception to preview equality."""
+    cache = thumbnails.cache_directory()
+    cache.mkdir(parents=True)
+    (cache / ("c" * 32 + ".png")).write_bytes(b"\x89PNG one")
+    preview = tidy.plan(roots=()).action(tidy.THUMBNAIL_CACHE)
+    assert any("doesn't wait for an unchanged list" in note for note in preview.notes)
+    (cache / ("d" * 32 + ".png")).write_bytes(b"\x89PNG made while browsing")
+    assert tidy.plan(roots=()).action(tidy.THUMBNAIL_CACHE).token != preview.token
+
+    result = tidy.apply(tidy.THUMBNAIL_CACHE, preview)
+
+    assert result.changed and "Cleared 2 thumbnails" in result.message
+    assert list(cache.iterdir()) == []

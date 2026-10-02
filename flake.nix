@@ -615,6 +615,18 @@
             pluginSource = noctalia-plugins;
             sampleMedia = import ./nix/sample-media.nix { inherit pkgs; };
           };
+
+          # Users go straight from the shipped v0.1.4 to this build, and v0.1.4
+          # is the only build they can roll back to. Prove both directions on
+          # the installed packages with the golden profile: update, use what
+          # bumps a store, roll back, edit there, update again.
+          upgrade-rollback = import ./nix/upgrade-rollback-test.nix {
+            inherit pkgs;
+            oldPackage = inputs.wio-v0-1-4.packages.${system}.wall-in-one;
+            newPackage = wall-in-one;
+            pluginSource = noctalia-plugins;
+            sampleMedia = import ./nix/sample-media.nix { inherit pkgs; };
+          };
         };
 
         devShells.default = pkgs.mkShell {

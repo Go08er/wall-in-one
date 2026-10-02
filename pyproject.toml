@@ -18,6 +18,7 @@ Issues = "https://github.com/Go08er/wall-in-one/issues"
 
 [project.scripts]
 wall-in-one = "wall_in_one.cli:main"
+wall-in-one-rollback = "wall_in_one.rollback:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

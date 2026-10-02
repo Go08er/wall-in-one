@@ -7,11 +7,13 @@ only APIs that v0.1.4 already had.
 
 Usage: ``downgrade_driver.py version``, ``downgrade_driver.py edit [FILE...]``,
 ``downgrade_driver.py same-schedule-edit``, ``downgrade_driver.py compile``,
-``downgrade_driver.py prepare`` or ``downgrade_driver.py settings [PATH...]``.
+``downgrade_driver.py prepare``, ``downgrade_driver.py faults`` or
+``downgrade_driver.py settings [PATH...]``.
 Prints one JSON object: the module and version that ran, which records each
 edit touched, and any edit that was refused (by message); ``compile`` reports
 what the old build's runtime publication did, ``prepare`` the exit status
-and output of its service unit's ``--service-startup-prepare``, and
+and output of its service unit's ``--service-startup-prepare``, ``faults``
+each store's fault on opening (``None`` when it reads cleanly), and
 ``settings`` what its strict settings loader makes of each file.
 """
 
@@ -178,6 +180,22 @@ def prepare_service_start() -> dict[str, object]:
     return {"status": status, "stdout": out.getvalue(), "stderr": err.getvalue()}
 
 
+def store_faults() -> dict[str, str | None]:
+    """What the old build's stores make of each file on opening it: its fault or None."""
+    openers: dict[str, Callable[[], object]] = {
+        "playlists.json": playlists.Store.open,
+        "schedules.json": schedules.Store.open,
+        "pairings.json": pairings.Store.open,
+        "displays.json": displays.Store.open,
+        "favourites.json": favourites.Store.open,
+    }
+    found: dict[str, str | None] = {}
+    for name, opener in openers.items():
+        fault = getattr(opener(), "fault", None)
+        found[name] = None if fault is None else str(fault)
+    return found
+
+
 def read_settings(files: list[str]) -> dict[str, object]:
     """What the old build's strict loader makes of each settings file.
 
@@ -248,6 +266,8 @@ def main(arguments: list[str]) -> int:
         report["prepare"] = prepare_service_start()
     elif arguments[:1] == ["settings"]:
         report["settings"] = read_settings(arguments[1:])
+    elif arguments[:1] == ["faults"]:
+        report["faults"] = store_faults()
     elif arguments[:1] != ["version"]:
         print(__doc__, file=sys.stderr)
         return 2

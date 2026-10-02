@@ -27,8 +27,9 @@ answering on a real socket, as its service would after a rollback.
   unchanged runtime.toml. v0.1.4's service unit still starts on that
   runtime.toml, but v0.1.4 publishes nothing while a bumped store is still at
   its new version, and narrows each store on its next edit.
-* Copying a ``.broken`` file back by hand on this build restores what was
-  narrowed, as docs/updating.md describes.
+* After ``wall-in-one-rollback --apply`` (docs/updating.md), v0.1.4 opens
+  every store without a fault, edits them without a ``.broken`` copy, and its
+  service start compiles runtime.toml from them again.
 
 What this build does with a file from a release newer than itself (0.2.0
 opening a 0.3.0 file read-only) needs no old build: that is
@@ -63,7 +64,7 @@ from tests.golden.sandbox import (
     runtime_document,
     write_json,
 )
-from wall_in_one import cli, config, paths, runtime_config
+from wall_in_one import cli, config, paths, rollback, runtime_config
 from wall_in_one.library import displays, favourites, pairings, playlists, schedules
 from wall_in_one.session import QUICK_CHOICE_ID
 from wall_in_one.theme.noctalia import ALL_SCHEMES
@@ -708,44 +709,52 @@ def test_downgrade_v0_1_4_narrows_both_stores(downgrade: Golden) -> None:
     )
 
 
-# -- getting narrowed data back by hand ----------------------------------------------------
+# -- after wall-in-one-rollback ----------------------------------------------------------
 
 
-def test_downgrade_copying_the_broken_files_back_restores_what_v0_1_4_narrowed(
-    downgrade: Golden, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """docs/updating.md's recovery, on this build after re-upgrading.
+@pytest.fixture
+def rolled_back(
+    old_build: str, tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Golden]:
+    """A golden profile that used every new field, then ran the rollback tool.
 
-    Each ``.broken`` file is this build's file as it was when v0.1.4 first
-    edited it. Copied over the live file (with the app closed), this build
-    reads it with no fault, the names, rotation and opt-in are back, and the
-    next compile publishes the overrides again. What v0.1.4 changed in that
-    file is not in the copy; the ``.v<old>-backup`` files are never needed.
+    The tool runs before the fake runtime answers, as it must: it refuses
+    while a service owns the runtime socket. Then v0.1.4 runs as a child
+    process with that runtime answering, as after a package rollback.
     """
-    profile = downgrade.profile
+    golden = sandbox.enter(harness.FIXTURE, tmp_path / "sandbox", runtime_dir, monkeypatch)
+    _current_build_edits(golden.profile)
+    _name_a_rule(golden.profile)
+    _use_overrides(golden.profile, independent=False)
+    assert rollback.main(["--apply"]) == 0
+    monkeypatch.setattr(subprocess, "Popen", sandbox.REAL_POPEN)
+    with harness.serve(golden.runtime, paths.runtime_socket_path()):
+        yield golden
+
+
+def test_downgrade_after_the_rollback_tool_v0_1_4_opens_edits_and_compiles(
+    rolled_back: Golden,
+) -> None:
+    """The tool's promise, against the real v0.1.4 source.
+
+    v0.1.4 opens every store without a fault, its next edit of each narrowed
+    store writes no ``.broken`` copy, and its service start compiles
+    runtime.toml from them ("wrote:"), which also carries that edit.
+    """
+    profile = rolled_back.profile
     state = profile.app_state
-    sidecar = state / runtime_config.OVERRIDES_FILENAME
-    _name_a_rule(profile)
-    in_use = _use_overrides(profile, independent=False)
-    backups = {path.name: path.read_bytes() for path in state.glob("*-backup")}
-    bumped = ("schedules.json", *OVERRIDE_STORES)
-    assert _run_old(profile, "edit", *bumped)["errors"] == {}
-    assert cli.main(["--write-config"]) == 0
-    assert not sidecar.exists(), "re-upgraded, nothing is in use any more"
+    assert not (state / runtime_config.OVERRIDES_FILENAME).exists()
+    assert _run_old(profile, "faults")["faults"] == dict.fromkeys(DOWNGRADE_FILES)
 
-    for name in bumped:
-        (broken,) = broken_copies(state / name)
-        (state / name).write_bytes(broken.read_bytes())
+    report = _run_old(profile, "edit", *rollback.V0_1_4_FORMATS)
+    assert report["errors"] == {}, report["errors"]
+    for name, version in rollback.V0_1_4_FORMATS.items():
+        assert broken_copies(state / name) == [], name
+        assert read_json(state / name)["version"] == version, name
 
-    for store in (schedules, playlists, displays):
-        assert store.Store.open().fault is None, store.__name__
-    assert any(rule.name == "Frog day" for rule in schedules.Store.open().rules)
-    assert any(playlist.has_rotation_override for playlist in playlists.Store.open().all())
-    assert displays.Store.open().beats_global_rules("DP-1")
-    assert not any(
-        playlist.name == downgrade_driver.OLD_PLAYLIST for playlist in playlists.Store.open().all()
-    ), "v0.1.4's own edit of the file is not in the .broken copy"
-    capsys.readouterr()
-    assert cli.main(["--write-config"]) == 0
-    assert sidecar.read_bytes() == in_use.overrides
-    assert {path.name: path.read_bytes() for path in state.glob("*-backup")} == backups
+    prepared = _run_old(profile, "prepare")["prepare"]
+    assert prepared["status"] == 0, prepared
+    assert "could not be compiled" not in prepared["stderr"], prepared["stderr"]
+    assert prepared["stdout"].startswith("wrote: "), prepared["stdout"]
+    picture = sorted(profile.home.glob("Pictures/Wallpapers/*.png"))[0]
+    assert str(picture) in (state / "runtime.toml").read_text(), "v0.1.4's edit is compiled"

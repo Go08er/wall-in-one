@@ -523,6 +523,7 @@
                 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
                   "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
                 ${wall-in-one}/bin/wall-in-one --help >/dev/null
+                ${wall-in-one}/bin/wall-in-one-rollback --help >/dev/null
                 ${wall-in-one}/bin/wall-in-one --version \
                   | grep -Fx 'wall-in-one ${wall-in-one.version}'
                 ${wall-in-one}/bin/wall-in-one-service --version \

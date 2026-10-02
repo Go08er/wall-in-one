@@ -216,7 +216,11 @@ backup, reconcile them before restoring rather than silently discarding them.
 Empty or unrelated claim directories are never deleted, trusted, or reused.
 After a replacement is durable, predecessor claims deliberately remain inert:
 they are crash evidence, not user-facing backups, and should not be renamed or
-cleaned by hand. Exact journal/stage files are retired only after the completion
+cleaned by hand. Once the completion marker records the upgrade as finished,
+nothing reads them again, and Settings → Tidy up can move the upgrade's own
+claim folders (only those named for its slots) into a dated folder under
+`~/.config/wall-in-one/tidy-archive`, recording where each came from; its
+Undo moves them back. It never deletes them. Exact journal/stage files are retired only after the completion
 marker is durable; harmless exact residue is cross-checked on later starts.
 
 Before installing the new package, stop Wall-in-One and back up:

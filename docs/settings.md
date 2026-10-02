@@ -96,6 +96,27 @@ default, and a missing file means defaults. An unreadable or malformed
 `ui.toml` also means defaults, but is left exactly as it is until you fix or
 delete it. The file never affects the wallpaper service.
 
+## Tidy up
+
+Settings → Tidy up cleans up what older versions left behind. Nothing runs by
+itself or during an update: each action lists exactly what it will change and
+what it keeps (and why), and changes nothing until you choose Apply. If
+anything changed since that list was made, Apply refuses and shows the new
+list instead.
+
+| Action | What it does | Kept safe by |
+| --- | --- | --- |
+| Archive old leftovers | Moves empty claim folders, empty deletion records, the finished upgrade's `.wall-in-one-removal-*` folders (with the pre-upgrade copies of `settings.toml` and `runtime.toml`) and empty removal folders no pending removal uses into one dated folder under `~/.config/wall-in-one/tidy-archive`. Anything holding data, recent, or not provably finished stays, with the reason shown. | The archive and its `manifest.json`; Undo moves everything back. |
+| Fix the palette template name | Points Noctalia's `[theme.templates.user.wall-in-one]` `input_path` from the old `palette.json.tmpl` at the current content-addressed template, then asks Noctalia to reload. | `settings.toml.bak-wall-in-one-<date>-<time>` (and the replaced file as `….original`) beside Noctalia's settings, plus a copy in the archive. Undo restores the file byte for byte, or, if Noctalia saved it since, reverses just this change. |
+| Archive the old palette template | Moves the old `palette.json.tmpl` into the archive, but only after Noctalia has rendered your colors from the new template (the next time your colors change). | The archive; Undo moves it back. |
+| Remove the old plugin's settings | Removes the keys the retired Wall-in-One plugin left under `[plugin_settings."goober/wall-in-one"]`. The current companion uses the same id, so every key it reads stays. | The same backups and Undo as the template fix. |
+| Clear the thumbnail cache | Deletes the cached thumbnails. | Nothing is needed: it is only a cache, rebuilt as you browse, so there is no archive and no Undo. |
+
+After an update, a card at the top of the window offers the first four once,
+when there is something to tidy. Showing it writes nothing; choosing Review
+or Not Now records the dismissal in `ui.toml` (creating it, and its
+`.ui.toml.mutation.lock`, if they don't exist yet).
+
 ## Settings reference
 
 | key | meaning | default |

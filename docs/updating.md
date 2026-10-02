@@ -63,6 +63,13 @@ to make an existing installation look like a fresh install.
    launcher; the companion prepares and starts a direct runtime when needed.
    Check playback, then apply any temporary playback choices you want again.
 
+After an update, the app may show a **Tidy up** card at the top of its window
+when older versions left things behind: leftover claim folders, a stale palette
+template name in Noctalia's settings, or the retired plugin's settings.
+Nothing changes until you review each item in Settings → Tidy up and choose
+Apply; every change is archived or backed up first and can be undone there.
+See [Tidy up](settings.md#tidy-up).
+
 Keep **Stop animations on battery** off until the running service supports it.
 The app refuses to enable it against an older runtime or unverified loaded
 service commands, before writing an incompatible configuration.
@@ -139,6 +146,7 @@ and `~/.local/state/wall-in-one`:
 | `favourites.json`, `pairings.json`, `pending-removals.json` | Read and edited as usual; 0.2.0 keeps them in 0.1.4's formats. |
 | `schedules.json.v2-backup`, `playlists.json.v1-backup`, `displays.json.v1-backup` | Ignored and left as they are. |
 | `<file>.broken` | Made as above, then ignored. |
+| `tidy-archive/` | Ignored and left as it is. What Tidy up archived stays there, and 0.2.0's Undo still works after a return. |
 
 If you didn't edit those three files under 0.1.4, returning to 0.2.0 finds
 everything as it left it. If 0.1.4 did narrow one, returning to 0.2.0 doesn't

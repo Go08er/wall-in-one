@@ -443,4 +443,5 @@ file as it was before its first bump.
 | `$XDG_STATE_HOME/wall-in-one/runtime.toml` | atomically compiled, fully resolved service config |
 | `<each configured root>/Wall-in-One/Automatic Stills/` | generated stills are discovered under every root; new captures use the first root |
 | `<first root>/Wall-in-One/Wallhaven/`, `.../MotionBGS/` | downloads |
-| `<affected parent>/.wall-in-one-retained/entry-*` | private exact cleanup residue; zero tombstones, intact retired transaction records/candidates, and empty transient claim containers are expected, while multiply linked files, sockets and unexpected evidence remain intact |
+| `<affected parent>/.wall-in-one-retained/entry-*` | private exact cleanup residue; zero tombstones, intact retired transaction records/candidates, and empty transient claim containers are expected, while multiply linked files, sockets and unexpected evidence remain intact. Settings → Tidy up archives only the provably inert ones: empty claim containers untouched for an hour and empty, singly linked records |
+| `~/.config/wall-in-one/tidy-archive/<date>-<action>/` | what Settings → Tidy up moved or backed up, with `manifest.json` (where each item came from) and a README; Undo uses it. Nothing in it is ever deleted |

@@ -175,16 +175,45 @@ def log_lines() -> list[str]:
     return machine.succeed(f"cat {DRIVER_LOG} 2>/dev/null || true").splitlines()
 
 
+def applied_by(pid: str, since: int) -> str | None:
+    """A wallpaper Noctalia showed for service ``pid`` (after line ``since``)."""
+    for line in log_lines()[since:]:
+        parent, status, command = line.split("\t", 2)
+        if parent == pid and status == "0" and command.startswith("msg wallpaper-set "):
+            return command
+    return None
+
+
 def wait_applied(pid: str, since: int) -> str:
-    """The service ``pid`` asked Noctalia to show a wallpaper (after line ``since``)."""
+    """The service ``pid`` had Noctalia show a wallpaper (after line ``since``)."""
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
-        for line in log_lines()[since:]:
-            parent, _, command = line.partition("\t")
-            if parent == pid and command.startswith("msg wallpaper-set "):
-                return command
+        command = applied_by(pid, since)
+        if command is not None:
+            return command
         time.sleep(0.5)
     raise AssertionError(f"service {pid} applied no wallpaper: {log_lines()[since:]}")
+
+
+def wait_first_apply(package: str) -> tuple[str, str]:
+    """The running service from ``package`` that has applied a wallpaper.
+
+    At login the service can start before Noctalia answers. If the shell is
+    not ready within the release's first-apply window (8 s in v0.1.4) the
+    service exits and systemd starts it again, so follow it to the instance
+    that succeeds rather than holding on to the first PID.
+    """
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        pid = prop("MainPID")
+        if pid.isdigit() and int(pid) > 1:
+            code, executable = machine.execute(f"readlink -e /proc/{pid}/exe")
+            if code == 0 and executable.strip() == f"{package}/bin/wall-in-one-service":
+                command = applied_by(pid, 0)
+                if command is not None:
+                    return pid, command
+        time.sleep(1)
+    raise AssertionError(f"no {package} service applied a wallpaper: {log_lines()}")
 
 
 def cursor() -> str:
@@ -414,13 +443,16 @@ seeded = _nodes(machine.succeed("cat /var/lib/wall-in-one-upgrade/seed.json"))
 
 with subtest("a: v0.1.4 starts on the golden profile and applies a wallpaper"):
     check_loaded(OLD)
-    pid = check_running(OLD)
-    started = wait_status(OLD, lambda value: value["playlist_id"] == EVENINGS)
+    pid, applied = wait_first_apply(OLD)
+    observe("a: applied", applied)
+    started = wait_status(
+        OLD, lambda value: value["playlist_id"] == EVENINGS and value["last_error"] == ""
+    )
     observe("a: v0.1.4 status", started)
+    assert check_running(OLD) == pid
     assert started["runtime_executable"] == f"{OLD}/bin/wall-in-one-service", started
     # A service that never mentions it never reads runtime-overrides.toml.
     assert "supported_override_schemas" not in started, started
-    observe("a: applied", wait_applied(pid, 0))
     a_done = snapshot()
     # The shipped release's own first start: recorded, not judged.
     # Noctalia's first start on the fixture's settings happens here too.

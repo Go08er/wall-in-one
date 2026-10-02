@@ -48,11 +48,15 @@ let
       ${python.interpreter} ${./upgrade-rollback/vm_tool_selfcheck.py} $out/profile
   '';
 
-  # Records which process asked Noctalia to show a wallpaper: the proof that
-  # a service, and which one, actually applied one.
+  # Records which process asked Noctalia to show a wallpaper, and whether
+  # Noctalia did: the proof that a service, and which one, applied one. An
+  # attempt while the shell is still starting fails, and must not count.
   noctaliaProbe = pkgs.writeShellScriptBin "noctalia" ''
     if [ "$#" -ge 2 ] && [ "$1" = msg ] && [ "$2" = wallpaper-set ]; then
-      printf '%s\t%s\n' "$PPID" "$*" >> ${driverLog}
+      status=0
+      ${lib.getExe pkgs.noctalia} "$@" || status=$?
+      printf '%s\t%s\t%s\n' "$PPID" "$status" "$*" >> ${driverLog}
+      exit "$status"
     fi
     exec ${lib.getExe pkgs.noctalia} "$@"
   '';

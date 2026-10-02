@@ -12,7 +12,10 @@
 }:
 
 # Update to this build and roll back to v0.1.4 on the installed packages, with
-# the golden profile, a real user session and the packaged user units.
+# the golden profile, a real user session and the packaged user units: once
+# raw (the floor: the wallpaper keeps running, nothing is lost, 0.1.4 saves
+# nothing), then, back on this build, through `wall-in-one-rollback --apply`,
+# after which 0.1.4 compiles the profile and edits it.
 #
 # The install is modelled as a user profile: one symlink that is flipped from
 # one package to the other (what `nix profile install`/`upgrade` does to

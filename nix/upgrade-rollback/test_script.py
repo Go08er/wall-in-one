@@ -381,13 +381,6 @@ def broken_copies(nodes: dict[str, Any], name: str) -> list[str]:
     return sorted(path for path in nodes if path.startswith(prefix))
 
 
-def keyed_playlists(nodes: dict[str, Any]) -> dict[str, list[str]]:
-    return {
-        playlist["id"]: [entry["id"] for entry in playlist["entries"]]
-        for playlist in document(nodes, "playlists.json")["playlists"]
-    }
-
-
 def compiled_stills(nodes: dict[str, Any], playlist_id: str) -> list[str]:
     """The stills runtime.toml compiles for one playlist, in order."""
     document = tomllib.loads(content(nodes, "runtime.toml").decode())
@@ -707,165 +700,234 @@ with subtest("e1: v0.1.4's own GUI refuses to edit the bumped profile"):
     gui_writes = writes("e1: v0.1.4 GUI open, refused edit, close", e_start, e_gui)
     expect("e1: the refused edit writes nothing", lambda: harness.check_changes(gui_writes, ()))
 
-with subtest("e2: the same edit through v0.1.4's installed store narrows playlists.json"):
-    # Not reachable from 0.1.4's GUI or ctl while any store is bumped (e1);
-    # this is the code every 0.1.4 playlist edit runs once its gate is open,
-    # from the installed package, as the sandboxed downgrade tests run it.
-    package_python(
-        OLD,
-        "from pathlib import Path\n"
-        "from wall_in_one.library import playlists\n"
-        "store = playlists.Store.open()\n"
-        "assert store.fault and 'unsupported version 2' in store.fault, store.fault\n"
-        f"store.add({TRAVEL!r}, Path({PICTURE!r}))\n",
-    )
-    e_done = snapshot()
-    writes("e2: v0.1.4 store edit", e_gui, e_done)
-
-    def narrowed() -> None:
-        (broken,) = broken_copies(e_done, "playlists.json")
-        assert e_done[broken].content == content(e_start, "playlists.json"), "not the v2 bytes"
-        after = document(e_done, "playlists.json")
-        assert after["version"] == 1, after["version"]
-        for playlist in after["playlists"]:
-            assert "cycle_interval" not in playlist and "shuffle" not in playlist, playlist
-        before = keyed_playlists(e_start)
-        now = keyed_playlists(e_done)
-        assert set(before) <= set(now), "a playlist was lost"
-        for identifier, entries in before.items():
-            assert now[identifier][: len(entries)] == entries, identifier
-        travel = {playlist["id"]: playlist for playlist in after["playlists"]}[TRAVEL]
-        assert travel["entries"][-1]["source"] == PICTURE, travel
-
-    expect("e2: .broken plus a rewrite at version 1", narrowed)
-    for kept in (
-        "playlists.json.v1-backup",
-        "schedules.json",
-        "schedules.json.v2-backup",
-        "displays.json",
-        "displays.json.v1-backup",
-        "runtime-overrides.toml",
-    ):
-        expect(f"e2: {kept} is untouched", partial(unchanged, e_start, e_done, kept))
-    expect(
-        "e2: the backup is still the released file",
-        lambda: require(
-            content(e_done, "playlists.json.v1-backup") == released["playlists.json"],
-            "the backup differs from the released playlists.json",
-        ),
-    )
-    observe(
-        "e2: runtime.toml after the edit",
-        "unchanged" if e_start[RUNTIME_REL].digest == e_done[RUNTIME_REL].digest else "changed",
-    )
-
-with subtest("f: v0.2.0 installed again after the rollback"):
-    f_start = snapshot()
+with subtest("e2: v0.2.0 installed again finds the bumped profile as it left it"):
+    e2_start = snapshot()
     old_pid = check_running(OLD)
     install(NEW)
     assert check_running(OLD) == old_pid
-    mixed = status(NEW)
-    assert mixed["runtime_executable"] == f"{OLD}/bin/wall-in-one-service", mixed
-    wait_health_sync(NEW)
-    f_window = snapshot()
-    window_writes = writes("f: mixed window", f_start, f_window)
-    expect("f: the mixed window writes nothing", lambda: harness.check_changes(window_writes, ()))
-
     since, mark = len(log_lines()), cursor()
     restart()
     new_pid = check_running(NEW)
     again = wait_status(
         NEW,
         lambda value: value["runtime_executable"] == f"{NEW}/bin/wall-in-one-service"
-        and value["playlist_id"] == EVENINGS,
+        and value.get("loaded_overrides_sha256") == sidecar_sha
+        and value.get("cycle_interval_seconds") == INTERVAL,
     )
-    observe("f: v0.2.0 status", again)
-    assert again["loaded_overrides_sha256"] is None, again
-    assert again.get("overrides_ignored") is None, again
-    assert again["cycle_interval_seconds"] == GLOBAL_INTERVAL, again
-    observe("f: applied", wait_applied(new_pid, since))
-    observe("f: service journal", journal("wall-in-one.service", mark))
+    observe("e2: v0.2.0 status after the raw rollback", again)
+    observe("e2: applied", wait_applied(new_pid, since))
     wait_health_sync(NEW)
-    f_done = snapshot()
-    f_writes = writes("f: v0.2.0 start after the rollback", f_window, f_done)
-
-    def recompiled(change: Any) -> None:
-        value = tomllib.loads(change.after.content.decode())
-        assert value["schema_version"] <= 5, value["schema_version"]
-
+    e2_done = snapshot()
+    e2_writes = writes("e2: v0.2.0 start after the raw rollback", e2_start, e2_done)
     expect(
-        "f: runtime.toml recompiled and the stale overrides file removed",
-        lambda: harness.check_changes(
-            f_writes,
-            [
-                harness.Allowance(
-                    RUNTIME_REL,
-                    frozenset({"modified"}),
-                    "compiled from the narrowed playlists, with v0.1.4's edit",
-                    recompiled,
-                ),
-                harness.Allowance(
-                    OVERRIDES_REL,
-                    frozenset({"deleted"}),
-                    "nothing in use any more: the narrowed playlists lost their interval",
-                ),
-                NOCTALIA_PALETTE,
-            ],
+        "e2: the start writes only the first-start whitelist",
+        lambda: harness.check_changes(e2_writes, first_start()),
+    )
+    # Nothing was lost, directly: the stores, the overrides and the backups
+    # are byte for byte what c left.
+    for kept in (*STORES, "runtime-overrides.toml", *(f"{name}.v1-backup" for name in ("playlists.json", "displays.json")), "schedules.json.v2-backup"):
+        expect(f"e2: {kept} is as c left it", partial(unchanged, c_done, e2_done, kept))
+
+
+def check_narrowed(nodes: dict[str, Any], name: str) -> None:
+    """The tool's rewrite: 0.1.4's version, every record of c's file, minus the new fields."""
+    before = document(c_done, name)
+    after = document(nodes, name)
+    if name == "playlists.json":
+        assert after["version"] == 1, after["version"]
+        assert after["playlists"] == [
+            {key: value for key, value in playlist.items() if key not in ("cycle_interval", "shuffle")}
+            for playlist in before["playlists"]
+        ], "a playlist or entry changed"
+    elif name == "schedules.json":
+        assert after["version"] == 2, after["version"]
+        assert after["rules"] == [
+            {key: value for key, value in rule.items() if key != "name"} for rule in before["rules"]
+        ], "a rule changed"
+    else:
+        assert after == {"version": 1, "displays": before["displays"]}, after
+
+
+with subtest("f: wall-in-one-rollback rewrites the three files for 0.1.4"):
+    run("systemctl --user stop wall-in-one.service")
+    machine.wait_until_fails(user("systemctl --user is-active wall-in-one.service"), timeout=60)
+    f_start = snapshot()
+    dry = run(f"{NEW}/bin/wall-in-one-rollback")
+    observe("f: dry run", dry)
+    for line in (
+        "playlists.json: version 2 -> 1",
+        '  playlist "Evenings" loses its interval (120 s)',
+        "schedules.json: version 3 -> 2",
+        f'  rule "{RULE_NAME}" loses its name',
+        "displays.json: version 2 -> 1",
+        f"  display {OPT_IN} loses its own playlist beating global schedule rules",
+    ):
+        expect(f"f: the dry run says {line.strip()!r}", partial(require, line in dry.splitlines(), dry))
+    expect(
+        "f: the dry run writes nothing",
+        lambda: harness.check_changes(writes("f: dry run", f_start, snapshot()), ()),
+    )
+
+    applied = run(f"{NEW}/bin/wall-in-one-rollback --apply")
+    observe("f: --apply", applied)
+    f_done = snapshot()
+    (backup,) = sorted(
+        path.rsplit("/", 1)[-1]
+        for path in f_done
+        if path.startswith(f"{STATE_REL}/rollback-to-0.1.4-")
+        and path.count("/") == STATE_REL.count("/") + 1
+    )
+    backup_rel = f"{STATE_REL}/{backup}"
+    backed_up_names = (*STORES, "runtime-overrides.toml")
+    f_writes = writes("f: wall-in-one-rollback --apply", f_start, f_done)
+    f_allowed = [
+        *(
+            harness.Allowance(
+                f"{STATE_REL}/{name}",
+                frozenset({"modified"}),
+                f"wall-in-one-rollback rewrites {name} in 0.1.4's version, every record kept",
+                lambda change, name=name: check_narrowed(f_done, name),
+            )
+            for name in STORES
+        ),
+        harness.Allowance(
+            OVERRIDES_REL,
+            frozenset({"deleted"}),
+            "wall-in-one-rollback removes runtime-overrides.toml, which 0.1.4 never reads",
+        ),
+        harness.Allowance(
+            backup_rel, frozenset({"created"}), "wall-in-one-rollback's one backup folder"
+        ),
+        *(
+            harness.Allowance(
+                f"{backup_rel}/{name}",
+                frozenset({"created"}),
+                f"wall-in-one-rollback's copy of {name}, made before anything is written",
+            )
+            for name in backed_up_names
+        ),
+    ]
+    expect(
+        "f: the three stores narrowed, the overrides removed, a backup first, nothing else",
+        lambda: harness.check_changes(f_writes, f_allowed),
+    )
+    # Directly, not only through the callbacks: every one of those writes
+    # happened, and the files hold what the tool promises.
+    expect(
+        "f: every rewrite, the removal and every backup copy happened",
+        lambda: require(
+            sorted((change.path, change.kind) for change in f_writes)
+            == sorted((allowance.pattern, next(iter(allowance.kinds))) for allowance in f_allowed),
+            str(sorted((change.path, change.kind) for change in f_writes)),
         ),
     )
+    for name in STORES:
+        expect(f"f: {name} is narrowed with every record", partial(check_narrowed, f_done, name))
+    for name in backed_up_names:
+        expect(
+            f"f: the backup of {name} is the file as it was",
+            partial(
+                require,
+                f_done[f"{backup_rel}/{name}"].content == content(f_start, name),
+                f"the backup of {name} differs",
+            ),
+        )
     expect(
-        "f: the overrides file is gone",
+        "f: runtime-overrides.toml is gone",
         lambda: require(OVERRIDES_REL not in f_done, "runtime-overrides.toml is still there"),
     )
-    # The final runtime.toml itself, whether or not the allowance above ran.
-    # Travel's own entries, not the whole file: All media always lists the
-    # picture, so its mere presence proves nothing.
+    for kept in ("runtime.toml", "pairings.json", "favourites.json", "playlists.json.v1-backup"):
+        expect(f"f: {kept} is untouched", partial(unchanged, f_start, f_done, kept))
     expect(
-        "f: runtime.toml was recompiled with v0.1.4's edit",
+        "f: it prints the two commands that put the backup back",
         lambda: require(
-            any(change.path == RUNTIME_REL and change.kind == "modified" for change in f_writes)
-            and schema(f_done) <= 5
-            and PICTURE not in compiled_stills(c_done, TRAVEL)
-            and compiled_stills(f_done, TRAVEL)[-1] == PICTURE,
-            f"Travel compiles {compiled_stills(f_done, TRAVEL)}, schema {schema(f_done)}",
+            "systemctl --user stop wall-in-one.service" in applied
+            and f"cp -p -- {STATE}/{backup}/* {STATE}/" in applied,
+            applied,
+        ),
+    )
+    second = run(f"{NEW}/bin/wall-in-one-rollback --apply")
+    observe("f: a second --apply", second)
+    expect(
+        "f: a second --apply finds nothing to do",
+        partial(require, "Nothing to roll back" in second, second),
+    )
+    expect(
+        "f: a second --apply writes nothing",
+        lambda: harness.check_changes(writes("f: second --apply", f_done, snapshot()), ()),
+    )
+
+
+def library_entries(nodes: dict[str, Any]) -> list[str]:
+    """The ids in runtime.toml's All media playlist: the library a compile scanned."""
+    value = tomllib.loads(content(nodes, "runtime.toml").decode())
+    (fallback,) = (playlist for playlist in value["playlists"] if playlist["id"] == "all-media")
+    return sorted(entry["id"] for entry in fallback.get("entries", []))
+
+
+with subtest("g: v0.1.4 runs the rewritten profile and edits it"):
+    g_start = snapshot()
+    install(OLD)
+    since, mark = len(log_lines()), cursor()
+    run("systemctl --user start wall-in-one.service")
+    machine.wait_until_succeeds(user("systemctl --user is-active wall-in-one.service"), timeout=60)
+    machine.wait_for_file(RUNTIME_SOCKET)
+    old_pid = check_running(OLD)
+    rolled = wait_status(
+        OLD,
+        lambda value: value["runtime_executable"] == f"{OLD}/bin/wall-in-one-service"
+        and value["playlist_id"] == EVENINGS,
+    )
+    observe("g: v0.1.4 status on the rewritten profile", rolled)
+    prepared = journal("wall-in-one.service", mark)
+    observe("g: service journal", prepared)
+    expect(
+        "g: v0.1.4's service start compiles the rewritten files",
+        lambda: require(
+            "could not be compiled" not in prepared
+            and (f"wrote: {RUNTIME}" in prepared or f"already current: {RUNTIME}" in prepared),
+            "v0.1.4's preflight did not compile the rewritten stores",
+        ),
+    )
+    observe("g: applied", wait_applied(old_pid, since))
+    g_service = snapshot()
+    writes("g: v0.1.4 start", g_start, g_service)
+    expect(
+        "g: the full library is in v0.1.4's runtime.toml",
+        lambda: require(
+            library_entries(g_service) == library_entries(c_done),
+            f"{library_entries(g_service)} != {library_entries(c_done)}",
         ),
     )
 
-    def nothing_lost() -> None:
-        for kept in ("schedules.json", "displays.json"):
-            assert content(f_done, kept) == content(c_done, kept), kept
-        for backup in ("playlists.json.v1-backup", "schedules.json.v2-backup", "displays.json.v1-backup"):
-            unchanged(c_done, f_done, backup)
-        (broken,) = broken_copies(f_done, "playlists.json")
-        assert f_done[broken].digest == e_done[broken].digest, "the .broken copy changed"
-        kept_rotation = {
-            playlist["id"]: playlist for playlist in json.loads(f_done[broken].content)["playlists"]
-        }[EVENINGS]
-        assert kept_rotation.get("cycle_interval") == INTERVAL, "the interval is not in .broken"
-        before = keyed_playlists(c_done)
-        now = keyed_playlists(f_done)
-        for identifier, entries in before.items():
-            assert now[identifier][: len(entries)] == entries, identifier
-
-    expect("f: nothing lost beyond the documented narrowing", nothing_lost)
-    package_python(
-        NEW,
-        "from wall_in_one.library import displays, playlists, schedules\n"
-        "for store in (playlists, schedules, displays):\n"
-        "    assert store.Store.open().fault is None, store.__name__\n"
-        "rules = {rule.id: rule for rule in schedules.Store.open().rules}\n"
-        f"assert rules[{NAMED_RULE!r}].name == {RULE_NAME!r}, rules[{NAMED_RULE!r}]\n"
-        f"assert displays.Store.open().beats_global_rules({OPT_IN!r})\n"
-        "assert not any(p.has_rotation_override for p in playlists.Store.open().all())\n",
-    )
-
-    open_gui(NEW, "playlists", "Playlists")
-    machine.screenshot("reupdated-v0.2.0-playlists")
+    open_gui(OLD, "playlists", "Playlists")
+    code, added = settle_authoring(OLD, f"playlist-add {TRAVEL} {PICTURE}")
+    observe("g: v0.1.4 ctl playlist-add", {"exit": code, "output": added})
+    expect("g: v0.1.4's playlist-add succeeds", partial(require, code == 0, added))
+    machine.screenshot("rolled-back-v0.1.4-playlists")
     close_gui()
-    f_gui = snapshot()
-    gui_writes = writes("f: v0.2.0 GUI open and close", f_done, f_gui)
-    for kept in ("playlists.json", "schedules.json", "displays.json", "pairings.json", "favourites.json"):
-        expect(f"f: the GUI leaves {kept} alone", partial(unchanged, f_done, f_gui, kept))
+    g_done = snapshot()
+    writes("g: v0.1.4 GUI edit and close", g_service, g_done)
+
+    def edited() -> None:
+        after = document(g_done, "playlists.json")
+        travel = {playlist["id"]: playlist for playlist in after["playlists"]}[TRAVEL]
+        assert travel["entries"][-1]["source"] == PICTURE, travel
+        assert after["version"] == 1, after["version"]
+        for name in STORES:
+            assert broken_copies(g_done, name) == [], f"{name} was moved aside"
+
+    expect("g: the edit is saved in place, with no .broken copy", edited)
+    # Travel's own compiled entries: All media always lists the picture.
+    expect(
+        "g: v0.1.4 compiled its edit into runtime.toml",
+        lambda: require(
+            PICTURE not in compiled_stills(c_done, TRAVEL)
+            and compiled_stills(g_done, TRAVEL)[-1:] == [PICTURE]
+            and schema(g_done) <= 5,
+            f"Travel compiles {compiled_stills(g_done, TRAVEL)}, schema {schema(g_done)}",
+        ),
+    )
 
 with subtest("the session stayed healthy"):
     machine.fail("coredumpctl --json=short | grep -E 'wall-in-one|niri|noctalia'")

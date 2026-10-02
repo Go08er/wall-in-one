@@ -125,96 +125,50 @@ runtime or replace settings with defaults merely to silence an error.
 
 Package rollback does not roll back application data, and there is no
 automatic data downgrade. An older release can refuse or narrow files that a
-newer one wrote (the table below says what 0.1.4 does with each): keep or
-restore the newer package to repair the configuration. Preserve current files before restoring
+newer one wrote (for 0.1.4, see below): keep or restore the newer package to
+repair the configuration. Preserve current files before restoring
 any backup, since a whole-folder restore would discard changes made after that
 backup.
 
 ### Rolling back from 0.2.0 to 0.1.4
 
-There is no 0.1.5. 0.2.0 updates 0.1.4 directly, and 0.1.4 is the only
-release to roll back to. 0.1.4 predates the guard that makes 0.2.0 and later
-open a file from a newer release read-only (see
-[State-file recovery](library.md#state-file-recovery)), so what a rollback
-keeps depends on the file.
+0.2.0 isn't designed to be rolled back, and there is no 0.1.5: 0.1.4 is the
+only release to go back to. 0.2.0 reads every 0.1.4 file as it is, but moves
+three of them to a newer version the first time you use what it adds:
 
-0.2.0 reads every 0.1.4 file as it is. It moves a file to a newer version only
-when you first use what that version adds:
-
-- naming a schedule rule moves `schedules.json` to version 3;
-- giving a playlist its own interval or shuffle moves `playlists.json` to
-  version 2;
+- naming a schedule rule moves `schedules.json` from version 2 to 3;
+- giving a playlist its own interval or shuffle moves `playlists.json` from
+  version 1 to 2;
 - letting a display's own playlist beat global schedule rules moves
-  `displays.json` to version 2.
+  `displays.json` from version 1 to 2.
 
-Just before that first save, 0.2.0 keeps the file as it was beside it, once:
-`schedules.json.v2-backup`, `playlists.json.v1-backup` or
-`displays.json.v1-backup`. A profile that never uses these features keeps
-every file in 0.1.4's formats, and a rollback loses nothing.
-`runtime.toml` never changes shape. The per-playlist and display settings
-reach the service through `runtime-overrides.toml` instead, and the new
-interface's window preferences live in `ui.toml`.
+A profile that never used these is entirely in 0.1.4's formats. Otherwise,
+to go back to 0.1.4, close the app and stop the service, then run the
+rollback tool that comes with 0.2.0:
 
-After a rollback, 0.1.4 does this with each file in `~/.config/wall-in-one`
-and `~/.local/state/wall-in-one`:
+```sh
+systemctl --user stop wall-in-one.service
+wall-in-one-rollback            # shows what it would change; writes nothing
+wall-in-one-rollback --apply    # backs up, then rewrites
+```
 
-| File | What 0.1.4 does |
-| --- | --- |
-| `runtime.toml` | Its service loads it as 0.2.0 left it, so the wallpaper keeps running. While any of the three files above is still at 0.2.0's version, 0.1.4 can't compile a new one: the service start keeps the last `runtime.toml`, and changes you save in the 0.1.4 app don't reach the wallpaper. |
-| `runtime-overrides.toml` | Never opened or changed. Per-playlist timing and display opt-ins stop applying. |
-| `ui.toml` | Never opened or changed. |
-| `settings.toml` | Read as it is. 0.2.0 writes only keys and values 0.1.4 knows. A key added by hand stops 0.1.4 from using the file: the service exits 78, or keeps the last `runtime.toml` and never publishes a new one. |
-| `schedules.json` (version 3), `playlists.json` or `displays.json` (version 2), until 0.1.4 edits it | Not changed. 0.1.4 shows what it can read of it, and its compile refuses it as an unsupported version. |
-| The same file after any 0.1.4 schedule, playlist or display edit | Moved aside as `<file>.broken`, then saved in 0.1.4's version with your edit and without the rule names, per-playlist intervals and shuffle, or display opt-ins. Once all three are back in 0.1.4's versions, 0.1.4 publishes `runtime.toml` again. |
-| `favourites.json`, `pairings.json`, `pending-removals.json` | Read and edited as usual; 0.2.0 keeps them in 0.1.4's formats. |
-| `schedules.json.v2-backup`, `playlists.json.v1-backup`, `displays.json.v1-backup` | Ignored and left as they are. |
-| `<file>.broken` | Made as above, then ignored. |
-| `tidy-archive/` | Ignored and left as it is. What Tidy up archived stays there, and 0.2.0's Undo still works after a return. |
+It lists what will be dropped, for example `rule "Evening lights" loses its
+name` or `playlist "Evenings" loses its interval (120 s)`, and keeps every
+playlist, entry, rule and display assignment. `--apply` copies the files it
+changes into one dated folder, `~/.local/state/wall-in-one/rollback-to-0.1.4-<date>/`,
+rewrites the three files in the versions 0.1.4 reads, and removes
+`runtime-overrides.toml`, which 0.1.4 never reads. It then prints the two
+commands that put the copies back. It refuses, writing nothing, while the
+app or the service is running, and when a file was saved by a version newer
+than 0.2.0. Running it again finds nothing to do.
 
-If you didn't edit those three files under 0.1.4, returning to 0.2.0 finds
-everything as it left it. If 0.1.4 did narrow one, returning to 0.2.0 doesn't
-bring the settings back: 0.2.0 reads the narrowed file like any 0.1.4 file,
-and its next compile removes `runtime-overrides.toml` if nothing in it is in
-use any more. 0.2.0 leaves the `.broken` and backup files alone. Using a
-feature again moves the file to the new version again and keeps the existing
-backup as it is.
+Then install 0.1.4 and start its service. Its first start compiles
+`runtime.toml` again from the rewritten files. Everything else is left as it
+is: `pairings.json`, `favourites.json`, `pending-removals.json` and
+`settings.toml` are already in 0.1.4's formats (0.2.0 writes only settings
+keys 0.1.4 knows), and 0.1.4 ignores `ui.toml`, the `.v<n>-backup` files and
+`tidy-archive/`.
 
-### Getting narrowed settings back by hand
-
-| File | What it holds |
-| --- | --- |
-| `schedules.json.broken` | 0.2.0's schedule, with the rule names. |
-| `playlists.json.broken` | 0.2.0's playlists, with their own intervals and shuffle. |
-| `displays.json.broken` | 0.2.0's display assignments, with the opt-ins (`beats_global_rules`). |
-| `schedules.json`, `playlists.json`, `displays.json` | 0.1.4's narrowed file, with the edits you made under 0.1.4. |
-| `schedules.json.v2-backup`, `playlists.json.v1-backup`, `displays.json.v1-backup` | The file from before 0.2.0 first used the feature. None of the 0.2.0 settings are in it. |
-
-Each `.broken` file is the file as 0.2.0 left it, just before 0.1.4's first
-edit of it. That edit, and anything else you changed in that file under 0.1.4,
-is only in the live file. If a file was narrowed more than once, the copies are
-`.broken`, `.broken.1`, `.broken.2` and so on, and the highest number is the
-most recent. The backups are for returning a file to how it was under 0.1.4,
-not for recovering 0.2.0 settings.
-
-To get the settings back:
-
-1. Update to 0.2.0 again first. A `.broken` file restored under 0.1.4 is
-   narrowed again by its next edit.
-2. Close the app and stop the service as in [Update and restart](#update-and-restart),
-   then back up the state folder.
-3. For each file, choose one:
-   - If you don't need what you changed in it under 0.1.4, copy the `.broken`
-     file over it and keep the copy, for example:
-
-     ```sh
-     cd ~/.local/state/wall-in-one
-     cp schedules.json.broken schedules.json
-     ```
-
-   - Otherwise keep the narrowed file and set the names, intervals, shuffle or
-     opt-ins again in 0.2.0, reading them from the `.broken` file. For
-     example, `jq '.rules[] | select(.name) | {id, name}' schedules.json.broken`
-     lists the rule names.
-4. Start the service. Its startup compile reads the restored files and
-   publishes `runtime-overrides.toml` again. Open the app and check the
-   schedule, playlists and displays.
+Without the tool, 0.1.4's app shows an empty library and saves nothing until
+you update to 0.2.0 again, but nothing is lost, and the wallpaper keeps
+running on the last `runtime.toml`.

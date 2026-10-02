@@ -450,3 +450,54 @@ def test_a_capture_leaves_no_engine_descendant_behind(
                 os.waitpid(sleeper, 0)
         processes.cancel()
         _subreaper(False)
+
+
+def test_the_legacy_renderer_stops_the_group_of_an_engine_that_already_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review question 1 / T-2 for SceneRenderer: checking is_running must not reap
+    the engine, or stop() could no longer reach the child it left in its group."""
+    handoff = tmp_path / "sleeper.pid"
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    monkeypatch.setattr(
+        SceneRenderer,
+        "command",
+        lambda _self, _scene, **_keywords: [
+            sys.executable,
+            "-c",
+            _ENGINE,
+            str(handoff),
+            "no-frame",
+            "",
+        ],
+    )
+    _subreaper(True)
+    sleeper: int | None = None
+    renderer = SceneRenderer(output="DP-1")
+    try:
+        renderer.start("123")
+        deadline = time.monotonic() + 5.0
+        while renderer.is_running or not handoff.exists() or not handoff.read_text():
+            assert time.monotonic() < deadline, "the stand-in engine never exited"
+            time.sleep(0.02)
+        sleeper = int(handoff.read_text())
+        assert renderer.scene == ""
+
+        renderer.stop()
+
+        reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        deadline = time.monotonic() + 3.0
+        while reaped == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+            reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        assert reaped == sleeper, "the engine's child outlived stop()"
+        assert os.WIFSIGNALED(status)
+        sleeper = None
+    finally:
+        if sleeper is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(sleeper, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(sleeper, 0)
+        renderer.stop()
+        _subreaper(False)

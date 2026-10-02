@@ -145,7 +145,18 @@ def running_elsewhere(output: str = "", proc: Path = Path("/proc")) -> tuple[int
 
 
 class SceneRenderer:
-    """Supervises at most one `linux-wallpaperengine` process."""
+    """Supervises at most one `linux-wallpaperengine` process.
+
+    Single-threaded by construction: its only driver is the Python applier
+    owned by a Session, and every Session call that starts, inspects or stops
+    the engine runs on the GTK main loop (navigation, the control socket's
+    replies, cycle timers and shutdown) or in a single-threaded command-line
+    or startup path that never starts a scene. No other thread can poll or
+    reap the engine while :meth:`stop` signals it. The engine still lives in
+    an :class:`worker_processes.OwnedProcess` for its whole lifetime, so that
+    checking whether it runs never reaps it: a reaped engine would put a
+    descendant still in its group beyond :meth:`stop`'s reach.
+    """
 
     def __init__(
         self,
@@ -167,13 +178,13 @@ class SceneRenderer:
         self.pause_when_covered = pause_when_covered
         self.scaling = scaling if scaling in SCALING_CHOICES else DEFAULT_SCALING
         self.clamp = clamp if clamp in CLAMP_CHOICES else DEFAULT_CLAMP
-        self._process: subprocess.Popen[bytes] | None = None
+        self._process: worker_processes.OwnedProcess | None = None
         self._scene: str = ""
 
     @property
     def is_running(self) -> bool:
-        process = self._process
-        return process is not None and process.poll() is None
+        owned = self._process
+        return owned is not None and not owned.exited()
 
     @property
     def scene(self) -> str:
@@ -262,16 +273,18 @@ class SceneRenderer:
             )
         except OSError as error:
             raise SceneError(f"cannot start linux-wallpaperengine: {error}") from error
-        self._process = process
+        self._process = worker_processes.OwnedProcess(process)
         self._scene = scene
 
     def stop(self) -> None:
-        process = self._process
+        owned = self._process
         self._process = None
         self._scene = ""
-        if process is None or process.poll() is not None:
+        if owned is None:
             return
-        _end(worker_processes.OwnedProcess(process))
+        # Even an engine that has exited: its zombie still holds the group,
+        # and anything it left running in that group goes with it.
+        _end(owned)
 
 
 def _end(owned: worker_processes.OwnedProcess, *, immediate: bool = False) -> None:

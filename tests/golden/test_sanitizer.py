@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +14,11 @@ from typing import Final
 from tests.golden import harness
 
 SANITIZER: Final = Path(__file__).resolve().parents[2] / "tools" / "golden-profile-sanitize.py"
+
+
+def _adoption_id(app_state: Path) -> str:
+    completion = json.loads((app_state / "deployed-upgrade-v1.json").read_bytes())
+    return str(completion["adoption_id"])
 
 
 def test_the_sanitizer_round_trips_a_profile_without_its_secrets(
@@ -58,6 +64,10 @@ def test_the_sanitizer_round_trips_a_profile_without_its_secrets(
     # for each home (their ids hash the paths) and are checked elsewhere.
     known = {str(path) for path in again.home.rglob("*")}
     back = harness.Relocation(str(again.home), str(real.home), known)
+    # So are the upgrade's claim-folder names, which derive from those ids.
+    slot_names = harness.claim_slot_names(
+        _adoption_id(real.app_state), _adoption_id(again.app_state)
+    )
     resealed = {"deployed-capture-adoption-v1.json", "deployed-upgrade-v1.json"}
     compared = 0
     for directory in (real.app_config, real.app_state):
@@ -65,7 +75,7 @@ def test_the_sanitizer_round_trips_a_profile_without_its_secrets(
             if not path.is_file() or path.name in resealed or path.name == "wallhaven-api-key":
                 continue
             relative = path.relative_to(real.home).as_posix()
-            twin = again.home / relative
+            twin = again.home / "/".join(slot_names.get(part, part) for part in relative.split("/"))
             assert twin.is_file(), f"the copy lost {relative}"
             data = twin.read_bytes()
             text = harness._decoded_text(data)

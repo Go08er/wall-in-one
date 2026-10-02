@@ -79,6 +79,20 @@ def test_relocated_deployed_evidence_is_accepted_as_complete(golden: Golden) -> 
     assert found.status == "complete", found.detail
 
 
+def test_removal_folders_keep_the_names_the_finished_upgrade_gave_them(golden: Golden) -> None:
+    """The upgrade names its claim folders after the adoption id, so resealing
+    the id renames them too; they stay the finished upgrade's own slots."""
+    finished = deployed_upgrade_transaction.finished_claims()
+    assert finished is not None
+    prefix = ".wall-in-one-removal-"
+    for parent, tokens in (
+        (finished.settings_parent, finished.settings_tokens),
+        (finished.runtime_parent, finished.runtime_tokens),
+    ):
+        names = [path.name.removeprefix(prefix) for path in parent.glob(f"{prefix}*")]
+        assert names and set(names) <= tokens, (parent, names)
+
+
 def _all_media(profile: Profile) -> list[dict[str, Any]]:
     document = runtime_document(profile)
     (fallback,) = (

@@ -417,10 +417,16 @@ def materialize(source: Path, root: Path, runtime_dir: Path) -> Profile:
                     handle.truncate(entry.sparse_size)
             target.chmod(entry.mode)
             os.utime(target, ns=(entry.mtime_ns, entry.mtime_ns))
-    reseal_deployed_markers(home / XDG_LAYOUT["state"] / "wall-in-one")
+    resealed = reseal_deployed_markers(home / XDG_LAYOUT["state"] / "wall-in-one")
     # Deepest first, so a read-only directory cannot block its own children.
     for directory, mode in sorted(directory_modes, key=lambda item: -len(item[0].parts)):
         directory.chmod(mode)
+    if resealed is not None:
+        rename_claim_slots(
+            home / XDG_LAYOUT["config"] / "wall-in-one",
+            home / XDG_LAYOUT["state"] / "wall-in-one",
+            *resealed,
+        )
     return Profile(
         source=source,
         root=root,
@@ -437,20 +443,22 @@ def _rewrite_preserving(path: Path, data: bytes) -> None:
     os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns))
 
 
-def reseal_deployed_markers(app_state: Path) -> None:
+def reseal_deployed_markers(app_state: Path) -> tuple[str, str] | None:
     """Re-derive the capture-adoption identity after its paths moved.
 
     ``adoption_id`` and ``bindings_sha256`` hash the manifest's paths, and the
     completion marker pins the manifest's bytes.  Both are rebuilt with
     :mod:`wall_in_one.library.adopted`'s own renderers, so whatever the
     profile recorded is re-attested exactly as this build would write it.
+    Returns the completion's old and new adoption ids, for
+    :func:`rename_claim_slots`.
     """
     from wall_in_one.library import adopted
 
     manifest_path = app_state / "deployed-capture-adoption-v1.json"
     completion_path = app_state / "deployed-upgrade-v1.json"
     if not manifest_path.is_file():
-        return
+        return None
     document = json.loads(manifest_path.read_bytes())
 
     def identity(value: object) -> tuple[int, int]:
@@ -486,12 +494,51 @@ def reseal_deployed_markers(app_state: Path) -> None:
     adoption = replace(adoption, adoption_id=adopted.adoption_id_for(adoption))
     manifest = adopted.render_manifest(adoption)
     _rewrite_preserving(manifest_path, manifest)
-    if completion_path.is_file():
-        completion = json.loads(completion_path.read_bytes())
-        completion["adoption_id"] = adoption.adoption_id
-        completion["root"] = str(adoption.root)
-        completion["authority_sha256"] = hashlib.sha256(manifest).hexdigest()
-        _rewrite_preserving(completion_path, adopted.canonical_bytes(completion))
+    if not completion_path.is_file():
+        return None
+    completion = json.loads(completion_path.read_bytes())
+    previous = str(completion["adoption_id"])
+    completion["adoption_id"] = adoption.adoption_id
+    completion["root"] = str(adoption.root)
+    completion["authority_sha256"] = hashlib.sha256(manifest).hexdigest()
+    _rewrite_preserving(completion_path, adopted.canonical_bytes(completion))
+    return previous, adoption.adoption_id
+
+
+def rename_claim_slots(app_config: Path, app_state: Path, old_id: str, new_id: str) -> None:
+    """Keep the upgrade's replay-slot folders named for the resealed adoption.
+
+    The deployed upgrade names the folders holding the replaced settings and
+    runtime after tokens derived from the adoption id, so they are path-derived
+    names like the others above. A folder named for no slot of the old id
+    stays as it is.
+    """
+    names = claim_slot_names(old_id, new_id)
+    for parent in (app_config, app_state):
+        for before, after in names.items():
+            source = parent / before
+            if source.is_dir() and before != after:
+                source.rename(parent / after)
+
+
+def claim_slot_names(old_id: str, new_id: str) -> dict[str, str]:
+    """Every replay-slot folder name of adoption ``old_id``, mapped to ``new_id``'s."""
+    from wall_in_one import deployed_upgrade_transaction as transaction
+    from wall_in_one import file_io
+
+    prefix = file_io.DELETION_CLAIM_PREFIX
+    names: dict[str, str] = {}
+    roles: tuple[Literal["settings", "runtime"], ...] = ("settings", "runtime")
+    for role in roles:
+        old = transaction._claim_tokens(transaction._role_token(old_id, role))
+        new = transaction._claim_tokens(transaction._role_token(new_id, role))
+        names.update(
+            {
+                f"{prefix}{before}": f"{prefix}{after}"
+                for before, after in zip(old, new, strict=True)
+            }
+        )
+    return names
 
 
 # -- snapshots ------------------------------------------------------------------

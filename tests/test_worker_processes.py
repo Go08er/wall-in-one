@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -16,6 +14,7 @@ from typing import Final, cast
 
 import pytest
 
+from tests.process_helpers import kill_and_reap, reaped, subreaper
 from wall_in_one import worker_processes
 
 
@@ -79,7 +78,6 @@ def test_cancel_before_submission_refuses_to_spawn(monkeypatch: pytest.MonkeyPat
 
 # -- a group whose leader already exited ------------------------------------------------
 
-_PR_SET_CHILD_SUBREAPER: Final = 36
 #: The leader starts ``sleep`` in its own process group (inheriting the captured
 #: pipes), writes the sleeper's pid where the test can read it, and exits.
 _LEADER: Final = """
@@ -90,20 +88,13 @@ with open(sys.argv[1], "w") as handle:
 """
 
 
-def _subreaper(enabled: bool) -> None:
-    """Adopt orphaned descendants, so the test can reap the exact sleeper itself."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
-        pytest.skip("this kernel can't make the test a child subreaper")
-
-
 def test_a_group_member_left_holding_the_pipes_by_an_exited_leader_is_ended(
     tmp_path: Path,
 ) -> None:
     """The audit's B-3: the leader exits first while its same-group child keeps the
     output pipes. That child used to survive until a cancellation reached it; the
     leader's exit now ends the run and the group with it, before the reap."""
-    _subreaper(True)
+    subreaper(True)
     sleeper: int | None = None
     pool = ThreadPoolExecutor(max_workers=1)
     try:
@@ -114,28 +105,26 @@ def test_a_group_member_left_holding_the_pipes_by_an_exited_leader_is_ended(
             [sys.executable, "-c", _LEADER, str(handoff)],
             timeout=60.0,
         )
+        # Known before the run ends, so a regression fails here, not after 60s.
+        deadline = time.monotonic() + 5.0
+        while not (handoff.exists() and handoff.read_text()) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        sleeper = int(handoff.read_text())
 
         completed = future.result(timeout=10)
 
         assert completed.returncode == 0
-        sleeper = int(handoff.read_text())
-        deadline = time.monotonic() + 3.0
-        reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        while reaped == 0 and time.monotonic() < deadline:
-            time.sleep(0.02)
-            reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        assert reaped == sleeper, "the sleeper outlived its leader's run"
+        status = reaped(sleeper, 3.0)
+        assert status is not None, "the sleeper outlived its leader's run"
         assert os.WIFSIGNALED(status)
         sleeper = None
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
         if sleeper is not None:
-            # Only the exact sleeper this test started, killed and reaped here.
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(sleeper, 0)
-        _subreaper(False)
+            # Only the exact sleeper this test started, killed and reaped here;
+            # that also frees a run still waiting on its pipes.
+            kill_and_reap(sleeper)
+        pool.shutdown(wait=True, cancel_futures=True)
+        subreaper(False)
 
 
 def test_a_cancel_that_races_the_reap_never_signals_a_reaped_group(
@@ -204,7 +193,7 @@ def test_a_successful_run_ends_what_its_leader_left_in_the_group(tmp_path: Path)
     """Follow-up to sweep 4: communicate() used to reap the leader the moment its
     pipes closed, so a same-group child that had let go of them outlived an
     ordinary, successful run."""
-    _subreaper(True)
+    subreaper(True)
     sleeper: int | None = None
     handoff = tmp_path / "sleeper.pid"
     try:
@@ -214,18 +203,11 @@ def test_a_successful_run_ends_what_its_leader_left_in_the_group(tmp_path: Path)
 
         assert completed.returncode == 0 and completed.stdout == b"done\n"
         sleeper = int(handoff.read_text())
-        deadline = time.monotonic() + 3.0
-        reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        while reaped == 0 and time.monotonic() < deadline:
-            time.sleep(0.02)
-            reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        assert reaped == sleeper, "the leader's child outlived the run"
+        status = reaped(sleeper, 3.0)
+        assert status is not None, "the leader's child outlived the run"
         assert os.WIFSIGNALED(status)
         sleeper = None
     finally:
         if sleeper is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(sleeper, 0)
-        _subreaper(False)
+            kill_and_reap(sleeper)
+        subreaper(False)

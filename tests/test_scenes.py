@@ -14,10 +14,7 @@ programs fighting over one wallpaper.
 
 from __future__ import annotations
 
-import contextlib
-import ctypes
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -26,6 +23,7 @@ from typing import Final
 
 import pytest
 
+from tests.process_helpers import is_alive, kill_and_reap, reaped, subreaper
 from wall_in_one import worker_processes
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import outputs, scenes
@@ -380,7 +378,6 @@ class _QuietRenderer:
 
 # -- an engine that exits and leaves a same-group child ------------------------------
 
-_PR_SET_CHILD_SUBREAPER: Final = 36
 #: A stand-in engine: it starts a sleeper in its own process group, records the
 #: sleeper's pid, optionally writes a frame, and exits while the sleeper lives on.
 _ENGINE: Final = """
@@ -392,13 +389,6 @@ if sys.argv[2] == "frame":
     with open(sys.argv[3], "wb") as frame:
         frame.write(b"\\x89PNG\\r\\n\\x1a\\nframe")
 """
-
-
-def _subreaper(enabled: bool) -> None:
-    """Adopt orphaned descendants so the test can reap the exact sleeper itself."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
-        pytest.skip("this kernel can't make the test a child subreaper")
 
 
 @pytest.mark.parametrize("frame", ["frame", "no-frame"])
@@ -423,7 +413,7 @@ def test_a_capture_leaves_no_engine_descendant_behind(
             str(screenshot),
         ],
     )
-    _subreaper(True)
+    subreaper(True)
     sleeper: int | None = None
     processes = worker_processes.Cancellation()
     try:
@@ -433,23 +423,16 @@ def test_a_capture_leaves_no_engine_descendant_behind(
             with pytest.raises(scenes.SceneError, match="stopped before writing"):
                 scenes.screenshot("123", destination, timeout=10, processes=processes)
         sleeper = int(handoff.read_text())
-        deadline = time.monotonic() + 3.0
-        reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        while reaped == 0 and time.monotonic() < deadline:
-            time.sleep(0.02)
-            reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        assert reaped == sleeper, "the engine's child outlived the capture"
+        status = reaped(sleeper, 3.0)
+        assert status is not None, "the engine's child outlived the capture"
         assert os.WIFSIGNALED(status)
         sleeper = None
     finally:
         if sleeper is not None:
             # Only the exact sleeper this test's engine started.
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(sleeper, 0)
+            kill_and_reap(sleeper)
         processes.cancel()
-        _subreaper(False)
+        subreaper(False)
 
 
 def test_the_legacy_renderer_stops_the_group_of_an_engine_that_already_exited(
@@ -471,7 +454,7 @@ def test_the_legacy_renderer_stops_the_group_of_an_engine_that_already_exited(
             "",
         ],
     )
-    _subreaper(True)
+    subreaper(True)
     sleeper: int | None = None
     renderer = SceneRenderer(output="DP-1")
     try:
@@ -482,22 +465,17 @@ def test_the_legacy_renderer_stops_the_group_of_an_engine_that_already_exited(
             time.sleep(0.02)
         sleeper = int(handoff.read_text())
         assert renderer.scene == ""
+        # Seeing the engine exit must not have ended its group: stop() does.
+        assert is_alive(sleeper), "the engine's child was gone before stop()"
 
         renderer.stop()
 
-        reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        deadline = time.monotonic() + 3.0
-        while reaped == 0 and time.monotonic() < deadline:
-            time.sleep(0.02)
-            reaped, status = os.waitpid(sleeper, os.WNOHANG)
-        assert reaped == sleeper, "the engine's child outlived stop()"
+        status = reaped(sleeper, 3.0)
+        assert status is not None, "the engine's child outlived stop()"
         assert os.WIFSIGNALED(status)
         sleeper = None
     finally:
         if sleeper is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(sleeper, 0)
+            kill_and_reap(sleeper)
         renderer.stop()
-        _subreaper(False)
+        subreaper(False)

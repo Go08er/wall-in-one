@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import contextlib
-import ctypes
 import os
-import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Final
 
 import pytest
 
+from tests.process_helpers import is_alive, kill_and_reap, reaped, subreaper
 from wall_in_one.theme import noctalia, source
 
 
@@ -96,36 +93,6 @@ def test_cancelled_resolution_does_not_spawn_a_fallback_cli_call(
     assert calls == ["wallpaper"]
 
 
-_PR_SET_CHILD_SUBREAPER: Final = 36
-
-
-def _subreaper(enabled: bool) -> None:
-    """Adopt orphaned descendants, so the test can reap the exact sleeper itself."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
-        pytest.skip("this kernel can't make the test a child subreaper")
-
-
-def _state(pid: int) -> str:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
-        return ""
-    return stat.rsplit(")", 1)[1].split()[0]
-
-
-def _reaped(pid: int, seconds: float) -> int | None:
-    """The exact adopted ``pid``'s wait status, or None if it is still running."""
-    deadline = time.monotonic() + seconds
-    while True:
-        reaped, status = os.waitpid(pid, os.WNOHANG)
-        if reaped == pid:
-            return status
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(0.02)
-
-
 class _GroupSignals:
     """Stands in for ``os.killpg`` while the stand-in CLI runs.
 
@@ -181,7 +148,7 @@ def test_a_cli_that_exits_leaving_its_group_does_not_leave_a_sleeper(
     handoff = tmp_path / "handoff"
     signals = _GroupSignals(handoff)
     monkeypatch.setattr(os, "killpg", signals)
-    _subreaper(True)
+    subreaper(True)
     sleeper: int | None = None
     pool = ThreadPoolExecutor(max_workers=1)
     try:
@@ -190,7 +157,7 @@ def test_a_cli_that_exits_leaving_its_group_does_not_leave_a_sleeper(
         if ending == "cancel":
             # Only once the leader has exited: a zombie, or already reaped.
             deadline = time.monotonic() + 3.0
-            while _state(leader) not in ("Z", "") and time.monotonic() < deadline:
+            while is_alive(leader) and time.monotonic() < deadline:
                 time.sleep(0.01)
             noctalia.cancel_pending()
 
@@ -201,7 +168,7 @@ def test_a_cli_that_exits_leaving_its_group_does_not_leave_a_sleeper(
         except noctalia.NoctaliaError as error:
             assert "was cancelled" in str(error) or "timed out" in str(error)
 
-        status = _reaped(sleeper, 3.0)
+        status = reaped(sleeper, 3.0)
         assert status is not None, "the CLI's sleeper outlived the call"
         sleeper = None
         assert os.WIFSIGNALED(status)
@@ -211,12 +178,9 @@ def test_a_cli_that_exits_leaving_its_group_does_not_leave_a_sleeper(
         if sleeper is not None:
             # Only the exact sleeper this test started; its pid is held until
             # it is reaped here. This also frees a call still on its pipes.
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(sleeper, 0)
+            kill_and_reap(sleeper)
         pool.shutdown(wait=True, cancel_futures=True)
-        _subreaper(False)
+        subreaper(False)
 
 
 @pytest.mark.parametrize("ending", ["cancel", "timeout"])
@@ -230,13 +194,15 @@ def test_a_cancel_or_timeout_ends_a_running_cli_and_its_group(
     handoff = tmp_path / "handoff"
     signals = _GroupSignals(handoff)
     monkeypatch.setattr(os, "killpg", signals)
-    _subreaper(True)
+    subreaper(True)
     sleeper: int | None = None
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         future = pool.submit(noctalia.message, "linger", str(handoff))
         _leader, sleeper = _handed_off(handoff)
         if ending == "cancel":
+            # Nothing else ends the group first: the leader runs for 30s.
+            assert is_alive(sleeper), "the sleeper was gone before the cancellation"
             noctalia.cancel_pending()
             expected = "was cancelled"
         else:
@@ -245,7 +211,7 @@ def test_a_cancel_or_timeout_ends_a_running_cli_and_its_group(
         with pytest.raises(noctalia.NoctaliaError, match=expected):
             future.result(timeout=5.0)
 
-        status = _reaped(sleeper, 3.0)
+        status = reaped(sleeper, 3.0)
         assert status is not None, "the CLI's sleeper outlived the call"
         sleeper = None
         assert os.WIFSIGNALED(status)
@@ -254,9 +220,6 @@ def test_a_cancel_or_timeout_ends_a_running_cli_and_its_group(
         assert not noctalia._ACTIVE
     finally:
         if sleeper is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(sleeper, 0)
+            kill_and_reap(sleeper)
         pool.shutdown(wait=True, cancel_futures=True)
-        _subreaper(False)
+        subreaper(False)

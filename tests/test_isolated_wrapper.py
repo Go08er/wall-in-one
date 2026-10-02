@@ -12,9 +12,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -143,3 +146,105 @@ def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> 
         assert seen[variable] == value, variable
     assert not root.exists(), "the throwaway profile is removed afterwards"
     assert not shell.exists(), "nothing was written in the stand-in shell's directories"
+
+
+#: Reports where it runs, then sleeps far longer than any test waits.
+SLEEPER: Final = """
+import json, os, sys, time
+report = {"pid": os.getpid(), "pgid": os.getpgid(0), "home": os.environ["HOME"]}
+with open(sys.argv[1] + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(300)
+"""
+
+
+def _session(session: int) -> dict[int, tuple[str, str]]:
+    """Every live process in ``session``: pid -> (start time, command name)."""
+    found: dict[int, tuple[str, str]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            text = Path(f"/proc/{entry}/stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        name = text[text.index("(") + 1 : text.rindex(")")]
+        fields = text[text.rindex(")") + 2 :].split()
+        # state, ppid, pgrp, session, ..., starttime (fields 3, 4, 5, 6, 22)
+        if fields[0] != "Z" and int(fields[3]) == session:
+            found[int(entry)] = (fields[19], name)
+    return found
+
+
+def _still_running(pid: int, started: str) -> bool:
+    """Whether that exact process (same start time) is alive, not a zombie."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    fields = text[text.rindex(")") + 2 :].split()
+    return fields[19] == started and fields[0] != "Z"
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goes(
+    tmp_path: Path, number: signal.Signals
+) -> None:
+    """Sweep 4 T-3, Codex's case: a real xvfb-run and a sleeping command, and
+    the signal sent only to the wrapper's own PID, as a task runner does.
+    Before, the profile was removed and xvfb-run, Xvfb and the command lived
+    on. Every process this test started is in its own session; cleanup kills
+    only those exact processes."""
+    bash, xvfb_run = shutil.which("bash"), shutil.which("xvfb-run")
+    if bash is None or xvfb_run is None:  # pragma: no cover - the gui-tests check has both
+        pytest.skip("needs bash and xvfb-run")
+    report = tmp_path / "report.json"
+    temporary = tmp_path / "tmp"
+    temporary.mkdir()
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in (conftest.SESSION_ROOT_ENV, "WIO_TEST_SESSION_PID")
+    }
+    environment.update(IN_NIX_SHELL="impure", TMPDIR=str(temporary))
+    wrapper = subprocess.Popen(
+        (bash, str(WRAPPER), sys.executable, "-c", SLEEPER, str(report)),
+        env=environment,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    owned: dict[int, tuple[str, str]] = {}
+    try:
+        deadline = time.monotonic() + 60
+        while not report.exists() and wrapper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert report.exists(), "the command never started"
+        seen = json.loads(report.read_text(encoding="utf-8"))
+        root = Path(seen["home"]).parent
+        assert root.parent == temporary and root.is_dir()
+        owned = _session(wrapper.pid)
+        names = sorted(name for _started, name in owned.values())
+        assert seen["pid"] in owned and "Xvfb" in names, names
+
+        os.kill(wrapper.pid, number)
+        status = wrapper.wait(timeout=30)
+
+        survivors = {
+            pid: name for pid, (started, name) in owned.items() if _still_running(pid, started)
+        }
+        assert survivors == {}, f"left running: {survivors}"
+        assert status == 128 + number
+        assert not root.exists(), "the profile is removed, after the workload"
+    finally:
+        for pid, (started, _name) in owned.items():
+            if pid != wrapper.pid and _still_running(pid, started):
+                os.kill(pid, signal.SIGKILL)
+        if wrapper.poll() is None:
+            wrapper.kill()
+        wrapper.wait(timeout=30)
+        if wrapper.stderr is not None:
+            wrapper.stderr.close()

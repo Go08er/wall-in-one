@@ -357,10 +357,10 @@ older service simply omits them.
 
 | Field | Meaning |
 | --- | --- |
-| `route_change_at` | Local wall-clock time, `YYYY-MM-DDTHH:MM:SS`, of the next schedule boundary that changes this display's automatic playlist or `route_source`. |
-| `route_change_in_s` | Whole seconds until then, rounded up. |
-| `next_cycle_at` | Local wall-clock time the rotation next advances. |
-| `next_cycle_in_s` | Whole seconds until then, rounded up; `0` when it is due. |
+| `route_change_at` | Local wall-clock time, `YYYY-MM-DDTHH:MM:SS`, of the next schedule boundary that changes this display's automatic playlist or `route_source`: the time the schedule reads. This is the authority for the schedule. |
+| `route_change_in_s` | Whole seconds until then, rounded up. A difference of local times, so it can be an hour off across a daylight-saving change. |
+| `next_cycle_at` | The local time the clock will show when the rotation next advances: `next_cycle_in_s` added to the real current time and read in the local zone. |
+| `next_cycle_in_s` | Whole seconds until then, rounded up; `0` when it is due. Elapsed time, and the authority for the rotation. |
 | `until` | `route_change_at` as local `HH:MM`, only when it is less than a day away. |
 | `next_change_in_s` | The same value as `next_cycle_in_s`. |
 
@@ -389,8 +389,21 @@ not connected. Stopped routes keep rotating stills, so they keep a deadline.
 Mirrored mode has one timer, so every mirrored row carries the same deadline.
 A successful rotation, schedule change or explicit command restarts it.
 
-Both clocks are naive local time. Seconds across a daylight-saving change
-can be an hour off; the wall-clock fields are the authority.
+The two kinds of timing have different authorities across a daylight-saving
+change:
+
+- The schedule is written and read in local wall-clock time, so
+  `route_change_at` and `until` are exact and `route_change_in_s` is
+  approximate. A boundary inside a clocks-forward gap (02:30 on a spring
+  change) never shows on the clock, so the schedule first sees it, and status
+  reports it, at the gap's end (03:00); a window lying wholly inside the gap
+  changes nothing that day. In the repeated hour after clocks go back the clock
+  passes the same times twice: the first is reported, and a rule boundary in
+  that hour acts again when the hour repeats.
+- Rotation runs on elapsed time, so `next_cycle_in_s` is exact and
+  `next_cycle_at` is that many seconds from now as the local clock will then
+  read: ten minutes after 01:55 on a spring change is 03:05, and ten minutes
+  after the first 01:55 on an autumn change is 01:05.
 
 ## Per-playlist rotation and display precedence (`runtime-overrides.toml`)
 

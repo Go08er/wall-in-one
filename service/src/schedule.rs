@@ -1,5 +1,5 @@
 use crate::config::{ConfigError, ScheduleRule, parse_time};
-use chrono::{Datelike, Days, NaiveDateTime, Timelike};
+use chrono::{Datelike, Days, LocalResult, NaiveDateTime, TimeDelta, TimeZone, Timelike};
 
 pub trait Clock {
     fn now(&self) -> NaiveDateTime;
@@ -88,6 +88,25 @@ pub fn resolve_targeted_rule<'a>(
 /// is reported as none.
 pub const CHANGE_HORIZON_DAYS: u64 = 8;
 
+/// The local time a clock in `zone` shows when it reaches `local`: `local`
+/// itself, or, for a time inside a clocks-forward gap that never appears, the
+/// first minute after the gap. The service reads its schedule from that
+/// clock, so on the spring change a boundary at 02:30 acts at 03:00.
+pub fn shown_on<Tz: TimeZone>(local: NaiveDateTime, zone: &Tz) -> NaiveDateTime {
+    let mut probe = local;
+    // No zone skips more than a day.
+    for _ in 0..24 * 60 {
+        if !matches!(zone.from_local_datetime(&probe), LocalResult::None) {
+            return probe;
+        }
+        let Some(next) = probe.checked_add_signed(TimeDelta::minutes(1)) else {
+            break;
+        };
+        probe = next;
+    }
+    local
+}
+
 /// The first whole minute after `at`, at most `CHANGE_HORIZON_DAYS` ahead, at
 /// which `decide` gives something other than what it gives at `at`.
 ///
@@ -95,6 +114,12 @@ pub const CHANGE_HORIZON_DAYS: u64 = 8;
 /// own start and end minutes; a wrapped window's after-midnight tail belongs
 /// to its start day, so midnight is no edge for it. `decide` is therefore
 /// asked only at those instants. Without an enabled rule nothing can change.
+///
+/// `shown` maps each of those instants to the time the local clock will show
+/// when it gets there (`shown_on`): a boundary inside a clocks-forward gap is
+/// judged, and reported, at the gap's end, so a window that lies entirely
+/// inside the gap changes nothing. In the repeated hour after clocks go back
+/// the local clock passes the same times twice; the first one is reported.
 ///
 /// Each `decide` is charged `rules.len()` against `budget`, the rule checks a
 /// caller allows for all its searches together. When the budget runs out the
@@ -104,6 +129,7 @@ pub fn next_change<T: PartialEq, E>(
     rules: &[ScheduleRule],
     at: NaiveDateTime,
     budget: &mut usize,
+    mut shown: impl FnMut(NaiveDateTime) -> NaiveDateTime,
     mut decide: impl FnMut(NaiveDateTime) -> Result<T, E>,
 ) -> Result<Option<NaiveDateTime>, E> {
     if !rules.iter().any(|rule| rule.enabled) {
@@ -133,6 +159,7 @@ pub fn next_change<T: PartialEq, E>(
     let horizon = at
         .checked_add_days(Days::new(CHANGE_HORIZON_DAYS))
         .unwrap_or(NaiveDateTime::MAX);
+    let mut judged = None;
     for offset in 0..=CHANGE_HORIZON_DAYS {
         let Some(day) = at.date().checked_add_days(Days::new(offset)) else {
             break;
@@ -143,12 +170,16 @@ pub fn next_change<T: PartialEq, E>(
             else {
                 continue;
             };
-            if candidate <= at {
+            // Gap times map forward, so the order is kept; several can land
+            // on the gap's end, which needs judging once.
+            let candidate = shown(candidate);
+            if candidate <= at || judged == Some(candidate) {
                 continue;
             }
             if candidate > horizon {
                 return Ok(None);
             }
+            judged = Some(candidate);
             match decide(candidate)? {
                 None => return Ok(None),
                 Some(answer) if answer != current => return Ok(Some(candidate)),
@@ -278,9 +309,13 @@ mod tests {
 
     fn next_winner(rules: &[ScheduleRule], from: NaiveDateTime) -> Option<NaiveDateTime> {
         let mut unlimited = usize::MAX;
-        next_change(rules, from, &mut unlimited, |instant| {
-            resolve(rules, "d", instant)
-        })
+        next_change(
+            rules,
+            from,
+            &mut unlimited,
+            |instant| instant,
+            |instant| resolve(rules, "d", instant),
+        )
         .unwrap()
     }
 
@@ -300,13 +335,13 @@ mod tests {
         // rules each.
         let mut budget = 6;
         assert_eq!(
-            next_change(&r, from, &mut budget, &mut count).unwrap(),
+            next_change(&r, from, &mut budget, |instant| instant, &mut count).unwrap(),
             Some(at(2026, 8, 4, 6, 0))
         );
         assert_eq!(budget, 0);
         let mut budget = 5;
         assert_eq!(
-            next_change(&r, from, &mut budget, &mut count).unwrap(),
+            next_change(&r, from, &mut budget, |instant| instant, &mut count).unwrap(),
             None
         );
         assert_eq!(budget, 1);
@@ -394,6 +429,49 @@ mod tests {
         assert_eq!(
             next_winner(&[rule("always", None, None)], at(2026, 8, 3, 9, 0)),
             None
+        );
+    }
+
+    #[test]
+    fn a_boundary_inside_the_spring_gap_acts_when_the_clock_reaches_its_end() {
+        use crate::schedule::test_zones::Chicago2026;
+        let chicago = |instant| shown_on(instant, &Chicago2026);
+        let next = |rules: &[ScheduleRule], from| {
+            let mut unlimited = usize::MAX;
+            next_change(rules, from, &mut unlimited, chicago, |instant| {
+                resolve(rules, "d", instant)
+            })
+            .unwrap()
+        };
+        // 2026-03-08: clocks go from 02:00 CST to 03:00 CDT.
+        assert_eq!(
+            shown_on(at(2026, 3, 8, 2, 30), &Chicago2026),
+            at(2026, 3, 8, 3, 0)
+        );
+        assert_eq!(
+            shown_on(at(2026, 3, 8, 1, 59), &Chicago2026),
+            at(2026, 3, 8, 1, 59)
+        );
+        let late = vec![rule("late", Some("02:30"), Some("06:00"))];
+        assert_eq!(
+            next(&late, at(2026, 3, 8, 1, 0)),
+            Some(at(2026, 3, 8, 3, 0))
+        );
+        // A window entirely inside the gap never shows that day.
+        let lost = vec![rule("lost", Some("02:15"), Some("02:45"))];
+        assert_eq!(
+            next(&lost, at(2026, 3, 8, 1, 0)),
+            Some(at(2026, 3, 9, 2, 15))
+        );
+        // On the autumn change the repeated hour exists; nothing moves.
+        assert_eq!(
+            shown_on(at(2026, 11, 1, 1, 30), &Chicago2026),
+            at(2026, 11, 1, 1, 30)
+        );
+        let early = vec![rule("early", Some("01:30"), Some("06:00"))];
+        assert_eq!(
+            next(&early, at(2026, 11, 1, 0, 30)),
+            Some(at(2026, 11, 1, 1, 30))
         );
     }
 
@@ -493,5 +571,68 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+}
+
+/// A hand-written America/Chicago for 2026, so DST tests need no zone
+/// database or process-wide `TZ`: CST (UTC-6) until 2026-03-08 08:00 UTC, CDT
+/// (UTC-5) until 2026-11-01 07:00 UTC, then CST again.
+#[cfg(test)]
+pub(crate) mod test_zones {
+    use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
+
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Chicago2026;
+
+    fn cst() -> FixedOffset {
+        FixedOffset::west_opt(6 * 3600).unwrap()
+    }
+
+    fn cdt() -> FixedOffset {
+        FixedOffset::west_opt(5 * 3600).unwrap()
+    }
+
+    fn utc(month: u32, day: u32, hour: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, month, day)
+            .unwrap()
+            .and_hms_opt(hour, 0, 0)
+            .unwrap()
+    }
+
+    impl TimeZone for Chicago2026 {
+        type Offset = FixedOffset;
+
+        fn from_offset(_offset: &FixedOffset) -> Self {
+            Self
+        }
+
+        fn offset_from_utc_datetime(&self, utc_time: &NaiveDateTime) -> FixedOffset {
+            if (utc(3, 8, 8)..utc(11, 1, 7)).contains(utc_time) {
+                cdt()
+            } else {
+                cst()
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc_date: &NaiveDate) -> FixedOffset {
+            self.offset_from_utc_datetime(&utc_date.and_hms_opt(0, 0, 0).unwrap())
+        }
+
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<FixedOffset> {
+            // Each reading is valid when the instant it names has that offset.
+            let valid = |offset: FixedOffset| {
+                let instant = *local - offset;
+                (self.offset_from_utc_datetime(&instant) == offset).then_some(offset)
+            };
+            match (valid(cdt()), valid(cst())) {
+                (Some(daylight), Some(standard)) => LocalResult::Ambiguous(daylight, standard),
+                (Some(offset), None) | (None, Some(offset)) => LocalResult::Single(offset),
+                (None, None) => LocalResult::None,
+            }
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+        }
     }
 }

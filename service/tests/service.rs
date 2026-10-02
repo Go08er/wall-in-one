@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{Config, Overrides};
 use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
 use wall_in_one_service::renderer::{RendererFailure, SystemDriver, WallpaperDriver};
-use wall_in_one_service::runtime::Runtime;
+use wall_in_one_service::runtime::{Runtime, wall_clock_after};
 
 /// Run `attempt` until the kernel stops calling the freshly written program busy.
 ///
@@ -7451,10 +7451,24 @@ fn a_rotation_restarts_the_cycle_deadline_from_the_tick_that_advanced_it() {
         state.lock().unwrap().applies.len() > applies,
         "the rotation ran"
     );
+    let before = chrono::Utc::now();
     let row = route(&status(&mut runtime, at), "ALL");
+    let after = chrono::Utc::now();
     assert_eq!(row["next_cycle_in_s"], 300);
-    assert_eq!(row["next_cycle_at"], "2026-08-03T09:05:00");
     assert_eq!(row["next_change_in_s"], 300);
+    // The deadline's wall-clock time is the real clock plus the elapsed 300 s
+    // in the local zone, not the synthetic schedule reading plus 300 s.
+    let due = chrono::NaiveDateTime::parse_from_str(
+        row["next_cycle_at"].as_str().unwrap(),
+        "%Y-%m-%dT%H:%M:%S",
+    )
+    .unwrap();
+    let earliest = wall_clock_after(before, 299, &chrono::Local).unwrap();
+    let latest = wall_clock_after(after, 300, &chrono::Local).unwrap();
+    assert!(
+        earliest <= due && due <= latest,
+        "{earliest} <= {due} <= {latest}"
+    );
     // No enabled rule: the route never changes on its own.
     assert_no_route_change(&row);
 }

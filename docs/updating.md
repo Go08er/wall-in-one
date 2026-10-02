@@ -161,7 +161,9 @@ rewrites the three files in the versions 0.1.4 reads, and removes
 commands that put the copies back; if a write fails part way, it says which
 files it already rewrote and prints the same commands. It refuses, writing
 nothing, while the app or the service is running, and when a file was saved
-by a version newer than 0.2.0. Running it again finds nothing to do.
+by a version newer than 0.2.0. A file that changes after the tool read it is
+never rewritten: the tool stops there and says so. Running it again finds
+nothing to do.
 
 Then install 0.1.4 and start its service. Its first start compiles
 `runtime.toml` again from the rewritten files. Everything else is left as it

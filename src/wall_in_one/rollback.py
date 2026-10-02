@@ -25,14 +25,22 @@ dated folder under the state directory, and then writes each file with its
 store's own atomic writer. It prints the two commands that put the copies
 back, also when a write fails part way, together with which files were
 already rewritten.
+
+Every file is read, checked, backed up and narrowed as one generation
+(:class:`Generation`): the copy must hold the bytes the plan was made from,
+and, under that store's writer lock, the file must still be them. A file
+another writer replaced in between, say with a newer version's, is refused,
+never narrowed over.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shlex
 import shutil
+import stat
 import sys
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
@@ -120,6 +128,86 @@ def _published_not_durable(error: BaseException) -> BaseException | None:
 
 
 @dataclass(frozen=True, slots=True)
+class Generation:
+    """One file exactly as this run read it.
+
+    The plan is built from this generation, the backup must hold its bytes,
+    and the file is rewritten only while it is still this generation: the
+    same inode, size and modification time, and the same bytes.
+    """
+
+    path: Path
+    identity: tuple[int, int, int, int]
+    digest: str
+
+
+class GenerationChangedError(Exception):
+    """A file is no longer the generation the plan was made from."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"{path.name} changed after this run read it, so it was left as it is, "
+            "not narrowed; run this again to plan from the file as it is now"
+        )
+        self.path = path
+
+
+def _generation(path: Path) -> Generation | None:
+    """``path``'s current generation, or ``None`` when there is no file.
+
+    Reads only, through one descriptor that follows no symbolic link; a
+    file that changes while it is read is refused.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RollbackRefusedError(f"cannot read {path.name} ({error}); repair it first") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RollbackRefusedError(f"{path.name} is not a regular file; repair it first")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1 << 16):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    except OSError as error:
+        raise RollbackRefusedError(f"cannot read {path.name} ({error}); repair it first") from error
+    finally:
+        os.close(descriptor)
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise GenerationChangedError(path)
+    return Generation(
+        path,
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        digest.hexdigest(),
+    )
+
+
+def _read_generation[T](path: Path, read: Callable[[Path], T]) -> tuple[Generation, T] | None:
+    """``read(path)``, and the generation it was read from; ``None`` without a file."""
+    generation = _generation(path)
+    if generation is None:
+        return None
+    value = read(path)
+    if _generation(path) != generation:
+        raise GenerationChangedError(path)
+    return generation, value
+
+
+def _require_unchanged(generation: Generation) -> None:
+    """Raise :class:`GenerationChangedError` unless the file is still ``generation``."""
+    try:
+        current = _generation(generation.path)
+    except RollbackRefusedError, GenerationChangedError:
+        current = None
+    if current != generation:
+        raise GenerationChangedError(generation.path)
+
+
+@dataclass(frozen=True, slots=True)
 class FileStep:
     """One file to narrow: what changes, and the write that does it."""
 
@@ -128,6 +216,7 @@ class FileStep:
     target: int
     dropped: tuple[str, ...]
     write: Callable[[], object]
+    generation: Generation
 
     def describe(self) -> list[str]:
         if self.version is None or self.version <= self.target:
@@ -142,17 +231,27 @@ class FileStep:
 @dataclass(frozen=True, slots=True)
 class Plan:
     steps: tuple[FileStep, ...]
-    overrides: Path | None
+    overrides_generation: Generation | None
+
+    @property
+    def overrides(self) -> Path | None:
+        """``runtime-overrides.toml`` when it is to be removed."""
+        found = self.overrides_generation
+        return found.path if found is not None else None
 
     @property
     def empty(self) -> bool:
         return not self.steps and self.overrides is None
 
-    def touched(self) -> tuple[Path, ...]:
-        found = [step.path for step in self.steps]
-        if self.overrides is not None:
-            found.append(self.overrides)
+    def generations(self) -> tuple[Generation, ...]:
+        """Every file this plan changes, as it was read."""
+        found = [step.generation for step in self.steps]
+        if self.overrides_generation is not None:
+            found.append(self.overrides_generation)
         return tuple(found)
+
+    def touched(self) -> tuple[Path, ...]:
+        return tuple(generation.path for generation in self.generations())
 
     def describe(self) -> list[str]:
         if self.empty:
@@ -185,9 +284,10 @@ def _readable(name: str, reading: state_file.Reading[Any]) -> None:
 
 
 def _playlists_step(path: Path) -> FileStep | None:
-    if not path.exists():
+    read = _read_generation(path, playlists._read)
+    if read is None:
         return None
-    reading = playlists._read(path)
+    generation, reading = read
     _readable(path.name, reading)
     target = V0_1_4_FORMATS[path.name]
     if reading.version is not None and reading.version <= target:
@@ -209,13 +309,15 @@ def _playlists_step(path: Path) -> FileStep | None:
         target,
         tuple(dropped),
         lambda: playlists.save(narrowed, path, version=target),
+        generation,
     )
 
 
 def _schedules_step(path: Path) -> FileStep | None:
-    if not path.exists():
+    read = _read_generation(path, schedules._read)
+    if read is None:
         return None
-    reading = schedules._read(path)
+    generation, reading = read
     _readable(path.name, reading)
     target = V0_1_4_FORMATS[path.name]
     if reading.version is not None and reading.version <= target:
@@ -228,13 +330,15 @@ def _schedules_step(path: Path) -> FileStep | None:
         target,
         dropped,
         lambda: schedules.save(narrowed, path, version=target),
+        generation,
     )
 
 
 def _displays_step(path: Path) -> FileStep | None:
-    if not path.exists():
+    read = _read_generation(path, displays._read)
+    if read is None:
         return None
-    reading = displays._read(path)
+    generation, reading = read
     _readable(path.name, reading)
     target = V0_1_4_FORMATS[path.name]
     if reading.version is not None and reading.version <= target:
@@ -251,6 +355,7 @@ def _displays_step(path: Path) -> FileStep | None:
         target,
         dropped,
         lambda: displays.save(assignments, path, version=target),
+        generation,
     )
 
 
@@ -268,16 +373,23 @@ def make_plan() -> Plan:
     ]
     runtime = paths.runtime_config_path()
     sidecar = runtime_config.overrides_path(runtime)
-    try:
-        text = runtime_config._read_overrides(runtime)
-    except runtime_config.RuntimeConfigError as error:
-        raise RollbackRefusedError(f"{error}; repair it first") from error
+
+    def read_overrides(_sidecar: Path) -> str | None:
+        try:
+            return runtime_config._read_overrides(runtime)
+        except runtime_config.RuntimeConfigError as error:
+            raise RollbackRefusedError(f"{error}; repair it first") from error
+
+    read = _read_generation(sidecar, read_overrides)
+    if read is None:
+        return Plan(tuple(steps), None)
+    generation, text = read
     if text is not None and runtime_config.overrides_from_a_newer_build(text):
         raise RollbackRefusedError(
             f"{sidecar.name} was written by a version newer than 0.2.0; "
             "roll back with that version first"
         )
-    return Plan(tuple(steps), sidecar if text is not None else None)
+    return Plan(tuple(steps), generation if text is not None else None)
 
 
 def _refuse_running_writers() -> None:
@@ -314,25 +426,31 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _back_up(files: Sequence[Path], backup: Path) -> None:
+def _back_up(generations: Sequence[Generation], backup: Path) -> None:
     """Copy each file byte for byte, flushed, before anything is written.
 
-    A failure refuses the run before any file is rewritten. Whatever was
-    already copied stays in the folder: a backup is never deleted.
+    Each copy must hold exactly the generation the plan was made from, and
+    the file must still be that generation once it is copied; otherwise the
+    run is refused. A failure refuses the run before any file is rewritten.
+    Whatever was already copied stays in the folder: a backup is never deleted.
     """
     try:
-        for source in files:
+        for generation in generations:
+            source = generation.path
             destination = backup / source.name
             shutil.copy2(source, destination)
+            copied = _generation(destination)
+            if copied is None or copied.digest != generation.digest:
+                raise GenerationChangedError(source)
+            _require_unchanged(generation)
             with destination.open("rb") as handle:
-                if handle.read() != source.read_bytes():
-                    raise RollbackRefusedError(
-                        f"the backup of {source.name} in {backup} does not match it; "
-                        "that folder was left as it is"
-                    )
                 os.fsync(handle.fileno())
         _fsync_directory(backup)
         _fsync_directory(backup.parent)
+    except GenerationChangedError as error:
+        raise RollbackRefusedError(
+            f"{error}. Nothing was rewritten; the backup folder {backup} was left as it is"
+        ) from error
     except OSError as error:
         raise RollbackRefusedError(
             f"could not back up the files into {backup} ({error}); that folder was left as it is"
@@ -363,20 +481,36 @@ def apply(*, when: datetime | None = None) -> tuple[Plan, Path | None]:
             return plan, None
         state = paths.app_state_dir()
         backup = _backup_directory(state, when or datetime.now())
-        _back_up(plan.touched(), backup)
+        _back_up(plan.generations(), backup)
         rewritten: list[Path] = []
         writing: Path | None = None
         try:
             stack.enter_context(runtime_config.compiler_lock())
             for step in plan.steps:
                 writing = step.path
+                # Under the store's own writer lock, so a cooperating writer
+                # cannot slip in between this check and the narrowing.
                 with state_file.mutation_lock(step.path, description=step.path.stem):
+                    _require_unchanged(step.generation)
                     step.write()
                 rewritten.append(step.path)
-            if plan.overrides is not None:
-                writing = plan.overrides
+            if plan.overrides_generation is not None:
+                writing = plan.overrides_generation.path
+                # The compiler lock above is the overrides file's writer lock.
+                _require_unchanged(plan.overrides_generation)
                 runtime_config._publish_overrides(None, paths.runtime_config_path())
-                rewritten.append(plan.overrides)
+                rewritten.append(writing)
+        except GenerationChangedError as error:
+            if not rewritten:
+                raise RollbackRefusedError(
+                    f"{error}. Nothing was rewritten; the backup folder {backup} was left as it is"
+                ) from error
+            raise RollbackIncompleteError(
+                str(error),
+                backup=backup,
+                rewritten=tuple(rewritten),
+                untouched=tuple(path for path in plan.touched() if path not in rewritten),
+            ) from error
         except Exception as error:
             # Whatever failed (a store's local-io refusal, a lock timeout, a
             # full disk), the person has to learn where the backup is.
@@ -473,7 +607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             return 0
         plan, backup = apply()
-    except RollbackRefusedError as error:
+    except (RollbackRefusedError, GenerationChangedError) as error:
         print(f"wall-in-one-rollback: refused, nothing was written: {error}", file=sys.stderr)
         return EXIT_REFUSED
     except RollbackIncompleteError as error:

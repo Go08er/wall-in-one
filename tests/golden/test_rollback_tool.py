@@ -493,6 +493,92 @@ def test_a_write_that_fails_after_the_backup_says_what_was_rewritten_and_how_to_
     assert {name: (state / name).read_bytes() for name in touched} == before
 
 
+def _a_newer_generation(path: Path) -> bytes:
+    """What a writer outside every lock might put there: a version-99 file with a new field."""
+    document = read_json(path)
+    document["version"] = 99
+    document["from_the_future"] = {"kept": True}
+    write_json(path, document)
+    return path.read_bytes()
+
+
+def test_a_store_replaced_before_the_backup_is_never_narrowed(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep 3 S-4, Codex's case: the plan is made, then playlists.json is
+    replaced by a version-99 file just before the backup copies it. The
+    backup would hold the replacement and the write would narrow the old
+    plan over it; now nothing is rewritten and the newer file stays."""
+    golden, _playlist = in_use
+    state = golden.profile.app_state
+    back_up = rollback._back_up
+    replaced: list[bytes] = []
+
+    def replaced_first(generations: Any, backup: Path) -> None:
+        replaced.append(_a_newer_generation(state / "playlists.json"))
+        back_up(generations, backup)
+
+    monkeypatch.setattr(rollback, "_back_up", replaced_first)
+    before = {name: (state / name).read_bytes() for name in NARROWED[1:]}
+
+    status, out, err = _run(capsys, "--apply")
+
+    assert status == rollback.EXIT_REFUSED, (out, err)
+    assert (state / "playlists.json").read_bytes() == replaced[0], "the newer file is untouched"
+    assert read_json(state / "playlists.json")["from_the_future"] == {"kept": True}
+    assert {name: (state / name).read_bytes() for name in NARROWED[1:]} == before
+    assert (state / runtime_config.OVERRIDES_FILENAME).exists()
+    assert "refused, nothing was written: playlists.json changed after this run read it" in err
+    (backup,) = state.glob(f"{rollback.BACKUP_PREFIX}*")
+    assert f"Nothing was rewritten; the backup folder {backup} was left as it is" in err, err
+
+
+@pytest.mark.parametrize("victim", ["playlists.json", "displays.json"])
+def test_a_store_replaced_after_the_backup_is_refused_under_its_lock(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    victim: str,
+) -> None:
+    """Replaced just before the tool takes its writer lock: the check under
+    that lock refuses it. The first store: nothing was written (exit 1).
+    The last: the two before it were, so the report and restore commands."""
+    golden, _playlist = in_use
+    state = golden.profile.app_state
+    lock = state_file.mutation_lock
+    replaced: list[bytes] = []
+
+    @contextlib.contextmanager
+    def replaced_before_the_lock(target: Path, **keywords: Any) -> Iterator[None]:
+        if Path(target).name == victim and not replaced:
+            replaced.append(_a_newer_generation(state / victim))
+        with lock(target, **keywords):
+            yield
+
+    monkeypatch.setattr(state_file, "mutation_lock", replaced_before_the_lock)
+
+    status, out, err = _run(capsys, "--apply")
+
+    assert replaced, "the tool reached that store's lock"
+    assert (state / victim).read_bytes() == replaced[0], "the newer file is never narrowed"
+    assert (state / runtime_config.OVERRIDES_FILENAME).exists(), "the run stopped there"
+    (backup,) = state.glob(f"{rollback.BACKUP_PREFIX}*")
+    reason = f"{victim} changed after this run read it, so it was left as it is, not narrowed"
+    if victim == "playlists.json":
+        assert status == rollback.EXIT_REFUSED, (out, err)
+        assert f"refused, nothing was written: {reason}" in err, err
+        assert f"Nothing was rewritten; the backup folder {backup} was left as it is" in err
+    else:
+        assert status == rollback.EXIT_INCOMPLETE, (out, err)
+        lines = err.splitlines()
+        assert lines[0].startswith(f"wall-in-one-rollback: stopped part way: {reason}"), err
+        assert "Already rewritten: playlists.json, schedules.json." in lines, err
+        assert "Not rewritten: displays.json, runtime-overrides.toml." in lines, err
+        assert f"  cp -p -- {backup}/* {state}/" in lines
+
+
 def test_a_store_saved_but_not_synced_is_reported_as_rewritten(
     in_use: tuple[Golden, str],
     capsys: pytest.CaptureFixture[str],

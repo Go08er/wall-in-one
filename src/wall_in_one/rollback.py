@@ -27,7 +27,8 @@ back, also when a write fails part way, together with which files were
 already rewritten.
 
 Every file is read, checked, backed up and narrowed as one generation
-(:class:`Generation`): the copy must hold the bytes the plan was made from,
+(:class:`Generation`): it is read once, and its store's own parser is given
+exactly those bytes, never the path again; the copy must hold those bytes,
 and, under that store's writer lock, the file must still be them. A file
 another writer replaced in between, say with a newer version's, is refused,
 never narrowed over.
@@ -152,11 +153,18 @@ class GenerationChangedError(Exception):
         self.path = path
 
 
-def _generation(path: Path) -> Generation | None:
-    """``path``'s current generation, or ``None`` when there is no file.
+#: Far larger than any store or overrides file; a bigger one is refused, not read.
+MAX_CAPTURE_BYTES: Final = 64 * 1024 * 1024
 
-    Reads only, through one descriptor that follows no symbolic link; a
-    file that changes while it is read is refused.
+
+def _capture(path: Path) -> tuple[Generation, bytes] | None:
+    """Read ``path`` once: its bytes, and the generation they are.
+
+    One descriptor, opened without following a symbolic link, on a regular
+    file. The identity is that descriptor's, and the digest is of exactly the
+    bytes returned, so whatever is parsed from them is that generation; a
+    file written in place while it is read is refused. ``None`` without a
+    file.
     """
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -169,9 +177,11 @@ def _generation(path: Path) -> Generation | None:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise RollbackRefusedError(f"{path.name} is not a regular file; repair it first")
-        digest = hashlib.sha256()
+        contents = bytearray()
         while chunk := os.read(descriptor, 1 << 16):
-            digest.update(chunk)
+            contents += chunk
+            if len(contents) > MAX_CAPTURE_BYTES:
+                raise RollbackRefusedError(f"{path.name} is too large; repair it first")
         after = os.fstat(descriptor)
     except OSError as error:
         raise RollbackRefusedError(f"cannot read {path.name} ({error}); repair it first") from error
@@ -179,22 +189,44 @@ def _generation(path: Path) -> Generation | None:
         os.close(descriptor)
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise GenerationChangedError(path)
-    return Generation(
+    data = bytes(contents)
+    generation = Generation(
         path,
         (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
-        digest.hexdigest(),
+        hashlib.sha256(data).hexdigest(),
     )
+    return generation, data
 
 
-def _read_generation[T](path: Path, read: Callable[[Path], T]) -> tuple[Generation, T] | None:
-    """``read(path)``, and the generation it was read from; ``None`` without a file."""
-    generation = _generation(path)
-    if generation is None:
+def _generation(path: Path) -> Generation | None:
+    """``path``'s current generation, or ``None`` when there is no file."""
+    captured = _capture(path)
+    return None if captured is None else captured[0]
+
+
+def _read_generation[T](
+    path: Path, parse: Callable[[Path, bytes], T]
+) -> tuple[Generation, T] | None:
+    """``parse`` of exactly the bytes one read returned, and their generation.
+
+    ``None`` without a file. The path is never read a second time, so no
+    other file put there for a moment can be what is parsed.
+    """
+    captured = _capture(path)
+    if captured is None:
         return None
-    value = read(path)
-    if _generation(path) != generation:
-        raise GenerationChangedError(path)
-    return generation, value
+    generation, data = captured
+    return generation, parse(path, data)
+
+
+def _store_parser[T](read: Callable[[Path], T]) -> Callable[[Path, bytes], T]:
+    """A store's own reader, given the captured bytes instead of the path."""
+
+    def parse(path: Path, data: bytes) -> T:
+        with state_file.read_snapshots({path: data}):
+            return read(path)
+
+    return parse
 
 
 def _require_unchanged(generation: Generation) -> None:
@@ -284,7 +316,7 @@ def _readable(name: str, reading: state_file.Reading[Any]) -> None:
 
 
 def _playlists_step(path: Path) -> FileStep | None:
-    read = _read_generation(path, playlists._read)
+    read = _read_generation(path, _store_parser(playlists._read))
     if read is None:
         return None
     generation, reading = read
@@ -314,7 +346,7 @@ def _playlists_step(path: Path) -> FileStep | None:
 
 
 def _schedules_step(path: Path) -> FileStep | None:
-    read = _read_generation(path, schedules._read)
+    read = _read_generation(path, _store_parser(schedules._read))
     if read is None:
         return None
     generation, reading = read
@@ -335,7 +367,7 @@ def _schedules_step(path: Path) -> FileStep | None:
 
 
 def _displays_step(path: Path) -> FileStep | None:
-    read = _read_generation(path, displays._read)
+    read = _read_generation(path, _store_parser(displays._read))
     if read is None:
         return None
     generation, reading = read
@@ -371,25 +403,26 @@ def make_plan() -> Plan:
         )
         if step is not None
     ]
-    runtime = paths.runtime_config_path()
-    sidecar = runtime_config.overrides_path(runtime)
+    sidecar = runtime_config.overrides_path(paths.runtime_config_path())
 
-    def read_overrides(_sidecar: Path) -> str | None:
+    def parse_overrides(path: Path, data: bytes) -> str:
+        if len(data) > runtime_config.MAX_RUNTIME_OVERRIDES_BYTES:
+            raise RollbackRefusedError(f"{path.name} is too large; repair it first")
         try:
-            return runtime_config._read_overrides(runtime)
-        except runtime_config.RuntimeConfigError as error:
-            raise RollbackRefusedError(f"{error}; repair it first") from error
+            return data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RollbackRefusedError(f"cannot read {path}: {error}; repair it first") from error
 
-    read = _read_generation(sidecar, read_overrides)
+    read = _read_generation(sidecar, parse_overrides)
     if read is None:
         return Plan(tuple(steps), None)
     generation, text = read
-    if text is not None and runtime_config.overrides_from_a_newer_build(text):
+    if runtime_config.overrides_from_a_newer_build(text):
         raise RollbackRefusedError(
             f"{sidecar.name} was written by a version newer than 0.2.0; "
             "roll back with that version first"
         )
-    return Plan(tuple(steps), generation if text is not None else None)
+    return Plan(tuple(steps), generation)
 
 
 def _refuse_running_writers() -> None:

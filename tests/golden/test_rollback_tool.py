@@ -502,6 +502,49 @@ def _a_newer_generation(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def test_a_document_swapped_in_only_for_the_read_is_never_what_is_parsed(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep 4 T-1, Codex's ABA read: playlists.json (A) is version 99 with a
+    field only a newer build knows. Only around the store's read, A is
+    renamed aside, a valid version-2 document (B) takes its place, and A is
+    renamed back, its inode and times intact. Fingerprints before and after
+    the read both describe A; the plan used to be B's, and A was narrowed to
+    version 1, its new field gone. The bytes parsed are now the bytes read."""
+    golden, _playlist = in_use
+    state = golden.profile.app_state
+    target = state / "playlists.json"
+    substitute = target.read_bytes()  # B: this build's own version-2 document
+    original = _a_newer_generation(target)  # A
+    read = playlists._read
+    swapped: list[bool] = []
+
+    def substituted_read(path: Path) -> object:
+        aside = path.with_name(".playlists.json.aside")
+        os.rename(path, aside)
+        try:
+            path.write_bytes(substitute)
+            swapped.append(True)
+            return read(path)
+        finally:
+            os.rename(aside, path)
+
+    monkeypatch.setattr(playlists, "_read", substituted_read)
+    before = harness.snapshot(golden.profile.home)
+
+    status, out, err = _run(capsys, "--apply")
+
+    assert swapped, "the substitution happened at the store's read"
+    assert target.read_bytes() == original, "A is never narrowed"
+    assert read_json(target)["from_the_future"] == {"kept": True}
+    assert status == rollback.EXIT_REFUSED, (out, err)
+    assert "playlists.json was saved by a version newer than 0.2.0" in err, err
+    assert harness.diff(before, harness.snapshot(golden.profile.home)) == []
+    assert not list(state.glob(f"{rollback.BACKUP_PREFIX}*"))
+
+
 def test_a_store_replaced_before_the_backup_is_never_narrowed(
     in_use: tuple[Golden, str],
     capsys: pytest.CaptureFixture[str],

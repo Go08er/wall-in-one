@@ -10,6 +10,11 @@ niri on PATH. No still can be captured, so the whitelist must hold as it is.
 A second machine has the engine and a measured display but refuses the
 engine's process: there the only extra write allowed is the one claim pair a
 withdrawn named temporary leaves (the engine needs a ``.png`` name).
+A third is the documented exception to the idle rule (docs/updating.md, "What
+opening the app writes"): the engine captures, and the 2x2 golden scene still
+is smaller than the measured display both ways, so idling replaces exactly
+that managed still with the captured frame (plus the claim pair the replaced
+inode leaves) and asks the engine once, rescan included.
 The still maker is spied on (its work runs) and waited for, since the
 application's shutdown cancels it without waiting. Before the fix the golden
 scene's 2x2 still was judged against a 2560x1440 guess, a capture was tried
@@ -27,11 +32,13 @@ from __future__ import annotations
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,9 +51,10 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.golden import harness, sandbox  # noqa: E402
-from tests.golden.harness import Allowance  # noqa: E402
+from tests.golden.harness import Allowance, Change  # noqa: E402
 from tests.golden.test_idle import first_start_writes  # noqa: E402
 from tests.golden.test_stills_idle import RETAINED, assert_one_claim_pair  # noqa: E402
+from tests.test_stills import _real_png  # noqa: E402
 from tests.test_ui_next_slice import IDLE_SECONDS, _cache_touch  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402
     Step,
@@ -82,7 +90,20 @@ def golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[sandbox.
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
-@pytest.mark.parametrize("machine", ["nix-check", "engine-refused"])
+#: The automatic stills folder of the golden profile's first library root.
+STILLS = RETAINED.removesuffix(".wall-in-one-retained/")
+#: The display niri measured on the capturing machine: larger than the golden
+#: scene's 2x2 still in both directions, and small enough for a tiny PNG.
+CAPTURED_SIZE = (64, 40)
+CAPTURED_FRAME = _real_png(*CAPTURED_SIZE)
+#: Stands in for linux-wallpaperengine: writes one frame to the exact
+#: ``--screenshot`` path it is given, then keeps running like the engine.
+FAKE_ENGINE = (
+    "import sys, time\nopen(sys.argv[1], 'wb').write(bytes.fromhex(sys.argv[2]))\ntime.sleep(60)\n"
+)
+
+
+@pytest.mark.parametrize("machine", ["nix-check", "engine-refused", "engine-captures"])
 @pytest.mark.parametrize("ui", ["classic", "next"])
 def test_idling_with_the_still_maker_writes_only_the_whitelist(
     golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch, ui: str, machine: str
@@ -98,6 +119,23 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
         # No engine, no niri: nothing at all may be written.
         monkeypatch.setattr(scenes, "is_available", lambda: False)
         monkeypatch.setattr(outputs, "is_available", lambda: False)
+    elif machine == "engine-captures":
+        # The documented exception to the idle rule: the engine is installed,
+        # niri measured a display larger than the 2x2 golden scene still in
+        # both directions, and the capture succeeds. The still is replaced.
+        monkeypatch.setattr(scenes, "is_available", lambda: True)
+        monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: CAPTURED_SIZE)
+        guarded: Callable[..., object] = subprocess.Popen
+
+        def capturing_engine(arguments: object, *args: Any, **kwargs: Any) -> object:
+            if isinstance(arguments, list) and arguments[:1] == ["linux-wallpaperengine"]:
+                engine_started.append(arguments)
+                path = arguments[arguments.index("--screenshot") + 1]
+                command = [sys.executable, "-c", FAKE_ENGINE, path, CAPTURED_FRAME.hex()]
+                return sandbox.REAL_POPEN(command, *args, **kwargs)
+            return guarded(arguments, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", capturing_engine)
     else:
         # The engine is installed and niri measured the panel, so the 2x2
         # golden still is due; but the engine's process is refused. Its named
@@ -153,9 +191,13 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
             lane.shutdown(wait=True)  # type: ignore[attr-defined]
     assert application._window is None
     assert asked, "the application asked its still maker for this library"
-    assert len(engine_started) == (machine == "engine-refused"), "one capture was tried"
+    # Exactly one: the rescan a capture causes must not ask for the same scene again.
+    assert len(engine_started) == (machine != "nix-check"), "one capture was tried"
     changes = harness.diff(before, harness.snapshot(profile.home))
-    if machine == "engine-refused":
+    if machine != "nix-check":
+        # The named temporary (refused engine) or the replaced still (capture)
+        # is withdrawn through file_io's claim-and-retain, which leaves one
+        # empty claim pair; the rmdir follow-up will remove it.
         assert_one_claim_pair([c for c in changes if c.path.startswith(RETAINED)])
         changes = [c for c in changes if not c.path.startswith(RETAINED)]
     allowed = [
@@ -167,7 +209,26 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
             _cache_touch,
         ),
     ]
+    if machine == "engine-captures":
+        replaced = [c for c in changes if c.path.startswith(STILLS) and c.path.endswith(".png")]
+        assert len(replaced) == 1, [c.describe() for c in replaced]
+        allowed.append(
+            Allowance(
+                f"{STILLS}*.png",
+                frozenset({"modified"}),
+                "the documented idle exception: the scene's managed still was smaller than "
+                "the measured display in both directions, so it is captured again",
+                _captured_frame,
+            )
+        )
     harness.check_changes(changes, allowed)
+
+
+def _captured_frame(change: Change) -> None:
+    """The 2x2 golden scene still, replaced by exactly the frame the engine wrote."""
+    assert change.before is not None and change.before.content is not None
+    assert change.after is not None and change.after.content == CAPTURED_FRAME
+    assert struct.unpack(">II", change.before.content[16:24]) == (2, 2)
 
 
 # -- the same selection on a real machine -----------------------------------------------

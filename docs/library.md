@@ -102,13 +102,23 @@ pairing in a sidecar when the video itself is inside the target library root.
 Videos from another configured root still use the deterministic managed still;
 the app does not write a pairing file beside a source outside that target root.
 
+A Wallpaper Engine scene gets its still from `linux-wallpaperengine`, rendered
+in a window at the size of a display niri measured, as `<scene id>.png` in the
+first library folder's `Wall-in-One/Automatic Stills/`. A scene whose managed still is smaller than that display in both
+directions is captured again, so an old low-resolution still is replaced. A
+still is never judged against a guessed size or by its shape, and nothing is
+written without the engine or a measured display.
+
 Generated filenames include a digest of the video's absolute path. Two files
 named `intro.mp4` in different folders therefore get different stills rather
 than silently overwriting each other.
 
-- Captures run after each rescan on a single background worker.
-- Each video is attempted once per session, so a failed capture does not keep
-  retrying on every rescan.
+- Captures run after each rescan, including the first one when the app opens,
+  on a single background worker, with no click. They are the one thing an
+  idle app writes into the library (see
+  [What opening the app writes](updating.md#what-opening-the-app-writes)).
+- Each wallpaper is attempted once per session, so a failed capture does not
+  keep retrying on every rescan.
 - It needs `ffmpeg`. The Nix package puts it on the app's `PATH`; without it
   the video still plays and simply keeps its "Video (no still)" badge.
 - Switching dynamics off takes a still from the video playing at that moment

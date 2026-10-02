@@ -74,6 +74,29 @@ Keep **Stop animations on battery** off until the running service supports it.
 The app refuses to enable it against an older runtime or unverified loaded
 service commands, before writing an incompatible configuration.
 
+### What opening the app writes
+
+Opening the app and leaving it idle changes none of your settings, playlists,
+schedules, displays, favourites or window preferences. It writes only:
+
+- `runtime.toml`, when the document compiled on this machine differs from the
+  one on disk, for example on the first start after an update or on another
+  machine (the renderer paths are this machine's). What it plays stays the
+  same.
+- `pairings.json`, when the wallpaper service reported a wallpaper that failed
+  to play: the health sync records that one marker on that wallpaper.
+- Automatic stills, the one exception that writes into your library (since
+  0.1.0). After each scan, including the first one, the app captures a still
+  for a moving wallpaper that has none, and captures a scene's managed still
+  again when it is smaller, in both directions, than a display niri measured.
+  Only files in `<library>/Wall-in-One/Automatic Stills/` change, plus the
+  pairing sidecar beside a video in that library. Without the capture tool, or
+  without a measured display for a scene, nothing is written. See
+  [Stills the app makes for itself](library.md#stills-the-app-makes-for-itself).
+
+Thumbnails in `~/.cache/wall-in-one` are a cache, rebuilt as needed, and are
+not counted.
+
 ## If configuration prevents startup
 
 The packaged service first regenerates its runtime configuration from saved

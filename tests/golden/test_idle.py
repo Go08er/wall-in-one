@@ -4,6 +4,16 @@ Only the writes in :func:`first_start_writes` may appear, each with its
 reason and a check of its content; a second identical run must write nothing
 at all. Every file below the sandbox home counts, dotfiles and the
 ``.wall-in-one-removal-*`` evidence included.
+
+This idle run never builds the GTK application, so it never runs the one
+documented exception to the rule (docs/updating.md, "What opening the app
+writes"): the window's automatic still maker. After each scan it captures a
+still for a moving wallpaper that has none and recaptures a scene's managed
+still when it is smaller, in both directions, than a measured display
+(deliberate since 3ba9ef9). tests/test_golden_still_maker.py opens both
+windows on this profile with the maker live: without an engine or a measured
+display nothing beyond this whitelist is written, and with one that captures,
+exactly the replaced still is.
 """
 
 from __future__ import annotations
@@ -151,7 +161,12 @@ def _without_taboo(document: dict[str, Any], motion: str | None) -> dict[str, An
 
 
 def first_start_writes(profile: Profile, failed: tuple[Path, str, str] | None) -> list[Allowance]:
-    """The complete whitelist for opening a stored profile on a new machine."""
+    """The complete whitelist for opening a stored profile on a new machine.
+
+    Complete for the app's state, config and cache. The window's automatic
+    still maker may also write into the library; that exception is whitelisted
+    where it runs, in tests/test_golden_still_maker.py.
+    """
     motion = profile.to_original(str(failed[0])) if failed else None
 
     def runtime_is_the_same_program(change: Change) -> None:

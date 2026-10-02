@@ -318,3 +318,71 @@ def test_the_tripwire_skips_only_what_the_desktop_writes_by_itself(tmp_path: Pat
         str(backup),
         str(state / "playlists.json"),
     ]
+
+
+def test_noctalias_configuration_is_guarded_and_watched(tmp_path: Path) -> None:
+    """Sweep 3 S-5: ~/.config/noctalia was neither guarded nor watched.
+
+    On a stand-in home, never the real one: the tripwire sees a write there,
+    and the in-process guard, given the same roots below the stand-in,
+    refuses one before it happens.
+    """
+    assert ".config/noctalia" in conftest.REAL_PROFILE_DIRECTORIES
+    assert str(conftest.REAL_HOME / ".config" / "noctalia") in conftest.GUARDED_ROOTS
+    home = tmp_path / "stand-in"
+    config = home / ".config" / "noctalia"
+    (config / "plugins" / "wall-in-one").mkdir(parents=True)
+    settings = config / "settings.json"
+    settings.write_text("{}\n", encoding="utf-8")
+    before = conftest.real_profile_snapshot(home)
+
+    settings.write_text('{"changed": true}\n', encoding="utf-8")
+    (config / "plugins" / "wall-in-one" / "settings.json").write_text("{}", encoding="utf-8")
+    assert conftest.real_profile_changes(before, conftest.real_profile_snapshot(home)) == [
+        str(config / "plugins" / "wall-in-one" / "settings.json"),
+        str(settings),
+    ]
+
+    stand_in_roots = [str(home / relative) for relative in conftest.REAL_PROFILE_DIRECTORIES]
+    conftest.GUARDED_ROOTS.extend(stand_in_roots)
+    try:
+        with pytest.raises(PermissionError, match="tried to write the real profile"):
+            settings.write_text("{}\n", encoding="utf-8")
+        refused = list(conftest.GUARD_REFUSALS)
+        assert refused == [f"open {settings}"]
+    finally:
+        for root in stand_in_roots:
+            conftest.GUARDED_ROOTS.remove(root)
+        conftest.GUARD_REFUSALS.clear()  # this test's refusal was the point
+    assert settings.read_text(encoding="utf-8") == '{"changed": true}\n'
+
+
+def test_the_tripwire_sees_a_child_processs_chmod(tmp_path: Path) -> None:
+    """Sweep 3 S-5: a chmod leaves the mtime alone, and a child process is
+    invisible to the audit hook. The snapshot now carries type and mode."""
+    home = tmp_path / "stand-in"
+    watched = home / ".config" / "wall-in-one"
+    watched.mkdir(parents=True, mode=0o700)
+    settings = watched / "settings.toml"
+    settings.write_text("opacity = 0.9\n", encoding="utf-8")
+    settings.chmod(0o600)
+    before = conftest.real_profile_snapshot(home)
+
+    for path, mode in ((settings, 0o644), (watched, 0o755)):
+        subprocess.run(
+            (
+                sys.executable,
+                "-c",
+                "import os, sys; os.chmod(sys.argv[1], int(sys.argv[2], 8))",
+                str(path),
+                f"{mode:o}",
+            ),
+            check=True,
+            timeout=30,
+        )
+
+    assert stat.S_IMODE(settings.stat().st_mode) == 0o644
+    assert conftest.real_profile_changes(before, conftest.real_profile_snapshot(home)) == [
+        str(watched),
+        str(settings),
+    ]

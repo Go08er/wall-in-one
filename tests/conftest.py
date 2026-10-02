@@ -113,6 +113,10 @@ REAL_PROFILE_DIRECTORIES: Final = (
     ".local/state/wall-in-one",
     ".cache/wall-in-one",
     ".local/state/noctalia",
+    # Noctalia's configuration: its plugins (the companion among them),
+    # colour schemes and settings. Unlike its state, nothing rewrites it
+    # behind the user's back, so the whole tree is watched.
+    ".config/noctalia",
 )
 #: Noctalia's state directory is the live desktop's: its clipboard, launcher
 #: counts, notifications and catalogues change all the time, and it rewrites
@@ -124,7 +128,9 @@ NOCTALIA_WATCHED: Final = ("*wall-in-one*", ".settings.toml.backup-*")
 #: Rewritten by Noctalia's template renderer when the wallpaper changes.
 DESKTOP_WRITTEN: Final = (".local/state/wall-in-one/palette.json",)
 
-_Identity = tuple[int, int, int]
+#: (inode, size, mtime, st_mode): ``st_mode`` carries the file type and the
+#: permission bits, so a chmod (which leaves the mtime alone) is a change too.
+_Identity = tuple[int, int, int, int]
 
 
 def _desktop_written(relative: str) -> bool:
@@ -145,13 +151,15 @@ def _desktop_written(relative: str) -> bool:
 
 
 def real_profile_snapshot(home: Path = REAL_HOME) -> dict[str, _Identity | None]:
-    """Identity, size and mtime of every entry in the watched directories.
+    """Identity, size, mtime, type and permissions of every watched entry.
 
     Reads metadata only and never follows a symbolic link. A watched
     directory that does not exist is recorded as ``None``, so its creation
-    counts as a change too. A directory is recorded by identity alone: an
-    entry appearing or going is itself a change, and the desktop's own
-    temporaries move a directory's mtime all the time.
+    counts as a change too. A directory is recorded by identity, type and
+    permissions, not size or mtime: an entry appearing or going is itself a
+    change, and the desktop's own temporaries move a directory's mtime all
+    the time. The type and permissions catch what the in-process guard
+    cannot see, such as a child process's chmod.
     """
     found: dict[str, _Identity | None] = {}
     for relative in REAL_PROFILE_DIRECTORIES:
@@ -163,7 +171,7 @@ def real_profile_snapshot(home: Path = REAL_HOME) -> dict[str, _Identity | None]
             continue
         except OSError:
             continue
-        found[str(top)] = (status.st_ino, 0, 0)
+        found[str(top)] = (status.st_ino, 0, 0, status.st_mode)
         for directory, directories, files in os.walk(top):
             # Do not even descend into what is skipped (Noctalia's caches).
             directories[:] = [
@@ -180,9 +188,9 @@ def real_profile_snapshot(home: Path = REAL_HOME) -> dict[str, _Identity | None]
                 except OSError:
                     continue  # vanished mid-walk
                 if stat.S_ISDIR(entry.st_mode):
-                    found[path] = (entry.st_ino, 0, 0)
+                    found[path] = (entry.st_ino, 0, 0, entry.st_mode)
                 else:
-                    found[path] = (entry.st_ino, entry.st_size, entry.st_mtime_ns)
+                    found[path] = (entry.st_ino, entry.st_size, entry.st_mtime_ns, entry.st_mode)
     return found
 
 

@@ -201,6 +201,8 @@ class Undo:
     detail: str
     #: An earlier Undo put back only some items; :func:`keep_archived` stops offering it.
     partial: bool = False
+    #: Why Undo can't run now although there is something to undo.
+    blocked: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1276,6 +1278,9 @@ def _settings_undo(
                     if current == manifest.document.get("after_sha256")
                     else "; settings changed since then keep their new values."
                 ),
+                blocked=_missing_undo_target(manifest, manifests)
+                if action == PALETTE_TEMPLATE
+                else "",
             )
         if state in ("undone", "undoing"):
             return None
@@ -1615,8 +1620,47 @@ def _restore_settings(
     return message + tail, reloaded
 
 
+def _missing_undo_target(manifest: _Manifest, manifests: Sequence[_Manifest]) -> str:
+    """Why undoing the template switch would point Noctalia at a missing file, or "".
+
+    The old template file must exist on disk, whatever any archive's state:
+    an archive kept with Keep Archived no longer offers Undo, but its file is
+    still not where Noctalia's settings would point.
+    """
+    old = Path(str(manifest.document.get("old_input_path", "")))
+    found = _lstat(old)
+    if found is not None and stat.S_ISREG(found.st_mode):
+        return ""
+    for archive in manifests:
+        if archive.action != OLD_PALETTE_TEMPLATE:
+            continue
+        for item in archive.document.get("items", []):
+            if item.get("original") != str(old) or item.get("outcome") not in _IN_ARCHIVE:
+                continue
+            kept_at = archive.directory / str(item.get("archived", ""))
+            if archive.state == "kept":
+                return (
+                    f"the old template file {old.name} was kept in the archive at {kept_at}. "
+                    f"Move it back to {old} first, or undoing would point Noctalia at a "
+                    "missing file"
+                )
+            return (
+                f"the old template file {old.name} is in the archive {archive.directory}. "
+                "Put the old template file back first: choose Undo on “Archive the old "
+                "palette template”"
+            )
+    return (
+        f"the old template file {old} isn't there, so undoing would point Noctalia at a "
+        "missing file"
+    )
+
+
 def _undo_palette_template(manifest: _Manifest) -> Result:
-    later = _latest(OLD_PALETTE_TEMPLATE, _manifests())
+    manifests = _manifests()
+    missing = _missing_undo_target(manifest, manifests)
+    if missing:
+        raise TidyError(f"Nothing was changed: {missing}.")
+    later = _latest(OLD_PALETTE_TEMPLATE, manifests)
     if later is not None:
         raise TidyError(
             "Put the old template file back first: choose Undo on "

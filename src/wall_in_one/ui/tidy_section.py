@@ -190,7 +190,12 @@ class _ActionRow:
             self._add(_row(f"{prefix}: {text}", f"In {folder}"))
         for note in plan.notes:
             self._add(_row(note))
-        if plan.undo is not None:
+        if plan.undo is not None and plan.undo.blocked:
+            reason = plan.undo.blocked[:1].upper() + plan.undo.blocked[1:]
+            self._add(
+                _row(f"Undo isn't possible yet: {reason}.", f"Archive: {_home(plan.undo.archive)}")
+            )
+        elif plan.undo is not None:
             self._add(_row(f"Undo: {plan.undo.detail}", f"Archive: {_home(plan.undo.archive)}"))
         self.refresh_buttons()
 
@@ -226,7 +231,7 @@ class _ActionRow:
         self.apply.set_visible(bool(self.plan.changes))
         self.apply.set_sensitive(self.plan.ready and not busy)
         self.undo.set_visible(self.plan.undo is not None)
-        self.undo.set_sensitive(not busy)
+        self.undo.set_sensitive(not busy and not (self.plan.undo and self.plan.undo.blocked))
         self.keep.set_visible(self.plan.undo is not None and self.plan.undo.partial)
         self.keep.set_sensitive(not busy)
         self.retry.set_visible(bool(self.plan.retry))

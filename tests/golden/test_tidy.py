@@ -22,7 +22,7 @@ import pytest
 from tests.golden import harness
 from tests.golden.harness import Change, Node
 from tests.golden.sandbox import Golden
-from wall_in_one import deployed_upgrade_transaction, paths, tidy, ui_prefs
+from wall_in_one import deployed_upgrade_transaction, file_io, paths, tidy, ui_prefs
 from wall_in_one.theme import noctalia, template
 
 NOCTALIA: Final = ".local/state/noctalia"
@@ -560,3 +560,41 @@ def test_an_undo_noctalia_never_confirmed_keeps_the_new_template_until_a_retry(
     assert (applied.archive / "items" / target.name).is_file()
     assert json.loads((applied.archive / "manifest.json").read_bytes())["state"] == "undone"
     assert not tidy.plan().action(tidy.PALETTE_TEMPLATE).retry
+
+
+def test_a_kept_old_template_blocks_the_template_undo_instead_of_a_missing_file(
+    golden: Golden, reloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sweep 3 S-3: the old template's archive was kept (Keep Archived) after its
+    Undo failed; a later palette Undo must not point Noctalia at the missing file."""
+    settings = golden.profile.state_home / "noctalia" / "settings.toml"
+    stale = golden.profile.app_state / "palette.json.tmpl"
+    target = template.installed_template_path()
+    tidy.apply(tidy.PALETTE_TEMPLATE, tidy.plan().action(tidy.PALETTE_TEMPLATE))
+    _render(golden)
+    tidy.apply(tidy.OLD_PALETTE_TEMPLATE, tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE))
+    real_move = file_io.atomic_move_no_replace
+
+    def refuse_the_old_template(source: Path, destination: Path, **keywords: object) -> None:
+        if destination == stale:
+            raise PermissionError(13, "injected: permission denied", str(destination))
+        real_move(source, destination, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", refuse_the_old_template)
+    assert "can be tried again" in tidy.undo(tidy.OLD_PALETTE_TEMPLATE).message
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", real_move)
+    partial = tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE).undo
+    assert partial is not None and partial.partial
+    assert tidy.keep_archived(tidy.OLD_PALETTE_TEMPLATE).changed
+    before = settings.read_bytes()
+
+    with pytest.raises(tidy.TidyError, match="Nothing was changed: the old template file"):
+        tidy.undo(tidy.PALETTE_TEMPLATE)
+
+    assert settings.read_bytes() == before, "settings still name the template that exists"
+    blocked = tidy.plan().action(tidy.PALETTE_TEMPLATE).undo
+    assert blocked is not None and "kept in the archive" in blocked.blocked
+    assert tomllib.loads(settings.read_text())["theme"]["templates"]["user"]["wall-in-one"][
+        "input_path"
+    ] == str(target)
+    assert target.exists() and not stale.exists()

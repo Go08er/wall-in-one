@@ -2,8 +2,7 @@
 
 It must offer the tidy-up, write nothing while it is shown, and write
 ``ui.toml`` only when the user dismisses it; once dismissed it never plans
-again. (Kept apart from ``test_ui_tidy``: these run whole applications, and
-in the gate's order they come before the ``ui/next`` window tests.)
+again. (Kept apart from ``test_ui_tidy`` because these run whole applications.)
 """
 
 from __future__ import annotations

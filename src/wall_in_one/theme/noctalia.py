@@ -15,8 +15,6 @@ filtering is needed.
 
 from __future__ import annotations
 
-import contextlib
-import os
 import shutil
 import signal
 import subprocess
@@ -27,6 +25,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from wall_in_one.theme.palette import Mode, PaletteError, PalettePair
+from wall_in_one.worker_processes import OwnedProcess, ProcessCancelledError, exchange
 
 #: Generation strategies, from `noctalia/src/theme/scheme.h`. The first five are
 #: Material Design 3; the rest are custom HSL-space generators with deliberately
@@ -66,7 +65,7 @@ MESSAGE_TIMEOUT: Final = 10.0
 # registry a wedged 30-second palette generation can therefore keep the whole
 # graphical process alive after its last window has closed.
 _ACTIVE_LOCK = threading.Lock()
-_ACTIVE: dict[int, subprocess.Popen[bytes]] = {}
+_ACTIVE: dict[int, OwnedProcess] = {}
 _CANCEL_GENERATION = 0
 
 
@@ -97,18 +96,6 @@ def _executable() -> str:
     return found
 
 
-def _signal_group(process: subprocess.Popen[bytes], requested: signal.Signals) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        # Every child below starts its own session.  Killing the group also
-        # catches a CLI wrapper which has spawned the real Noctalia process.
-        os.killpg(process.pid, requested)
-    except OSError, ProcessLookupError:
-        with contextlib.suppress(OSError):
-            process.send_signal(requested)
-
-
 def cancel_pending() -> None:
     """Cancel every currently running Noctalia CLI call.
 
@@ -120,8 +107,11 @@ def cancel_pending() -> None:
     with _ACTIVE_LOCK:
         _CANCEL_GENERATION += 1
         active = tuple(_ACTIVE.values())
-    for process in active:
-        _signal_group(process, signal.SIGKILL)
+    for child in active:
+        # Every child starts its own session, so killing the group also
+        # catches a CLI wrapper's own children. ``signal_group`` only signals
+        # while the leader is unreaped, which keeps the group id ours.
+        child.signal_group(signal.SIGKILL)
 
 
 def _run(
@@ -145,39 +135,39 @@ def _run(
     except OSError as error:
         raise NoctaliaError(f"cannot run noctalia: {error}") from error
 
+    child = OwnedProcess(process)
     with _ACTIVE_LOCK:
-        cancelled_before_registration = generation != _CANCEL_GENERATION or (
-            cancelled is not None and cancelled()
-        )
-        _ACTIVE[process.pid] = process
-    if cancelled_before_registration:
-        _signal_group(process, signal.SIGKILL)
+        _ACTIVE[process.pid] = child
+
+    def was_cancelled() -> bool:
+        with _ACTIVE_LOCK:
+            if generation != _CANCEL_GENERATION:
+                return True
+        return cancelled is not None and cancelled()
+
+    # ``exchange`` treats the leader's exit, seen without reaping it, as the end
+    # of the call; it then ends anything the CLI left in its group and only
+    # then reaps. A cancellation that came before registration is seen by its
+    # first check. Every wait is bounded.
     try:
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            _signal_group(process, signal.SIGTERM)
-            try:
-                process.communicate(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                _signal_group(process, signal.SIGKILL)
-                process.communicate()
-            raise NoctaliaError(f"noctalia {arguments[0]} timed out after {timeout}s") from error
+        completed = exchange(child, timeout=timeout, cancelled=was_cancelled)
+    except ProcessCancelledError as error:
+        raise NoctaliaError(f"noctalia {arguments[0]} was cancelled") from error
+    except subprocess.TimeoutExpired as error:
+        raise NoctaliaError(f"noctalia {arguments[0]} timed out after {timeout}s") from error
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE.pop(process.pid, None)
 
-    with _ACTIVE_LOCK:
-        was_cancelled = generation != _CANCEL_GENERATION or (cancelled is not None and cancelled())
-    if was_cancelled:
+    if was_cancelled():
         raise NoctaliaError(f"noctalia {arguments[0]} was cancelled")
 
-    if process.returncode != 0:
-        detail = stderr.decode("utf-8", "replace").strip()
-        summary = detail.splitlines()[-1] if detail else f"exit {process.returncode}"
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        summary = detail.splitlines()[-1] if detail else f"exit {completed.returncode}"
         raise NoctaliaError(f"noctalia {' '.join(arguments)}: {summary}")
 
-    return stdout.decode("utf-8", "replace")
+    return completed.stdout.decode("utf-8", "replace")
 
 
 def is_available() -> bool:

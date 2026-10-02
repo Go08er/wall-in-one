@@ -281,7 +281,8 @@
           # or data file the wheel forgot fails here and not on a desktop.
           # The fixture profile is materialized below $TMPDIR; no renderer is
           # on PATH, which the first-start whitelist already allows for. The
-          # opt-in downgrade and local-profile modes skip without their inputs.
+          # downgrade mode skips here (it runs in golden-downgrade below), and
+          # the local-profile mode skips without its input.
           golden-profile =
             pkgs.runCommand "wall-in-one-golden-profile"
               {
@@ -306,6 +307,49 @@
                 export WALL_IN_ONE_SERVICE_BINARY=${wall-in-one-service}/bin/wall-in-one-service
                 cd ${./.}
                 pytest tests/golden -q -ra -p no:cacheprovider
+                touch $out
+              '';
+
+          # The 0.1.4 downgrade suite as a gate: the shipped v0.1.4 source
+          # (the flake input, the only build anyone rolls back to) edits what
+          # the installed package wrote, in child processes against sandboxed
+          # golden profiles. tools/golden-downgrade.sh runs the same tests
+          # locally from a git worktree. Every test must run: a skip (say,
+          # WIO_OLD_SRC lost) fails the check instead of passing it quietly.
+          golden-downgrade =
+            pkgs.runCommand "wall-in-one-golden-downgrade"
+              {
+                nativeBuildInputs = [
+                  (python.withPackages (ps: [
+                    ps.pytest
+                    (ps.toPythonModule wall-in-one)
+                  ]))
+                ];
+              }
+              ''
+                export HOME="$TMPDIR/home"
+                export XDG_CONFIG_HOME="$TMPDIR/config"
+                export XDG_STATE_HOME="$TMPDIR/state"
+                export XDG_CACHE_HOME="$TMPDIR/cache"
+                export XDG_DATA_HOME="$TMPDIR/data"
+                export XDG_RUNTIME_DIR="$TMPDIR/run"
+                mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
+                  "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
+                export PYTHONDONTWRITEBYTECODE=1
+                export WIO_GOLDEN_EXPECT_PACKAGE=1
+                export WIO_OLD_SRC=${inputs.wio-v0-1-4}/src
+                cd ${./.}
+                pytest tests/golden/test_downgrade.py -m downgrade -q -ra -p no:cacheprovider \
+                  --junitxml="$TMPDIR/downgrade-results.xml"
+
+                # The report proves collection did not fall to zero and
+                # nothing was skipped.
+                grep -Eq 'tests="[1-9][0-9]*"' "$TMPDIR/downgrade-results.xml"
+                if grep -Eq 'skipped="[1-9][0-9]*"' "$TMPDIR/downgrade-results.xml"; then
+                  echo "the v0.1.4 downgrade suite skipped tests" >&2
+                  cat "$TMPDIR/downgrade-results.xml" >&2
+                  exit 1
+                fi
                 touch $out
               '';
 

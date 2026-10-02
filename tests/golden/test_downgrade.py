@@ -7,7 +7,8 @@ files after a rollback, which is what docs/updating.md tells people to expect.
 
 Opt-in: ``-m downgrade`` with ``WIO_OLD_SRC`` pointing at a v0.1.4 checkout's
 ``src`` (``tools/golden-downgrade.sh`` sets it up); any other build fails the
-session instead of being half-tested. v0.1.4 runs in a child process
+session instead of being half-tested. ``checks.golden-downgrade`` runs it
+against the flake's ``wio-v0-1-4`` input and fails on any skip. v0.1.4 runs in a child process
 (``downgrade_driver.py``) against the same sandbox, with a fake runtime
 answering on a real socket, as its service would after a rollback.
 

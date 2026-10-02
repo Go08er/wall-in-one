@@ -4,12 +4,14 @@ Matching and ordering cover the whole library (the adapter answers
 `AppState.library_query`); only a page of it becomes cards, like the classic
 grid (`wall_in_one.ui.grid.MEDIA_PAGE_SIZE`), plus the wallpapers on screen
 and the one whose details are open, wherever they sort. Selection mode,
-adding to playlists, removing and the folder button exist only when the
-adapter offers `AppState.editing`.
+adding to playlists and removing exist only when the adapter offers
+`AppState.editing`; the "Add a folder" button only when it offers
+`AppState.library_folders`.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Final
 
@@ -26,7 +28,7 @@ from wall_in_one.ui.next import thumbs, widgets
 from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.inspector import Inspector
 from wall_in_one.ui.next.page import Page
-from wall_in_one.ui.next.state import AppState, LibraryEditing, WallpaperView
+from wall_in_one.ui.next.state import AppState, LibraryEditing, LibraryFolders, WallpaperView
 
 #: Cards are built a page at a time, like the classic grid, so a library of
 #: thousands builds 72 cards, not thousands.
@@ -44,6 +46,7 @@ class LibraryPage(Page):
     def __init__(self, state: AppState) -> None:
         super().__init__(state)
         self._editing: LibraryEditing | None = state.editing
+        self._folders: LibraryFolders | None = state.library_folders
         self._kind = "all"
         self._favorites = False
         self._query = ""
@@ -253,7 +256,7 @@ class LibraryPage(Page):
         return self._title_box
 
     def header_start(self) -> list[Gtk.Widget]:
-        return [self._add] if self._editing is not None else []
+        return [self._add] if self._folders is not None else []
 
     def header_end(self) -> list[Gtk.Widget]:
         return []
@@ -587,10 +590,20 @@ class LibraryPage(Page):
                 folder = source.select_folder_finish(result)
             except GLib.Error:
                 return  # canceled
-            if folder is not None:
-                self.state.toast(f"Added folder {quoted(folder.get_basename() or '')} (demo)")
+            path = folder.get_path() if folder is not None else None
+            if path is not None:
+                self.add_folder(path)
 
         dialog.select_folder(parent, None, done)
+
+    def add_folder(self, path: str) -> None:
+        """Hand a chosen folder to the adapter; the button exists only when it can."""
+        folders = self._folders
+        if folders is None:
+            return
+        undo = folders.add_library_folder(path)
+        name = os.path.basename(path.rstrip(os.sep)) or path
+        self.state.toast(f"Added {quoted(name)} · scanning", undo)
 
     def _set_size(self, size: str) -> None:
         if size not in CARD_WIDTHS or self.state.appearance_blocked():

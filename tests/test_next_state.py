@@ -224,6 +224,13 @@ def test_the_real_adapter_defines_every_member_of_the_protocol() -> None:
         assert hasattr(RealAppState, name), name
 
 
+def test_the_real_adapter_offers_no_folder_authoring_yet(backend: FakeApplication) -> None:
+    """Folders are still added in the classic Settings: no "Add a folder" that pretends."""
+    adapter, _keeper = _adapter(backend)
+    assert adapter.library_folders is None
+    assert adapter.editing is None
+
+
 # -- wording ----------------------------------------------------------------------
 
 

@@ -21,12 +21,13 @@ the slice uses: ``now`` (what is on screen), ``playback``, ``library``,
 notices), ``scope`` (the player bar's display scope), ``settings``,
 ``theme`` and ``appearance`` (window style, glass dials).
 
-**Optional parts.** `PlaybackControls` and `LibraryEditing` are separate
-Protocols an adapter offers through ``controls`` and ``editing``, or not at
-all (``None``). Widgets hide or disable what an adapter does not offer, so
-the real adapter never has to pretend: in this slice its only writes are
-Apply, Favorite and the playback controls. Undo exists only on the editing
-paths, so it never shows under an adapter without them.
+**Optional parts.** `PlaybackControls`, `LibraryEditing` and
+`LibraryFolders` are separate Protocols an adapter offers through
+``controls``, ``editing`` and ``library_folders``, or not at all (``None``).
+Widgets hide or disable what an adapter does not offer, so the real adapter
+never has to pretend: in this slice its only writes are Apply, Favorite and
+the playback controls. Undo exists only on the editing and folder paths, so
+it never shows under an adapter without them.
 
 GTK-free: annotations only.
 """
@@ -329,6 +330,14 @@ class LibraryEditing(Protocol):
     def palettes(self, origin: str | None = None) -> Sequence[PaletteView]: ...
 
 
+class LibraryFolders(Protocol):
+    """Adding a library folder. Absent: the Library's "Add a folder" is hidden."""
+
+    def add_library_folder(self, path: str) -> Undo:
+        """Make ``path`` a library folder and scan it."""
+        ...
+
+
 class AppState(Protocol):
     """What the new interface's shell, player bar, Library and inspector use."""
 
@@ -480,3 +489,6 @@ class AppState(Protocol):
 
     @property
     def editing(self) -> LibraryEditing | None: ...
+
+    @property
+    def library_folders(self) -> LibraryFolders | None: ...

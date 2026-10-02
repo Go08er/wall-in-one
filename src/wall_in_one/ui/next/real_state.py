@@ -61,6 +61,7 @@ from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
 from wall_in_one.ui.next.state import (
     Banner,
     LibraryEditing,
+    LibraryFolders,
     OnScreen,
     PlaybackControls,
     PlaybackState,
@@ -802,13 +803,18 @@ class RealAppState(GObject.Object):
     def appearance_blocked(self) -> str:
         return self._prefs.read_only
 
-    # -- optional parts: the playback controls; no editing yet --------------------------
+    # -- optional parts: the playback controls; no editing or folders yet ---------------
     @property
     def controls(self) -> PlaybackControls | None:
         return self._controls
 
     @property
     def editing(self) -> LibraryEditing | None:
+        return None
+
+    @property
+    def library_folders(self) -> LibraryFolders | None:
+        """Folders are still added in the classic Settings; no button pretends here."""
         return None
 
 

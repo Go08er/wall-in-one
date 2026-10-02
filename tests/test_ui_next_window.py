@@ -43,6 +43,7 @@ from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.theme import noctalia, source  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
 from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange  # noqa: E402
@@ -601,6 +602,50 @@ def test_a_sidebar_rebuilt_while_away_is_selected_by_page_not_position() -> None
         application._stills.shutdown()
         session.shutdown()
     assert drains(GLib.MainContext.default()), "the sidebar idle outlived the window"
+
+
+def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real adapter has no folder path yet, so the Library shows no button
+    that only pretends; one that offers ``library_folders`` gets it, wired."""
+    application = Application(ui="next")
+    added: list[str] = []
+    toasts: list[str] = []
+
+    class Folders:
+        def add_library_folder(self, path: str) -> Callable[[], None]:
+            added.append(path)
+            return lambda: added.remove(path)
+
+    try:
+        window = NextWindow(application, application.settings)
+        try:
+            page = window.pages["library"]
+            assert isinstance(page, LibraryPage)
+            assert window.state.library_folders is None
+            assert page.header_start() == []
+            page.add_folder("/home/someone/Pictures/Walls")
+            assert added == [], "without the capability the page adds nothing"
+        finally:
+            window.destroy()
+
+        folders = Folders()
+        monkeypatch.setattr(RealAppState, "library_folders", property(lambda _self: folders))
+        window = NextWindow(application, application.settings)
+        try:
+            page = window.pages["library"]
+            assert isinstance(page, LibraryPage)
+            assert page.header_start() == [page._add]
+            window.state.connect("toast", lambda _state, text, _button: toasts.append(text))
+            page.add_folder("/home/someone/Pictures/Walls/")
+            assert added == ["/home/someone/Pictures/Walls/"]
+            assert toasts == ["Added “Walls” · scanning"]
+        finally:
+            window.destroy()
+    finally:
+        application._stills.shutdown()
+        application.session.shutdown()
 
 
 def _remote(events: list[object]) -> type:

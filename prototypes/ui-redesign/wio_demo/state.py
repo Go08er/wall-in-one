@@ -358,6 +358,11 @@ class AppState(GObject.Object):
     def editing(self) -> AppState:
         return self
 
+    @property
+    def library_folders(self) -> AppState:
+        """The Library's "Add a folder" adds to the demo's folder list."""
+        return self
+
     def banner(self) -> Banner | None:
         if not self.service_running:
             return Banner("The wallpaper service isn't running, so nothing changes on schedule", "Start", "start")

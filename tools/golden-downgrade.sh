@@ -11,9 +11,10 @@
 # tests in tests/golden/test_downgrade.py run with WIO_OLD_SRC pointing at it,
 # and the worktree is removed again on exit.
 #
-# Run it from the dev shell (`nix develop --command tools/golden-downgrade.sh`).
-# Every test builds its own sandbox home; the old build only ever sees that
-# sandbox, never the real profile.
+# Run it through the isolated wrapper, `tools/isolated.sh tools/golden-downgrade.sh`,
+# never from a bare dev shell. Every test builds its own sandbox home and the
+# old build only ever sees that sandbox, but the wrapper is what keeps the
+# rest of the run off your real profile and session.
 set -euo pipefail
 
 rev="${1:-dbfbaa0}"

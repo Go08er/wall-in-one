@@ -31,6 +31,12 @@ per-test guard below. Restoring the environment
 can then only ever land there. Below that, an audit hook refuses any write
 this process attempts under the real profile directories, and a tripwire
 fails the test after which they were written or changed.
+
+All of this is a backstop, not the way to run the suite. An audit hook sees
+only this Python process, not a child process or native code, and the
+tripwire notices a change only after it happened. Run the tests through
+``tools/isolated.sh`` or the flake's checks (README, "Development"), never as
+a bare ``pytest`` from a developer shell.
 """
 
 from __future__ import annotations

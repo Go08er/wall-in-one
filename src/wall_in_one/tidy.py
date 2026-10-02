@@ -1277,7 +1277,7 @@ def _settings_undo(
                     else "; settings changed since then keep their new values."
                 ),
             )
-        if state == "undone":
+        if state in ("undone", "undoing"):
             return None
     return None
 
@@ -1292,7 +1292,7 @@ def _current_edit(
         state = _effective_state(manifest, current)
         if state in ("applied", "applying"):
             return manifest
-        if state == "undone":
+        if state in ("undone", "undoing"):
             return None
     return None
 
@@ -1563,8 +1563,13 @@ def _apply_palette_template(expected: ActionPlan | None) -> Result:
     )
 
 
-def _restore_settings(manifest: _Manifest, reverse: Callable[[_NoctaliaSettings], str]) -> str:
-    """Undo one settings edit: byte for byte if untouched since, else ``reverse``."""
+def _restore_settings(
+    manifest: _Manifest, reverse: Callable[[_NoctaliaSettings], str]
+) -> tuple[str, bool]:
+    """Undo one settings edit: byte for byte if untouched since, else ``reverse``.
+
+    Returns the message and whether Noctalia confirmed reloading its settings.
+    """
     settings, unreadable = _read_noctalia()
     if settings is None:
         raise TidyError(unreadable or "Noctalia's settings are gone, so there's nothing to undo.")
@@ -1580,7 +1585,7 @@ def _restore_settings(manifest: _Manifest, reverse: Callable[[_NoctaliaSettings]
         restored = before.decode("utf-8")
         exact = True
     elif settings.sha256 == document.get("before_sha256"):
-        return "Noctalia's settings were already back as they were."
+        return "Noctalia's settings were already back as they were.", _reload_noctalia()
     else:
         restored = reverse(settings)
         exact = False
@@ -1607,7 +1612,7 @@ def _restore_settings(manifest: _Manifest, reverse: Callable[[_NoctaliaSettings]
     )
     if not reloaded:
         message += " Noctalia didn't confirm that it reloaded them."
-    return message + tail
+    return message + tail, reloaded
 
 
 def _undo_palette_template(manifest: _Manifest) -> Result:
@@ -1627,25 +1632,78 @@ def _undo_palette_template(manifest: _Manifest) -> Result:
             raise TidyError("Noctalia's template entry changed since; there's nothing to undo")
         return _set_template_input(settings.text, settings.document, new, old)
 
-    message = _restore_settings(manifest, reverse)
-    created = document.get("created_template")
-    if isinstance(created, str):
-        installed = Path(created)
-        settings, _unreadable = _read_noctalia()
-        still_used = settings is not None and str(installed) in settings.text
-        found = _lstat(installed)
-        if found is not None and not still_used:
-            destination = manifest.directory / "items" / installed.name
-            with contextlib.suppress(OSError, ValueError):
-                file_io.atomic_move_no_replace(
-                    installed, destination, expected_identity=(found.st_dev, found.st_ino)
-                )
-                _fsync_all({installed.parent, destination.parent})
-                message += f" The new template file went into {manifest.directory}."
+    message, reloaded = _restore_settings(manifest, reverse)
+    if not reloaded:
+        return _await_undo_reload(PALETTE_TEMPLATE, manifest, document, message)
+    message += _retire_created_template(manifest, document)
     document["state"] = "undone"
     document["undone"] = _now_iso()
     _write_manifest(manifest.directory, document)
     return Result(PALETTE_TEMPLATE, True, message, manifest.directory)
+
+
+_UNDO_RELOAD_NOTE: Final = (
+    "Undo put Noctalia's settings back, but Noctalia didn't confirm that it reloaded "
+    "them, so the running shell may still use the changed ones. Retry the reload once "
+    "Noctalia is running; until then nothing more is removed."
+)
+
+
+def _await_undo_reload(
+    action: Action, manifest: _Manifest, document: dict[str, Any], message: str
+) -> Result:
+    """Settings are reversed on disk, but the reverse switch isn't confirmed yet.
+
+    Nothing the running shell may still read is removed: for the palette, the
+    content-addressed template it was switched to stays in place. The journal
+    records the pending reload (state ``undoing``) and :func:`retry` finishes
+    the Undo once Noctalia confirms it.
+    """
+    document["state"] = "undoing"
+    document["undo_settings_restored"] = _now_iso()
+    _write_manifest(manifest.directory, document)
+    kept = (
+        " The current template file stays where it is until then, since the running "
+        "shell may still read it."
+        if action == PALETTE_TEMPLATE
+        else ""
+    )
+    return Result(
+        action,
+        True,
+        f"{message}{kept} Use Retry Reload once Noctalia is running.",
+        manifest.directory,
+    )
+
+
+def _retire_created_template(manifest: _Manifest, document: Mapping[str, Any]) -> str:
+    """Archive the template this Undo's Apply created, if nothing names it now."""
+    created = document.get("created_template")
+    if not isinstance(created, str):
+        return ""
+    installed = Path(created)
+    settings, _unreadable = _read_noctalia()
+    still_used = settings is None or str(installed) in settings.text
+    found = _lstat(installed)
+    if found is None or still_used:
+        return ""
+    destination = manifest.directory / "items" / installed.name
+    try:
+        file_io.atomic_move_no_replace(
+            installed, destination, expected_identity=(found.st_dev, found.st_ino)
+        )
+    except OSError, ValueError:
+        return ""
+    _fsync_all({installed.parent, destination.parent})
+    return f" The new template file went into {manifest.directory}."
+
+
+def _pending_undo(action: Action, manifests: Sequence[_Manifest]) -> _Manifest | None:
+    """The newest edit of ``action``, if its Undo waits for Noctalia to reload."""
+    for manifest in manifests:
+        if manifest.action == action:
+            return manifest if manifest.state == "undoing" else None
+    return None
 
 
 # -- action 2b: the old palette template file ------------------------------------------
@@ -1968,7 +2026,9 @@ def _undo_plugin_settings(manifest: _Manifest) -> Result:
     def reverse(settings: _NoctaliaSettings) -> str:
         return _restore_plugin_keys(settings.text, settings.document, removed)
 
-    message = _restore_settings(manifest, reverse)
+    message, reloaded = _restore_settings(manifest, reverse)
+    if not reloaded:
+        return _await_undo_reload(PLUGIN_SETTINGS, manifest, document, message)
     document["state"] = "undone"
     document["undone"] = _now_iso()
     _write_manifest(manifest.directory, document)
@@ -2039,15 +2099,12 @@ def plan(*, roots: Sequence[Path] | None = None, now: float | None = None) -> Pl
     current = settings.sha256 if settings is not None else None
     if not plugin.changes and _reload_pending(PLUGIN_SETTINGS, manifests, current):
         plugin = replace(plugin, notes=(*plugin.notes, _RELOAD_PENDING_NOTE), retry="Retry Reload")
-    return Plan(
-        (
-            leftovers,
-            _plan_palette_template(settings, unreadable, manifests),
-            old_template,
-            plugin,
-            _plan_thumbnails(),
-        )
-    )
+    palette = _plan_palette_template(settings, unreadable, manifests)
+    if _pending_undo(PALETTE_TEMPLATE, manifests) is not None:
+        palette = replace(palette, notes=(*palette.notes, _UNDO_RELOAD_NOTE), retry="Retry Reload")
+    if _pending_undo(PLUGIN_SETTINGS, manifests) is not None:
+        plugin = replace(plugin, notes=(*plugin.notes, _UNDO_RELOAD_NOTE), retry="Retry Reload")
+    return Plan((leftovers, palette, old_template, plugin, _plan_thumbnails()))
 
 
 def apply(
@@ -2093,9 +2150,13 @@ def retry(action: Action) -> Result:
     if action not in (PALETTE_TEMPLATE, PLUGIN_SETTINGS):
         raise TidyError("There's nothing to retry for this action.")
     with _exclusive():
+        manifests = _manifests()
+        waiting = _pending_undo(action, manifests)
+        if waiting is not None:
+            return _finish_undo(action, waiting)
         settings, _unreadable = _read_noctalia()
         current = settings.sha256 if settings is not None else None
-        edit = _current_edit(action, _manifests(), current)
+        edit = _current_edit(action, manifests, current)
         if edit is None or edit.document.get("reloaded") is True:
             return Result(action, False, "There's no reload left to retry.")
         if not _reload_noctalia():
@@ -2111,6 +2172,25 @@ def retry(action: Action) -> Result:
         document["palette_after_reload"] = _palette_fingerprint()
         _write_manifest(edit.directory, document)
         return Result(action, True, "Noctalia reloaded its settings.", edit.directory)
+
+
+def _finish_undo(action: Action, manifest: _Manifest) -> Result:
+    """Complete an Undo whose reverse switch waited for Noctalia's reload."""
+    if not _reload_noctalia():
+        return Result(
+            action,
+            False,
+            "Noctalia still didn't confirm a reload. Make sure it's running, then try again.",
+            manifest.directory,
+        )
+    document = copy.deepcopy(manifest.document)
+    message = "Noctalia reloaded its settings, so the Undo is complete."
+    if action == PALETTE_TEMPLATE:
+        message += _retire_created_template(manifest, document)
+    document["state"] = "undone"
+    document["undone"] = _now_iso()
+    _write_manifest(manifest.directory, document)
+    return Result(action, True, message, manifest.directory)
 
 
 def undo(action: Action) -> Result:
@@ -2132,7 +2212,7 @@ def undo(action: Action) -> Result:
                     if action == PALETTE_TEMPLATE:
                         return _undo_palette_template(manifest)
                     return _undo_plugin_settings(manifest)
-                if state == "undone":
+                if state in ("undone", "undoing"):
                     break
             return Result(action, False, "There's nothing to undo.")
         latest = _latest(action, manifests)

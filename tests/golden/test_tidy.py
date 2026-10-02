@@ -525,3 +525,38 @@ def test_putting_back_the_old_template_waits_for_its_name_to_be_free(
     assert tidy.undo(tidy.OLD_PALETTE_TEMPLATE).changed
     assert stale.read_bytes() == original
     assert tidy.plan().action(tidy.OLD_PALETTE_TEMPLATE).undo is None
+
+
+def test_an_undo_noctalia_never_confirmed_keeps_the_new_template_until_a_retry(
+    golden: Golden, reloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sweep 3 S-2: Undo restores the settings but the reload fails, so the running
+    shell may still read the new template. It must stay, and the Undo stays
+    pending (retryable) instead of being recorded as done."""
+    settings = golden.profile.state_home / "noctalia" / "settings.toml"
+    original = settings.read_bytes()
+    target = template.installed_template_path()
+    applied = tidy.apply(tidy.PALETTE_TEMPLATE, tidy.plan().action(tidy.PALETTE_TEMPLATE))
+    assert applied.archive is not None and target.exists()
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: False)
+
+    undone = tidy.undo(tidy.PALETTE_TEMPLATE)
+
+    assert settings.read_bytes() == original, "the settings are reversed on disk"
+    assert target.exists(), "the template the shell may still read stays"
+    assert "didn't confirm" in undone.message and "Retry Reload" in undone.message
+    manifest = json.loads((applied.archive / "manifest.json").read_bytes())
+    assert manifest["state"] == "undoing"
+    pending = tidy.plan().action(tidy.PALETTE_TEMPLATE)
+    assert pending.retry == "Retry Reload" and pending.undo is None
+    assert not tidy.retry(tidy.PALETTE_TEMPLATE).changed
+    assert target.exists()
+
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: True)
+    finished = tidy.retry(tidy.PALETTE_TEMPLATE)
+
+    assert finished.changed and "Undo is complete" in finished.message
+    assert not target.exists(), "only now does the new template go into the archive"
+    assert (applied.archive / "items" / target.name).is_file()
+    assert json.loads((applied.archive / "manifest.json").read_bytes())["state"] == "undone"
+    assert not tidy.plan().action(tidy.PALETTE_TEMPLATE).retry

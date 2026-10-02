@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings
+from wall_in_one.library import pairings, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.wallpaper import scenes
@@ -70,6 +70,28 @@ COMPILER_LOCK_POLL_SECONDS: Final = 0.025
 
 class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
+
+
+class RuntimeConfigNotDurableError(RuntimeConfigError):
+    """A file was replaced (or removed), but syncing its folder then failed.
+
+    The runtime equivalent of :class:`state_file.PublishedNotDurableError`.
+    Every reader, the service's watcher included, already sees the new
+    files; only their survival across a power loss is unconfirmed. It is not
+    a refusal: what is on disk is the new pair, and nothing may be put back
+    on its account.
+    """
+
+    def __init__(self, published: tuple[Path, ...], error: OSError) -> None:
+        names = " and ".join(path.name for path in published)
+        verb = "were" if len(published) > 1 else "was"
+        folder = "their folder" if len(published) > 1 else "its folder"
+        super().__init__(
+            f"{names} {verb} saved, but syncing {folder} failed, so the change may not "
+            f"survive a power loss ({error.strerror or error})"
+        )
+        self.published = published
+        self.error = error
 
 
 @dataclass(slots=True)
@@ -986,24 +1008,44 @@ def _publish(
     error), leaves the new overrides beside the previous ``runtime.toml``: a
     pair the service loads, since it skips overrides naming what that
     document lacks, until the next successful save replaces it.
+
+    A file that was replaced but whose folder could not be synced is
+    published, not failed (:class:`RuntimeConfigNotDurableError`): the save
+    carries on to the new pair and keeps it, and only then reports that it
+    may not survive a power loss. Putting the old overrides back beside an
+    already published ``runtime.toml`` would make a pair nobody asked for.
     """
+    not_durable: list[RuntimeConfigNotDurableError] = []
     if publish_overrides:
-        _publish_overrides(overrides, target)
-    if document is None:
-        return
-    try:
-        _install(document, target)
-    except Exception as error:
-        if not publish_overrides:
-            raise
         try:
-            _publish_overrides(previous_overrides, target)
-        except (RuntimeConfigError, OSError) as restore:
-            raise RuntimeConfigError(
-                f"{error}; the previous {OVERRIDES_FILENAME} could not be put back either "
-                f"({restore}), so it may not match runtime.toml until the next successful save"
-            ) from error
-        raise
+            _publish_overrides(overrides, target)
+        except RuntimeConfigNotDurableError as uncertain:
+            not_durable.append(uncertain)
+    if document is not None:
+        try:
+            _install(document, target)
+        except RuntimeConfigNotDurableError as uncertain:
+            not_durable.append(uncertain)
+        except Exception as error:
+            if not publish_overrides:
+                raise
+            try:
+                _publish_overrides(previous_overrides, target)
+            except RuntimeConfigNotDurableError as restore:
+                raise RuntimeConfigError(
+                    f"{error}; the previous {OVERRIDES_FILENAME} was put back, but {restore}"
+                ) from error
+            except (RuntimeConfigError, OSError) as restore:
+                raise RuntimeConfigError(
+                    f"{error}; the previous {OVERRIDES_FILENAME} could not be put back either "
+                    f"({restore}), so it may not match runtime.toml until the next successful save"
+                ) from error
+            raise
+    if not_durable:
+        raise RuntimeConfigNotDurableError(
+            tuple(path for uncertain in not_durable for path in uncertain.published),
+            not_durable[-1].error,
+        ) from not_durable[-1]
 
 
 def _require_publishable(document: str, target: Path) -> None:
@@ -1040,15 +1082,15 @@ def _publish_overrides(overrides: str | None, target: Path) -> None:
         raise RuntimeConfigError(f"{sidecar} is not a regular file; it was left untouched")
     try:
         sidecar.unlink()
-        directory = os.open(sidecar.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     except FileNotFoundError:
         return
     except OSError as error:
         raise RuntimeConfigError(f"cannot remove {sidecar}: {error}") from error
+    # Gone for every reader: a failure from here on is durability uncertainty.
+    try:
+        state_file.fsync_parent(sidecar)
+    except OSError as error:
+        raise RuntimeConfigNotDurableError((sidecar,), error) from error
 
 
 def _install(document: str, target: Path) -> None:
@@ -1057,7 +1099,11 @@ def _install(document: str, target: Path) -> None:
 
 
 def _write_atomic(document: str, target: Path) -> None:
-    """Same-directory temporary, flush, rename, then flush the directory."""
+    """Same-directory temporary, flush, rename, then flush the directory.
+
+    A failure up to the rename is :class:`RuntimeConfigError`, with the old
+    file in place; one after it is :class:`RuntimeConfigNotDurableError`.
+    """
     paths.ensure_directory(target.parent)
     descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     temporary = Path(name)
@@ -1067,11 +1113,12 @@ def _write_atomic(document: str, target: Path) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
-        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise RuntimeConfigError(f"cannot write {target}: {error}") from error
+    # Published: every reader sees the new bytes. A failure from here on is
+    # uncertainty about durability, never a refusal.
+    try:
+        state_file.fsync_parent(target)
+    except OSError as error:
+        raise RuntimeConfigNotDurableError((target,), error) from error

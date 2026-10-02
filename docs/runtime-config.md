@@ -460,6 +460,10 @@ guarantees:
   none, it removes the new file. The pair on disk is the previous one. If
   that restore fails too, the error says so: the two files may disagree
   until the next successful save.
+- If a file was replaced but syncing its folder then failed, it is already
+  what every reader sees, so nothing is put back: the save goes on to the
+  new pair and keeps it, and the error says the change may not survive a
+  power loss.
 - Between the two writes, and after a crash between them, the new overrides
   sit beside the previous `runtime.toml`. The service loads that pair (see
   below) until `runtime.toml` lands or the next save replaces it.

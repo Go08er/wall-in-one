@@ -20,9 +20,11 @@ transition rule: nothing changes for a profile until somebody uses one.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import stat
 import subprocess
 import tomllib
 from collections.abc import Callable
@@ -640,6 +642,115 @@ def test_a_failed_runtime_install_puts_the_previous_overrides_back(
     assert (sidecar.read_bytes() if sidecar.exists() else None) == (
         None if published is None else published.encode()
     )
+    session.shutdown()
+
+
+def _intervals(target: Path) -> tuple[int, int | None]:
+    """runtime.toml's global interval and the overrides file's one playlist interval."""
+    main = tomllib.loads(target.read_text(encoding="utf-8"))["settings"]["cycle_interval_seconds"]
+    sidecar = runtime_config.overrides_path(target)
+    if not sidecar.exists():
+        return main, None
+    (playlist,) = tomllib.loads(sidecar.read_text(encoding="utf-8"))["playlists"]
+    return main, playlist["cycle_interval_seconds"]
+
+
+@pytest.mark.parametrize("writer", ["write", "update"])
+@pytest.mark.parametrize("unsynced", ["runtime.toml", runtime_config.OVERRIDES_FILENAME])
+def test_a_folder_sync_failure_after_publication_keeps_the_new_pair(
+    library: Path, monkeypatch: pytest.MonkeyPatch, writer: str, unsynced: str
+) -> None:
+    """Sweep 3 S-1: published but not durable is not a failed publication.
+
+    Main interval 300 with a playlist override of 60, saved as 600 and 120.
+    The folder sync after one file's rename fails; every other sync runs.
+    Putting the old overrides back would leave the new runtime.toml beside
+    them (600 with 60), a pair nobody asked for. The new pair stays, and the
+    error says it may not survive a power loss.
+    """
+    settings = config.Settings(roots=(library,), scan_workshop=False, cycle_interval=300)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, cycle_interval=60)
+    target = runtime_config.write(settings, session)
+    assert _intervals(target) == (300, 60)
+    changed = replace(settings, cycle_interval=600)
+    session.playlists.set_rotation(made.id, cycle_interval=120)
+
+    renamed: list[str] = []
+    failed: list[str] = []
+    real_replace, real_fsync = os.replace, os.fsync
+
+    def rename(source: Any, destination: Any) -> None:
+        real_replace(source, destination)
+        renamed.append(Path(destination).name)
+
+    def sync(descriptor: int) -> None:
+        if renamed[-1:] == [unsynced] and not failed and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            failed.append(unsynced)
+            raise OSError(errno.EIO, "injected directory fsync failure after publication")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "replace", rename)
+    monkeypatch.setattr(os, "fsync", sync)
+    with pytest.raises(runtime_config.RuntimeConfigError) as caught:
+        getattr(runtime_config, writer)(changed, session)
+    # Only the injections are put back (monkeypatch.undo() would also drop
+    # conftest's XDG sandbox).
+    monkeypatch.setattr(os, "replace", real_replace)
+    monkeypatch.setattr(os, "fsync", real_fsync)
+
+    assert failed == [unsynced]
+    assert _intervals(target) == (600, 120), "the requested pair, never new main with old overrides"
+    assert renamed == [runtime_config.OVERRIDES_FILENAME, "runtime.toml"], "both were published"
+    assert type(caught.value).__name__ == "RuntimeConfigNotDurableError", caught.value
+    assert str(caught.value).startswith(f"{unsynced} was saved, but syncing its folder failed")
+    assert "may not survive a power loss" in str(caught.value)
+    assert runtime_config.update(changed, session) is False, "nothing is left to publish"
+    session.shutdown()
+
+
+def test_a_restore_that_is_put_back_but_not_synced_says_so(
+    library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """runtime.toml refused after the overrides were published: they are put back;
+    if only the sync of that restore fails, the previous pair is on disk."""
+    settings = config.Settings(roots=(library,), scan_workshop=False, cycle_interval=300)
+    config.save(settings)
+    session = Session(settings)
+    session.refresh()
+    made = session.playlists.create("Evening")
+    session.playlists.add(made.id, library / "one.png")
+    session.playlists.set_rotation(made.id, cycle_interval=60)
+    target = runtime_config.write(settings, session)
+    session.playlists.set_rotation(made.id, cycle_interval=120)
+    publish = runtime_config._publish_overrides
+    calls: list[str | None] = []
+
+    def restore_not_synced(overrides: str | None, path: Path) -> None:
+        calls.append(overrides)
+        publish(overrides, path)
+        if len(calls) > 1:
+            raise runtime_config.RuntimeConfigNotDurableError(
+                (runtime_config.overrides_path(path),), OSError(errno.EIO, "injected")
+            )
+
+    def failing(document: str, path: Path) -> None:
+        raise runtime_config.RuntimeConfigError(INJECTED_FAILURE)
+
+    monkeypatch.setattr(runtime_config, "_publish_overrides", restore_not_synced)
+    monkeypatch.setattr(runtime_config, "_install", failing)
+    with pytest.raises(runtime_config.RuntimeConfigError) as caught:
+        runtime_config.update(replace(settings, cycle_interval=600), session)
+
+    assert not isinstance(caught.value, runtime_config.RuntimeConfigNotDurableError)
+    message = str(caught.value)
+    assert INJECTED_FAILURE in message and "was put back, but" in message
+    assert "could not be put back" not in message
+    assert _intervals(target) == (300, 60), "the previous pair"
     session.shutdown()
 
 

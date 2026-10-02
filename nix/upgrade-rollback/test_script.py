@@ -710,9 +710,14 @@ with subtest("e1: v0.1.4's own GUI refuses to edit the bumped profile"):
         observe(f"e1: v0.1.4 ctl {verb.split()[0]}", {"exit": code, "output": refused})
         assert code == 1, (verb, code, refused)
         assert "current authoring needs repair before changes can be saved" in refused, refused
-    # What the paused app shows: recorded for docs/updating.md, not judged.
-    code, listed = machine.execute(user(f"{OLD}/bin/wall-in-one ctl list 2>&1"))
-    observe("e1: v0.1.4 ctl list", {"exit": code, "output": listed.strip()})
+    # docs/updating.md: the paused app never scans, so it shows an empty
+    # library (its gate holds the first activation's scan back).
+    paused = gui_library(OLD)
+    observe("e1: v0.1.4 ctl list", {"listed": paused[0], "of": paused[1], "paths": paused[2]})
+    expect(
+        "e1: the paused app shows an empty library",
+        partial(require, paused == (0, 0, []), f"v0.1.4 listed {paused}"),
+    )
     machine.screenshot("rollback-v0.1.4-playlists")
     close_gui()
     e_gui = snapshot()

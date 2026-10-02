@@ -90,9 +90,12 @@ class ReadOnlyPalette:
             # to paint a notice. Keep its last usable colours instead.
             error = str(caught)
         if not self._cancelled.is_set():
-            GLib.idle_add(
+            # A palette delivery, and every later reload waits for it: at the
+            # theme lane's HIGH_IDLE, ahead of the next redraw.
+            GLib.idle_add(  # type: ignore[call-arg]
                 self._finish,
                 _Result(generation, palette, opacity, tuple(sorted(directories)), error),
+                priority=GLib.PRIORITY_HIGH_IDLE,
             )
 
     def _finish(self, result: _Result) -> bool:

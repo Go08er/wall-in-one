@@ -346,6 +346,7 @@ class PairingsPage(Gtk.Box):
         self._editor.append(self._reset_button)
 
         self._request_adaptive_previews(bundle)
+        # Plain idle on purpose: it must follow the rebuilt editor's layout.
         GLib.idle_add(self._restore_interaction, scroll, restore_focus)
 
     def _populate_policy_list(self, item: MediaItem, bundle: pairings.Pairing) -> None:

@@ -97,6 +97,12 @@ APPLICATION_STYLE_PRIORITY: Final = Gtk.STYLE_PROVIDER_PRIORITY_USER + 1
 # stopped. HIGH_IDLE is GLib's slot for work which must precede the next
 # resize and redraw. One priority for the whole theme lane keeps its order.
 THEME_DELIVERY_PRIORITY: Final = GLib.PRIORITY_HIGH_IDLE
+# Every other worker hand-off that ends a busy state -- a library scan, an
+# authoring transaction, a runtime or control reply, the rescan a playback
+# gesture waits on after a removal -- runs at the priority of the socket and
+# timer sources it answers, above redraw for the same reason. Each lane posts
+# at this one priority, so each lane stays first in, first out.
+COMPLETION_PRIORITY: Final = GLib.PRIORITY_DEFAULT
 _RuntimeResult = TypeVar("_RuntimeResult")
 _AuthoringResult = TypeVar("_AuthoringResult")
 _LibrarySources = tuple[tuple[Path, ...], bool]
@@ -1637,10 +1643,8 @@ class Application(Adw.Application):
                     start_worker = True
         if rejected:
             if on_complete is not None:
-                GLib.idle_add(
-                    self._deliver_rejected_palette_callback,
-                    on_complete,
-                )
+                # A reply on the theme lane: the lane's own priority.
+                self._deliver_theme_result(self._deliver_rejected_palette_callback, on_complete)
         elif start_worker:
             self._theme_pool().submit(self._drain_theme_jobs)
         return self._resolved
@@ -1837,7 +1841,8 @@ class Application(Adw.Application):
         with self._theme_lock:
             if self._theme_shutdown:
                 if on_complete is not None:
-                    GLib.idle_add(self._deliver_rejected_theme_callback, on_complete)
+                    # A reply on the theme lane: the lane's own priority.
+                    self._deliver_theme_result(self._deliver_rejected_theme_callback, on_complete)
                 return False
             self._theme_generation += 1
             self._theme_action_generation += 1
@@ -2154,7 +2159,9 @@ class Application(Adw.Application):
             self._queue_library_reconciliation(generation, request, library)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # It ends the scanning spinner and releases playback gestures waiting
+        # on this scan: above redraw.
+        GLib.idle_add(deliver, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     def _queue_library_reconciliation(
         self,
@@ -2631,11 +2638,14 @@ class Application(Adw.Application):
                 task.reply(Response.failure("application is shutting down"))
             self._authoring_task_completed(task)
             return
+        # The adoption, the reply and the next queued task all wait on this
+        # delivery: above redraw.
         future.add_done_callback(
-            lambda done: GLib.idle_add(
+            lambda done: GLib.idle_add(  # type: ignore[call-arg]
                 self._finish_authoring_outcome,
                 done,
                 task,
+                priority=COMPLETION_PRIORITY,
             )
         )
 
@@ -2997,24 +3007,26 @@ class Application(Adw.Application):
                 reply(response)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # A reply can be the end of an authoring task's Deferred, which holds
+        # the authoring lane until it lands.
+        GLib.idle_add(deliver, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     @staticmethod
     def _post_runtime_completion(
         future: Future[_RuntimeResult],
         callback: Callable[[Future[_RuntimeResult]], bool],
-        *,
-        priority: int = GLib.PRIORITY_DEFAULT_IDLE,
     ) -> None:
-        """Marshal one worker completion back onto GTK's main context.
+        """Marshal one runtime-lane completion back onto GTK's main context.
 
-        A completion that ends a visible busy state passes
-        ``GLib.PRIORITY_DEFAULT``: at the default idle priority (200) it
-        waits below GTK's redraw (120), and an animating spinner can starve
-        the very result that would stop it.
+        Every runtime-lane result lands at :data:`COMPLETION_PRIORITY`: at the
+        default idle priority (200) it waits below GTK's redraw (120), and an
+        animating spinner can starve the very result that would stop it --
+        a playback command's busy state, a control reply an authoring task is
+        waiting for. One priority for the whole lane also keeps the single
+        runtime worker's results in the order it produced them.
         """
         # PyGObject's idle_add override accepts priority=; its stubs omit it.
-        GLib.idle_add(callback, future, priority=priority)  # type: ignore[call-arg]
+        GLib.idle_add(callback, future, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     def _ensure_runtime_compile_queued(self) -> None:
         """Start at most one coalescing compiler job for the latest request."""
@@ -3903,8 +3915,8 @@ class Application(Adw.Application):
                     on_complete,
                 )
 
-            # It ends the busy state (the new player bar's spinner): above redraw.
-            self._post_runtime_completion(done, deliver, priority=GLib.PRIORITY_DEFAULT)
+            # It ends the busy state (the new player bar's spinner).
+            self._post_runtime_completion(done, deliver)
 
         future.add_done_callback(completed)
         return True
@@ -4325,7 +4337,8 @@ class Application(Adw.Application):
         self._restore_runtime_after_uncommitted_removal()
         if self._refresh_after_removal:
             self._refresh_after_removal = False
-            GLib.idle_add(self.refresh_library)
+            # A playback gesture can be waiting on this scan: above redraw.
+            GLib.idle_add(self.refresh_library, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     def _begin_removal_convergence(self) -> None:
         """Keep the process alive through one committed post-delete refresh."""
@@ -4394,7 +4407,10 @@ class Application(Adw.Application):
             # released its operation lease and the actor has adopted every
             # semantic cleanup delta.
         if refresh:
-            GLib.idle_add(self.refresh_library)
+            # The removal cleared the library barrier above, so a playback
+            # gesture -- spinner and all -- waits for this scan to start and
+            # finish: above redraw, or its own animation could starve it.
+            GLib.idle_add(self.refresh_library, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     def _invalidate_runtime_for_pending_removal(self) -> None:
         """Cancel stale health/compile requests before physical deletion."""
@@ -4480,6 +4496,8 @@ class Application(Adw.Application):
             artifact_source_context=artifact_source_context,
         )
         self._stills.forget(item.path)
+        # Plain idle on purpose: only the headless --service mode gets here,
+        # and it draws no frames to starve it.
         GLib.idle_add(self.refresh_library)
         return failures
 
@@ -4725,6 +4743,8 @@ class Application(Adw.Application):
             and cursor.path == item.path
         ):
             GLib.idle_add(self._reapply_current)
+        # Plain idle on purpose: a background rescan nothing waits on, kept
+        # after the headless re-apply above.
         GLib.idle_add(self.refresh_library)
 
     def _reapply_current(self) -> bool:
@@ -4826,7 +4846,8 @@ class Application(Adw.Application):
                 reply(response)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(deliver)
+        # A control reply: above redraw, like every other one.
+        GLib.idle_add(deliver, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     # -- cycle timer -----------------------------------------------------
 
@@ -6256,7 +6277,8 @@ class _Commands:
             done = browser.download(candidate, variant=variant)
             # The file is in the library directory but not in the library until
             # something looks again. Back on the main thread to do it, since the
-            # scan ends in the grid.
+            # scan ends in the grid. Plain idle on purpose: nothing waits on
+            # this rescan, and the reply goes back on its own.
             GLib.idle_add(self._app.refresh_library)
             return Response.success(f"{done.describe()} -> {done.result.path}")
 
@@ -6268,6 +6290,7 @@ class _Commands:
                 "the GUI is open, but the wallpaper runtime is not running",
                 kind="runtime-not-running",
             )
+        # Plain idle on purpose: only the headless --service mode gets here.
         GLib.idle_add(self._app.request_quit)
         return Response.success("quitting")
 

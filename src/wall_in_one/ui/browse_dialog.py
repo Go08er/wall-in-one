@@ -1362,6 +1362,7 @@ class BrowseDialog(Adw.Dialog):
                 self._cards[0].grab_focus()
             return GLib.SOURCE_REMOVE
 
+        # Plain idle on purpose: it must follow the new page's first layout.
         GLib.idle_add(settle_page)
 
     def _update_pager(self) -> None:
@@ -1443,7 +1444,7 @@ class BrowseDialog(Adw.Dialog):
             # The loader has cached this completion already. If a recreated
             # card wants the same URL, ask again on the next main-loop turn so
             # it receives the cache hit under the current generation instead
-            # of remaining blank.
+            # of remaining blank. (Plain idle: a re-request, not a delivery.)
             GLib.idle_add(self._refresh_previews)
             return
         for card in self._cards:
@@ -1586,8 +1587,11 @@ class BrowseDialog(Adw.Dialog):
         generation = self._ownership_generation
         future = self._ownership_jobs.submit(lambda: self._browser.owned)
         self._ownership_future = future
+        # It settles each card's busy/downloaded state: above redraw.
         future.add_done_callback(
-            lambda done: GLib.idle_add(self._finish_ownership, generation, done)
+            lambda done: GLib.idle_add(  # type: ignore[call-arg]
+                self._finish_ownership, generation, done, priority=GLib.PRIORITY_DEFAULT
+            )
         )
 
     def _finish_ownership(self, generation: int, future: Future[owned.Index]) -> bool:
@@ -1981,7 +1985,8 @@ class DetailDialog(Adw.Dialog):
                 self._show(detail, picture, message)
             return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(show)
+        # It ends the "Loading…" state: above redraw.
+        GLib.idle_add(show, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def _show(self, detail: CandidateDetail | None, picture: bytes, message: str) -> None:
         if detail is None:

@@ -411,6 +411,13 @@ then.
 In the repeated hour a reading such as 01:00 names two moments; the one meant
 is the next, which `route_change_in_s` makes explicit.
 
+Each status reply reads the local zone afresh, as the schedule does on every
+tick. The zone is re-read at most once a second, from `TZ` when the service's
+environment sets it, otherwise when `/etc/localtime` itself is replaced, as
+changing the system time zone does. A tzdata update that leaves
+`/etc/localtime` alone, or a `TZ` naming a zone whose file changes, takes
+effect when the service next starts, for the schedule and status alike.
+
 ## Per-playlist rotation and display precedence (`runtime-overrides.toml`)
 
 A playlist's own interval and shuffle, and a display whose own playlist beats

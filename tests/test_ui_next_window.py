@@ -43,6 +43,7 @@ from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.theme import noctalia, source  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange  # noqa: E402
 from wall_in_one.ui.window import MainWindow  # noqa: E402
@@ -524,6 +525,82 @@ def test_a_next_window_gone_before_its_first_layout_leaves_a_later_run_able_to_e
         for lane in lanes:
             lane.shutdown(wait=True)
     assert application._window is None
+
+
+def selected_key(window: NextWindow) -> str | None:
+    """The navigation key of the sidebar's selected row, or None when none is."""
+    index = window.sidebar.get_selected()
+    keys = window.nav_keys
+    return keys[index] if 0 <= index < len(keys) else None
+
+
+def away(window: NextWindow) -> None:
+    """Hide the window and unrealize it, as GTK does when it goes."""
+    window.set_visible(False)
+    window.unrealize()
+    assert not window.get_realized()
+    assert selected_key(window) is None, "no selection while away: the sidebar idle can end"
+
+
+def test_a_returning_window_selects_the_row_of_the_page_it_shows() -> None:
+    """Navigation while the window is away moves the page; the row follows on return."""
+    application = Application(ui="next")
+    window = NextWindow(application, application.settings)
+    window.present()
+    try:
+        assert selected_key(window) == "library"
+        assert window.stack.get_visible_child_name() == "library"
+
+        away(window)
+        window.navigate("settings")
+        assert window.stack.get_visible_child_name() == "settings"
+        assert selected_key(window) is None, "still nothing selected while away"
+        window.present()
+        assert window.get_realized()
+        assert selected_key(window) == "settings", "the visible page, not the row it left on"
+        assert window.content_page.get_title() == "Settings"
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+    assert drains(GLib.MainContext.default()), "the sidebar idle outlived the window"
+
+
+def test_a_sidebar_rebuilt_while_away_is_selected_by_page_not_position() -> None:
+    application = Application(ui="next")
+    session = application.session
+    window = NextWindow(application, application.settings)
+    window.present()
+    try:
+        window.navigate("settings")
+        before = window.nav_keys.index("settings")
+        away(window)
+        # A new playlist adds a row above Settings while the window is away.
+        evening = session.playlists.create("Evening")
+        state = window.state
+        assert isinstance(state, RealAppState)
+        state.reload_playlists()
+        assert window.nav_keys.index("settings") == before + 1
+        assert selected_key(window) is None, "a rebuild selects nothing while away"
+        window.present()
+        assert selected_key(window) == "settings"
+
+        # The page on screen loses its row while the window is away: none selected.
+        window.navigate(f"playlist:{evening.id}")
+        assert selected_key(window) == f"playlist:{evening.id}"
+        assert window.content_page.get_title() == "Evening"
+        away(window)
+        session.playlists.delete(evening.id)
+        state.reload_playlists()
+        assert selected_key(window) is None
+        window.present()
+        assert window.stack.get_visible_child_name() == "playlist"
+        assert selected_key(window) is None, "no row for the page on screen"
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        session.shutdown()
+    assert drains(GLib.MainContext.default()), "the sidebar idle outlived the window"
 
 
 def _remote(events: list[object]) -> type:

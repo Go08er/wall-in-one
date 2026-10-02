@@ -72,6 +72,11 @@ class ShellWindow(Adw.ApplicationWindow):
         self.pages: dict[str, Page] = {}
         self._current: Page | None = None
         self._nav_keys: list[str] = []
+        #: The navigation identity of the page on screen (``library``,
+        #: ``playlist:<id>``, ...), whether or not the sidebar shows it.
+        self._nav_key = ""
+        #: The window is away (unrealized): the sidebar keeps no selection.
+        self._sidebar_released = False
         self._header_widgets: list[Gtk.Widget] = []
         self._banner_action = ""
 
@@ -156,7 +161,6 @@ class ShellWindow(Adw.ApplicationWindow):
         self._refresh_banners()
         self._refresh_glass()
         self.navigate("library")
-        self._released_selection: int | None = None
         self.connect("unrealize", lambda _window: self._release_sidebar())
         self.connect("realize", lambda _window: self._restore_sidebar())
 
@@ -185,16 +189,34 @@ class ShellWindow(Adw.ApplicationWindow):
         closures can postpone forever. The idle would then run on every
         main-loop pass at full CPU, and `Gio.Application.run`'s final flush
         (``while (g_main_context_iteration (context, FALSE))``) would never
-        return. With no row selected, the idle removes itself on its next run.
+        return. With no row selected, the idle removes itself on its next run,
+        so nothing selects one until the window is back (`_restore_sidebar`).
         """
-        self._released_selection = self.sidebar.get_selected()
+        self._sidebar_released = True
         self.sidebar.set_selected(Gtk.INVALID_LIST_POSITION)
 
     def _restore_sidebar(self) -> None:
-        """Select the current page's row again, should the window come back."""
-        released, self._released_selection = self._released_selection, None
-        if released is not None:
-            self.sidebar.set_selected(released)
+        """Select the row of the page on screen, now that the window is back.
+
+        By its navigation key, not a row index saved when the window went:
+        navigation and sidebar rebuilds may have happened meanwhile. A page
+        with no row leaves the sidebar with none selected.
+        """
+        if not self._sidebar_released:
+            return
+        self._sidebar_released = False
+        key = self._nav_key
+        self.sidebar.set_selected(
+            self._nav_keys.index(key) if key in self._nav_keys else Gtk.INVALID_LIST_POSITION
+        )
+        self._title_content()
+
+    def _title_content(self) -> None:
+        """Name the content after the selected row (follows renames), else its page."""
+        item = self.sidebar.get_selected_item()
+        page = self._current
+        title = item.get_title() if item is not None else page.title if page is not None else ""
+        self.content_page.set_title(title)
 
     def _build_sidebar(self, selected: str | None = None) -> None:
         state = self.state
@@ -264,7 +286,11 @@ class ShellWindow(Adw.ApplicationWindow):
         end = _Adw.SidebarSection()
         add(end, "settings", "Settings", "emblem-system-symbolic")
         self.sidebar.append(end)
-        if selected in self._nav_keys:
+        if self._sidebar_released:
+            # Adw.Sidebar selects its first row of new items by itself; while
+            # the window is away it must keep none (`_release_sidebar`).
+            self.sidebar.set_selected(Gtk.INVALID_LIST_POSITION)
+        elif selected in self._nav_keys:
             self.sidebar.set_selected(self._nav_keys.index(selected))
 
     @property
@@ -312,12 +338,14 @@ class ShellWindow(Adw.ApplicationWindow):
             self._current = page
         page.activate(argument or None)
         nav_key = key if name == "playlist" else name
-        if nav_key in self._nav_keys:
+        self._nav_key = nav_key
+        # While the window is away the sidebar keeps no selection; it gets
+        # this page's row when the window is back (`_restore_sidebar`).
+        if nav_key in self._nav_keys and not self._sidebar_released:
             index = self._nav_keys.index(nav_key)
             if self.sidebar.get_selected() != index:
                 self.sidebar.set_selected(index)
-        item = self.sidebar.get_selected_item()
-        self.content_page.set_title(item.get_title() if item is not None else page.title)
+        self._title_content()
         self.set_title(f"Wall-in-One - {page.title}")
         self.split.set_show_content(True)
 

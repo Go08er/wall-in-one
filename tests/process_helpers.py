@@ -49,6 +49,15 @@ def is_alive(pid: int) -> bool:
     return bool(fields) and fields[0] not in _EXITED
 
 
+def handed_off(handoff: Path, seconds: float = 3.0) -> tuple[int, int]:
+    """The ``"<leader> <sleeper>"`` pids a stand-in wrote (atomically) to ``handoff``."""
+    deadline = time.monotonic() + seconds
+    while not handoff.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    leader, sleeper = handoff.read_text().split()
+    return int(leader), int(sleeper)
+
+
 def reaped(pid: int, seconds: float) -> int | None:
     """Reap the test's own child ``pid``: its wait status, or None if it
     is still running after ``seconds``."""

@@ -25,7 +25,13 @@ from pathlib import Path
 from typing import Final, Literal
 
 from wall_in_one.theme.palette import Mode, PaletteError, PalettePair
-from wall_in_one.worker_processes import OwnedProcess, ProcessCancelledError, exchange
+from wall_in_one.worker_processes import (
+    OwnedProcess,
+    ProcessCancelledError,
+    abandon,
+    exchange,
+    spawn,
+)
 
 #: Generation strategies, from `noctalia/src/theme/scheme.h`. The first five are
 #: Material Design 3; the rest are custom HSL-space generators with deliberately
@@ -126,18 +132,17 @@ def _run(
             raise NoctaliaError(f"noctalia {arguments[0]} was cancelled")
         generation = _CANCEL_GENERATION
     try:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+        # Its selector is built before the child, so running out of
+        # descriptors fails here, with no child to lose.
+        child, selector = spawn(command)
     except OSError as error:
         raise NoctaliaError(f"cannot run noctalia: {error}") from error
 
-    child = OwnedProcess(process)
-    with _ACTIVE_LOCK:
-        _ACTIVE[process.pid] = child
+    try:
+        with _ACTIVE_LOCK:
+            _ACTIVE[child.pid] = child
+    except BaseException as error:
+        abandon(child, selector, error)
 
     def was_cancelled() -> bool:
         with _ACTIVE_LOCK:
@@ -148,16 +153,18 @@ def _run(
     # ``exchange`` treats the leader's exit, seen without reaping it, as the end
     # of the call; it then ends anything the CLI left in its group and only
     # then reaps. A cancellation that came before registration is seen by its
-    # first check. Every wait is bounded.
+    # first check. Every wait is bounded, and every way out of it, an
+    # unexpected error or interrupt included, ends the group before the
+    # registry lets go of it below.
     try:
-        completed = exchange(child, timeout=timeout, cancelled=was_cancelled)
+        completed = exchange(child, selector=selector, timeout=timeout, cancelled=was_cancelled)
     except ProcessCancelledError as error:
         raise NoctaliaError(f"noctalia {arguments[0]} was cancelled") from error
     except subprocess.TimeoutExpired as error:
         raise NoctaliaError(f"noctalia {arguments[0]} timed out after {timeout}s") from error
     finally:
         with _ACTIVE_LOCK:
-            _ACTIVE.pop(process.pid, None)
+            _ACTIVE.pop(child.pid, None)
 
     if was_cancelled():
         raise NoctaliaError(f"noctalia {arguments[0]} was cancelled")

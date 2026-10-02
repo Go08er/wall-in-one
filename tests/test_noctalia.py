@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.process_helpers import is_alive, kill_and_reap, reaped, subreaper
+from tests.process_helpers import handed_off, is_alive, kill_and_reap, reaped, subreaper
 from wall_in_one.theme import noctalia, source
 
 
@@ -125,14 +125,6 @@ class _GroupSignals:
         self._killpg(group, requested)
 
 
-def _handed_off(handoff: Path) -> tuple[int, int]:
-    deadline = time.monotonic() + 3.0
-    while not handoff.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    leader, sleeper = handoff.read_text().split()
-    return int(leader), int(sleeper)
-
-
 @pytest.mark.parametrize("ending", ["cancel", "timeout"])
 def test_a_cli_that_exits_leaving_its_group_does_not_leave_a_sleeper(
     ending: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -153,7 +145,7 @@ def test_a_cli_that_exits_leaving_its_group_does_not_leave_a_sleeper(
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         future = pool.submit(noctalia.message, "orphan", str(handoff))
-        leader, sleeper = _handed_off(handoff)
+        leader, sleeper = handed_off(handoff)
         if ending == "cancel":
             # Only once the leader has exited: a zombie, or already reaped.
             deadline = time.monotonic() + 3.0
@@ -199,7 +191,7 @@ def test_a_cancel_or_timeout_ends_a_running_cli_and_its_group(
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         future = pool.submit(noctalia.message, "linger", str(handoff))
-        _leader, sleeper = _handed_off(handoff)
+        _leader, sleeper = handed_off(handoff)
         if ending == "cancel":
             # Nothing else ends the group first: the leader runs for 30s.
             assert is_alive(sleeper), "the sleeper was gone before the cancellation"

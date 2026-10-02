@@ -357,8 +357,8 @@ older service simply omits them.
 
 | Field | Meaning |
 | --- | --- |
-| `route_change_at` | Local wall-clock time, `YYYY-MM-DDTHH:MM:SS`, of the next schedule boundary that changes this display's automatic playlist or `route_source`: the time the schedule reads. This is the authority for the schedule. |
-| `route_change_in_s` | Whole seconds until then, rounded up. A difference of local times, so it can be an hour off across a daylight-saving change. |
+| `route_change_at` | The local time, `YYYY-MM-DDTHH:MM:SS`, the clock will show when this display's automatic playlist or `route_source` next changes: at a schedule boundary, or when the clock itself jumps across a daylight-saving change. |
+| `route_change_in_s` | Real seconds until then, rounded up. |
 | `next_cycle_at` | The local time the clock will show when the rotation next advances: `next_cycle_in_s` added to the real current time and read in the local zone. |
 | `next_cycle_in_s` | Whole seconds until then, rounded up; `0` when it is due. Elapsed time, and the authority for the rotation. |
 | `until` | `route_change_at` as local `HH:MM`, only when it is less than a day away. |
@@ -379,7 +379,8 @@ because the schedule still moves a paused route, and is `null`:
 - for a configured display that is not connected;
 - when no boundary within eight days changes the winner. A handover between
   two rules choosing the same playlist with the same source is not a change.
-  Only midnight and each enabled rule's start and end minute are examined.
+  Only midnight, each enabled rule's start and end minute, and the clock's
+  own daylight-saving jumps are examined.
   One status reply spends at most two million rule checks on these searches;
   hundreds of rules on dozens of displays can exhaust that, and the displays
   left over report `null`.
@@ -389,21 +390,26 @@ not connected. Stopped routes keep rotating stills, so they keep a deadline.
 Mirrored mode has one timer, so every mirrored row carries the same deadline.
 A successful rotation, schedule change or explicit command restarts it.
 
-The two kinds of timing have different authorities across a daylight-saving
-change:
+Every field holds across a daylight-saving change. The seconds are real
+elapsed time, and the wall-clock fields are what the local clock will show
+then.
 
-- The schedule is written and read in local wall-clock time, so
-  `route_change_at` and `until` are exact and `route_change_in_s` is
-  approximate. A boundary inside a clocks-forward gap (02:30 on a spring
-  change) never shows on the clock, so the schedule first sees it, and status
-  reports it, at the gap's end (03:00); a window lying wholly inside the gap
-  changes nothing that day. In the repeated hour after clocks go back the clock
-  passes the same times twice: the first is reported, and a rule boundary in
-  that hour acts again when the hour repeats.
-- Rotation runs on elapsed time, so `next_cycle_in_s` is exact and
-  `next_cycle_at` is that many seconds from now as the local clock will then
-  read: ten minutes after 01:55 on a spring change is 03:05, and ten minutes
-  after the first 01:55 on an autumn change is 01:05.
+- The schedule is written and read in local wall-clock time, and the search
+  follows the clock's readings in the order they happen. After clocks go
+  forward, a boundary in the skipped hour (02:30 on a spring change) never
+  shows, so the schedule first sees it, and status reports it, at 03:00; a
+  window lying wholly inside the gap changes nothing that day. When clocks go
+  back, the rewind is itself a boundary: at the first 01:55, a 01:30–02:30
+  window matches, but five minutes later the clock reads 01:00, where it no
+  longer does, so status reports a change at 01:00, five minutes away, not at
+  02:30. The repeated hour's boundaries then come round a second time.
+- Rotation runs on elapsed time, so `next_cycle_at` is `next_cycle_in_s` from
+  now as the local clock will then read: ten minutes after 01:55 on a spring
+  change is 03:05, and ten minutes after the first 01:55 on an autumn change is
+  01:05.
+
+In the repeated hour a reading such as 01:00 names two moments; the one meant
+is the next, which `route_change_in_s` makes explicit.
 
 ## Per-playlist rotation and display precedence (`runtime-overrides.toml`)
 

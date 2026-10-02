@@ -108,16 +108,35 @@ fn timing_follows_the_local_clock_across_both_chicago_changes() {
     );
 
     // A schedule boundary inside the spring gap acts, and is reported, when
-    // the clock reaches the gap's end.
+    // the clock reaches the gap's end, an hour of real time after 01:00 CST.
     let gap = row(window("02:30", "06:00"), local(3, 8, 1, 0));
     assert_eq!(gap["route_source"], "default");
     assert_eq!(gap["route_change_at"], "2026-03-08T03:00:00");
     assert_eq!(gap["until"], "03:00");
+    assert_eq!(gap["route_change_in_s"], 3600);
     // A window that lies entirely inside the gap changes nothing that day.
     let lost = row(window("02:15", "02:45"), local(3, 8, 1, 0));
     assert_eq!(lost["route_change_at"], "2026-03-09T02:15:00");
-    // On the autumn change the repeated hour exists, so a boundary in it is
-    // reported as it reads; its first occurrence is the one that comes next.
-    let repeated = row(window("01:30", "06:00"), local(11, 1, 0, 30));
-    assert_eq!(repeated["until"], "01:30");
+
+    // A reading the caller supplies is its first instant, so 01:55 on
+    // 2026-11-01 is daylight time, five minutes before the clock goes back.
+    // The audit's case: a 01:30-02:30 window matches now and no longer does
+    // once the clock reads 01:00 again, so the route changes then, not at
+    // 02:30.
+    let rewound = row(window("01:30", "02:30"), local(11, 1, 1, 55));
+    assert_eq!(rewound["route_source"], "schedule");
+    assert_eq!(rewound["route_change_at"], "2026-11-01T01:00:00");
+    assert_eq!(rewound["until"], "01:00");
+    assert_eq!(rewound["route_change_in_s"], 300);
+    // A window that still matches at 01:00 is no change there: it ends at
+    // 02:30 standard time, 95 real minutes on.
+    let kept = row(window("00:30", "02:30"), local(11, 1, 1, 55));
+    assert_eq!(kept["route_source"], "schedule");
+    assert_eq!(kept["route_change_at"], "2026-11-01T02:30:00");
+    assert_eq!(kept["until"], "02:30");
+    assert_eq!(kept["route_change_in_s"], 95 * 60);
+    // Before the repeated hour, its first 01:30 comes first.
+    let early = row(window("01:30", "06:00"), local(11, 1, 0, 30));
+    assert_eq!(early["until"], "01:30");
+    assert_eq!(early["route_change_in_s"], 3600);
 }

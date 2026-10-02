@@ -259,10 +259,12 @@ pub struct DisplayStatus<'a> {
 /// display row; every field is `null` when there is nothing to report.
 #[derive(Debug, Default, Serialize)]
 pub struct DisplayTiming {
-    /// Local wall-clock time (`YYYY-MM-DDTHH:MM:SS`) of the next schedule
-    /// boundary that changes this display's automatic playlist or route
-    /// source, at most `schedule::CHANGE_HORIZON_DAYS` ahead. `null` while a
-    /// manual pick holds, for a detached display, or with no change in range.
+    /// Local wall-clock time (`YYYY-MM-DDTHH:MM:SS`) the clock will show at
+    /// the next schedule change of this display's automatic playlist or route
+    /// source, at most `schedule::CHANGE_HORIZON_DAYS` ahead, including one
+    /// caused by the clock itself jumping. `null` while a manual pick holds,
+    /// for a detached display, or with no change in range. The seconds are
+    /// real elapsed time.
     pub route_change_at: Option<String>,
     pub route_change_in_s: Option<u64>,
     /// Local wall-clock time the rotation next advances: the elapsed
@@ -282,17 +284,15 @@ const WALL_CLOCK_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 impl DisplayTiming {
-    /// `at` is the local reading the schedule was judged from; `reference`
-    /// is the same moment as a real instant, from which an elapsed countdown
-    /// is projected into `zone`.
+    /// `reference` is the real instant the reply describes, from which an
+    /// elapsed rotation countdown is projected into `zone`.
     fn new<Tz: TimeZone>(
-        at: NaiveDateTime,
-        route_change: Option<NaiveDateTime>,
+        route_change: Option<schedule::Change>,
         cycle_in: Option<Duration>,
         reference: DateTime<Utc>,
         zone: &Tz,
     ) -> Self {
-        let route_change_in_s = route_change.map(|change| seconds_between(at, change));
+        let route_change_in_s = route_change.map(|change| whole_seconds_up(change.after));
         let next_cycle_in_s =
             cycle_in.map(|remaining| remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0));
         let next_cycle_at = next_cycle_in_s
@@ -300,14 +300,14 @@ impl DisplayTiming {
             .map(|due| due.format(WALL_CLOCK_FORMAT).to_string());
         Self {
             route_change_at: route_change
-                .map(|change| change.format(WALL_CLOCK_FORMAT).to_string()),
+                .map(|change| change.local.format(WALL_CLOCK_FORMAT).to_string()),
             route_change_in_s,
             next_cycle_at,
             next_cycle_in_s,
             until: route_change
                 .zip(route_change_in_s)
                 .filter(|(_, seconds)| *seconds < SECONDS_PER_DAY)
-                .map(|(change, _)| change.format("%H:%M").to_string()),
+                .map(|(change, _)| change.local.format("%H:%M").to_string()),
             next_change_in_s: next_cycle_in_s,
         }
     }
@@ -327,12 +327,8 @@ pub fn wall_clock_after<Tz: TimeZone>(
     Some(due.with_timezone(zone).naive_local())
 }
 
-/// Whole seconds from `from` to `to`, rounded up; 0 once `to` has passed.
-/// Both are naive local times, so across a daylight-saving change this is an
-/// hour off; for a schedule boundary the local wall-clock time is the
-/// authority.
-fn seconds_between(from: NaiveDateTime, to: NaiveDateTime) -> u64 {
-    let delta = to - from;
+/// `delta` in whole seconds, rounded up; 0 once it has passed.
+fn whole_seconds_up(delta: chrono::TimeDelta) -> u64 {
     let seconds = delta.num_seconds();
     let rounded = if delta.subsec_nanos() > 0 {
         seconds + 1
@@ -4540,13 +4536,16 @@ impl<D: WallpaperDriver> Runtime<D> {
         Err(error)
     }
 
-    /// The moment one status reply describes: the monotonic instant cycle
-    /// deadlines are measured from (the real clock, or a later instant `tick`
-    /// was handed) and the real UTC time they are projected from.
-    fn status_clock(&self) -> StatusClock {
-        StatusClock {
+    /// The moment one status reply describes at the local reading `at`: the
+    /// monotonic instant cycle deadlines are measured from (the real clock, or
+    /// a later instant `tick` was handed), the real UTC time they are
+    /// projected from, and the local clock's readings the schedule will see.
+    fn status_moment(&self, at: NaiveDateTime) -> StatusMoment {
+        let utc = Utc::now();
+        StatusMoment {
             instant: self.observed_instant.max(Instant::now()),
-            utc: Utc::now(),
+            utc,
+            timeline: schedule::Timeline::from_reading(at, utc, &Local),
         }
     }
 
@@ -4579,8 +4578,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         &self,
         explicit: Option<&DisplayAssignment>,
         connected: bool,
-        at: NaiveDateTime,
-        clock: StatusClock,
+        moment: &StatusMoment,
         budget: &mut usize,
     ) -> DisplayTiming {
         if !connected {
@@ -4591,9 +4589,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         } else {
             schedule::next_change(
                 &self.config.schedules,
-                at,
+                &moment.timeline,
                 budget,
-                |instant| schedule::shown_on(instant, &Local),
                 |instant| self.mirrored_route_key(explicit, instant),
             )
             .ok()
@@ -4604,10 +4601,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                 cycle_remaining(
                     self.last_cycle,
                     self.mirrored_cycle_interval_seconds(),
-                    clock.instant,
+                    moment.instant,
                 )
             });
-        DisplayTiming::new(at, route_change, cycle, clock.utc, &Local)
+        DisplayTiming::new(route_change, cycle, moment.utc, &Local)
     }
 
     /// One independent route's timing: its own calendar winner (with the
@@ -4617,8 +4614,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         connector: &str,
         route: &DisplayRoute,
         connected: bool,
-        at: NaiveDateTime,
-        clock: StatusClock,
+        moment: &StatusMoment,
         budget: &mut usize,
     ) -> DisplayTiming {
         if !connected {
@@ -4629,9 +4625,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         } else {
             schedule::next_change(
                 &self.config.schedules,
-                at,
+                &moment.timeline,
                 budget,
-                |instant| schedule::shown_on(instant, &Local),
                 |instant| {
                     self.automatic_route(connector, instant)
                         .map(|(playlist, source, _rule)| (self.playlist_id(&playlist), source))
@@ -4646,17 +4641,17 @@ impl<D: WallpaperDriver> Runtime<D> {
             cycle_remaining(
                 route.last_cycle,
                 self.playlist_cycle_interval_seconds(&route.active_playlist),
-                clock.instant,
+                moment.instant,
             )
         });
-        DisplayTiming::new(at, route_change, cycle, clock.utc, &Local)
+        DisplayTiming::new(route_change, cycle, moment.utc, &Local)
     }
 
     fn status_json(&self, at: NaiveDateTime) -> Result<String, String> {
         if self.is_independent() {
             return self.status_json_independent(at);
         }
-        let clock = self.status_clock();
+        let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let active_playlist = self.playlist()?;
         let effective_ids = self.effective_playlist_ids();
@@ -4787,7 +4782,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             reason: pending.reason,
                         }
                     }),
-                    timing: self.mirrored_timing(None, true, at, clock, &mut budget),
+                    timing: self.mirrored_timing(None, true, &moment, &mut budget),
                 });
             }
         } else {
@@ -4890,8 +4885,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         timing: self.mirrored_timing(
                             explicit,
                             self.target_outputs.iter().any(|target| target == output),
-                            at,
-                            clock,
+                            &moment,
                             &mut budget,
                         ),
                     });
@@ -4991,7 +4985,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn status_json_independent(&self, at: NaiveDateTime) -> Result<String, String> {
-        let clock = self.status_clock();
+        let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let live_targets = self.current_targets(&self.target_outputs);
         if live_targets.is_empty() {
@@ -5203,8 +5197,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     &target.output,
                     route,
                     self.target_outputs.contains(&target.output),
-                    at,
-                    clock,
+                    &moment,
                     &mut budget,
                 ),
             });
@@ -5391,11 +5384,11 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 }
 
-/// The moment one status reply describes, on both clocks it needs.
-#[derive(Clone, Copy)]
-struct StatusClock {
+/// The moment one status reply describes, on every clock it needs.
+struct StatusMoment {
     instant: Instant,
     utc: DateTime<Utc>,
+    timeline: schedule::Timeline,
 }
 
 /// Time left on a rotation timer started at `last_cycle`; zero once due.
@@ -5556,8 +5549,9 @@ fn _is_absolute(path: &Path) -> bool {
 mod tests {
     use super::{
         DisplayTiming, EntryKey, MAX_TABOO_STATUS_ENTRIES, PLAYBACK_HISTORY_LIMIT, cycle_remaining,
-        promote_taboo_status_key, push_bounded, seconds_between, wall_clock_after,
+        promote_taboo_status_key, push_bounded, wall_clock_after, whole_seconds_up,
     };
+    use crate::schedule::Change;
     use crate::schedule::test_zones::Chicago2026;
     use chrono::{NaiveDate, NaiveDateTime, TimeDelta, Utc};
     use std::time::{Duration, Instant};
@@ -5568,7 +5562,11 @@ mod tests {
         route_change: Option<NaiveDateTime>,
         cycle_in: Option<Duration>,
     ) -> DisplayTiming {
-        DisplayTiming::new(at, route_change, cycle_in, at.and_utc(), &Utc)
+        let change = route_change.map(|local| Change {
+            local,
+            after: local - at,
+        });
+        DisplayTiming::new(change, cycle_in, at.and_utc(), &Utc)
     }
 
     fn day(month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
@@ -5584,24 +5582,13 @@ mod tests {
         // 01:55 CST on 2026-03-08 (07:55 UTC): ten minutes later the clock
         // has jumped to daylight time. Adding to the local reading would say
         // 02:05, a time that never shows.
-        let spring = DisplayTiming::new(
-            day(3, 8, 1, 55),
-            None,
-            ten_minutes,
-            day(3, 8, 7, 55).and_utc(),
-            &Chicago2026,
-        );
+        let spring =
+            DisplayTiming::new(None, ten_minutes, day(3, 8, 7, 55).and_utc(), &Chicago2026);
         assert_eq!(spring.next_cycle_at.as_deref(), Some("2026-03-08T03:05:00"));
         assert_eq!(spring.next_cycle_in_s, Some(600));
         // 01:55 CDT on 2026-11-01 (06:55 UTC): ten minutes later the clock
         // has gone back to 01:05 standard time, not on to 02:05.
-        let fall = DisplayTiming::new(
-            day(11, 1, 1, 55),
-            None,
-            ten_minutes,
-            day(11, 1, 6, 55).and_utc(),
-            &Chicago2026,
-        );
+        let fall = DisplayTiming::new(None, ten_minutes, day(11, 1, 6, 55).and_utc(), &Chicago2026);
         assert_eq!(fall.next_cycle_at.as_deref(), Some("2026-11-01T01:05:00"));
         assert_eq!(fall.next_cycle_in_s, Some(600));
         // The same reading an hour later, in standard time, simply adds.
@@ -5616,6 +5603,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_route_change_across_the_rewind_reads_the_clock_and_counts_real_seconds() {
+        // At the first 01:55 on 2026-11-01 a change at the rewind reads 01:00
+        // and is 300 real seconds away; a difference of readings would be
+        // negative.
+        let rewind = Change {
+            local: day(11, 1, 1, 0),
+            after: TimeDelta::minutes(5),
+        };
+        let timing = DisplayTiming::new(
+            Some(rewind),
+            None,
+            day(11, 1, 6, 55).and_utc(),
+            &Chicago2026,
+        );
+        assert_eq!(
+            timing.route_change_at.as_deref(),
+            Some("2026-11-01T01:00:00")
+        );
+        assert_eq!(timing.route_change_in_s, Some(300));
+        assert_eq!(timing.until.as_deref(), Some("01:00"));
+    }
+
     fn at(hour: u32, minute: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 8, 3)
             .unwrap()
@@ -5626,9 +5636,9 @@ mod tests {
     #[test]
     fn timing_rounds_up_to_whole_seconds_and_never_goes_negative() {
         let half = at(17, 59) + TimeDelta::milliseconds(30_500);
-        assert_eq!(seconds_between(half, at(18, 0)), 30);
-        assert_eq!(seconds_between(at(17, 0), at(18, 0)), 3600);
-        assert_eq!(seconds_between(at(18, 1), at(18, 0)), 0);
+        assert_eq!(whole_seconds_up(at(18, 0) - half), 30);
+        assert_eq!(whole_seconds_up(at(18, 0) - at(17, 0)), 3600);
+        assert_eq!(whole_seconds_up(at(18, 0) - at(18, 1)), 0);
 
         let start = Instant::now();
         let later = start + Duration::from_millis(100_250);

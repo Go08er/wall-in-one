@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import os
+import signal
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -67,3 +73,79 @@ def test_cancel_before_submission_refuses_to_spawn(monkeypatch: pytest.MonkeyPat
         cancellation.run(["never-started"], timeout=60.0)
 
     assert not spawned
+
+
+# -- a group whose leader already exited ------------------------------------------------
+
+_PR_SET_CHILD_SUBREAPER: Final = 36
+#: The leader starts ``sleep`` in its own process group (inheriting the captured
+#: pipes), writes the sleeper's pid where the test can read it, and exits.
+_LEADER: Final = """
+import subprocess, sys
+sleeper = subprocess.Popen(["sleep", "120"])
+with open(sys.argv[1], "w") as handle:
+    handle.write(str(sleeper.pid))
+"""
+
+
+def _subreaper(enabled: bool) -> None:
+    """Adopt orphaned descendants, so the test can reap the exact sleeper itself."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
+        pytest.skip("this kernel can't make the test a child subreaper")
+
+
+def _state(pid: int) -> str:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return ""
+    return stat.rsplit(")", 1)[1].split()[0]
+
+
+def test_cancel_kills_a_group_member_whose_leader_already_exited(tmp_path: Path) -> None:
+    """The audit's B-3: the leader exits first; its same-group child keeps the
+    output pipes. Cancelling must still kill that child."""
+    _subreaper(True)
+    sleeper: int | None = None
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        cancellation = worker_processes.Cancellation()
+        handoff = tmp_path / "sleeper.pid"
+        future = pool.submit(
+            cancellation.run,
+            [sys.executable, "-c", _LEADER, str(handoff)],
+            timeout=60.0,
+        )
+        _wait_until_started(cancellation)
+        with cancellation._lock:
+            (leader,) = cancellation._active
+        deadline = time.monotonic() + 5.0
+        while _state(leader) != "Z" or not handoff.exists() or not handoff.read_text():
+            assert time.monotonic() < deadline, "the leader never exited"
+            time.sleep(0.01)
+        sleeper = int(handoff.read_text())
+        assert os.getpgid(sleeper) == leader, "the sleeper stayed in the leader's group"
+        assert _state(sleeper) in ("S", "R")
+
+        cancellation.cancel()
+        with pytest.raises(worker_processes.ProcessCancelledError):
+            future.result(timeout=5)
+
+        deadline = time.monotonic() + 3.0
+        reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        while reaped == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+            reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        assert reaped == sleeper, "the sleeper outlived the cancellation"
+        assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+        sleeper = None
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        if sleeper is not None:
+            # Only the exact sleeper this test started, killed and reaped here.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(sleeper, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(sleeper, 0)
+        _subreaper(False)

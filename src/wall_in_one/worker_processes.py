@@ -34,7 +34,21 @@ class ProcessCancelledError(Exception):
 
 
 def _signal_group(process: subprocess.Popen[bytes], requested: signal.Signals) -> None:
-    if process.poll() is not None:
+    """Signal the child's whole process group, even if its leader has exited.
+
+    The group is the child's own (``start_new_session``), so its id is the
+    leader's pid. A leader that has exited but has not been reaped is a zombie
+    that still holds that pid, and Linux never hands out a pid while a zombie,
+    or any live group member, still uses it as a pid or group id. So while
+    ``returncode`` is unset (this module has not reaped the leader), the group
+    id can only name this child's group, and ``killpg`` reaches every member
+    still in it, including descendants that outlived the leader and keep its
+    pipes open. That is why this must not call ``poll()``: reaping the leader
+    here is what used to skip the group, and would free the pid for reuse.
+    Once the leader has been reaped, the id may belong to someone else, so the
+    group is left alone; every path below signals before it reaps.
+    """
+    if process.returncode is not None:
         return
     with contextlib.suppress(OSError, ProcessLookupError):
         os.killpg(process.pid, requested)

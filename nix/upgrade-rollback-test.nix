@@ -37,11 +37,15 @@ let
 
   # The golden profile, the harness that materializes and snapshots it, and
   # the guest-side tool, in one store path both the guest and the driver read.
+  # Building it first proves the tool fails an unrelated change to Noctalia's
+  # settings, so a broken write gate cannot boot a VM that passes.
   support = pkgs.runCommand "wall-in-one-upgrade-rollback-support" { } ''
     mkdir -p $out
     cp ${../tests/golden/harness.py} $out/harness.py
     cp ${./upgrade-rollback/vm_tool.py} $out/vm_tool.py
     cp -R ${../tests/golden/profile} $out/profile
+    PYTHONPATH=$out PYTHONDONTWRITEBYTECODE=1 \
+      ${python.interpreter} ${./upgrade-rollback/vm_tool_selfcheck.py} $out/profile
   '';
 
   # Records which process asked Noctalia to show a wallpaper: the proof that

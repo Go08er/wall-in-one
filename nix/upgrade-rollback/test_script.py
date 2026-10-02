@@ -7,7 +7,6 @@
 # tests/golden/harness.py's own diff and allowance machinery, on snapshots the
 # guest takes of the trees Wall-in-One owns or reads.
 
-import base64
 import importlib
 import json
 import shlex
@@ -18,10 +17,11 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-# The harness lives in the support store path, outside the driver's
-# environment, so it is loaded at run time rather than resolved statically.
+# The harness and the guest tool live in the support store path, outside the
+# driver's environment, so they are loaded at run time, not resolved statically.
 sys.path.insert(0, SUPPORT)
 harness = importlib.import_module("harness")
+vm_tool = importlib.import_module("vm_tool")
 
 q = shlex.quote
 STATE_REL = ".local/state/wall-in-one"
@@ -256,22 +256,8 @@ def settle_authoring(package: str, arguments: str) -> tuple[int, str]:
 # -- snapshots and expectations ---------------------------------------------------------
 
 
-def _node(value: dict[str, Any]) -> Any:
-    data = value["content"]
-    return harness.Node(
-        value["kind"],
-        value["mode"],
-        value["inode"],
-        value["mtime_ns"],
-        value["size"],
-        value["digest"],
-        None if data is None else base64.b64decode(data),
-        value["target"],
-    )
-
-
 def _nodes(text: str) -> dict[str, Any]:
-    return {path: _node(value) for path, value in json.loads(text).items()}
+    return vm_tool.nodes(json.loads(text))
 
 
 def snapshot() -> dict[str, Any]:
@@ -283,11 +269,25 @@ def snapshot() -> dict[str, Any]:
     )
 
 
-def writes(label: str, before: dict[str, Any], after: dict[str, Any]) -> list[Any]:
+def writes(
+    label: str, before: dict[str, Any], after: dict[str, Any], *, shell_first_start: bool = False
+) -> list[Any]:
+    """Every write between two snapshots, for the phase's own allowances.
+
+    Noctalia's own rewrites are judged here, in every phase, and set aside:
+    its settings.toml may change only in vm_tool.SHELL_FIELDS (plus, across
+    the shell's first start, vm_tool.SHELL_MIGRATION), so an app -- or anyone
+    -- changing any other key fails whichever phase it happens in.
+    """
     changes = harness.diff(before, after)
     observations[label] = [change.describe() for change in changes]
     print(f"WIO_WRITES {label}: {json.dumps(observations[label], indent=1)}")
-    return changes
+    rest, problems = vm_tool.shell_writes(changes, first_start=shell_first_start)
+    expect(
+        f"{label}: Noctalia's settings change only in shell-owned fields",
+        lambda: require(not problems, "; ".join(problems)),
+    )
+    return rest
 
 
 def expect(label: str, check: Callable[[], None]) -> None:
@@ -416,7 +416,8 @@ with subtest("a: v0.1.4 starts on the golden profile and applies a wallpaper"):
     observe("a: applied", wait_applied(pid, 0))
     a_done = snapshot()
     # The shipped release's own first start: recorded, not judged.
-    writes("a: v0.1.4 first start", seeded, a_done)
+    # Noctalia's first start on the fixture's settings happens here too.
+    writes("a: v0.1.4 first start", seeded, a_done, shell_first_start=True)
     observe("a: service journal", journal("wall-in-one.service"))
 
 with subtest("b: v0.2.0 installed; the mixed window, then its first start and idle"):

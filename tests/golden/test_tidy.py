@@ -598,3 +598,31 @@ def test_a_kept_old_template_blocks_the_template_undo_instead_of_a_missing_file(
         "input_path"
     ] == str(target)
     assert target.exists() and not stale.exists()
+
+
+@pytest.mark.parametrize("action", [tidy.PALETTE_TEMPLATE, tidy.PLUGIN_SETTINGS])
+def test_apply_waits_while_the_same_actions_undo_waits_for_its_reload(
+    golden: Golden, reloads: list[str], monkeypatch: pytest.MonkeyPatch, action: tidy.Action
+) -> None:
+    """Sweep 4 T-4: a second Apply during a pending Undo would create a newer journal
+    that hides the older one from Retry Reload (and, for the palette, strands the
+    created template). Apply is unavailable, with the reason, until it's finished."""
+    first = tidy.apply(action, tidy.plan().action(action))
+    assert first.archive is not None
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: False)
+    tidy.undo(action)
+    journals = sorted(tidy.archive_root().iterdir())
+
+    pending = tidy.plan().action(action)
+
+    assert pending.changes, "the reversed edit is offered again"
+    assert not pending.ready and "Retry Reload first" in pending.blocked
+    assert pending.retry == "Retry Reload"
+    with pytest.raises(tidy.TidyError, match="Retry Reload first"):
+        tidy.apply(action, pending)
+    assert sorted(tidy.archive_root().iterdir()) == journals, "no newer journal"
+
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: True)
+    assert tidy.retry(action).changed
+    assert json.loads((first.archive / "manifest.json").read_bytes())["state"] == "undone"
+    assert tidy.plan().action(action).ready, "Apply is available again"

@@ -1520,6 +1520,7 @@ def _tail_note(document: Mapping[str, Any]) -> str:
 def _apply_palette_template(expected: ActionPlan | None) -> Result:
     template.recover_interrupted_edit()
     manifests = _manifests()
+    _refuse_while_undo_pends(PALETTE_TEMPLATE, manifests)
     settings, unreadable = _read_noctalia()
     plan = _plan_palette_template(settings, unreadable, manifests)
     if expected is not None and expected.token != plan.token:
@@ -1691,6 +1692,23 @@ _UNDO_RELOAD_NOTE: Final = (
     "them, so the running shell may still use the changed ones. Retry the reload once "
     "Noctalia is running; until then nothing more is removed."
 )
+
+
+_UNDO_PENDING_BLOCK: Final = (
+    "The last Undo still waits for Noctalia to confirm it reloaded its settings. "
+    "Finish it with Retry Reload first; applying again now would leave that Undo "
+    "unfinished"
+)
+
+
+def _refuse_while_undo_pends(action: Action, manifests: Sequence[_Manifest]) -> None:
+    """Apply must not start a newer edit over an Undo still waiting for its reload.
+
+    The newer journal would hide the pending one from Retry Reload, and with it
+    the cleanup of anything that Undo still owns (the created template).
+    """
+    if _pending_undo(action, manifests) is not None:
+        raise TidyError(f"{_UNDO_PENDING_BLOCK}.")
 
 
 def _await_undo_reload(
@@ -2030,6 +2048,7 @@ def _plan_plugin_settings(
 def _apply_plugin_settings(expected: ActionPlan | None) -> Result:
     template.recover_interrupted_edit()
     manifests = _manifests()
+    _refuse_while_undo_pends(PLUGIN_SETTINGS, manifests)
     settings, unreadable = _read_noctalia()
     plan, orphaned = _plan_plugin_settings(settings, unreadable, manifests)
     if expected is not None and expected.token != plan.token:
@@ -2145,9 +2164,19 @@ def plan(*, roots: Sequence[Path] | None = None, now: float | None = None) -> Pl
         plugin = replace(plugin, notes=(*plugin.notes, _RELOAD_PENDING_NOTE), retry="Retry Reload")
     palette = _plan_palette_template(settings, unreadable, manifests)
     if _pending_undo(PALETTE_TEMPLATE, manifests) is not None:
-        palette = replace(palette, notes=(*palette.notes, _UNDO_RELOAD_NOTE), retry="Retry Reload")
+        palette = replace(
+            palette,
+            notes=(*palette.notes, _UNDO_RELOAD_NOTE),
+            retry="Retry Reload",
+            blocked=_UNDO_PENDING_BLOCK,
+        )
     if _pending_undo(PLUGIN_SETTINGS, manifests) is not None:
-        plugin = replace(plugin, notes=(*plugin.notes, _UNDO_RELOAD_NOTE), retry="Retry Reload")
+        plugin = replace(
+            plugin,
+            notes=(*plugin.notes, _UNDO_RELOAD_NOTE),
+            retry="Retry Reload",
+            blocked=_UNDO_PENDING_BLOCK,
+        )
     return Plan((leftovers, palette, old_template, plugin, _plan_thumbnails()))
 
 

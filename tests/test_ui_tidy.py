@@ -222,3 +222,25 @@ def test_an_undo_left_unfinished_offers_undo_again_or_keep_archived(
     leftovers.keep.emit("clicked")
     spin_until(lambda: _idle(group) and leftovers.plan.undo is None, timeout=10)
     assert not leftovers.keep.get_visible() and "no longer offered" in application.reports[-1]
+
+
+def test_apply_is_unavailable_with_its_reason_while_an_undo_waits_for_its_reload(
+    section: tuple[TidySection, _Application], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    group, _application = section
+    _noctalia_settings()
+    group.refresh()
+    spin_until(lambda: _idle(group) and group.row(tidy.PLUGIN_SETTINGS) is not None)
+    plugin = group.row(tidy.PLUGIN_SETTINGS)
+    assert plugin is not None and plugin.plan.ready
+    plugin.apply.emit("clicked")
+    spin_until(lambda: _idle(group) and plugin.plan.undo is not None, timeout=10)
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: False)
+
+    plugin.undo.emit("clicked")
+    spin_until(lambda: _idle(group) and plugin.plan.retry != "", timeout=10)
+
+    assert plugin.apply.get_visible() and not plugin.apply.get_sensitive()
+    assert any(text.startswith("Not now") for text in _texts(group, tidy.PLUGIN_SETTINGS))
+    assert "Retry Reload first" in plugin.plan.blocked
+    assert plugin.retry.get_visible()

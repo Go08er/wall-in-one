@@ -61,6 +61,27 @@ class MissingSettingsError(ConfigError):
     """Unattended publication was requested before a profile was saved."""
 
 
+class SettingsNotDurableError(ConfigError):
+    """settings.toml now holds ``settings``, but its durability isn't confirmed.
+
+    Raised after publication, so unlike every other ConfigError the file did
+    change: callers adopt ``settings`` (or re-read the file) and say the save
+    happened but may not survive a power loss.
+    """
+
+    def __init__(self, settings: Settings, error: OSError) -> None:
+        super().__init__(str(error))
+        self.settings = settings
+
+
+def _publish(target: Path, settings: Settings) -> None:
+    """Write ``settings``; a failure after publication is SettingsNotDurableError."""
+    try:
+        state_file.write_atomic_text(target, settings.to_toml())
+    except state_file.PublishedNotDurableError as error:
+        raise SettingsNotDurableError(settings, error) from error
+
+
 #: How many unrecognized keys a message names before summarizing the rest.
 _MAX_NAMED_KEYS: Final = 5
 _MAX_KEY_DISPLAY_CHARS: Final = 64
@@ -708,7 +729,9 @@ def save(settings: Settings, path: Path | None = None) -> Path:
             _refuse_unknown_keys(target)
             _check_runtime_compatibility(settings, target)
             paths.ensure_directory(target.parent)
-            state_file.write_atomic_text(target, settings.validated().to_toml())
+            _publish(target, settings.validated())
+    except ConfigError:
+        raise
     except OSError as error:
         raise ConfigError(f"cannot write {target}: {error}") from error
     return target
@@ -771,7 +794,7 @@ def mutate(
             _validate_strict_mapping(tomllib.loads(candidate.to_toml()), target)
             _check_runtime_compatibility(candidate, target)
             paths.ensure_directory(target.parent)
-            state_file.write_atomic_text(target, candidate.to_toml())
+            _publish(target, candidate)
             return candidate
     except ConfigError:
         raise
@@ -803,7 +826,7 @@ def forget_playlist_default(
                 raise SettingsReadOnlyError(loaded.unknown_keys)
             candidate = replace(current, active_playlist="").validated()
             paths.ensure_directory(target.parent)
-            state_file.write_atomic_text(target, candidate.to_toml())
+            _publish(target, candidate)
             return candidate
     except ConfigError:
         raise

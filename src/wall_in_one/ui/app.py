@@ -277,6 +277,8 @@ class _SettingsResult:
     generation: int
     settings: config.Settings
     changes: tuple[tuple[str, int, Any], ...]
+    #: Set when the snapshot was published but its durability is unconfirmed.
+    not_durable: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -4997,7 +4999,17 @@ class Application(Adw.Application):
                 raise config.ConfigError(
                     "the chosen default playlist was deleted before Settings could save"
                 )
-            saved = config.update(change_map)
+            try:
+                saved = config.update(change_map)
+            except config.SettingsNotDurableError as error:
+                # Published, then the folder sync failed: this is no refusal.
+                # Adopt what the file holds now, not the rejected-looking old
+                # snapshot, and say the save happened.
+                try:
+                    published = config.load_strict()
+                except config.ConfigError:
+                    published = error.settings
+                return _SettingsResult(generation, published, changes, str(error))
             return _SettingsResult(generation, saved, changes)
 
         source_change = any(key in {"roots", "scan_workshop"} for key, _gen, _value in changes)
@@ -5053,6 +5065,11 @@ class Application(Adw.Application):
         for _generation, success, _failure in callbacks:
             if success is not None:
                 success(result.settings)
+        if result.not_durable:
+            self.window_report(
+                "Settings were saved, but Wall-in-One couldn't confirm they're safely on "
+                f"disk: {result.not_durable}"
+            )
         if pending:
             self._start_settings_authoring()
 

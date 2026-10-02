@@ -743,6 +743,23 @@ def _restore_relocated_publication_entry(
     return f"the {relocated_description} was restored to {path}"
 
 
+class PublishedNotDurableError(OSError):
+    """The new bytes replaced the file, but syncing its directory then failed.
+
+    Every reader already sees the new contents; only their survival across a
+    power loss is unconfirmed. This is not a refusal: a caller must adopt what
+    is on disk and must never report it as "nothing changed".
+    """
+
+    def __init__(self, path: Path, error: OSError) -> None:
+        super().__init__(
+            error.errno,
+            f"{path} was saved, but syncing its folder failed, so the change may not "
+            f"survive a power loss ({error.strerror or error})",
+        )
+        self.path = path
+
+
 def write_atomic_text(
     path: Path,
     contents: str,
@@ -781,7 +798,8 @@ def write_atomic_bytes(
     generation aside: if a manual repair appears in that newly empty pathname,
     the repair wins instead of being overwritten by the recovered mutation.
     With ``replace_existing=False`` an existing ``path`` raises
-    :class:`FileExistsError` and is left exactly as it was.
+    :class:`FileExistsError` and is left exactly as it was. A failure after
+    the new bytes were published raises :class:`PublishedNotDurableError`.
     ``mode`` sets the new file's permission bits before any byte is written;
     without it the file keeps ``mkstemp``'s private 0600.
     """
@@ -835,7 +853,6 @@ def write_atomic_bytes(
                     f"{error}; {restoration}",
                     preserved_path=error.preserved_path,
                 ) from error
-        fsync_parent(path)
     except OSError, UnicodeError:
         if temporary_pin is None:
             # Even descriptor exhaustion must not make cleanup identify the
@@ -858,6 +875,12 @@ def write_atomic_bytes(
                 os.close(descriptor)
         if temporary_pin is not None:
             temporary_pin.close()
+    # Publication is done: the name holds the new bytes. A failure from here
+    # on is uncertainty about durability, never a refusal.
+    try:
+        fsync_parent(path)
+    except OSError as error:
+        raise PublishedNotDurableError(path, error) from error
 
 
 @contextlib.contextmanager

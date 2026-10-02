@@ -1008,3 +1008,42 @@ def test_bytes_and_text_writers_publish_the_same_file(tmp_path: Path) -> None:
     with pytest.raises(FileExistsError):
         state_file.write_atomic_bytes(tmp_path / "a.json", b"x", replace_existing=False)
     assert (tmp_path / "a.json").read_text() == text
+
+
+# -- a failure after publication is not a refusal -------------------------------------
+
+
+def _sync_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fails(_path: Path) -> None:
+        raise OSError(5, "injected post-replace directory sync failure")
+
+    monkeypatch.setattr(state_file, "fsync_parent", fails)
+
+
+def test_a_folder_sync_failure_after_the_replace_says_the_file_was_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "store.json"
+    target.write_text("old")
+    _sync_fails(monkeypatch)
+
+    with pytest.raises(state_file.PublishedNotDurableError, match="was saved") as raised:
+        state_file.write_atomic_text(target, "new")
+
+    assert raised.value.path == target
+    assert target.read_text() == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["store.json"]
+
+
+def test_settings_published_before_a_sync_failure_are_reported_as_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The audit's B-2 at the config layer: opacity 0.4 → 0.8, then the sync fails."""
+    target = config.save(config.Settings(roots=(tmp_path,), opacity=0.4))
+    _sync_fails(monkeypatch)
+
+    with pytest.raises(config.SettingsNotDurableError) as raised:
+        config.update({"opacity": 0.8})
+
+    assert raised.value.settings.opacity == 0.8
+    assert config.load_strict(target).opacity == 0.8

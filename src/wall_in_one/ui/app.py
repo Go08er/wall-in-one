@@ -6065,6 +6065,11 @@ class _Commands:
 
             def remove_legacy() -> Response:
                 item = server.resolve(session.library, value, verb="remove")
+                # Before the journal intent and the physical step, as a
+                # RemovalPlan does on its worker.
+                blocked = session.removal_cleanup_blocker(item)
+                if blocked is not None:
+                    return Response.failure(blocked[1], kind=blocked[0])
                 try:
                     intent = self._app.prepare_item_removal(item)
                 except removals.RemovalJournalError as error:

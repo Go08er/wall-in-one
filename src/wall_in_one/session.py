@@ -180,6 +180,64 @@ def _retained_adoption_paths(
     return authority.capture_path, authority.sidecar_path
 
 
+#: Kind of a Delete/Trash refused because a record store it must clear is
+#: unreadable (a newer file is :data:`state_file.NEWER_VERSION`).
+REMOVAL_BLOCKED_UNREADABLE = "invalid-state"
+
+
+def _removal_cleanup_blocker(
+    item: MediaItem,
+    stores: Sequence[favourites.Store | pairings.Store | playlists.Store],
+) -> tuple[str, str] | None:
+    """``(kind, message)`` when a removal's cleanup is already known to fail.
+
+    After the file is moved or unlinked, cleanup removes the wallpaper from
+    favourites, pairings and playlists. A store this build cannot change -- a
+    newer version's file, or one it cannot read -- would refuse that after the
+    file was gone, leaving its records and a pending removal that cannot
+    finish. ``stores`` must be fresh reads of those files. The message reads
+    on its own (``ctl``) and after the window's "Nothing was moved: ".
+    """
+    faults = [(store.fault_kind, store.fault) for store in stores if store.fault is not None]
+    if not faults:
+        return None
+    newer = sum(kind == state_file.NEWER_VERSION for kind, _fault in faults)
+    unreadable = len(faults) - newer
+    if newer and unreadable:
+        advice = (
+            "Use the version that saved the newer file, and repair or restore the unreadable "
+            "one, then try again."
+        )
+    elif newer:
+        advice = (
+            f"Remove it with the version that saved {'that file' if newer == 1 else 'them'} "
+            "instead."
+        )
+    else:
+        advice = f"Repair or restore {'that file' if unreadable == 1 else 'them'}, then try again."
+    details = "; ".join(fault for _kind, fault in faults if fault)
+    return (
+        state_file.NEWER_VERSION if newer else REMOVAL_BLOCKED_UNREADABLE,
+        f"removing {item.name} would also update its records, which this version cannot do: "
+        f"{details}. The wallpaper was left where it is. {advice}",
+    )
+
+
+def _cleanup_failure(label: str, filename: str, error: Exception) -> str:
+    """One record a committed removal could not clear, worded for after the fact.
+
+    A Store's refusal ends "Nothing was changed.", which is true of its own
+    file but, beside a wallpaper already moved or deleted, reads as a denial
+    that anything happened.
+    """
+    if getattr(error, "kind", None) == state_file.NEWER_VERSION:
+        return (
+            f"{label}: {filename} was saved by a newer version of Wall-in-One; this version "
+            "cannot change it, so it may still list this wallpaper"
+        )
+    return f"{label}: {error}"
+
+
 @dataclass(frozen=True, slots=True)
 class RemovalPlan:
     """Value-only removal inputs whose lease and I/O live on one worker.
@@ -236,6 +294,20 @@ class RemovalPlan:
             for name, original, rebased in stores
             if original.fault is not None and rebased.fault is None
         )
+        # Before the journal intent and the physical step: a cleanup this
+        # build already knows it cannot do refuses the whole removal.
+        blocked = _removal_cleanup_blocker(
+            self.item, (favourite_store, pairing_store, playlist_store)
+        )
+        if blocked is not None:
+            return RemovalResult(
+                item=self.item,
+                trash=self.trash,
+                committed=False,
+                error_kind=blocked[0],
+                error_message=blocked[1],
+                repaired_faults=repaired_faults,
+            )
         snapshot = Session(
             self.settings,
             favourite_store=favourite_store,
@@ -833,6 +905,23 @@ class Session:
         """Explicit removal intents, retained until cleanup is complete."""
         return self._removals
 
+    def removal_cleanup_blocker(self, item: MediaItem) -> tuple[str, str] | None:
+        """``(kind, message)`` when removing ``item`` must be refused up front.
+
+        For callers that remove synchronously (the headless ``--service``
+        mode); a :class:`RemovalPlan` makes the same check on its worker. Each
+        record file is read afresh: the fault a live Store remembers may have
+        been repaired since, and a newer file may have appeared.
+        """
+        return _removal_cleanup_blocker(
+            item,
+            (
+                self._favourites.worker_copy(rebase=True),
+                self._pairings.worker_copy(rebase=True),
+                self._playlists.worker_copy(rebase=True),
+            ),
+        )
+
     def prepare_removal(
         self,
         item: MediaItem,
@@ -1068,7 +1157,7 @@ class Session:
         try:
             self._favourites.discard(item.path)
         except favourites.FavouritesError as error:
-            failures.append(f"favourites: {error}")
+            failures.append(_cleanup_failure("favourites", favourites.STATE_FILENAME, error))
         else:
             favourite_succeeded = self._favourites.fault is None
             if not favourite_succeeded:
@@ -1089,7 +1178,7 @@ class Session:
         try:
             self._pairings.forget_item(item, removed_stills=artifacts)
         except pairings.PairingError as error:
-            failures.append(f"pairing: {error}")
+            failures.append(_cleanup_failure("pairing", pairings.STATE_FILENAME, error))
         else:
             pairing_succeeded = self._pairings.fault is None
             if not pairing_succeeded:
@@ -1097,7 +1186,7 @@ class Session:
         try:
             self._playlists.forget_path(item.path)
         except playlists.PlaylistError as error:
-            failures.append(f"playlists: {error}")
+            failures.append(_cleanup_failure("playlists", playlists.STATE_FILENAME, error))
         else:
             playlist_succeeded = self._playlists.fault is None
             if not playlist_succeeded:

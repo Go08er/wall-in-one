@@ -252,6 +252,14 @@ sidecars whose exact generated paths prove they belong to that wallpaper.
 Those records normally outlive a missing file because the file might come
 back; that is not true of one the app just destroyed.
 
+So before anything is moved or deleted, Remove and Move to Trash read
+`favourites.json`, `pairings.json` and `playlists.json` again. If any of them
+was saved by a newer version of Wall-in-One, or cannot be read, the whole
+removal is refused: the message names the file, and the wallpaper is left
+where it is. Records that still cannot be cleared after the media commit, for
+example because a newer version saved a file in between, are reported as
+incomplete cleanup with a refresh to retry, never as nothing having changed.
+
 A manually chosen still remains a separate library item. Removing the moving
 wallpaper deletes the association but never the still file or that still's own
 Pairing metadata. Conversely, explicitly removing the still clears only the
@@ -394,7 +402,8 @@ it and says once which files are affected; every edit to such a file is refused
 with the reason `newer-version` ("… was saved by a newer version of Wall-in-One;
 open that version to change it. Nothing was changed."), and the runtime keeps
 its last-known-good configuration. The pending-removals journal is never acted
-on at all in that case.
+on at all in that case, and while favourites, pairings or playlists is such a
+file, Remove and Move to Trash are refused before the wallpaper is touched.
 
 Fields the app does not know, for example ones a newer version added, are kept
 through every save of a file it does understand: at the top level and on each

@@ -1781,8 +1781,18 @@ def _undo_plugin_settings(manifest: _Manifest) -> Result:
 
 
 def _plan_thumbnails() -> ActionPlan:
-    usage = thumbnails.usage()
     title = "Clear the thumbnail cache"
+    try:
+        usage = thumbnails.usage()
+    except thumbnails.CacheDirectoryRefusedError as error:
+        reason = f"{error}."
+        return ActionPlan(
+            THUMBNAIL_CACHE,
+            title,
+            "The thumbnail cache is left alone.",
+            kept=(Kept(thumbnails.cache_directory(), reason),),
+            blocked=reason,
+        )
     cap = format_size(thumbnails.MAX_CACHE_BYTES)
     if usage.entries == 0 and usage.total_bytes == 0:
         return ActionPlan(THUMBNAIL_CACHE, title, "The thumbnail cache is empty.")
@@ -1844,7 +1854,10 @@ def apply(
     if expected is not None and expected.action != action:
         raise ValueError("the preview belongs to a different action")
     if action == THUMBNAIL_CACHE:
-        removed = thumbnails.clear()
+        try:
+            removed = thumbnails.clear()
+        except thumbnails.CacheDirectoryRefusedError as error:
+            raise TidyError(f"Nothing was deleted: {error}.") from error
         return Result(
             THUMBNAIL_CACHE,
             removed > 0,

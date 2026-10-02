@@ -34,6 +34,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -536,12 +537,73 @@ def to_displayable(
 class _Entry:
     """One file in the cache directory that this module wrote."""
 
-    path: Path
+    name: str
+    identity: tuple[int, int]
     size: int
     used_at: float
 
 
-def _scan() -> tuple[list[_Entry], list[_Entry]]:
+class CacheDirectoryRefusedError(Exception):
+    """The cache directory is not one this app may delete in (the message says why)."""
+
+
+def _refusal(directory: Path) -> str:
+    """Why ``directory`` (which could not be opened as a real directory) is refused."""
+    try:
+        found = directory.lstat()
+    except OSError:
+        return ""
+    if stat.S_ISLNK(found.st_mode):
+        return (
+            f"{directory} is a link to another folder, so Wall-in-One won't count or "
+            "delete anything through it"
+        )
+    if not stat.S_ISDIR(found.st_mode):
+        return f"{directory} isn't a folder"
+    return ""
+
+
+@contextlib.contextmanager
+def _pinned_directory() -> Iterator[int | None]:
+    """The cache directory, opened once; every scan and unlink goes through it.
+
+    Enumerating by pathname and then unlinking by pathname would follow the
+    path twice: if the directory were renamed and its name pointed somewhere
+    else in between, the unlink would land in that other directory. Holding
+    one descriptor and using ``unlinkat`` relative to it keeps every deletion
+    inside the directory that was inspected.
+
+    The policy for the directory itself: it must be a real directory owned by
+    this user. A symbolic link at its name (or anything else) is refused with
+    :class:`CacheDirectoryRefusedError`, and nothing is counted or deleted through
+    it; ancestors resolve as usual, since the descriptor pins whatever they
+    led to. A missing directory yields ``None``: there is nothing to do.
+    """
+    directory = cache_directory()
+    try:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except FileNotFoundError:
+        yield None
+        return
+    except OSError as error:
+        reason = _refusal(directory)
+        if reason:
+            raise CacheDirectoryRefusedError(reason) from error
+        # Unreadable: nothing here can be accounted for or removed.
+        yield None
+        return
+    try:
+        if os.fstat(descriptor).st_uid != os.getuid():
+            raise CacheDirectoryRefusedError(f"{directory} belongs to another user")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _scan(descriptor: int) -> tuple[list[_Entry], list[_Entry]]:
     """Cache entries and abandoned temporaries, each least-recently-used first.
 
     Only files whose names this module could have written are returned, and only
@@ -552,7 +614,7 @@ def _scan() -> tuple[list[_Entry], list[_Entry]]:
     entries: list[_Entry] = []
     temporaries: list[_Entry] = []
     try:
-        with os.scandir(cache_directory()) as found:
+        with os.scandir(descriptor) as found:
             for candidate in found:
                 if _ENTRY_NAME.match(candidate.name) or _PREVIEW_NAME.match(candidate.name):
                     bucket = entries
@@ -568,22 +630,39 @@ def _scan() -> tuple[list[_Entry], list[_Entry]]:
                     continue
                 if not stat.S_ISREG(status.st_mode):
                     continue
-                bucket.append(_Entry(Path(candidate.path), status.st_size, status.st_mtime))
+                bucket.append(
+                    _Entry(
+                        candidate.name,
+                        (status.st_dev, status.st_ino),
+                        status.st_size,
+                        status.st_mtime,
+                    )
+                )
     except OSError:
-        # No cache directory yet, or one we cannot read. Either way there is
-        # nothing here to account for.
+        # A directory we cannot read: nothing here to account for.
         return [], []
     entries.sort(key=lambda entry: entry.used_at)
     temporaries.sort(key=lambda entry: entry.used_at)
     return entries, temporaries
 
 
-def _discard(entry: _Entry) -> bool:
-    """Unlink one entry, tolerating a second instance having got there first."""
+def _discard(descriptor: int, entry: _Entry) -> bool:
+    """Unlink one entry inside the pinned directory, if it is still the scanned file.
+
+    A different file now at that name (a fresh thumbnail, or anything else) is
+    left alone. A second instance having removed it already counts as done.
+    """
     try:
-        entry.path.unlink()
+        current = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
     except FileNotFoundError:
-        # Two instances evicting the same entry. Gone is gone.
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != entry.identity:
+        return False
+    try:
+        os.unlink(entry.name, dir_fd=descriptor)
+    except FileNotFoundError:
         return True
     except OSError:
         return False
@@ -591,8 +670,14 @@ def _discard(entry: _Entry) -> bool:
 
 
 def usage() -> CacheUsage:
-    """How many thumbnails are cached and what they weigh."""
-    entries, temporaries = _scan()
+    """How many thumbnails are cached and what they weigh.
+
+    Raises :class:`CacheDirectoryRefusedError` when the cache directory is refused.
+    """
+    with _pinned_directory() as descriptor:
+        if descriptor is None:
+            return CacheUsage(entries=0, total_bytes=0)
+        entries, temporaries = _scan(descriptor)
     both = (*entries, *temporaries)
     return CacheUsage(entries=len(entries), total_bytes=sum(entry.size for entry in both))
 
@@ -611,13 +696,23 @@ def prune(max_bytes: int = MAX_CACHE_BYTES) -> int:
     draw. The next prune collects them.
     """
     moment = time.time()
-    entries, temporaries = _scan()
+    try:
+        with _pinned_directory() as descriptor:
+            if descriptor is None:
+                return 0
+            return _prune_in(descriptor, max_bytes, moment)
+    except CacheDirectoryRefusedError:
+        # Maintenance never deletes through a refused directory; Settings says why.
+        return 0
 
+
+def _prune_in(descriptor: int, max_bytes: int, moment: float) -> int:
+    entries, temporaries = _scan(descriptor)
     removed = 0
     for temporary in temporaries:
         # A temporary this old is the leavings of a crashed or killed encode;
         # nothing live writes to one for an hour.
-        if moment - temporary.used_at > TEMPORARY_GRACE_SECONDS and _discard(temporary):
+        if moment - temporary.used_at > TEMPORARY_GRACE_SECONDS and _discard(descriptor, temporary):
             removed += 1
 
     total = sum(entry.size for entry in entries)
@@ -630,7 +725,7 @@ def prune(max_bytes: int = MAX_CACHE_BYTES) -> int:
             break
         if moment - entry.used_at < EVICTION_GRACE_SECONDS:
             continue
-        if _discard(entry):
+        if _discard(descriptor, entry):
             removed += 1
             total -= entry.size
     return removed
@@ -641,7 +736,12 @@ def clear() -> int:
 
     Here for a Settings button to call. The old plugin left 108 files and 2.4 MB
     in its state directory with nothing anywhere that could remove them; the
-    fact that they were small was luck, not design.
+    fact that they were small was luck, not design. Every deletion stays inside
+    the one directory it inspected (see :func:`_pinned_directory`); a refused
+    directory raises :class:`CacheDirectoryRefusedError` and nothing is deleted.
     """
-    entries, temporaries = _scan()
-    return sum(_discard(entry) for entry in (*entries, *temporaries))
+    with _pinned_directory() as descriptor:
+        if descriptor is None:
+            return 0
+        entries, temporaries = _scan(descriptor)
+        return sum(_discard(descriptor, entry) for entry in (*entries, *temporaries))

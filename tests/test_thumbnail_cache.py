@@ -474,3 +474,44 @@ def test_a_preview_temporary_is_swept_like_any_other(cache: Path) -> None:
     thumbnails.prune()
 
     assert not leftover.exists()
+
+
+# -- the directory itself --------------------------------------------------
+
+
+def test_a_cache_directory_that_is_a_link_is_refused_and_nothing_is_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Policy: the thumbnails directory must be a real directory; a link is refused."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    lookalike = _entry(elsewhere, 0)
+    thumbnails.cache_directory().parent.mkdir(parents=True)
+    thumbnails.cache_directory().symlink_to(elsewhere)
+
+    with pytest.raises(thumbnails.CacheDirectoryRefusedError, match="link to another folder"):
+        thumbnails.clear()
+    with pytest.raises(thumbnails.CacheDirectoryRefusedError):
+        thumbnails.usage()
+    assert thumbnails.prune(max_bytes=0) == 0
+    assert lookalike.exists()
+
+
+def test_eviction_leaves_a_file_that_replaced_a_scanned_entry(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each unlink first checks the name still holds the file that was scanned."""
+    scanned = _entry(cache, 0)
+    real_scan = thumbnails._scan
+
+    def scan_then_replace(descriptor: int) -> tuple[list[object], list[object]]:
+        found = real_scan(descriptor)
+        scanned.unlink()
+        scanned.write_bytes(_png(b"\x01\x01"))
+        return found  # type: ignore[return-value]
+
+    monkeypatch.setattr(thumbnails, "_scan", scan_then_replace)
+
+    assert thumbnails.clear() == 0
+    assert scanned.exists()

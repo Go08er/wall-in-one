@@ -22,6 +22,7 @@ from wall_in_one import (
     file_io,
     legacy_migration,
     paths,
+    thumbnails,
     tidy,
 )
 from wall_in_one.library import manage, removals
@@ -379,3 +380,55 @@ def test_format_size_reads_like_the_file_manager() -> None:
     assert tidy.format_size(1) == "1 byte"
     assert tidy.format_size(953) == "953 bytes"
     assert tidy.format_size(258_528_584) == "258.5 MB"
+
+
+# -- the thumbnail cache stays inside the directory it inspected ----------------------
+
+
+def test_clearing_the_cache_never_follows_a_swapped_directory_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's race (F-1): after the scan, the cache directory is renamed
+    and a link to another folder takes its name. A same-named file there must
+    survive; only the inspected directory's entries go."""
+    cache = thumbnails.cache_directory()
+    cache.mkdir(parents=True)
+    name = "a" * 32 + ".png"
+    (cache / name).write_bytes(b"\x89PNG cached")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    foreign = elsewhere / name
+    foreign.write_bytes(b"someone else's file")
+    preview = tidy.plan(roots=()).action(tidy.THUMBNAIL_CACHE)
+    assert preview.ready
+    moved = cache.with_name("thumbnails.moved")
+    real_scan = thumbnails._scan
+
+    def scan_then_swap_the_directory(*arguments: int) -> tuple[list[object], list[object]]:
+        found = real_scan(*arguments)
+        cache.rename(moved)
+        cache.symlink_to(elsewhere)
+        return found  # type: ignore[return-value]
+
+    monkeypatch.setattr(thumbnails, "_scan", scan_then_swap_the_directory)
+
+    result = tidy.apply(tidy.THUMBNAIL_CACHE, preview)
+
+    assert foreign.read_bytes() == b"someone else's file"
+    assert not (moved / name).exists(), "the inspected directory's entry was the one cleared"
+    assert result.changed
+
+
+def test_a_linked_cache_directory_is_shown_as_left_alone(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ("b" * 32 + ".png")).write_bytes(b"\x89PNG")
+    thumbnails.cache_directory().parent.mkdir(parents=True)
+    thumbnails.cache_directory().symlink_to(elsewhere)
+
+    found = tidy.plan(roots=()).action(tidy.THUMBNAIL_CACHE)
+
+    assert not found.ready and "link to another folder" in found.blocked
+    with pytest.raises(tidy.TidyError, match="Nothing was deleted"):
+        tidy.apply(tidy.THUMBNAIL_CACHE, found)
+    assert (elsewhere / ("b" * 32 + ".png")).exists()

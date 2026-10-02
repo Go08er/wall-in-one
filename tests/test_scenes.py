@@ -14,11 +14,19 @@ programs fighting over one wallpaper.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
+from typing import Final
 
 import pytest
 
+from wall_in_one import worker_processes
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import outputs, scenes
 from wall_in_one.wallpaper.scenes import SceneRenderer
@@ -368,3 +376,77 @@ class _QuietRenderer:
 
     def stop(self) -> None:
         self.stops += 1
+
+
+# -- an engine that exits and leaves a same-group child ------------------------------
+
+_PR_SET_CHILD_SUBREAPER: Final = 36
+#: A stand-in engine: it starts a sleeper in its own process group, records the
+#: sleeper's pid, optionally writes a frame, and exits while the sleeper lives on.
+_ENGINE: Final = """
+import subprocess, sys
+sleeper = subprocess.Popen(["sleep", "60"])
+with open(sys.argv[1], "w") as handle:
+    handle.write(str(sleeper.pid))
+if sys.argv[2] == "frame":
+    with open(sys.argv[3], "wb") as frame:
+        frame.write(b"\\x89PNG\\r\\n\\x1a\\nframe")
+"""
+
+
+def _subreaper(enabled: bool) -> None:
+    """Adopt orphaned descendants so the test can reap the exact sleeper itself."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
+        pytest.skip("this kernel can't make the test a child subreaper")
+
+
+@pytest.mark.parametrize("frame", ["frame", "no-frame"])
+def test_a_capture_leaves_no_engine_descendant_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frame: str
+) -> None:
+    """Sweep 4 T-2: the engine exits while a child stays in its group. Whether the
+    capture succeeds or fails, that child must be gone when screenshot() returns,
+    because only the unreaped leader keeps the group signallable."""
+    handoff = tmp_path / "sleeper.pid"
+    destination = tmp_path / "shot.png"
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    monkeypatch.setattr(
+        SceneRenderer,
+        "command",
+        lambda _self, _scene, screenshot=None, **_keywords: [
+            sys.executable,
+            "-c",
+            _ENGINE,
+            str(handoff),
+            frame,
+            str(screenshot),
+        ],
+    )
+    _subreaper(True)
+    sleeper: int | None = None
+    processes = worker_processes.Cancellation()
+    try:
+        if frame == "frame":
+            assert scenes.screenshot("123", destination, timeout=10, processes=processes)
+        else:
+            with pytest.raises(scenes.SceneError, match="stopped before writing"):
+                scenes.screenshot("123", destination, timeout=10, processes=processes)
+        sleeper = int(handoff.read_text())
+        deadline = time.monotonic() + 3.0
+        reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        while reaped == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+            reaped, status = os.waitpid(sleeper, os.WNOHANG)
+        assert reaped == sleeper, "the engine's child outlived the capture"
+        assert os.WIFSIGNALED(status)
+        sleeper = None
+    finally:
+        if sleeper is not None:
+            # Only the exact sleeper this test's engine started.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(sleeper, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(sleeper, 0)
+        processes.cancel()
+        _subreaper(False)

@@ -31,9 +31,7 @@ is how a scene gets a representative without anything appearing on screen.
 
 from __future__ import annotations
 
-import contextlib
 import shutil
-import signal
 import stat
 import subprocess
 import time
@@ -280,22 +278,16 @@ def _end(owned: worker_processes.OwnedProcess, *, immediate: bool = False) -> No
     """Ask the process group to stop, then insist.
 
     The group rather than the process: `linux-wallpaperengine` is started in
-    its own session precisely so that whatever it spawned goes with it. The
-    group is signalled only while its leader is unreaped (see
-    :meth:`worker_processes.OwnedProcess.signal_group`), so a leader already
-    reaped by ``_wait_for`` never turns its freed id into someone else's group.
+    its own session precisely so that whatever it spawned goes with it, even
+    after the engine itself has exited: ``_wait_for`` only observes that exit
+    and never reaps, so the leader's zombie keeps the group id this child's
+    until :meth:`worker_processes.OwnedProcess.end_group` has signalled the
+    group and reaps it.
     """
-    requested = signal.SIGKILL if immediate else signal.SIGTERM
-    wait_timeout = CANCEL_WAIT_TIMEOUT if immediate else TERMINATE_TIMEOUT
-    owned.signal_group(requested)
-    try:
-        owned.wait(wait_timeout)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    owned.signal_group(signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        owned.wait(wait_timeout)
+    owned.end_group(
+        immediate=immediate,
+        grace=CANCEL_WAIT_TIMEOUT if immediate else TERMINATE_TIMEOUT,
+    )
 
 
 def screenshot(
@@ -426,7 +418,9 @@ def _wait_for(
             size = destination.stat().st_size
         except OSError:
             size = 0
-        if process.poll() is not None and size <= 0:
+        # Observed without reaping: a reaped leader would put any engine
+        # descendant still in its group beyond _end's reach.
+        if process.exited() and size <= 0:
             raise SceneError("linux-wallpaperengine stopped before writing a screenshot")
         if size > 0:
             if settled_at == size:

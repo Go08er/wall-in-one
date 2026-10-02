@@ -80,7 +80,50 @@ class OwnedProcess:
             with contextlib.suppress(OSError, ProcessLookupError):
                 os.killpg(self.process.pid, requested)
 
+    def exited(self) -> bool:
+        """Whether the leader has exited, observed without reaping it.
+
+        ``waitid(..., WNOWAIT)`` reports an exit but leaves the leader a
+        zombie, and that zombie keeps its pid, and so the group id, reserved.
+        A liveness check must use this rather than :meth:`poll`: reaping here
+        would leave any descendant still in the group beyond reach, since a
+        reaped group may no longer be signalled. :meth:`end_group` reaps.
+        """
+        with self.lock:
+            if self.process.returncode is not None:
+                return True
+            try:
+                found = os.waitid(
+                    os.P_PID,
+                    self.process.pid,
+                    os.WEXITED | os.WNOHANG | os.WNOWAIT,
+                )
+            except ChildProcessError:
+                # Already reaped outside this owner: nothing left to signal.
+                return True
+            return found is not None
+
+    def end_group(self, *, immediate: bool, grace: float) -> None:
+        """Stop the whole group, and only then reap the leader.
+
+        ``SIGTERM`` (or ``SIGKILL`` when ``immediate``) to the group; up to
+        ``grace`` seconds for the leader to exit, observed without reaping;
+        then ``SIGKILL`` to the group, which reaches every descendant still in
+        it, those that outlived their leader included; then reap. Every signal
+        is sent while the leader is unreaped (see :meth:`signal_group`), so the
+        group id is still this child's.
+        """
+        with self.lock:
+            self.signal_group(signal.SIGKILL if immediate else signal.SIGTERM)
+            deadline = time.monotonic() + (0.0 if immediate else grace)
+            while not self.exited() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.signal_group(signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.process.wait(timeout=grace)
+
     def poll(self) -> int | None:
+        """Reap the leader if it has exited. Not a liveness check: see :meth:`exited`."""
         with self.lock:
             return self.process.poll()
 

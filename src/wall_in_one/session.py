@@ -223,19 +223,27 @@ def _removal_cleanup_blocker(
     )
 
 
+#: How a Store's refusal ends; only ever true of the store's own file.
+_STORE_UNCHANGED = "Nothing was changed."
+
+
 def _cleanup_failure(label: str, filename: str, error: Exception) -> str:
     """One record a committed removal could not clear, worded for after the fact.
 
-    A Store's refusal ends "Nothing was changed.", which is true of its own
-    file but, beside a wallpaper already moved or deleted, reads as a denial
-    that anything happened.
+    A Store's refusal ends "Nothing was changed." (a newer file, a backup it
+    could not make), which is true of its own file but, beside a wallpaper
+    already moved or deleted, reads as a denial that anything happened.
     """
     if getattr(error, "kind", None) == state_file.NEWER_VERSION:
         return (
             f"{label}: {filename} was saved by a newer version of Wall-in-One; this version "
             "cannot change it, so it may still list this wallpaper"
         )
-    return f"{label}: {error}"
+    text = str(error).rstrip()
+    if text.endswith(_STORE_UNCHANGED):
+        text = text.removesuffix(_STORE_UNCHANGED).rstrip()
+        return f"{label}: {text} {filename} was left as it was, so it may still list this wallpaper"
+    return f"{label}: {text}"
 
 
 @dataclass(frozen=True, slots=True)

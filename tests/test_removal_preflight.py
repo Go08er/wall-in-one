@@ -20,6 +20,7 @@ import pytest
 from tests.test_control import _commands, _downloaded, _immediate, _on_disk
 from tests.test_session import FakeRenderer, _download_authority
 from wall_in_one import config, paths
+from wall_in_one import session as session_module
 from wall_in_one.library import favourites, manage, pairings, playlists, removals, state_file
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import RemovalResult, Session
@@ -244,3 +245,37 @@ def test_ctl_remove_in_the_headless_service_refuses_up_front_too(sandbox: Path, 
     assert app.forgotten == []
     assert target.read_bytes() == newer
     assert app.session.removal_journal.records == ()
+
+
+@pytest.mark.parametrize(
+    ("label", "store", "error", "reason"),
+    [
+        (
+            "playlists",
+            playlists,
+            playlists.PlaylistError(
+                "no-backup",
+                "could not keep a copy of playlists.json (version 1) as playlists.json.v1-backup "
+                "before saving it as version 2: No space left on device. Nothing was changed.",
+            ),
+            "no-backup: could not keep a copy of playlists.json (version 1) as "
+            "playlists.json.v1-backup before saving it as version 2: No space left on device.",
+        ),
+        (
+            "favourites",
+            favourites,
+            favourites.FavouritesError("local-io", "favourites.json is busy. Nothing was changed."),
+            "local-io: favourites.json is busy.",
+        ),
+    ],
+)
+def test_no_store_refusal_after_the_commit_says_nothing_was_changed(
+    label: str, store: ModuleType, error: Exception, reason: str
+) -> None:
+    """Whatever a Store's refusal says of its own file, it is reworded after the fact."""
+    failure = session_module._cleanup_failure(label, str(store.STATE_FILENAME), error)
+    assert failure == (
+        f"{label}: {reason} {store.STATE_FILENAME} was left as it was, "
+        "so it may still list this wallpaper"
+    )
+    assert "Nothing was changed" not in manage.metadata_cleanup_note((failure,))

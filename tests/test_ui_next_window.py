@@ -470,6 +470,62 @@ def test_next_window_renders_from_the_model_not_the_forwarded_calls(
     assert len(subscribers) == 2, "the destroyed window no longer listens; the forwarder does"
 
 
+#: Bounds the drain below: far more passes than a settled main context needs.
+FLUSH_PASSES = 10_000
+
+
+def drains(context: GLib.MainContext) -> bool:
+    """`Gio.Application.run`'s final flush, bounded: does every ready source run out?
+
+    GLib ends ``g_application_run`` with ``while (g_main_context_iteration
+    (context, FALSE));``. A source that re-arms forever keeps that loop, and
+    the process, running; here it fails the test instead of hanging it.
+    """
+    return any(not context.iteration(False) for _pass in range(FLUSH_PASSES))
+
+
+def test_a_next_window_gone_before_its_first_layout_leaves_a_later_run_able_to_end(
+    runtime: FakeRuntime,
+) -> None:
+    """The new window, mapped and destroyed with no main loop, then a classic run.
+
+    `Adw.Sidebar` scrolls its selected row into view from an idle that re-arms
+    until the scroll succeeds, which needs a layout. Such a window never had
+    one, and is not disposed while Python still references it, so that idle
+    used to outlive it and run forever: the next `Application.run` in the
+    process never returned from GLib's final flush. The shell now lets the
+    idle end when the window goes, so the context drains and the run ends.
+    """
+    shown = Application(ui="next")
+    window = NextWindow(shown, shown.settings)
+    window.present()  # mapped now; laid out only by a main loop, which never runs
+    try:
+        shown.status_model.adopt(two_display_status())
+        shown.status_model.set_busy(True)  # the player bar's spinner, too
+    finally:
+        window.destroy()
+        shown._stills.shutdown()
+        shown.session.shutdown()
+    assert drains(GLib.MainContext.default()), "a source re-arms forever after its window went"
+
+    application = Application()
+    lanes: list[ThreadPoolExecutor] = []
+
+    def scenario() -> Iterator[Step]:
+        classic = application._window
+        assert isinstance(classic, MainWindow)
+        yield "the first scan", lambda: settled(application) and classic._playable == 2
+        lanes.extend(application_lanes(application))
+        classic.close()
+
+    try:
+        assert run_application(application, scenario()) == 0
+    finally:
+        for lane in lanes:
+            lane.shutdown(wait=True)
+    assert application._window is None
+
+
 def _remote(events: list[object]) -> type:
     """A verified running instance of this package, as registration reports it."""
 

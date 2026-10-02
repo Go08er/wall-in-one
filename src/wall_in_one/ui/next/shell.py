@@ -156,6 +156,9 @@ class ShellWindow(Adw.ApplicationWindow):
         self._refresh_banners()
         self._refresh_glass()
         self.navigate("library")
+        self._released_selection: int | None = None
+        self.connect("unrealize", lambda _window: self._release_sidebar())
+        self.connect("realize", lambda _window: self._restore_sidebar())
 
     # -- subclass hooks --------------------------------------------------------
     def wrap_body(self, body: Gtk.Widget) -> Gtk.Widget:
@@ -171,6 +174,28 @@ class ShellWindow(Adw.ApplicationWindow):
         GlassDialog(self.state).present(self)
 
     # -- sidebar -------------------------------------------------------------
+    def _release_sidebar(self) -> None:
+        """Let the sidebar's scroll-into-view idle end with the window.
+
+        When its list maps, Adw.Sidebar scrolls the selected row into view
+        from a GLib idle that re-arms until the scroll succeeds, and only the
+        sidebar's dispose removes it. A window torn down before its first
+        layout never lets that scroll succeed, and GTK 4 disposes a destroyed
+        window only once its last reference goes, which Python's signal
+        closures can postpone forever. The idle would then run on every
+        main-loop pass at full CPU, and `Gio.Application.run`'s final flush
+        (``while (g_main_context_iteration (context, FALSE))``) would never
+        return. With no row selected, the idle removes itself on its next run.
+        """
+        self._released_selection = self.sidebar.get_selected()
+        self.sidebar.set_selected(Gtk.INVALID_LIST_POSITION)
+
+    def _restore_sidebar(self) -> None:
+        """Select the current page's row again, should the window come back."""
+        released, self._released_selection = self._released_selection, None
+        if released is not None:
+            self.sidebar.set_selected(released)
+
     def _build_sidebar(self, selected: str | None = None) -> None:
         state = self.state
         self.sidebar.remove_all()

@@ -419,11 +419,12 @@ Fields the app does not know, for example ones a newer version added, are kept
 through every save of a file it does understand: at the top level and on each
 playlist, playlist entry, schedule rule, pairing and removal intent.
 
-0.1.4 has neither guard. It reports a newer file as unreadable, moves it aside
-as `.broken` on its next edit and saves it in its own version, and it drops
-fields it does not know. To go back to 0.1.4, `wall-in-one-rollback` rewrites
-those files in 0.1.4's versions first; see
-[Rolling back from 0.2.0 to 0.1.4](updating.md#rolling-back-from-020-to-014).
+0.1.4 has neither guard. It reads a newer file as unreadable and drops fields
+it does not know. Its app checks the playlists, schedules and display
+assignments before it saves anything, so while one of them is from 0.2.0 it
+pauses every edit instead, and nothing is moved aside or lost. To go back to
+0.1.4, `wall-in-one-rollback` rewrites those files in 0.1.4's versions first;
+see [Rolling back from 0.2.0 to 0.1.4](updating.md#rolling-back-from-020-to-014).
 
 ### Format versions and their backups
 

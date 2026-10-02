@@ -158,9 +158,10 @@ playlist, entry, rule and display assignment. `--apply` copies the files it
 changes into one dated folder, `~/.local/state/wall-in-one/rollback-to-0.1.4-<date>/`,
 rewrites the three files in the versions 0.1.4 reads, and removes
 `runtime-overrides.toml`, which 0.1.4 never reads. It then prints the two
-commands that put the copies back. It refuses, writing nothing, while the
-app or the service is running, and when a file was saved by a version newer
-than 0.2.0. Running it again finds nothing to do.
+commands that put the copies back; if a write fails part way, it says which
+files it already rewrote and prints the same commands. It refuses, writing
+nothing, while the app or the service is running, and when a file was saved
+by a version newer than 0.2.0. Running it again finds nothing to do.
 
 Then install 0.1.4 and start its service. Its first start compiles
 `runtime.toml` again from the rewritten files. Everything else is left as it

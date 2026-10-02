@@ -1376,12 +1376,27 @@ def _apply_settings_edit(
             "Check the new preview."
         ) from error
     except template.TemplateInstallError as error:
-        document["state"] = "abandoned"
-        _write_manifest(archive, document)
-        raise TidyError(f"Noctalia's settings weren't changed: {error}") from error
-    document["backup"] = str(edit.backup_path)
-    document["displaced"] = str(edit.displaced_path)
-    document["after_sha256"] = edit.after_sha256
+        # The exchange is the commit point, and a later step (keeping the
+        # replaced file, retiring the transaction record) can fail after it.
+        # What is on disk decides, never the error alone.
+        outcome = _settings_outcome(document["after_sha256"], settings.sha256)
+        if outcome == "untouched":
+            document["state"] = "abandoned"
+            _write_manifest(archive, document)
+            raise TidyError(f"Noctalia's settings weren't changed: {error}") from error
+        document["tail_error"] = str(error)
+        if outcome == "unknown":
+            # Stays "applying": Undo is offered for whatever did take effect.
+            _write_manifest(archive, document)
+            raise TidyError(
+                "Noctalia's settings may have been changed, but Wall-in-One can't confirm "
+                f"it ({error}). The change is recorded in {archive}, and Undo reverses it "
+                "if it took effect."
+            ) from error
+    else:
+        document["backup"] = str(edit.backup_path)
+        document["displaced"] = str(edit.displaced_path)
+        document["after_sha256"] = edit.after_sha256
     document["reloaded"] = _reload_noctalia()
     document["reloaded_at_ns"] = time.time_ns()
     document["palette_after_reload"] = _palette_fingerprint()
@@ -1389,6 +1404,27 @@ def _apply_settings_edit(
     document["finished"] = _now_iso()
     _write_manifest(archive, document)
     return archive, document
+
+
+def _settings_outcome(after_sha256: object, before_sha256: object) -> str:
+    """After a failed exchange: ``committed``, ``untouched`` or ``unknown``, from the bytes."""
+    current, _unreadable = _read_noctalia()
+    if current is not None and current.sha256 == after_sha256:
+        return "committed"
+    if current is not None and current.sha256 == before_sha256:
+        return "untouched"
+    return "unknown"
+
+
+def _tail_note(document: Mapping[str, Any]) -> str:
+    """What to add to a result whose change committed but whose cleanup failed."""
+    error = document.get("tail_error")
+    if not error:
+        return ""
+    return (
+        f" The change was made, but a step after it failed ({error}); its recovery "
+        "files are kept, and Undo is available."
+    )
 
 
 def _apply_palette_template(expected: ActionPlan | None) -> Result:
@@ -1430,14 +1466,14 @@ def _apply_palette_template(expected: ActionPlan | None) -> Result:
             "Noctalia's settings now name the current palette template, but Noctalia "
             "didn't confirm that it reloaded them, so the old template file stays in use "
             "until it does. Use Retry Reload once Noctalia is running. The old settings "
-            f"were backed up beside them and in {archive}.",
+            f"were backed up beside them and in {archive}." + _tail_note(document),
             archive,
         )
     return Result(
         PALETTE_TEMPLATE,
         True,
         "Noctalia now uses the current palette template. Its old settings were backed up "
-        f"beside them and in {archive}.",
+        f"beside them and in {archive}." + _tail_note(document),
         archive,
     )
 
@@ -1463,18 +1499,30 @@ def _restore_settings(manifest: _Manifest, reverse: Callable[[_NoctaliaSettings]
     else:
         restored = reverse(settings)
         exact = False
+    tail = ""
     try:
         template.edit_settings(settings.sha256, lambda _text: restored)
     except template.SettingsChangedError as error:
         raise TidyChangedError("Noctalia changed its settings just now; try Undo again.") from error
     except template.TemplateInstallError as error:
-        raise TidyError(f"Noctalia's settings weren't changed: {error}") from error
-    _reload_noctalia()
-    return (
+        outcome = _settings_outcome(_sha256(restored.encode("utf-8")), settings.sha256)
+        if outcome == "untouched":
+            raise TidyError(f"Noctalia's settings weren't changed: {error}") from error
+        if outcome == "unknown":
+            raise TidyError(
+                "Noctalia's settings may have been changed, but Wall-in-One can't confirm "
+                f"it ({error}). Nothing is marked undone; check them and try Undo again."
+            ) from error
+        tail = f" A step after the change failed ({error}); its recovery files are kept."
+    reloaded = _reload_noctalia()
+    message = (
         "Noctalia's settings are back as they were."
         if exact
         else "Wall-in-One's change was reversed; settings changed since then keep their new values."
     )
+    if not reloaded:
+        message += " Noctalia didn't confirm that it reloaded them."
+    return message + tail
 
 
 def _undo_palette_template(manifest: _Manifest) -> Result:
@@ -1829,7 +1877,7 @@ def _apply_plugin_settings(expected: ActionPlan | None) -> Result:
         PLUGIN_SETTINGS,
         True,
         f"Removed {_plural(len(orphaned), 'old plugin setting')}.{unconfirmed} Noctalia's "
-        f"settings were backed up beside them and in {archive}.",
+        f"settings were backed up beside them and in {archive}." + _tail_note(document),
         archive,
     )
 
@@ -1985,6 +2033,8 @@ def undo(action: Action) -> Result:
     with _exclusive():
         manifests = _manifests()
         if action in (PALETTE_TEMPLATE, PLUGIN_SETTINGS):
+            # Finish whatever an earlier edit left half done before reading.
+            template.recover_interrupted_edit()
             settings, _unreadable = _read_noctalia()
             current = settings.sha256 if settings is not None else None
             for manifest in manifests:

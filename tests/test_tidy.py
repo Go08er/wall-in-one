@@ -26,7 +26,7 @@ from wall_in_one import (
     tidy,
 )
 from wall_in_one.library import manage, removals
-from wall_in_one.theme import noctalia
+from wall_in_one.theme import noctalia, template
 
 FIXTURES: Final = Path(__file__).parent / "fixtures" / "companion"
 OLD: Final = time.time() - 2 * tidy.CLAIM_GRACE_SECONDS
@@ -432,3 +432,62 @@ def test_a_linked_cache_directory_is_shown_as_left_alone(tmp_path: Path) -> None
     with pytest.raises(tidy.TidyError, match="Nothing was deleted"):
         tidy.apply(tidy.THUMBNAIL_CACHE, found)
     assert (elsewhere / ("b" * 32 + ".png")).exists()
+
+
+# -- a settings edit that committed before a later step failed ------------------------
+
+
+def test_a_committed_edit_whose_cleanup_failed_stays_undoable_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review's F-3: keeping the replaced file fails after the atomic exchange.
+    The edit is live, so it must not be journaled as abandoned or reported as
+    unchanged, and Undo must still put the original bytes back."""
+    settings = _noctalia_settings()
+    original = settings.read_bytes()
+    monkeypatch.setattr(noctalia, "reload_config", lambda: None)
+    real_preserve = template._preserve_regular_at_backup
+
+    def fails_after_the_exchange(*_arguments: object, **_keywords: object) -> Path:
+        raise OSError(5, "simulated I/O error after the exchange")
+
+    monkeypatch.setattr(template, "_preserve_regular_at_backup", fails_after_the_exchange)
+
+    result = tidy.apply(tidy.PLUGIN_SETTINGS, tidy.plan(roots=()).action(tidy.PLUGIN_SETTINGS))
+
+    assert settings.read_bytes() != original, "the exchange committed"
+    assert result.changed
+    assert "weren't changed" not in result.message
+    assert "The change was made, but a step after it failed" in result.message
+    (archive,) = tidy.archive_root().iterdir()
+    manifest = json.loads((archive / "manifest.json").read_bytes())
+    assert manifest["state"] == "applied" and "simulated I/O error" in manifest["tail_error"]
+    found = tidy.plan(roots=()).action(tidy.PLUGIN_SETTINGS)
+    assert not found.changes and found.undo is not None
+
+    monkeypatch.setattr(template, "_preserve_regular_at_backup", real_preserve)
+    undone = tidy.undo(tidy.PLUGIN_SETTINGS)
+
+    assert undone.changed
+    assert settings.read_bytes() == original
+
+
+def test_a_failure_before_the_exchange_is_still_reported_as_nothing_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _noctalia_settings()
+    original = settings.read_bytes()
+    monkeypatch.setattr(noctalia, "reload_config", lambda: None)
+
+    def refuses_before_the_exchange(*_arguments: object, **_keywords: object) -> Path:
+        raise template.TemplateInstallError("simulated: no room for the backup")
+
+    monkeypatch.setattr(template, "_backup", refuses_before_the_exchange)
+
+    with pytest.raises(tidy.TidyError, match="weren't changed"):
+        tidy.apply(tidy.PLUGIN_SETTINGS, tidy.plan(roots=()).action(tidy.PLUGIN_SETTINGS))
+
+    assert settings.read_bytes() == original
+    (archive,) = tidy.archive_root().iterdir()
+    assert json.loads((archive / "manifest.json").read_bytes())["state"] == "abandoned"
+    assert tidy.plan(roots=()).action(tidy.PLUGIN_SETTINGS).undo is None

@@ -210,17 +210,31 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
         ),
     ]
     if machine == "engine-captures":
-        replaced = [c for c in changes if c.path.startswith(STILLS) and c.path.endswith(".png")]
-        assert len(replaced) == 1, [c.describe() for c in replaced]
-        allowed.append(
+        stills = [c for c in changes if c.path.startswith(STILLS) and c.path.endswith(".png")]
+        (replaced,) = (c for c in stills if c.kind == "modified")
+        # Directly, not only through the allowances: the one replaced still
+        # and its permissions, nothing else under Automatic Stills.
+        assert sorted((c.path, c.kind) for c in stills) == [
+            (replaced.path, "mode"),
+            (replaced.path, "modified"),
+        ], [c.describe() for c in stills]
+        allowed += [
             Allowance(
-                f"{STILLS}*.png",
+                replaced.path,
                 frozenset({"modified"}),
                 "the documented idle exception: the scene's managed still was smaller than "
                 "the measured display in both directions, so it is captured again",
                 _captured_frame,
-            )
-        )
+            ),
+            Allowance(
+                replaced.path,
+                frozenset({"mode"}),
+                "the recaptured still is a new file, and every still the app makes is "
+                "published private (0600, like a first capture); the golden profile's "
+                "was 0644",
+                _private_still,
+            ),
+        ]
     harness.check_changes(changes, allowed)
 
 
@@ -229,6 +243,13 @@ def _captured_frame(change: Change) -> None:
     assert change.before is not None and change.before.content is not None
     assert change.after is not None and change.after.content == CAPTURED_FRAME
     assert struct.unpack(">II", change.before.content[16:24]) == (2, 2)
+
+
+def _private_still(change: Change) -> None:
+    """Exactly 0644 to 0600, on the still whose frame was replaced."""
+    assert change.before is not None and change.after is not None
+    assert (change.before.mode, change.after.mode) == (0o644, 0o600)
+    assert change.after.content == CAPTURED_FRAME
 
 
 # -- the same selection on a real machine -----------------------------------------------

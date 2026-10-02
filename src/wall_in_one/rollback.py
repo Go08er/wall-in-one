@@ -79,8 +79,10 @@ class RollbackRefusedError(Exception):
 class RollbackIncompleteError(Exception):
     """A write failed after the backup was made.
 
-    ``rewritten`` were written (or removed) before it; ``untouched`` were not.
-    Every one of them is in ``backup`` as it was before the run.
+    ``rewritten`` were written (or removed) before it, or by it: a file that
+    was replaced but whose folder could not be synced is rewritten, and is
+    also in ``not_durable``. ``untouched`` were not. Every one of them is in
+    ``backup`` as it was before the run.
     """
 
     def __init__(
@@ -90,12 +92,31 @@ class RollbackIncompleteError(Exception):
         backup: Path,
         rewritten: tuple[Path, ...],
         untouched: tuple[Path, ...],
+        not_durable: tuple[Path, ...] = (),
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.backup = backup
         self.rewritten = rewritten
         self.untouched = untouched
+        self.not_durable = not_durable
+
+
+def _published_not_durable(error: BaseException) -> BaseException | None:
+    """The publication-without-folder-sync behind ``error``, if that is what failed.
+
+    A store's writer wraps :class:`state_file.PublishedNotDurableError` in its
+    own local-io error, so the chain of causes is searched.
+    """
+    found: BaseException | None = error
+    while found is not None:
+        if isinstance(
+            found,
+            state_file.PublishedNotDurableError | runtime_config.RuntimeConfigNotDurableError,
+        ):
+            return found
+        found = found.__cause__
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,23 +365,36 @@ def apply(*, when: datetime | None = None) -> tuple[Plan, Path | None]:
         backup = _backup_directory(state, when or datetime.now())
         _back_up(plan.touched(), backup)
         rewritten: list[Path] = []
+        writing: Path | None = None
         try:
             stack.enter_context(runtime_config.compiler_lock())
             for step in plan.steps:
+                writing = step.path
                 with state_file.mutation_lock(step.path, description=step.path.stem):
                     step.write()
                 rewritten.append(step.path)
             if plan.overrides is not None:
+                writing = plan.overrides
                 runtime_config._publish_overrides(None, paths.runtime_config_path())
                 rewritten.append(plan.overrides)
         except Exception as error:
             # Whatever failed (a store's local-io refusal, a lock timeout, a
             # full disk), the person has to learn where the backup is.
+            reason = str(error) or type(error).__name__
+            not_durable: tuple[Path, ...] = ()
+            uncertain = _published_not_durable(error)
+            if uncertain is not None and writing is not None:
+                # Replaced, so rewritten: only its survival of a power loss
+                # is unconfirmed. Stop anyway; the disk is misbehaving.
+                rewritten.append(writing)
+                not_durable = (writing,)
+                reason = str(uncertain)
             raise RollbackIncompleteError(
-                str(error) or type(error).__name__,
+                reason,
                 backup=backup,
                 rewritten=tuple(rewritten),
                 untouched=tuple(path for path in plan.touched() if path not in rewritten),
+                not_durable=not_durable,
             ) from error
         return plan, backup
 
@@ -400,7 +434,18 @@ def _left_alone() -> list[str]:
 
 def _report_incomplete(error: RollbackIncompleteError) -> None:
     def names(found: tuple[Path, ...]) -> str:
-        return ", ".join(path.name for path in found) or "none"
+        return (
+            ", ".join(
+                path.name
+                + (
+                    " (saved, but not yet safe from a power loss)"
+                    if path in error.not_durable
+                    else ""
+                )
+                for path in found
+            )
+            or "none"
+        )
 
     lines = [
         f"wall-in-one-rollback: stopped part way: {error.reason}",

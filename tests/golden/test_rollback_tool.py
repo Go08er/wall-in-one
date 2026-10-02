@@ -27,7 +27,15 @@ from tests.golden.harness import Allowance, Change, Profile
 from tests.golden.sandbox import Golden, decorate, read_json, write_json
 from tests.golden.test_downgrade import V0_1_4_FORMATS
 from wall_in_one import cli, config, legacy_migration, paths, rollback, runtime_config
-from wall_in_one.library import displays, favourites, pairings, playlists, removals, schedules
+from wall_in_one.library import (
+    displays,
+    favourites,
+    pairings,
+    playlists,
+    removals,
+    schedules,
+    state_file,
+)
 
 RULE_NAME: Final = "Evening lights"
 INTERVAL: Final = 120
@@ -483,6 +491,43 @@ def test_a_write_that_fails_after_the_backup_says_what_was_rewritten_and_how_to_
     for copy in backup.iterdir():
         shutil.copy2(copy, state / copy.name)
     assert {name: (state / name).read_bytes() for name in touched} == before
+
+
+def test_a_store_saved_but_not_synced_is_reported_as_rewritten(
+    in_use: tuple[Golden, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep 3 Q3: replaced but its folder sync failed (PublishedNotDurableError).
+
+    schedules.json is already narrowed on disk, so it is rewritten, with its
+    durability uncertain, never "Not rewritten".
+    """
+    golden, _playlist = in_use
+    state = golden.profile.app_state
+    sync = state_file.fsync_parent
+
+    def unsynced(path: Path) -> None:
+        if path.name == "schedules.json":
+            raise OSError(errno.EIO, "Input/output error")
+        sync(path)
+
+    monkeypatch.setattr(state_file, "fsync_parent", unsynced)
+
+    status, out, err = _run(capsys, "--apply")
+
+    assert status == rollback.EXIT_INCOMPLETE, (out, err)
+    assert read_json(state / "schedules.json")["version"] == 2, "it was published, narrowed"
+    lines = err.splitlines()
+    assert lines[0].startswith("wall-in-one-rollback: stopped part way: ")
+    assert "schedules.json was saved, but syncing its folder failed" in lines[0], lines[0]
+    assert (
+        "Already rewritten: playlists.json, "
+        "schedules.json (saved, but not yet safe from a power loss)." in lines
+    ), err
+    assert "Not rewritten: displays.json, runtime-overrides.toml." in lines, err
+    (backup,) = state.glob(f"{rollback.BACKUP_PREFIX}*")
+    assert f"  cp -p -- {backup}/* {state}/" in lines
 
 
 def test_a_backup_that_fails_refuses_before_anything_is_rewritten(

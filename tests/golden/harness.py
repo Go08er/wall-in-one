@@ -608,6 +608,8 @@ class Change:
 
     ``rewritten`` is an atomic replacement (new inode or mtime) whose bytes
     happen to be identical. It is still a write, and still needs a reason.
+    ``mode`` is reported on its own even when the same file also changed
+    contents, so an allowance for a write never also allows a chmod.
     """
 
     path: str
@@ -641,6 +643,9 @@ def _short_diff(before: bytes, after: bytes) -> str:
 
 
 def diff(before: Mapping[str, Node], after: Mapping[str, Node]) -> list[Change]:
+    """Every change, by path. A file whose permissions changed gets a ``mode``
+    change besides any ``modified``/``rewritten`` one: an allowance names its
+    kinds, and a chmod must never ride along with an allowed write unseen."""
     changes: list[Change] = []
     for path in sorted(set(before) | set(after)):
         old = before.get(path)
@@ -656,7 +661,7 @@ def diff(before: Mapping[str, Node], after: Mapping[str, Node]) -> list[Change]:
                 changes.append(Change(path, "modified", old, new))
             elif old.inode != new.inode or old.mtime_ns != new.mtime_ns:
                 changes.append(Change(path, "rewritten", old, new))
-            elif old.mode != new.mode:
+            if old.mode != new.mode:
                 changes.append(Change(path, "mode", old, new))
         elif old.kind == "symlink":
             if old.target != new.target:

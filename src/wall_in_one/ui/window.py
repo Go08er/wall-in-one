@@ -29,6 +29,7 @@ from wall_in_one.ui.playlists_page import PlaylistsPage
 from wall_in_one.ui.preferences import PreferencesPage
 from wall_in_one.ui.schedules_page import SchedulesPage
 from wall_in_one.ui.thumbnails import ThumbnailLoader
+from wall_in_one.ui.tidy_section import TidyCard
 
 #: A palette submenu is a menu, not a list: past this many a person is
 #: scrolling rather than choosing, and the palette browser is the right place
@@ -251,6 +252,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.add_action(palette_action)
 
         toolbar.add_top_bar(header)
+        # Offered once after an update, above every page; it plans when the
+        # window first appears and writes nothing unless it is dismissed.
+        self._tidy_card = TidyCard(self._app, self.open_tidy)
+        toolbar.add_top_bar(self._tidy_card)
+        self.connect("map", lambda _window: self._tidy_card.start())
         media = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         media.append(self._build_library_bar())
         media.append(self._grid)
@@ -515,6 +521,11 @@ class MainWindow(Adw.ApplicationWindow):
 
     def open_preferences(self) -> None:
         self.show_page("settings")
+
+    def open_tidy(self) -> None:
+        """Settings, scrolled to Tidy up with the offered action open."""
+        self.show_page("settings")
+        self._settings_page.tidy.reveal()
 
     def open_palette_browser(self) -> None:
         dialog = PaletteBrowserDialog(self._app, palette_catalog=self._palette_catalog)

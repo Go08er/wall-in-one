@@ -25,6 +25,7 @@ from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
+from wall_in_one.ui.tidy_section import TidySection
 from wall_in_one.wallpaper import renderer, scenes
 
 #: mpvpaper's vocabulary is `--auto-pause` and `--auto-stop`, which say what
@@ -95,6 +96,10 @@ class PreferencesPage(Adw.PreferencesPage):
         self.add(self._build_providers_group())
         self.add(self._build_colour_group())
         self.add(self._build_appearance_group())
+        # Deliberately not among the settings controls below: Tidy up never
+        # writes settings.toml, so read-only settings don't disable it.
+        self.tidy = TidySection(application)
+        self.add(self.tidy)
 
         # Every control here that writes settings.toml. The Wallhaven key
         # rows and the palette actions are deliberately absent: they write

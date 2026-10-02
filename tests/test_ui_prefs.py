@@ -362,12 +362,15 @@ def test_the_writer_refuses_a_document_it_could_not_read_back() -> None:
     assert target.read_bytes() == before
 
 
-def test_todays_ui_never_reads_or_writes_ui_toml() -> None:
-    """ui.toml belongs to the new UI (``ui/next``); nothing else may use it.
+def test_only_the_new_ui_and_the_tidy_card_use_ui_toml() -> None:
+    """ui.toml belongs to the new UI (``ui/next``), plus one classic exception.
 
-    The classic window, the application, the command line and the service
-    never read or write it, so an idle classic run stays write-free. In the
-    new UI only its preferences keeper touches the file.
+    The classic window reads it only through the Tidy up card, to learn whether
+    its one-time offer was dismissed, and writes it only when the user
+    dismisses that card (``ui/tidy_section.py``). Opening and idling never
+    create it (``tests/test_ui_tidy.py`` and the golden idle tests check). The
+    application, the command line and the service never read or write it. In
+    the new UI only its preferences keeper touches the file.
     """
     use = re.compile(
         r"from\s+wall_in_one\s+import[^\n]*\bui_prefs\b"
@@ -380,13 +383,24 @@ def test_todays_ui_never_reads_or_writes_ui_toml() -> None:
         for source in package.rglob("*.py")
         if use.search(source.read_text(encoding="utf-8"))
     )
-    assert users == ["paths.py", "ui/next/prefs.py", "ui/next/real_state.py", "ui_prefs.py"]
+    assert users == [
+        "paths.py",
+        "ui/next/prefs.py",
+        "ui/next/real_state.py",
+        "ui/tidy_section.py",
+        "ui_prefs.py",
+    ]
     writers = [
         user
         for user in users
         if re.search(r"ui_prefs\.(save|update|mutate)\b", (package / user).read_text())
     ]
-    assert writers == ["ui/next/prefs.py"], "only the new UI's keeper writes ui.toml"
+    assert writers == ["ui/next/prefs.py", "ui/tidy_section.py"], (
+        "only the new UI's keeper and the Tidy up card's dismissal write ui.toml"
+    )
+    card = (package / "ui/tidy_section.py").read_text()
+    assert card.count("ui_prefs.update(") == 1
+    assert '{"tidy_offer_dismissed": True}' in card
 
 
 def test_the_tidy_offer_dismissal_is_written_only_once_true() -> None:

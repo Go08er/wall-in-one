@@ -53,6 +53,7 @@ from wall_in_one.theme import css, noctalia, source
 from wall_in_one.ui.next.window import NextWindow
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
+from wall_in_one.ui.tidy_section import TidyLane
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
 from wall_in_one.ui.window_services import DEFAULT_UI, UiKind, WindowServices
 from wall_in_one.wallpaper import outputs
@@ -533,6 +534,8 @@ class Application(Adw.Application):
         self._suppress_palette_reload = 0
         self._browse_jobs: ThreadPoolExecutor | None = None
         self._browse_lock = threading.Lock()
+        #: Settings → Tidy up and its card: one ordered lane, read-only until a click.
+        self.tidy_lane = TidyLane()
         self._browse_shutdown = False
         self._browse_transports: set[Browser] = set()
         # Library walking is filesystem I/O, not the measured pure-Python
@@ -1404,6 +1407,7 @@ class Application(Adw.Application):
             self._browse_transports.clear()
         for browser in browse_transports:
             browser.shutdown()
+        self.tidy_lane.shutdown()
         if self._browse_jobs is not None:
             # Active transports were closed above, waking their socket reads;
             # queued futures are invalidated here. Downloads stage under a

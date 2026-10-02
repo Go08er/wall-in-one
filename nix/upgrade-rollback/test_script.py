@@ -9,6 +9,7 @@
 
 import importlib
 import json
+import re
 import shlex
 import sys
 import time
@@ -269,6 +270,21 @@ def close_gui() -> None:
         machine.wait_until_succeeds(f"test ! -e /proc/{window['pid']}", timeout=60)
     machine.wait_until_succeeds(f"test ! -e {GUI_SOCKET}", timeout=30)
     assert not windows()
+
+
+def gui_library(package: str) -> tuple[int, int, list[str]]:
+    """The open GUI's library, from `ctl list`: rows listed, the library's size, the paths.
+
+    v0.1.4's GUI serves `list` from the scan it is showing:
+    ``# library: <listed> of <size> wallpapers``, then one tab-separated row
+    per wallpaper, its path first.
+    """
+    output = ctl(package, "list")
+    lines = output.splitlines()
+    match = re.match(r"# library: (\d+) of (\d+) ", lines[0]) if lines else None
+    assert match, output
+    paths = sorted(line.split("\t", 1)[0] for line in lines if not line.startswith("# "))
+    return int(match[1]), int(match[2]), paths
 
 
 def settle_authoring(package: str, arguments: str) -> tuple[int, str]:
@@ -694,6 +710,9 @@ with subtest("e1: v0.1.4's own GUI refuses to edit the bumped profile"):
         observe(f"e1: v0.1.4 ctl {verb.split()[0]}", {"exit": code, "output": refused})
         assert code == 1, (verb, code, refused)
         assert "current authoring needs repair before changes can be saved" in refused, refused
+    # What the paused app shows: recorded for docs/updating.md, not judged.
+    code, listed = machine.execute(user(f"{OLD}/bin/wall-in-one ctl list 2>&1"))
+    observe("e1: v0.1.4 ctl list", {"exit": code, "output": listed.strip()})
     machine.screenshot("rollback-v0.1.4-playlists")
     close_gui()
     e_gui = snapshot()
@@ -858,11 +877,25 @@ with subtest("f: wall-in-one-rollback rewrites the three files for 0.1.4"):
     )
 
 
-def library_entries(nodes: dict[str, Any]) -> list[str]:
-    """The ids in runtime.toml's All media playlist: the library a compile scanned."""
+def all_media(nodes: dict[str, Any]) -> list[dict[str, Any]]:
+    """runtime.toml's All media playlist: the whole library a compile scanned."""
     value = tomllib.loads(content(nodes, "runtime.toml").decode())
     (fallback,) = (playlist for playlist in value["playlists"] if playlist["id"] == "all-media")
-    return sorted(entry["id"] for entry in fallback.get("entries", []))
+    return list(fallback.get("entries", []))
+
+
+def library_entries(nodes: dict[str, Any]) -> list[str]:
+    """The ids in runtime.toml's All media playlist."""
+    return sorted(entry["id"] for entry in all_media(nodes))
+
+
+def library_files(nodes: dict[str, Any]) -> list[str]:
+    """The file of every video and picture in All media (a scene is a directory)."""
+    return sorted(
+        entry["motion"] if entry["kind"] == "video" else entry["still"]
+        for entry in all_media(nodes)
+        if entry["kind"] in ("video", "still")
+    )
 
 
 with subtest("g: v0.1.4 runs the rewritten profile and edits it"):
@@ -904,6 +937,23 @@ with subtest("g: v0.1.4 runs the rewritten profile and edits it"):
     code, added = settle_authoring(OLD, f"playlist-add {TRAVEL} {PICTURE}")
     observe("g: v0.1.4 ctl playlist-add", {"exit": code, "output": added})
     expect("g: v0.1.4's playlist-add succeeds", partial(require, code == 0, added))
+    # The app itself, not only the service's compile, has the whole library:
+    # every wallpaper 0.2.0 compiled in c, the same count and every file.
+    size = len(library_entries(c_done))
+    deadline = time.monotonic() + 60
+    while True:
+        shown = gui_library(OLD)
+        if shown[1] == size or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    observe("g: v0.1.4 ctl list", {"listed": shown[0], "of": shown[1], "paths": shown[2]})
+    expect(
+        "g: v0.1.4's app opens with the full library",
+        lambda: require(
+            shown[0] == shown[1] == size and set(library_files(c_done)) <= set(shown[2]),
+            f"listed {shown[0]} of {shown[1]}, want {size} with {library_files(c_done)}",
+        ),
+    )
     machine.screenshot("rolled-back-v0.1.4-playlists")
     close_gui()
     g_done = snapshot()

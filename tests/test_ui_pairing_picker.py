@@ -625,3 +625,66 @@ def test_a_refused_gesture_leaves_nothing_pending(
 
     page.shutdown()
     session.shutdown()
+
+
+def _palette_editor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Session, QueuedPairingApp, pairings_page.PairingsPage, MediaItem, PaletteCatalog]:
+    """An editor over two installed palettes, Ayu saved for the wallpaper."""
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    picture = tmp_path / "wall.png"
+    picture.write_bytes(b"image")
+    media = _item(picture)
+    other_picture = tmp_path / "other.png"
+    other_picture.write_bytes(b"image")
+    other = _item(other_picture)
+    library = Library(roots=(tmp_path,), items=(media, other), still_inventory=(media, other))
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: library,
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    session.pairings.choose_palette(media, pairings.PalettePolicy("custom", "Ayu"))
+    pair = PalettePair(
+        dark=Palette.from_mapping("dark", {"primary": "#000000"}),
+        light=Palette.from_mapping("light", {"primary": "#ffffff"}),
+    )
+    entries = tuple(
+        palettes.PaletteEntry(name=name, origin=palettes.Origin.CUSTOM, path=None, colours=pair)
+        for name in ("Ayu", "Nord")
+    )
+    catalog = PaletteCatalog(initial=palettes.Discovery(entries=entries))
+    application = QueuedPairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None, palette_catalog=catalog)
+    page.edit(session, media)
+    assert page._palette_buttons["custom:Ayu"].get_active()
+    return session, application, page, media, catalog
+
+
+def _search_palettes(page: pairings_page.PairingsPage, text: str) -> None:
+    page._palette_search.set_text(text)
+    page._palette_search.emit("search-changed")
+
+
+def test_choosing_a_palette_found_by_search_does_not_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rebuilding the rows regroups reused radio buttons. GTK can leave such a
+    group's links looping, and the next radio set active then never returns:
+    search for Nord (Ayu saved, so pinned below it), then pick Nord."""
+    session, application, page, media, catalog = _palette_editor(tmp_path, monkeypatch)
+
+    _search_palettes(page, "Nord")
+    page._palette_buttons["custom:Nord"].set_active(True)
+    application.drain()
+
+    saved = session.pairings.get(pairings.Identity.of(media))
+    assert saved is not None and saved.palette.name == "Nord"
+    assert page._palette_buttons["custom:Nord"].get_active()
+    assert not page._palette_buttons["custom:Ayu"].get_active()
+
+    page.shutdown()
+    catalog.shutdown()
+    session.shutdown()

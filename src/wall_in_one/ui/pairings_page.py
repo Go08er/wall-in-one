@@ -405,10 +405,13 @@ class PairingsPage(Gtk.Box):
         self._policy_rows.clear()
         self._policy_models.clear()
         policies = self._policies(bundle)
-        wanted_keys = {policy.encode() for _label, policy, _palette in policies}
-        for key, button in old_buttons.items():
-            if key not in wanted_keys:
-                button.set_group(None)
+        # Every old radio leaves its group before the wanted ones regroup.
+        # Linking a radio that is still grouped into a group again can leave
+        # GTK's group list looping (GTK 4.22), and the next radio set active
+        # then never returns: searching for a palette and picking it froze
+        # the window.
+        for button in old_buttons.values():
+            button.set_group(None)
         first: Gtk.CheckButton | None = None
         self._reflecting_policy = True
         try:

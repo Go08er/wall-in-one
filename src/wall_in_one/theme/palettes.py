@@ -710,13 +710,21 @@ def _write_atomic(target: Path, serialised: str) -> None:
         raise PaletteWriteError(f"cannot write {target}: {error}") from error
 
 
-def _serialise(document: Mapping[str, object]) -> tuple[str, PalettePair]:
-    """Render a document, and prove it parses before anyone writes it.
+def _serialise(document: Mapping[str, object], target: Path) -> tuple[str, PalettePair]:
+    """Render a document, and prove it parses and reads back before anyone writes it.
 
     A file Noctalia would reject is worse than no file, because the failure
-    surfaces somewhere else entirely.
+    surfaces somewhere else entirely. So is one larger than MAX_PALETTE_BYTES:
+    this app's reader refuses it, and an edited palette keeps every field of
+    its source, which indented output can make larger than the source was.
     """
     serialised = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    try:
+        state_file.require_readable_size(serialised, target, maximum_bytes=MAX_PALETTE_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise PaletteWriteError(
+            state_file.too_large_refusal(error, "remove fields it doesn't need from the source")
+        ) from error
     return serialised, parse_document(serialised)
 
 
@@ -727,7 +735,7 @@ def write_custom(
 ) -> PaletteEntry:
     """Write a custom palette, atomically, and return the entry for it."""
     target = custom_path(name, directory if directory is not None else custom_directory())
-    serialised, colours = _serialise(document)
+    serialised, colours = _serialise(document, target)
     _write_atomic(target, serialised)
     return PaletteEntry(
         name=validate_name(name), origin=Origin.CUSTOM, path=target, colours=colours
@@ -741,7 +749,7 @@ def save_edits(entry: PaletteEntry, document: Mapping[str, object]) -> PaletteEn
     rather than reaching the filesystem.
     """
     target = target_for(entry)
-    serialised, colours = _serialise(document)
+    serialised, colours = _serialise(document, target)
     _write_atomic(target, serialised)
     return PaletteEntry(name=entry.name, origin=entry.origin, path=target, colours=colours)
 

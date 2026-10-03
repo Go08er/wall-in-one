@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from wall_in_one.theme import palettes
-from wall_in_one.theme.palette import Mode, PaletteError
+from wall_in_one.theme.palette import MAX_PALETTE_BYTES, Mode, PaletteError
 from wall_in_one.theme.palettes import Origin, PaletteWriteError
 
 #: The shape a real palette file has, cut down to what the parser needs. Keys,
@@ -498,6 +498,28 @@ def test_a_document_that_would_not_parse_is_never_written(directories: tuple[Pat
     custom, _ = directories
     with pytest.raises(PaletteError):
         palettes.write_custom("Mine", {"dark": {"mPrimary": "nonsense"}, "light": {}}, custom)
+    assert list(custom.iterdir()) == []
+
+
+def test_an_edit_that_would_outgrow_the_palette_reader_is_never_written(
+    directories: tuple[Path, Path],
+) -> None:
+    """An edit keeps every field of its source. A compact source within the
+    reader's MAX_PALETTE_BYTES can grow past it once written indented, and
+    this app then could not read it back. It is refused, nothing written."""
+    custom, community = directories
+    source = _document() | {"notes": [[0]] * 60_000}
+    compact = json.dumps(source, separators=(",", ":"))
+    assert len(compact.encode()) < MAX_PALETTE_BYTES < len(json.dumps(source, indent=2))
+    source_path = community / "Roomy.json"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(compact, encoding="utf-8")
+    roomy = palettes.discover(custom=custom, community=community).find(Origin.COMMUNITY, "Roomy")
+    assert roomy is not None, "the compact source reads back"
+
+    with pytest.raises(PaletteError, match="this version can read back"):
+        palettes.write_custom("Mine", source, custom)
+
     assert list(custom.iterdir()) == []
 
 

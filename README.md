@@ -403,6 +403,18 @@ last-known-good runtime document.
 See [settings and manual repair](docs/settings.md) for the keys, defaults and
 backup-first recovery steps.
 
+### GPU acceleration for the window
+
+**Settings → Appearance → GPU acceleration** (also on the new interface's
+Settings page) decides how the next start draws Wall-in-One's own window. It
+does not touch wallpaper playback, which the service's renderers do. On, the
+default, the app leaves the choice to GTK as every earlier release did, and
+GTK uses the GPU when it can. Off starts the window with GTK's software
+renderer by setting `GSK_RENDERER=cairo`, which GTK programs the app starts
+inherit too. A `GSK_RENDERER` you set yourself always wins over the setting.
+It takes effect the next time Wall-in-One starts, is saved in `ui.toml`, and
+0.2.0 and 0.2.1 ignore it.
+
 ## Upgrades and migration
 
 For an existing installation, start with [updating Wall-in-One](docs/updating.md).

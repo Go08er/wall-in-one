@@ -148,3 +148,23 @@ def test_the_choice_module_is_imported_without_gtk() -> None:
     """The lookup must run before GTK loads, so its own imports must not load it."""
     assert "gi" not in vars(ui_prefs)
     assert Path(ui_prefs.__file__).name == "ui_prefs.py"
+
+
+def _words(relative: str) -> str:
+    return " ".join((Path(__file__).resolve().parents[1] / relative).read_text().split())
+
+
+def test_the_docs_name_the_override_and_both_rollback_cases() -> None:
+    """GPU acceleration's docs, and review L-1: a first choice leaves no v1 backup."""
+    readme = _words("README.md")
+    assert "A `GSK_RENDERER` you set yourself always wins over the setting" in readme
+    assert "which GTK programs the app starts inherit too" in readme
+    settings = _words("docs/settings.md")
+    assert "`false` sets `GSK_RENDERER=cairo`" in settings
+    assert "it starts at version 2 and there is no backup" in settings
+    updating = _words("docs/updating.md")
+    assert "**`ui.toml.v1-backup` is there.**" in updating
+    assert "**No `ui.toml.v1-backup`.**" in updating
+    assert "(`mv ui.toml ui.toml.v2-saved`)" in updating
+    assert "Never remove the whole `~/.config/wall-in-one`" in updating
+    assert "rm -r" not in updating

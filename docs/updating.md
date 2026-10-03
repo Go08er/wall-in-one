@@ -130,17 +130,34 @@ repair the configuration. Preserve current files before restoring
 any backup, since a whole-folder restore would discard changes made after that
 backup.
 
-### Going back to 0.2.1 or 0.2.0 after choosing the new interface
+### Going back to 0.2.1 or 0.2.0 after choosing the new interface or turning GPU acceleration off
 
-0.2.0 and 0.2.1 don't know Settings → Appearance → Interface: they start the
-classic interface (and `--ui=next` still works there). A profile that never
-chose New (preview) is unaffected. Choosing it moved `ui.toml` to version 2,
-after keeping the version 1 file as `ui.toml.v1-backup`. 0.2.0 and 0.2.1 read
-a version 2 `ui.toml` for the preferences they know (window style, opacity,
-frost, thumbnail size, the Tidy up card's dismissal) but don't save changes
-to them; nothing is lost. To let them save those again, close the app and
-copy `ui.toml.v1-backup` over `ui.toml`; window preferences changed since you
-chose New are then back to what they were. 0.1.4 ignores `ui.toml`.
+0.2.0 and 0.2.1 don't know Settings → Appearance → Interface or GPU
+acceleration: they start the classic interface (`--ui=next` still works
+there) and leave the renderer to GTK (`GSK_RENDERER=cairo` in the environment
+still works there too). A profile that never chose New (preview) and never
+turned GPU acceleration off is unaffected.
+
+Either choice moved `~/.config/wall-in-one/ui.toml` to version 2. 0.2.0 and
+0.2.1 read a version 2 `ui.toml` for the preferences they know (window style,
+opacity, frost, thumbnail size, the Tidy up card's dismissal) but never save
+changes to it; nothing is lost. To let them save window preferences again,
+close the app first, then, depending on what you find next to `ui.toml`:
+
+- **`ui.toml.v1-backup` is there.** `ui.toml` existed before the choice, and
+  this is its version 1, kept when the choice was saved. Keep a copy of the
+  current file (`cp ui.toml ui.toml.v2-saved`), then copy the backup over it
+  (`cp ui.toml.v1-backup ui.toml`). Window preferences changed since then are
+  back to what they were.
+- **No `ui.toml.v1-backup`.** The choice is what created `ui.toml`, at version
+  2, so there is no version 1 to go back to. Move it aside
+  (`mv ui.toml ui.toml.v2-saved`): 0.2.0 and 0.2.1 then start with default
+  window preferences and write a new `ui.toml` when you change one.
+
+Don't copy a version 2 file, such as `ui.toml.v2-saved`, back for 0.2.0 or
+0.2.1: they only read it. Never remove the whole `~/.config/wall-in-one` or
+`~/.local/state/wall-in-one` folder for this; only `ui.toml` is involved.
+0.1.4 ignores `ui.toml`.
 
 ### Rolling back from 0.2.0 to 0.1.4
 

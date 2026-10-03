@@ -10,10 +10,10 @@ wallpaper service.
 
 The contract every build keeps:
 
-* ``version`` 1 or 2 (:data:`FORMATS`). A file with a newer version is read for
-  the keys this build knows and never written; saving raises
-  :class:`UiPrefsReadOnlyError`. A version this build cannot interpret at all
-  is treated the same way. A file without a version is taken as version 1.
+* ``version = 1``. A file with a newer version is read for the keys this build
+  knows and never written; saving raises :class:`UiPrefsReadOnlyError`. A
+  version this build cannot interpret at all is treated the same way. A file
+  without a version is taken as version 1.
 * Unknown keys, at the top level or inside the per-style opacity tables, are
   carried through every save unchanged.
 * An invalid value falls back to the default for that field only. The next
@@ -27,21 +27,11 @@ The contract every build keeps:
 * Any new field, or new value for an existing field, bumps ``version``.
   ``tidy_offer_dismissed`` joined version 1 before any release shipped
   ui.toml (0.2.0 is the first), so no build knows a version 1 without it.
-* Version 2 adds ``interface``, the window the app builds when it starts
-  without ``--ui``. It follows the owner-approved format guards of
-  :mod:`wall_in_one.library.state_file`: the file moves to version 2 only when
-  ``interface = "next"`` is first saved (a lazy bump; a profile that never
-  chooses the new interface stays at version 1, which 0.2.0 and 0.2.1 keep
-  writing), the version 1 bytes are first copied to ``ui.toml.v1-backup``
-  (one time, never overwritten; without it the save is refused), and the file
-  never moves back down. 0.2.0 and 0.2.1 read a version 2 file for the keys
-  they know and leave it unwritten.
 """
 
 from __future__ import annotations
 
 import datetime
-import logging
 import math
 import re
 import tomllib
@@ -53,10 +43,7 @@ from typing import Any, Final
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 
-#: Version 1 is what 0.2.0 and 0.2.1 read and write; version 2 adds ``interface``.
-FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=2)
-VERSION: Final = FORMATS.current
-LOGGER: Final = logging.getLogger(__name__)
+VERSION: Final = 1
 MAX_BYTES: Final = 64 * 1024
 FILE_MODE: Final = 0o644
 
@@ -64,8 +51,6 @@ WINDOW_STYLES: Final[tuple[str, ...]] = ("solid", "translucent", "frosted")
 #: The styles that see through the window and so have opacity dials.
 GLASS_STYLES: Final[tuple[str, ...]] = ("translucent", "frosted")
 THUMBNAIL_SIZES: Final[tuple[str, ...]] = ("small", "large")
-#: The windows a start without ``--ui`` can build (``ui.window_services.UI_KINDS``).
-INTERFACES: Final[tuple[str, ...]] = ("classic", "next")
 MAX_PAGE_CHARS: Final = 256
 
 _GLASS_TABLES: Final[tuple[str, ...]] = ("background_opacity", "panel_opacity")
@@ -76,7 +61,6 @@ _SCALAR_KEYS: Final[tuple[str, ...]] = (
     "thumbnail_size",
     "last_page",
     "tidy_offer_dismissed",
-    "interface",
 )
 KNOWN_KEYS: Final = frozenset((*_SCALAR_KEYS, *_GLASS_TABLES))
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+")
@@ -166,8 +150,6 @@ class UiPrefs:
     last_page: str = "library"
     #: The user dismissed the one-time Tidy up card shown after an update.
     tidy_offer_dismissed: bool = False
-    #: The window the next start builds when no ``--ui`` is given (version 2).
-    interface: str = "classic"
 
     def validated(self) -> UiPrefs:
         """Replace each invalid field with its own default."""
@@ -186,7 +168,6 @@ class UiPrefs:
                 "thumbnail_size": self.thumbnail_size,
                 "last_page": self.last_page,
                 "tidy_offer_dismissed": self.tidy_offer_dismissed,
-                "interface": self.interface,
             }
         )
 
@@ -205,13 +186,7 @@ class UiPrefs:
             tidy_offer_dismissed=_flag(
                 raw.get("tidy_offer_dismissed"), defaults.tidy_offer_dismissed
             ),
-            interface=_choice(raw.get("interface"), INTERFACES, defaults.interface),
         )
-
-
-def required_version(prefs: UiPrefs) -> int:
-    """The oldest version that can hold ``prefs``: 2 only for the new interface."""
-    return 2 if prefs.validated().interface != "classic" else 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,18 +221,18 @@ def _clipped(value: object) -> str:
 
 
 def _version_problem(raw: Mapping[str, Any]) -> str:
-    if FORMATS.declared(raw) is not None:
-        return ""
-    version = raw.get("version")
-    if type(version) is int and version > FORMATS.current:
+    version = raw.get("version", VERSION)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        return (
+            f"ui.toml has a version this version of Wall-in-One doesn't recognize "
+            f"({_clipped(version)}), so it won't change the file"
+        )
+    if version > VERSION:
         return (
             f"ui.toml is from a newer version of Wall-in-One (version {version}); this "
             "version uses the preferences it understands but won't change the file"
         )
-    return (
-        f"ui.toml has a version this version of Wall-in-One doesn't recognize "
-        f"({_clipped(version)}), so it won't change the file"
-    )
+    return ""
 
 
 def _read(target: Path) -> tuple[UiPrefsDocument, bytes | None]:
@@ -343,21 +318,12 @@ def _value(value: object) -> str:
     raise UiPrefsError(f"ui.toml cannot hold a {type(value).__name__} value")
 
 
-def render(
-    prefs: UiPrefs, raw: Mapping[str, Any] | None = None, *, version: int | None = None
-) -> str:
-    """The document for ``prefs``, carrying every unknown key in ``raw``.
-
-    ``version`` defaults to the oldest that can hold ``prefs``.
-    """
+def render(prefs: UiPrefs, raw: Mapping[str, Any] | None = None) -> str:
+    """The document for ``prefs``, carrying every unknown key in ``raw``."""
     prefs = prefs.validated()
-    needed = required_version(prefs)
-    written = needed if version is None else version
-    if not needed <= written <= FORMATS.current:
-        raise UiPrefsError(f"ui.toml version {written} cannot hold these preferences")
     carried = dict(raw or {})
     scalars: dict[str, object] = {
-        "version": written,
+        "version": VERSION,
         "window_style": prefs.window_style,
         "frost": prefs.frost,
         "thumbnail_size": prefs.thumbnail_size,
@@ -367,9 +333,6 @@ def render(
         # Written only once true, like settings.toml's battery key: a window
         # preference save before any dismissal keeps its familiar shape.
         scalars["tidy_offer_dismissed"] = True
-    if prefs.interface != "classic":
-        # Only the new interface needs version 2; classic is the default.
-        scalars["interface"] = prefs.interface
     tables: dict[str, Mapping[str, Any]] = {}
     for name, glass in (
         ("background_opacity", prefs.background_opacity),
@@ -413,32 +376,21 @@ def mutate(
     Re-reading under the lock keeps another window's edit to a different
     field, and the latest unknown keys, instead of a stale snapshot. A file
     that has not changed is not rewritten.
-
-    The file keeps its version unless the change needs a newer one (choosing
-    the new interface needs 2); before that first bump its old bytes are kept
-    as ``ui.toml.v1-backup``, or nothing is saved.
     """
     target = path if path is not None else paths.ui_prefs_path()
     try:
-        with (
-            state_file.mutation_lock(target, description="UI preferences"),
-            state_file.observe(target) as observed,
-        ):
+        with state_file.mutation_lock(target, description="UI preferences"):
             current, existing = _read(target)
             if current.read_only:
                 raise UiPrefsReadOnlyError(current.read_only)
             prefs = change(current.prefs).validated()
-            on_disk = FORMATS.declared(current.raw) if existing is not None else None
-            version = FORMATS.to_write(on_disk, required_version(prefs))
-            text = render(prefs, current.raw, version=version)
+            text = render(prefs, current.raw)
             encoded = text.encode("utf-8")
             if len(encoded) > MAX_BYTES:
                 raise UiPrefsError(
                     f"ui.toml would exceed its {MAX_BYTES}-byte limit; nothing was saved"
                 )
             if encoded != existing:
-                if on_disk is not None and FORMATS.is_bump(on_disk, version):
-                    _back_up_before_bump(target, observed, on_disk, version)
                 paths.ensure_directory(target.parent)
                 state_file.write_atomic_text(target, text, mode=FILE_MODE)
             return UiPrefsDocument(prefs, tomllib.loads(text))
@@ -446,44 +398,6 @@ def mutate(
         raise
     except (OSError, TimeoutError, UnicodeError) as error:
         raise UiPrefsError(f"cannot save {target}: {error}") from error
-
-
-def _back_up_before_bump(
-    target: Path, observed: state_file.StateFileObservation, replaced: int, version: int
-) -> None:
-    """Guard 2, or refuse: never bump ui.toml without its old bytes kept."""
-    try:
-        state_file.backup_before_bump(target, observed=observed, replaced=replaced)
-    except OSError as error:
-        backup = state_file.version_backup_path(target, replaced)
-        raise UiPrefsError(
-            f"could not keep a copy of {target.name} (version {replaced}) as {backup.name} "
-            f"before saving it as version {version}: {error.strerror or error}. "
-            "Nothing was changed."
-        ) from error
-
-
-def launch_interface(path: Path | None = None) -> str | None:
-    """``"next"`` when a start without ``--ui`` should build the new interface, else None.
-
-    Read-only: it never writes and never raises. A missing file, an
-    unreadable or malformed one, and an unknown value all mean the classic
-    interface (None); the last two are logged in one line. A file from a newer
-    version is read for this key like every key this build knows.
-    """
-    document = load(path)
-    if document.read_only and not document.raw:
-        LOGGER.info("%s; starting the classic interface", document.read_only)
-        return None
-    chosen = document.raw.get("interface", "classic")
-    if chosen not in INTERFACES:
-        LOGGER.info(
-            "ui.toml names an interface this version doesn't know (%s); "
-            "starting the classic interface",
-            _clipped(chosen),
-        )
-        return None
-    return None if chosen == "classic" else str(chosen)
 
 
 def save(prefs: UiPrefs, path: Path | None = None) -> UiPrefsDocument:

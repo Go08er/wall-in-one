@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import datetime
+import importlib.machinery
+import importlib.util
+import logging
 import math
 import os
 import re
 import stat
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -241,7 +246,7 @@ def test_unknown_keys_anywhere_are_preserved_on_save() -> None:
     assert paths.ui_prefs_path().read_bytes() == first
 
 
-@pytest.mark.parametrize("version", (2, 99))
+@pytest.mark.parametrize("version", (3, 99))
 def test_a_newer_version_is_read_but_never_written(version: int) -> None:
     target = _write(
         f'version = {version}\nwindow_style = "frosted"\nfrost = 0.2\n'
@@ -414,3 +419,155 @@ def test_the_tidy_offer_dismissal_is_written_only_once_true() -> None:
     assert document["tidy_offer_dismissed"] is True and document["version"] == 1
     assert ui_prefs.load().prefs == UiPrefs(frost=0.3, tidy_offer_dismissed=True)
     assert UiPrefs.from_mapping({"tidy_offer_dismissed": "yes"}).tidy_offer_dismissed is False
+
+
+# -- version 2: the interface to start, behind the format guards ------------------------
+
+#: ui_prefs.py exactly as 0.2.0 and 0.2.1 shipped it (identical in both tags):
+#: the reader a rollback meets. Kept verbatim, outside the linters, as a fixture.
+RELEASED_READER = Path(__file__).parent / "fixtures" / "ui_prefs_v0_2.py.frozen"
+
+
+def _released(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    name = "ui_prefs_as_released_in_0_2"
+    loader = importlib.machinery.SourceFileLoader(name, str(RELEASED_READER))
+    spec = importlib.util.spec_from_loader(name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)  # dataclasses look their module up
+    loader.exec_module(module)
+    assert module.VERSION == 1
+    return module
+
+
+def test_the_interfaces_are_the_ones_the_app_builds() -> None:
+    from wall_in_one.ui.window_services import UI_KINDS
+
+    assert ui_prefs.INTERFACES == UI_KINDS
+    assert UiPrefs().interface == "classic"
+    assert UiPrefs.from_mapping({"interface": "fancy"}).interface == "classic"
+    assert UiPrefs.from_mapping({"interface": 2}).interface == "classic"
+
+
+def test_a_profile_that_never_chooses_the_new_interface_stays_at_version_1() -> None:
+    ui_prefs.update({"window_style": "frosted"})
+    ui_prefs.update({"tidy_offer_dismissed": True})
+    ui_prefs.update({"interface": "classic"})
+
+    document = tomllib.loads(paths.ui_prefs_path().read_text())
+    assert document["version"] == 1 and "interface" not in document
+    assert _siblings() == {"ui.toml", ".ui.toml.mutation.lock"}, "no backup without a bump"
+
+
+def test_choosing_the_new_interface_bumps_once_and_keeps_the_version_1_bytes() -> None:
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"window_style": "frosted"})
+    version_1 = target.read_bytes()
+
+    ui_prefs.update({"interface": "next"})
+
+    document = tomllib.loads(target.read_text())
+    assert document["version"] == 2 and document["interface"] == "next"
+    assert document["window_style"] == "frosted"
+    backup = paths.app_config_dir() / "ui.toml.v1-backup"
+    assert backup.read_bytes() == version_1
+    assert stat.S_IMODE(backup.stat().st_mode) == stat.S_IMODE(os.stat(target).st_mode)
+    assert ui_prefs.load().prefs.interface == "next"
+
+    # Back to classic: the key goes, the version stays (a file never moves down).
+    ui_prefs.update({"interface": "classic"})
+    document = tomllib.loads(target.read_text())
+    assert document["version"] == 2 and "interface" not in document
+    ui_prefs.update({"interface": "next"})
+    assert backup.read_bytes() == version_1, "the one backup is never overwritten"
+
+
+def test_a_first_file_that_chooses_the_new_interface_needs_no_backup() -> None:
+    ui_prefs.update({"interface": "next"})
+
+    assert tomllib.loads(paths.ui_prefs_path().read_text())["version"] == 2
+    assert _siblings() == {"ui.toml", ".ui.toml.mutation.lock"}
+
+
+def test_no_backup_means_no_bump() -> None:
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"frost": 0.25})
+    before = target.read_bytes()
+    (paths.app_config_dir() / "ui.toml.v1-backup").mkdir()
+
+    with pytest.raises(ui_prefs.UiPrefsError, match="Nothing was changed"):
+        ui_prefs.update({"interface": "next"})
+
+    assert target.read_bytes() == before
+    ui_prefs.update({"frost": 0.5})  # an edit version 1 can hold still saves
+    assert tomllib.loads(target.read_text())["version"] == 1
+
+
+def test_0_2_releases_read_a_version_2_file_but_never_write_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released = _released(monkeypatch)
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"window_style": "translucent", "thumbnail_size": "small"})
+    # Until the new interface is chosen, a 0.2 release keeps editing the file.
+    assert released.load().writable
+    released.update({"frost": 0.3})
+    assert ui_prefs.load().prefs.frost == 0.3
+
+    ui_prefs.update({"interface": "next"})
+    chosen = target.read_bytes()
+    seen = released.load()
+
+    assert seen.prefs.window_style == "translucent" and seen.prefs.thumbnail_size == "small"
+    assert "newer version of Wall-in-One (version 2)" in seen.read_only
+    with pytest.raises(released.UiPrefsReadOnlyError):
+        released.update({"frost": 0.9})
+    with pytest.raises(released.UiPrefsReadOnlyError):
+        released.update({"tidy_offer_dismissed": True})
+    assert target.read_bytes() == chosen, "read-only, never broken or rewritten"
+    backup = paths.app_config_dir() / "ui.toml.v1-backup"
+    assert released.load(backup).writable, "the backup is a file the release can edit again"
+
+
+def _config_files() -> dict[str, bytes] | None:
+    directory = paths.app_config_dir()
+    if not directory.exists():
+        return None
+    return {entry.name: entry.read_bytes() for entry in directory.iterdir() if entry.is_file()}
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "logged"),
+    [
+        (None, None, False),
+        ('version = 2\ninterface = "next"\n', "next", False),
+        ('version = 2\ninterface = "classic"\n', None, False),
+        ('interface = "next"\n', "next", False),
+        ('version = 7\ninterface = "next"\n', "next", False),
+        ('version = 2\ninterface = "fancy"\n', None, True),
+        ("version = 2\ninterface = 2\n", None, True),
+        ("version = 2\ninterface =\n", None, True),
+    ],
+)
+def test_the_launch_reads_the_interface_and_never_writes(
+    document: str | None,
+    expected: str | None,
+    logged: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    if document is not None:
+        _write(document)
+    before = _config_files()
+
+    with caplog.at_level(logging.INFO, logger="wall_in_one.ui_prefs"):
+        assert ui_prefs.launch_interface() == expected
+
+    assert _config_files() == before, "reading the choice writes nothing"
+    assert len(caplog.records) == (1 if logged else 0), "one line, only for an unusable value"
+
+
+def test_an_unreadable_file_starts_the_classic_interface(caplog: pytest.LogCaptureFixture) -> None:
+    paths.ui_prefs_path().mkdir(parents=True)
+    with caplog.at_level(logging.INFO, logger="wall_in_one.ui_prefs"):
+        assert ui_prefs.launch_interface() is None
+    assert len(caplog.records) == 1 and "starting the classic interface" in caplog.text

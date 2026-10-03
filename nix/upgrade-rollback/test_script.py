@@ -55,6 +55,9 @@ SAFE_PRE_ADMISSION = {
 
 failures: list[str] = []
 observations: dict[str, Any] = {}
+#: The GUIs this test launched, by PID. `ctl open` starts the app in a new
+#: session it leads, so whatever the app starts shares that session ID.
+gui_sessions: list[int] = []
 
 
 # -- the guest -------------------------------------------------------------------------
@@ -259,15 +262,51 @@ def open_gui(package: str, page: str, title: str) -> dict[str, Any]:
         timeout=90,
     )
     (window,) = windows()
-    command = machine.succeed(f"tr '\\0' ' ' < /proc/{window['pid']}/cmdline")
+    pid = int(window["pid"])
+    command = machine.succeed(f"tr '\\0' ' ' < /proc/{pid}/cmdline")
     assert package in command, command
+    session = machine.succeed(f"ps -o sid= -p {pid}").strip()
+    assert session == str(pid), f"the GUI {pid} does not lead its own session ({session})"
+    gui_sessions.append(pid)
     return window
+
+
+def session_processes(session: int) -> list[str]:
+    """Live processes of ``session`` (zombies have exited), as ps lines."""
+    found = []
+    for line in machine.succeed("ps -e -o pid=,sid=,stat=,args=").splitlines():
+        fields = line.split(None, 3)
+        if len(fields) >= 3 and fields[1] == str(session) and not fields[2].startswith("Z"):
+            found.append(line.strip())
+    return found
+
+
+def wait_session_exited(session: int, timeout: float = 60) -> None:
+    """Every process of the GUI launched as ``session`` has exited.
+
+    The window's own PID going away is not enough: anything the app started
+    (a still renderer, a worker) can still be writing to the profile after it.
+    """
+    deadline = time.monotonic() + timeout
+    lingered: list[str] = []
+    while alive := session_processes(session):
+        if not any(line.split(None, 1)[0] == str(session) for line in alive):
+            lingered = alive
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"the GUI launched as {session} has not exited after {timeout:g} s:\n"
+                + "\n".join(alive)
+            )
+        time.sleep(0.2)
+    if lingered:
+        observe(f"GUI {session}: processes that outlived it", lingered)
 
 
 def close_gui() -> None:
     for window in windows():
         niri(f"action close-window --id {window['id']}")
-        machine.wait_until_succeeds(f"test ! -e /proc/{window['pid']}", timeout=60)
+    while gui_sessions:
+        wait_session_exited(gui_sessions.pop())
     machine.wait_until_succeeds(f"test ! -e {GUI_SOCKET}", timeout=30)
     assert not windows()
 
@@ -305,7 +344,44 @@ def _nodes(text: str) -> dict[str, Any]:
     return vm_tool.nodes(json.loads(text))
 
 
+#: Lists the app's lock files (the profile lock, each store's, the compiler's)
+#: that some process holds. It takes and drops each flock without creating,
+#: writing or touching any file.
+BUSY_LOCKS = """
+import fcntl, os, sys
+from pathlib import Path
+for directory in sys.argv[1:]:
+    for lock in sorted(Path(directory).glob("*.lock")):
+        try:
+            descriptor = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(lock.name)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+"""
+
+
+def wait_profile_idle(timeout: float = 90) -> None:
+    """No app writer holds a profile lock: nothing is mid-transaction."""
+    deadline = time.monotonic() + timeout
+    while busy := machine.succeed(
+        f"{GUEST_PYTHON} -c {q(BUSY_LOCKS)} {q(STATE)} {q(HOME + '/.config/wall-in-one')}"
+    ).split():
+        if time.monotonic() > deadline:
+            holders = machine.succeed("ps -e -o pid=,sid=,args= | grep -F wall-in-one || true")
+            raise AssertionError(f"still held after {timeout:g} s: {busy}\n{holders}")
+        time.sleep(0.2)
+
+
 def snapshot() -> dict[str, Any]:
+    """The profile once no app writer is mid-transaction."""
+    wait_profile_idle()
     return _nodes(
         machine.succeed(
             f"PYTHONPATH={SUPPORT} PYTHONDONTWRITEBYTECODE=1 {GUEST_PYTHON} "

@@ -693,6 +693,18 @@ def test_a_second_launch_with_another_ui_presents_the_running_window_unchanged(
     assert "already running, so --ui=next was not applied" in error
 
 
+def test_a_start_builds_the_interface_chosen_in_settings_and_a_second_says_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    events: list[object] = []
+    monkeypatch.setattr(app_module, "Application", _remote(events))
+
+    assert app_module.run(initial_page="media", preferred_ui="next") == 0
+
+    assert events[0] == ("constructed", "next"), "the remembered choice picks the window"
+    assert capsys.readouterr().err == "", "only an explicit --ui is noted as not applied"
+
+
 def test_a_second_default_launch_says_nothing_new(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

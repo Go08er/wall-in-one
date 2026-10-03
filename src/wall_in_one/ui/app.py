@@ -6316,13 +6316,15 @@ def run(
     service: bool = False,
     initial_page: str | None = None,
     ui: UiKind | None = None,
+    preferred_ui: UiKind | None = None,
 ) -> int:
     """Start, or hand off to, the single Wall-in-One instance.
 
-    ``ui`` is None unless ``--ui`` was given; the window is then classic. The
+    ``ui`` is None unless ``--ui`` was given. Without it the window is
+    ``preferred_ui``, the interface chosen in Settings, or classic. Either
     choice belongs to the process that starts: a launch which finds an
-    instance already running presents that instance's window unchanged and
-    only notes that its ``--ui`` was not applied.
+    instance already running presents that instance's window unchanged, and
+    notes that only for an explicit ``--ui``.
     """
     # GtkApplication overwrites prgname with the application id on Wayland, so
     # setting it here would be cosmetic at best and misleading at worst. The
@@ -6331,7 +6333,7 @@ def run(
     application = Application(
         service=service,
         initial_page=initial_page,
-        ui=DEFAULT_UI if ui is None else ui,
+        ui=ui if ui is not None else preferred_ui if preferred_ui is not None else DEFAULT_UI,
     )
     try:
         application.register(None)

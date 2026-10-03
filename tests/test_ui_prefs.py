@@ -374,8 +374,11 @@ def test_only_the_new_ui_and_the_tidy_card_use_ui_toml() -> None:
     its one-time offer was dismissed, and writes it only when the user
     dismisses that card (``ui/tidy_section.py``). Opening and idling never
     create it (``tests/test_ui_tidy.py`` and the golden idle tests check). The
-    application, the command line and the service never read or write it. In
-    the new UI only its preferences keeper touches the file.
+    command line only reads it, for the interface a start without ``--ui``
+    builds (``ui_prefs.launch_interface``). The application and the service
+    never read or write it. Both windows change it only through the
+    preferences keeper (``ui/next/prefs.py``), the classic one for the
+    interface row in Settings.
     """
     use = re.compile(
         r"from\s+wall_in_one\s+import[^\n]*\bui_prefs\b"
@@ -389,6 +392,7 @@ def test_only_the_new_ui_and_the_tidy_card_use_ui_toml() -> None:
         if use.search(source.read_text(encoding="utf-8"))
     )
     assert users == [
+        "cli.py",
         "paths.py",
         "ui/next/prefs.py",
         "ui/next/real_state.py",

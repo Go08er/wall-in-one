@@ -29,7 +29,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from wall_in_one import __version__, paths
+from wall_in_one import __version__, paths, ui_prefs
 from wall_in_one.ui.window_services import UI_KINDS
 
 if TYPE_CHECKING:
@@ -124,8 +124,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="present the GUI on one workflow page",
     )
     # Which window the GUI builds. Hidden while the new interface is a
-    # placeholder; default (absent) is the classic window. Only a process
-    # that starts the app applies it: see ui.app.run for a running instance.
+    # preview; when absent, the interface chosen in Settings (ui.toml) is
+    # built, and classic when there is none. Only a process that starts the
+    # app applies either: see ui.app.run for a running instance.
     parser.add_argument(
         "--ui",
         choices=UI_KINDS,
@@ -783,10 +784,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from wall_in_one.ui.app import run
 
-    if options.ui is None:
-        # The default launch calls run() exactly as before --ui existed.
-        return run(service=options.service, initial_page=options.open_page)
-    return run(service=options.service, initial_page=options.open_page, ui=options.ui)
+    if options.ui is not None:
+        # An explicit --ui always wins over the choice saved in Settings.
+        return run(service=options.service, initial_page=options.open_page, ui=options.ui)
+    # Every GUI start comes through here: the desktop entry, `ctl open` with
+    # no instance running (it starts `wall-in-one --open-page <page>`) and
+    # --service. Read-only: an unusable ui.toml means classic, never a write.
+    if ui_prefs.launch_interface() == "next":
+        return run(service=options.service, initial_page=options.open_page, preferred_ui="next")
+    # The default launch calls run() exactly as before --ui existed.
+    return run(service=options.service, initial_page=options.open_page)
 
 
 if __name__ == "__main__":

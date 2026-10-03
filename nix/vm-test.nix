@@ -123,23 +123,37 @@ pkgs.testers.runNixOSTest {
     noctalia_settings = "${home}/.local/state/noctalia/settings.toml"
     companion_backup = "/tmp/wall-in-one-vm-noctalia-with-companion.toml"
     # Noctalia rewrites its settings in its own layout, so edit by pattern
-    # and prove the result by parsing it.
-    unload_companion = r"""
+    # and prove the result by parsing it. Clears the companion's executable
+    # override; with --unload-plugin, also takes it off the enabled plugins.
+    edit_companion_settings_script = r"""
     import re, sys, tomllib
     from pathlib import Path
-    path = Path(sys.argv[1])
+    assert sys.argv[2:] in ([], ["--unload-plugin"]), sys.argv
+    path, unload = Path(sys.argv[1]), sys.argv[2:] == ["--unload-plugin"]
     text = path.read_text()
-    text, plugins = re.subn(
-        r'(?m)^([ \t]*)enabled[ \t]*=[ \t]*\[[ \t]*"goober/wall-in-one"[ \t]*\][ \t]*$',
-        r'\1enabled = []', text)
+    if unload:
+        text, plugins = re.subn(
+            r'(?m)^([ \t]*)enabled[ \t]*=[ \t]*\[[ \t]*"goober/wall-in-one"[ \t]*\][ \t]*$',
+            r'\1enabled = []', text)
+        assert plugins == 1, plugins
     text, override = re.subn(
         r'(?m)^([ \t]*)binary_path[ \t]*=[ \t]*".*"[ \t]*$', r'\1binary_path = ""', text)
-    assert (plugins, override) == (1, 1), (plugins, override)
+    assert override == 1, override
     document = tomllib.loads(text)
-    assert document["plugins"]["enabled"] == [], document["plugins"]
+    if unload:
+        assert document["plugins"]["enabled"] == [], document["plugins"]
     assert document["plugin_settings"]["goober/wall-in-one"]["binary_path"] == ""
     path.write_text(text)
     """
+
+    def edit_companion_settings(*, unload_plugin: bool) -> None:
+        """Clear the companion's executable override, and maybe unload it."""
+        machine.succeed(as_user(
+            "${pkgs.python3}/bin/python3 -c "
+            + shlex.quote(textwrap.dedent(edit_companion_settings_script))
+            + " " + noctalia_settings
+            + (" --unload-plugin" if unload_plugin else "")
+        ))
 
     def single_runtime() -> str:
         """The one runtime process there is, and it is the unit's."""
@@ -171,11 +185,7 @@ pkgs.testers.runNixOSTest {
             machine.succeed(as_user(f"mv {companion_backup} {noctalia_settings}"))
         else:
             machine.succeed(as_user(f"cp {noctalia_settings} {companion_backup}"))
-            machine.succeed(as_user(
-                "${pkgs.python3}/bin/python3 -c "
-                + shlex.quote(textwrap.dedent(unload_companion))
-                + " " + noctalia_settings
-            ))
+            edit_companion_settings(unload_plugin=True)
         cursor = machine.succeed("journalctl -n 0 --show-cursor").split("-- cursor: ")[-1].strip()
         machine.succeed(as_user("systemctl --user start noctalia.service"))
         machine.wait_until_succeeds(
@@ -435,9 +445,14 @@ pkgs.testers.runNixOSTest {
         # absent runtime. Use normal systemd ownership, not a binary override.
         machine.succeed(as_user("systemctl --user stop noctalia.service wall-in-one.service"))
         machine.fail("test -S ${runtimeDir}/wall-in-one-runtime.sock")
-        settings = "${home}/.local/state/noctalia/settings.toml"
+        settings = noctalia_settings
         machine.succeed(as_user(f"cp {settings} {settings}.cold-start-backup"))
-        machine.succeed(as_user(f"sed -i 's|^binary_path = .*|binary_path = \"\"|' {settings}"))
+        # Recorded for the history: whether the line-exact
+        # `sed 's|^binary_path = .*|...|'` this edit replaced would have
+        # matched Noctalia's own layout of the file.
+        old_sed_matches = machine.succeed(f"grep -c '^binary_path = ' {settings} || true").strip()
+        print(f"VM_COLD_START_OLD_SED_MATCHES {old_sed_matches}")
+        edit_companion_settings(unload_plugin=False)
         machine.succeed(as_user("touch ${slowStart}"))
         cursor = machine.succeed("journalctl -n 0 --show-cursor").split("-- cursor: ")[-1].strip()
         machine.succeed(as_user("systemctl --user start noctalia.service"))

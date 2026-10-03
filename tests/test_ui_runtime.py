@@ -1062,6 +1062,50 @@ def test_control_authoring_waits_for_the_store_lock_without_stopping_gtk(
         _close(application)
 
 
+def test_playlist_add_past_the_files_readable_size_is_refused_with_the_stores_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.2.1b H-3 through `ctl playlist-add`: the reply carries the refusal
+    (kind ``full``), and playlists.json stays the valid file it was."""
+    application = _application(tmp_path, monkeypatch)
+    _attach(application, FakeWindow())
+    replies: list[Response] = []
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "personal.png"
+    source.write_bytes(b"image")
+    item = MediaItem(source, Kind.STILL, 5, 1)
+    saved = application.session.playlists.create("Saved", entry_id="saved")
+    settings = replace(application.settings, roots=(root,)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.adopt_library(Library((root,), (item,)))
+    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
+    target = playlists.state_path()
+    monkeypatch.setattr(playlists, "MAX_STATE_BYTES", target.stat().st_size + 5)
+    before = target.read_bytes()
+    try:
+        outcome = _Commands(application).add_to_playlist(f"{saved.id} {source}")
+        assert isinstance(outcome, server.Deferred)
+        outcome.start(replies.append)
+        spin_until(lambda: bool(replies))
+        (reply,) = replies
+        assert not reply.ok
+        assert reply.kind == "full", reply
+        assert "playlists.json would be " in reply.message
+        assert reply.message.endswith("remove some playlist entries first. Nothing was changed.")
+        assert target.read_bytes() == before
+        durable = playlists.Store.open().get(saved.id)
+        assert durable is not None and len(durable) == 0
+        assert not application._authoring_active
+    finally:
+        _close(application)
+
+
 def test_last_window_close_waits_for_committed_authoring_runtime_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

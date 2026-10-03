@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 import os
 import stat
 import threading
@@ -102,7 +101,7 @@ _MutationResult = TypeVar("_MutationResult")
 class PairingError(Exception):
     """A pairing could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``, ``invalid-state``, ``newer-version``.
+    Kinds in use: ``local-io``, ``invalid-state``, ``newer-version``, ``full``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -583,6 +582,44 @@ def load(path: Path | None = None) -> dict[str, Pairing]:
     return _read(path if path is not None else state_path()).value
 
 
+def _render(
+    records: Mapping[str, Pairing],
+    target: Path,
+    *,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+) -> str:
+    """The document ``save`` writes; refused if this build could not read it back."""
+    payload = state_file.merge_unknown(
+        {
+            "version": FORMAT_VERSION,
+            "pairings": [records[key].to_json() for key in sorted(records)],
+        },
+        unknown,
+        DOCUMENT_SHAPE,
+    )
+    try:
+        return state_file.render_json(payload, target, maximum_bytes=MAX_STATE_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise PairingError(
+            "full", state_file.too_large_refusal(error, "reset some pairings")
+        ) from error
+
+
+def _write_document(target: Path, document: str, *, replace_existing: bool = True) -> None:
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise PairingError(
+            "local-io", f"could not create {target.parent}: {error.strerror or error}"
+        ) from error
+    try:
+        state_file.write_atomic_text(target, document, replace_existing=replace_existing)
+    except OSError as error:
+        raise PairingError(
+            "local-io", f"could not write {target}: {error.strerror or error}"
+        ) from error
+
+
 def save(
     records: Mapping[str, Pairing],
     path: Path | None = None,
@@ -595,34 +632,14 @@ def save(
     An exclusively-created temporary in the same directory is atomically
     replaced into place. A half-written file would read
     back as somebody's choices having partly evaporated, which looks like the
-    app forgetting rather than like a file that needs attention.
+    app forgetting rather than like a file that needs attention. A document
+    larger than ``MAX_STATE_BYTES``, which this build's reader would refuse,
+    is refused (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise PairingError(
-            "local-io", f"could not create {target.parent}: {error.strerror or error}"
-        ) from error
-
-    payload = state_file.merge_unknown(
-        {
-            "version": FORMAT_VERSION,
-            "pairings": [records[key].to_json() for key in sorted(records)],
-        },
-        unknown,
-        DOCUMENT_SHAPE,
+    _write_document(
+        target, _render(records, target, unknown=unknown), replace_existing=replace_existing
     )
-    try:
-        state_file.write_atomic_text(
-            target,
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            replace_existing=replace_existing,
-        )
-    except OSError as error:
-        raise PairingError(
-            "local-io", f"could not write {target}: {error.strerror or error}"
-        ) from error
     return target
 
 
@@ -1266,6 +1283,9 @@ class Store:
         unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     ) -> None:
         target = self._path if self._path is not None else state_path()
+        # Refused if too large to read back, before anything is backed up
+        # or moved; `save` then renders and writes it.
+        _render(records, target, unknown=unknown)
         recovering_fault = self._fault is not None
         if recovering_fault:
             # Do not overwrite bytes we could not understand: they are

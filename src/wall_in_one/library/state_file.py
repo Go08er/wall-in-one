@@ -760,6 +760,49 @@ class PublishedNotDurableError(OSError):
         self.path = path
 
 
+class DocumentTooLargeError(ValueError):
+    """A store document larger than its own reader accepts; it was not written.
+
+    A store's model bounds counts and field lengths, not the whole file, and
+    preserved unknown fields add to it. Written anyway, a valid file plus one
+    ordinary edit could become one the next open refuses as too large and
+    then moves aside as ``.broken``.
+    """
+
+    def __init__(self, path: Path, size: int, maximum: int) -> None:
+        super().__init__(
+            f"{path.name} would be {size:,} bytes, more than the {maximum:,} bytes this "
+            "version can read back"
+        )
+        self.path = path
+        self.size = size
+        self.maximum = maximum
+
+
+def require_readable_size(contents: str, path: Path, *, maximum_bytes: int) -> None:
+    """Raise :class:`DocumentTooLargeError` when ``contents`` encodes past ``maximum_bytes``.
+
+    ``maximum_bytes`` is the budget the file's own reader enforces. Checked
+    before anything is written, so a refusal leaves the file and every
+    backup as they were.
+    """
+    size = len(contents.encode("utf-8", "surrogatepass"))
+    if size > maximum_bytes:
+        raise DocumentTooLargeError(path, size, maximum_bytes)
+
+
+def render_json(payload: Mapping[str, Any], path: Path, *, maximum_bytes: int) -> str:
+    """A Store's JSON document as written, or :class:`DocumentTooLargeError`."""
+    contents = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    require_readable_size(contents, path, maximum_bytes=maximum_bytes)
+    return contents
+
+
+def too_large_refusal(error: DocumentTooLargeError, remedy: str) -> str:
+    """The sentence every Store uses when an edit would make its file unreadable."""
+    return f"{error}; {remedy} first. Nothing was changed."
+
+
 def write_atomic_text(
     path: Path,
     contents: str,

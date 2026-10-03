@@ -24,7 +24,6 @@ dropped.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import secrets
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -686,6 +685,49 @@ def load(path: Path | None = None) -> dict[str, Playlist]:
     return _read(path if path is not None else state_path()).value
 
 
+def _render(
+    playlists: Mapping[str, Playlist],
+    target: Path,
+    *,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+    version: int | None = None,
+) -> str:
+    """The document ``save`` writes; refused if this build could not read it back."""
+    wanted = required_version(playlists.values())
+    written = version if version is not None else FORMATS.to_write(None, wanted)
+    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
+        raise ValueError(f"playlists cannot be saved as version {written}; they need {wanted}")
+    payload = state_file.merge_unknown(
+        {
+            "version": written,
+            "playlists": [playlists[key].to_json() for key in sorted(playlists)],
+        },
+        unknown,
+        DOCUMENT_SHAPE,
+    )
+    try:
+        return state_file.render_json(payload, target, maximum_bytes=MAX_STATE_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise PlaylistError(
+            "full", state_file.too_large_refusal(error, "remove some playlist entries")
+        ) from error
+
+
+def _write(target: Path, document: str, *, replace_existing: bool = True) -> None:
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise PlaylistError(
+            "local-io", f"could not create {target.parent}: {error.strerror or error}"
+        ) from error
+    try:
+        state_file.write_atomic_text(target, document, replace_existing=replace_existing)
+    except OSError as error:
+        raise PlaylistError(
+            "local-io", f"could not write {target}: {error.strerror or error}"
+        ) from error
+
+
 def save(
     playlists: Mapping[str, Playlist],
     path: Path | None = None,
@@ -701,38 +743,16 @@ def save(
     ``version`` defaults to the oldest format that holds ``playlists`` (see
     `required_version`), so playlists without their own rotation are written
     as version 1. Keeping a file's newer version, and the backup before a
-    bump, belong to `Store`, which knows what is on disk.
+    bump, belong to `Store`, which knows what is on disk. A document larger
+    than ``MAX_STATE_BYTES``, which this build's reader would refuse, is
+    refused (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
-    wanted = required_version(playlists.values())
-    written = version if version is not None else FORMATS.to_write(None, wanted)
-    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
-        raise ValueError(f"playlists cannot be saved as version {written}; they need {wanted}")
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise PlaylistError(
-            "local-io", f"could not create {target.parent}: {error.strerror or error}"
-        ) from error
-
-    payload = state_file.merge_unknown(
-        {
-            "version": written,
-            "playlists": [playlists[key].to_json() for key in sorted(playlists)],
-        },
-        unknown,
-        DOCUMENT_SHAPE,
+    _write(
+        target,
+        _render(playlists, target, unknown=unknown, version=version),
+        replace_existing=replace_existing,
     )
-    try:
-        state_file.write_atomic_text(
-            target,
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            replace_existing=replace_existing,
-        )
-    except OSError as error:
-        raise PlaylistError(
-            "local-io", f"could not write {target}: {error.strerror or error}"
-        ) from error
     return target
 
 
@@ -1243,6 +1263,9 @@ class Store:
                 result, changed = change(authored)
                 if changed:
                     version = FORMATS.to_write(reading.version, required_version(authored.values()))
+                    # Refused if too large to read back, before anything is backed up
+                    # or moved; `save` then renders and writes it.
+                    _render(authored, target, unknown=reading.unknown, version=version)
                     if reading.version is not None and FORMATS.is_bump(reading.version, version):
                         _back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:

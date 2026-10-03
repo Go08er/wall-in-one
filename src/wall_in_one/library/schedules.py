@@ -21,7 +21,6 @@ the alternative is making them write two rules.
 
 from __future__ import annotations
 
-import json
 import secrets
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -494,6 +493,44 @@ def load(path: Path | None = None) -> tuple[Rule, ...]:
     return _read(path if path is not None else state_path()).value
 
 
+def _render(
+    rules: Sequence[Rule],
+    target: Path,
+    *,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+    version: int | None = None,
+) -> str:
+    """The document ``save`` writes; refused if this build could not read it back."""
+    written = version if version is not None else FORMATS.to_write(None, required_version(rules))
+    if required_version(rules) > written or not FORMATS.floor <= written <= FORMATS.current:
+        raise ValueError(f"schedules cannot be saved as version {written}")
+    payload = state_file.merge_unknown(
+        {"version": written, "rules": [rule.to_json() for rule in rules]},
+        unknown,
+        DOCUMENT_SHAPE,
+    )
+    try:
+        return state_file.render_json(payload, target, maximum_bytes=MAX_STATE_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise ScheduleError(
+            "full", state_file.too_large_refusal(error, "remove some schedule rules")
+        ) from error
+
+
+def _write(target: Path, document: str, *, replace_existing: bool = True) -> None:
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise ScheduleError(
+            "local-io", f"could not create {target.parent}: {error.strerror or error}"
+        ) from error
+    try:
+        state_file.write_atomic_text(target, document, replace_existing=replace_existing)
+    except (OSError, UnicodeError) as error:
+        detail = getattr(error, "strerror", None) or str(error)
+        raise ScheduleError("local-io", f"could not write {target}: {detail}") from error
+
+
 def save(
     rules: Sequence[Rule],
     path: Path | None = None,
@@ -508,33 +545,15 @@ def save(
     `required_version`), so unnamed rules are written as version 2. This
     writes what it is given and nothing more: keeping a file's newer version,
     and the backup before a bump, belong to `Store`, which knows what is on
-    disk.
+    disk. A document larger than ``MAX_STATE_BYTES``, which this build's
+    reader would refuse, is refused (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
-    written = version if version is not None else FORMATS.to_write(None, required_version(rules))
-    if required_version(rules) > written or not FORMATS.floor <= written <= FORMATS.current:
-        raise ValueError(f"schedules cannot be saved as version {written}")
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise ScheduleError(
-            "local-io", f"could not create {target.parent}: {error.strerror or error}"
-        ) from error
-
-    payload = state_file.merge_unknown(
-        {"version": written, "rules": [rule.to_json() for rule in rules]},
-        unknown,
-        DOCUMENT_SHAPE,
+    _write(
+        target,
+        _render(rules, target, unknown=unknown, version=version),
+        replace_existing=replace_existing,
     )
-    try:
-        state_file.write_atomic_text(
-            target,
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            replace_existing=replace_existing,
-        )
-    except (OSError, UnicodeError) as error:
-        detail = getattr(error, "strerror", None) or str(error)
-        raise ScheduleError("local-io", f"could not write {target}: {detail}") from error
     return target
 
 
@@ -847,6 +866,9 @@ class Store:
                     # these rules need a newer one, and keep the old bytes
                     # before the first bump -- before anything is moved.
                     version = FORMATS.to_write(reading.version, required_version(rules))
+                    # Refused if too large to read back, before anything is backed up
+                    # or moved; `save` then renders and writes it.
+                    _render(rules, target, unknown=reading.unknown, version=version)
                     if reading.version is not None and FORMATS.is_bump(reading.version, version):
                         self._back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:

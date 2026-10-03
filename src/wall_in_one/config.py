@@ -75,9 +75,20 @@ class SettingsNotDurableError(ConfigError):
 
 
 def _publish(target: Path, settings: Settings) -> None:
-    """Write ``settings``; a failure after publication is SettingsNotDurableError."""
+    """Write ``settings``; a failure after publication is SettingsNotDurableError.
+
+    A document larger than ``MAX_SETTINGS_BYTES``, which this build's reader
+    would refuse, is refused before anything is written.
+    """
+    document = settings.to_toml()
     try:
-        state_file.write_atomic_text(target, settings.to_toml())
+        state_file.require_readable_size(document, target, maximum_bytes=MAX_SETTINGS_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise ConfigError(
+            state_file.too_large_refusal(error, "remove some library folders")
+        ) from error
+    try:
+        state_file.write_atomic_text(target, document)
     except state_file.PublishedNotDurableError as error:
         raise SettingsNotDurableError(settings, error) from error
 

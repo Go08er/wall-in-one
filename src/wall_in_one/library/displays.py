@@ -28,7 +28,6 @@ kept as ``displays.json.v1-backup``; until then it stays version 1.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,7 +68,7 @@ class DisplayError(Exception):
     """An assignment could not be stored.
 
     Kinds in use: ``local-io``, ``validation``, ``newer-version``,
-    ``no-backup``.
+    ``no-backup``, ``full``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -189,6 +188,48 @@ def _parse(path: Path, document: dict[str, Any]) -> tuple[Arrangement, str | Non
     return Arrangement(found, frozenset(beating)), state_file.joined_faults(faults)
 
 
+def _render(
+    assignments: Mapping[str, str],
+    target: Path,
+    *,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+    beats_global_rules: Iterable[str] = (),
+    version: int | None = None,
+) -> str:
+    """The document ``save`` writes; refused if this build could not read it back."""
+    beating = sorted(set(beats_global_rules))
+    if any(connector not in assignments for connector in beating):
+        raise ValueError("only an assigned display can beat global rules")
+    wanted = required_version(beating)
+    written = version if version is not None else FORMATS.to_write(None, wanted)
+    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
+        raise ValueError(f"displays cannot be saved as version {written}; they need {wanted}")
+    fields: dict[str, Any] = {"version": written, "displays": dict(assignments)}
+    if beating:
+        fields[BEATS_GLOBAL_RULES_KEY] = beating
+    payload = state_file.merge_unknown(fields, unknown, DOCUMENT_SHAPE)
+    try:
+        return state_file.render_json(payload, target, maximum_bytes=MAX_STATE_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise DisplayError(
+            "full", state_file.too_large_refusal(error, "clear some display assignments")
+        ) from error
+
+
+def _write(target: Path, document: str, *, replace_existing: bool = True) -> None:
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise DisplayError(
+            "local-io", f"could not prepare {target.parent}: {error.strerror or error}"
+        ) from error
+    try:
+        state_file.write_atomic_text(target, document, replace_existing=replace_existing)
+    except (OSError, UnicodeError) as error:
+        detail = getattr(error, "strerror", None) or str(error)
+        raise DisplayError("local-io", f"could not write {target}: {detail}") from error
+
+
 def save(
     assignments: Mapping[str, str],
     path: Path | None = None,
@@ -203,35 +244,22 @@ def save(
     ``version`` defaults to the oldest format that holds the arrangement (see
     `required_version`), so a file without opt-ins is written as version 1.
     Keeping a file's newer version, and the backup before a bump, belong to
-    `Store`, which knows what is on disk.
+    `Store`, which knows what is on disk. A document larger than
+    ``MAX_STATE_BYTES``, which this build's reader would refuse, is refused
+    (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
-    beating = sorted(set(beats_global_rules))
-    if any(connector not in assignments for connector in beating):
-        raise ValueError("only an assigned display can beat global rules")
-    wanted = required_version(beating)
-    written = version if version is not None else FORMATS.to_write(None, wanted)
-    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
-        raise ValueError(f"displays cannot be saved as version {written}; they need {wanted}")
-    fields: dict[str, Any] = {"version": written, "displays": dict(assignments)}
-    if beating:
-        fields[BEATS_GLOBAL_RULES_KEY] = beating
-    payload = state_file.merge_unknown(fields, unknown, DOCUMENT_SHAPE)
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise DisplayError(
-            "local-io", f"could not prepare {target.parent}: {error.strerror or error}"
-        ) from error
-    try:
-        state_file.write_atomic_text(
+    _write(
+        target,
+        _render(
+            assignments,
             target,
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            replace_existing=replace_existing,
-        )
-    except (OSError, UnicodeError) as error:
-        detail = getattr(error, "strerror", None) or str(error)
-        raise DisplayError("local-io", f"could not write {target}: {detail}") from error
+            unknown=unknown,
+            beats_global_rules=beats_global_rules,
+            version=version,
+        ),
+        replace_existing=replace_existing,
+    )
     return target
 
 
@@ -485,6 +513,15 @@ class Store:
                 if changed:
                     version = FORMATS.to_write(
                         reading.version, required_version(working.beats_global_rules)
+                    )
+                    # Refused if too large to read back, before anything is backed up
+                    # or moved; `save` then renders and writes it.
+                    _render(
+                        working.assignments,
+                        target,
+                        unknown=reading.unknown,
+                        beats_global_rules=working.beats_global_rules,
+                        version=version,
                     )
                     if reading.version is not None and FORMATS.is_bump(reading.version, version):
                         _back_up_before_bump(target, observed, reading.version, version)

@@ -427,6 +427,30 @@ def test_source_row_activation_adds_once_and_respects_unavailable_pairings(
     assert len(app.session.playlists.find("evening")) == 1
 
 
+def test_an_add_past_the_files_readable_size_is_refused_and_reported(
+    make_editor: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """0.2.1b H-3 on the classic Add: a document its reader would refuse is
+    refused before the write and reported; the file and editor stay."""
+    app, page = make_editor(entries=1)
+    target = tmp_path / "playlists.json"
+    monkeypatch.setattr(playlists, "MAX_STATE_BYTES", target.stat().st_size + 5)
+    before = target.read_bytes()
+    card = next(iter(page._source_cards))
+    child = card.get_parent()
+    assert isinstance(child, Gtk.FlowBoxChild)
+
+    page._source_flow.emit("child-activated", child)
+
+    assert len(app.reports) == 1, app.reports
+    assert "playlists.json would be " in app.reports[0]
+    assert app.reports[0].endswith("remove some playlist entries first. Nothing was changed.")
+    assert target.read_bytes() == before
+    assert len(app.session.playlists.find("evening")) == 1
+    assert app.published == 0
+    assert page._entry_count.get_label() == "1 pairing · fixed choice"
+
+
 def test_enter_renames_through_authoring_without_replacing_the_editor(make_editor: Any) -> None:
     app, page = make_editor()
     entry = page._name_entry

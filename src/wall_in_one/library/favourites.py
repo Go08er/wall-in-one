@@ -77,7 +77,7 @@ BROKEN_SUFFIX: Final = ".broken"
 class FavouritesError(Exception):
     """The favourites could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``, ``newer-version``.
+    Kinds in use: ``local-io``, ``newer-version``, ``full``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -223,6 +223,38 @@ def load(path: Path | None = None) -> Favourites:
     return _read(path if path is not None else state_path()).value
 
 
+def _render(
+    favourites: Favourites,
+    target: Path,
+    *,
+    unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
+) -> str:
+    """The document ``save`` writes; refused if this build could not read it back."""
+    document = favourites.to_json(unknown)
+    try:
+        state_file.require_readable_size(document, target, maximum_bytes=MAX_STATE_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise FavouritesError(
+            "full", state_file.too_large_refusal(error, "unstar some wallpapers")
+        ) from error
+    return document
+
+
+def _write(target: Path, document: str, *, replace_existing: bool = True) -> None:
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise FavouritesError(
+            "local-io", f"could not create {target.parent}: {error.strerror or error}"
+        ) from error
+    try:
+        state_file.write_atomic_text(target, document, replace_existing=replace_existing)
+    except OSError as error:
+        raise FavouritesError(
+            "local-io", f"could not write {target}: {error.strerror or error}"
+        ) from error
+
+
 def save(
     favourites: Favourites,
     path: Path | None = None,
@@ -236,26 +268,12 @@ def save(
     replaced into place. A half-written list is the one outcome worth
     engineering against: it would read back as a
     shorter list of favourites, which looks like the app silently dropping
-    some rather than like a file that needs attention.
+    some rather than like a file that needs attention. A document larger
+    than ``MAX_STATE_BYTES``, which this build's reader would refuse, is
+    refused (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise FavouritesError(
-            "local-io", f"could not create {target.parent}: {error.strerror or error}"
-        ) from error
-
-    try:
-        state_file.write_atomic_text(
-            target,
-            favourites.to_json(unknown),
-            replace_existing=replace_existing,
-        )
-    except OSError as error:
-        raise FavouritesError(
-            "local-io", f"could not write {target}: {error.strerror or error}"
-        ) from error
+    _write(target, _render(favourites, target, unknown=unknown), replace_existing=replace_existing)
     return target
 
 
@@ -402,6 +420,9 @@ class Store:
                 base = current if present or self._loaded else self._favourites
                 changed, updated = change(base)
                 if changed:
+                    # Refused if too large to read back, before anything is backed up
+                    # or moved; `save` then renders and writes it.
+                    _render(updated, target, unknown=reading.unknown)
                     if fault is not None:
                         # Do not overwrite bytes we could not understand. They
                         # are the user's list, in some form, and a copy costs

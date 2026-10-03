@@ -66,6 +66,7 @@ pkgs.testers.runNixOSTest {
     import json
     import re
     import shlex
+    import textwrap
     import time
 
     user_environment = (
@@ -118,6 +119,82 @@ pkgs.testers.runNixOSTest {
             "${lib.getExe pkgs.niri} msg " + arguments
         )
         return machine.succeed(as_user(command)).strip()
+
+    noctalia_settings = "${home}/.local/state/noctalia/settings.toml"
+    companion_backup = "/tmp/wall-in-one-vm-noctalia-with-companion.toml"
+    # Noctalia rewrites its settings in its own layout, so edit by pattern
+    # and prove the result by parsing it.
+    unload_companion = r"""
+    import re, sys, tomllib
+    from pathlib import Path
+    path = Path(sys.argv[1])
+    text = path.read_text()
+    text, plugins = re.subn(
+        r'(?m)^([ \t]*)enabled[ \t]*=[ \t]*\[[ \t]*"goober/wall-in-one"[ \t]*\][ \t]*$',
+        r'\1enabled = []', text)
+    text, override = re.subn(
+        r'(?m)^([ \t]*)binary_path[ \t]*=[ \t]*".*"[ \t]*$', r'\1binary_path = ""', text)
+    assert (plugins, override) == (1, 1), (plugins, override)
+    document = tomllib.loads(text)
+    assert document["plugins"]["enabled"] == [], document["plugins"]
+    assert document["plugin_settings"]["goober/wall-in-one"]["binary_path"] == ""
+    path.write_text(text)
+    """
+
+    def single_runtime() -> str:
+        """The one runtime process there is, and it is the unit's."""
+        pid = machine.succeed(
+            as_user("systemctl --user show -p MainPID --value wall-in-one.service")
+        ).strip()
+        # comm is truncated to 15 bytes; this must find exactly one daemon.
+        assert machine.succeed("pgrep -u ${uid} -x wall-in-one-ser").split() == [pid]
+        return pid
+
+    def companion(loaded: bool) -> None:
+        """Give the runtime one lifecycle owner, or hand the companion back.
+
+        Loaded with vm-base's executable override, the companion starts a
+        runtime of its own -- directly, outside systemd -- whenever the unit's
+        is not answering, and runs its own health sync whenever failures are
+        reported. Subtests that stop, kill or restart the unit, or rely on
+        ExecStop as the only health writer, run with it unloaded and the
+        override cleared. Noctalia restarts without it and stays the wallpaper
+        endpoint; loading it again restores the settings byte for byte.
+        """
+        state = json.loads(ctl("status"))
+        held = state["cycle_enabled"] and state["cycle_source"] == "config"
+        if held:
+            # No wallpaper is due while Noctalia restarts.
+            assert ctl("cycle off") == "cycle off (manual)"
+        machine.succeed(as_user("systemctl --user stop noctalia.service"))
+        if loaded:
+            machine.succeed(as_user(f"mv {companion_backup} {noctalia_settings}"))
+        else:
+            machine.succeed(as_user(f"cp {noctalia_settings} {companion_backup}"))
+            machine.succeed(as_user(
+                "${pkgs.python3}/bin/python3 -c "
+                + shlex.quote(textwrap.dedent(unload_companion))
+                + " " + noctalia_settings
+            ))
+        cursor = machine.succeed("journalctl -n 0 --show-cursor").split("-- cursor: ")[-1].strip()
+        machine.succeed(as_user("systemctl --user start noctalia.service"))
+        machine.wait_until_succeeds(
+            as_user("${lib.getExe pkgs.noctalia} msg color-scheme-get"), timeout=60
+        )
+        journal = (
+            "journalctl -b _SYSTEMD_USER_UNIT=noctalia.service --no-pager -o cat --after-cursor="
+            + shlex.quote(cursor)
+        )
+        if loaded:
+            machine.wait_until_succeeds(
+                journal + " | grep -F \"started service 'goober/wall-in-one:control'\"",
+                timeout=60,
+            )
+        else:
+            machine.fail(journal + " | grep -F \"loaded plugin 'goober/wall-in-one'\"")
+        if held:
+            assert ctl("cycle default") == "cycle on (config)"
+        single_runtime()
 
     start_all()
     machine.wait_for_unit("multi-user.target")
@@ -173,6 +250,9 @@ pkgs.testers.runNixOSTest {
             as_user("systemctl --user show -p MainPID --value wall-in-one.service")
         ).strip()
         assert int(service_pid) > 1, service_pid
+
+    with subtest("the unit's lifecycle subtests run without the companion"):
+        companion(loaded=False)
 
     with subtest("corrupt authoring keeps a valid last-known-good runtime alive"):
         playlist_store = "${home}/.local/state/wall-in-one/playlists.json"
@@ -324,6 +404,9 @@ pkgs.testers.runNixOSTest {
             status_matches('.playlist_id == "day" and .last_error == ""'),
             timeout=20,
         )
+
+    with subtest("the companion is handed back for its own subtests"):
+        companion(loaded=True)
 
     with subtest("companion plugin loads from an isolated path source"):
         # Deliberately not asserting the entry count. It used to insist on
@@ -648,6 +731,9 @@ pkgs.testers.runNixOSTest {
         listing = ctl("playlists")
         assert "Night samples\t1\tyes" in listing, listing
 
+    with subtest("the unit's restart and ExecStop subtests run without the companion"):
+        companion(loaded=False)
+
     with subtest("health persistence follows the runtime and absence is not a failure"):
         # Add an inactive video rule while the renderer is healthy, and wait
         # until Rust has loaded that exact authoring generation. The boundary
@@ -669,6 +755,7 @@ pkgs.testers.runNixOSTest {
         # two-second status poll. Close it and prove all three observable
         # lifetime surfaces are gone before creating the finding, so only the
         # package's ExecStop hook can make the later Pairings change durable.
+        # (The companion, the other health writer, is unloaded above.)
         gui_owners = machine.succeed(
             "${pkgs.psmisc}/bin/fuser ${runtimeDir}/wall-in-one.sock 2>/dev/null"
         ).split()
@@ -782,6 +869,8 @@ pkgs.testers.runNixOSTest {
             as_user("systemctl --user show -p MainPID --value wall-in-one.service")
         ).strip()
         assert service_pid != crashed_pid, (service_pid, crashed_pid)
+        # systemd restarted it, and nothing else started a second one.
+        assert single_runtime() == service_pid
 
         machine.succeed(as_user("systemctl --user stop wall-in-one.service"))
         machine.wait_until_succeeds(
@@ -958,6 +1047,11 @@ pkgs.testers.runNixOSTest {
         after_handover = authored_snapshot()
         assert after_handover == before_handover, (before_handover, after_handover)
         machine.fail("test -e ${runtimeDir}/wall-in-one.sock")
+
+    with subtest("the companion is handed back and starts no second runtime"):
+        companion(loaded=True)
+        time.sleep(10)
+        assert single_runtime() == service_pid
 
     with subtest("the desktop session stayed healthy"):
         machine.succeed("kill -0 " + service_pid)

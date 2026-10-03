@@ -3,7 +3,8 @@
 `NextWindow` is the prototype's `ShellWindow` -- sidebar, header, banners,
 player bar, frosted backdrop -- over a `RealAppState`, with the real Library
 page and inspector. Store, Playlists, Schedule, Displays and Settings are
-honest "not in the new interface yet" pages until they are ported.
+honest "not in the new interface yet" pages until they are ported; Settings
+already offers the interface to start, so the new one can be left from inside.
 
 It implements every `WindowServices` member. Runtime status reaches it
 through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
@@ -21,6 +22,7 @@ change that is still waiting, and stops its thumbnail workers.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Final
 
 import gi
@@ -28,7 +30,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw
+from gi.repository import Adw, Gtk
 
 from wall_in_one import __version__, config
 from wall_in_one.session import Session
@@ -37,9 +39,10 @@ from wall_in_one.ui.next import library, status_line, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
 from wall_in_one.ui.next.page import Placeholder, not_ported
-from wall_in_one.ui.next.prefs import UiPrefsKeeper
+from wall_in_one.ui.next.prefs import INTERFACE_CHOICES, INTERFACE_NOTE, UiPrefsKeeper
 from wall_in_one.ui.next.real_state import RealAppState
 from wall_in_one.ui.next.shell import ShellWindow
+from wall_in_one.ui.next.state import AppState
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -56,6 +59,47 @@ _PAGES: Final = {
 PORTED: Final = frozenset({"media"})
 #: Kept for callers of the placeholder era.
 NOT_PORTED_HINT: Final = CLASSIC_HINT
+
+
+class SettingsPlaceholder(Placeholder):
+    """Settings is not ported yet, except the interface to start.
+
+    Someone who chose the new interface must be able to choose classic again
+    from inside it. The row writes ui.toml through the window's keeper, like
+    every window preference here, and is off while ui.toml cannot be written.
+    """
+
+    def __init__(self, state: AppState, keeper: UiPrefsKeeper, report: Callable[[str], None]):
+        super().__init__(
+            state,
+            "settings",
+            "Settings",
+            "emblem-system-symbolic",
+            f"Settings is not in the new interface yet. {CLASSIC_HINT}",
+        )
+        self._keeper = keeper
+        self._report = report
+        self.interface_row = Adw.ComboRow(
+            title="Interface",
+            subtitle=INTERFACE_NOTE,
+            model=Gtk.StringList.new([label for _key, label in INTERFACE_CHOICES]),
+        )
+        keys = [key for key, _label in INTERFACE_CHOICES]
+        self.interface_row.set_selected(keys.index(keeper.prefs.interface))
+        if keeper.read_only:
+            self.interface_row.set_subtitle(keeper.read_only)
+            self.interface_row.set_sensitive(False)
+        self.interface_row.connect("notify::selected", self._on_interface)
+        group = Adw.PreferencesGroup()
+        group.add(self.interface_row)
+        self.status.set_child(Adw.Clamp(child=group, maximum_size=480))
+
+    def _on_interface(self, row: Adw.ComboRow, _property: object) -> None:
+        index = row.get_selected()
+        if 0 <= index < len(INTERFACE_CHOICES) and not self._keeper.change(
+            interface=INTERFACE_CHOICES[index][0]
+        ):
+            self._report(self._keeper.read_only)
 
 
 class NextWindow(ShellWindow):
@@ -78,7 +122,9 @@ class NextWindow(ShellWindow):
                 "playlist": not_ported("playlist", "Playlists", "view-list-symbolic"),
                 "schedule": not_ported("schedule", "Schedule", "x-office-calendar-symbolic"),
                 "displays": not_ported("displays", "Displays", "video-display-symbolic"),
-                "settings": not_ported("settings", "Settings", "emblem-system-symbolic"),
+                "settings": lambda state: SettingsPlaceholder(
+                    state, self._prefs, application.window_report
+                ),
             },
             version=__version__,
         )

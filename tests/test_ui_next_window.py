@@ -37,7 +37,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from tests.test_next_status_line import BATTERY, two_display_status  # noqa: E402
-from wall_in_one import config, paths  # noqa: E402
+from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.theme import noctalia, source  # noqa: E402
@@ -45,7 +45,7 @@ from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
 from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
-from wall_in_one.ui.next.window import NextWindow  # noqa: E402
+from wall_in_one.ui.next.window import NextWindow, SettingsPlaceholder  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange  # noqa: E402
 from wall_in_one.ui.window import MainWindow  # noqa: E402
 from wall_in_one.ui.window_services import WindowServices  # noqa: E402
@@ -644,6 +644,60 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
         finally:
             window.destroy()
     finally:
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
+def test_the_new_interface_settings_page_chooses_the_interface_to_start() -> None:
+    """Whoever starts the new interface can choose classic again from inside it."""
+    application = Application(ui="next")
+    window = NextWindow(application, application.settings)
+    target = paths.ui_prefs_path()
+    window.present()
+    try:
+        assert window.show_page("settings") is False, "Settings is still not ported"
+        assert window.note_text.startswith("Settings is not in the new interface yet")
+        assert "choose the classic interface in Settings" in window.note_text
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPlaceholder)
+        row = page.interface_row
+        assert row.get_selected() == 0, "nothing saved yet: the next start is classic"
+        assert row.get_sensitive() and row.get_subtitle() == (
+            "Takes effect the next time Wall-in-One starts."
+        )
+        assert not target.exists(), "showing the row writes nothing"
+
+        row.set_selected(1)
+        window.preferences.close(wait=True)
+        assert ui_prefs.load().prefs.interface == "next"
+        assert ui_prefs.launch_interface() == "next"
+        row.set_selected(0)
+        window.preferences.close(wait=True)
+        assert ui_prefs.launch_interface() is None
+        assert window.preferences.saves == 2, "one write per change"
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
+def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written() -> None:
+    target = paths.ui_prefs_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    document = 'version = 5\ninterface = "next"\n'
+    target.write_text(document)
+    application = Application(ui="next")
+    window = NextWindow(application, application.settings)
+    try:
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPlaceholder)
+        assert not page.interface_row.get_sensitive()
+        assert "newer version of Wall-in-One" in (page.interface_row.get_subtitle() or "")
+        page.interface_row.set_selected(0)
+        window.preferences.close(wait=True)
+        assert target.read_text() == document
+    finally:
+        window.destroy()
         application._stills.shutdown()
         application.session.shutdown()
 

@@ -5383,7 +5383,8 @@ class _Commands:
         if self._app.present_page(page) is False:
             return Response.failure(
                 f"the {page} page is not available in the new UI yet; the window is open. "
-                "Start Wall-in-One with --ui=classic to use it.",
+                "To use it, choose the classic interface in Settings and restart "
+                "Wall-in-One, or start it with --ui=classic.",
                 kind="not-in-new-ui",
             )
         return Response.success(f"opened {page}")

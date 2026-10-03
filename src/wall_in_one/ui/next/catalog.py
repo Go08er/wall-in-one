@@ -13,7 +13,10 @@ KIND_ICON: Final[dict[str, str]] = {
 }
 
 #: Said where a page or an action of the new interface is not ported yet.
-CLASSIC_HINT: Final = "Start Wall-in-One with --ui=classic to use it."
+CLASSIC_HINT: Final = (
+    "To use it, choose the classic interface in Settings and restart Wall-in-One, "
+    "or start it with --ui=classic."
+)
 
 
 def quoted(text: str) -> str:

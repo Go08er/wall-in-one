@@ -1008,6 +1008,9 @@ struct RuntimeDriverState {
     motion_active: bool,
     active_outputs: HashSet<String>,
     fail_apply: bool,
+    /// Refuse every apply on this one output, as a renderer that cannot
+    /// start there would, while other outputs succeed.
+    fail_apply_output: Option<String>,
     fail_applies_remaining: usize,
     fail_entry_id: Option<String>,
     fail_entry_attempts_remaining: usize,
@@ -1052,6 +1055,9 @@ impl WallpaperDriver for RuntimeDriver {
         state.applied_outputs.push(output.to_string());
         if state.fail_apply {
             return Err("renderer refused resume".into());
+        }
+        if state.fail_apply_output.as_deref() == Some(output) {
+            return Err(format!("renderer refused {output}"));
         }
         if state.fail_entry_id.as_deref() == Some(&entry.id)
             && state.fail_entry_attempts_remaining > 0
@@ -5056,6 +5062,72 @@ fn only_a_successful_apply_or_quit_supersedes_startup_readiness() {
             .ok
     );
     assert_ne!(runtime.authoritative_generation(), toggle_paused);
+}
+
+/// Two outputs showing the day playlist's video, stopped, with DP-1 about
+/// to refuse every apply while HDMI-A-1 still succeeds.
+fn stopped_pair_with_one_failing_output(
+    independent: bool,
+) -> (
+    Runtime<RuntimeDriver>,
+    Arc<Mutex<RuntimeDriverState>>,
+    chrono::NaiveDateTime,
+) {
+    let document = if independent {
+        independent_config()
+    } else {
+        format!(
+            "{}\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"day\"\n\
+             [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"day\"\n",
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        )
+    };
+    let at = noon();
+    let (mut runtime, state) = started_runtime(loaded(&document, &[]), at);
+    assert!(runtime_command(&mut runtime, at, "next", None).ok);
+    let both: HashSet<String> = ["DP-1".to_string(), "HDMI-A-1".to_string()].into();
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        both,
+        "both play the video"
+    );
+    assert!(runtime_command(&mut runtime, at, "stop", None).ok);
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    state.lock().unwrap().fail_apply_output = Some("DP-1".into());
+    (runtime, state, at)
+}
+
+#[test]
+fn a_partly_failed_resume_from_stopped_leaves_no_output_animating() {
+    for independent in [false, true] {
+        let (mut runtime, state, at) = stopped_pair_with_one_failing_output(independent);
+        let response = runtime_command(&mut runtime, at, "play", None);
+        assert!(!response.ok, "DP-1 refused, so Play reports failure");
+        assert!(
+            response.message.contains("renderer refused DP-1"),
+            "{}",
+            response.message
+        );
+        let snapshot = status(&mut runtime, at);
+        assert_eq!(
+            state.lock().unwrap().active_outputs,
+            HashSet::new(),
+            "independent={independent}: HDMI-A-1 started, then must be released"
+        );
+        assert_eq!(
+            snapshot["motion_active"], false,
+            "independent={independent}"
+        );
+        for row in snapshot["displays"].as_array().unwrap() {
+            assert_eq!(row["playback_state"], "stopped", "{row}");
+            assert_eq!(row["motion_active"], false, "{row}");
+        }
+
+        // Once DP-1 can start again, Play resumes both.
+        state.lock().unwrap().fail_apply_output = None;
+        assert!(runtime_command(&mut runtime, at, "play", None).ok);
+        assert_eq!(state.lock().unwrap().active_outputs.len(), 2);
+    }
 }
 
 #[test]

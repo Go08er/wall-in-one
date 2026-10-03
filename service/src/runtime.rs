@@ -3776,8 +3776,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             PlaybackState::Stopped => {
                 self.playback_state = PlaybackState::Playing;
                 if let Err(error) = self.apply_current() {
-                    // A failed resume did not restore motion. Keep status honest
-                    // and retain the released/still-only state for another try.
+                    // A failed resume did not restore motion everywhere: one
+                    // output can fail after another started. As for Paused,
+                    // release every surviving child, then keep status honest
+                    // and the still-only state for another try.
+                    self.driver.stop();
                     self.playback_state = PlaybackState::Stopped;
                     return Err(error);
                 }

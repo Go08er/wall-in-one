@@ -39,6 +39,12 @@ from wall_in_one.ui_prefs import UiPrefs
 LOGGER = logging.getLogger(__name__)
 #: How long a dial must rest before its value is saved.
 DIAL_SAVE_DELAY_MS: Final = 600
+#: The interface a start without ``--ui`` builds, as both windows offer it.
+INTERFACE_CHOICES: Final[tuple[tuple[str, str], ...]] = (
+    ("classic", "Classic"),
+    ("next", "New (preview)"),
+)
+INTERFACE_NOTE: Final = "Takes effect the next time Wall-in-One starts."
 
 
 class UiPrefsKeeper:

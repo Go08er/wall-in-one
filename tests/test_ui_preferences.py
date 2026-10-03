@@ -19,7 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
-from wall_in_one import config  # noqa: E402
+from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
 from wall_in_one.theme.noctalia import ALL_SCHEMES  # noqa: E402
 from wall_in_one.ui.preferences import PreferencesPage  # noqa: E402
@@ -339,3 +339,51 @@ def test_scene_presentation_choices_are_saved_and_failed_writes_restore_them(
     page._scene_scaling.set_selected(scenes.SCALING_CHOICES.index("fit"))
     assert application.settings.scene_scaling == "fill"
     assert page._scene_scaling.get_selected() == scenes.SCALING_CHOICES.index("fill")
+
+
+# -- the interface to start --------------------------------------------------------------
+
+
+def test_the_interface_row_saves_ui_toml_once_and_only_on_a_change(tmp_path: Path) -> None:
+    application = SettingsApp(tmp_path)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    row = page._interface
+    target = paths.ui_prefs_path()
+    model = row.get_model()
+    assert isinstance(model, Gtk.StringList)
+    assert [model.get_string(i) for i in range(model.get_n_items())] == [
+        "Classic",
+        "New (preview)",
+    ]
+    assert row.get_selected() == 0 and row.get_sensitive()
+    assert row.get_subtitle() == "Takes effect the next time Wall-in-One starts."
+    assert not target.exists(), "opening Settings writes nothing"
+
+    row.set_selected(1)
+    page._ui_prefs.close(wait=True)
+
+    assert ui_prefs.load().prefs.interface == "next"
+    assert page._ui_prefs.saves == 1
+    assert application.changes == [], "settings.toml is not touched"
+    again = PreferencesPage(application)  # type: ignore[arg-type]
+    assert again._interface.get_selected() == 1, "the next Settings shows the saved choice"
+    again._ui_prefs.close(wait=True)
+    assert again._ui_prefs.saves == 0
+
+
+def test_the_interface_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path) -> None:
+    target = paths.ui_prefs_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    document = 'version = 9\ninterface = "next"\n'
+    target.write_text(document)
+    application = SettingsApp(tmp_path)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    row = page._interface
+
+    assert not row.get_sensitive()
+    assert "newer version of Wall-in-One" in (row.get_subtitle() or "")
+    assert row.get_selected() == 1, "it still shows what the file chose"
+    row.set_selected(0)  # even asked directly, nothing is written
+    page._ui_prefs.close(wait=True)
+    assert target.read_text() == document
+    assert application.reports and "newer version" in application.reports[-1]

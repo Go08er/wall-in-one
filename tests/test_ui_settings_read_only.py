@@ -117,6 +117,8 @@ def test_preferences_shows_the_banner_and_offers_no_settings_edits(
     assert not any(button.get_sensitive() for button in root_buttons)
     # The Wallhaven key lives in its own file and stays editable.
     assert page._api_key_entry.get_sensitive()
+    # So does the interface to start, in ui.toml.
+    assert page._interface.get_sensitive()
 
     # Even a programmatic toggle cannot get a change saved: it is refused,
     # and the switch returns to the durable value.

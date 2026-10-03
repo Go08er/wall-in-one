@@ -24,6 +24,7 @@ from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui import runtime_truth
+from wall_in_one.ui.next.prefs import INTERFACE_CHOICES, INTERFACE_NOTE, UiPrefsKeeper
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.ui.tidy_section import TidySection
 from wall_in_one.wallpaper import renderer, scenes
@@ -731,7 +732,36 @@ class PreferencesPage(Adw.PreferencesPage):
         )
         self._opacity.connect("notify::value", self._on_changed)
         group.add(self._opacity)
+
+        # Which window the next start builds. It lives in ui.toml, not
+        # settings.toml, so it is not among the settings controls: read-only
+        # settings leave it alone, and only an unwritable ui.toml turns it off.
+        # The keeper is ui.toml's one writer, shared with the new window.
+        # Reports are looked up when one is due: lightweight application doubles
+        # build this page without the window's report.
+        self._ui_prefs = UiPrefsKeeper(lambda message: self._app.window_report(message))
+        self.connect("unrealize", lambda _page: self._ui_prefs.close())
+        self._interface = Adw.ComboRow(
+            title="Interface",
+            subtitle=INTERFACE_NOTE,
+            model=Gtk.StringList.new([label for _key, label in INTERFACE_CHOICES]),
+        )
+        keys = [key for key, _label in INTERFACE_CHOICES]
+        self._interface.set_selected(keys.index(self._ui_prefs.prefs.interface))
+        blocked = self._ui_prefs.read_only
+        if blocked:
+            self._interface.set_subtitle(blocked)
+            self._interface.set_sensitive(False)
+        self._interface.connect("notify::selected", self._on_interface)
+        group.add(self._interface)
         return group
+
+    def _on_interface(self, row: Adw.ComboRow, _property: object) -> None:
+        index = row.get_selected()
+        if not 0 <= index < len(INTERFACE_CHOICES):
+            return
+        if not self._ui_prefs.change(interface=INTERFACE_CHOICES[index][0]):
+            self._app.window_report(self._ui_prefs.read_only)
 
     # -- read-only settings ----------------------------------------------
 

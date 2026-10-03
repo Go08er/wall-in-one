@@ -10,6 +10,7 @@ an actions menu.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -55,6 +56,25 @@ STILL_PICKER_PAGE_SIZE: Final = 48
 #: visible swatch owns CSS and colour widgets.  Search still covers the whole
 #: catalogue, while explicit paging keeps an editor opening bounded.
 PALETTE_PAGE_SIZE: Final = 24
+
+
+def _queue_intent[T](intents: dict[str, tuple[T, int]], key: str, value: T) -> None:
+    """One more save queued for ``key``; the controls show ``value`` meanwhile."""
+    _previous, outstanding = intents.get(key, (value, 0))
+    intents[key] = (value, outstanding + 1)
+
+
+def _settle_intent[T](intents: dict[str, tuple[T, int]], key: str) -> bool:
+    """One queued save for ``key`` finished; True when it was the last one."""
+    entry = intents.get(key)
+    if entry is None:
+        return True
+    value, outstanding = entry
+    if outstanding > 1:
+        intents[key] = (value, outstanding - 1)
+        return False
+    del intents[key]
+    return True
 
 
 class _StillCard(Gtk.ToggleButton):
@@ -114,6 +134,15 @@ class PairingsPage(Gtk.Box):
         ] = {}
         self._policy_render_key: object = None
         self._reflecting_policy = False
+        # Saves still queued on the authoring actor, per pairing identity: what
+        # the controls show meanwhile, and how many are outstanding. A gesture
+        # builds on this rather than on the last durable pairing, so it never
+        # captures a sibling field an earlier queued gesture is changing, and
+        # going back to the saved value is not dropped as "unchanged". Each
+        # save writes only the field its gesture changed, onto whatever is
+        # durable when it reaches the head of the queue.
+        self._palette_intent: dict[str, tuple[pairings.PalettePolicy, int]] = {}
+        self._still_intent: dict[str, tuple[Path | None, int]] = {}
         self._palette_catalog = palette_catalog or PaletteCatalog()
         self._owns_palette_catalog = palette_catalog is None
         self._catalog_state = self._palette_catalog.state
@@ -308,8 +337,9 @@ class PairingsPage(Gtk.Box):
             title="Theme mode",
             model=Gtk.StringList.new([label for label, _mode in _MODES]),
         )
+        shown = self._shown(bundle).palette
         self._mode_row.set_selected(
-            next(i for i, choice in enumerate(_MODES) if choice[1] is bundle.palette.mode)
+            next(i for i, choice in enumerate(_MODES) if choice[1] is shown.mode)
         )
         self._mode_row.connect("notify::selected", self._make_mode_changed(item))
         colour_group.add(self._mode_row)
@@ -336,7 +366,7 @@ class PairingsPage(Gtk.Box):
         self._palette_limit = PALETTE_PAGE_SIZE
         self._populate_policy_list(item, bundle)
         self._editor.append(colour_group)
-        self._refresh_palette_swatches(bundle.palette.mode)
+        self._refresh_palette_swatches(shown.mode)
 
         self._reset_button = Gtk.Button(label="Reset this pairing to automatic defaults")
         self._reset_button.add_css_class("destructive-action")
@@ -351,6 +381,7 @@ class PairingsPage(Gtk.Box):
 
     def _populate_policy_list(self, item: MediaItem, bundle: pairings.Pairing) -> None:
         """Rebuild only the bounded policy rows; keep search and page identity."""
+        bundle = self._shown(bundle)
         render_key = (
             item.path,
             bundle.palette,
@@ -474,7 +505,7 @@ class PairingsPage(Gtk.Box):
             return
         bundle = session.pairings.resolve_accepted(item, session.library)
         self._populate_policy_list(item, bundle)
-        self._refresh_palette_swatches(bundle.palette.mode)
+        self._refresh_palette_swatches(self._shown(bundle).palette.mode)
 
     def _show_more_palettes(self, _button: Gtk.Button) -> None:
         self._palette_limit += PALETTE_PAGE_SIZE
@@ -484,7 +515,7 @@ class PairingsPage(Gtk.Box):
             return
         bundle = session.pairings.resolve_accepted(item, session.library)
         self._populate_policy_list(item, bundle)
-        self._refresh_palette_swatches(bundle.palette.mode)
+        self._refresh_palette_swatches(self._shown(bundle).palette.mode)
 
     def _catalog_changed(self, state: CatalogState) -> None:
         self._catalog_state = state
@@ -494,7 +525,7 @@ class PairingsPage(Gtk.Box):
             return
         bundle = session.pairings.resolve_accepted(item, session.library)
         self._populate_policy_list(item, bundle)
-        self._refresh_palette_swatches(bundle.palette.mode)
+        self._refresh_palette_swatches(self._shown(bundle).palette.mode)
 
     def _build_still_picker(
         self, item: MediaItem, bundle: pairings.Pairing
@@ -593,9 +624,10 @@ class PairingsPage(Gtk.Box):
         # constructing every card before it. A search that deliberately
         # excludes it is allowed to hide it; the manual/current subtitle still
         # names the choice.
-        if not self._still_search.get_text().strip() and self._still_selected is not None:
+        shown = self._still_shown()
+        if not self._still_search.get_text().strip() and shown is not None:
             chosen = next(
-                (item for item in self._still_inventory if item.path == self._still_selected),
+                (item for item in self._still_inventory if item.path == shown),
                 None,
             )
             if chosen is not None and all(item.path != chosen.path for item in visible):
@@ -662,12 +694,21 @@ class PairingsPage(Gtk.Box):
             self._reconcile_still_cards(item)
             self._reflect_still_selection()
 
+    def _still_shown(self) -> Path | None:
+        """The still choice the picker shows: a queued save's, else the saved one."""
+        item = self._selected
+        pending = (
+            self._still_intent.get(pairings.Identity.of(item).key) if item is not None else None
+        )
+        return pending[0] if pending is not None else self._still_selected
+
     def _reflect_still_selection(self) -> None:
+        shown = self._still_shown()
         self._reflecting_still = True
         try:
-            self._automatic_still.set_active(self._still_selected is None)
+            self._automatic_still.set_active(shown is None)
             for path, card in self._still_cards_by_path.items():
-                card.set_active(path == self._still_selected)
+                card.set_active(path == shown)
         finally:
             self._reflecting_still = False
         known = self._still_selected is None or any(
@@ -684,7 +725,7 @@ class PairingsPage(Gtk.Box):
         )
 
     def _choose_picker_still(self, item: MediaItem, still: Path | None) -> None:
-        if self._reflecting_still or still == self._still_selected:
+        if self._reflecting_still or still == self._still_shown():
             return
         try:
             if still is not None:
@@ -694,24 +735,35 @@ class PairingsPage(Gtk.Box):
             self._reflect_still_selection()
             return
         store = self._app.session.pairings
+        key = pairings.Identity.of(item).key
+        _queue_intent(self._still_intent, key, still)
 
         def saved(result: Any) -> None:
+            _settle_intent(self._still_intent, key)
             current = self._app.adopt_pairing_still(result.item, result.effective_still)
             bundle = self._app.session.pairings.resolve_accepted(
                 current,
                 self._app.session.library,
             )
-            self._rendered = self._editor_key(current, bundle)
-            self._still_selected = still
-            self._reflect_still_selection()
+            if self._editing(item):
+                self._rendered = self._editor_key(current, bundle)
+                # Saves land in order, so this is now the durable choice; the
+                # picker keeps showing a later queued one until it lands.
+                self._still_selected = still
+                self._reflect_still_selection()
             self._request_adaptive_previews(bundle)
             self._app.pairing_changed(current)
 
+        reported = False
+
         def failed(error: str) -> None:
+            nonlocal reported
+            reported = True
+            _settle_intent(self._still_intent, key)
             self._app.window_report(str(error))
             self._reflect_still_selection()
 
-        self._app.authoring_action_async(
+        accepted = self._app.authoring_action_async(
             lambda: store.choose_still(item, still),
             saved,
             prepare=lambda: self._app.prepare_still_pairing_mutation(
@@ -723,6 +775,11 @@ class PairingsPage(Gtk.Box):
             ),
             failure=failed,
         )
+        if not accepted and not reported:
+            # Refused without a report (shutting down, or authoring not open
+            # yet): nothing is queued, so the picker shows what is saved.
+            _settle_intent(self._still_intent, key)
+            self._reflect_still_selection()
 
     def _restore_interaction(self, scroll: float, focus: str) -> bool:
         self._editor_scroll.get_vadjustment().set_value(scroll)
@@ -833,7 +890,7 @@ class PairingsPage(Gtk.Box):
 
     def _request_adaptive_previews(self, bundle: pairings.Pairing) -> None:
         self._adaptive_previews.clear()
-        self._refresh_palette_swatches(bundle.palette.mode)
+        self._refresh_palette_swatches(self._shown(bundle).palette.mode)
         if bundle.still is None:
             return
         for scheme in noctalia.ALL_SCHEMES:
@@ -849,7 +906,25 @@ class PairingsPage(Gtk.Box):
         if bundle.still != preview.image:
             return
         self._adaptive_previews[preview.scheme] = preview
-        self._refresh_palette_swatch(f"{pairings.ADAPTIVE}:{preview.scheme}", bundle.palette.mode)
+        self._refresh_palette_swatch(
+            f"{pairings.ADAPTIVE}:{preview.scheme}", self._shown(bundle).palette.mode
+        )
+
+    def _resolve(self, item: MediaItem) -> pairings.Pairing:
+        session = self._app.session
+        return session.pairings.resolve_accepted(item, session.library)
+
+    def _shown(self, bundle: pairings.Pairing) -> pairings.Pairing:
+        """``bundle`` as the controls show it: a queued colour change replaces the saved one."""
+        pending = self._palette_intent.get(bundle.identity.key)
+        return bundle if pending is None else replace(bundle, palette=pending[0])
+
+    def _editing(self, item: MediaItem) -> bool:
+        selected = self._selected
+        return (
+            selected is not None
+            and pairings.Identity.of(selected).key == pairings.Identity.of(item).key
+        )
 
     def _make_mode_changed(self, item: MediaItem) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
@@ -858,15 +933,16 @@ class PairingsPage(Gtk.Box):
             index = row.get_selected()
             if index >= len(_MODES):
                 return
-            session = self._app.session
-            current = session.pairings.resolve_accepted(item, session.library).palette
-            wanted = pairings.PalettePolicy(current.kind, current.name, _MODES[index][1])
-            if wanted == current:
+            mode = _MODES[index][1]
+            shown = self._shown(self._resolve(item)).palette
+            if mode is shown.mode:
                 return
-            if self._store_policy(item, wanted):
-                self._refresh_palette_swatches(wanted.mode)
-            else:
-                self._reflect_palette_policy(current)
+            if self._store_policy(
+                item,
+                replace(shown, mode=mode),
+                lambda store, current: store.choose_mode(current, mode),
+            ):
+                self._refresh_palette_swatches(mode)
 
         return changed
 
@@ -874,13 +950,15 @@ class PairingsPage(Gtk.Box):
         def changed(button: Gtk.CheckButton) -> None:
             if self._reflecting_policy or not button.get_active():
                 return
-            session = self._app.session
-            current = session.pairings.resolve_accepted(item, session.library).palette
-            wanted = pairings.PalettePolicy(policy.kind, policy.name, current.mode)
-            if wanted == current:
+            shown = self._shown(self._resolve(item)).palette
+            wanted = pairings.PalettePolicy(policy.kind, policy.name, shown.mode)
+            if wanted == shown:
                 return
-            if not self._store_policy(item, wanted):
-                self._reflect_palette_policy(current)
+            self._store_policy(
+                item,
+                wanted,
+                lambda store, current: store.choose_palette(current, wanted, keep_mode=True),
+            )
 
         return changed
 
@@ -904,32 +982,59 @@ class PairingsPage(Gtk.Box):
             self._reflecting_policy = False
         self._refresh_palette_swatches(policy.mode)
 
-    def _store_policy(self, item: MediaItem, policy: pairings.PalettePolicy) -> bool:
+    def _store_policy(
+        self,
+        item: MediaItem,
+        wanted: pairings.PalettePolicy,
+        mutation: Callable[[pairings.Store, MediaItem], pairings.Pairing],
+    ) -> bool:
+        """Queue one colour change; the controls show ``wanted`` until the queue drains.
+
+        ``mutation`` writes only the field the gesture changed (the palette
+        keeps the recorded mode, a mode keeps the recorded palette), so a
+        save queued behind another builds on that one's result. Once the last
+        queued save for the pairing lands, or fails, the controls show what
+        is durable.
+        """
+        key = pairings.Identity.of(item).key
         store = self._app.session.pairings
+        _queue_intent(self._palette_intent, key, wanted)
 
         def saved(_record: pairings.Pairing) -> None:
-            session = self._app.session
-            bundle = session.pairings.resolve_accepted(item, session.library)
-            self._rendered = self._editor_key(item, bundle)
+            last = _settle_intent(self._palette_intent, key)
+            bundle = self._resolve(item)
+            if self._editing(item):
+                self._rendered = self._editor_key(item, bundle)
+                if last:
+                    self._reflect_palette_policy(bundle.palette)
             self._app.pairing_changed(item)
 
-        def failed(error: str) -> None:
-            self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
-            current = self._app.session.pairings.resolve_accepted(
-                item,
-                self._app.session.library,
-            ).palette
-            self._reflect_palette_policy(current)
+        reported = False
 
-        return self._app.authoring_action_async(
-            lambda: store.choose_palette(item, policy),
+        def failed(error: str) -> None:
+            nonlocal reported
+            reported = True
+            last = _settle_intent(self._palette_intent, key)
+            self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
+            if last and self._editing(item):
+                self._reflect_palette_policy(self._resolve(item).palette)
+
+        accepted = self._app.authoring_action_async(
+            lambda: mutation(store, item),
             saved,
-            prepare=lambda: self._app.prepare_pairing_mutation(
-                item,
-                lambda current_store, current: current_store.choose_palette(current, policy),
-            ),
+            prepare=lambda: self._app.prepare_pairing_mutation(item, mutation),
             failure=failed,
         )
+        # Refused without a report (shutting down, or authoring not open yet):
+        # nothing is queued, so the controls show what is saved.
+        if (
+            not accepted
+            and not reported
+            and _settle_intent(self._palette_intent, key)
+            and self._editing(item)
+        ):
+            self._reflect_palette_policy(self._resolve(item).palette)
+        return accepted
 
     def _choose_manual_still(self, item: MediaItem) -> None:
         dialog = Gtk.FileDialog(title=f"Choose a still for {item.name}", modal=True)

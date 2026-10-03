@@ -938,6 +938,32 @@ class Store:
 
         return self._mutate(choose)
 
+    def choose_mode(self, item: MediaItem, mode: Mode) -> Pairing:
+        """Record only the light/dark mode ``item`` asks for.
+
+        The colours it asks for are kept as recorded at the moment of the
+        write, so a mode change queued behind a palette change keeps that
+        palette rather than one read before it was saved.
+        """
+        identity = Identity.of(item)
+
+        def choose(records: dict[str, Pairing]) -> tuple[Pairing, bool]:
+            existing = records.get(identity.key)
+            still = existing.still if existing is not None else None
+            health = existing.health if existing is not None else Health()
+            palette = existing.palette if existing is not None else PalettePolicy()
+            record = Pairing(
+                identity=identity,
+                still=still,
+                palette=replace(palette, mode=mode),
+                customized=True,
+                health=health,
+            )
+            records[identity.key] = record
+            return record, record != existing
+
+        return self._mutate(choose)
+
     def mark_borked(self, item: MediaItem, reason: str, source: str) -> bool:
         """Persist one runtime finding without changing pairing choices.
 

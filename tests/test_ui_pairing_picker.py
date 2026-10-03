@@ -375,10 +375,12 @@ def test_failed_palette_write_restores_mode_and_policy_controls(
     replacement_name = next(name for name in noctalia.ALL_SCHEMES if name != original_name)
     replacement = page._palette_buttons[f"adaptive:{replacement_name}"]
 
-    def fail(_item: MediaItem, _policy: pairings.PalettePolicy) -> None:
+    def fail(_item: MediaItem, _choice: object, **_options: object) -> None:
         raise pairings.PairingError("local-io", "disk full")
 
+    # A colour change writes one field: the palette, or the mode alone.
     monkeypatch.setattr(session.pairings, "choose_palette", fail)
+    monkeypatch.setattr(session.pairings, "choose_mode", fail)
     page._mode_row.set_selected(2)  # Light
 
     assert page._mode_row.get_selected() == 0  # Keep current mode
@@ -442,5 +444,184 @@ def test_file_picker_refuses_an_indexed_video_as_a_still(
     assert application.changes == 0
     assert len(application.messages) == 1
     assert "indexed as video, not as a still image" in application.messages[0]
+    page.shutdown()
+    session.shutdown()
+
+
+class QueuedPairingApp(PairingApp):
+    """The ordered authoring actor, held: accepted gestures wait for `drain`.
+
+    As on the real actor, every gesture is accepted while it is busy, and each
+    one's ``prepare`` runs only when it reaches the head of the queue, then its
+    work, then its finish on GTK.
+    """
+
+    def __init__(self, session: Session) -> None:
+        super().__init__(session)
+        self.queue: list[tuple[Any, Any, Any, Any]] = []
+
+    def authoring_action_async(
+        self,
+        work: Any,
+        finish: Any,
+        *,
+        prepare: Any = None,
+        failure: Any = None,
+        **_keywords: object,
+    ) -> bool:
+        self.queue.append((work, finish, prepare, failure))
+        return True
+
+    def drain(self) -> None:
+        while self.queue:
+            work, finish, prepare, failure = self.queue.pop(0)
+            try:
+                result = (prepare() if prepare is not None else work)()
+            except Exception as error:
+                if failure is not None:
+                    failure(str(error))
+                continue
+            finish(result)
+
+
+def _mode_index(mode: pairings.Mode) -> int:
+    return next(
+        index for index, (_label, choice) in enumerate(pairings_page._MODES) if choice is mode
+    )
+
+
+def _queued_editor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Session, QueuedPairingApp, pairings_page.PairingsPage, MediaItem]:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    picture = tmp_path / "wall.png"
+    picture.write_bytes(b"image")
+    media = _item(picture)
+    session = _session(tmp_path, item=media, stills=(media,))
+    application = QueuedPairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    page.edit(session, media)
+    return session, application, page, media
+
+
+def test_a_mode_queued_behind_a_palette_keeps_that_palette(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final 0.2.0 review F-2: m3-content, then Light, while the actor is busy.
+    The mode used to be saved over the palette read before m3-content landed."""
+    session, application, page, media = _queued_editor(tmp_path, monkeypatch)
+    content = page._palette_buttons["adaptive:m3-content"]
+
+    content.set_active(True)
+    page._mode_row.set_selected(_mode_index(pairings.Mode.LIGHT))
+
+    assert len(application.queue) == 2
+    assert content.get_active()
+    assert page._mode_row.get_selected() == _mode_index(pairings.Mode.LIGHT)
+
+    application.drain()
+
+    saved = session.pairings.get(pairings.Identity.of(media))
+    assert saved is not None
+    assert saved.palette == pairings.PalettePolicy(
+        pairings.ADAPTIVE, "m3-content", pairings.Mode.LIGHT
+    )
+    assert content.get_active()
+    assert page._mode_row.get_selected() == _mode_index(pairings.Mode.LIGHT)
+    assert application.messages == []
+
+    page.shutdown()
+    session.shutdown()
+
+
+def test_going_back_while_a_mode_is_queued_is_saved_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-2: Light, then back to Keep before Light is saved. Keep used to be
+    dropped as equal to the durable mode, so Light was saved under Keep."""
+    session, application, page, media = _queued_editor(tmp_path, monkeypatch)
+
+    page._mode_row.set_selected(_mode_index(pairings.Mode.LIGHT))
+    page._mode_row.set_selected(_mode_index(pairings.Mode.KEEP))
+
+    assert len(application.queue) == 2
+    application.drain()
+
+    saved = session.pairings.get(pairings.Identity.of(media))
+    assert saved is not None and saved.palette.mode is pairings.Mode.KEEP
+    assert page._mode_row.get_selected() == _mode_index(pairings.Mode.KEEP)
+
+    page.shutdown()
+    session.shutdown()
+
+
+def test_going_back_to_automatic_while_a_still_is_queued_is_saved_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-2's still-picker analogue: choose a still, then Automatic again before
+    the first save lands. Automatic used to be dropped as already saved."""
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video_path = tmp_path / "motion" / "clip.mp4"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    video = _item(video_path, Kind.VIDEO)
+    cover_path = tmp_path / "cover.png"
+    cover_path.write_bytes(b"image")
+    cover = _item(cover_path)
+    session = _session(tmp_path, item=video, stills=(cover,))
+    application = QueuedPairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    page.edit(session, video)
+    card = page._still_cards_by_path[cover.path]
+    assert page._automatic_still.get_active()
+
+    card.set_active(True)
+    page._automatic_still.set_active(True)
+
+    assert len(application.queue) == 2
+    assert page._automatic_still.get_active() and not card.get_active()
+
+    application.drain()
+
+    saved = session.pairings.get(pairings.Identity.of(video))
+    assert saved is not None and saved.still is None
+    assert page._automatic_still.get_active() and not card.get_active()
+    assert application.messages == []
+
+    page.shutdown()
+    session.shutdown()
+
+
+class RefusingPairingApp(QueuedPairingApp):
+    """Authoring not open yet: gestures are refused without a failure report."""
+
+    def authoring_action_async(self, work: Any, finish: Any, **_keywords: Any) -> bool:
+        return False
+
+
+def test_a_refused_gesture_leaves_nothing_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-2's intent tracking must not outlive a gesture the actor never took:
+    the controls go back to what is saved, and the next gesture is judged
+    against that."""
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    picture = tmp_path / "wall.png"
+    picture.write_bytes(b"image")
+    media = _item(picture)
+    session = _session(tmp_path, item=media, stills=(media,))
+    application = RefusingPairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    page.edit(session, media)
+
+    page._mode_row.set_selected(_mode_index(pairings.Mode.LIGHT))
+
+    assert page._mode_row.get_selected() == _mode_index(pairings.Mode.KEEP)
+    assert page._palette_intent == {}
+    assert session.pairings.get(pairings.Identity.of(media)) is None
+
     page.shutdown()
     session.shutdown()

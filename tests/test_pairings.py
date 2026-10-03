@@ -329,6 +329,27 @@ def test_choosing_only_a_palette_keeps_the_chosen_light_or_dark_mode(tmp_path: P
     assert reopened.palette.mode is pairings.Mode.DARK
 
 
+def test_choosing_only_a_mode_keeps_the_recorded_palette_and_still(tmp_path: Path) -> None:
+    """The pairing editor's mode control writes the mode alone (final 0.2.0
+    review F-2), so a mode queued behind a palette change keeps that palette."""
+    clip = video(tmp_path / "clip.mp4")
+    chosen = png(tmp_path / "chosen.png")
+    store = Store(path=tmp_path / "pairings.json")
+    store.choose_still(item(clip, Kind.VIDEO), chosen)
+    store.choose_palette(item(clip, Kind.VIDEO), PalettePolicy(pairings.ADAPTIVE, "m3-content"))
+    store.choose_mode(item(clip, Kind.VIDEO), pairings.Mode.LIGHT)
+    reopened = Store.open(tmp_path / "pairings.json").resolve(
+        item(clip, Kind.VIDEO), roots=[tmp_path]
+    )
+    assert reopened.still == chosen
+    assert reopened.palette == PalettePolicy(pairings.ADAPTIVE, "m3-content", pairings.Mode.LIGHT)
+    assert reopened.customized
+
+    fresh = png(tmp_path / "fresh.png")
+    store.choose_mode(item(fresh), pairings.Mode.DARK)
+    assert store.resolve(item(fresh)).palette == PalettePolicy(mode=pairings.Mode.DARK)
+
+
 def test_the_pairing_editor_still_sets_the_mode_it_asks_for(tmp_path: Path) -> None:
     picture = png(tmp_path / "a.png")
     store = Store(path=tmp_path / "pairings.json")

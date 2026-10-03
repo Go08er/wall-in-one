@@ -39,6 +39,7 @@ from types import TracebackType
 from typing import Any, Final
 
 from wall_in_one import file_io, paths
+from wall_in_one.library import state_file
 from wall_in_one.theme import noctalia
 
 TEMPLATE_ID: Final = "wall-in-one"
@@ -2138,6 +2139,14 @@ def _write_atomically(path: Path, text: str, expected: _SettingsSnapshot) -> Pat
     public and the displaced entry remains named at ``transaction.swap``.
     """
 
+    # Every reader of Noctalia's settings here, this module's included, refuses
+    # a file past MAX_NOCTALIA_SETTINGS_BYTES, so an edit must never write one.
+    try:
+        state_file.require_readable_size(text, path, maximum_bytes=MAX_NOCTALIA_SETTINGS_BYTES)
+    except state_file.DocumentTooLargeError as error:
+        raise TemplateInstallError(
+            state_file.too_large_refusal(error, "shorten Noctalia's settings")
+        ) from error
     candidate_document = text.encode("utf-8")
     backup = _backup(path, expected)
     transaction = _begin_publication_transaction(

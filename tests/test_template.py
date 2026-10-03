@@ -2267,6 +2267,28 @@ def test_edit_settings_backs_up_then_exchanges_and_releases_the_file(fake_home: 
     assert stat.S_IMODE(settings_path.stat().st_mode) == 0o644, "Noctalia's permissions stay"
 
 
+def test_edit_settings_never_writes_a_file_its_readers_would_refuse(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Noctalia's settings are read back with a cap (MAX_NOCTALIA_SETTINGS_BYTES).
+    An edit that would take the file past it is refused before anything is
+    written, backups and transaction records included."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    original = settings_path.read_bytes()
+    before = sorted(path.name for path in settings_path.parent.iterdir())
+    monkeypatch.setattr(template, "MAX_NOCTALIA_SETTINGS_BYTES", len(original) + 8)
+
+    with pytest.raises(template.TemplateInstallError, match="this version can read back"):
+        template.edit_settings(
+            hashlib.sha256(original).hexdigest(),
+            lambda text: text + "\n# longer than the eight bytes left\n",
+        )
+
+    assert settings_path.read_bytes() == original
+    assert sorted(path.name for path in settings_path.parent.iterdir()) == before
+    assert template.read_settings_document() == original
+
+
 def test_edit_settings_refuses_a_file_rewritten_since_it_was_read(fake_home: Path) -> None:
     settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
     seen = hashlib.sha256(settings_path.read_bytes()).hexdigest()

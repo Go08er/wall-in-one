@@ -76,3 +76,13 @@ def test_the_readme_says_every_control_follows_the_bar_scope() -> None:
     section = _section()
     assert "Every playback control acts on the displays the player bar is scoped to" in section
     assert "act on all of them" not in section
+
+
+def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> None:
+    """The interface is chosen in Settings; --ui overrides it; 0.2.0 and 0.2.1 ignore it."""
+    section = _section()
+    assert "Settings → Appearance → Interface → New (preview)" in section
+    assert "takes effect the next time Wall-in-One starts" in section
+    assert "`--ui=classic` overrides the saved choice for that start" in section
+    assert "When no app is running, `ctl open` launches the interface chosen in Settings" in section
+    assert "0.2.0 and 0.2.1 don't know the choice and start classic" in section

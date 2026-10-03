@@ -78,20 +78,30 @@ existing key, ever again; an older release would read either one as a typo,
 and 0.1.4 can't use a file with one at all.
 
 - New preferences for the window itself (glass style, opacity, frost,
-  thumbnail size, the page to reopen) go in `ui.toml`, beside
-  `settings.toml`. The classic interface reads it for one thing, whether you
+  thumbnail size, the page to reopen, the interface to start) go in
+  `ui.toml`, beside `settings.toml`. A start without `--ui` reads it, without
+  writing, for `interface` (`classic` or `next`): the interface it builds. A
+  missing or unusable value means classic, and `--ui=classic` or `--ui=next`
+  always overrides it. The classic interface also reads it for whether you
   dismissed the Tidy up card after an update (`tidy_offer_dismissed`), and
-  writes it only when you do. The new interface (`--ui=next`) reads it when
-  its window opens and writes it only when you change the window style, an
-  opacity or frost dial, or the thumbnail size. Neither writes it on start or
-  while idle, and there is no unconditional save on close: a pending change
-  you made (a dial you had just let go of) is flushed when the window closes
-  or the app quits. Neither saves the page to reopen or the window size.
+  writes it only when you do or when you change Settings → Appearance →
+  Interface. The new interface (`--ui=next`) reads it when its window opens
+  and writes it only when you change the window style, an opacity or frost
+  dial, the thumbnail size, or the Interface row on its Settings page.
+  Neither writes it on start or while idle, and there is no unconditional
+  save on close: a pending change you made (a dial you had just let go of) is
+  flushed when the window closes or the app quits. Neither saves the page to
+  reopen or the window size.
 - New wallpaper behavior goes in a versioned authoring store, with a version
   bump.
 
 `ui.toml` carries a `version`. A release that finds a newer version uses the
-preferences it understands and never writes the file. Keys it doesn't know are
+preferences it understands and never writes the file. Version 2 adds
+`interface`. A file moves to it only when you first choose New (preview): its
+version 1 bytes are kept first as `ui.toml.v1-backup` (never overwritten, and
+without it nothing is saved), and it stays at version 2 after that, even if
+you choose Classic again. A profile that never chooses New stays at version
+1, which 0.2.0 and 0.2.1 keep reading and writing. Keys it doesn't know are
 kept through every save, an invalid value falls back to that preference's
 default, and a missing file means defaults. An unreadable or malformed
 `ui.toml` also means defaults, but is left exactly as it is until you fix or

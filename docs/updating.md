@@ -130,6 +130,18 @@ repair the configuration. Preserve current files before restoring
 any backup, since a whole-folder restore would discard changes made after that
 backup.
 
+### Going back to 0.2.1 or 0.2.0 after choosing the new interface
+
+0.2.0 and 0.2.1 don't know Settings → Appearance → Interface: they start the
+classic interface (and `--ui=next` still works there). A profile that never
+chose New (preview) is unaffected. Choosing it moved `ui.toml` to version 2,
+after keeping the version 1 file as `ui.toml.v1-backup`. 0.2.0 and 0.2.1 read
+a version 2 `ui.toml` for the preferences they know (window style, opacity,
+frost, thumbnail size, the Tidy up card's dismissal) but don't save changes
+to them; nothing is lost. To let them save those again, close the app and
+copy `ui.toml.v1-backup` over `ui.toml`; window preferences changed since you
+chose New are then back to what they were. 0.1.4 ignores `ui.toml`.
+
 ### Rolling back from 0.2.0 to 0.1.4
 
 0.2.0 isn't designed to be rolled back, and there is no 0.1.5: 0.1.4 is the

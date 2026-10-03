@@ -494,9 +494,13 @@ XDG directories -- never the real one.
 
 ### The new interface behind `--ui=next`
 
-The redesigned interface is being ported from `prototypes/ui-redesign` behind a
-hidden flag. `wall-in-one --ui=next` builds `ui/next/window.py`'s `NextWindow`
-instead of the classic window; `--ui=classic`, or no flag, is today's app.
+The redesigned interface is being ported from `prototypes/ui-redesign` as a
+preview. Choose **Settings → Appearance → Interface → New (preview)** (or, in
+the new interface, its Settings page) and the next start builds
+`ui/next/window.py`'s `NextWindow` instead of the classic window; the choice is
+saved in `ui.toml` and takes effect the next time Wall-in-One starts. The
+hidden flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved
+choice for that start. With neither, the app is classic.
 
 - **What it has so far.** The redesign's sidebar, header and player bar, and a
   paged Library grid with the details pane beside it, all over the app's real
@@ -512,7 +516,9 @@ instead of the classic window; `--ui=classic`, or no flag, is today's app.
   gone, or the displays are mirrored, nothing is sent and a notice says so.
   There is no undo yet. The player bar says what the runtime reports and why
   ("Evening · from schedule", "Your pick"). Store, Playlists, Schedule,
-  Displays and Settings say they are not in the new interface yet.
+  Displays and Settings say they are not in the new interface yet; Settings
+  already offers the Interface choice, so you can go back to classic from
+  inside the new interface.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites and the playback controls off and says so in a notice under
   the header. Settings keys this version doesn't know are named in that notice
@@ -527,15 +533,19 @@ instead of the classic window; `--ui=classic`, or no flag, is today's app.
   `ui/next/real_state.py` is the app's side of that boundary.
 
 - **One process, one interface.** The choice belongs to the process that starts
-  the app. A second `wall-in-one --ui=…` that reaches an already-running instance
-  presents that instance's window unchanged and prints a note that its `--ui`
-  was not applied; close the app and start it again to switch. The forwarded
-  activation carries only the package and the page, because older builds fix
-  its shape.
+  the app: the desktop entry, `ctl open` with no app running, and `--service`
+  all read the saved choice when they start it. A second launch that reaches an
+  already-running instance presents that instance's window unchanged (a second
+  `wall-in-one --ui=…` prints a note that its `--ui` was not applied); close the
+  app and start it again to switch. The forwarded activation carries only the
+  package and the page, because older builds fix its shape.
 - **`ctl open <page>`** presents the window either way. In the new interface it
   answers `not-in-new-ui`, with exit status 1, until that page is ported; the
-  Library (`media`) is. When no app is running, `ctl open` launches the classic
-  interface.
+  Library (`media`) is. When no app is running, `ctl open` launches the
+  interface chosen in Settings.
+- **Rolling back.** 0.2.0 and 0.2.1 don't know the choice and start classic
+  (`--ui=next` still works there). See [docs/updating.md](docs/updating.md) for
+  what choosing New (preview) does to `ui.toml` for them.
 - **The seams.** `Application` talks to its window only through the
   `WindowServices` Protocol (`ui/window_services.py`), which mypy checks both
   windows against. Runtime status goes through one `RuntimeStatusModel`

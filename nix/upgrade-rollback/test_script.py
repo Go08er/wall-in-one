@@ -55,16 +55,19 @@ SAFE_PRE_ADMISSION = {
 
 failures: list[str] = []
 observations: dict[str, Any] = {}
-#: The GUIs this test launched, by PID. `ctl open` starts the app in a new
-#: session it leads, so whatever the app starts shares that session ID.
-gui_sessions: list[int] = []
+#: The transient user units the GUIs were launched in, with the window's PID.
+#: Everything a launch starts stays in its unit's cgroup -- including helpers
+#: that begin their own session, as scene and worker helpers do -- so an empty
+#: cgroup is the only proof that nothing the GUI started is still writing.
+gui_units: list[tuple[str, int]] = []
+launches = 0
 
 
 # -- the guest -------------------------------------------------------------------------
 
 
-def user(command: str) -> str:
-    environment = (
+def user_environment() -> str:
+    return (
         f"HOME={HOME} USER=wallpaper "
         f"XDG_CONFIG_HOME={HOME}/.config XDG_STATE_HOME={HOME}/.local/state "
         f"XDG_CACHE_HOME={HOME}/.cache XDG_DATA_HOME={HOME}/.local/share "
@@ -76,7 +79,13 @@ def user(command: str) -> str:
         # would rewrite runtime.toml's program paths for no reason of the app's.
         f"PATH={NOCTALIA_PROBE}/bin:{PROFILE}/bin:/run/current-system/sw/bin LANG=C.UTF-8"
     )
-    return f"runuser -u wallpaper -- env -i {environment} {BASH} -euo pipefail -c {q(command)}"
+
+
+def user(command: str) -> str:
+    return (
+        f"runuser -u wallpaper -- env -i {user_environment()} "
+        f"{BASH} -euo pipefail -c {q(command)}"
+    )
 
 
 def run(command: str) -> str:
@@ -251,9 +260,68 @@ def windows() -> list[dict[str, Any]]:
     return [window for window in json.loads(niri("--json windows")) if window.get("app_id") == APP_ID]
 
 
+def launch_tracked(command: str) -> str:
+    """Run ``command`` as the user, in the same environment, in a unit of its own.
+
+    A oneshot that remains after its command exits, so whatever the command
+    left running stays in the unit's cgroup until it exits too. Returns the
+    unit, which :func:`wait_unit_drained` waits on.
+    """
+    global launches
+    launches += 1
+    unit = f"wall-in-one-test-launch-{launches}.service"
+    run(
+        f"systemd-run --user --quiet --collect --unit={unit} "
+        "--property=Type=oneshot --property=RemainAfterExit=yes "
+        f"-- env -i {user_environment()} {BASH} -euo pipefail -c {q(command)}"
+    )
+    assert prop("ExecMainStatus", unit) == "0", prop("Result", unit)
+    return unit
+
+
+def unit_processes(unit: str) -> list[str]:
+    """The live processes in ``unit``'s cgroup, as ``pid sid args`` lines."""
+    group = prop("ControlGroup", unit)
+    assert group, f"{unit} has no cgroup"
+    found = []
+    for pid in machine.succeed(f"cat /sys/fs/cgroup{group}/cgroup.procs").split():
+        code, line = machine.execute(f"ps -o pid=,sid=,stat=,args= -p {pid}")
+        if code == 0 and line.split(None, 3)[2:3] and not line.split()[2].startswith("Z"):
+            found.append(line.strip())
+    return found
+
+
+def wait_unit_drained(unit: str, leader: int | None = None, timeout: float = 60) -> None:
+    """Every process launched in ``unit`` has exited, then the unit is stopped.
+
+    The window's own process going away is not enough: anything the app
+    started -- a still renderer, a worker, in its own session or not -- can
+    still be writing to the profile after it. Nothing is killed: on timeout
+    this fails, naming the survivors, and the empty unit's stop signals no one.
+    """
+    deadline = time.monotonic() + timeout
+    lingered: list[str] = []
+    while alive := unit_processes(unit):
+        if leader is not None and not any(line.split()[0] == str(leader) for line in alive):
+            lingered = alive
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"what {unit} launched has not exited after {timeout:g} s:\n" + "\n".join(alive)
+            )
+        time.sleep(0.2)
+    if lingered:
+        observe(f"{unit}: processes that outlived the GUI", lingered)
+    run(f"systemctl --user stop {unit}")
+
+
 def open_gui(package: str, page: str, title: str) -> dict[str, Any]:
     """`ctl open`, as vm-test.nix does: the authoring verbs need the GTK app."""
-    assert ctl(package, f"open {page}") == f"launch requested for {page}"
+    unit = launch_tracked(f"{package}/bin/wall-in-one ctl open {page}")
+    machine.wait_until_succeeds(
+        f"journalctl --no-pager -o cat _SYSTEMD_USER_UNIT={unit} "
+        f"| grep -Fx {q(f'launch requested for {page}')}",
+        timeout=15,
+    )
     machine.wait_until_succeeds(
         user(
             f"NIRI_SOCKET=$(find {RUNTIME_DIR} -maxdepth 1 -name 'niri*.sock' -print -quit) "
@@ -265,48 +333,18 @@ def open_gui(package: str, page: str, title: str) -> dict[str, Any]:
     pid = int(window["pid"])
     command = machine.succeed(f"tr '\\0' ' ' < /proc/{pid}/cmdline")
     assert package in command, command
-    session = machine.succeed(f"ps -o sid= -p {pid}").strip()
-    assert session == str(pid), f"the GUI {pid} does not lead its own session ({session})"
-    gui_sessions.append(pid)
+    assert any(line.split()[0] == str(pid) for line in unit_processes(unit)), (
+        f"the GUI {pid} is not in {unit}"
+    )
+    gui_units.append((unit, pid))
     return window
-
-
-def session_processes(session: int) -> list[str]:
-    """Live processes of ``session`` (zombies have exited), as ps lines."""
-    found = []
-    for line in machine.succeed("ps -e -o pid=,sid=,stat=,args=").splitlines():
-        fields = line.split(None, 3)
-        if len(fields) >= 3 and fields[1] == str(session) and not fields[2].startswith("Z"):
-            found.append(line.strip())
-    return found
-
-
-def wait_session_exited(session: int, timeout: float = 60) -> None:
-    """Every process of the GUI launched as ``session`` has exited.
-
-    The window's own PID going away is not enough: anything the app started
-    (a still renderer, a worker) can still be writing to the profile after it.
-    """
-    deadline = time.monotonic() + timeout
-    lingered: list[str] = []
-    while alive := session_processes(session):
-        if not any(line.split(None, 1)[0] == str(session) for line in alive):
-            lingered = alive
-        if time.monotonic() > deadline:
-            raise AssertionError(
-                f"the GUI launched as {session} has not exited after {timeout:g} s:\n"
-                + "\n".join(alive)
-            )
-        time.sleep(0.2)
-    if lingered:
-        observe(f"GUI {session}: processes that outlived it", lingered)
 
 
 def close_gui() -> None:
     for window in windows():
         niri(f"action close-window --id {window['id']}")
-    while gui_sessions:
-        wait_session_exited(gui_sessions.pop())
+    while gui_units:
+        wait_unit_drained(*gui_units.pop())
     machine.wait_until_succeeds(f"test ! -e {GUI_SOCKET}", timeout=30)
     assert not windows()
 
@@ -525,6 +563,21 @@ machine.wait_until_succeeds(user("systemctl --user is-active wall-in-one.service
 machine.wait_until_succeeds(user("systemctl --user is-active noctalia.service"), timeout=90)
 machine.wait_for_file(RUNTIME_SOCKET)
 seeded = _nodes(machine.succeed("cat /var/lib/wall-in-one-upgrade/seed.json"))
+
+with subtest("the GUI census follows a helper that starts its own session"):
+    # A stand-in for a scene or worker helper: started in a new session, it
+    # outlives its launcher. A census by the launcher's session misses it;
+    # the launch unit's cgroup does not. Touches nothing but /tmp.
+    done = "/tmp/wall-in-one-test-helper-done"
+    unit = launch_tracked(f"setsid {BASH} -c 'sleep 6; touch {done}' < /dev/null > /dev/null 2>&1 &")
+    launcher = prop("ExecMainPID", unit)
+    helpers = [line.split()[:2] for line in unit_processes(unit)]
+    # The helper leads a session of its own; nothing left shares the launcher's.
+    assert any(pid == session for pid, session in helpers), helpers
+    assert all(session != launcher for _pid, session in helpers), (launcher, helpers)
+    machine.fail(f"test -e {done}")
+    wait_unit_drained(unit)
+    machine.succeed(f"test -e {done}")
 
 with subtest("a: v0.1.4 starts on the golden profile and applies a wallpaper"):
     check_loaded(OLD)

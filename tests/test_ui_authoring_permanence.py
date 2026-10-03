@@ -1515,3 +1515,220 @@ def test_a_named_rule_is_shown_by_name_and_editing_it_keeps_the_name(tmp_path: P
     assert rules.rules[0].weekdays == frozenset({5, 6})
     assert schedules.Store.open(tmp_path / "schedules.json").rules[0].name == "Frog & toad"
     session.shutdown()
+
+
+class QueuedScheduleApp(ScheduleApp):
+    """The ordered authoring actor, held: accepted edits wait for `drain`.
+
+    As on the real actor, every gesture is accepted while it is busy, and each
+    one's ``prepare`` runs only when it reaches the head of the queue, then its
+    work, then its finish on GTK.
+    """
+
+    def __init__(self, session: Session) -> None:
+        super().__init__(session)
+        self.queue: list[tuple[Any, Any, Any, Any]] = []
+        self.reports: list[str] = []
+
+    def window_report(self, message: str) -> None:
+        self.reports.append(message)
+
+    def runtime_config_changed(self) -> None: ...
+
+    def authoring_action_async(
+        self,
+        work: Any,
+        finish: Any,
+        *,
+        prepare: Any = None,
+        failure: Any = None,
+    ) -> bool:
+        self.queue.append((work, finish, prepare, failure))
+        return True
+
+    def drain(self) -> None:
+        while self.queue:
+            work, finish, prepare, failure = self.queue.pop(0)
+            try:
+                result = (prepare() if prepare is not None else work)()
+            except Exception as error:
+                if failure is not None:
+                    failure(str(error))
+                continue
+            finish(result)
+
+
+def _independent_schedules(
+    tmp_path: Path,
+) -> tuple[Session, QueuedScheduleApp, SchedulesPage, dict[str, str]]:
+    """Independent displays, playlists A, B and C, and DP-1 durably on A."""
+    store = playlists.Store(path=tmp_path / "playlists.json")
+    ids = {name: store.create(name, entry_id=f"entry-{name}").id for name in ("A", "B", "C")}
+    session = Session(
+        config.Settings(display_mode=config.DISPLAY_MODE_INDEPENDENT),
+        scanner=lambda _roots: Library(roots=(Path("/test-media"),), items=()),
+        playlist_store=store,
+        schedule_store=schedules.Store(path=tmp_path / "schedules.json"),
+        display_store=displays.Store(path=tmp_path / "displays.json"),
+    )
+    session.refresh()
+    session.displays.assign("DP-1", ids["A"])
+    application = QueuedScheduleApp(session)
+    page = SchedulesPage(application)  # type: ignore[arg-type]
+    page.refresh(session)
+    return session, application, page, ids
+
+
+def _descendants(widget: Gtk.Widget) -> list[Gtk.Widget]:
+    found: list[Gtk.Widget] = []
+    child = widget.get_first_child()
+    while child is not None:
+        found.append(child)
+        found.extend(_descendants(child))
+        child = child.get_next_sibling()
+    return found
+
+
+def _screen_row(page: SchedulesPage, connector: str) -> Adw.ComboRow:
+    """The selector on screen now for ``connector``, found as a user would."""
+    (row,) = (
+        widget
+        for widget in _descendants(page)
+        if isinstance(widget, Adw.ComboRow) and widget.get_title() == connector
+    )
+    return row
+
+
+def _rule_switch(page: SchedulesPage, title: str) -> Adw.SwitchRow:
+    """The switch on screen now for the rule shown as ``title``."""
+    (row,) = (
+        widget
+        for widget in _descendants(page)
+        if isinstance(widget, Adw.SwitchRow) and widget.get_title() == title
+    )
+    return row
+
+
+def _choice_index(row: Adw.ComboRow, name: str) -> int:
+    model = cast(Gtk.StringList, row.get_model())
+    return next(index for index in range(model.get_n_items()) if model.get_string(index) == name)
+
+
+def _refuse_assignments(
+    monkeypatch: pytest.MonkeyPatch, session: Session, refused: set[str]
+) -> None:
+    real = session.displays.assign
+
+    def assign(connector: str, playlist_id: str) -> None:
+        if playlist_id in refused:
+            raise displays.DisplayError("local-io", "display disk is full")
+        real(connector, playlist_id)
+
+    monkeypatch.setattr(session.displays, "assign", assign)
+
+
+def test_a_queued_assignment_after_a_failed_one_is_shown_once_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.2.1 review H-1: DP-1 on A; B, then C, while the actor is busy. B fails
+    and put the row back on A while C was still queued; C then saved, but the
+    row stayed on A, and an ordinary refresh returned early on the fingerprint."""
+    session, application, page, ids = _independent_schedules(tmp_path)
+    _refuse_assignments(monkeypatch, session, {ids["B"]})
+    row = _screen_row(page, "DP-1")
+    c = _choice_index(row, "C")
+
+    row.set_selected(_choice_index(row, "B"))
+    row.set_selected(c)
+    assert len(application.queue) == 2
+
+    application.drain()
+
+    assert session.displays.playlist_for("DP-1") == ids["C"]
+    assert _screen_row(page, "DP-1").get_selected() == c
+    page.refresh(session)
+    assert _screen_row(page, "DP-1").get_selected() == c
+    assert application.reports[-1] == "Updated DP-1"
+    session.shutdown()
+
+
+def test_a_rebuild_while_assignments_are_queued_keeps_showing_the_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H-1, across a rebuild: the page is rebuilt (as after an edit elsewhere)
+    while B and C are queued. It shows the queued C, and when B fails and C
+    saves, settlement reaches the new row, not the replaced one."""
+    session, application, page, ids = _independent_schedules(tmp_path)
+    _refuse_assignments(monkeypatch, session, {ids["B"]})
+    row = _screen_row(page, "DP-1")
+    c = _choice_index(row, "C")
+    row.set_selected(_choice_index(row, "B"))
+    row.set_selected(c)
+
+    page._fingerprint = None
+    page.refresh(session)
+    rebuilt = _screen_row(page, "DP-1")
+    assert rebuilt is not row
+    assert rebuilt.get_selected() == c
+
+    application.drain()
+
+    assert session.displays.playlist_for("DP-1") == ids["C"]
+    assert _screen_row(page, "DP-1") is rebuilt
+    assert rebuilt.get_selected() == c
+    session.shutdown()
+
+
+def test_queued_assignments_that_all_fail_leave_the_saved_one_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, application, page, ids = _independent_schedules(tmp_path)
+    _refuse_assignments(monkeypatch, session, {ids["B"], ids["C"]})
+    row = _screen_row(page, "DP-1")
+    a = _choice_index(row, "A")
+
+    row.set_selected(_choice_index(row, "B"))
+    row.set_selected(_choice_index(row, "C"))
+    application.drain()
+
+    assert session.displays.playlist_for("DP-1") == ids["A"]
+    assert _screen_row(page, "DP-1").get_selected() == a
+    page.refresh(session)
+    assert _screen_row(page, "DP-1").get_selected() == a
+    assert len(application.reports) == 2
+    session.shutdown()
+
+
+def test_a_rule_switch_shows_the_last_queued_state_once_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H-1's pattern on a rule's switch: off, on, off while the actor is busy,
+    with the first one failing. The switch used to stay on the restored "on"."""
+    session, application, page, ids = _independent_schedules(tmp_path)
+    rule = session.schedules.add(ids["A"], rule_id="evenings", name="Evenings")
+    page.refresh(session)
+    real = session.schedules.set_enabled
+    calls: list[bool] = []
+
+    def set_enabled(rule_id: str, enabled: bool) -> schedules.Rule:
+        calls.append(enabled)
+        if len(calls) == 1:
+            raise schedules.ScheduleError("local-io", "schedule disk is full")
+        return real(rule_id, enabled)
+
+    monkeypatch.setattr(session.schedules, "set_enabled", set_enabled)
+    switch = _rule_switch(page, "Evenings")
+    assert switch.get_active()
+
+    switch.set_active(False)
+    switch.set_active(True)
+    switch.set_active(False)
+    assert len(application.queue) == 3
+    application.drain()
+
+    assert session.schedules.rules[0].id == rule.id
+    assert not session.schedules.rules[0].enabled
+    assert not _rule_switch(page, "Evenings").get_active()
+    page.refresh(session)
+    assert not _rule_switch(page, "Evenings").get_active()
+    session.shutdown()

@@ -16,6 +16,7 @@ from gi.repository import Adw, Gdk, Gtk
 from wall_in_one import config
 from wall_in_one.library import schedules
 from wall_in_one.ui import playback_verbs, runtime_truth
+from wall_in_one.ui.pending_edits import queue_intent, settle_intent
 
 if TYPE_CHECKING:
     from wall_in_one.session import Session
@@ -84,6 +85,14 @@ def _connected_outputs() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _assignment_index(choices: tuple[Any, ...], playlist_id: str) -> int:
+    """A screen selector's row for ``playlist_id``; 0 is "Follow default"."""
+    return next(
+        (at for at, playlist in enumerate(choices, start=1) if playlist.id == playlist_id),
+        0,
+    )
+
+
 class SchedulesPage(Gtk.ScrolledWindow):
     """Choose the default, per-screen playlists, and timed overrides."""
 
@@ -105,6 +114,16 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self._playback_group: Adw.PreferencesGroup | None = None
         self._playback_widgets: list[Gtk.Widget] = []
         self._display_playback_rows: dict[str, _DisplayControls] = {}
+        # Authoring edits still queued, per control (see `pending_edits`): a
+        # screen's playlist by connector, a rule's switch by rule id. Only the
+        # last one to settle puts the control on what is durable, and a
+        # rebuild in between shows the queued value. The live rows are kept
+        # so that settlement reaches the row on screen, not one a rebuild
+        # replaced.
+        self._pending_assignments: dict[str, tuple[str, int]] = {}
+        self._pending_enabled: dict[str, tuple[bool, int]] = {}
+        self._assignment_rows: dict[str, tuple[Adw.ComboRow, tuple[Any, ...]]] = {}
+        self._enabled_rows: dict[str, Adw.SwitchRow] = {}
         self._display_selected_echo: dict[str, int] = {}
         self._playback_truth: runtime_truth.RuntimeTruth | None = None
         self._palette_playback_row: Adw.ActionRow | None = None
@@ -687,20 +706,18 @@ class SchedulesPage(Gtk.ScrolledWindow):
             return group
         choices = session.playlists.all()
         names = ["Follow default", *(one.name for one in choices)]
+        self._assignment_rows.clear()
         for connector in connectors:
             row = Adw.ComboRow(
                 title=connector,
                 subtitle="Not attached" if connector not in connected else "Connected",
                 model=Gtk.StringList.new(names),
             )
-            wanted = assigned.get(connector, "")
-            selected = 0
-            for index, playlist in enumerate(choices, start=1):
-                if playlist.id == wanted:
-                    selected = index
-                    break
-            row.set_selected(selected)
+            pending = self._pending_assignments.get(connector)
+            wanted = pending[0] if pending is not None else assigned.get(connector, "")
+            row.set_selected(_assignment_index(choices, wanted))
             row.connect("notify::selected", self._make_display_changed(connector, choices))
+            self._assignment_rows[connector] = (row, choices)
             group.add(row)
         return group
 
@@ -714,6 +731,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
     def _populate_rules(self, session: Session) -> None:
         self._rule_rows.clear()
+        self._enabled_rows.clear()
         self._rule_more = None
         names = {playlist.id: playlist.name for playlist in session.playlists.all()}
         if not session.schedules.rules:
@@ -734,13 +752,15 @@ class SchedulesPage(Gtk.ScrolledWindow):
             playlist = names.get(rule.playlist, f"Missing playlist {rule.playlist}")
             # A named rule leads with its name and still says what it plays.
             details = f"{target} · priority {index + 1} · {rule.describe()}"
+            pending = self._pending_enabled.get(rule.id)
             row = Adw.SwitchRow(
                 title=playlist if rule.name is None else rule.name,
                 subtitle=details if rule.name is None else f"{playlist} · {details}",
-                active=rule.enabled,
+                active=pending[0] if pending is not None else rule.enabled,
                 use_markup=False,
             )
             row.connect("notify::active", self._make_enabled(rule.id))
+            self._enabled_rows[rule.id] = row
             actions = Adw.WrapBox(orientation=Gtk.Orientation.HORIZONTAL)
             actions.set_child_spacing(2)
             actions.set_line_spacing(2)
@@ -1203,6 +1223,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if self._loading:
                 return
             index = row.get_selected()
+            wanted = choices[index - 1].id if 0 < index <= len(choices) else ""
             store = self._app.session.displays
 
             def work() -> object:
@@ -1211,26 +1232,27 @@ class SchedulesPage(Gtk.ScrolledWindow):
                     return None
                 return store.unassign(connector)
 
+            reported = False
+
             def failed(error: str) -> None:
+                nonlocal reported
+                reported = True
                 self._app.window_report(str(error))
-                # ComboRow has already adopted the clicked index. Put it back
-                # on the durable store so a failed write cannot masquerade as
-                # a saved connector assignment until the page is rebuilt.
-                current = self._app.session.displays.playlist_for(connector)
-                selected = next(
-                    (at for at, playlist in enumerate(choices, start=1) if playlist.id == current),
-                    0,
-                )
-                self._loading = True
-                try:
-                    row.set_selected(selected)
-                finally:
-                    self._loading = False
+                # ComboRow has already adopted the clicked index. Once nothing
+                # else is queued for this screen, put it back on the durable
+                # store, so a failed write cannot masquerade as a saved one;
+                # a later queued choice keeps showing until it settles.
+                if settle_intent(self._pending_assignments, connector):
+                    self._reconcile_assignment(connector, row, choices)
 
             def saved(_result: object) -> None:
                 self._app.runtime_config_changed()
                 self._app.window_report(f"Updated {connector}")
                 self._fingerprint = self._authoring_fingerprint(self._app.session)
+                # An earlier queued choice may have failed and put the row
+                # back meanwhile; the last one to settle shows what is saved.
+                if settle_intent(self._pending_assignments, connector):
+                    self._reconcile_assignment(connector, row, choices)
 
             def prepare() -> Any:
                 if 0 < index <= len(choices):
@@ -1239,14 +1261,35 @@ class SchedulesPage(Gtk.ScrolledWindow):
                         raise ValueError("that playlist was deleted before the assignment saved")
                 return work
 
-            self._app.authoring_action_async(
+            queue_intent(self._pending_assignments, connector, wanted)
+            accepted = self._app.authoring_action_async(
                 work,
                 saved,
                 prepare=prepare,
                 failure=failed,
             )
+            # Refused without a report (shutting down, or authoring not open
+            # yet): nothing is queued.
+            if (
+                not accepted
+                and not reported
+                and settle_intent(self._pending_assignments, connector)
+            ):
+                self._reconcile_assignment(connector, row, choices)
 
         return changed
+
+    def _reconcile_assignment(
+        self, connector: str, gesture_row: Adw.ComboRow, gesture_choices: tuple[Any, ...]
+    ) -> None:
+        """Show ``connector``'s durable playlist, on the row now on screen."""
+        row, choices = self._assignment_rows.get(connector, (gesture_row, gesture_choices))
+        current = self._app.session.displays.playlist_for(connector)
+        self._loading = True
+        try:
+            row.set_selected(_assignment_index(choices, current))
+        finally:
+            self._loading = False
 
     def _make_enabled(self, rule_id: str) -> Any:
         def changed(row: Adw.SwitchRow, _property: object) -> None:
@@ -1254,34 +1297,44 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return
             wanted = row.get_active()
             store = self._app.session.schedules
+            reported = False
 
             def failed(error: str) -> None:
+                nonlocal reported
+                reported = True
                 self._app.window_report(str(error))
-                current = next(
-                    (
-                        rule.enabled
-                        for rule in self._app.session.schedules.rules
-                        if rule.id == rule_id
-                    ),
-                    False,
-                )
-                self._loading = True
-                try:
-                    row.set_active(current)
-                finally:
-                    self._loading = False
+                if settle_intent(self._pending_enabled, rule_id):
+                    self._reconcile_enabled(rule_id, row)
 
             def saved(_rule: schedules.Rule) -> None:
                 self._app.schedule_edited()
                 self._fingerprint = self._authoring_fingerprint(self._app.session)
+                if settle_intent(self._pending_enabled, rule_id):
+                    self._reconcile_enabled(rule_id, row)
 
-            self._app.authoring_action_async(
+            queue_intent(self._pending_enabled, rule_id, wanted)
+            accepted = self._app.authoring_action_async(
                 lambda: store.set_enabled(rule_id, wanted),
                 saved,
                 failure=failed,
             )
+            if not accepted and not reported and settle_intent(self._pending_enabled, rule_id):
+                self._reconcile_enabled(rule_id, row)
 
         return changed
+
+    def _reconcile_enabled(self, rule_id: str, gesture_row: Adw.SwitchRow) -> None:
+        """Show whether rule ``rule_id`` is durably enabled, on the switch now on screen."""
+        row = self._enabled_rows.get(rule_id, gesture_row)
+        current = next(
+            (rule.enabled for rule in self._app.session.schedules.rules if rule.id == rule_id),
+            False,
+        )
+        self._loading = True
+        try:
+            row.set_active(current)
+        finally:
+            self._loading = False
 
     def _make_move(self, rule_id: str, position: int) -> Any:
         def move(_button: Gtk.Button) -> None:

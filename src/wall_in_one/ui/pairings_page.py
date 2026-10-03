@@ -32,6 +32,7 @@ from wall_in_one.theme.palette import Mode as PaletteMode
 from wall_in_one.theme.palette import Palette, PalettePair
 from wall_in_one.ui.palette_browser import SchemePreview, SchemePreviewLoader, swatch_strip
 from wall_in_one.ui.palette_catalog import CatalogState, PaletteCatalog
+from wall_in_one.ui.pending_edits import queue_intent, settle_intent
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 if TYPE_CHECKING:
@@ -56,25 +57,6 @@ STILL_PICKER_PAGE_SIZE: Final = 48
 #: visible swatch owns CSS and colour widgets.  Search still covers the whole
 #: catalogue, while explicit paging keeps an editor opening bounded.
 PALETTE_PAGE_SIZE: Final = 24
-
-
-def _queue_intent[T](intents: dict[str, tuple[T, int]], key: str, value: T) -> None:
-    """One more save queued for ``key``; the controls show ``value`` meanwhile."""
-    _previous, outstanding = intents.get(key, (value, 0))
-    intents[key] = (value, outstanding + 1)
-
-
-def _settle_intent[T](intents: dict[str, tuple[T, int]], key: str) -> bool:
-    """One queued save for ``key`` finished; True when it was the last one."""
-    entry = intents.get(key)
-    if entry is None:
-        return True
-    value, outstanding = entry
-    if outstanding > 1:
-        intents[key] = (value, outstanding - 1)
-        return False
-    del intents[key]
-    return True
 
 
 class _StillCard(Gtk.ToggleButton):
@@ -739,10 +721,10 @@ class PairingsPage(Gtk.Box):
             return
         store = self._app.session.pairings
         key = pairings.Identity.of(item).key
-        _queue_intent(self._still_intent, key, still)
+        queue_intent(self._still_intent, key, still)
 
         def saved(result: Any) -> None:
-            _settle_intent(self._still_intent, key)
+            settle_intent(self._still_intent, key)
             current = self._app.adopt_pairing_still(result.item, result.effective_still)
             bundle = self._app.session.pairings.resolve_accepted(
                 current,
@@ -762,7 +744,7 @@ class PairingsPage(Gtk.Box):
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
-            _settle_intent(self._still_intent, key)
+            settle_intent(self._still_intent, key)
             self._app.window_report(str(error))
             self._reflect_still_selection()
 
@@ -781,7 +763,7 @@ class PairingsPage(Gtk.Box):
         if not accepted and not reported:
             # Refused without a report (shutting down, or authoring not open
             # yet): nothing is queued, so the picker shows what is saved.
-            _settle_intent(self._still_intent, key)
+            settle_intent(self._still_intent, key)
             self._reflect_still_selection()
 
     def _restore_interaction(self, scroll: float, focus: str) -> bool:
@@ -1017,10 +999,10 @@ class PairingsPage(Gtk.Box):
         """
         key = pairings.Identity.of(item).key
         store = self._app.session.pairings
-        _queue_intent(self._palette_intent, key, wanted)
+        queue_intent(self._palette_intent, key, wanted)
 
         def saved(_record: pairings.Pairing) -> None:
-            last = _settle_intent(self._palette_intent, key)
+            last = settle_intent(self._palette_intent, key)
             bundle = self._resolve(item)
             if self._editing(item):
                 self._rendered = self._editor_key(item, bundle)
@@ -1033,7 +1015,7 @@ class PairingsPage(Gtk.Box):
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
-            last = _settle_intent(self._palette_intent, key)
+            last = settle_intent(self._palette_intent, key)
             self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
             if last and self._editing(item):
                 self._settle_palette_controls()
@@ -1049,7 +1031,7 @@ class PairingsPage(Gtk.Box):
         if (
             not accepted
             and not reported
-            and _settle_intent(self._palette_intent, key)
+            and settle_intent(self._palette_intent, key)
             and self._editing(item)
         ):
             self._settle_palette_controls()

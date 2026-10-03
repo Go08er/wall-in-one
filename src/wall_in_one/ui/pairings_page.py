@@ -985,6 +985,22 @@ class PairingsPage(Gtk.Box):
             self._reflecting_policy = False
         self._refresh_palette_swatches(policy.mode)
 
+    def _settle_palette_controls(self) -> None:
+        """No colour save is queued for the edited pairing any more: show what is durable.
+
+        The rows were built around the queued choice, so a search or the page
+        may have left the durable one without a row of its own. The list is
+        reconciled first, which pins and selects it while keeping the search
+        and page, then the mode and swatches follow.
+        """
+        item = self._selected
+        if item is None:
+            return
+        bundle = self._resolve(item)
+        if hasattr(self, "_policy_list"):
+            self._populate_policy_list(item, bundle)
+        self._reflect_palette_policy(bundle.palette)
+
     def _store_policy(
         self,
         item: MediaItem,
@@ -1009,7 +1025,7 @@ class PairingsPage(Gtk.Box):
             if self._editing(item):
                 self._rendered = self._editor_key(item, bundle)
                 if last:
-                    self._reflect_palette_policy(bundle.palette)
+                    self._settle_palette_controls()
             self._app.pairing_changed(item)
 
         reported = False
@@ -1020,7 +1036,7 @@ class PairingsPage(Gtk.Box):
             last = _settle_intent(self._palette_intent, key)
             self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
             if last and self._editing(item):
-                self._reflect_palette_policy(self._resolve(item).palette)
+                self._settle_palette_controls()
 
         accepted = self._app.authoring_action_async(
             lambda: mutation(store, item),
@@ -1036,7 +1052,7 @@ class PairingsPage(Gtk.Box):
             and _settle_intent(self._palette_intent, key)
             and self._editing(item)
         ):
-            self._reflect_palette_policy(self._resolve(item).palette)
+            self._settle_palette_controls()
         return accepted
 
     def _choose_manual_still(self, item: MediaItem) -> None:

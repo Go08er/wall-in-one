@@ -683,7 +683,109 @@ def test_choosing_a_palette_found_by_search_does_not_hang(
     saved = session.pairings.get(pairings.Identity.of(media))
     assert saved is not None and saved.palette.name == "Nord"
     assert page._palette_buttons["custom:Nord"].get_active()
-    assert not page._palette_buttons["custom:Ayu"].get_active()
+    # Once saved, the rows follow the saved choice: Ayu is no longer pinned.
+    ayu = page._palette_buttons.get("custom:Ayu")
+    assert ayu is None or not ayu.get_active()
+
+    page.shutdown()
+    catalog.shutdown()
+    session.shutdown()
+
+
+def _refuse_nord(monkeypatch: pytest.MonkeyPatch, session: Session) -> None:
+    """Saving Nord fails before anything is published; other choices save."""
+    real = session.pairings.choose_palette
+
+    def choose(item: MediaItem, policy: pairings.PalettePolicy, **options: Any) -> Any:
+        if policy.name == "Nord":
+            raise pairings.PairingError("local-io", "disk full")
+        return real(item, policy, **options)
+
+    monkeypatch.setattr(session.pairings, "choose_palette", choose)
+
+
+def _assert_ayu_shown(page: pairings_page.PairingsPage, session: Session, media: MediaItem) -> None:
+    ayu = page._palette_buttons.get("custom:Ayu")
+    assert ayu is not None, "the saved palette has no row"
+    assert ayu.get_active(), "the saved palette is not the selected one"
+    nord = page._palette_buttons.get("custom:Nord")
+    assert nord is None or not nord.get_active()
+    assert page._palette_intent == {}
+    saved = session.pairings.get(pairings.Identity.of(media))
+    assert saved is not None and (saved.palette.kind, saved.palette.name) == ("custom", "Ayu")
+
+
+def test_a_failed_queued_palette_rolls_back_to_a_row_the_search_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.2.1 review G-1: Nord queued, the list searched down to Nord, then
+    Nord's save fails. The saved Ayu had no row to go back to, so Nord stayed
+    selected as if saved."""
+    session, application, page, media, catalog = _palette_editor(tmp_path, monkeypatch)
+    _refuse_nord(monkeypatch, session)
+
+    page._palette_buttons["custom:Nord"].set_active(True)
+    _search_palettes(page, "Nord")
+    assert "custom:Ayu" not in page._palette_buttons
+
+    application.drain()
+
+    _assert_ayu_shown(page, session, media)
+    assert page._palette_search.get_text() == "Nord"
+    assert any("not saved" in message for message in application.messages)
+    page.refresh(session)
+    _assert_ayu_shown(page, session, media)
+
+    page.shutdown()
+    catalog.shutdown()
+    session.shutdown()
+
+
+def test_a_failed_palette_with_a_saved_mode_behind_it_still_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-1: as above, with a Light mode queued behind Nord that does save."""
+    session, application, page, media, catalog = _palette_editor(tmp_path, monkeypatch)
+    _refuse_nord(monkeypatch, session)
+
+    page._palette_buttons["custom:Nord"].set_active(True)
+    _search_palettes(page, "Nord")
+    page._mode_row.set_selected(_mode_index(pairings.Mode.LIGHT))
+    assert len(application.queue) == 2
+
+    application.drain()
+
+    _assert_ayu_shown(page, session, media)
+    saved = session.pairings.get(pairings.Identity.of(media))
+    assert saved is not None and saved.palette.mode is pairings.Mode.LIGHT
+    assert page._mode_row.get_selected() == _mode_index(pairings.Mode.LIGHT)
+
+    page.shutdown()
+    catalog.shutdown()
+    session.shutdown()
+
+
+def test_a_failed_palette_rolls_back_after_switching_pairings_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-1 across an identity switch: Nord queued, another wallpaper opened
+    and this one reopened while it waits (shown as Nord), searched to Nord,
+    then the save fails."""
+    session, application, page, media, catalog = _palette_editor(tmp_path, monkeypatch)
+    _refuse_nord(monkeypatch, session)
+    other = next(item for item in session.library.items if item.path != media.path)
+
+    page._palette_buttons["custom:Nord"].set_active(True)
+    page.edit(session, other)
+    page.edit(session, media)
+    assert page._palette_buttons["custom:Nord"].get_active(), "reopened on what is queued"
+    _search_palettes(page, "Nord")
+    assert "custom:Ayu" not in page._palette_buttons
+
+    application.drain()
+
+    _assert_ayu_shown(page, session, media)
+    assert session.pairings.get(pairings.Identity.of(other)) is None
 
     page.shutdown()
     catalog.shutdown()

@@ -126,10 +126,16 @@ class NextWindow(ShellWindow):
             thumbs.install(self._thumbnails)
         self._prefs.reopen()
         self._state.listen()
+        settings = self.pages.get("settings")
+        if isinstance(settings, SettingsPlaceholder):
+            settings.launch.listen()
         self._show_status()
 
     def _teardown(self) -> None:
         self._state.close()
+        settings = self.pages.get("settings")
+        if isinstance(settings, SettingsPlaceholder):
+            settings.launch.close()  # as classic Settings does
         self._prefs.close()
         provider, self._thumbnails = self._thumbnails, None
         if provider is not None:

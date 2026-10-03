@@ -818,6 +818,27 @@ def test_a_failed_look_save_goes_back_everywhere_and_the_same_choice_then_saves(
         application.session.shutdown()
 
 
+def test_the_new_settings_rows_stop_following_the_keeper_when_the_window_goes() -> None:
+    """As classic Settings does on unrealize; they follow it again if the window returns."""
+    application = Application(ui="next")
+    window = NextWindow(application, application.settings)
+    keeper = window.preferences
+    window.present()
+    try:
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPlaceholder)
+        assert len(keeper._subscribers) == 2, "the window's look and its Settings rows"
+        away(window)
+        assert keeper._subscribers == []
+        window.present()
+        assert len(keeper._subscribers) == 2, "back with the window"
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+    assert keeper._subscribers == []
+
+
 def _remote(events: list[object]) -> type:
     """A verified running instance of this package, as registration reports it."""
 

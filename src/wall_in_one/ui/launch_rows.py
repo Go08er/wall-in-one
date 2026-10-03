@@ -54,8 +54,8 @@ class LaunchRows:
             (self.interface, INTERFACE_NOTE),
             (self.gpu, GPU_NOTE),
         )
-        self._unsubscribe = keeper.subscribe(self.show)
-        self.show()
+        self._unsubscribe: Callable[[], None] | None = None
+        self.listen()
 
     @property
     def rows(self) -> tuple[Adw.ActionRow, ...]:
@@ -77,9 +77,17 @@ class LaunchRows:
             row.set_subtitle(blocked or note)
             row.set_sensitive(not blocked)
 
+    def listen(self) -> None:
+        """Follow the keeper (again, after `close`) and show what it holds."""
+        if self._unsubscribe is None:
+            self._unsubscribe = self._keeper.subscribe(self.show)
+        self.show()
+
     def close(self) -> None:
         """Stop following the keeper; the window is going away."""
-        self._unsubscribe()
+        unsubscribe, self._unsubscribe = self._unsubscribe, None
+        if unsubscribe is not None:
+            unsubscribe()
 
     def _change(self, **fields: Any) -> None:
         if not self._keeper.change(**fields):

@@ -498,15 +498,20 @@ instead of the classic window; `--ui=classic`, or no flag, is today's app.
 
 - **What it has so far.** The redesign's sidebar, header and player bar, and a
   paged Library grid with the details pane beside it, all over the app's real
-  library, stores and runtime status. Its only changes are **Apply** (to all
-  displays, or the display the player bar is scoped to) and **favorites**; the
-  playback controls are shown but off, and there is no undo yet. The player bar
-  says what the runtime reports and why ("Evening · from schedule", "Your
-  pick"). Store, Playlists, Schedule, Displays and Settings say they are not in
-  the new interface yet.
-- **Read-only states.** A store saved by a newer version turns Apply and
-  favorites off and says so in a notice under the header, as do settings keys
-  this version doesn't know.
+  library, stores and runtime status. It can change three things: **Apply** (to
+  all displays, or the display the player bar is scoped to), **favorites**, and
+  **playback**, through the player bar's live controls. Play/pause, next,
+  previous, random, shuffle and Resume schedule act on all displays or the
+  scoped one; Stop and "Change wallpaper automatically" act on all of them.
+  They are the classic window's runtime commands, sent the same way. There is
+  no undo yet. The player bar says what the runtime reports and why ("Evening ·
+  from schedule", "Your pick"). Store, Playlists, Schedule, Displays and
+  Settings say they are not in the new interface yet.
+- **When it can't change things.** A store saved by a newer version turns
+  Apply, favorites and the playback controls off and says so in a notice under
+  the header. Settings keys this version doesn't know are named in that notice
+  as read-only. The playback controls are also off until the wallpaper service
+  has answered, and while it isn't running; the app doesn't start the service.
 - **Its own preferences.** The window style (solid, translucent or frosted), its
   opacity and frost dials and the thumbnail size live in `ui.toml`, written only
   when you change one of them.

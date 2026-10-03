@@ -24,7 +24,7 @@ from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import NO_SERVICE_START
 from wall_in_one.ui.next.real_state import RealAppState, human_size, scheme_name, wallpaper_view
-from wall_in_one.ui.next.state import AppState, Reason, reason_text
+from wall_in_one.ui.next.state import AppState, Reason, reason_text, solo_displays
 from wall_in_one.ui.status_model import RuntimeStatusModel
 
 if TYPE_CHECKING:
@@ -891,3 +891,54 @@ def test_a_newer_store_turns_the_playback_controls_off(library: tuple[MediaItem,
         assert backend.sent == [] and backend.reports == [off] * 8
     finally:
         session.shutdown()
+
+
+# -- explicit one-display Apply ----------------------------------------------------------
+
+
+def _without_hdmi(status: dict[str, object]) -> dict[str, object]:
+    displays = status["displays"]
+    assert isinstance(displays, list)
+    displays[1]["connected"] = False
+    return status
+
+
+def test_an_explicit_one_display_apply_is_refused_once_that_display_is_gone(
+    backend: FakeApplication,
+) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    stills = {"DP-1": items[1].path, "HDMI-A-1": items[0].path}
+    backend.status_model.adopt(_status(stills))
+    wid, path = str(items[2].path), items[2].path
+    assert [d.connector for d in solo_displays(adapter)] == ["DP-1", "HDMI-A-1"]
+    adapter.apply_only(wid, "HDMI-A-1")
+    adapter.apply(wid, "all")
+    assert backend.played == [(path, "HDMI-A-1"), (path, None)]
+
+    seen = _topics(adapter)
+    backend.status_model.adopt(_without_hdmi(_status(stills)))
+    assert "displays" in seen and [d.connector for d in solo_displays(adapter)] == ["DP-1"]
+    adapter.apply_only(wid, "HDMI-A-1")
+    assert backend.played == [(path, "HDMI-A-1"), (path, None)], "never widened to every display"
+    assert backend.reports == ["HDMI-A-1 is no longer controlled on its own, so nothing was sent"]
+
+    # The player bar's scope keeps its documented fallback: a display that is gone means all.
+    adapter.apply(wid, "HDMI-A-1")
+    assert backend.played[-1] == (path, None)
+
+
+def test_mirrored_displays_offer_no_one_display_target(backend: FakeApplication) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    stills = {"DP-1": items[1].path, "HDMI-A-1": items[1].path}
+    backend.status_model.adopt(_status(stills))
+    seen = _topics(adapter)
+    mirrored = _status(stills)
+    mirrored["display_mode"] = "mirrored"
+    backend.status_model.adopt(mirrored)
+    assert "displays" in seen, "a mode change alone changes the targets"
+    assert solo_displays(adapter) == []
+    adapter.apply_only(str(items[2].path), "DP-1")
+    assert backend.played == []
+    assert backend.reports == ["DP-1 is no longer controlled on its own, so nothing was sent"]

@@ -28,7 +28,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from tests.golden import harness, sandbox  # noqa: E402
 from tests.golden.harness import Allowance, Change  # noqa: E402
@@ -318,6 +318,124 @@ def test_the_library_pages_inspects_and_applies_through_the_runtime(
             ),
         )
         assert runtime.requested("playlist-use") == ["quick-choice"], "only one global apply"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def menu_targets(model: Gio.MenuModel | None) -> list[str]:
+    """Every item's action target in ``model``, sections included."""
+    found: list[str] = []
+    if model is None:
+        return found
+    for index in range(model.get_n_items()):
+        section = model.get_item_link(index, Gio.MENU_LINK_SECTION)
+        if section is not None:
+            found.extend(menu_targets(section))
+            continue
+        target = model.get_item_attribute_value(index, Gio.MENU_ATTRIBUTE_TARGET, None)
+        if target is not None:
+            found.append(target.get_string())
+    return found
+
+
+def apply_targets(model: Gio.MenuModel | None, wid: str) -> list[str]:
+    """The Apply targets ``model`` offers for ``wid``: ``all`` or a connector."""
+    return [
+        target.split("|", 1)[1] for target in menu_targets(model) if target.startswith(f"{wid}|")
+    ]
+
+
+def test_an_explicit_one_display_apply_is_never_widened_after_that_display_goes(
+    runtime: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = Application(ui="next")
+    lanes: list[object] = []
+    reports: list[str] = []
+    stills = {"DP-1": picture(tmp_path, 1), "HDMI-A-1": picture(tmp_path, 1)}
+
+    def without_hdmi() -> dict[str, object]:
+        document = status(stills)
+        records = document["displays"]
+        assert isinstance(records, list)
+        records[1]["connected"] = False
+        return document
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        page = library_page(window)
+        shown = window.report
+
+        def report(message: str) -> None:
+            reports.append(message)
+            shown(message)
+
+        monkeypatch.setattr(window, "report", report)
+        yield (
+            "the first scan",
+            lambda: settled(application) and window.library_text == "80 wallpapers in the library",
+        )
+        runtime.answer(status(stills))
+        application.refresh_runtime_status_async()
+        yield "both displays", lambda: len(window.state.displays) == 2
+        target = window.state.wallpaper(picture(tmp_path, 5))
+        page.inspect(target)
+
+        def card_targets() -> list[str]:
+            # The card shown now: the grid may have rebuilt it meanwhile.
+            menu = page._cards[target.id].menu
+            assert menu is not None
+            return apply_targets(menu.get_menu_model(), target.id)
+
+        apply_button = page.inspector.apply_button
+        assert apply_button is not None
+        assert apply_targets(apply_button.get_menu_model(), target.id) == [
+            "all",
+            "DP-1",
+            "HDMI-A-1",
+        ]
+        assert card_targets() == ["all", "DP-1", "HDMI-A-1"]
+
+        # -- HDMI-A-1 goes away while the details stay open on the same wallpaper ------
+        runtime.answer(without_hdmi())
+        application.refresh_runtime_status_async()
+        yield "one display", lambda: [d.connector for d in window.state.displays] == ["DP-1"]
+        assert page.inspector.wallpaper is not None and page.inspector.wallpaper.id == target.id
+        retained = page.inspector.apply_button
+        assert retained is not None
+        assert apply_targets(retained.get_menu_model(), target.id) == ["all", "DP-1"]
+        assert card_targets() == ["all", "DP-1"]
+
+        # A choice made from the old menu (still open, or saved) reaches the action anyway.
+        page.widget.activate_action("lib.apply", GLib.Variant("s", f"{target.id}|HDMI-A-1"))
+        yield "the stale choice to settle", lambda: settled(application)
+        assert runtime.commands() == [], "nothing sent, and above all not to every display"
+        assert reports[-1] == "HDMI-A-1 is no longer controlled on its own, so nothing was sent"
+
+        # -- a display that still stands on its own, and an explicit All displays --------
+        page.widget.activate_action("lib.apply", GLib.Variant("s", f"{target.id}|DP-1"))
+        yield (
+            "DP-1's Quick choice",
+            lambda: settled(application) and bool(runtime.requested("on")),
+        )
+        assert (runtime.requested("on")[0] or "").startswith("DP-1 playlist-use quick-choice:")
+        page.widget.activate_action("lib.apply", GLib.Variant("s", f"{target.id}|all"))
+        yield (
+            "the global Quick choice",
+            lambda: settled(application) and runtime.requested("playlist-use") == ["quick-choice"],
+        )
+
+        # -- mirrored displays offer no one-display target at all ------------------------
+        mirrored = status(stills)
+        mirrored["display_mode"] = "mirrored"
+        runtime.answer(mirrored)
+        application.refresh_runtime_status_async()
+        yield "mirrored displays", lambda: window.state.display_mode == "mirrored"
+        mirrored_button = page.inspector.apply_button
+        assert mirrored_button is not None
+        assert apply_targets(mirrored_button.get_menu_model(), target.id) == ["all"]
+        assert card_targets() == ["all"]
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)

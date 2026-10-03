@@ -28,7 +28,13 @@ from wall_in_one.ui.next import thumbs, widgets
 from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.inspector import Inspector
 from wall_in_one.ui.next.page import Page
-from wall_in_one.ui.next.state import AppState, LibraryEditing, LibraryFolders, WallpaperView
+from wall_in_one.ui.next.state import (
+    AppState,
+    LibraryEditing,
+    LibraryFolders,
+    WallpaperView,
+    solo_displays,
+)
 
 #: Cards are built a page at a time, like the classic grid, so a library of
 #: thousands builds 72 cards, not thousands.
@@ -319,9 +325,15 @@ class LibraryPage(Page):
             group.add_action(action)
 
         def apply(value: str) -> None:
-            wid, _, scope = value.partition("|")
-            if not self.state.apply_blocked(wid):
-                self.state.apply(wid, scope or "all")
+            # An explicit target from a menu: "all", or one display that must
+            # still stand on its own (never widened to all; see apply_only).
+            wid, _, target = value.partition("|")
+            if self.state.apply_blocked(wid):
+                return
+            if target in ("", "all"):
+                self.state.apply(wid, "all")
+            else:
+                self.state.apply_only(wid, target)
 
         add("apply", apply)
         add("fav", self._favorite)
@@ -364,6 +376,15 @@ class LibraryPage(Page):
             self.state.toggle_favorite(wid)
 
     def _card_menu(self, wallpaper: WallpaperView) -> Gtk.PopoverMenu:
+        return Gtk.PopoverMenu.new_from_model(self._card_menu_model(wallpaper))
+
+    def _refresh_card_menus(self) -> None:
+        """Offer each card's Apply targets for the displays as they are now."""
+        for card in self._cards.values():
+            if card.menu is not None:
+                card.menu.set_menu_model(self._card_menu_model(card.wallpaper))
+
+    def _card_menu_model(self, wallpaper: WallpaperView) -> Gio.Menu:
         menu = Gio.Menu()
         apply = Gio.Menu()
         blocked = self.state.apply_blocked(wallpaper.id)
@@ -371,7 +392,7 @@ class LibraryPage(Page):
             apply.append(blocked if len(blocked) < 60 else "Apply is off here", None)
         else:
             apply.append("Apply to all displays", f"lib.apply::{wallpaper.id}|all")
-            for display in self.state.displays:
+            for display in solo_displays(self.state):
                 apply.append(
                     f"Apply to {display.connector} only",
                     f"lib.apply::{wallpaper.id}|{display.connector}",
@@ -395,7 +416,7 @@ class LibraryPage(Page):
             files.append("Show in Files", f"lib.files::{wallpaper.id}")
             files.append("Remove from library…", f"lib.remove::{wallpaper.id}")
             menu.append_section(None, files)
-        return Gtk.PopoverMenu.new_from_model(menu)
+        return menu
 
     def _bulk_playlist_menu(self) -> Gio.Menu:
         menu = Gio.Menu()
@@ -532,6 +553,8 @@ class LibraryPage(Page):
             self._rebuild()
         elif topic == "system":
             self._update_count()
+        elif topic == "displays":
+            self._refresh_card_menus()
 
     def _on_search(self, entry: Gtk.SearchEntry) -> None:
         self._query = entry.get_text().strip()

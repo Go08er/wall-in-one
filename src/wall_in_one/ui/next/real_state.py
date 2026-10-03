@@ -71,6 +71,8 @@ from wall_in_one.ui.next.state import (
     ToastButton,
     Undo,
     WallpaperView,
+    not_on_its_own,
+    solo_displays,
 )
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui_prefs import GLASS_STYLES, GlassOpacity
@@ -278,6 +280,7 @@ class RealAppState(GObject.Object):
         self._playlists: tuple[LibraryPlaylist, ...] = ()
         self._playlist_index: dict[str, LibraryPlaylist] = {}
         self._displays: tuple[LiveDisplay, ...] = ()
+        self._mode = ""
         self._current: dict[str, str] = {}
         self._view = backend.status_model.view
         self._player = Player()
@@ -391,8 +394,11 @@ class RealAppState(GObject.Object):
         if self._scope != "all" and self._scope not in {d.connector for d in displays}:
             self._scope = "all"
         topics: list[str] = []
-        if displays != self._displays:
+        mode = self.display_mode
+        if displays != self._displays or mode != self._mode:
+            # A mode change alone changes which displays stand on their own.
             self._displays = displays
+            self._mode = mode
             topics.append("displays")
         if current != self._current:
             self._current = current
@@ -690,6 +696,17 @@ class RealAppState(GObject.Object):
             self._backend.play_item_async(item)
         else:
             self._backend.play_item_on_async(item, scope)
+
+    def apply_only(self, wid: str, connector: str) -> None:
+        """Quick choice on ``connector`` alone; refused, never widened, when it no longer is one."""
+        blocked = self.apply_blocked(wid)
+        if blocked:
+            self._backend.window_report(blocked)
+            return
+        if connector not in {display.connector for display in solo_displays(self)}:
+            self._backend.window_report(not_on_its_own(connector))
+            return
+        self._backend.play_item_on_async(self._index[wid].item, connector)
 
     def favorite_blocked(self) -> str:
         return self._authoring_blocked("Favorites")

@@ -25,7 +25,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango
 
 from wall_in_one.ui.next import thumbs, widgets
 from wall_in_one.ui.next.catalog import KIND_LABEL, quoted
-from wall_in_one.ui.next.state import AppState, LibraryEditing, WallpaperView
+from wall_in_one.ui.next.state import AppState, LibraryEditing, WallpaperView, solo_displays
 
 
 class DesktopPreview(Gtk.Widget):
@@ -181,6 +181,10 @@ class Inspector(Gtk.Box):
         if wallpaper is None:
             return
         if topic in ("scope", "displays") and self._apply is not None:
+            if topic == "displays":
+                # Only targets that mean something now: a display that went
+                # away, or that mirroring took over, is no longer offered.
+                self._apply.set_menu_model(self._apply_menu(wallpaper))
             self._label_apply()
         if topic in ("library", "system") and self.state.has_wallpaper(wallpaper.id):
             # A new view of the same wallpaper: the favorite, its problem, its colors.
@@ -341,14 +345,7 @@ class Inspector(Gtk.Box):
 
     def _actions(self, wallpaper: WallpaperView) -> Gtk.Box:
         row = Gtk.Box(spacing=8)
-        menu = Gio.Menu()
-        menu.append("All displays", f"lib.apply::{wallpaper.id}|all")
-        for display in self.state.displays:
-            label = f"{display.connector} only"
-            if display.model:
-                label += f" \u2014 {display.model}"
-            menu.append(label, f"lib.apply::{wallpaper.id}|{display.connector}")
-        apply = Adw.SplitButton(menu_model=menu, hexpand=True)
+        apply = Adw.SplitButton(menu_model=self._apply_menu(wallpaper), hexpand=True)
         apply.add_css_class("suggested-action")
         apply.add_css_class("pill")
         apply.set_dropdown_tooltip("Choose a display")
@@ -398,6 +395,17 @@ class Inspector(Gtk.Box):
     @property
     def favorite_button(self) -> Gtk.ToggleButton | None:
         return self._favorite
+
+    def _apply_menu(self, wallpaper: WallpaperView) -> Gio.Menu:
+        """Apply's explicit targets: every display, and each one that stands on its own."""
+        menu = Gio.Menu()
+        menu.append("All displays", f"lib.apply::{wallpaper.id}|all")
+        for display in solo_displays(self.state):
+            label = f"{display.connector} only"
+            if display.model:
+                label += f" \u2014 {display.model}"
+            menu.append(label, f"lib.apply::{wallpaper.id}|{display.connector}")
+        return menu
 
     def _label_apply(self) -> None:
         """Name the target: the player bar's scope, like Apply on the cards."""

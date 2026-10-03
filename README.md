@@ -505,10 +505,12 @@ instead of the classic window; `--ui=classic`, or no flag, is today's app.
   schedule. Every playback control acts on the displays the player bar is
   scoped to, all of them or one; mirrored displays, or a display that has gone
   away, get the command for all of them. They are the classic window's runtime
-  commands, sent the same way. There is no undo yet. The player bar says what
-  the runtime reports and why ("Evening · from schedule", "Your pick"). Store,
-  Playlists, Schedule, Displays and Settings say they are not in the new
-  interface yet.
+  commands, sent the same way. A "<display> only" chosen from a card's or the
+  details pane's Apply menu is never widened like that: if that display has
+  gone, or the displays are mirrored, nothing is sent and a notice says so.
+  There is no undo yet. The player bar says what the runtime reports and why
+  ("Evening · from schedule", "Your pick"). Store, Playlists, Schedule,
+  Displays and Settings say they are not in the new interface yet.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites and the playback controls off and says so in a notice under
   the header. Settings keys this version doesn't know are named in that notice

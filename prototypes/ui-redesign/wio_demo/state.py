@@ -38,7 +38,16 @@ import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
-from wall_in_one.ui.next.state import UNCHANGED, Banner, OnScreen, Player, Reason, WallpaperView
+from wall_in_one.ui.next.state import (
+    UNCHANGED,
+    Banner,
+    OnScreen,
+    Player,
+    Reason,
+    WallpaperView,
+    not_on_its_own,
+    solo_displays,
+)
 
 from . import art, data, store_catalog
 from .catalog import KIND_LABEL
@@ -396,6 +405,13 @@ class AppState(GObject.Object):
             self.emit_changed("now", "playback")
 
         self.toast(f"“{self.wallpaper(wid).name}” is now on {where}", undo)
+
+    def apply_only(self, wid: str, connector: str) -> None:
+        """A menu's "<connector> only": refused, never widened, once it no longer is one."""
+        if connector not in {display.connector for display in solo_displays(self)}:
+            self.toast(not_on_its_own(connector))
+            return
+        self.apply(wid, connector)
 
     def play_playlist(self, pid: str, scope: str = "all", start: int = 0) -> None:
         """Your pick: play a playlist (from entry ``start``) until you resume the schedule."""

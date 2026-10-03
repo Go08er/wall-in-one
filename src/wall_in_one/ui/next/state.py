@@ -428,7 +428,22 @@ class AppState(Protocol):
 
     # -- the writes every adapter offers: Apply and Favorite --------------------------
 
-    def apply(self, wid: str, scope: str = "all") -> None: ...
+    def apply(self, wid: str, scope: str = "all") -> None:
+        """Apply on the player bar's ``scope`` ("all" or a connector).
+
+        A connector that is mirrored, or gone, means every display: the
+        scope's documented fallback.
+        """
+        ...
+
+    def apply_only(self, wid: str, connector: str) -> None:
+        """Apply on ``connector`` alone, as a menu's "<connector> only" asks.
+
+        Never widened: when ``connector`` is not among `solo_displays` (it went
+        away, or the displays are mirrored), nothing is sent and a notice
+        (`not_on_its_own`) says so.
+        """
+        ...
 
     def apply_blocked(self, wid: str) -> str:
         """Why ``wid`` cannot be applied now, or empty when it can."""
@@ -492,3 +507,13 @@ class AppState(Protocol):
 
     @property
     def library_folders(self) -> LibraryFolders | None: ...
+
+
+def solo_displays(state: AppState) -> list[DisplayView]:
+    """The displays a menu may offer as "<connector> only": none while they are mirrored."""
+    return [] if state.display_mode == "mirrored" else list(state.displays)
+
+
+def not_on_its_own(connector: str) -> str:
+    """The notice when an explicit one-display target is no longer one."""
+    return f"{connector} is no longer controlled on its own, so nothing was sent"

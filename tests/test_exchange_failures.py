@@ -353,10 +353,12 @@ def _caused_by_interrupt(error: BaseException | None) -> bool:
 
 
 #: Where the SIGINT lands: on ``release()``'s first line, before anything in it
-#: is protected, or in ``end_group()`` just before it would send its first kill.
+#: is protected; in ``end_group()`` just before it would send its first kill;
+#: or on entry to the selector's ``close()``, ahead of the pipes' (V-2).
 BOUNDARIES: dict[str, tuple[CodeType, str | None]] = {
     "release-entry": (worker_processes.release.__code__, None),
     "before-first-kill": (OwnedProcess.end_group.__code__, "self.signal_group("),
+    "selector-close": (selectors.EpollSelector.close.__code__, None),
 }
 
 
@@ -365,9 +367,10 @@ BOUNDARIES: dict[str, tuple[CodeType, str | None]] = {
 def test_an_interrupted_cleanup_still_ends_the_group_before_letting_go(
     caller: str, boundary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Sweep 5 V-1: a read error starts the cleanup, then a real SIGINT cuts it
-    off before it has signalled anything. The termination is retried, so the
-    group still ends, and only then does the owner let go of it."""
+    """Sweep 5 V-1 and V-2: a read error starts the cleanup, then a real SIGINT
+    cuts it off, before it has signalled anything or while it closes. The
+    group still ends, only then does the owner let go of it, and the
+    selector and every pipe are still closed."""
     harness = _Harness(caller, "read-eio", tmp_path, monkeypatch)
     code, source = BOUNDARIES[boundary]
     subreaper(True)
@@ -420,6 +423,37 @@ def test_a_group_that_could_not_be_ended_stays_owned_until_cancelled(
     finally:
         harness.close()
         subreaper(False)
+
+
+def test_an_interrupted_close_still_closes_the_selector_and_every_pipe() -> None:
+    """Sweep 5 V-2, on release() itself: a real SIGINT on entry to the
+    selector's close() used to skip every pipe's close. Each is now closed on
+    its own, the interrupted one tried again, and the interrupt still raised."""
+    owned, selector = worker_processes.spawn(["sleep", "30"], stdin=subprocess.PIPE)
+    process = owned.process
+    assert isinstance(selector, selectors.EpollSelector)
+    try:
+        with (
+            _sigint_at(selectors.EpollSelector.close.__code__) as fired,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            worker_processes.release(owned, selector)
+
+        assert fired, "the SIGINT was never delivered"
+        assert process.returncode == -signal.SIGKILL, "the group was not ended first"
+        with pytest.raises(ValueError):
+            selector.fileno()  # Closed.
+        for stream in (process.stdin, process.stdout, process.stderr):
+            assert stream is not None and stream.closed
+    finally:
+        if process.returncode is None:
+            # Unreaped, so still this test's own child.
+            process.kill()
+            process.wait(timeout=5)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        selector.close()
 
 
 def test_a_failed_release_is_chained_to_the_original_error(

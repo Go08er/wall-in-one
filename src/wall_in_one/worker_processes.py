@@ -190,29 +190,53 @@ def release(owned: OwnedProcess, selector: selectors.BaseSelector | None = None)
     After a finished :meth:`OwnedProcess.end_group` the leader is reaped, so
     this signals nothing and returns at once; otherwise it kills the group
     and reaps. If that is interrupted or fails, perhaps before its first
-    signal, :meth:`OwnedProcess.kill_group` makes one more, direct attempt,
-    and the first error is the one raised. The selector and every pipe are
-    closed even so. Should the leader still be unreaped afterwards, the
-    termination did not finish and the owner must keep it registered
-    (callers check ``returncode``).
+    signal, :meth:`OwnedProcess.kill_group` makes one more, direct attempt.
+    Should the leader still be unreaped afterwards, the termination did not
+    finish and the owner must keep it registered (callers check
+    ``returncode``).
+
+    The selector and every pipe are then closed, each on its own: one close
+    being interrupted or failing doesn't skip the rest, and an interrupted
+    close is tried once more. Everything is attempted before the first error,
+    from ending the group or from a close, is raised.
     """
+    errors: list[BaseException] = []
     try:
+        owned.end_group(immediate=True, grace=TERMINATE_GRACE_SECONDS)
+    except BaseException as error:
+        errors.append(error)
+        # Bounded: one retry, whose own failure is not raised over this.
+        with contextlib.suppress(BaseException):
+            owned.kill_group(TERMINATE_GRACE_SECONDS)
+    process = owned.process
+    closers: list[Callable[[], None]] = []
+    if selector is not None:
+        closers.append(selector.close)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            closers.append(stream.close)
+    for close in closers:
+        _close(close, errors)
+    if errors:
+        raise errors[0]
+
+
+def _close(close: Callable[[], None], errors: list[BaseException]) -> None:
+    """Run ``close``, once more if it was interrupted; record what it raised.
+
+    An ``OSError`` is not recorded: the descriptor is released even when
+    ``close`` reports one. Closing again after a close that finished is a
+    no-op for selectors and streams alike.
+    """
+    for _attempt in range(2):
         try:
-            owned.end_group(immediate=True, grace=TERMINATE_GRACE_SECONDS)
-        except BaseException:
-            # Bounded: one retry, whose own failure is not raised over this.
-            with contextlib.suppress(BaseException):
-                owned.kill_group(TERMINATE_GRACE_SECONDS)
-            raise
-    finally:
-        process = owned.process
-        if selector is not None:
-            with contextlib.suppress(OSError):
-                selector.close()
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is not None:
-                with contextlib.suppress(OSError):
-                    stream.close()
+            close()
+        except OSError:
+            return
+        except BaseException as error:
+            errors.append(error)
+            continue
+        return
 
 
 def abandon(

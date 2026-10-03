@@ -24,8 +24,9 @@ flags stay fast and work with no display attached.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -36,6 +37,10 @@ if TYPE_CHECKING:
     from wall_in_one import config
     from wall_in_one.session import Session
 
+#: GTK's renderer choice. Set by the user, it always wins.
+RENDERER_VARIABLE: Final = "GSK_RENDERER"
+#: GTK's software renderer, for a window with GPU acceleration turned off.
+SOFTWARE_RENDERER: Final = "cairo"
 EXIT_TEMPFAIL: Final = 75
 EXIT_CONFIG: Final = 78
 
@@ -718,6 +723,21 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
     return 0
 
 
+def _choose_window_renderer(environ: MutableMapping[str, str] | None = None) -> None:
+    """Before GTK loads: with GPU acceleration turned off, windows render in software.
+
+    An explicit ``GSK_RENDERER`` always wins and is left alone. With the
+    preference on (the default) nothing is set, so GTK chooses as it always
+    has. Turning it off sets ``GSK_RENDERER=cairo``, which GTK programs this
+    process starts inherit too. Read-only: ui.toml is never written here.
+    """
+    environ = os.environ if environ is None else environ
+    if RENDERER_VARIABLE in environ:
+        return
+    if not ui_prefs.launch_gpu_acceleration():
+        environ[RENDERER_VARIABLE] = SOFTWARE_RENDERER
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     options = parser.parse_args(argv)
@@ -770,6 +790,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     maintenance = _run_maintenance(options)
     if maintenance is not None:
         return maintenance
+
+    # Every path below may open a window, and none has imported GTK yet: the
+    # recovery window, the app, --service, and `ctl open`'s cold start (which
+    # runs `wall-in-one --open-page <page>`). The paths above never look.
+    _choose_window_renderer()
 
     def retry_startup(message: str) -> bool:
         from wall_in_one.ui.recovery import run

@@ -36,6 +36,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_next_status_line import BATTERY, two_display_status  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
@@ -696,6 +697,39 @@ def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written()
         page.interface_row.set_selected(0)
         window.preferences.close(wait=True)
         assert target.read_text() == document
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
+def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M-1 in the new interface, with the same real refusal."""
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    obstacle = target.parent / "ui.toml.v1-backup"
+    obstacle.mkdir()
+    application = Application(ui="next")
+    reports: list[str] = []
+    # The keeper takes the application's report when the window builds it.
+    monkeypatch.setattr(application, "window_report", reports.append)
+    window = NextWindow(application, application.settings)
+    window.present()
+    try:
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPlaceholder)
+        row = page.interface_row
+        row.set_selected(1)
+        spin_until(lambda: reports and not window.preferences.busy, what="the refusal")
+        assert "Nothing was changed" in reports[0]
+        assert row.get_selected() == 0, "the row shows what ui.toml holds"
+        obstacle.rmdir()
+        row.set_selected(1)
+        spin_until(lambda: not window.preferences.busy, what="the retried save")
+        assert ui_prefs.load().prefs.interface == "next" and row.get_selected() == 1
+        assert len(reports) == 1
     finally:
         window.destroy()
         application._stills.shutdown()

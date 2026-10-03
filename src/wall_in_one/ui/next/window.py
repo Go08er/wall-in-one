@@ -30,16 +30,17 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw
 
 from wall_in_one import __version__, config
 from wall_in_one.session import Session
 from wall_in_one.theme import source
+from wall_in_one.ui.launch_rows import LaunchRows
 from wall_in_one.ui.next import library, status_line, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
 from wall_in_one.ui.next.page import Placeholder, not_ported
-from wall_in_one.ui.next.prefs import INTERFACE_CHOICES, INTERFACE_NOTE, UiPrefsKeeper
+from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_state import RealAppState
 from wall_in_one.ui.next.shell import ShellWindow
 from wall_in_one.ui.next.state import AppState
@@ -62,11 +63,12 @@ NOT_PORTED_HINT: Final = CLASSIC_HINT
 
 
 class SettingsPlaceholder(Placeholder):
-    """Settings is not ported yet, except the interface to start.
+    """Settings is not ported yet, except how the next start opens.
 
     Someone who chose the new interface must be able to choose classic again
-    from inside it. The row writes ui.toml through the window's keeper, like
-    every window preference here, and is off while ui.toml cannot be written.
+    from inside it. The rows (`LaunchRows`) write ui.toml through the window's
+    keeper, like every window preference here, show what was saved, and are
+    off while ui.toml cannot be written.
     """
 
     def __init__(self, state: AppState, keeper: UiPrefsKeeper, report: Callable[[str], None]):
@@ -77,29 +79,12 @@ class SettingsPlaceholder(Placeholder):
             "emblem-system-symbolic",
             f"Settings is not in the new interface yet. {CLASSIC_HINT}",
         )
-        self._keeper = keeper
-        self._report = report
-        self.interface_row = Adw.ComboRow(
-            title="Interface",
-            subtitle=INTERFACE_NOTE,
-            model=Gtk.StringList.new([label for _key, label in INTERFACE_CHOICES]),
-        )
-        keys = [key for key, _label in INTERFACE_CHOICES]
-        self.interface_row.set_selected(keys.index(keeper.prefs.interface))
-        if keeper.read_only:
-            self.interface_row.set_subtitle(keeper.read_only)
-            self.interface_row.set_sensitive(False)
-        self.interface_row.connect("notify::selected", self._on_interface)
+        self.launch = LaunchRows(keeper, report)
+        self.interface_row = self.launch.interface
         group = Adw.PreferencesGroup()
-        group.add(self.interface_row)
+        for row in self.launch.rows:
+            group.add(row)
         self.status.set_child(Adw.Clamp(child=group, maximum_size=480))
-
-    def _on_interface(self, row: Adw.ComboRow, _property: object) -> None:
-        index = row.get_selected()
-        if 0 <= index < len(INTERFACE_CHOICES) and not self._keeper.change(
-            interface=INTERFACE_CHOICES[index][0]
-        ):
-            self._report(self._keeper.read_only)
 
 
 class NextWindow(ShellWindow):

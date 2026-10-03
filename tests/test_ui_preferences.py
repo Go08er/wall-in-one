@@ -387,3 +387,30 @@ def test_the_interface_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path
     page._ui_prefs.close(wait=True)
     assert target.read_text() == document
     assert application.reports and "newer version" in application.reports[-1]
+
+
+def test_a_failed_interface_save_goes_back_and_the_same_choice_then_saves(
+    tmp_path: Path,
+) -> None:
+    """Review M-1, with a real filesystem refusal: the bump's backup can't be kept."""
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    obstacle = target.parent / "ui.toml.v1-backup"
+    obstacle.mkdir()
+    before = target.read_bytes()
+    application = SettingsApp(tmp_path)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    row = page._interface
+
+    row.set_selected(1)
+    spin_until(lambda: application.reports and not page._ui_prefs.busy, what="the refusal")
+
+    assert "Nothing was changed" in application.reports[0]
+    assert row.get_selected() == 0, "the row shows what ui.toml holds"
+    assert target.read_bytes() == before
+    obstacle.rmdir()
+    row.set_selected(1)  # the same choice again
+    spin_until(lambda: not page._ui_prefs.busy, what="the retried save")
+    assert ui_prefs.load().prefs.interface == "next" and row.get_selected() == 1
+    assert len(application.reports) == 1 and page._ui_prefs.saves == 2
+    page._ui_prefs.close(wait=True)

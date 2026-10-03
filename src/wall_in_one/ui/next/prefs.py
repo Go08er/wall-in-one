@@ -16,6 +16,13 @@ Nothing else lives here: no last page, no window size.
 * A file this build must not write (a newer version, unreadable, malformed)
   is never touched; ``read_only`` says why, and the window turns those
   controls off.
+* Every save comes back as what is durable. A failed save (the version
+  bump's backup can't be written, say) reports why, and the keeper returns
+  to what ui.toml really holds, read back on the worker; a successful one
+  adopts the saved file. Subscribers (`subscribe`) then show that, so a row
+  never keeps a choice that was not saved, and choosing it again saves
+  again. Only the latest save reconciles, and only once nothing newer is
+  waiting: an earlier save finishing never reverts a later choice.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -47,6 +54,38 @@ INTERFACE_CHOICES: Final[tuple[tuple[str, str], ...]] = (
 INTERFACE_NOTE: Final = "Takes effect the next time Wall-in-One starts."
 
 
+@dataclass(frozen=True, slots=True)
+class _Saved:
+    """One finished save, as the worker found ui.toml afterwards."""
+
+    #: Which flush this was (`UiPrefsKeeper._revision` when it was handed over).
+    revision: int
+    #: What ui.toml holds now: the saved document, or the file read back.
+    prefs: UiPrefs
+    #: Why this build must not write ui.toml, as read back; empty when it may.
+    read_only: str = ""
+    #: Why the save failed, or empty.
+    error: str = ""
+
+
+def _save(changes: dict[str, Any], path: Path | None, revision: int) -> _Saved:
+    """Save on the worker and say what is durable; never raises.
+
+    A failure reads the file back here too, so GTK never waits on ui.toml
+    even when a completion is delivered on its own thread.
+    """
+    try:
+        saved = ui_prefs.update(changes, path)
+    except ui_prefs.UiPrefsReadOnlyError as error:
+        message = str(error)
+    except Exception as error:  # the worker boundary: report, never raise
+        message = f"Window preferences were not saved: {error}"
+    else:
+        return _Saved(revision, saved.prefs)
+    durable = ui_prefs.load(path)
+    return _Saved(revision, durable.prefs, durable.read_only, message)
+
+
 class UiPrefsKeeper:
     """The window's preferences: read once, written on explicit changes only."""
 
@@ -63,6 +102,24 @@ class UiPrefsKeeper:
         self._closed = False
         #: Writes handed to the worker, for tests and shutdown.
         self.saves = 0
+        #: The latest flush's number: only its completion may reconcile.
+        self._revision = 0
+        #: Saves handed to the worker whose result GTK has not adopted yet.
+        self._in_flight = 0
+        self._subscribers: list[tuple[object, Callable[[], None]]] = []
+
+    def subscribe(self, subscriber: Callable[[], None]) -> Callable[[], None]:
+        """Call ``subscriber`` after ``prefs`` or ``read_only`` changed to what is durable.
+
+        Returns its unsubscribe. Called on GTK's thread.
+        """
+        token = object()
+        self._subscribers.append((token, subscriber))
+
+        def unsubscribe() -> None:
+            self._subscribers[:] = [entry for entry in self._subscribers if entry[0] is not token]
+
+        return unsubscribe
 
     def change(self, *, delay_ms: int = 0, **fields: Any) -> bool:
         """Adopt new values now and save them (after ``delay_ms`` of quiet).
@@ -107,32 +164,45 @@ class UiPrefsKeeper:
         if self._jobs is None:
             self._jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ui-prefs")
         self.saves += 1
-        future = self._jobs.submit(ui_prefs.update, changes, self._path)
+        self._revision += 1
+        self._in_flight += 1
+        future = self._jobs.submit(_save, changes, self._path, self._revision)
         future.add_done_callback(self._finished)
 
-    def _finished(self, future: Future[ui_prefs.UiPrefsDocument]) -> None:
-        try:
-            future.result()
-        except ui_prefs.UiPrefsReadOnlyError as error:
-            message = str(error)
-        except Exception as error:  # the worker boundary: report, never raise into GTK
-            message = f"Window preferences were not saved: {error}"
-        else:
-            return
+    def _finished(self, future: Future[_Saved]) -> None:
+        """Hand a finished save to GTK (this may run on the worker, or on GTK)."""
+        saved = future.result()  # _save never raises
 
         def deliver() -> bool:
-            if not self._closed:
-                self._report(message)
-            else:
-                LOGGER.warning("%s", message)
+            self._adopt(saved)
             return GLib.SOURCE_REMOVE
 
+        # Ends a choice in flight that a row shows: above redraw, never starved.
         GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
+
+    def _adopt(self, saved: _Saved) -> None:
+        """Report a failure, then show what is durable unless something newer is coming."""
+        self._in_flight -= 1
+        if saved.error:
+            if not self._closed:
+                self._report(saved.error)
+            else:
+                LOGGER.warning("%s", saved.error)
+        if saved.revision != self._revision or self._pending or self._timer:
+            return  # a later save is in flight or waiting; it reconciles
+        if saved.prefs == self.prefs and saved.read_only == self.read_only:
+            return
+        self.prefs = saved.prefs
+        self.read_only = saved.read_only
+        if self._closed:
+            return
+        for _token, subscriber in tuple(self._subscribers):
+            subscriber()
 
     @property
     def busy(self) -> bool:
-        """A change is waiting to be saved or being saved."""
-        return bool(self._pending) or bool(self._timer)
+        """A change is waiting to be saved, or a save has not come back to GTK yet."""
+        return bool(self._pending) or bool(self._timer) or self._in_flight > 0
 
     def close(self, *, wait: bool = False) -> None:
         """Save what the user changed and is still waiting, then stop the worker.

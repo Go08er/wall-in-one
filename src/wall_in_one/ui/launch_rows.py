@@ -1,5 +1,8 @@
 """The Settings rows that choose how the next start opens, in either window.
 
+Two rows: the **Interface** (classic or the new one) and **GPU acceleration**
+for the window (off starts it with GTK's software renderer, ``cairo``).
+
 Both windows offer them -- classic Settings → Appearance, and the new
 interface's Settings page -- over the same ``ui.toml`` keeper
 (`wall_in_one.ui.next.prefs.UiPrefsKeeper`), ui.toml's one writer.
@@ -23,11 +26,16 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk
 
-from wall_in_one.ui.next.prefs import INTERFACE_CHOICES, INTERFACE_NOTE, UiPrefsKeeper
+from wall_in_one.ui.next.prefs import (
+    GPU_NOTE,
+    INTERFACE_CHOICES,
+    INTERFACE_NOTE,
+    UiPrefsKeeper,
+)
 
 
 class LaunchRows:
-    """The next start's interface, bound to a ui.toml keeper."""
+    """The next start's interface and GPU acceleration, bound to a ui.toml keeper."""
 
     def __init__(self, keeper: UiPrefsKeeper, report: Callable[[str], None]) -> None:
         self._keeper = keeper
@@ -40,7 +48,12 @@ class LaunchRows:
             model=Gtk.StringList.new([label for _key, label in INTERFACE_CHOICES]),
         )
         self.interface.connect("notify::selected", self._on_interface)
-        self._notes: tuple[tuple[Adw.ActionRow, str], ...] = ((self.interface, INTERFACE_NOTE),)
+        self.gpu = Adw.SwitchRow(title="GPU acceleration", subtitle=GPU_NOTE)
+        self.gpu.connect("notify::active", self._on_gpu)
+        self._notes: tuple[tuple[Adw.ActionRow, str], ...] = (
+            (self.interface, INTERFACE_NOTE),
+            (self.gpu, GPU_NOTE),
+        )
         self._unsubscribe = keeper.subscribe(self.show)
         self.show()
 
@@ -56,6 +69,7 @@ class LaunchRows:
         self._showing = True
         try:
             self.interface.set_selected(keys.index(prefs.interface))
+            self.gpu.set_active(prefs.gpu_acceleration)
         finally:
             self._showing = False
         blocked = self._keeper.read_only
@@ -76,3 +90,7 @@ class LaunchRows:
         index = row.get_selected()
         if not self._showing and 0 <= index < len(INTERFACE_CHOICES):
             self._change(interface=INTERFACE_CHOICES[index][0])
+
+    def _on_gpu(self, row: Adw.SwitchRow, _property: object) -> None:
+        if not self._showing:
+            self._change(gpu_acceleration=row.get_active())

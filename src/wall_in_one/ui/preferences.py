@@ -746,6 +746,7 @@ class PreferencesPage(Adw.PreferencesPage):
         self._ui_prefs = UiPrefsKeeper(report)
         self._launch = LaunchRows(self._ui_prefs, report)
         self._interface = self._launch.interface
+        self._gpu = self._launch.gpu
         for row in self._launch.rows:
             group.add(row)
         self.connect("unrealize", lambda _page: self._close_launch_rows())

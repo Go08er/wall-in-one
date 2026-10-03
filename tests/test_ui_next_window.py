@@ -736,6 +736,49 @@ def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_ret
         application.session.shutdown()
 
 
+def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_unwritable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    obstacle = target.parent / "ui.toml.v1-backup"
+    obstacle.mkdir()
+    application = Application(ui="next")
+    reports: list[str] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    window = NextWindow(application, application.settings)
+    window.present()
+    try:
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPlaceholder)
+        row = page.gpu_row
+        assert row.get_active() and row.get_sensitive()
+        row.set_active(False)
+        spin_until(lambda: reports and not window.preferences.busy, what="the refusal")
+        assert "Nothing was changed" in reports[0] and row.get_active()
+        obstacle.rmdir()
+        row.set_active(False)
+        spin_until(lambda: not window.preferences.busy, what="the retried save")
+        assert ui_prefs.load().prefs.gpu_acceleration is False and not row.get_active()
+        assert window.preferences.saves == 2 and len(reports) == 1
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+
+    target.write_text("version = 9\n")
+    application = Application(ui="next")
+    window = NextWindow(application, application.settings)
+    try:
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPlaceholder)
+        assert not page.gpu_row.get_sensitive() and not page.interface_row.get_sensitive()
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
 def _remote(events: list[object]) -> type:
     """A verified running instance of this package, as registration reports it."""
 

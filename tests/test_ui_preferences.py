@@ -414,3 +414,61 @@ def test_a_failed_interface_save_goes_back_and_the_same_choice_then_saves(
     assert ui_prefs.load().prefs.interface == "next" and row.get_selected() == 1
     assert len(application.reports) == 1 and page._ui_prefs.saves == 2
     page._ui_prefs.close(wait=True)
+
+
+GPU_NOTE = "Takes effect the next time Wall-in-One starts. Off uses software rendering."
+
+
+def test_the_gpu_row_saves_ui_toml_once_per_change(tmp_path: Path) -> None:
+    application = SettingsApp(tmp_path)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    row = page._gpu
+    target = paths.ui_prefs_path()
+    assert row.get_title() == "GPU acceleration" and row.get_subtitle() == GPU_NOTE
+    assert row.get_active() and row.get_sensitive()
+    assert not target.exists(), "opening Settings writes nothing"
+
+    row.set_active(False)
+    spin_until(lambda: not page._ui_prefs.busy, what="the save")
+    assert ui_prefs.load().prefs.gpu_acceleration is False
+    assert ui_prefs.launch_gpu_acceleration() is False
+    row.set_active(True)
+    spin_until(lambda: not page._ui_prefs.busy, what="the second save")
+    assert ui_prefs.load().prefs.gpu_acceleration is True
+    assert page._ui_prefs.saves == 2 and application.changes == []
+    page._ui_prefs.close(wait=True)
+
+
+def test_the_gpu_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path) -> None:
+    target = paths.ui_prefs_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    document = "version = 9\ngpu_acceleration = false\n"
+    target.write_text(document)
+    application = SettingsApp(tmp_path)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+
+    assert not page._gpu.get_sensitive()
+    assert "newer version of Wall-in-One" in (page._gpu.get_subtitle() or "")
+    page._gpu.set_active(not page._gpu.get_active())  # even asked directly
+    assert target.read_text() == document
+
+
+def test_a_failed_gpu_save_goes_back_and_the_same_choice_then_saves(tmp_path: Path) -> None:
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    obstacle = target.parent / "ui.toml.v1-backup"
+    obstacle.mkdir()
+    application = SettingsApp(tmp_path)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    row = page._gpu
+
+    row.set_active(False)
+    spin_until(lambda: application.reports and not page._ui_prefs.busy, what="the refusal")
+    assert "Nothing was changed" in application.reports[0]
+    assert row.get_active(), "back on: off was not saved"
+    obstacle.rmdir()
+    row.set_active(False)
+    spin_until(lambda: not page._ui_prefs.busy, what="the retried save")
+    assert ui_prefs.load().prefs.gpu_acceleration is False and not row.get_active()
+    assert len(application.reports) == 1
+    page._ui_prefs.close(wait=True)

@@ -81,6 +81,7 @@ class SettingsPlaceholder(Placeholder):
         )
         self.launch = LaunchRows(keeper, report)
         self.interface_row = self.launch.interface
+        self.gpu_row = self.launch.gpu
         group = Adw.PreferencesGroup()
         for row in self.launch.rows:
             group.add(row)

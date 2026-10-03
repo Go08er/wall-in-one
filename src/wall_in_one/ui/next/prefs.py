@@ -52,6 +52,8 @@ INTERFACE_CHOICES: Final[tuple[tuple[str, str], ...]] = (
     ("next", "New (preview)"),
 )
 INTERFACE_NOTE: Final = "Takes effect the next time Wall-in-One starts."
+#: Whether the next start's window may render on the GPU, as both windows offer it.
+GPU_NOTE: Final = "Takes effect the next time Wall-in-One starts. Off uses software rendering."
 
 
 @dataclass(frozen=True, slots=True)

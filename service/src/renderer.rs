@@ -5,14 +5,14 @@ use crate::config::{
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,6 +26,19 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(3);
 const HELPER_STOP_GRACE: Duration = Duration::from_millis(250);
 const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(100);
 const MAX_SOCKET_PATH_BYTES: usize = 100;
+/// The longest one mpv IPC exchange (connect, request and reply together)
+/// may take. The runtime has one thread; a renderer that stops answering
+/// must not take supervision, other clients and shutdown down with it.
+pub const IPC_DEADLINE: Duration = Duration::from_secs(2);
+/// How long an exchange waits between looks at its deadline and at
+/// `IPC_ABANDONED`.
+const IPC_WAIT_SLICE: Duration = Duration::from_millis(20);
+
+/// Set by the service's SIGTERM/SIGINT handler (one atomic store, so it is
+/// async-signal-safe). An mpv IPC exchange in progress gives up at its next
+/// look instead of waiting out its deadline, and later ones fail at once, so
+/// a stalled renderer cannot hold up shutdown.
+pub static IPC_ABANDONED: AtomicBool = AtomicBool::new(false);
 static DRIVER_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -327,33 +340,12 @@ impl Mpvpaper {
         let Some(path) = &self.socket else {
             return Err("mpvpaper IPC socket is not configured".into());
         };
-        let mut stream = UnixStream::connect(path).map_err(|error| {
-            format!("cannot connect to mpvpaper IPC {}: {error}", path.display())
-        })?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .map_err(|error| format!("cannot configure mpvpaper IPC timeout: {error}"))?;
-        let mut encoded = serde_json::to_vec(&json!({"command": command}))
-            .map_err(|error| format!("cannot encode mpvpaper IPC request: {error}"))?;
-        encoded.push(b'\n');
-        stream
-            .write_all(&encoded)
-            .map_err(|error| format!("cannot write mpvpaper IPC request: {error}"))?;
-        let mut reply = String::new();
-        BufReader::new(stream)
-            .take(4097)
-            .read_line(&mut reply)
-            .map_err(|error| format!("cannot read mpvpaper IPC response: {error}"))?;
-        if reply.len() > 4096 {
-            return Err("mpvpaper IPC response exceeded 4 KiB".into());
-        }
-        let document: serde_json::Value = serde_json::from_str(reply.trim())
-            .map_err(|error| format!("mpvpaper IPC returned invalid JSON: {error}"))?;
-        match document.get("error").and_then(serde_json::Value::as_str) {
-            Some("success") => Ok(()),
-            Some(error) => Err(format!("mpvpaper IPC refused the command: {error}")),
-            None => Err("mpvpaper IPC response has no error field".into()),
-        }
+        mpv_ipc(
+            path,
+            &command,
+            Instant::now() + IPC_DEADLINE,
+            &IPC_ABANDONED,
+        )
     }
 
     fn signal(&mut self, signal: i32) -> Result<(), String> {
@@ -550,6 +542,195 @@ impl VideoRenderer for Mpvpaper {
         let mute_ok = self.ipc(json!(["set_property", "mute", muted])).is_ok();
         volume_ok && mute_ok
     }
+}
+
+/// One request to mpv's JSON IPC socket at `path`, and its one-line reply,
+/// within `deadline` as a whole: the connect, the write and the read share
+/// it. A listener that never accepts (its backlog full), never reads or
+/// never answers ends in an ordinary IPC error at the deadline, or as soon as
+/// `abandoned` is set.
+pub fn mpv_ipc(
+    path: &Path,
+    command: &serde_json::Value,
+    deadline: Instant,
+    abandoned: &AtomicBool,
+) -> Result<(), String> {
+    let mut stream = connect_until(path, deadline, abandoned)
+        .map_err(|error| format!("cannot connect to mpvpaper IPC {}: {error}", path.display()))?;
+    let mut encoded = serde_json::to_vec(&json!({"command": command}))
+        .map_err(|error| format!("cannot encode mpvpaper IPC request: {error}"))?;
+    encoded.push(b'\n');
+    write_until(&mut stream, &encoded, deadline, abandoned)
+        .map_err(|error| format!("cannot write mpvpaper IPC request: {error}"))?;
+    let reply = read_line_until(&mut stream, 4097, deadline, abandoned)
+        .map_err(|error| format!("cannot read mpvpaper IPC response: {error}"))?;
+    if reply.len() > 4096 {
+        return Err("mpvpaper IPC response exceeded 4 KiB".into());
+    }
+    let document: serde_json::Value = serde_json::from_str(reply.trim())
+        .map_err(|error| format!("mpvpaper IPC returned invalid JSON: {error}"))?;
+    match document.get("error").and_then(serde_json::Value::as_str) {
+        Some("success") => Ok(()),
+        Some(error) => Err(format!("mpvpaper IPC refused the command: {error}")),
+        None => Err("mpvpaper IPC response has no error field".into()),
+    }
+}
+
+/// How long the next wait may be: a slice of what is left before `deadline`,
+/// or the reason to stop waiting now.
+fn wait_slice(deadline: Instant, abandoned: &AtomicBool) -> std::io::Result<Duration> {
+    if abandoned.load(Ordering::Relaxed) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "the service is shutting down",
+        ));
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("no answer within {} s", IPC_DEADLINE.as_secs()),
+        ));
+    }
+    Ok(left.min(IPC_WAIT_SLICE))
+}
+
+/// Connect without blocking. A Unix listener whose backlog is full refuses a
+/// nonblocking connect with `EAGAIN` instead of queueing it, so retry until
+/// it has room, the deadline passes or the exchange is abandoned.
+fn connect_until(
+    path: &Path,
+    deadline: Instant,
+    abandoned: &AtomicBool,
+) -> std::io::Result<UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket path is not a usable Unix socket address",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Owned at once, so every early return closes it.
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    loop {
+        let wait = wait_slice(deadline, abandoned)?;
+        let result =
+            unsafe { libc::connect(socket.as_raw_fd(), (&raw const address).cast(), length) };
+        if result == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EISCONN) => break,
+            Some(libc::EAGAIN | libc::EINTR) => thread::sleep(wait),
+            Some(libc::EINPROGRESS | libc::EALREADY) => {
+                let mut poll = libc::pollfd {
+                    fd: socket.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let timeout = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX).max(1);
+                if unsafe { libc::poll(&mut poll, 1, timeout) } > 0 {
+                    let mut failure: libc::c_int = 0;
+                    let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                    let read = unsafe {
+                        libc::getsockopt(
+                            socket.as_raw_fd(),
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&raw mut failure).cast(),
+                            &mut size,
+                        )
+                    };
+                    if read != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if failure != 0 {
+                        return Err(std::io::Error::from_raw_os_error(failure));
+                    }
+                    break;
+                }
+            }
+            _ => return Err(error),
+        }
+    }
+    let stream = UnixStream::from(socket);
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+fn write_until(
+    stream: &mut UnixStream,
+    mut bytes: &[u8],
+    deadline: Instant,
+    abandoned: &AtomicBool,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        stream.set_write_timeout(Some(wait_slice(deadline, abandoned)?))?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// The first line of the reply (or what arrives before the peer closes),
+/// reading at most `limit` bytes.
+fn read_line_until(
+    stream: &mut UnixStream,
+    limit: usize,
+    deadline: Instant,
+    abandoned: &AtomicBool,
+) -> std::io::Result<String> {
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 512];
+    while reply.len() < limit && !reply.contains(&b'\n') {
+        stream.set_read_timeout(Some(wait_slice(deadline, abandoned)?))?;
+        let wanted = (limit - reply.len()).min(chunk.len());
+        match stream.read(&mut chunk[..wanted]) {
+            Ok(0) => break,
+            Ok(read) => reply.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if let Some(end) = reply.iter().position(|byte| *byte == b'\n') {
+        reply.truncate(end + 1);
+    }
+    String::from_utf8(reply)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "reply is not UTF-8"))
 }
 
 pub struct SystemDriver {
@@ -1324,6 +1505,7 @@ fn _absolute(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
 
     #[test]
@@ -1521,6 +1703,86 @@ mod tests {
         let rendered = diagnostic(&output.stderr);
         assert!(rendered.len() <= MAX_DIAGNOSTIC_BYTES + 32);
         assert!(rendered.ends_with("[truncated]"));
+    }
+
+    /// A listener that never accepts, with its whole connection backlog
+    /// already taken: `listen(0)` admits one queued client, which `filler`
+    /// is. The next connect cannot complete until something accepts.
+    pub(crate) fn stalled_endpoint(path: &Path) -> (std::os::fd::OwnedFd, UnixStream) {
+        use std::os::fd::FromRawFd;
+        let bytes = path.as_os_str().as_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        assert!(bytes.len() < address.sun_path.len());
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0);
+        let listener = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        assert_eq!(
+            unsafe { libc::bind(fd, (&raw const address).cast(), length) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(unsafe { libc::listen(fd, 0) }, 0);
+        let filler = UnixStream::connect(path).unwrap();
+        (listener, filler)
+    }
+
+    fn scratch_socket(label: &str) -> (PathBuf, PathBuf) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wall-in-one-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("mpv.sock");
+        (root, socket)
+    }
+
+    #[test]
+    fn a_stalled_mpv_endpoint_cannot_hold_the_runtime_past_its_deadline() {
+        let (root, socket) = scratch_socket("mpv-stalled");
+        let (listener, filler) = stalled_endpoint(&socket);
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut renderer = Mpvpaper::new();
+        renderer.child = Some(command.spawn().unwrap());
+        renderer.socket = Some(socket.clone());
+
+        // Pause through IPC on a worker, so an unbounded connect fails this
+        // test instead of hanging it.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let started = Instant::now();
+            let result = renderer.ipc(json!(["set_property", "pause", true]));
+            sender.send((result, started.elapsed())).unwrap();
+            renderer
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(6));
+        drop(filler);
+        drop(listener);
+        let (result, elapsed) = outcome.expect("mpv IPC to a stalled endpoint never returned");
+        let error = result.unwrap_err();
+        assert!(error.contains("cannot connect to mpvpaper IPC"), "{error}");
+        assert!(
+            elapsed >= IPC_DEADLINE && elapsed < IPC_DEADLINE + Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+        let mut renderer = worker.join().unwrap();
+        renderer.stop();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

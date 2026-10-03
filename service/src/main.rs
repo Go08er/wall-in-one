@@ -86,6 +86,8 @@ struct StartupRetry {
 
 extern "C" fn terminate(_: libc::c_int) {
     TERMINATE.store(true, Ordering::Relaxed);
+    // A stalled renderer's IPC gives up now rather than at its deadline.
+    wall_in_one_service::renderer::IPC_ABANDONED.store(true, Ordering::Relaxed);
 }
 
 struct Options {

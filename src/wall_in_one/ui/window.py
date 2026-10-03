@@ -163,7 +163,15 @@ class MainWindow(Adw.ApplicationWindow):
         self._renderer_taboo = False
 
         self.set_content(self._build_content())
-        self.connect("destroy", self._on_destroy)
+        # Torn down on "unrealize", as NextWindow is: closing unrealizes at
+        # once, but GTK 4 emits "destroy" only at disposal, which a pending
+        # preview's callback (bound to this window's pages) can postpone for
+        # as long as it waits. In resident --service mode nothing else would
+        # stop this window's workers. "destroy" remains a fallback; the
+        # teardown runs once.
+        self._torn_down = False
+        self.connect("unrealize", self._teardown)
+        self.connect("destroy", self._teardown)
         self._palette_catalog.ensure_loaded()
 
     # -- construction ----------------------------------------------------
@@ -544,7 +552,16 @@ class MainWindow(Adw.ApplicationWindow):
         """Surface a failure where the user will actually see it."""
         self._toast.add_toast(Adw.Toast.new(message))
 
-    def _on_destroy(self, _window: Gtk.Window) -> None:
+    def _teardown(self, _window: Gtk.Window) -> None:
+        """Stop this window's workers and cancel their queued work, once.
+
+        The thumbnail loaders, the palette previews, Browse's searches and
+        downloads, the playlists page and the palette catalog all belong to
+        this window; a reopened window builds its own.
+        """
+        if self._torn_down:
+            return
+        self._torn_down = True
         if self._palettes is not None:
             self._palettes.close()
         self._loader.shutdown()

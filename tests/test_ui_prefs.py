@@ -575,3 +575,86 @@ def test_an_unreadable_file_starts_the_classic_interface(caplog: pytest.LogCaptu
     with caplog.at_level(logging.INFO, logger="wall_in_one.ui_prefs"):
         assert ui_prefs.launch_interface() is None
     assert len(caplog.records) == 1 and "starting the classic interface" in caplog.text
+
+
+# -- version 2: GPU acceleration for the window ---------------------------------------------
+
+
+def test_gpu_acceleration_is_a_strict_bool_that_defaults_on() -> None:
+    assert UiPrefs().gpu_acceleration is True
+    assert UiPrefs.from_mapping({"gpu_acceleration": False}).gpu_acceleration is False
+    for invalid in ("false", 0, None, "off"):
+        assert UiPrefs.from_mapping({"gpu_acceleration": invalid}).gpu_acceleration is True
+
+
+def test_turning_gpu_acceleration_off_bumps_once_keeps_v1_and_never_demotes() -> None:
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    ui_prefs.update({"gpu_acceleration": True})
+    assert "gpu_acceleration" not in target.read_text(), "omitted while on"
+    version_1 = target.read_bytes()
+
+    ui_prefs.update({"gpu_acceleration": False})
+
+    document = tomllib.loads(target.read_text())
+    assert document["version"] == 2 and document["gpu_acceleration"] is False
+    backup = paths.app_config_dir() / "ui.toml.v1-backup"
+    assert backup.read_bytes() == version_1
+    ui_prefs.update({"gpu_acceleration": True})
+    document = tomllib.loads(target.read_text())
+    assert document["version"] == 2 and "gpu_acceleration" not in document, "never demoted"
+    ui_prefs.update({"gpu_acceleration": False})
+    assert backup.read_bytes() == version_1, "the one backup is never overwritten"
+
+
+def test_a_first_file_that_turns_gpu_acceleration_off_has_nothing_to_back_up() -> None:
+    ui_prefs.update({"gpu_acceleration": False})
+
+    assert tomllib.loads(paths.ui_prefs_path().read_text())["version"] == 2
+    assert _siblings() == {"ui.toml", ".ui.toml.mutation.lock"}
+
+
+def test_0_2_releases_never_write_a_file_with_gpu_acceleration_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released = _released(monkeypatch)
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"window_style": "frosted", "gpu_acceleration": False})
+    written = target.read_bytes()
+
+    seen = released.load()
+
+    assert seen.prefs.window_style == "frosted"
+    assert "newer version of Wall-in-One (version 2)" in seen.read_only
+    with pytest.raises(released.UiPrefsReadOnlyError):
+        released.update({"frost": 0.9})
+    assert target.read_bytes() == written
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        (None, True),
+        ("version = 2\ngpu_acceleration = false\n", False),
+        ("version = 2\ngpu_acceleration = true\n", True),
+        ("gpu_acceleration = false\n", False),
+        ('version = 2\ngpu_acceleration = "false"\n', True),
+        ("version = 9\ngpu_acceleration = false\n", True),
+        ("gpu_acceleration = [[\n", True),
+    ],
+)
+def test_the_launch_reads_gpu_acceleration_and_never_writes(
+    document: str | None, expected: bool
+) -> None:
+    if document is not None:
+        _write(document)
+    before = _config_files()
+
+    assert ui_prefs.launch_gpu_acceleration() is expected
+
+    assert _config_files() == before, "reading the choice writes nothing"
+
+
+def test_an_unreadable_file_leaves_gpu_acceleration_on() -> None:
+    paths.ui_prefs_path().mkdir(parents=True)
+    assert ui_prefs.launch_gpu_acceleration() is True

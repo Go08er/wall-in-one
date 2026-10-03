@@ -28,14 +28,18 @@ The contract every build keeps:
   ``tidy_offer_dismissed`` joined version 1 before any release shipped
   ui.toml (0.2.0 is the first), so no build knows a version 1 without it.
 * Version 2 adds ``interface``, the window the app builds when it starts
-  without ``--ui``. It follows the owner-approved format guards of
-  :mod:`wall_in_one.library.state_file`: the file moves to version 2 only when
-  ``interface = "next"`` is first saved (a lazy bump; a profile that never
-  chooses the new interface stays at version 1, which 0.2.0 and 0.2.1 keep
-  writing), the version 1 bytes are first copied to ``ui.toml.v1-backup``
-  (one time, never overwritten; without it the save is refused), and the file
-  never moves back down. 0.2.0 and 0.2.1 read a version 2 file for the keys
-  they know and leave it unwritten.
+  without ``--ui``, and ``gpu_acceleration``, whether that window may render
+  on the GPU (``false`` makes the next start use GTK's software renderer).
+  ``gpu_acceleration`` joined version 2 before any release shipped it, so no
+  released build knows a version 2 without it. Both follow the owner-approved
+  format guards of :mod:`wall_in_one.library.state_file`: the file moves to
+  version 2 only when ``interface = "next"`` or ``gpu_acceleration = false``
+  is first saved (a lazy bump; a profile that never chooses either stays at
+  version 1, which 0.2.0 and 0.2.1 keep writing), the version 1 bytes are
+  first copied to ``ui.toml.v1-backup`` (one time, never overwritten; without
+  it the save is refused; nothing to copy when there was no file), and the
+  file never moves back down. 0.2.0 and 0.2.1 read a version 2 file for the
+  keys they know and leave it unwritten.
 """
 
 from __future__ import annotations
@@ -53,7 +57,8 @@ from typing import Any, Final
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 
-#: Version 1 is what 0.2.0 and 0.2.1 read and write; version 2 adds ``interface``.
+#: Version 1 is what 0.2.0 and 0.2.1 read and write; version 2 adds ``interface``
+#: and ``gpu_acceleration``.
 FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=2)
 VERSION: Final = FORMATS.current
 LOGGER: Final = logging.getLogger(__name__)
@@ -77,6 +82,7 @@ _SCALAR_KEYS: Final[tuple[str, ...]] = (
     "last_page",
     "tidy_offer_dismissed",
     "interface",
+    "gpu_acceleration",
 )
 KNOWN_KEYS: Final = frozenset((*_SCALAR_KEYS, *_GLASS_TABLES))
 _BARE_KEY: Final = re.compile(r"[A-Za-z0-9_-]+")
@@ -168,6 +174,9 @@ class UiPrefs:
     tidy_offer_dismissed: bool = False
     #: The window the next start builds when no ``--ui`` is given (version 2).
     interface: str = "classic"
+    #: Whether the next start's window may render on the GPU (version 2). Off
+    #: starts it with GTK's software renderer.
+    gpu_acceleration: bool = True
 
     def validated(self) -> UiPrefs:
         """Replace each invalid field with its own default."""
@@ -187,6 +196,7 @@ class UiPrefs:
                 "last_page": self.last_page,
                 "tidy_offer_dismissed": self.tidy_offer_dismissed,
                 "interface": self.interface,
+                "gpu_acceleration": self.gpu_acceleration,
             }
         )
 
@@ -206,12 +216,14 @@ class UiPrefs:
                 raw.get("tidy_offer_dismissed"), defaults.tidy_offer_dismissed
             ),
             interface=_choice(raw.get("interface"), INTERFACES, defaults.interface),
+            gpu_acceleration=_flag(raw.get("gpu_acceleration"), defaults.gpu_acceleration),
         )
 
 
 def required_version(prefs: UiPrefs) -> int:
-    """The oldest version that can hold ``prefs``: 2 only for the new interface."""
-    return 2 if prefs.validated().interface != "classic" else 1
+    """The oldest version that can hold ``prefs``: 2 for the new interface or no GPU."""
+    prefs = prefs.validated()
+    return 2 if prefs.interface != "classic" or not prefs.gpu_acceleration else 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +382,9 @@ def render(
     if prefs.interface != "classic":
         # Only the new interface needs version 2; classic is the default.
         scalars["interface"] = prefs.interface
+    if not prefs.gpu_acceleration:
+        # Omitted while on (the default), so only turning it off needs version 2.
+        scalars["gpu_acceleration"] = False
     tables: dict[str, Mapping[str, Any]] = {}
     for name, glass in (
         ("background_opacity", prefs.background_opacity),
@@ -415,8 +430,9 @@ def mutate(
     that has not changed is not rewritten.
 
     The file keeps its version unless the change needs a newer one (choosing
-    the new interface needs 2); before that first bump its old bytes are kept
-    as ``ui.toml.v1-backup``, or nothing is saved.
+    the new interface, or turning GPU acceleration off, needs 2); before that
+    first bump its old bytes are kept as ``ui.toml.v1-backup``, or nothing is
+    saved.
     """
     target = path if path is not None else paths.ui_prefs_path()
     try:
@@ -484,6 +500,17 @@ def launch_interface(path: Path | None = None) -> str | None:
         )
         return None
     return None if chosen == "classic" else str(chosen)
+
+
+def launch_gpu_acceleration(path: Path | None = None) -> bool:
+    """Whether a start's window may render on the GPU: False only when turned off.
+
+    Read-only: it never writes and never raises. Unlike `launch_interface`, a
+    file this build must not write -- missing is fine, but unreadable,
+    malformed or from a newer version -- means on: the safe, unchanged default.
+    """
+    document = load(path)
+    return document.prefs.gpu_acceleration if document.writable else True
 
 
 def save(prefs: UiPrefs, path: Path | None = None) -> UiPrefsDocument:

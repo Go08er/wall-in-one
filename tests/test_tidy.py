@@ -593,3 +593,89 @@ def test_clearing_the_cache_takes_what_is_there_now_not_what_was_previewed() -> 
 
     assert result.changed and "Cleared 2 thumbnails" in result.message
     assert list(cache.iterdir()) == []
+
+
+# -- a manifest is never written past what its reader takes ---------------------------
+
+
+def _archives() -> list[Path]:
+    root = tidy.archive_root()
+    return sorted(root.iterdir()) if root.is_dir() else []
+
+
+def test_an_archive_whose_manifest_would_be_unreadable_is_refused_before_moving(
+    finished: deployed_upgrade_transaction.FinishedClaims, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest is read back with a cap (MAX_MANIFEST_BYTES). Written past
+    it, the archive is invisible to Undo. With a reduced budget, Apply is
+    refused before anything is created or moved."""
+    parent = paths.app_state_dir()
+    leftovers = [
+        _claim_folder(parent, "entry-aaaaaaaa"),
+        _claim_folder(parent, "entry-bbbbbbbb"),
+        _record(parent),
+    ]
+    preview = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+    assert len(preview.changes) == 3
+    monkeypatch.setattr(tidy, "MAX_MANIFEST_BYTES", 512)
+
+    with pytest.raises(tidy.TidyError, match="Nothing was changed") as refused:
+        tidy.apply(tidy.LEFTOVERS, preview)
+
+    assert "more than the 512 bytes this version can read back" in str(refused.value)
+    assert all(path.exists() for path in leftovers), "nothing was moved"
+    assert _archives() == [], "no archive was started"
+    again = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+    assert len(again.changes) == 3 and again.undo is None
+
+    # With the real budget, the same plan archives normally.
+    monkeypatch.setattr(tidy, "MAX_MANIFEST_BYTES", 4 * 1024 * 1024)
+    done = tidy.apply(tidy.LEFTOVERS, again)
+    assert done.changed and not any(path.exists() for path in leftovers)
+
+
+def test_an_edit_whose_manifest_would_be_unreadable_is_refused_before_editing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _noctalia_settings()
+    original = settings.read_bytes()
+    monkeypatch.setattr(noctalia, "reload_config", lambda: None)
+    preview = tidy.plan(roots=()).action(tidy.PLUGIN_SETTINGS)
+    assert preview.changes
+    monkeypatch.setattr(tidy, "MAX_MANIFEST_BYTES", 512)
+
+    with pytest.raises(tidy.TidyError, match="Nothing was changed"):
+        tidy.apply(tidy.PLUGIN_SETTINGS, preview)
+
+    assert settings.read_bytes() == original
+    assert _archives() == []
+
+
+def test_an_undo_that_could_leave_its_manifest_unreadable_is_refused(
+    finished: deployed_upgrade_transaction.FinishedClaims, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undo records each item's outcome, so its manifest grows too. Short of
+    room for that, it is refused before anything is put back."""
+    folder = _claim_folder(paths.app_state_dir(), "entry-cccccccc")
+    record = _record(paths.app_state_dir())
+    tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS))
+    (archive,) = _archives()
+    before = (archive / "manifest.json").read_bytes()
+    # Room to read the manifest as it is, not for what Undo would add.
+    monkeypatch.setattr(tidy, "MAX_MANIFEST_BYTES", len(before) + 64)
+
+    with pytest.raises(tidy.TidyError, match="Nothing was changed"):
+        tidy.undo(tidy.LEFTOVERS)
+
+    assert not folder.exists() and not record.exists(), "nothing was put back"
+    assert (archive / "manifest.json").read_bytes() == before
+    assert tidy.plan(roots=()).action(tidy.LEFTOVERS).undo is not None
+
+
+def test_journal_text_is_bounded_and_keeps_both_ends() -> None:
+    """An item's later notes add a bounded amount, which the room check counts on."""
+    long = "first-file " + "näme/" * 3000 + " the reason it failed"
+    text = tidy._journal_text(OSError(5, long))
+    assert len(json.dumps(text)) <= tidy.MAX_JOURNAL_TEXT_BYTES
+    assert text.startswith("[Errno 5] first-file") and text.endswith("the reason it failed")
+    assert tidy._journal_text("short") == "short"

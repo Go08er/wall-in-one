@@ -132,6 +132,22 @@ MANIFEST: Final = "manifest.json"
 MANIFEST_KIND: Final = "wall-in-one-tidy-up"
 MANIFEST_VERSION: Final = 1
 MAX_MANIFEST_BYTES: Final = 4 * 1024 * 1024
+#: Error text a journal records is cut, in the middle, to at most this many
+#: bytes as the manifest writes it, so whatever an item's record gains after
+#: the first write is bounded.
+MAX_JOURNAL_TEXT_BYTES: Final = 1024
+_JOURNAL_TEXT_BYTES: Final = MAX_JOURNAL_TEXT_BYTES
+#: The most one item's record can grow after an Apply's first manifest write:
+#: a note, an outcome and a later Undo error, plus its other changed fields.
+ITEM_GROWTH_BYTES: Final = 3 * _JOURNAL_TEXT_BYTES + 1024
+#: Room for what an Apply adds to its manifest after the first write: states
+#: and times, Noctalia's backup paths, the reload result, a tail error.
+MANIFEST_GROWTH_BYTES: Final = 128 * 1024
+#: The same for a later step (Undo, Retry Reload, Keep): an item can still
+#: gain an Undo error, and the document a few states and times. Inside what
+#: the Apply reserved, so an archive this version made never runs out of room.
+UNDO_ITEM_GROWTH_BYTES: Final = _JOURNAL_TEXT_BYTES + 256
+STEP_GROWTH_BYTES: Final = 4 * 1024
 #: A claim folder this recently changed may belong to a deletion in progress.
 CLAIM_GRACE_SECONDS: Final = 3600.0
 #: The largest pre-upgrade copy the archive hashes (runtime.toml's own cap is 8 MiB).
@@ -395,9 +411,74 @@ def _new_archive(action: Action) -> Path:
     raise TidyError(f"too many tidy-up archives were started at {stamp}")
 
 
+def _render_manifest(directory: Path, document: Mapping[str, Any]) -> str:
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+
 def _write_manifest(directory: Path, document: Mapping[str, Any]) -> None:
-    data = json.dumps(document, indent=2, sort_keys=True) + "\n"
+    """Journal ``document``, never past what :func:`_manifests` reads back.
+
+    Every action checks its room up front (:func:`_require_manifest_room`), so
+    this refusal is a backstop. Should it happen, the manifest keeps its last
+    written state, which Undo works from.
+    """
+    data = _render_manifest(directory, document)
+    try:
+        state_file.require_readable_size(
+            data, directory / MANIFEST, maximum_bytes=MAX_MANIFEST_BYTES
+        )
+    except state_file.DocumentTooLargeError as error:
+        raise TidyError(
+            f"{error}, so it wasn't updated. {directory} keeps its last saved state, "
+            "and Undo works from that."
+        ) from error
     state_file.write_atomic_text(directory / MANIFEST, data, mode=0o600)
+
+
+def _require_manifest_room(
+    directory: Path,
+    document: Mapping[str, Any],
+    *,
+    items: int,
+    remedy: str,
+    doing: str,
+    item_growth: int = ITEM_GROWTH_BYTES,
+    growth: int = MANIFEST_GROWTH_BYTES,
+) -> None:
+    """Refuse a step, before it changes anything, if its manifest could outgrow the reader.
+
+    The projection is the document as it would be written now plus the most
+    each of ``items`` records (``item_growth``), and the rest of the document
+    (``growth``), can still gain.
+    """
+    path = directory / MANIFEST
+    size = len(_render_manifest(directory, document).encode("utf-8"))
+    projected = size + items * item_growth + growth
+    if projected > MAX_MANIFEST_BYTES:
+        error = state_file.DocumentTooLargeError(path, projected, MAX_MANIFEST_BYTES)
+        raise TidyError(
+            f"{doing} would need a manifest of up to {projected:,} bytes, more than the "
+            f"{MAX_MANIFEST_BYTES:,} bytes this version can read back, so Undo couldn't "
+            f"find it again; {remedy} first. Nothing was changed."
+        ) from error
+
+
+def _journal_text(error: object) -> str:
+    """``error`` as a journal records it: at most MAX_JOURNAL_TEXT_BYTES as written.
+
+    An error names the file near its start and the reason at its end, so a
+    long one loses its middle.
+    """
+    text = str(error)
+    if len(json.dumps(text)) <= MAX_JOURNAL_TEXT_BYTES:
+        return text
+    keep = MAX_JOURNAL_TEXT_BYTES // 2
+    while keep > 0:
+        shortened = f"{text[:keep]}\u2026{text[-keep:]}"
+        if len(json.dumps(shortened)) <= MAX_JOURNAL_TEXT_BYTES:
+            return shortened
+        keep -= max(1, keep // 8)
+    return "\u2026"
 
 
 def _manifests() -> list[_Manifest]:
@@ -830,7 +911,6 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
         )
     if not leftovers:
         return Result(LEFTOVERS, False, "There was nothing to archive.")
-    archive = _new_archive(LEFTOVERS)
     items: list[dict[str, Any]] = []
     for index, item in enumerate(leftovers, start=1):
         items.append(
@@ -854,6 +934,14 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
         "created": _now_iso(),
         "items": items,
     }
+    _require_manifest_room(
+        archive_root(),
+        document,
+        items=len(items),
+        remedy="move some of the listed leftovers elsewhere by hand",
+        doing=f"Archiving {_plural(len(items), 'leftover')} at once",
+    )
+    archive = _new_archive(LEFTOVERS)
     _write_manifest(archive, document)
     touched: set[Path] = {archive / "items"}
     for record in items:
@@ -892,13 +980,15 @@ def _settle_location(record: dict[str, Any], destination: Path, error: object) -
     found = _lstat(destination)
     if found is None or isinstance(error, FileExistsError):
         # Nothing arrived, or the name was taken before the move: it never left.
-        record["outcome"] = f"skipped: {error}"
+        record["outcome"] = f"skipped: {_journal_text(error)}"
         return
     record["outcome"] = "moved"
     record["identity"] = [found.st_dev, found.st_ino]
     record["type"] = "dir" if stat.S_ISDIR(found.st_mode) else "file"
     record["fingerprint"] = None
-    record["note"] = f"the move didn't finish cleanly ({error}); what reached the archive is kept"
+    record["note"] = (
+        f"the move didn't finish cleanly ({_journal_text(error)}); what reached the archive is kept"
+    )
 
 
 def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
@@ -929,7 +1019,7 @@ def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
             if _lstat(destination) is not None:
                 record["note"] = (
                     "it gained contents while it was being archived and couldn't be put "
-                    f"back ({error}); it's kept in the archive with them"
+                    f"back ({_journal_text(error)}); it's kept in the archive with them"
                 )
             else:
                 _settle_location(record, destination, error)
@@ -983,7 +1073,7 @@ def _undo_archive(manifest: _Manifest) -> Result:
             failed += 1
             continue
         except (OSError, ValueError) as error:
-            record["undo_error"] = str(error)
+            record["undo_error"] = _journal_text(error)
             failed += 1
             continue
         record["outcome"] = "restored"
@@ -1428,13 +1518,6 @@ def _apply_settings_edit(
 ) -> tuple[Path, dict[str, Any]]:
     """Archive a copy, journal, edit through the template transaction, reload."""
     after_text = transform(settings.text)
-    archive = _new_archive(action)
-    state_file.write_atomic_bytes(
-        archive / "items" / "settings.toml.before",
-        settings.data,
-        replace_existing=False,
-        mode=0o600,
-    )
     document: dict[str, Any] = {
         "kind": MANIFEST_KIND,
         "version": MANIFEST_VERSION,
@@ -1447,6 +1530,20 @@ def _apply_settings_edit(
         "after_sha256": _sha256(after_text.encode("utf-8")),
         **extra,
     }
+    _require_manifest_room(
+        archive_root(),
+        document,
+        items=0,
+        remedy="make this change to Noctalia's settings by hand",
+        doing="Recording this change",
+    )
+    archive = _new_archive(action)
+    state_file.write_atomic_bytes(
+        archive / "items" / "settings.toml.before",
+        settings.data,
+        replace_existing=False,
+        mode=0o600,
+    )
     _write_manifest(archive, document)
     if before_edit is not None:
         try:
@@ -1474,7 +1571,7 @@ def _apply_settings_edit(
             document["state"] = "abandoned"
             _write_manifest(archive, document)
             raise TidyError(f"Noctalia's settings weren't changed: {error}") from error
-        document["tail_error"] = str(error)
+        document["tail_error"] = _journal_text(error)
         if outcome == "unknown":
             # Stays "applying": Undo is offered for whatever did take effect.
             _write_manifest(archive, document)
@@ -1917,7 +2014,6 @@ def _apply_old_palette_template(expected: ActionPlan | None) -> Result:
     if plan.blocked:
         raise TidyError(plan.blocked)
     stale = _stale_template()
-    archive = _new_archive(OLD_PALETTE_TEMPLATE)
     fingerprint = file_io.file_fingerprint(found)
     document: dict[str, Any] = {
         "kind": MANIFEST_KIND,
@@ -1939,6 +2035,14 @@ def _apply_old_palette_template(expected: ActionPlan | None) -> Result:
             }
         ],
     }
+    _require_manifest_room(
+        archive_root(),
+        document,
+        items=1,
+        remedy=f"move {stale} elsewhere by hand",
+        doing="Archiving the old template",
+    )
+    archive = _new_archive(OLD_PALETTE_TEMPLATE)
     _write_manifest(archive, document)
     record = document["items"][0]
     _move_into_archive(archive, record)
@@ -2226,12 +2330,14 @@ def retry(action: Action) -> Result:
         manifests = _manifests()
         waiting = _pending_undo(action, manifests)
         if waiting is not None:
+            _require_undo_room(waiting, items=0)
             return _finish_undo(action, waiting)
         settings, _unreadable = _read_noctalia()
         current = settings.sha256 if settings is not None else None
         edit = _current_edit(action, manifests, current)
         if edit is None or edit.document.get("reloaded") is True:
             return Result(action, False, "There's no reload left to retry.")
+        _require_undo_room(edit, items=0)
         if not _reload_noctalia():
             return Result(
                 action,
@@ -2266,6 +2372,21 @@ def _finish_undo(action: Action, manifest: _Manifest) -> Result:
     return Result(action, True, message, manifest.directory)
 
 
+def _require_undo_room(manifest: _Manifest, *, items: int) -> None:
+    """Refuse a later step on an archive whose manifest could no longer be read back."""
+    _require_manifest_room(
+        manifest.directory,
+        manifest.document,
+        items=items,
+        remedy=(
+            f"finish it by hand: {manifest.directory / MANIFEST} lists where everything came from"
+        ),
+        doing="Recording this step",
+        item_growth=UNDO_ITEM_GROWTH_BYTES,
+        growth=STEP_GROWTH_BYTES,
+    )
+
+
 def undo(action: Action) -> Result:
     """Put back what the latest :func:`apply` of ``action`` changed."""
     if action == THUMBNAIL_CACHE:
@@ -2282,6 +2403,7 @@ def undo(action: Action) -> Result:
                     continue
                 state = _effective_state(manifest, current)
                 if state in ("applied", "applying"):
+                    _require_undo_room(manifest, items=0)
                     if action == PALETTE_TEMPLATE:
                         return _undo_palette_template(manifest)
                     return _undo_plugin_settings(manifest)
@@ -2292,6 +2414,7 @@ def undo(action: Action) -> Result:
         if latest is None:
             return Result(action, False, "There's nothing to undo.")
         if action in (LEFTOVERS, OLD_PALETTE_TEMPLATE):
+            _require_undo_room(latest, items=len(_archived_items(latest)))
             return _undo_archive(latest)
     raise ValueError(f"unknown tidy-up action {action!r}")
 
@@ -2308,6 +2431,7 @@ def keep_archived(action: Action) -> Result:
         latest = _latest(action, _manifests())
         if latest is None:
             return Result(action, False, "There's nothing archived to keep.")
+        _require_undo_room(latest, items=0)
         document = copy.deepcopy(latest.document)
         document["state"] = "kept"
         document["kept"] = _now_iso()

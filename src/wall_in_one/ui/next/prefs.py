@@ -206,6 +206,10 @@ class UiPrefsKeeper:
         """A change is waiting to be saved, or a save has not come back to GTK yet."""
         return bool(self._pending) or bool(self._timer) or self._in_flight > 0
 
+    def reopen(self) -> None:
+        """Tell subscribers about saves again, after `close`: the window is back."""
+        self._closed = False
+
     def close(self, *, wait: bool = False) -> None:
         """Save what the user changed and is still waiting, then stop the worker.
 

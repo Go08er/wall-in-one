@@ -1027,3 +1027,99 @@ def test_an_earlier_failure_never_reverts_a_later_queued_choice(
     assert shown == [("classic", "frosted")], "only the latest save reconciled, once"
     assert len(backend.reports) == 1
     assert tomllib.loads(target.read_text())["version"] == 1
+
+
+# -- the new interface's look follows what ui.toml holds ---------------------------------
+
+
+def _locked_out() -> Path:
+    """A directory where ui.toml's mutation lock must go: every save is refused."""
+    lock = paths.app_config_dir() / ".ui.toml.mutation.lock"
+    lock.unlink(missing_ok=True)  # an earlier save's lock file: no save holds it now
+    lock.mkdir(parents=True)
+    return lock
+
+
+SOLID = css.Glass(background=1.0, panel=1.0)
+FROSTED = css.Glass(background=0.30, panel=0.60)
+
+
+def test_a_failed_look_save_goes_back_live_and_the_same_choice_then_saves(
+    backend: FakeApplication,
+) -> None:
+    lock = _locked_out()
+    adapter, keeper = _adapter(backend)
+    seen = _topics(adapter)
+
+    adapter.set_window_style("frosted")
+    assert backend.glass[-1] == FROSTED, "the live look follows the choice at once"
+    spin_until(lambda: backend.reports and not keeper.busy, what="the refusal")
+
+    assert "were not saved" in backend.reports[0]
+    assert adapter.window_style == "solid" and backend.glass[-1] == SOLID, "back to ui.toml"
+    assert seen == ["appearance", "appearance"]
+    assert not paths.ui_prefs_path().exists()
+    lock.rmdir()
+    adapter.set_window_style("frosted")  # the same choice again
+    spin_until(lambda: not keeper.busy, what="the retried save")
+    assert ui_prefs.load().prefs.window_style == "frosted" and backend.glass[-1] == FROSTED
+    assert keeper.saves == 2 and len(backend.reports) == 1
+    keeper.close(wait=True)
+
+
+def test_only_a_dials_settled_value_saves_and_its_failure_goes_back(
+    backend: FakeApplication,
+) -> None:
+    adapter, keeper = _adapter(backend)
+    adapter.set_window_style("translucent")
+    spin_until(lambda: not keeper.busy, what="the style save")
+    lock = _locked_out()
+
+    adapter.set_panel_opacity(0.7)
+    adapter.set_panel_opacity(0.72)  # a drag: one save once it rests
+    assert keeper.busy and adapter.panel_alpha == 0.72
+    spin_until(lambda: backend.reports and not keeper.busy, timeout=5.0, what="the refusal")
+
+    assert keeper.saves == 2, "the style, then the dial's settled value only"
+    assert adapter.panel_alpha == 0.80, "back to ui.toml"
+    assert backend.glass[-1] == css.Glass(background=0.55, panel=0.80), "live look included"
+    lock.rmdir()
+    adapter.set_panel_opacity(0.72)
+    spin_until(lambda: not keeper.busy, timeout=5.0, what="the retried dial")
+    assert ui_prefs.load().prefs.panel_opacity.translucent == 0.72
+    assert adapter.panel_alpha == 0.72 and len(backend.reports) == 1
+    keeper.close(wait=True)
+
+
+def test_an_earlier_failed_look_save_never_reverts_a_later_one(
+    backend: FakeApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = _locked_out()
+    update = ui_prefs.update
+    calls: list[dict[str, object]] = []
+
+    def first_refused(changes: dict[str, object], path: Path | None = None) -> object:
+        # The real refusal for the first save; the obstacle goes right after it,
+        # on the worker, before the second save runs.
+        calls.append(dict(changes))
+        try:
+            return update(changes, path)
+        finally:
+            if len(calls) == 1:
+                lock.rmdir()
+
+    monkeypatch.setattr(ui_prefs, "update", first_refused)
+    adapter, keeper = _adapter(backend)
+    seen = _topics(adapter)
+
+    adapter.set_window_style("frosted")  # refused
+    adapter.set_thumbnail_size("small")  # saved
+    spin_until(lambda: backend.reports and not keeper.busy, what="both saves")
+    keeper.close(wait=True)
+
+    assert calls == [{"window_style": "frosted"}, {"thumbnail_size": "small"}]
+    durable = ui_prefs.load().prefs
+    assert (durable.window_style, durable.thumbnail_size) == ("solid", "small")
+    assert (adapter.window_style, adapter.thumbnail_size) == ("solid", "small")
+    assert backend.glass[-1] == SOLID and len(backend.reports) == 1
+    assert seen == ["appearance", "appearance"], "the choice, then one reconcile by the latest"

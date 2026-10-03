@@ -124,6 +124,7 @@ class NextWindow(ShellWindow):
         if self._thumbnails is None:
             self._thumbnails = LibraryThumbnails()
             thumbs.install(self._thumbnails)
+        self._prefs.reopen()
         self._state.listen()
         self._show_status()
 

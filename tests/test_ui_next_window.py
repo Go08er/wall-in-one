@@ -41,7 +41,7 @@ from tests.test_next_status_line import BATTERY, two_display_status  # noqa: E40
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
-from wall_in_one.theme import noctalia, source  # noqa: E402
+from wall_in_one.theme import css, noctalia, source  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
@@ -773,6 +773,45 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
         page = window.pages["settings"]
         assert isinstance(page, SettingsPlaceholder)
         assert not page.gpu_row.get_sensitive() and not page.interface_row.get_sensitive()
+    finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
+def test_a_failed_look_save_goes_back_everywhere_and_the_same_choice_then_saves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new interface's look follows ui.toml, with a real refusal: no lock can be taken."""
+    lock = paths.app_config_dir() / ".ui.toml.mutation.lock"
+    lock.mkdir(parents=True)
+    application = Application(ui="next")
+    reports: list[str] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    window = NextWindow(application, application.settings)
+    window.present()
+    try:
+        page = window.pages["library"]
+        assert isinstance(page, LibraryPage)
+        window.activate_action("win.style", GLib.Variant("s", "frosted"))
+        page.widget.activate_action("lib.size", GLib.Variant("s", "small"))
+        assert window.has_css_class("wio-glass") and page.flow.min_width == 156
+        spin_until(lambda: len(reports) == 2 and not window.preferences.busy, what="refusals")
+
+        style = window.lookup_action("style")
+        assert isinstance(style, Gio.SimpleAction)
+        state = style.get_state()
+        assert state is not None and state.get_string() == "solid", "the style menu goes back"
+        assert not window.has_css_class("wio-glass")
+        assert application._window_glass == css.Glass(background=1.0, panel=1.0), "live look"
+        assert page.flow.min_width == 208, "the thumbnail size goes back"
+        assert not paths.ui_prefs_path().exists()
+
+        lock.rmdir()
+        window.activate_action("win.style", GLib.Variant("s", "frosted"))
+        spin_until(lambda: not window.preferences.busy, what="the retried save")
+        assert ui_prefs.load().prefs.window_style == "frosted"
+        assert window.has_css_class("wio-glass") and len(reports) == 2
     finally:
         window.destroy()
         application._stills.shutdown()

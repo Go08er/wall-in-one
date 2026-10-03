@@ -286,22 +286,40 @@ class RealAppState(GObject.Object):
         self._player = Player()
         self._banner: Banner | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        self._unfollow_prefs: Callable[[], None] | None = None
         self._controls = RuntimeControls(backend, self, self._authoring_blocked)
         self.reload()
         self.listen()
 
     # -- lifetime ----------------------------------------------------------------
     def listen(self) -> None:
-        """Follow the status model (again, after `close`)."""
+        """Follow the status model and the ui.toml keeper (again, after `close`)."""
         if self._unsubscribe is None:
             self._unsubscribe = self._backend.status_model.subscribe(self._on_status)
             self._adopt_status(self._backend.status_model.view)
+        if self._unfollow_prefs is None:
+            self._unfollow_prefs = self._prefs.subscribe(self._look_saved)
 
     def close(self) -> None:
-        """Stop following the status model; the window is going away."""
+        """Stop following the status model and the keeper; the window is going away."""
         unsubscribe, self._unsubscribe = self._unsubscribe, None
         if unsubscribe is not None:
             unsubscribe()
+        unfollow, self._unfollow_prefs = self._unfollow_prefs, None
+        if unfollow is not None:
+            unfollow()
+
+    def _look_saved(self) -> None:
+        """A look save came back and ui.toml holds something else: show what it holds.
+
+        The keeper has already reconciled (a failed save goes back to the
+        durable look, reported by the keeper; only the latest save does, and
+        only once nothing newer waits). The live look follows, then every
+        widget that shows it (the style menu, the opacity dialog, the
+        thumbnail size) through "appearance".
+        """
+        self._backend.set_window_glass(self.glass())
+        self.emit_changed("appearance")
 
     def emit_changed(self, *topics: str) -> None:
         for topic in topics:

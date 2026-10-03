@@ -555,6 +555,8 @@ class LibraryPage(Page):
             self._update_count()
         elif topic == "displays":
             self._refresh_card_menus()
+        elif topic == "appearance":
+            self._follow_size()
 
     def _on_search(self, entry: Gtk.SearchEntry) -> None:
         self._query = entry.get_text().strip()
@@ -627,6 +629,14 @@ class LibraryPage(Page):
         undo = folders.add_library_folder(path)
         name = os.path.basename(path.rstrip(os.sep)) or path
         self.state.toast(f"Added {quoted(name)} · scanning", undo)
+
+    def _follow_size(self) -> None:
+        """Show the thumbnail size the state holds (a size whose save failed goes back)."""
+        width = CARD_WIDTHS.get(self.state.thumbnail_size, CARD_WIDTHS["large"])
+        if width != self._card_width:
+            self._card_width = width
+            self.flow.min_width = width
+            self._rebuild()
 
     def _set_size(self, size: str) -> None:
         if size not in CARD_WIDTHS or self.state.appearance_blocked():

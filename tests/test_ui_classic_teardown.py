@@ -34,6 +34,7 @@ from tests.test_ui_next_window import (  # noqa: E402
     STEP_SECONDS,
     Step,
     application_lanes,
+    control,
     run_application,
     sandboxed_runtime,
     settled,
@@ -236,5 +237,53 @@ def test_a_resident_window_is_torn_down_on_close_and_reopens_fresh(
         assert run_application(application, scenario()) == 0
     finally:
         gate.released.set()
+        for pool in (*pools, *lanes):
+            pool.shutdown(wait=True)
+
+
+def test_a_resident_quit_with_the_window_open_stops_its_workers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """0.2.1 review: in --service mode, ``ctl quit`` ends the application with
+    the classic window still open. GTK neither unrealized nor destroyed it, so
+    its teardown never ran and its workers outlived the loop."""
+    sandboxed_runtime(monkeypatch, tmp_path)
+    gate = _Gate(monkeypatch)
+    shutdowns = _Shutdowns(monkeypatch)
+    image = tmp_path / "wallpapers" / "dawn.png"
+    application = Application(service=True)
+    requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
+    lanes: list[ThreadPoolExecutor] = []
+    pools: list[ThreadPoolExecutor] = []
+    components: dict[str, int] = {}
+    futures: list[Future[SchemePreview]] = []
+    answers: list[Future[object]] = []
+
+    def scenario() -> Iterator[Step]:
+        window = _shown(application)
+        assert isinstance(window, MainWindow)
+        yield "the first scan to settle", lambda: settled(application)
+        futures.extend(_request_gated_previews(window, image))
+        pools.append(window._pairings_page._preview_loader._pool)
+        yield "two previews running and one queued", lambda: gate.count() == 2
+        components.update(_components(window))
+        lanes.extend(application_lanes(application))
+        del window
+        answers.append(control(requests, "quit"))  # type: ignore[arg-type]
+
+    def launch() -> bool:
+        application.activate()
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(launch)
+    try:
+        assert run_application(application, scenario()) == 0
+        assert answers and answers[0].result(timeout=STEP_SECONDS).ok  # type: ignore[attr-defined]
+        assert shutdowns.missing(components) == [], "the quit left the window's workers open"
+        assert futures[2].cancelled(), "the queued preview was not cancelled"
+        assert pools[0]._shutdown
+    finally:
+        gate.released.set()
+        requests.shutdown(wait=True)
         for pool in (*pools, *lanes):
             pool.shutdown(wait=True)

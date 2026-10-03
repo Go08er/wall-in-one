@@ -1384,6 +1384,16 @@ class Application(Adw.Application):
         )
 
     def do_shutdown(self) -> None:
+        # A deliberate quit (`ctl quit` in --service mode) ends the loop with
+        # the window still open, and GTK then neither unrealizes nor destroys
+        # it, so the teardown it runs on unrealize would not happen. Destroy it
+        # first: the workers it owns stop with the application. A window that
+        # was closed is already gone from here.
+        # Typed as WindowServices, which says nothing about GTK.
+        window: object = self._window
+        self._window = None
+        if isinstance(window, Gtk.Window):
+            window.destroy()
         self._stop_palette_monitor()
         self._shutdown_theme_jobs()
         self._shutdown_legacy_migration_jobs()

@@ -500,13 +500,15 @@ instead of the classic window; `--ui=classic`, or no flag, is today's app.
   paged Library grid with the details pane beside it, all over the app's real
   library, stores and runtime status. It can change three things: **Apply** (to
   all displays, or the display the player bar is scoped to), **favorites**, and
-  **playback**, through the player bar's live controls. Play/pause, next,
-  previous, random, shuffle and Resume schedule act on all displays or the
-  scoped one; Stop and "Change wallpaper automatically" act on all of them.
-  They are the classic window's runtime commands, sent the same way. There is
-  no undo yet. The player bar says what the runtime reports and why ("Evening ·
-  from schedule", "Your pick"). Store, Playlists, Schedule, Displays and
-  Settings say they are not in the new interface yet.
+  **playback**, through the player bar's live controls: play/pause, next,
+  previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
+  schedule. Every playback control acts on the displays the player bar is
+  scoped to, all of them or one; mirrored displays, or a display that has gone
+  away, get the command for all of them. They are the classic window's runtime
+  commands, sent the same way. There is no undo yet. The player bar says what
+  the runtime reports and why ("Evening · from schedule", "Your pick"). Store,
+  Playlists, Schedule, Displays and Settings say they are not in the new
+  interface yet.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites and the playback controls off and says so in a notice under
   the header. Settings keys this version doesn't know are named in that notice

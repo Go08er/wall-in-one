@@ -18,7 +18,7 @@ README: Final = Path(__file__).resolve().parents[1] / "README.md"
 
 #: Each `PlaybackControls` method, and how the README names what it does.
 CONTROLS: Final = {
-    "toggle_play": ("Play/pause",),
+    "toggle_play": ("play/pause",),
     "step": ("next", "previous"),
     "random": ("random",),
     "stop": ("Stop",),
@@ -59,3 +59,20 @@ def test_the_readme_keeps_the_real_restrictions() -> None:
     assert "Settings keys this version doesn't know are named in that notice" in section
     assert "off until the wallpaper service has answered, and while it isn't running" in section
     assert "There is no undo yet." in section
+
+
+def test_the_readme_says_every_control_follows_the_bar_scope() -> None:
+    """0.2.1 review G-2: it said Stop and automatic changing always act on all
+    displays. A control without a ``scope`` parameter follows the bar's scope
+    too, by the protocol's own rule, so the README states one rule for all."""
+    contract = " ".join((state.PlaybackControls.__doc__ or "").split())
+    assert "None (or no ``scope`` parameter at all) means `AppState.scope`" in contract
+    unscoped = {
+        name
+        for name in CONTROLS
+        if "scope" not in inspect.signature(getattr(state.PlaybackControls, name)).parameters
+    }
+    assert {"stop", "set_rotate"} <= unscoped, "the controls the old wording singled out"
+    section = _section()
+    assert "Every playback control acts on the displays the player bar is scoped to" in section
+    assert "act on all of them" not in section

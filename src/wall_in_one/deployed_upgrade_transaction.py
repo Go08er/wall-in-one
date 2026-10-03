@@ -57,6 +57,9 @@ COMPLETION_KIND: Final = "deployed-upgrade-completion"
 MAX_JOURNAL_BYTES: Final = 16 * 1024 * 1024
 MAX_COMPLETION_BYTES: Final = 1024 * 1024
 LOCK_TIMEOUT_SECONDS: Final = 60.0
+#: How long removing a completed upgrade's leftovers waits for its locks. That
+#: removal is optional; a busy profile just leaves them for a later start.
+HOUSEKEEPING_LOCK_TIMEOUT_SECONDS: Final = 1.0
 AUTHORING_SOCKET_TIMEOUT_SECONDS: Final = 0.15
 MAX_CLAIM_TOKEN_ATTEMPTS: Final = 64
 
@@ -2555,6 +2558,32 @@ def _cleanup_completed_recovery() -> None:
         return
 
 
+def _housekeep_completed() -> None:
+    """Remove a completed upgrade's authenticated leftovers, if that's free now.
+
+    The completion marker is durable and its journal and stage no longer
+    have authority over anything, so their removal is housekeeping, never a
+    requirement. The stopped-writer guards of a cutover (both singleton
+    locks free) don't apply: a running service or GUI can't touch these
+    files and must not keep a completed profile from starting. Only the
+    profile-wide and completion locks are taken, briefly; if either is busy,
+    the leftovers stay for a later start and the upgrade is still complete.
+    """
+    try:
+        with (
+            legacy_migration.profile_transaction(timeout=HOUSEKEEPING_LOCK_TIMEOUT_SECONDS),
+            state_file.mutation_lock(
+                deployed_upgrade.completion_path(),
+                description="deployed profile upgrade",
+                timeout=HOUSEKEEPING_LOCK_TIMEOUT_SECONDS,
+            ),
+        ):
+            if probe().status == "complete":
+                _cleanup_completed_recovery()
+    except legacy_migration.MigrationError, OSError, TransactionError:
+        return
+
+
 def _ensure_locked(*, cutover: bool) -> Outcome:
     found = probe()
     if found.status == "absent":
@@ -2644,6 +2673,8 @@ def ensure(*, cutover: bool = True) -> Outcome:
             or _sha256(journal_raw) != completion_record[0].journal_sha256
         ):
             return Outcome(False, "complete", initial.detail, initial.counts)
+        _housekeep_completed()
+        return Outcome(False, "complete", initial.detail, initial.counts)
 
     try:
         with (

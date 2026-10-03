@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -17,6 +18,7 @@ import pytest
 
 from tests.test_deployed_upgrade import _Profile, _profile
 from wall_in_one import (
+    cli,
     config,
     deployed_upgrade,
     deployed_upgrade_transaction,
@@ -1583,6 +1585,104 @@ def test_interrupted_completion_cleanup_does_not_bind_later_user_edits(
     assert not deployed_upgrade.journal_path().exists()
     assert not deployed_upgrade.staged_runtime_path().exists()
     assert deployed_upgrade.completion_path().is_file()
+
+
+def _complete_upgrade(monkeypatch: pytest.MonkeyPatch, *, leave_residue: bool) -> None:
+    """Migrate the fixture; optionally as if best-effort cleanup had not committed."""
+    original_discard = deployed_upgrade_transaction._discard_exact_artifact
+
+    def leave_recovery_artifact(
+        _path: Path, _contents: bytes, _maximum: int, *, label: str
+    ) -> None:
+        del label
+
+    if leave_residue:
+        monkeypatch.setattr(
+            deployed_upgrade_transaction, "_discard_exact_artifact", leave_recovery_artifact
+        )
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+    monkeypatch.setattr(deployed_upgrade_transaction, "_discard_exact_artifact", original_discard)
+    assert deployed_upgrade.journal_path().is_file() is leave_residue
+    assert deployed_upgrade.staged_runtime_path().is_file() is leave_residue
+    assert deployed_upgrade_transaction.probe().status == "complete"
+
+
+def _profile_documents() -> tuple[Path, ...]:
+    residue = (deployed_upgrade.journal_path(), deployed_upgrade.staged_runtime_path())
+    return tuple(path for path in _watched_documents() if path not in residue)
+
+
+def _held_lock_path(target: Path) -> Path:
+    lock_path = target.with_name(f"{target.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    os.close(os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600))
+    return lock_path
+
+
+@pytest.mark.parametrize("residue", (True, False), ids=("residue", "no-residue"))
+@pytest.mark.parametrize(
+    "socket_path",
+    (paths.socket_path, paths.runtime_socket_path),
+    ids=("authoring", "runtime"),
+)
+def test_a_completed_upgrade_starts_beside_a_live_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    socket_path: Callable[[], Path],
+    residue: bool,
+) -> None:
+    """Final 0.2.0 review F-1: leftovers from a completed cutover must not make
+    every later start require both singleton locks free. With the service (or
+    a GUI) holding one, ensure() used to raise retry, so the GUI gate and the
+    health sync exited 75 for good. The no-residue cases are the controls."""
+    _profile(tmp_path, monkeypatch)
+    _complete_upgrade(monkeypatch, leave_residue=residue)
+    before = _snapshot(_profile_documents())
+    written: list[str] = []
+
+    def write() -> int:
+        written.append("health")
+        return 0
+
+    with _external_flock(_held_lock_path(socket_path())):
+        outcome = deployed_upgrade_transaction.ensure()
+        unattended = cli._run_unattended_writer(write)
+        graphical = cli._run_graphical_startup_upgrade(require_legacy_safe=False)
+
+    assert (outcome.status, outcome.changed) == ("complete", False)
+    assert unattended == 0 and written == ["health"]
+    assert graphical is None
+    # Nothing a live writer could touch is involved, so the leftovers go.
+    assert not deployed_upgrade.journal_path().exists()
+    assert not deployed_upgrade.staged_runtime_path().exists()
+    assert deployed_upgrade.completion_path().is_file()
+    assert _snapshot(_profile_documents()) == before
+
+
+def test_completed_residue_waits_for_a_free_housekeeping_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-1: removing the leftovers is housekeeping. While its lock is busy the
+    upgrade is still complete, promptly, and they stay for a later start."""
+    _profile(tmp_path, monkeypatch)
+    _complete_upgrade(monkeypatch, leave_residue=True)
+    completion = deployed_upgrade.completion_path().absolute()
+    busy = completion.with_name(f".{completion.name}.mutation.lock")
+    assert busy.is_file()
+
+    with _external_flock(busy):
+        started = time.monotonic()
+        outcome = deployed_upgrade_transaction.ensure()
+        elapsed = time.monotonic() - started
+
+    assert (outcome.status, outcome.changed) == ("complete", False)
+    assert elapsed < deployed_upgrade_transaction.LOCK_TIMEOUT_SECONDS / 2
+    assert deployed_upgrade.journal_path().is_file()
+    assert deployed_upgrade.staged_runtime_path().is_file()
+
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+    assert not deployed_upgrade.journal_path().exists()
+    assert not deployed_upgrade.staged_runtime_path().exists()
 
 
 @pytest.mark.parametrize("artifact", ("stage", "journal"))

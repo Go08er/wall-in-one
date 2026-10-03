@@ -17,13 +17,15 @@ Noctalia plugin talks to it.
 
 ## Status
 
-Current version: **0.2.0**, paired with Noctalia companion **0.2.0**
+Current version: **0.2.1**, paired with Noctalia companion **0.2.1**
 (Noctalia 5.2; older Noctalia hosts keep companion 0.1.3).
-0.2.0 updates 0.1.4 directly. It reads every 0.1.4 file as it is, opens files
-from newer releases read-only, captures scene stills for the first time, adds
-Tidy up and an early preview of the new interface behind `--ui=next`.
-See the [release notes](docs/releases/v0.2.0.md) and
-[update guide](docs/updating.md) before updating an existing installation.
+0.2.1 is a bug-fix update to 0.2.0, which updated 0.1.4 directly. 0.2.0 reads
+every 0.1.4 file as it is, opens files from newer releases read-only, captures
+scene stills for the first time, adds Tidy up and an early preview of the new
+interface behind `--ui=next`.
+See the release notes for [0.2.1](docs/releases/v0.2.1.md) and
+[0.2.0](docs/releases/v0.2.0.md), and the [update guide](docs/updating.md),
+before updating an existing installation.
 
 The app manages a local library, video/still pairings, playlists, schedules,
 Wallpaper Engine scenes, colour sync, and downloads from two wallpaper sites.

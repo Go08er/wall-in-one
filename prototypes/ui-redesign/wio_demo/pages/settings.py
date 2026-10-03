@@ -27,7 +27,7 @@ from . import Page
 from .settings_palettes import PalettesDialog
 from .settings_widgets import LogView, SchemeDialog
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 COMPANION = "0.1.3"
 
 CSS = """

@@ -409,9 +409,11 @@ failed. The same rule applies to an in-place repair of the original inode.
 Each of these files has a size the app reads back: 8 MiB for playlists and
 Pairings, 4 MiB for schedules and favourites, 64 KiB for display assignments,
 and 1 MiB for `settings.toml`. An edit that would make one larger is refused
-before anything is written, with the reason `full` ("… would be N bytes, more
-than the M bytes this version can read back; remove some playlist entries
-first. Nothing was changed."), so the file stays readable as it was.
+before anything is written ("… would be N bytes, more than the M bytes this
+version can read back; remove some playlist entries first. Nothing was
+changed."), so the file stays readable as it was. For the library files the
+refusal's reason is `full`; for `settings.toml` it is a settings error with the
+same explanation.
 
 From 0.2.0, a file saved by a newer version of Wall-in-One is not unreadable,
 and it is never moved aside or rewritten. The app shows what it understands of

@@ -2,9 +2,10 @@
 
 `UiPrefsKeeper` reads ``ui.toml`` once, when the window opens, and from then
 on holds the preferences in memory. It writes only on an explicit preference
-change -- the window style, an opacity dial, frost, the thumbnail size -- and
-never on startup, while idle or on close. Nothing else lives here: no last
-page, no window size.
+change -- the window style, an opacity dial, frost, the thumbnail size --
+never on startup or while idle, and there is no unconditional save on close:
+only a change the user made that is still pending is flushed then (`close`).
+Nothing else lives here: no last page, no window size.
 
 * Writes go to `wall_in_one.ui_prefs.update` on one worker thread, so the
   file lock and the atomic replace never block GTK. Only the fields that

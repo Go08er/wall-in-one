@@ -21,6 +21,7 @@ from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
 from wall_in_one.theme import css
 from wall_in_one.ui import playback_verbs, runtime_truth
+from wall_in_one.ui.next import prefs
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import NO_SERVICE_START
 from wall_in_one.ui.next.real_state import RealAppState, human_size, scheme_name, wallpaper_view
@@ -602,6 +603,31 @@ def test_the_look_is_read_from_ui_toml_and_saved_only_on_a_change(
     adapter.set_thumbnail_size("small")
     keeper.close(wait=True)
     assert keeper.saves == 1 and ui_prefs.load().prefs.thumbnail_size == "small"
+
+
+def test_close_saves_only_a_pending_change_and_the_docs_say_so(backend: FakeApplication) -> None:
+    """Review H-4: the docs said ui.toml is never written on close; a pending change is."""
+    target = paths.ui_prefs_path()
+    adapter, keeper = _adapter(backend)
+    keeper.close(wait=True)
+    assert not target.exists() and keeper.saves == 0, "an untouched window saves nothing"
+
+    keeper = UiPrefsKeeper(backend.window_report)
+    adapter = RealAppState(backend, keeper)
+    adapter.set_frost(0.25)  # a dial: saved a moment after it rests
+    assert keeper.busy and not target.exists()
+    keeper.close(wait=True)
+    assert keeper.saves == 1 and ui_prefs.load().prefs.frost == 0.25, "flushed on close"
+
+    doc = " ".join(
+        (Path(__file__).resolve().parents[1] / "docs" / "settings.md").read_text().split()
+    )
+    assert "while idle or on close" not in doc
+    assert "no unconditional save on close: a pending change you made" in doc
+    assert "is flushed when the window closes or the app quits" in doc
+    module = " ".join((prefs.__doc__ or "").split())
+    assert "never on startup, while idle or on close" not in module
+    assert "no unconditional save on close" in module
 
 
 def test_a_ui_toml_from_a_newer_version_is_never_written(backend: FakeApplication) -> None:

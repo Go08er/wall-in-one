@@ -83,9 +83,10 @@ and 0.1.4 can't use a file with one at all.
   dismissed the Tidy up card after an update (`tidy_offer_dismissed`), and
   writes it only when you do. The new interface (`--ui=next`) reads it when
   its window opens and writes it only when you change the window style, an
-  opacity or frost dial, or the thumbnail size. Neither writes it on start,
-  while idle or on close, and neither saves the page to reopen or the window
-  size.
+  opacity or frost dial, or the thumbnail size. Neither writes it on start or
+  while idle, and there is no unconditional save on close: a pending change
+  you made (a dial you had just let go of) is flushed when the window closes
+  or the app quits. Neither saves the page to reopen or the window size.
 - New wallpaper behavior goes in a versioned authoring store, with a version
   bump.
 

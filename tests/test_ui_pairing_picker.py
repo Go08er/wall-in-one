@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import faulthandler
+import os
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -663,22 +667,42 @@ def _palette_editor(
     return session, application, page, media, catalog
 
 
+@contextlib.contextmanager
+def _bounded(capfd: pytest.CaptureFixture[str], seconds: float = 20.0) -> Iterator[None]:
+    """End the whole run, with every thread's traceback, if this block hangs.
+
+    The radio-group freeze hangs inside GTK, where no Python timeout reaches
+    and the suite's faulthandler_timeout only dumps a traceback. A regression
+    must fail loudly instead of stalling the GUI check until it is killed.
+    The traceback goes to the real stderr, past pytest's capture.
+    """
+    with capfd.disabled():
+        stream = os.fdopen(os.dup(2), "w")
+    faulthandler.dump_traceback_later(seconds, exit=True, file=stream)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        stream.close()
+
+
 def _search_palettes(page: pairings_page.PairingsPage, text: str) -> None:
     page._palette_search.set_text(text)
     page._palette_search.emit("search-changed")
 
 
 def test_choosing_a_palette_found_by_search_does_not_hang(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """Rebuilding the rows regroups reused radio buttons. GTK can leave such a
     group's links looping, and the next radio set active then never returns:
     search for Nord (Ayu saved, so pinned below it), then pick Nord."""
     session, application, page, media, catalog = _palette_editor(tmp_path, monkeypatch)
 
-    _search_palettes(page, "Nord")
-    page._palette_buttons["custom:Nord"].set_active(True)
-    application.drain()
+    with _bounded(capfd):
+        _search_palettes(page, "Nord")
+        page._palette_buttons["custom:Nord"].set_active(True)
+        application.drain()
 
     saved = session.pairings.get(pairings.Identity.of(media))
     assert saved is not None and saved.palette.name == "Nord"
@@ -716,7 +740,7 @@ def _assert_ayu_shown(page: pairings_page.PairingsPage, session: Session, media:
 
 
 def test_a_failed_queued_palette_rolls_back_to_a_row_the_search_left_out(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """0.2.1 review G-1: Nord queued, the list searched down to Nord, then
     Nord's save fails. The saved Ayu had no row to go back to, so Nord stayed
@@ -728,7 +752,8 @@ def test_a_failed_queued_palette_rolls_back_to_a_row_the_search_left_out(
     _search_palettes(page, "Nord")
     assert "custom:Ayu" not in page._palette_buttons
 
-    application.drain()
+    with _bounded(capfd):
+        application.drain()
 
     _assert_ayu_shown(page, session, media)
     assert page._palette_search.get_text() == "Nord"
@@ -742,7 +767,7 @@ def test_a_failed_queued_palette_rolls_back_to_a_row_the_search_left_out(
 
 
 def test_a_failed_palette_with_a_saved_mode_behind_it_still_rolls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """G-1: as above, with a Light mode queued behind Nord that does save."""
     session, application, page, media, catalog = _palette_editor(tmp_path, monkeypatch)
@@ -753,7 +778,8 @@ def test_a_failed_palette_with_a_saved_mode_behind_it_still_rolls_back(
     page._mode_row.set_selected(_mode_index(pairings.Mode.LIGHT))
     assert len(application.queue) == 2
 
-    application.drain()
+    with _bounded(capfd):
+        application.drain()
 
     _assert_ayu_shown(page, session, media)
     saved = session.pairings.get(pairings.Identity.of(media))
@@ -766,7 +792,7 @@ def test_a_failed_palette_with_a_saved_mode_behind_it_still_rolls_back(
 
 
 def test_a_failed_palette_rolls_back_after_switching_pairings_meanwhile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """G-1 across an identity switch: Nord queued, another wallpaper opened
     and this one reopened while it waits (shown as Nord), searched to Nord,
@@ -782,7 +808,8 @@ def test_a_failed_palette_rolls_back_after_switching_pairings_meanwhile(
     _search_palettes(page, "Nord")
     assert "custom:Ayu" not in page._palette_buttons
 
-    application.drain()
+    with _bounded(capfd):
+        application.drain()
 
     _assert_ayu_shown(page, session, media)
     assert session.pairings.get(pairings.Identity.of(other)) is None

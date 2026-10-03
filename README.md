@@ -17,10 +17,12 @@ Noctalia plugin talks to it.
 
 ## Status
 
-Current version: **0.1.4**, paired with Noctalia companion **0.1.3**.
-This maintenance update improves upgrade stability and cleans up verified
-legacy automatic stills without resetting settings or manual choices.
-See the [release notes](docs/releases/v0.1.4.md) and
+Current version: **0.2.0**, paired with Noctalia companion **0.2.0**
+(Noctalia 5.2; older Noctalia hosts keep companion 0.1.3).
+0.2.0 updates 0.1.4 directly. It reads every 0.1.4 file as it is, opens files
+from newer releases read-only, captures scene stills for the first time, adds
+Tidy up and an early preview of the new interface behind `--ui=next`.
+See the [release notes](docs/releases/v0.2.0.md) and
 [update guide](docs/updating.md) before updating an existing installation.
 
 The app manages a local library, video/still pairings, playlists, schedules,

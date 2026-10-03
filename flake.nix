@@ -8,6 +8,13 @@
       url = "github:Go08er/goober-noctalia-plugins-v5";
       flake = false;
     };
+    # The Noctalia the VM tests run. Companion 0.2.0 targets plugin API 32,
+    # which Noctalia 5.2 provides; nixpkgs still ships 5.1. Same pin as the
+    # plugin repository's VM tests.
+    noctalia = {
+      url = "github:noctalia-dev/noctalia/v5.2.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # The last shipped release, the one build every user can roll back to.
     # Deliberately no `follows`: its own flake.lock is part of what shipped,
     # so the upgrade-rollback VM installs exactly that build.
@@ -20,6 +27,7 @@
       nixpkgs,
       flake-utils,
       noctalia-plugins,
+      noctalia,
       ...
     }:
     (flake-utils.lib.eachSystem [
@@ -28,7 +36,11 @@
     ] (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          # Only the VM tests use pkgs.noctalia; the app itself never does.
+          overlays = [ (_final: _prev: { noctalia = noctalia.packages.${system}.default; }) ];
+        };
         # InterpreterPoolExecutor is the measured isolation boundary between
         # pure-Python provider parsing and GTK.  Pin the interpreter that owns
         # that stdlib API instead of relying on nixpkgs' moving `python3`

@@ -68,14 +68,35 @@
         "type": "github"
       }
     },
+    "noctalia": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790517835,
+        "narHash": "sha256-RfRxWi9PfJVSyoLrLj5mQ5vo24FjkgfBIi+UmE96zZo=",
+        "owner": "noctalia-dev",
+        "repo": "noctalia",
+        "rev": "ec704377180fc4ffe79322a14a6ae87e9f922cae",
+        "type": "github"
+      },
+      "original": {
+        "owner": "noctalia-dev",
+        "ref": "v5.2.0",
+        "repo": "noctalia",
+        "type": "github"
+      }
+    },
     "noctalia-plugins": {
       "flake": false,
       "locked": {
-        "lastModified": 1790198435,
-        "narHash": "sha256-LnuI2+1rvMNecR1WS/b77myEdSHFT4ZtqyRcyKpx4Gw=",
+        "lastModified": 1790990913,
+        "narHash": "sha256-s0lgTUGGxLY0/4IxeM4lAE6mk20Dv36/kq4L3Kusjt8=",
         "owner": "Go08er",
         "repo": "goober-noctalia-plugins-v5",
-        "rev": "931dba1b00e64150c028783dcfe8184f1e329b12",
+        "rev": "faf192cafcaec7f3cc8705771859d54a1946b156",
         "type": "github"
       },
       "original": {
@@ -104,6 +125,7 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
+        "noctalia": "noctalia",
         "noctalia-plugins": "noctalia-plugins",
         "wio-v0-1-4": "wio-v0-1-4"
       }

@@ -123,6 +123,18 @@ class OwnedProcess:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self.process.wait(timeout=grace)
 
+    def kill_group(self, grace: float) -> None:
+        """``SIGKILL`` to the group while the leader is unreaped, then reap.
+
+        The bounded second attempt :func:`release` makes when
+        :meth:`end_group` was interrupted or failed, perhaps before its first
+        signal. Once the leader is reaped it signals nothing.
+        """
+        with self.lock:
+            self.signal_group(signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.process.wait(timeout=grace)
+
     def poll(self) -> int | None:
         """Reap the leader if it has exited. Not a liveness check: see :meth:`exited`."""
         with self.lock:
@@ -177,12 +189,23 @@ def release(owned: OwnedProcess, selector: selectors.BaseSelector | None = None)
 
     After a finished :meth:`OwnedProcess.end_group` the leader is reaped, so
     this signals nothing and returns at once; otherwise it kills the group
-    and reaps. The selector and every pipe are closed even if that fails.
+    and reaps. If that is interrupted or fails, perhaps before its first
+    signal, :meth:`OwnedProcess.kill_group` makes one more, direct attempt,
+    and the first error is the one raised. The selector and every pipe are
+    closed even so. Should the leader still be unreaped afterwards, the
+    termination did not finish and the owner must keep it registered
+    (callers check ``returncode``).
     """
-    process = owned.process
     try:
-        owned.end_group(immediate=True, grace=TERMINATE_GRACE_SECONDS)
+        try:
+            owned.end_group(immediate=True, grace=TERMINATE_GRACE_SECONDS)
+        except BaseException:
+            # Bounded: one retry, whose own failure is not raised over this.
+            with contextlib.suppress(BaseException):
+                owned.kill_group(TERMINATE_GRACE_SECONDS)
+            raise
     finally:
+        process = owned.process
         if selector is not None:
             with contextlib.suppress(OSError):
                 selector.close()
@@ -199,14 +222,18 @@ def abandon(
 
     The caller must see that original error. If the release fails as well,
     its error is chained to the original (as ``__context__``) rather than
-    raised in its place.
+    raised in its place. A failed release gets one more go, since an
+    interrupt can land before :func:`release` has even entered its own
+    protection. Bounded: the second failure is not raised.
     """
     try:
         release(owned, selector)
     except BaseException:
+        with contextlib.suppress(BaseException):
+            release(owned, selector)
         # Deliberately the original, not ``from``: raised in this handler, it
-        # gets the release error as its implicit ``__context__`` and keeps
-        # whatever ``__cause__`` it already had.
+        # gets the first release error as its implicit ``__context__`` and
+        # keeps whatever ``__cause__`` it already had.
         raise error  # noqa: B904
     raise error
 
@@ -333,9 +360,10 @@ def exchange(
         # still ours: end anything it left there, then reap it.
         owned.end_group(immediate=False, grace=TERMINATE_GRACE_SECONDS)
         drain(TERMINATE_GRACE_SECONDS)
+        # Inside, so an interrupted close takes the same way out.
+        release(owned, selector)
     except BaseException as error:
         abandon(owned, selector, error)
-    release(owned, selector)
     returncode = process.returncode
     return subprocess.CompletedProcess(
         process.args,
@@ -430,6 +458,9 @@ class Cancellation:
                 raise ProcessCancelledError("worker subprocess was cancelled")
             return completed
         finally:
-            # Only now: exchange() has ended the group on every way out.
-            if registered:
+            # Only once the owner is done with the child: its leader reaped,
+            # which exchange() does only after ending the group. Should even
+            # its retried cleanup not get that far, the child stays registered
+            # so cancel() can still end it.
+            if registered and child.process.returncode is not None:
                 self.unregister(child)

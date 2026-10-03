@@ -155,7 +155,7 @@ def _run(
     # then reaps. A cancellation that came before registration is seen by its
     # first check. Every wait is bounded, and every way out of it, an
     # unexpected error or interrupt included, ends the group before the
-    # registry lets go of it below.
+    # registry may let go of it below.
     try:
         completed = exchange(child, selector=selector, timeout=timeout, cancelled=was_cancelled)
     except ProcessCancelledError as error:
@@ -163,8 +163,12 @@ def _run(
     except subprocess.TimeoutExpired as error:
         raise NoctaliaError(f"noctalia {arguments[0]} timed out after {timeout}s") from error
     finally:
-        with _ACTIVE_LOCK:
-            _ACTIVE.pop(child.pid, None)
+        # Only once the leader is reaped, which exchange() does only after
+        # ending the group. Should even its retried cleanup not get that far,
+        # the child stays registered so cancel_pending() can still end it.
+        if child.process.returncode is not None:
+            with _ACTIVE_LOCK:
+                _ACTIVE.pop(child.pid, None)
 
     if was_cancelled():
         raise NoctaliaError(f"noctalia {arguments[0]} was cancelled")

@@ -119,9 +119,13 @@ REPAIR_NEEDED: Final = (
 NO_FOLDER: Final = (
     "There\u2019s no wallpaper folder yet, so the library is empty and nothing is downloaded."
 )
+PUBLICATION_FAILED: Final = (
+    "Changes aren\u2019t reaching playback, which keeps the last setup that worked:"
+)
 OLDER_DATA: Final = "older-data"
 REPAIR: Final = "repair"
 LIBRARY_FOLDER: Final = "library-folder"
+PLAYLISTS: Final = "playlists"
 
 
 def settings_page(state: AppState, keeper: UiPrefsKeeper, application: Application) -> SettingsPage:
@@ -401,6 +405,10 @@ class NextWindow(ShellWindow):
             self.welcome.focus()
         self._refresh_window_banner()
 
+    def publication_changed(self) -> None:
+        """The last publication's problem appeared or went: say so under the header."""
+        self._refresh_window_banner()
+
     def first_run_changed(self) -> None:
         """Read the application again, once, after the callback that moved it.
 
@@ -484,6 +492,10 @@ class NextWindow(ShellWindow):
             and not application.requested_settings.roots  # one is being saved
         ):
             return Banner(NO_FOLDER, "Choose a Folder\u2026", LIBRARY_FOLDER)
+        problem = application.publication_problem
+        if problem:
+            # Until a change gets through: it names the playlist, so its page helps.
+            return Banner(f"{PUBLICATION_FAILED} {problem}", "Playlists", PLAYLISTS)
         return None
 
     def _refresh_window_banner(self) -> None:
@@ -502,3 +514,5 @@ class NextWindow(ShellWindow):
             self._refresh_window_banner()
         elif action == LIBRARY_FOLDER and not application.ask_for_library_folder():
             self._sync_first_run()
+        elif action == PLAYLISTS:
+            self.navigate("playlist")

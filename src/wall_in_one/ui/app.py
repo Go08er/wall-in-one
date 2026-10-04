@@ -508,6 +508,8 @@ class Application(Adw.Application):
         self._runtime_compiled_generation = 0
         self._runtime_compile_pending = False
         self._runtime_authoring_request: _RuntimeAuthoringRequest | None = None
+        #: Why the last publication didn't reach the wallpaper service, or empty.
+        self._publication_problem = ""
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
         # last normal window cannot cancel a committed Store -> runtime.toml
@@ -3602,22 +3604,46 @@ class Application(Adw.Application):
             ):
                 self._removal_convergence_runtime_terminal = True
         if not self._runtime_shutdown and current:
+            problem = ""
             if publication.error:
                 self.window_report(publication.error)
+                problem = publication.error
             elif publication.unavailable:
                 self._status_model.mark_unavailable(forget=False)
             elif publication.response is not None and not publication.response.ok:
-                self.window_report(
-                    f"Runtime rejected the new configuration: {publication.response.message}"
-                )
+                problem = f"Runtime rejected the new configuration: {publication.response.message}"
+                self.window_report(problem)
             elif publication.changed and self._window is not None:
                 self.refresh_runtime_status_async()
+            if not publication.deferred:
+                self._set_publication_problem(problem)
         if (again or retry_terminal_scan) and not self._runtime_shutdown:
             self._ensure_runtime_compile_queued()
         if publication_hold_terminal:
             self._release_runtime_publication_hold()
         self._maybe_finish_removal_convergence()
         return GLib.SOURCE_REMOVE
+
+    @property
+    def publication_problem(self) -> str:
+        """Why the last publication didn't reach the wallpaper service, or empty.
+
+        The compiler's refusal (a playlist with nothing to play, naming it,
+        when its files went away outside the app, say) or the runtime's; the
+        service keeps the last configuration that worked meanwhile. The next
+        publication that gets through clears it.
+        """
+        return self._publication_problem
+
+    def _set_publication_problem(self, problem: str) -> None:
+        if problem == self._publication_problem:
+            return
+        self._publication_problem = problem
+        # The new window keeps it under its header; the classic one says it
+        # in its toast, as it did.
+        changed = getattr(self._window, "publication_changed", None)
+        if callable(changed):
+            changed()
 
     def _release_runtime_publication_hold(self) -> None:
         """Balance the coalesced hold after its newest terminal publication."""

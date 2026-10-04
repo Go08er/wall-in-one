@@ -11,6 +11,7 @@ playlist the compiler refuses.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple
 
@@ -29,13 +30,19 @@ from tests.test_ui_next_editing import hold_the_lane  # noqa: E402
 from tests.test_ui_next_settings import Opened, _close, _open  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
-from wall_in_one import config, runtime_compatibility, runtime_config  # noqa: E402
+from tests.test_ui_runtime import FakeWindow, _application, _attach  # noqa: E402
+from tests.test_ui_runtime import _close as _close_application  # noqa: E402
+from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
+from wall_in_one.control import client, server  # noqa: E402
+from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import displays, playlists, scan, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui import playlists_page, preferences  # noqa: E402
+from wall_in_one.ui.app import _Commands  # noqa: E402
 from wall_in_one.ui.next.real_playlists import RealPlaylists  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 from wall_in_one.ui.next.schedule_state import RuleView  # noqa: E402
+from wall_in_one.ui.next.window import PUBLICATION_FAILED  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -322,3 +329,95 @@ def test_deleting_a_playlist_named_by_name_takes_those_references_too(shown: Sho
     assert application.session.schedules.rules == ()
     assert application.session.displays.all() == ()
     assert _builds(shown)
+
+
+# -- files deleted outside the app ------------------------------------------------------------
+
+
+def test_a_playlists_files_deleted_outside_the_app_are_reported_and_an_edit_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing can stop it; what follows is honest: the service keeps what worked, the app
+    names the playlist and keeps saying so, and the next valid edit gets through."""
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    verbs: list[str] = []
+
+    def runtime(verb: str, *_arguments: object, **_keywords: object) -> Response:
+        verbs.append(verb)
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", runtime)
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    for name in ("dawn.png", "dusk.png"):
+        (root / name).write_bytes(b"placeholder image bytes")
+    dawn = MediaItem(root / "dawn.png", Kind.STILL, 5, 1)
+    dusk = MediaItem(root / "dusk.png", Kind.STILL, 5, 1)
+    settings = replace(application.settings, roots=(root,)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.adopt_library(Library((root,), (dawn, dusk)))
+    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    evening = application.session.playlists.create("Evening")
+    application.session.playlists.add(evening.id, dawn.path)
+    application.update_settings(active_playlist=evening.id)
+    document = paths.runtime_config_path()
+
+    def published() -> bool:
+        return not application._runtime_compile_pending and application._library_scan_future is None
+
+    try:
+        assert application._publish_runtime_async()
+        spin_until(lambda: published() and document.exists(), 10, what="the first publication")
+        good = document.read_bytes()
+        assert str(dawn.path).encode() in good
+        assert application.publication_problem == ""
+
+        dawn.path.unlink()  # outside the app
+        application.refresh_library()
+        spin_until(lambda: bool(application.publication_problem), 10, what="the refusal")
+
+        problem = application.publication_problem
+        assert "'Evening'" in problem and "no playable entries" in problem, problem
+        assert problem in window.reports, "said once, and kept (`publication_problem`)"
+        assert document.read_bytes() == good, "the service keeps the last setup that worked"
+
+        reply: list[Response] = []
+        server.dispatch(
+            server.build_verb_table(_Commands(application)),
+            Request("playlist-add", f"{evening.id} {dusk.path}").encode(),
+            reply.append,
+        )
+        spin_until(
+            lambda: bool(reply) and published() and application.publication_problem == "",
+            10,
+            what="the edit to get through",
+        )
+        assert reply[0].ok, reply
+        assert str(dusk.path).encode() in document.read_bytes()
+    finally:
+        _close_application(application)
+
+
+def test_the_new_window_keeps_saying_why_changes_arent_reaching_playback(shown: Shown) -> None:
+    opened = shown.opened
+    application = opened.application
+    problem = (
+        "default playlist refers to playlist 'Evening', which has no playable entries. "
+        "Add media or choose another playlist; the existing runtime configuration was "
+        "left untouched."
+    )
+
+    application._set_publication_problem(problem)
+    banner = opened.window.state.banner()
+    assert banner is not None and banner.title == f"{PUBLICATION_FAILED} {problem}"
+    assert banner.button == "Playlists"
+    opened.window.state.banner_activated(banner.action)
+    assert opened.window.current_page is opened.window.pages["playlist"]
+
+    application._set_publication_problem("")
+    assert opened.window.state.banner() is None

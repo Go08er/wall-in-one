@@ -153,6 +153,20 @@ def filters_for(query: StoreQuery, seed: str = "") -> browse.Filters:
     )
 
 
+#: Why nothing can be downloaded without a library folder, and where to add one.
+NO_FOLDER: Final = (
+    "Downloads go into your first library folder, and there is none yet. "
+    "Add one in Settings \u2192 Library"
+)
+#: Settings, scrolled to its Library group.
+SETTINGS_LIBRARY: Final = "settings:library"
+
+
+def _words(error: ProviderError) -> str:
+    """A provider error's message without its kind, for the Store's error page."""
+    return Exception.__str__(error)
+
+
 def search_request(query: StoreQuery, page: int, seed: str = "") -> tuple[SearchQuery, str]:
     """The provider request for ``page``, and the random-sort seed to keep for the next.
 
@@ -373,7 +387,7 @@ class RealStore:
         try:
             request, self._seed = search_request(query, max(1, page), self._seed)
         except ProviderError as error:
-            problem = StoreProblem(error.kind, str(error))
+            problem = StoreProblem(error.kind, _words(error))
             _later(lambda: self._answer(lanes, generation, problem, done))
             return
         name = query.provider
@@ -400,7 +414,7 @@ class RealStore:
         except CancelledError:
             answer = None  # superseded: the newer search answers instead
         except ProviderError as error:
-            answer = StoreProblem(error.kind, str(error))
+            answer = StoreProblem(error.kind, _words(error))
         except Exception as error:  # a search must never take the app down
             answer = StoreProblem("failed", f"search failed: {error}")
         else:
@@ -583,7 +597,7 @@ class RealStore:
 
     def download_blocked(self) -> str:
         if not self._backend.settings.roots:
-            return "Downloads go into your first library folder, and there is none yet"
+            return NO_FOLDER
         return ""
 
     @property
@@ -604,7 +618,9 @@ class RealStore:
             return
         blocked = self.download_blocked()
         if blocked:
-            self._backend.window_report(blocked)
+            # Said with the way to fix it: Settings' Library group, one press away.
+            settings = ("Settings", lambda: self._host.navigate(SETTINGS_LIBRARY))
+            self._host.toast(blocked, action=settings)
             return
         lanes = self._open()
         self._busy[key] = candidate

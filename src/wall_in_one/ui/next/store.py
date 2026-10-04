@@ -544,7 +544,7 @@ class StorePage(Page):
             else:
                 # Keep every page reached; stop offering a Next that fails.
                 self.pages.stop()
-                self.state.toast(answer.message)
+                self.state.toast(answer.reported)
                 self._update_pager()
             return
         before = self.pages.pages
@@ -915,6 +915,7 @@ class StorePage(Page):
             in_library=self.store.in_library(item),
             busy=self._busy(item),
             apply_blocked=self.store.apply_item_blocked(item),
+            download_blocked=self.store.download_blocked(),
         )
         if not card.can_pick and self.picked.pop(item.id, None) is not None:
             card.set_checked(False)

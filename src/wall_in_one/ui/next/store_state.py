@@ -288,7 +288,14 @@ class StoreProblem:
     #: The provider's kind (``rate-limit``, ``challenge``, ``credential``,
     #: ``validation``, ``timeout``, ``transport``...), or ``failed``.
     kind: str
+    #: For a person: the provider's own words, without the kind, which the
+    #: error page shows in its title and buttons instead.
     message: str
+
+    @property
+    def reported(self) -> str:
+        """``kind: message``, as a toast (and `ctl`) says it; ``failed`` says itself."""
+        return self.message if self.kind == "failed" else f"{self.kind}: {self.message}"
 
 
 @dataclass(frozen=True, slots=True)

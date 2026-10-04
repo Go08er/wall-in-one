@@ -265,6 +265,7 @@ class StoreCard(Gtk.Box):
         self.busy = ""
         self._selecting = False
         self._apply_blocked = ""
+        self._download_blocked = ""
 
         overlay = Gtk.Overlay()
         self.frame = overlay
@@ -413,11 +414,14 @@ class StoreCard(Gtk.Box):
         """Only what can still be downloaded can be picked."""
         return not self.in_library and not self.busy
 
-    def update(self, *, in_library: bool, busy: str, apply_blocked: str) -> None:
+    def update(
+        self, *, in_library: bool, busy: str, apply_blocked: str, download_blocked: str = ""
+    ) -> None:
         """Show the result's state: ``busy`` is "", "downloading" or "waiting"."""
         self.in_library = in_library
         self.busy = busy
         self._apply_blocked = apply_blocked
+        self._download_blocked = download_blocked
         self._sync()
 
     def _sync(self) -> None:
@@ -431,6 +435,9 @@ class StoreCard(Gtk.Box):
         self._resolution.set_visible(not busy)
         self._owned.set_visible(owned and not busy)
         self.download_button.set_visible(not owned)
+        # Off, with the reason, when nothing can be downloaded (no library folder).
+        self.download_button.set_sensitive(not self._download_blocked)
+        self.download_button.set_tooltip_text(self._download_blocked or "Download")
         self.apply_button.set_visible(owned)
         self.apply_button.set_sensitive(not self._apply_blocked)
         self.apply_button.set_tooltip_text(self._apply_blocked or "Show it now")

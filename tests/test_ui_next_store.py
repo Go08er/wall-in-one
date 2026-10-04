@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -417,6 +417,10 @@ def test_motionbgs_browses_by_genre_and_downloads_the_chosen_quality(store: Stor
     page.mode.set_selected(3)  # By genre
     _searched(page)
     assert page.problem is not None and "type a genre" in page.problem.message
+    # The error page reads as a sentence: the kind is for code and toasts.
+    description = page._error.get_description() or ""
+    assert description.startswith("type a genre") and "validation:" not in description
+    assert page.problem.reported.startswith("validation: type a genre")
     page.genre.set_text("anime")
     page.genre.emit("activate")
     _searched(page)
@@ -561,6 +565,35 @@ def test_a_rescan_that_fails_says_the_download_was_not_applied(store: Store) -> 
     finished(False)
     assert store.backend.played == []
     assert any("could not be rescanned" in report for report in store.backend.reports)
+
+
+def test_with_no_library_folder_download_is_off_and_says_where_to_add_one(
+    store: Store,
+) -> None:
+    """The card's Download looks and is off, with the reason; the refusal opens Settings."""
+    page = store.page()
+    page.activate(None)
+    _searched(page)
+    item = page.pages.current[0]
+    card = page.cards[item.id]
+    assert card.download_button.get_sensitive()
+    session = store.backend.session
+    session.update_settings(replace(session.settings, roots=()), rescan_library=False)
+    store.state.emit_changed("settings")
+    reason = store.store.download_blocked()
+    assert reason.endswith("Add one in Settings \u2192 Library")
+    assert not card.download_button.get_sensitive()
+    assert card.download_button.get_tooltip_text() == reason
+
+    buttons: list[tuple[str, Callable[[], None]] | None] = []
+    store.state.connect("toast", lambda _state, _text, button: buttons.append(button))
+    store.store.download(item)  # a press that reaches it anyway (the menu, a key)
+    assert store.toasts == [reason]
+    [button] = buttons
+    assert button is not None and button[0] == "Settings"
+    button[1]()
+    assert store.navigations[-1] == "settings:library"
+    assert store.script.downloads == [], "nothing was downloaded"
 
 
 def test_a_plain_download_offers_apply_in_its_toast(store: Store) -> None:

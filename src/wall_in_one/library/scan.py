@@ -330,6 +330,33 @@ def _walk(
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
+def would_find(item: MediaItem, roots: Sequence[Path], include_workshop: bool) -> bool:
+    """Whether a scan of ``roots`` (and of the Workshop, if included) finds ``item`` again.
+
+    Decided from the item's accepted path alone, so nothing on disk is read,
+    by the walk's own rules (`_walk`): a file is found under a root by its
+    lexical path, by whole components (``/a/b`` holds ``/a/b/x``, never
+    ``/a/bc/x``), never through a hidden name, at most `MAX_DEPTH` folders
+    down. The walk follows no symlinked directory and `scan` skips a root
+    that is a symlink, so no accepted path runs through one, and a path is
+    never resolved here either. A Workshop item, and a scene always, comes
+    back from the Workshop scan only, which runs while it is included. The
+    scan's budgets (`MAX_ITEMS`, `MAX_ENTRIES_EXAMINED`) are not predicted.
+    """
+    if item.kind is not Kind.SCENE:
+        for root in roots:
+            if not item.path.is_relative_to(root):
+                continue
+            parts = item.path.relative_to(root).parts
+            if (
+                parts
+                and len(parts) - 1 <= MAX_DEPTH
+                and not any(part.startswith(".") for part in parts)
+            ):
+                return True
+    return include_workshop and item.provider == WORKSHOP_PROVIDER
+
+
 def workshop_items(
     steam_roots: Sequence[Path] | None = None,
     *,

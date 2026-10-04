@@ -5222,11 +5222,13 @@ class Application(Adw.Application):
 
         On GTK, after every write queued before it has saved: a default
         playlist that has nothing to play by now (its last wallpaper removed
-        meanwhile, say) is refused here, whichever page or window asked for
-        it, so the runtime configuration can still be built. A refusal fails
-        the whole batch, as a failed write does: every control goes back to
-        what is saved. Changes arriving after this snapshot stay pending and
-        start their own batch.
+        meanwhile, say), and library folders or Wallpaper Engine scanning
+        changed so that a playlist would lose what it plays, are refused here
+        (`runtime_config.settings_refusal`), whichever page or window asked,
+        so the runtime configuration can still be built. A refusal fails the
+        whole batch, as a failed write does: every control goes back to what
+        is saved. Changes arriving after this snapshot stay pending and start
+        their own batch.
         """
         with self._settings_authoring_lock:
             generation = self._settings_authoring_generation
@@ -5238,7 +5240,8 @@ class Application(Adw.Application):
             {key: value for key, _gen, value in changes}, self._session
         )
         if refusal:
-            raise config.ConfigError(refusal)
+            # Its kind keeps the reply a sentence (`control.server.failed`).
+            raise runtime_config.PlaybackGuardError(refusal)
         return lambda: self._persist_settings_batch(generation, changes)
 
     def _persist_settings_batch(

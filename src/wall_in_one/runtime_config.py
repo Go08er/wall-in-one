@@ -20,12 +20,12 @@ import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings, state_file
+from wall_in_one.library import pairings, scan, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.session import Session
@@ -917,14 +917,56 @@ def pairing_refusals_if_unresolved(item: MediaItem, session: Session) -> list[st
     return pairing_refusal(item, False, session.settings, session)
 
 
+def sources_refusal(after: config.Settings, session: Session) -> list[str]:
+    """Each refusal (`change_refusal`) that scanning ``after``'s library sources earns.
+
+    A library folder removed, or Wallpaper Engine scanning turned off, takes
+    wallpapers out of the library, and every playlist entry naming one then
+    names nothing the compiler can use. Which ones leave is worked out from
+    the accepted library by the scan's own rules (`scan.would_find`), so
+    nothing on disk is read; uses are counted as ``after`` has them.
+    """
+    include_workshop = after.scan_workshop and bool(after.roots)
+    leaving = [
+        item.path
+        for item in session.library.items
+        if not scan.would_find(item, after.roots, include_workshop)
+    ]
+    return emptied_by_removing(leaving, after, session) if leaving else []
+
+
+#: The settings that decide which playlist is the default and what is in the library.
+_PLAYBACK_SETTINGS: Final = ("active_playlist", "roots", "scan_workshop")
+
+
 def settings_refusal(changes: Mapping[str, object], session: Session) -> str:
-    """Why a settings change may not be saved (a default with nothing to play); or empty."""
+    """Why a settings change may not be saved, or empty.
+
+    A default with nothing to play (`use_refusal`), and library folders or
+    Wallpaper Engine scanning changed so that a playlist would break
+    (`sources_refusal`), each with every change asked for at once applied.
+    """
     wanted = changes.get("active_playlist")
     if isinstance(wanted, str) and wanted:
         refusal = use_refusal(wanted, session)
         if refusal:
             return f"the chosen default playlist can\u2019t be used: {refusal}"
-    return ""
+    if "roots" not in changes and "scan_workshop" not in changes:
+        return ""
+    current = session.settings
+    asked: dict[str, Any] = {key: changes[key] for key in _PLAYBACK_SETTINGS if key in changes}
+    after = replace(current, **asked).validated()
+    if (after.roots, after.scan_workshop) == (current.roots, current.scan_workshop):
+        return ""
+    refused = sources_refusal(after, session)
+    if not refused:
+        return ""
+    what = (
+        "that change to the library folders"
+        if after.roots != current.roots
+        else "turning off Wallpaper Engine scanning"
+    )
+    return f"{what} would take wallpapers out of the library: {listed(refused)}"
 
 
 def _validate_playlist_identity(

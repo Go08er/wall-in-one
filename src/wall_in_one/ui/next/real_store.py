@@ -513,7 +513,7 @@ class RealStore:
             try:
                 detail = browser.describe(candidate)
             except ProviderError as error:
-                return StoreDetail(problem=str(error), page_url=candidate.page_url)
+                return StoreDetail(problem=_words(error), page_url=candidate.page_url)
             return _detail_of(detail, _picture_for(browser, detail.preview_url, lanes.processes))
 
         def finished(future: Future[StoreDetail]) -> None:

@@ -45,6 +45,7 @@ from wall_in_one.providers.base import (  # noqa: E402
     CandidateDetail,
     DownloadResult,
     Fact,
+    ProviderError,
     SearchQuery,
     SearchResult,
     WallpaperCandidate,
@@ -59,6 +60,7 @@ from wall_in_one.ui.next.store_state import (  # noqa: E402
     MOTIONBGS,
     WALLHAVEN,
     StoreAccess,
+    StoreDetail,
     StoreItemView,
 )
 
@@ -122,6 +124,8 @@ class Script:
     gates: dict[str, threading.Event] = field(default_factory=dict)
     downloads: list[tuple[str, str]] = field(default_factory=list)
     during_download: Callable[[], None] | None = None
+    #: Raised by ``describe`` when set: a preview whose details fail.
+    describe_error: ProviderError | None = None
 
     def answer(self, name: str, query: SearchQuery) -> SearchResult:
         found = self.pages.get((name, query.text, query.page))
@@ -166,6 +170,8 @@ class StubBrowser(Browser):
 
     def describe(self, wanted: WallpaperCandidate) -> CandidateDetail:
         self.script.threads.append(("describe", threading.get_ident()))
+        if self.script.describe_error is not None:
+            raise self.script.describe_error
         return CandidateDetail(
             candidate=wanted,
             preview_url=f"https://w.wallhaven.cc/full/{wanted.identifier}.png",
@@ -565,6 +571,19 @@ def test_a_rescan_that_fails_says_the_download_was_not_applied(store: Store) -> 
     finished(False)
     assert store.backend.played == []
     assert any("could not be rescanned" in report for report in store.backend.reports)
+
+
+def test_a_preview_whose_details_fail_says_so_in_the_sites_words(store: Store) -> None:
+    """As on the error page: the kind is for code, the words are for the person."""
+    page = store.page()
+    page.activate(None)
+    _searched(page)
+    item = page.pages.current[0]
+    store.script.describe_error = ProviderError("rate-limit", "slow down, please")
+    details: list[StoreDetail] = []
+    store.store.item_detail(item, details.append)
+    spin_until(lambda: bool(details), 5)
+    assert details[0].problem == "slow down, please"
 
 
 def test_with_no_library_folder_download_is_off_and_says_where_to_add_one(

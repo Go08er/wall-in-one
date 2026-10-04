@@ -405,8 +405,9 @@ observed uninstall reaches the removal journal, its cleanup is restart-safe.
 A playlist's page adds wallpapers with **Add wallpapers…**: a picker with its
 own search and kind filter, where the wallpapers you click are numbered in the
 order they will go in, then **Add N** (or `Ctrl+Enter`) adds them in one save.
-You can also drag a Library card onto the playlist's row in the sidebar, or
-use **Add to playlist** in a card's menu or the details pane.
+You can also drag a Library card onto the playlist's rows, where it lands
+where you drop it (below the last row shown, at the end), or onto its row in
+the sidebar, or use **Add to playlist** in a card's menu or the details pane.
 Drag a playlist row's handle to reorder it, or focus the row and press
 `Ctrl+Up` / `Ctrl+Down` (`Ctrl+Home` / `Ctrl+End` for the top and bottom); the
 row's menu has the same moves. Reordering preserves each occurrence's stable

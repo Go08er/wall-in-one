@@ -106,6 +106,20 @@ _MONTHS: Final = (
 _DEFAULT: Final = "default"
 
 
+class RenameResult(Protocol):
+    """A saved rename (`Application.prepare_playlist_rename`)."""
+
+    @property
+    def before(self) -> playlists.Playlist: ...
+
+    @property
+    def renamed(self) -> playlists.Playlist: ...
+
+    #: The settings saved first, when the default named it by name; else None.
+    @property
+    def settings(self) -> config.Settings | None: ...
+
+
 class PlaylistBackend(Protocol):
     """What the playlist actions use of `wall_in_one.ui.app.Application`."""
 
@@ -138,6 +152,12 @@ class PlaylistBackend(Protocol):
         *,
         on_error: Callable[[str], None] | None = None,
     ) -> bool: ...
+
+    def prepare_playlist_rename(self, reference: str, name: str) -> Callable[[], RenameResult]:
+        """At the head of the queue: the rename, with what names it by name kept working."""
+        ...
+
+    def adopt_playlist_rename(self, result: RenameResult) -> None: ...
 
     def update_settings_async(
         self,
@@ -641,6 +661,12 @@ class RealPlaylists:
         return copy
 
     def rename_playlist(self, pid: str, name: str) -> None:
+        """Renamed by the application's own rename (`prepare_playlist_rename`).
+
+        It keeps an older profile's default, rule or display assignment that
+        names the playlist by name working, by giving it the playlist's id
+        first, in the same task.
+        """
         playlist = self._editable(pid)
         if playlist is None:
             return
@@ -648,17 +674,16 @@ class RealPlaylists:
         shown = self._names[pid][0] if pid in self._names else playlist.name
         if tidy == shown:
             return
-        store = self._store
         queue_intent(self._names, pid, tidy)
         self._emit_edits()
 
-        def prepare() -> Callable[[], tuple[playlists.Playlist, playlists.Playlist]]:
-            before = self._require(pid, "the new name")
-            return lambda: (before, store.rename(pid, name))
+        def prepare() -> Callable[[], RenameResult]:
+            self._require(pid, "the new name")
+            return self._backend.prepare_playlist_rename(pid, name)
 
-        def saved(result: tuple[playlists.Playlist, playlists.Playlist]) -> bool:
-            before, renamed = result
-            return renamed != before
+        def saved(result: RenameResult) -> bool:
+            self._backend.adopt_playlist_rename(result)
+            return result.renamed != result.before
 
         self._queue(
             f"{quoted(playlist.name)} was not renamed",

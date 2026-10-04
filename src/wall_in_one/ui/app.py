@@ -51,6 +51,7 @@ from wall_in_one.session import (
 )
 from wall_in_one.theme import css, noctalia, source
 from wall_in_one.ui.activity_log import ActivityLog
+from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.window import NextWindow
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
@@ -299,6 +300,15 @@ class _PlaylistDeleteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PlaylistRenameResult:
+    """A saved rename, and the settings saved first if the default named it by name."""
+
+    before: playlists.Playlist
+    renamed: playlists.Playlist
+    settings: config.Settings | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _PlaylistReferenceRepairResult:
     """Idempotent cleanup of references left by an interrupted deletion."""
 
@@ -306,6 +316,9 @@ class _PlaylistReferenceRepairResult:
     schedule_playlists: tuple[str, ...] = ()
     display_playlists: tuple[str, ...] = ()
     failures: tuple[str, ...] = ()
+    #: References by name, now the playlist's id: (reference, id).
+    schedule_retargets: tuple[tuple[str, str], ...] = ()
+    display_retargets: tuple[tuple[str, str], ...] = ()
 
 
 class Application(Adw.Application):
@@ -624,6 +637,14 @@ class Application(Adw.Application):
     def _repair_dangling_playlist_references() -> _PlaylistReferenceRepairResult:
         """Remove only references whose playlist identity is durably absent.
 
+        A reference is to a playlist's id, but an older profile's default,
+        rule or display assignment may name its playlist by name, which the
+        compiler resolves too (by id, then by name, ignoring case). Such a
+        reference is not dangling: it is pointed at the playlist's id, in the
+        existing key or record, so it keeps working and a later rename can't
+        leave it naming nothing. Only a reference that resolves to no
+        playlist at all is removed.
+
         A store saved by a newer version is skipped rather than failed: it is
         read-only here, so it cannot be repaired, and pausing every write
         (and the first library scan) for it would turn a rollback into an
@@ -643,6 +664,13 @@ class Application(Adw.Application):
         failures: list[str] = []
         repaired_schedules: list[str] = []
         repaired_displays: list[str] = []
+        retargeted_schedules: list[tuple[str, str]] = []
+        retargeted_displays: list[tuple[str, str]] = []
+
+        def named(reference: str) -> str | None:
+            """The id of the playlist ``reference`` names by name, as the compiler finds it."""
+            found = playlist_store.by_name(reference)
+            return found.id if found is not None else None
 
         schedule_store = schedules.Store.open()
         if schedule_store.fault_kind == state_file.NEWER_VERSION:
@@ -652,7 +680,12 @@ class Application(Adw.Application):
         else:
             dangling = sorted({rule.playlist for rule in schedule_store.rules} - valid)
             for playlist_id in dangling:
+                target = named(playlist_id)
                 try:
+                    if target is not None:
+                        if schedule_store.retarget(playlist_id, target):
+                            retargeted_schedules.append((playlist_id, target))
+                        continue
                     schedule_changed = schedule_store.forget_playlist(playlist_id)
                 except schedules.ScheduleError as error:
                     failures.append(f"schedule rules for {playlist_id}: {error}")
@@ -668,7 +701,12 @@ class Application(Adw.Application):
         else:
             dangling = sorted({playlist for _connector, playlist in display_store.all()} - valid)
             for playlist_id in dangling:
+                target = named(playlist_id)
                 try:
+                    if target is not None:
+                        if display_store.retarget(playlist_id, target):
+                            retargeted_displays.append((playlist_id, target))
+                        continue
                     display_count = display_store.forget_playlist(playlist_id)
                 except displays.DisplayError as error:
                     failures.append(f"display assignments for {playlist_id}: {error}")
@@ -681,7 +719,12 @@ class Application(Adw.Application):
             durable_settings = config.load_strict()
             active = durable_settings.active_playlist
             if active and active not in valid:
-                saved_settings = config.forget_playlist_default(active)
+                target = named(active)
+                saved_settings = (
+                    config.forget_playlist_default(active)
+                    if target is None
+                    else config.repoint_playlist_default(active, target)
+                )
                 if saved_settings is None:
                     durable_settings = config.load_strict()
                     if (
@@ -698,6 +741,8 @@ class Application(Adw.Application):
             settings=saved_settings,
             schedule_playlists=tuple(repaired_schedules),
             display_playlists=tuple(repaired_displays),
+            schedule_retargets=tuple(retargeted_schedules),
+            display_retargets=tuple(retargeted_displays),
             failures=tuple(failures),
         )
 
@@ -708,6 +753,8 @@ class Application(Adw.Application):
         """Adopt committed repair deltas, opening the gate only when clean."""
         self._session.schedules.adopt_worker_forget_playlists(result.schedule_playlists)
         self._session.displays.adopt_worker_forget_playlists(result.display_playlists)
+        self._session.schedules.adopt_worker_retarget(dict(result.schedule_retargets))
+        self._session.displays.adopt_worker_retarget(dict(result.display_retargets))
         if result.settings is not None:
             previous = self._settings
             with self._settings_authoring_lock:
@@ -718,7 +765,7 @@ class Application(Adw.Application):
                 self._window.apply_settings(result.settings)
             if previous.active_playlist != result.settings.active_playlist:
                 self._session.playlists_changed()
-        elif result.schedule_playlists:
+        elif result.schedule_playlists or result.schedule_retargets:
             self._session.playlists_changed()
 
         if result.failures:
@@ -4730,6 +4777,10 @@ class Application(Adw.Application):
         playlist_store = self._session.playlists
         schedule_store = self._session.schedules
         display_store = self._session.displays
+        # Its id, and its name where an older profile's reference still says
+        # that (the compiler resolves it too): both go with it.
+        named_by = self._references_by_name(playlist)
+        references = (playlist.id, *named_by)
 
         def work() -> _PlaylistDeleteResult:
             # The playlist is the authoritative lifecycle boundary.  Once it
@@ -4738,20 +4789,23 @@ class Application(Adw.Application):
             # later references needlessly dangling.  The one tail checked
             # first is a saved default that read-only settings cannot clear:
             # refusing the whole deletion beats a default naming nothing.
-            config.require_playlist_deletable(playlist.id)
+            config.require_playlist_deletable(playlist.id, also=named_by)
             playlist_store.delete(playlist.id)
             failures: list[str] = []
             try:
-                schedule_store.forget_playlist(playlist.id)
+                for reference in references:
+                    schedule_store.forget_playlist(reference)
             except Exception as error:
                 failures.append(f"schedule rules: {error}")
             try:
-                display_store.forget_playlist(playlist.id)
+                for reference in references:
+                    display_store.forget_playlist(reference)
             except Exception as error:
                 failures.append(f"display assignments: {error}")
             saved_settings: config.Settings | None = None
             try:
-                saved_settings = config.forget_playlist_default(playlist.id)
+                for reference in references:
+                    saved_settings = config.forget_playlist_default(reference) or saved_settings
             except config.ConfigError as error:
                 failures.append(f"saved default: {error}")
             return _PlaylistDeleteResult(
@@ -4762,6 +4816,77 @@ class Application(Adw.Application):
             )
 
         return work
+
+    def _references_by_name(self, playlist: playlists.Playlist) -> tuple[str, ...]:
+        """How the default, rules and display assignments name ``playlist`` other than by id.
+
+        By name, as the compiler resolves it (`runtime_config.find_playlist`):
+        what an older profile may hold. Read on GTK from what is saved.
+        """
+
+        def names_it(reference: str) -> bool:
+            if not reference or reference == playlist.id:
+                return False
+            found = runtime_config.find_playlist(reference, self._session)
+            return found is not None and found.id == playlist.id
+
+        found = (
+            {self._settings.active_playlist} if names_it(self._settings.active_playlist) else set()
+        )
+        found.update(
+            rule.playlist for rule in self._session.schedules.rules if names_it(rule.playlist)
+        )
+        found.update(
+            assigned for _connector, assigned in self._session.displays.all() if names_it(assigned)
+        )
+        return tuple(sorted(found))
+
+    def prepare_playlist_rename(
+        self, reference: str, name: str
+    ) -> Callable[[], PlaylistRenameResult]:
+        """Rename one playlist at the head of the lane, keeping what names it by name working.
+
+        An older profile's default, rule or display assignment may name the
+        playlist by its name, which the compiler resolves (by id, then by
+        name); renaming it would leave that naming nothing and stop every
+        publication. In this task each such reference is first given the
+        playlist's id, in the record or key it is already in, then the
+        playlist is renamed: the id names the same playlist before and after,
+        so nothing breaks if the rename itself then fails. No new field is
+        stored. Read-only settings refuse the whole rename, saying why.
+        """
+        playlist = self._session.playlists.find(reference)
+        pid = playlist.id
+        named_by = self._references_by_name(playlist)
+        default = (
+            self._settings.active_playlist if self._settings.active_playlist in named_by else ""
+        )
+        store = self._session.playlists
+        schedule_store = self._session.schedules
+        display_store = self._session.displays
+
+        def work() -> PlaylistRenameResult:
+            saved: config.Settings | None = None
+            if default:
+                saved = config.repoint_playlist_default(default, pid)
+            for old in named_by:
+                schedule_store.retarget(old, pid)
+                display_store.retarget(old, pid)
+            return PlaylistRenameResult(playlist, store.rename(pid, name), saved)
+
+        return work
+
+    def adopt_playlist_rename(self, result: RenameResult) -> None:
+        """Take a rename's saved default on GTK, if it gave the default the playlist's id."""
+        if result.settings is None:
+            return
+        previous = self._settings
+        with self._settings_authoring_lock:
+            pending = {
+                key: value for key, (_gen, value) in self._settings_authoring_pending.items()
+            }
+            self._settings_requested = replace(result.settings, **pending).validated()
+        self._adopt_settings(previous, result.settings)
 
     def _adopt_playlist_delete(self, result: _PlaylistDeleteResult) -> tuple[str, ...]:
         """Reconcile every portion which committed, even after partial cleanup."""

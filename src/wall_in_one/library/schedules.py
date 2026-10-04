@@ -836,6 +836,36 @@ class Store:
 
         return self._mutate(forget)
 
+    def retarget(self, reference: str, playlist_id: str) -> int:
+        """Point every rule naming ``reference`` at ``playlist_id``; say how many.
+
+        For a playlist about to be renamed while an older profile's rule
+        names it by name: its id names the same playlist before and after.
+        One save, and none when nothing names it.
+        """
+        if not playlist_id.strip():
+            raise ScheduleError("no-such-rule", "a rule needs a playlist")
+
+        def retarget(rules: list[Rule]) -> tuple[int, bool]:
+            changed = 0
+            for index, rule in enumerate(rules):
+                if rule.playlist == reference:
+                    rules[index] = replace(rule, playlist=playlist_id)
+                    changed += 1
+            return changed, bool(changed)
+
+        return self._mutate(retarget)
+
+    def adopt_worker_retarget(self, retargeted: Mapping[str, str]) -> int:
+        """Mirror a detached `retarget` (reference to playlist id) without another write."""
+        changed = 0
+        for index, rule in enumerate(self._rules):
+            replacement = retargeted.get(rule.playlist)
+            if replacement is not None:
+                self._rules[index] = replace(rule, playlist=replacement)
+                changed += 1
+        return changed
+
     def adopt_worker_forget_playlists(self, playlists: Iterable[str]) -> int:
         """Mirror detached dangling-reference cleanup without another write."""
         removed = frozenset(playlists)

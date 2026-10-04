@@ -63,6 +63,16 @@ class PlaylistApp:
             raise ValueError("pairing no longer exists")
         return current
 
+    def prepare_playlist_rename(self, reference: str, name: str) -> Any:
+        """The application's rename, without the older profiles' name references."""
+        store = self.session.playlists
+        before = store.find(reference)
+        return lambda: SimpleNamespace(
+            before=before, renamed=store.rename(before.id, name), settings=None
+        )
+
+    def adopt_playlist_rename(self, _result: Any) -> None: ...
+
     def authoring_action_async(
         self, work: Any, finish: Any, *, prepare: Any = None, failure: Any = None
     ) -> bool:

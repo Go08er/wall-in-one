@@ -28,10 +28,12 @@ from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_ui_next_editing import hold_the_lane  # noqa: E402
 from tests.test_ui_next_settings import Opened, _close, _open  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
+from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from wall_in_one import config, runtime_compatibility, runtime_config  # noqa: E402
-from wall_in_one.library import playlists, scan  # noqa: E402
+from wall_in_one.library import displays, playlists, scan, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
-from wall_in_one.ui import preferences  # noqa: E402
+from wall_in_one.ui import playlists_page, preferences  # noqa: E402
+from wall_in_one.ui.next.real_playlists import RealPlaylists  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 from wall_in_one.ui.next.schedule_state import RuleView  # noqa: E402
 
@@ -233,4 +235,90 @@ def test_a_refused_folder_change_rolls_back_the_whole_batch_it_came_in(shown: Sh
     assert (saved.opacity, saved.roots) == (before, (shown.walls, shown.walls2))
     assert application.requested_settings.opacity == before, "the controls go back too"
     assert len(errors) == 2 and all("Evening" in error for error in errors)
+    assert _builds(shown)
+
+
+# -- references by name, which older profiles may hold ---------------------------------------
+
+
+def _by_name(shown: Shown, playlist: playlists.Playlist) -> None:
+    """An older profile's references: the default, a rule and DP-1, each by name."""
+    application = shown.opened.application
+    application.update_settings(active_playlist=playlist.name.lower())  # names ignore case
+    application.session.schedules.add(playlist.name)
+    application.session.displays.assign("DP-1", playlist.name)
+    assert _builds(shown), "the compiler resolves a playlist by name too"
+
+
+def test_the_startup_repair_keeps_an_older_profiles_references_by_name(shown: Shown) -> None:
+    """They were judged dangling and removed (the default became All media); now repointed."""
+    application = shown.opened.application
+    evening = _playlist(shown, "Evening", [shown.dawn])
+    _by_name(shown, evening)
+    application.session.schedules.add("Gone")  # names nothing: still removed
+
+    result = application._repair_dangling_playlist_references()
+    application._finish_playlist_reference_repair(result)
+
+    assert config.load().active_playlist == evening.id
+    assert [rule.playlist for rule in schedules.Store.open().rules] == [evening.id]
+    assert displays.Store.open().playlist_for("DP-1") == evening.id
+    assert application.settings.active_playlist == evening.id
+    assert [rule.playlist for rule in application.session.schedules.rules] == [evening.id]
+    assert application.session.displays.playlist_for("DP-1") == evening.id
+    assert _builds(shown)
+
+
+def test_renaming_a_playlist_named_by_name_keeps_its_references_in_both_windows(
+    shown: Shown, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened = shown.opened
+    application = opened.application
+    evening = _playlist(shown, "Evening", [shown.dawn])
+    _by_name(shown, evening)
+
+    editing = opened.window.state.playlist_editing
+    assert isinstance(editing, RealPlaylists)
+    editing.rename_playlist(evening.id, "Night")
+    opened.wait(
+        "the new window's rename",
+        lambda: application.session.playlists.find(evening.id).name == "Night",
+    )
+    assert config.load().active_playlist == evening.id, "the existing key, given the id"
+    assert application.settings.active_playlist == evening.id
+    assert [rule.playlist for rule in application.session.schedules.rules] == [evening.id]
+    assert application.session.displays.playlist_for("DP-1") == evening.id
+    assert _builds(shown)
+
+    morning = _playlist(shown, "Morning", [shown.rain])
+    application.session.schedules.add("Morning")
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    classic = playlists_page.PlaylistsPage(application)
+    classic._selected = morning.id
+    classic.refresh(application.session)
+    classic._rename("Dawn")
+    opened.wait(
+        "the classic rename", lambda: application.session.playlists.find(morning.id).name == "Dawn"
+    )
+    assert [rule.playlist for rule in application.session.schedules.rules] == [
+        evening.id,
+        morning.id,
+    ]
+    assert _builds(shown)
+
+
+def test_deleting_a_playlist_named_by_name_takes_those_references_too(shown: Shown) -> None:
+    opened = shown.opened
+    application = opened.application
+    evening = _playlist(shown, "Evening", [shown.dawn])
+    _by_name(shown, evening)
+    editing = opened.window.state.playlist_editing
+    assert isinstance(editing, RealPlaylists)
+
+    editing.delete_playlist(evening.id)
+    opened.wait("the deletion", lambda: application.session.playlists.get(evening.id) is None)
+
+    assert config.load().active_playlist == ""
+    assert application.session.schedules.rules == ()
+    assert application.session.displays.all() == ()
     assert _builds(shown)

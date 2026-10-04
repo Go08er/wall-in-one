@@ -10,7 +10,7 @@ from __future__ import annotations
 import tomllib
 from collections import deque
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_protocol_members
 
@@ -27,6 +27,7 @@ from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.next import prefs
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import NO_SERVICE_START
+from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.real_state import RealAppState, human_size, scheme_name, wallpaper_view
 from wall_in_one.ui.next.state import AppState, Reason, reason_text, solo_displays
 from wall_in_one.ui.status_model import RuntimeStatusModel
@@ -52,6 +53,15 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
+@dataclass(frozen=True)
+class Renamed:
+    """`Application.prepare_playlist_rename`'s result, as the adapter reads it."""
+
+    before: playlists.Playlist
+    renamed: playlists.Playlist
+    settings: config.Settings | None = None
+
+
 class FakeApplication:
     """The `Backend` the adapter talks to, recording every request.
 
@@ -67,6 +77,7 @@ class FakeApplication:
         #: Runtime commands: (connector or None for every display, verb, argument).
         self.sent: list[tuple[str | None, str, str | None]] = []
         self.reports: list[str] = []
+        self.renames: list[RenameResult] = []
         self.glass: list[css.Glass | None] = []
         self.published = 0
         self.authoring: deque[Callable[[], None]] = deque()
@@ -208,6 +219,15 @@ class FakeApplication:
             on_complete(deleted, ())
 
         return self.authoring_action_async(work, finish, failure=on_error)
+
+    def prepare_playlist_rename(self, reference: str, name: str) -> Callable[[], Renamed]:
+        """The application's rename, without the older profiles' name references."""
+        store = self._session.playlists
+        before = store.find(reference)
+        return lambda: Renamed(before, store.rename(before.id, name))
+
+    def adopt_playlist_rename(self, result: RenameResult) -> None:
+        self.renames.append(result)
 
     def update_settings_async(
         self,

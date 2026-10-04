@@ -826,16 +826,39 @@ def forget_playlist_default(
     file has keys this build does not know, `SettingsReadOnlyError` is raised
     and nothing is written.
     """
+    return _rewrite_playlist_default(playlist, "", path)
+
+
+def repoint_playlist_default(
+    reference: str,
+    playlist_id: str,
+    path: Path | None = None,
+) -> Settings | None:
+    """Give ``active_playlist`` the id ``playlist_id`` iff it still says ``reference``.
+
+    An older profile's default may name its playlist by name, which the
+    compiler also resolves (by id first, then by name). Before that playlist
+    is renamed, its id is written to the same key: it names the same playlist
+    before and after the rename. Otherwise as `forget_playlist_default`.
+    """
+    return _rewrite_playlist_default(reference, playlist_id, path)
+
+
+def _rewrite_playlist_default(
+    reference: str,
+    replacement: str,
+    path: Path | None,
+) -> Settings | None:
     target = path if path is not None else paths.settings_path()
     try:
         with state_file.mutation_lock(target, description="settings"):
             loaded = load_strict_document(target)
             current = loaded.settings
-            if current.active_playlist != playlist:
+            if current.active_playlist != reference:
                 return None
             if loaded.read_only:
                 raise SettingsReadOnlyError(loaded.unknown_keys)
-            candidate = replace(current, active_playlist="").validated()
+            candidate = replace(current, active_playlist=replacement).validated()
             paths.ensure_directory(target.parent)
             _publish(target, candidate)
             return candidate
@@ -845,7 +868,9 @@ def forget_playlist_default(
         raise ConfigError(f"cannot safely update {target}: {error}") from error
 
 
-def require_playlist_deletable(playlist: str, path: Path | None = None) -> None:
+def require_playlist_deletable(
+    playlist: str, path: Path | None = None, *, also: tuple[str, ...] = ()
+) -> None:
     """Refuse up front a deletion that would need a read-only settings write.
 
     Deleting the saved default playlist also clears ``active_playlist``. When
@@ -855,11 +880,12 @@ def require_playlist_deletable(playlist: str, path: Path | None = None) -> None:
 
     Only that case is refused. An unreadable or malformed file keeps its
     existing outcome: the deletion proceeds and clearing the default reports
-    its own error.
+    its own error. ``also`` are other references to the same playlist (its
+    name, which an older profile's default may hold).
     """
     try:
         loaded = load_strict_document(path)
     except ConfigError:
         return
-    if loaded.read_only and loaded.settings.active_playlist == playlist:
+    if loaded.read_only and loaded.settings.active_playlist in (playlist, *also):
         raise SettingsReadOnlyError(loaded.unknown_keys)

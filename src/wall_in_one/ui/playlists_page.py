@@ -1948,9 +1948,19 @@ class PlaylistsPage(Gtk.Box):
         if session is None:
             return
         selected = self._selected
+
+        def renamed(result: Any) -> None:
+            self._app.adopt_playlist_rename(result)
+            self._app.playlists_changed()
+
+        def unprepared() -> Any:  # pragma: no cover - prepare always replaces it
+            raise RuntimeError("the rename was not prepared")
+
         self._app.authoring_action_async(
-            lambda: session.playlists.rename(selected, name),
-            lambda _playlist: self._app.playlists_changed(),
+            unprepared,
+            renamed,
+            # The application's rename keeps what names it by name working.
+            prepare=lambda: self._app.prepare_playlist_rename(selected, name),
             failure=self._app.window_report,
         )
 

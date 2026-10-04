@@ -436,6 +436,33 @@ class Store:
 
         return self._mutate(forget)
 
+    def retarget(self, reference: str, playlist_id: str) -> int:
+        """Point every assignment naming ``reference`` at ``playlist_id``; say how many.
+
+        For a playlist about to be renamed while an older profile's
+        assignment names it by name: its id names the same playlist before
+        and after. One save, and none when nothing names it.
+        """
+        wanted, replacement = _clean(reference), _clean(playlist_id)
+        if not replacement:
+            raise DisplayError("validation", "that is not a playlist name")
+
+        def retarget(working: _Working) -> tuple[int, bool]:
+            stale = [key for key, value in working.assignments.items() if value == wanted]
+            for key in stale:
+                working.assignments[key] = replacement
+            return len(stale), bool(stale)
+
+        return self._mutate(retarget)
+
+    def adopt_worker_retarget(self, retargeted: Mapping[str, str]) -> int:
+        """Mirror a detached `retarget` (reference to playlist id) without another write."""
+        cleaned = {_clean(reference): _clean(target) for reference, target in retargeted.items()}
+        stale = [key for key, value in self._assignments.items() if value in cleaned]
+        for key in stale:
+            self._assignments[key] = cleaned[self._assignments[key]]
+        return len(stale)
+
     def adopt_worker_forget_playlists(self, playlists: Iterable[str]) -> int:
         """Mirror detached dangling-reference cleanup without another write."""
         removed = frozenset(_clean(playlist) for playlist in playlists)

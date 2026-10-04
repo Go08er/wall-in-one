@@ -17,7 +17,7 @@ import pytest
 from tests.test_next_schedule_mapping import Owner
 from tests.test_next_state import FakeApplication, _adapter, _library, _session
 from wall_in_one import runtime_config
-from wall_in_one.library import playlists, schedules
+from wall_in_one.library import favourites, playlists, schedules
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.ui.next import real_schedule
@@ -304,3 +304,22 @@ def test_p5_a_copy_with_its_rotation_is_one_write(
     copy = playlists.Store.open().by_name("Evening (copy)")
     assert copy is not None and len(copy.entries) == 1
     assert (copy.cycle_interval, copy.shuffle) == (60, True)
+
+
+# -- P-6: bulk favorites past the count cap ----------------------------------------------------
+
+
+def test_p6_bulk_favorites_past_the_cap_add_none_and_say_how_many_fit(
+    items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(favourites, "MAX_FAVOURITES", 2)
+    store = favourites.Store.open()
+    a, b, c = (item.path for item in items[:3])
+    with pytest.raises(favourites.FavouritesError) as refused:
+        store.add_many([a, b, c])
+    assert refused.value.kind == "full"
+    assert "only 2 more" in str(refused.value) and "3 were chosen" in str(refused.value)
+    assert favourites.Store.open().paths == frozenset(), "nothing was added"
+    assert store.add_many([a, b, a]) == 2
+    assert favourites.Store.open().paths == {a, b}
+    assert store.add_many([a]) == 0, "already starred: nothing new, nothing refused"

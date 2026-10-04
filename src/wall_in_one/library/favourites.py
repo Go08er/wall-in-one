@@ -475,15 +475,26 @@ class Store:
         """Mark every one of ``paths`` in one write; return how many were new.
 
         One transaction, so several wallpapers chosen together are starred
-        together or (on a failed write) not at all.
+        together or (on a failed write) not at all. That includes the count
+        cap: when the new ones don't all fit under `MAX_FAVOURITES`, none is
+        added and the refusal (``full``) says how many would fit, rather than
+        quietly keeping the first few.
         """
         wanted = tuple(dict.fromkeys(paths))
         added = 0
 
         def add(current: Favourites) -> tuple[bool, Favourites]:
             nonlocal added
+            new = [path for path in wanted if path not in current.entries]
+            room = MAX_FAVOURITES - len(current.entries)
+            if len(new) > room:
+                raise FavouritesError(
+                    "full",
+                    f"only {max(0, room)} more can be favorites (at most {MAX_FAVOURITES}), "
+                    f"and {len(new)} were chosen; none was added",
+                )
             updated = current
-            for path in wanted:
+            for path in new:
                 updated = updated.with_added(path)
             added = len(updated.entries) - len(current.entries)
             return updated is not current, updated

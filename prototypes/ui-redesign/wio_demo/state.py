@@ -43,6 +43,7 @@ import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
+from wall_in_one.ui.next import thumbs as pictures
 from wall_in_one.ui.next.playlists_state import EntryView, PlaylistDetail, Rotation, Usage
 from wall_in_one.ui.next.settings_state import (
     KEY_REFUSED,
@@ -66,6 +67,14 @@ from wall_in_one.ui.next.state import (
     WallpaperView,
     not_on_its_own,
     solo_displays,
+)
+from wall_in_one.ui.next.store_state import (
+    MOTIONBGS,
+    Downloads,
+    StoreDetail,
+    StoreProblem,
+    StoreQuery,
+    StoreResults,
 )
 
 from . import art, data, store_catalog
@@ -226,6 +235,13 @@ class AppState(GObject.Object):
         # Shared between Settings and the Store.
         self.wallhaven_key_saved = True
         self.download_folder = data.LIBRARY_FOLDERS[0][0]
+        # The Store's pretend download lane: one at a time, like the real one.
+        self._store_queue: list[DemoStoreItem] = []
+        self._store_then: dict[str, str] = {}
+        self._store_variant: dict[str, str] = {}
+        self._store_counts = [0, 0]  # queued, finished
+        self._store_landed: list[DemoStoreItem] = []
+        self._store_generation = 0
         self.folders = [
             Folder(path, "" if "not found" in note.lower() else note.split(" · ")[0], "not found" in note.lower())
             for path, note, _primary in data.LIBRARY_FOLDERS
@@ -422,10 +438,12 @@ class AppState(GObject.Object):
         """The Library's "Add a folder" adds to the demo's folder list."""
         return self
 
-    # The demo's own pages still render these; the shared ones arrive with each port.
     @property
-    def store_access(self) -> None:
-        return None
+    def store_access(self) -> AppState:
+        """The shared Store page searches the dummy catalog (``store_catalog``)."""
+        return self
+
+    # The demo's own pages still render these; the shared ones arrive with each port.
 
     @property
     def playlist_editing(self) -> AppState:
@@ -738,6 +756,181 @@ class AppState(GObject.Object):
                 playlist.entries.append(wid)
         self.emit_changed("library")
         return wid
+
+    # -- the shared Store page (StoreAccess) -----------------------------------
+    # The real app's adapter is ``wall_in_one.ui.next.real_store``; this one
+    # answers from ``store_catalog`` and pretends the network on GLib timers.
+
+    def search_store(self, query: StoreQuery, page: int, done) -> None:
+        """A provider page of the dummy catalog, answered on the main loop."""
+        self._store_generation += 1
+        generation = self._store_generation
+        answer = self._store_answer(query, page)
+
+        def deliver() -> bool:
+            if generation == self._store_generation:
+                done(answer)
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)
+
+    def _store_answer(self, query: StoreQuery, page: int) -> StoreResults | StoreProblem:
+        if "NSFW" in query.purity and not self.wallhaven_key_saved:
+            return StoreProblem("credential", "NSFW search requires a Wallhaven API key")
+        if query.provider == MOTIONBGS and query.mode == "genre" and not query.genre:
+            return StoreProblem("validation", "type a genre, or pick another way to browse")
+        motion = query.provider == MOTIONBGS
+        searching = bool(query.text.strip())
+        ratio = {"16x9": "16:9", "16x10": "16:10", "21x9": "21:9", "32x9": "32:9"}
+        items = store_catalog.search(
+            store_catalog.Query(
+                provider="MotionBGS" if motion else "Wallhaven",
+                text=query.text,
+                sort=query.sort,
+                top_range=query.top_range,
+                reverse=query.reverse,
+                min_height=int(query.size) if query.size.isdigit() else 0,
+                ratio=ratio.get(query.ratio, query.ratio),
+                color=query.colour or None,
+                categories=frozenset(query.categories),
+                genre=query.genre if query.mode == "genre" and query.genre and not searching else "all",
+                quality="4k" if query.mode == "4k" and not searching else "any",
+            )
+        )
+        size = 24
+        chunk = items[(page - 1) * size : page * size]
+        return StoreResults(
+            items=tuple(DemoStoreItem(item) for item in chunk),
+            has_next=page * size < len(items),
+            total_hint=len(items),
+        )
+
+    def item_pictures(self, items, done) -> None:
+        loader = pictures.provider()
+        for view in items:
+            texture = loader.request(
+                view.item, 480, 270, lambda texture, v=view: done(v, texture) if texture else None
+            )
+            if texture is not None:
+                done(view, texture)
+
+    def item_detail(self, item, done) -> None:
+        source = item.item
+        if source.provider == "Wallhaven":
+            facts = (
+                ("Resolution", f"{source.resolution} · {store_catalog.ratio(source)}"),
+                ("Size", f"{store_catalog.megabytes(source)} MB · {store_catalog.file_type(source)}"),
+                ("Category", store_catalog.category_label(source)),
+                ("Uploader", store_catalog.uploader(source)),
+                ("Added", store_catalog.added(source)),
+                ("Favorites", f"{store_catalog.favorites(source):,}"),
+            )
+        else:
+            facts = (
+                ("Length", f"{store_catalog.duration(source)} loop"),
+                ("Category", store_catalog.category_label(source)),
+                ("Type", store_catalog.file_type(source)),
+            )
+        detail = StoreDetail(
+            facts=facts,
+            tags=tuple(store_catalog.tags(source)),
+            colours=tuple(store_catalog.colors(source)) if source.provider == "Wallhaven" else (),
+            variants=("hd", "4k") if store_catalog.has_4k(source) else (),
+            page_url=f"https://{store_catalog.url(source)}",
+        )
+
+        def deliver() -> bool:
+            done(detail)
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)
+
+    def in_library(self, item) -> bool:
+        return item.item.in_library
+
+    @property
+    def downloads(self) -> Downloads:
+        queued, finished = self._store_counts
+        text = f"Downloading {finished + 1} of {queued}" if finished < queued else ""
+        return Downloads(busy=tuple(view.id for view in self._store_queue), text=text)
+
+    def download_blocked(self) -> str:
+        return "" if self.folders else "Downloads go into your first library folder, and there is none yet"
+
+    def download(self, item, *, variant: str = "", then: str = "") -> None:
+        if any(view.id == item.id for view in self._store_queue):
+            if then:
+                self._store_then[item.id] = then
+            return
+        self._store_queue.append(item)
+        self._store_variant[item.id] = variant
+        if then:
+            self._store_then[item.id] = then
+        self._store_counts[0] += 1
+        if len(self._store_queue) == 1:
+            GLib.timeout_add(1200, self._store_downloaded)
+        self.emit_changed("store")
+
+    def _store_downloaded(self) -> bool:
+        if not self._store_queue:
+            return GLib.SOURCE_REMOVE
+        view = self._store_queue.pop(0)
+        self._store_counts[1] += 1
+        wid = self.import_store_item(view.id, self._store_variant.pop(view.id, "") or None, fresh=True)
+        then = self._store_then.pop(view.id, "")
+        if then == "apply":
+            self.apply(wid, self.scope)
+        elif then == "show":
+            self.navigate(f"library:{wid}")
+        else:
+            self._store_landed.append(view)
+        if self._store_queue:
+            GLib.timeout_add(1200, self._store_downloaded)
+        else:
+            landed, self._store_landed = self._store_landed, []
+            self._store_counts = [0, 0]
+            if len(landed) == 1:
+                self.toast(
+                    f"\u201c{landed[0].title}\u201d is in your library",
+                    action=("Apply", lambda: self.apply_item(landed[0])),
+                )
+            elif landed:
+                self.toast(
+                    f"{len(landed)} wallpapers are in your library",
+                    action=("Show", lambda: self.navigate("library")),
+                )
+        self.emit_changed("store")
+        return GLib.SOURCE_REMOVE
+
+    def apply_item_blocked(self, item) -> str:
+        return ""
+
+    def apply_item(self, item) -> None:
+        self.apply(self.import_store_item(item.id), self.scope)
+
+    def show_item(self, item) -> None:
+        self.navigate(f"library:{self.import_store_item(item.id)}")
+
+    @property
+    def download_destination(self) -> str:
+        return self.download_folder
+
+    def refresh_facts(self) -> None:
+        """The demo key lives in this state; Settings' switch says "settings"."""
+
+    @property
+    def nsfw_blocked(self) -> str:
+        return "" if self.wallhaven_key_saved else "NSFW results need a Wallhaven API key"
+
+    @property
+    def has_workshop(self) -> bool:
+        return True
+
+    def open_workshop(self) -> None:
+        self.toast("Would open the Wallpaper Engine Steam Workshop")
+
+    def open_site(self, item) -> None:
+        self.toast(f"Would open {store_catalog.url(item.item)} in your browser")
 
     # -- colors ---------------------------------------------------------------
     @property
@@ -1961,3 +2154,42 @@ class DemoPalettes:
         undo = self.state.set_default_scheme(scheme)
         also = " and Noctalia's" if sync_noctalia else ""
         self.state.toast(f"Default scheme{also} is now {self.state.scheme_name(scheme)}", undo)
+
+
+@dataclass(frozen=True)
+class DemoStoreItem:
+    """A dummy Store result, as the shared Store page shows it (``StoreItemView``)."""
+
+    item: StoreItem
+
+    @property
+    def id(self) -> str:
+        return self.item.id
+
+    @property
+    def provider(self) -> str:
+        return self.item.provider.casefold()
+
+    @property
+    def title(self) -> str:
+        return self.item.title
+
+    @property
+    def is_moving(self) -> bool:
+        return self.item.provider == "MotionBGS"
+
+    @property
+    def resolution(self) -> str:
+        if self.is_moving:
+            return "4K" if store_catalog.has_4k(self.item) else "HD"
+        return self.item.resolution
+
+    @property
+    def detail(self) -> str:
+        return self.item.detail
+
+    @property
+    def key(self):
+        """The art the demo's thumbnail loader draws."""
+        return self.item.key
+

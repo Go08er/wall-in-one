@@ -37,7 +37,7 @@ from wall_in_one import __version__, config
 from wall_in_one.session import Session
 from wall_in_one.theme import source
 from wall_in_one.ui.launch_rows import LaunchRows
-from wall_in_one.ui.next import library, playlists, status_line, thumbs
+from wall_in_one.ui.next import library, playlists, status_line, store, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
 from wall_in_one.ui.next.page import Placeholder, not_ported
@@ -60,7 +60,7 @@ _PAGES: Final = {
     "settings": "settings",
 }
 #: The pages this interface has. Every other one is a placeholder for now.
-PORTED: Final = frozenset({"media", "playlists", "settings"})
+PORTED: Final = frozenset({"media", "browse", "playlists", "settings"})
 #: Kept for callers of the placeholder era.
 NOT_PORTED_HINT: Final = CLASSIC_HINT
 
@@ -96,7 +96,7 @@ class NextWindow(ShellWindow):
             self._state,
             {
                 "library": library.create,
-                "store": not_ported("store", "Store", "folder-download-symbolic"),
+                "store": store.create,
                 "playlist": playlists.create,
                 "schedule": not_ported("schedule", "Schedule", "x-office-calendar-symbolic"),
                 "displays": not_ported("displays", "Displays", "video-display-symbolic"),

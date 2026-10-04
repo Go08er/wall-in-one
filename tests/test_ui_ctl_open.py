@@ -267,10 +267,10 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         calls = count_first_activation_work(application, monkeypatch)
         libraries = record_library_shown(NextWindow, monkeypatch)
 
-        for page in ("schedules", "media", "settings", "playlists", "schedules"):
+        for page in ("schedules", "media", "browse", "settings", "playlists", "schedules"):
             opened = control(requests, "open", page)
             yield f"ctl open {page}", opened.done
-            if page in ("media", "settings", "playlists"):  # these are ported
+            if page in ("media", "browse", "settings", "playlists"):  # these are ported
                 assert opened.result() == Response.success(f"opened {page}")
             else:
                 not_in_new_ui(opened.result(), page)

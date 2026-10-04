@@ -69,6 +69,7 @@ from wall_in_one.ui.next.prefs import DIAL_SAVE_DELAY_MS, UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
 from wall_in_one.ui.next.real_playlists import PlaylistBackend, RealPlaylists
 from wall_in_one.ui.next.real_settings import RealSettings, SettingsBackend
+from wall_in_one.ui.next.real_store import RealStore, StoreBackend
 from wall_in_one.ui.next.schedule_state import Scheduling
 from wall_in_one.ui.next.settings_state import SettingsAccess
 from wall_in_one.ui.next.state import (
@@ -305,6 +306,7 @@ class RealAppState(GObject.Object):
         self._playlist_editing = RealPlaylists(backend, self, self._authoring_blocked)
         #: The Settings page's part, made when the page first asks for it.
         self._settings_part: RealSettings | None = None
+        self._store: RealStore | None = None
         self.reload()
         self.listen()
 
@@ -329,6 +331,8 @@ class RealAppState(GObject.Object):
             unfollow()
         if self._settings_part is not None:
             self._settings_part.close()
+        if self._store is not None:
+            self._store.close()  # its lanes and transport start again on next use
 
     def _look_saved(self) -> None:
         """A look save came back and ui.toml holds something else: show what it holds.
@@ -879,7 +883,10 @@ class RealAppState(GObject.Object):
     # -- pages still to port: each shows its placeholder while its part is None ---------
     @property
     def store_access(self) -> StoreAccess | None:
-        return None
+        """The Store over the classic `Browser` (`real_store`), when the app can drive it."""
+        if self._store is None and isinstance(self._backend, StoreBackend):
+            self._store = RealStore(self._backend, self)
+        return self._store
 
     @property
     def playlist_editing(self) -> PlaylistEditing | None:

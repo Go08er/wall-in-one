@@ -92,13 +92,26 @@ def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> 
 def test_the_readme_says_what_the_playlists_page_does() -> None:
     """R5: Playlists is ported; the README says so, and what it changes."""
     section = _section()
-    assert "Store, Schedule and Displays say they are not in the new interface" in section
+    assert "Schedule and Displays say they are not in the new interface" in section
     assert "Playlists say" not in section and "Store, Playlists" not in section
     for words in (
         "with Undo",
         "its own interval and shuffle",
         '"Your pick" stays hidden',
         "can't lose its last wallpaper that plays",
-        "Library (`media`), Playlists (`playlists`) and Settings (`settings`) are",
+        "Library (`media`), the Store (`browse`), Playlists (`playlists`) and Settings",
     ):
         assert words in section, words
+
+
+def test_the_readme_says_what_the_store_does() -> None:
+    """The Store is ported (R5): the README describes it in the terms its code keeps."""
+    from wall_in_one.ui.next import store_state
+
+    section = _section()
+    assert "Store, Playlists" not in section, "the Store is no longer a placeholder"
+    assert f"Results come {store_state.PAGE_SIZE} to a page with Previous and Next" in section
+    assert "inline under the provider row (never in a popover)" in section
+    assert "one at a time" in section and "no pretend progress or cancel" in section
+    assert f"Wallhaven's {len(store_state.COLOURS)} search colours" in section
+    assert "the Store (`browse`)" in section

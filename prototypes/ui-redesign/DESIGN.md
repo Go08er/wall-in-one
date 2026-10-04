@@ -48,12 +48,11 @@ wio_demo/
   catalog.py            fixed words and choices (kind labels re-exported from the app)
   state.py              AppState(GObject): the demo's adapter for the app's AppState Protocol
   thumbs.py             the demo's ThumbnailProvider: procedural art drawn on worker threads
-  store_catalog.py      dummy Store providers (the real app's Browser): options, item facts, search
+  store_catalog.py      dummy Store providers (the real app's Browser): item facts and search
   ui.py                 re-exports the app's widgets (wall_in_one.ui.next.widgets) + load_css()
   shell.py              MainWindow: the app's ShellWindow + Demo menu, welcome screen, glass.Look
   glass.py              the demo's colors (simulated or read-only live Noctalia); glass layers are the app's
   pages/__init__.py     re-exports the app's Page contract
-  pages/store.py        Store (online providers); store_widgets.py
   pages/schedule.py     week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
   pages/displays.py     monitor arrangement + per-display assignment; displays_arrangement.py
 src/wall_in_one/ui/next/   (the app's; shared with this prototype)
@@ -72,6 +71,8 @@ src/wall_in_one/ui/next/   (the app's; shared with this prototype)
   playlists_picker.py   "Add wallpapers": pick several, paged
   settings.py           Settings: searchable groups, folders, key, look; settings_palettes.py
   settings_state.py     the SettingsAccess and PaletteManager Protocols, row choices
+  store.py              Store: providers, inline filters, 40-card pages, downloads (StoreAccess)
+  store_widgets.py      Store result cards, filter chips and palette, preview dialog
   backdrop.py           the frosted style's blurred wallpaper
 tools/smoke.sh          headless smoke test; tools/typecheck.sh the Protocol check
 run.sh                  launch the interactive demo

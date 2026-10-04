@@ -1,7 +1,7 @@
 """The demo's window: the app's own shell (``wall_in_one.ui.next.shell``) plus demo extras.
 
 The sidebar, header, banners, player bar, frosted backdrop, Library,
-inspector, Playlists and Settings are the widgets the app ships. This subclass
+inspector, Store, Playlists and Settings are the widgets the app ships. This subclass
 adds only what is demo-only: the prototype's other pages, the ☰ menu's Demo
 switches, the welcome screen, and the colors that follow the simulated (or
 real, read-only) Noctalia (``glass.Look``).
@@ -17,14 +17,19 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from wall_in_one.ui.next import library, playlists, settings
+from wall_in_one.ui.next import library, playlists, settings, store
 from wall_in_one.ui.next.shell import PAGES, PageFactory, ShellWindow
 
 from . import art, glass
 from .pages import Page, Placeholder
 
 #: The pages the app ships; the prototype runs them over its demo state.
-SHARED = {"library": library.create, "playlist": playlists.create, "settings": settings.create}
+SHARED = {
+    "library": library.create,
+    "store": store.create,
+    "playlist": playlists.create,
+    "settings": settings.create,
+}
 
 
 def _factory(name: str, title: str, icon: str) -> PageFactory:

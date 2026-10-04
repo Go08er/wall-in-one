@@ -21,7 +21,7 @@ from gi.repository import Adw, GLib
 from wio_demo import art, data, store_catalog, thumbs, ui
 from wio_demo.models import Rule, Wallpaper
 from wio_demo.shell import MainWindow
-from wio_demo.state import AppState
+from wio_demo.state import AppState, DemoStoreItem
 
 from wall_in_one.ui.next import library as library_page
 
@@ -396,8 +396,10 @@ def settings_actions(state, window) -> None:
 
 def store_actions(state, window) -> None:
     window.navigate("store")
-    page = window.pages["store"]
+    page = window.pages["store"]  # the app's shared Store page (wall_in_one.ui.next.store)
     page.demo("reset")
+    settle(lambda: not page.loading)
+    assert page.cards and len(page.cards) <= 40, len(page.cards)
     results = state.store_search(store_catalog.Query("Wallhaven", text="night"))
     assert results and all(item.provider == "Wallhaven" for item in results)
     source = state.store_item("wallhaven-3")
@@ -408,15 +410,50 @@ def store_actions(state, window) -> None:
         for item in state.store_search(store_catalog.Query("Wallhaven"))
         if item.in_library and not state.has_wallpaper(f"store-{item.id}")
     )
+    view = DemoStoreItem(owned)
+    assert page.store.in_library(view)
     count = len(state.wallpapers)
-    page.apply_item(owned)  # already in the library: it gets a Library entry, then Apply
+    page.apply_item(view)  # already in the library: it gets a Library entry, then Apply
     wid = f"store-{owned.id}"
     assert state.has_wallpaper(wid) and len(state.wallpapers) == count + 1, (wid, count, len(state.wallpapers))
     assert state.current[state.targets()[0]] == wid, state.current
     assert wid in state.playlist("all-media").entries
     assert state.import_store_item(owned.id) == wid and len(state.wallpapers) == count + 1
-    page.show_in_library(owned)
+    page.show_in_library(view)
     state.resume_schedule("all")
+
+
+def store_paging(window) -> None:
+    """Bounded pages with Previous/Next: the next provider page is asked for on Next."""
+    window.navigate("store")
+    page = window.pages["store"]
+    page.demo("reset")
+    settle(lambda: not page.loading)
+    first = [item.id for item in page.pages.current]
+    assert first and page.pages.can_next and not page.pages.can_previous
+    page.show_next()
+    settle(lambda: not page.fetching and page.pages.index == 1)
+    assert page.pages.index == 1 and page.pages.can_previous, page.pages.label()
+    assert 0 < len(page.cards) <= 40 and not set(page.cards) & set(first)
+    page.show_previous()
+    assert [item.id for item in page.pages.current] == first
+
+
+def store_download(window) -> None:
+    """One download at a time, then "In library" on its card."""
+    window.navigate("store")
+    page = window.pages["store"]
+    page.demo("reset")
+    settle(lambda: not page.loading)
+    targets = [card.item for card in page.cards.values() if card.can_pick][:2]
+    for item in targets:
+        page.download(item)
+    assert page.store.downloads.busy == tuple(item.id for item in targets)
+    assert page.cards[targets[0].id].busy == "downloading"
+    assert page.cards[targets[1].id].busy == "waiting"
+    assert page.queue_label.get_label() == "Downloading 1 of 2"
+    settle(lambda: not page.store.downloads.busy, 6.0)
+    assert all(page.cards[item.id].in_library for item in targets)
 
 
 def window_actions(state, window) -> None:
@@ -569,6 +606,10 @@ def build_steps(app, holder):
                 w().pages[p.partition(":")[0]].demo(sc)
 
             steps.append((f"{page}+{scene}", run))
+        if page == "store":
+            # The demo's downloads land on timers, as real ones do: let them
+            # land here, not in the middle of the next page's scenes.
+            steps.append(("store downloads land", lambda: settle(lambda: not s().downloads.busy, 10)))
     steps.append(
         (
             "select pill library",
@@ -611,6 +652,8 @@ def build_steps(app, holder):
     steps.append(("schedule actions", lambda: schedule_actions(s(), w())))
     steps.append(("settings actions", lambda: settings_actions(s(), w())))
     steps.append(("store actions", lambda: store_actions(s(), w())))
+    steps.append(("store paging", lambda: store_paging(w())))
+    steps.append(("store download", lambda: store_download(w())))
     steps.append(("window actions", lambda: window_actions(s(), w())))
     steps.append(
         (

@@ -518,12 +518,12 @@ hidden flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved
 choice for that start. With neither, the app is classic.
 
 - **What it has so far.** The redesign's sidebar, header and player bar, a
-  paged Library grid with the details pane beside it, the Playlists page and
-  the Settings page, all over the app's real library, stores and runtime
-  status. Beyond **playlists** and **Settings** (below) it can change three
-  things: **Apply** (to all displays, or the display the player bar is scoped
-  to), **favorites**, and **playback**, through the player bar's live
-  controls: play/pause, next,
+  paged Library grid with the details pane beside it, the Store, the Playlists
+  page and the Settings page, all over the app's real library, stores and
+  runtime status. Beyond downloading from the **Store**, **playlists** and
+  **Settings** (below) it can change three things: **Apply** (to all
+  displays, or the display the player bar is scoped to), **favorites**, and
+  **playback**, through the player bar's live controls: play/pause, next,
   previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
   schedule. Every playback control acts on the displays the player bar is
   scoped to, all of them or one; mirrored displays, or a display that has gone
@@ -532,8 +532,8 @@ choice for that start. With neither, the app is classic.
   details pane's Apply menu is never widened like that: if that display has
   gone, or the displays are mirrored, nothing is sent and a notice says so.
   Apply, favorites and playback have no undo yet. The player bar says what the
-  runtime reports and why ("Evening · from schedule", "Your pick"). Store,
-  Schedule and Displays say they are not in the new interface yet.
+  runtime reports and why ("Evening · from schedule", "Your pick"). Schedule
+  and Displays say they are not in the new interface yet.
 - **Playlists.** The Playlists page edits your own playlists: create, rename,
   duplicate and delete them (Delete names the schedule rules, display
   assignments and default that go with it), add several wallpapers at once
@@ -560,6 +560,21 @@ choice for that start. With neither, the app is classic.
   every installed palette, apply one through Noctalia, duplicate one into
   yours and edit its colours, and preview each scheme on a still to use it as
   the default or keep it as a palette. Like classic, it has no delete.
+- **The Store.** It searches Wallhaven and MotionBGS through the classic
+  Store's code, and opens on what is popular once you first show it. Its
+  filters sit inline under the provider row (never in a popover): sort, "Top
+  list covers" for the top list, minimum size, aspect ratio, categories,
+  content rating and Wallhaven's 29 search colours; MotionBGS browses latest,
+  4K, HD or a genre, and its quality picks the file a download takes. Results
+  come 40 to a page with Previous and Next. Downloads go into your first
+  library folder, one at a time, with "Downloading 2 of 5" and no pretend
+  progress or cancel; "Download & apply" and "Show in Library" wait for the
+  library rescan that follows, and a download that landed in a folder Settings
+  replaced meanwhile is said so and not applied. NSFW results need a Wallhaven
+  API key; the Store says so in Wallhaven's words and links to the Settings
+  page's Wallhaven key, where it is saved. Space picks a result, Ctrl+A picks
+  the page, Ctrl+D downloads the picks, and the ⋯ menu hands off to the Steam
+  Workshop when Steam is installed.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites and the playback controls off and says so in a notice under
   the header; the Playlists page says so too and changes nothing. Settings keys
@@ -587,8 +602,8 @@ choice for that start. With neither, the app is classic.
   package and the page, because older builds fix its shape.
 - **`ctl open <page>`** presents the window either way. In the new interface it
   answers `not-in-new-ui`, with exit status 1, until that page is ported; the
-  Library (`media`), Playlists (`playlists`) and Settings (`settings`) are.
-  When no app is running, `ctl open` launches the
+  Library (`media`), the Store (`browse`), Playlists (`playlists`) and
+  Settings (`settings`) are. When no app is running, `ctl open` launches the
   interface chosen in Settings.
 - **Rolling back.** 0.2.0 and 0.2.1 don't know the choice and start classic
   (`--ui=next` still works there). See [docs/updating.md](docs/updating.md) for

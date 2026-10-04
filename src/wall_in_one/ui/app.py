@@ -555,6 +555,9 @@ class Application(Adw.Application):
         self._library_scan_request: LibraryRefreshPlan | None = None
         self._library_scan_generation = 0
         self._library_scan_shutdown = False
+        #: `refresh_library(finished=...)` callbacks, told whether the next
+        #: library install landed (True) or the refresh failed (False).
+        self._library_refresh_waiters: list[Callable[[bool], None]] = []
         self._stills = StillMaker(report=self.window_report)
 
     # -- lifecycle -------------------------------------------------------
@@ -2027,7 +2030,7 @@ class Application(Adw.Application):
     def session(self) -> Session:
         return self._session
 
-    def refresh_library(self) -> None:
+    def refresh_library(self, *, finished: Callable[[bool], None] | None = None) -> None:
         """Rescan and reconcile without filesystem work on GTK's thread.
 
         Headless callers keep the synchronous :class:`Session` contract. With
@@ -2036,12 +2039,20 @@ class Application(Adw.Application):
         through detached Stores.  The existing grid, search, scroll and focus
         remain in place. A newer request cooperatively cancels the older one
         and makes any already-running result ineligible to land.
+
+        ``finished``, when given, runs once on GTK: with True after the next
+        library install has been shown (`_finish_library_refresh`), or with
+        False when this refresh fails or cannot start. The new interface's
+        Store uses it to find a fresh download in the library before applying
+        it. Nothing calls it when the application is shutting down.
         """
         # An idle refresh can already be queued when the final window and
         # workers shut down. Window absence is not permission to re-enter the
         # synchronous headless path on a closed Session.
         if self._runtime_shutdown or self._library_scan_shutdown:
             return
+        if finished is not None:
+            self._library_refresh_waiters.append(finished)
         if self._removal_active:
             self._refresh_after_removal = True
             return
@@ -2060,6 +2071,7 @@ class Application(Adw.Application):
                 else:
                     self._mark_removal_scan_terminal(runtime_generation)
                 self.window_report(f"Library scan failed: {detail}")
+                self._settle_library_refresh_waiters(False)
                 return
             if runtime_pending:
                 self._adopt_runtime_library_scan(runtime_generation)
@@ -2072,6 +2084,10 @@ class Application(Adw.Application):
             request = self._session.prepare_library_refresh()
         except LibraryRefreshBusyError as error:
             self.window_report(f"Library refresh will wait: {error}")
+            # Only this request failed: a scan already running may still land.
+            if finished is not None and finished in self._library_refresh_waiters:
+                self._library_refresh_waiters.remove(finished)
+                self._tell_library_refresh_waiter(finished, False)
             return
         self._library_scan_generation += 1
         generation = self._library_scan_generation
@@ -2094,6 +2110,7 @@ class Application(Adw.Application):
             self._window.show_library_scanning(False)
             self.window_report(f"Library scan could not start: {detail}")
             self._finish_runtime_library_scan(generation, error=detail)
+            self._settle_library_refresh_waiters(False)
             return
         self._library_scan_request = request
         self._library_scan_future = future
@@ -2129,6 +2146,8 @@ class Application(Adw.Application):
         if jobs is not None:
             jobs.shutdown(wait=wait, cancel_futures=True)
         self._library_scan_future = None
+        # Shutting down: nobody is left to tell (see `refresh_library`).
+        self._library_refresh_waiters.clear()
         if release_lifetime:
             self.release()
             if not self._runtime_shutdown:
@@ -2158,6 +2177,7 @@ class Application(Adw.Application):
                 if self._window is not None:
                     self._window.show_library_scanning(False)
                 self._finish_runtime_library_scan(generation, error=detail)
+                self._settle_library_refresh_waiters(False)
                 return GLib.SOURCE_REMOVE
             except Exception as error:  # defensive boundary around injected scanners too
                 detail = str(error) or error.__class__.__name__
@@ -2165,6 +2185,7 @@ class Application(Adw.Application):
                     self._window.show_library_scanning(False)
                     self._window.report(f"Library scan failed: {detail}")
                 self._finish_runtime_library_scan(generation, error=detail)
+                self._settle_library_refresh_waiters(False)
                 return GLib.SOURCE_REMOVE
             self._queue_library_reconciliation(generation, request, library)
             return GLib.SOURCE_REMOVE
@@ -2229,6 +2250,7 @@ class Application(Adw.Application):
             self._window.show_library_scanning(False)
             self._window.report(f"Library result could not be installed: {detail}")
         self._finish_runtime_library_scan(generation, error=detail)
+        self._settle_library_refresh_waiters(False)
 
     def _finish_library_refresh(self, *, scan_generation: int | None = None) -> None:
         """Reconcile and render one installed scan, always on the main thread."""
@@ -2257,6 +2279,21 @@ class Application(Adw.Application):
             self._window.show_library(self._session)
             self.refresh_runtime_status_async()
         self._make_missing_stills()
+        # Last, so a waiter finds the installed library in the window too.
+        self._settle_library_refresh_waiters(True)
+
+    def _settle_library_refresh_waiters(self, installed: bool) -> None:
+        """Tell every `refresh_library(finished=...)` caller how it ended, once."""
+        waiters, self._library_refresh_waiters = self._library_refresh_waiters, []
+        for waiter in waiters:
+            self._tell_library_refresh_waiter(waiter, installed)
+
+    def _tell_library_refresh_waiter(self, waiter: Callable[[bool], None], installed: bool) -> None:
+        """A waiter's failure is its own: it must never read as the scan's."""
+        try:
+            waiter(installed)
+        except Exception as error:  # defensive: the scan paths around this stay classic
+            self.window_report(f"After the library refresh: {error}")
 
     def _begin_runtime_library_scan(self, generation: int) -> None:
         """Make a source-changing scan an explicit publication barrier."""

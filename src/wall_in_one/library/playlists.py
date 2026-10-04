@@ -926,10 +926,50 @@ class Store:
                     f"{other_value!r} on {playlist.name!r}; choose a different name",
                 )
 
-    def create(self, name: str, entry_id: str | None = None) -> Playlist:
-        """A new, empty playlist with an unambiguous id and display name."""
+    def create(
+        self,
+        name: str,
+        entry_id: str | None = None,
+        *,
+        entries: Sequence[Entry] = (),
+        cycle_interval: int | None = None,
+        shuffle: bool | None = None,
+    ) -> Playlist:
+        """A new playlist with an unambiguous id and display name, in one save.
+
+        It may start with ``entries`` (kept with their ids, in order) and its
+        own interval and shuffle: all of it is one transaction, so a refusal
+        or a failed write leaves no playlist behind. Entries are checked as
+        `insert_entries` checks them (usable ids, none twice, absolute
+        sources, at most `MAX_ENTRIES`), the rotation as `set_rotation` does,
+        and the whole document against its size cap, before anything is
+        written. Using a rotation field moves the file to version 2 on this
+        save, as `set_rotation` would.
+        """
         identifier = new_id() if entry_id is None else _identifier(entry_id)
         tidy = tidy_name(name)
+        wanted = tuple(entries)
+        seen: set[str] = set()
+        for entry in wanted:
+            if not entry.id.strip() or entry.id != entry.id.strip():
+                raise PlaylistError("validation", f"entry id {entry.id!r} is not usable")
+            if entry.id in seen:
+                raise PlaylistError("identity-conflict", f"entry {entry.id} is given twice")
+            seen.add(entry.id)
+            if not entry.source.strip() or not Path(entry.source).is_absolute():
+                raise PlaylistError(
+                    "validation", f"{entry.source!r} is not an absolute path to a wallpaper"
+                )
+        if len(wanted) > MAX_ENTRIES:
+            raise PlaylistError("full", f"{tidy} can hold at most {MAX_ENTRIES} wallpapers")
+        if cycle_interval is not None and not valid_cycle_interval(cycle_interval):
+            raise PlaylistError(
+                "validation",
+                f"a playlist interval must be whole seconds from {MIN_CYCLE_INTERVAL} "
+                f"to {MAX_CYCLE_INTERVAL}",
+            )
+        if shuffle is not None and type(shuffle) is not bool:
+            raise PlaylistError("validation", "a playlist shuffle must be on, off or the default")
 
         def create(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
             authored_count = sum(not _is_generated_playlist_id(found) for found in authored)
@@ -939,7 +979,13 @@ class Store:
                     f"there are already {MAX_AUTHORED_PLAYLISTS} authored playlists",
                 )
             self._validate_identity(identifier, tidy, authored=authored)
-            playlist = Playlist(id=identifier, name=tidy)
+            playlist = Playlist(
+                id=identifier,
+                name=tidy,
+                entries=wanted,
+                cycle_interval=cycle_interval,
+                shuffle=shuffle,
+            )
             authored[playlist.id] = playlist
             return playlist, True
 

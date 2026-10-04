@@ -4,10 +4,11 @@
 ordered authoring lane (`Application.authoring_action_async`): its checks
 run on GTK when it reaches the head of the queue, against what is saved by
 then, and its store transaction runs on the lane's worker. Adding several
-wallpapers (the picker, a drop) and removing several entries are one
-transaction each (`playlists.Store.insert_entries`, `remove_entries`), all
-of them or none. After a save the application republishes the runtime
-configuration and hands the window the session
+wallpapers (the picker, a drop), removing several entries, and making a
+playlist with its wallpapers (and, for a copy, its rotation) are one
+transaction each (`playlists.Store.insert_entries`, `remove_entries`,
+`create`), all of it or none. After a save the application republishes the
+runtime configuration and hands the window the session
 (`Application.playlists_changed`), which reloads the adapter: the page shows
 what was saved. A refusal or a failure is reported ("…; nothing changed")
 and the page goes back to what is saved (``playlist-edits``).
@@ -556,16 +557,9 @@ class RealPlaylists:
                         f"playback became unavailable for {item.name}; "
                         f"it can\u2019t be added: {health.reason}"
                     )
-            placed = [
-                (index, playlists.Entry(playlists.new_id(), str(item.path)))
-                for index, item in enumerate(items)
-            ]
-
-            def work() -> playlists.Playlist:
-                made = store.create(name, entry_id=pid)
-                return store.insert_entries(pid, placed) if placed else made
-
-            return work
+            entries = [playlists.Entry(playlists.new_id(), str(item.path)) for item in items]
+            # One save: the playlist and its wallpapers, or nothing at all.
+            return lambda: store.create(name, entry_id=pid, entries=entries)
 
         def saved(made: playlists.Playlist) -> bool:
             if views:
@@ -601,31 +595,15 @@ class RealPlaylists:
                 sources = [entry.source for entry in source.entries]
                 interval, shuffle = source.cycle_interval, source.shuffle
             name = copy_name(source_name, (playlist.name for playlist in store.all()))
-            placed = [
-                (index, playlists.Entry(playlists.new_id(), source_path))
-                for index, source_path in enumerate(sources)
-            ]
-
-            def work() -> playlists.Playlist:
-                made = store.create(name, entry_id=copy)
-                try:
-                    if placed:
-                        made = store.insert_entries(copy, placed)
-                    if interval is not None or shuffle is not None:
-                        made = store.set_rotation(copy, cycle_interval=interval, shuffle=shuffle)
-                except playlists.PlaylistError as error:
-                    try:
-                        store.delete(copy)  # no half copy
-                    except playlists.PlaylistError as cleanup:
-                        raise playlists.PlaylistError(
-                            error.kind,
-                            f"{error}; the unfinished copy {name!r} could not be removed: "
-                            f"{cleanup}",
-                        ) from error
-                    raise
-                return made
-
-            return work
+            entries = [playlists.Entry(playlists.new_id(), source) for source in sources]
+            # One save: the copy, its entries and its rotation, or nothing at all.
+            return lambda: store.create(
+                name,
+                entry_id=copy,
+                entries=entries,
+                cycle_interval=interval,
+                shuffle=shuffle,
+            )
 
         self._queue(
             "The copy was not made",

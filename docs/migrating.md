@@ -284,6 +284,11 @@ display count, and any current files which prevent an import.
   graphical launch, and the empty-library question is not allowed to create a
   competing fresh profile during that launch.
 
+The classic window asks in dialogs. The new interface asks the same questions,
+in the same words, on its welcome screen; after **Not now** a notice under the
+header says that the library isn't loaded and changes can't be saved until you
+choose, and its **Review…** button runs the check and asks again.
+
 An import which has reached its journal cannot be converted into **Start
 fresh**. Some current targets may already have been installed at that point,
 so the only automatic operation is to resume the exact transaction. If its

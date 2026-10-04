@@ -288,9 +288,11 @@ saved, on the same worker that then makes it:
 
 - the real scan of the library as the change would leave it. A file the
   removal deletes (the wallpaper, its sidecars and the stills that go with
-  it) counts as gone under every path that reaches it: through a linked
-  folder, or a symbolic link to it. Another hard link to it stays, as it does
-  on disk;
+  it, including a still being captured for it that isn't there yet) counts as
+  gone under every path that reaches it: through a linked folder, a bind
+  mount, or a symbolic link to it, and wherever else the scan would look,
+  such as Wallpaper Engine's folders. Another hard link to it stays, as it
+  does on disk. While it is tried, no still for that wallpaper can be saved;
 - the removal's own cleanup of favourites, playlist entries and still choices,
   on copies;
 - the build of the runtime configuration from what is left.
@@ -306,14 +308,19 @@ What pages show as you go is early feedback from what the app already knows:
 a card's **No still**, a wallpaper the playlist picker doesn't offer, a
 removal refused as you choose it. The check above is the guarantee.
 
-After a removal, the library that check found is the new library. It is shown
-and published at once, without scanning again, so no runtime configuration
-names a deleted file. Only a removal that went through with a problem (a
-cleanup that failed) is followed by a rescan.
+The check only decides whether the change is made. After a removal, the
+library is scanned again, on the same worker, and only what that scan finds is
+shown and published; until then the wallpaper service keeps the setup it has.
+So no runtime configuration names a deleted file. A removal that went through
+with a problem (a cleanup that failed) is scanned once more after that, with
+the cleanup tried again.
 
-The check costs about one scan and one build of the runtime configuration: on
-a library of about 2,100 wallpapers, all in one playlist, about half a second,
-on the worker rather than in the window.
+The check costs about one scan and one build of the runtime configuration, and
+a removal one more scan after it, all on the worker rather than in the window.
+One measurement on one machine, not a bound: with about 2,100 wallpapers, all
+in one playlist, the check took about half a second and the whole removal,
+scan after it included, about 0.7 seconds; the same run on a busy machine
+took several times as long.
 
 Only the home trash is implemented. A wallpaper on another filesystem cannot be
 renamed into it: the action reports the problem and leaves the file in place.

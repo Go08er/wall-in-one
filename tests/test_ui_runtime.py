@@ -731,8 +731,12 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
         assert release_compile.wait(2)
         return original_update(current, session, path)  # type: ignore[arg-type]
 
+    reloaded: list[str] = []
+
     def runtime(verb: str, *_args: object, **_kwargs: object) -> Response:
         reloads.append(verb)
+        if verb == "reload":
+            reloaded.append(paths.runtime_config_path().read_text(encoding="utf-8"))
         return Response.success()
 
     monkeypatch.setattr(runtime_config, "update", held_update)
@@ -753,7 +757,13 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
         release_compile.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
         try:
-            spin_until(lambda: removed == [True] and refreshes == [True])
+            spin_until(
+                lambda: (
+                    removed == [True]
+                    and bool(reloaded)
+                    and not application._runtime_compile_pending
+                )
+            )
         except AssertionError as error:
             raise AssertionError(
                 f"removal did not converge: removed={removed}, refreshes={refreshes}, "
@@ -761,9 +771,14 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
                 f"scan_pending={application._runtime_library_scan_pending}, "
                 f"actor_active={application._authoring_active}"
             ) from error
-        assert "reload" not in reloads
+        # The stale compile never reloads; what is published at once is the library the
+        # removal's dry run found (round 3), with no rescan, naming no deleted file.
+        assert reloads.count("reload") == 1
+        assert all(str(source) not in document for document in reloaded)
+        assert str(kept) in reloaded[0]
+        assert refreshes == []
         assert not source.exists()
-        assert not application._runtime_library_ready.is_set()
+        assert application._runtime_library_ready.is_set()
     finally:
         release_compile.set()
         _close(application)
@@ -833,8 +848,10 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
 
         release_reload.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
-        spin_until(lambda: removed == [True] and refreshes == [True])
-        assert source_seen_during_reload == [True]
+        spin_until(lambda: removed == [True] and len(source_seen_during_reload) == 2)
+        # Then the dry run's library is published at once, with no rescan (round 3).
+        assert source_seen_during_reload == [True, False]
+        assert refreshes == []
         assert not source.exists()
     finally:
         release_reload.set()
@@ -913,12 +930,13 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
 
         release_flush.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
-        spin_until(lambda: removed == [True] and refreshes == [True])
+        # The post-delete tail is the dry run's library, installed as a finished
+        # scan is, and its publication (round 3): graceful quit waits for both.
+        spin_until(lambda: removed == [True] and quit_calls == [True])
         assert not source.exists()
-        # The fake refresh has not completed the post-delete convergence tail;
-        # graceful quit must still retain it after the physical worker ends.
-        assert application._removal_convergence_held
-        assert quit_calls == []
+        assert refreshes == []
+        assert not application._removal_convergence_held
+        assert application.session.library.items == ()
     finally:
         release_flush.set()
         _close(application)
@@ -950,10 +968,23 @@ def test_late_refresh_and_removal_cleanup_do_not_publish_after_shutdown(
         _close(application)
 
 
+def _committing_with_a_cleanup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removals commit, and then report that a cleanup failed."""
+    original = RemovalPlan.run
+
+    def partial(plan: RemovalPlan) -> RemovalResult:
+        result = original(plan)
+        assert result.committed
+        return replace(result, cleanup_failures=("favourites: held by this test",))
+
+    monkeypatch.setattr(RemovalPlan, "run", partial)
+
+
 def test_explicit_quit_drains_committed_removal_scan_and_reconciliation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A removal that commits with a failure is scanned again; quit waits for that scan."""
     application = _application(tmp_path, monkeypatch)
     window = FakeWindow()
     _attach(application, window)
@@ -1006,6 +1037,7 @@ def test_explicit_quit_drains_committed_removal_scan_and_reconciliation(
     monkeypatch.setattr(application, "refresh_runtime_status_async", lambda: True)
     monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: Response.success())
     monkeypatch.setattr(Application, "quit", lambda _self: quits.append(True))
+    _committing_with_a_cleanup_failure(monkeypatch)
     try:
         assert application.remove_item_async(
             item,
@@ -1027,6 +1059,61 @@ def test_explicit_quit_drains_committed_removal_scan_and_reconciliation(
         assert not source.exists()
     finally:
         release_scan.set()
+        _close(application)
+
+
+def test_explicit_quit_drains_a_fully_committed_removal_without_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed in full, a removal's dry-run library is final: quit waits for its publication."""
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    source = root / "personal.png"
+    source.write_bytes(b"image")
+    item = MediaItem(source, Kind.STILL, 5, 1)
+    settings = replace(application.settings, roots=(root,)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.adopt_library(Library((root,), (item,)))
+    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    plans: list[bool] = []
+    removed: list[bool] = []
+    quits: list[bool] = []
+    reloads: list[str] = []
+
+    def runtime(verb: str, *_args: object, **_kwargs: object) -> Response:
+        reloads.append(verb)
+        return Response.success()
+
+    monkeypatch.setattr(application.session, "prepare_library_refresh", lambda: plans.append(True))
+    monkeypatch.setattr(application, "_queue_wallpaper_query", lambda _generation: None)
+    monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+    monkeypatch.setattr(application, "refresh_runtime_status_async", lambda: True)
+    monkeypatch.setattr(client, "send_runtime", runtime)
+    monkeypatch.setattr(Application, "quit", lambda _self: quits.append(True))
+    try:
+        assert application.remove_item_async(
+            item,
+            trash=True,
+            finish=lambda result: removed.append(result.committed),
+        )
+        application.request_quit()
+        spin_until(lambda: removed == [True] and quits == [True], timeout=10)
+        assert plans == [], "no scan after a removal that committed in full"
+        assert "reload" in reloads, "its library was published before quitting"
+        assert not application._authoring_active
+        assert application._authoring_lifetime_holds == 0
+        assert not application._runtime_publication_held
+        assert not application._removal_convergence_held
+        assert application.session.library.items == ()
+        assert not source.exists()
+    finally:
         _close(application)
 
 
@@ -1593,7 +1680,7 @@ def test_queued_item_authoring_cannot_resurrect_metadata_after_removal(
         _close(application)
 
 
-def test_committed_removal_filters_live_library_before_a_failed_refresh(
+def test_committed_removal_installs_its_dry_runs_library_without_a_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1637,7 +1724,8 @@ def test_committed_removal_filters_live_library_before_a_failed_refresh(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        spin_until(lambda: removed == [True] and refreshes == [True])
+        spin_until(lambda: removed == [True])
+        assert refreshes == [], "the dry run's library is the post-removal one (round 3)"
         assert application.session.library.find(item.path) is None
         assert all(
             candidate.path != item.path for candidate in application.session.library.still_inventory

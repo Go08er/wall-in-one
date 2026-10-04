@@ -25,7 +25,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterable
+import stat
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -76,7 +80,107 @@ LEGACY_AUTOMATIC_KIND: Final = "automatic-still"
 _STILL_EXTENSION_ORDER: Final[tuple[str, ...]] = (".png", ".webp", ".avif", ".jpg", ".jpeg")
 
 
-def still_extensions() -> tuple[str, ...]:
+@dataclass(frozen=True, slots=True)
+class Exclusion:
+    """Files a dry run treats as already deleted, by identity (`excluding`).
+
+    A removal deletes directory entries for regular files. Every path that
+    reaches one of them is gone with it: its own spelling, one through a
+    linked folder, a symlink to it. A file is matched by its identity,
+    ``(st_dev, st_ino)``, so a spelling never decides; for a file with more
+    than one hard link, only the paths that resolve to a deleted entry go, as
+    its other names stay on disk.
+    """
+
+    identities: frozenset[tuple[int, int]] = frozenset()
+    #: The deleted entries, symlinks resolved: which names of a multiply-linked file go.
+    entries: frozenset[str] = frozenset()
+
+    @classmethod
+    def of(cls, paths: Iterable[Path]) -> Exclusion:
+        """The regular files at ``paths`` (anything else at one is left alone)."""
+        identities: set[tuple[int, int]] = set()
+        entries: set[str] = set()
+        for path in paths:
+            found = file_identity(path)
+            if found is not None:
+                identities.add(found)
+                entries.add(os.path.realpath(path))
+        return cls(frozenset(identities), frozenset(entries))
+
+    def covers(self, path: Path, status: os.stat_result) -> bool:
+        """Whether ``path``, whose ``stat`` is ``status``, is one of the deleted files."""
+        if (status.st_dev, status.st_ino) not in self.identities:
+            return False
+        # One link: every path to the file goes through the deleted entry.
+        return status.st_nlink <= 1 or os.path.realpath(path) in self.entries
+
+    def removes(self, path: Path) -> bool:
+        """Whether ``path`` exists now and would not once the files go."""
+        try:
+            status = path.stat()
+        except OSError, ValueError:
+            return False
+        return self.covers(path, status)
+
+
+def file_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the regular file at ``path``, or None.
+
+    From the file itself (``fstat`` of an ``O_PATH`` descriptor that does not
+    follow a final symlink), the way a removal opens what it deletes.
+    """
+    try:
+        descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError, ValueError:
+        return None
+    try:
+        status = os.fstat(descriptor)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    return (status.st_dev, status.st_ino) if stat.S_ISREG(status.st_mode) else None
+
+
+#: What a dry run treats as already deleted (`excluding`); None outside one,
+#: so everything is as on disk.
+_EXCLUDED: ContextVar[Exclusion | None] = ContextVar("wall_in_one_excluded_files", default=None)
+
+
+@contextmanager
+def excluding(exclusion: Exclusion | None) -> Iterator[None]:
+    """Within this, ``exclusion``'s files count as gone (`present`, `is_excluded`).
+
+    For a dry run of a removal (`scan.scan(excluded=...)`): the scanner sees
+    the library as the removal would leave it. Context-local, so only the
+    scan that entered it is affected.
+    """
+    token = _EXCLUDED.set(exclusion if exclusion is not None and exclusion.identities else None)
+    try:
+        yield
+    finally:
+        _EXCLUDED.reset(token)
+
+
+def is_excluded(path: Path, status: os.stat_result) -> bool:
+    """Whether ``path`` (``status``) is a file a dry run treats as gone."""
+    exclusion = _EXCLUDED.get()
+    return exclusion is not None and exclusion.covers(path, status)
+
+
+def present(path: Path) -> bool:
+    """`Path.is_file`, as every convention here asks it, honoring a dry run's exclusions."""
+    if _EXCLUDED.get() is None:
+        return path.is_file()
+    try:
+        status = path.stat()
+    except OSError, ValueError:
+        return False
+    return stat.S_ISREG(status.st_mode) and not is_excluded(path, status)
+
+
+def _still_extensions() -> tuple[str, ...]:
     """Image extensions, preferred ones first, and never `.gif`.
 
     A gif pairing a video would itself be played as a video, which defeats the
@@ -108,7 +212,7 @@ def read_sidecar(video: Path) -> Path | None:
     candidate = Path(recorded)
     if not candidate.is_absolute():
         candidate = video.parent / candidate
-    return candidate if candidate.is_file() else None
+    return candidate if present(candidate) else None
 
 
 def legacy_automatic_identity(still: Path) -> str | None:
@@ -177,9 +281,9 @@ def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
     """Look for a generated still under a managed `Automatic Stills` directory."""
     for root in roots:
         directory = still_directory(root)
-        for extension in still_extensions():
+        for extension in _still_extensions():
             candidate = directory / (automatic_still_stem(video) + extension)
-            if candidate.is_file():
+            if present(candidate):
                 return candidate
     return None
 
@@ -187,9 +291,9 @@ def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
 def _sibling_still(video: Path) -> Path | None:
     """`foo.mp4` -> `foo-still.png`, else `foo.png`."""
     for stem in (video.stem + STILL_NAME_SUFFIX, video.stem):
-        for extension in still_extensions():
+        for extension in _still_extensions():
             candidate = video.with_name(stem + extension)
-            if candidate != video and candidate.is_file():
+            if candidate != video and present(candidate):
                 return candidate
     return None
 
@@ -201,7 +305,7 @@ def preview_beside(video: Path) -> Path | None:
     which wants a wallpaper. See `PREVIEW_STEM`.
     """
     directory = video.parent
-    for extension in (*still_extensions(), ".gif", ".mp4", ".webm"):
+    for extension in (*_still_extensions(), ".gif", ".mp4", ".webm"):
         candidate = directory / f"{PREVIEW_STEM}{extension}"
         if candidate != video and candidate.is_file():
             return candidate
@@ -216,9 +320,9 @@ def scene_still(scene: str, roots: Iterable[Path] = ()) -> Path | None:
     """
     for root in roots:
         directory = still_directory(root)
-        for extension in still_extensions():
+        for extension in _still_extensions():
             candidate = directory / f"{scene}{extension}"
-            if candidate.is_file():
+            if present(candidate):
                 return candidate
     return None
 

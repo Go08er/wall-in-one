@@ -2132,9 +2132,6 @@ class AppState(GObject.Object):
         self.emit_changed("settings")
         self.toast(f"Scanning {path}", lambda: (undo(), self.emit_changed("settings")))
 
-    def folder_removal_blocked(self, path: str) -> str:
-        return ""  # the demo's playlists never depend on one folder
-
     def remove_folder(self, path: str) -> None:
         undo = self.remove_library_folder(path)
         self.emit_changed("settings")

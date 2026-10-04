@@ -59,7 +59,7 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gdk, GLib
 
-from wall_in_one import config, display_policy, runtime_config
+from wall_in_one import config, display_policy
 from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.session import Session
@@ -855,23 +855,6 @@ class RealSettings:
         requested = self._backend.requested_settings.roots
         if removed in requested:
             self._set_roots(tuple(root for root in requested if root != removed))
-
-    def folder_removal_blocked(self, path: str) -> str:
-        """The application's own rule (`runtime_config.sources_refusal`), asked early.
-
-        Worked out from the accepted library, so the confirmation can name
-        the playlists up front; the save is checked again at the head of the
-        lane, whatever this said.
-        """
-        removed = Path(path)
-        requested = self._backend.requested_settings
-        if removed not in requested.roots:
-            return ""
-        after = replace(
-            requested, roots=tuple(root for root in requested.roots if root != removed)
-        ).validated()
-        refused = runtime_config.sources_refusal(after, self._backend.session)
-        return runtime_config.listed(refused) if refused else ""
 
     def make_download_folder(self, path: str) -> None:
         chosen = Path(path)

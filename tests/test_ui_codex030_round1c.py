@@ -1,15 +1,18 @@
 """After Codex 0.3.0 round 1, the last gaps, in the real application.
 
 Library folders and Wallpaper Engine scanning: a change that takes away what
-a playlist plays is refused at the head of the authoring lane, in the
-settings write itself (`Application._prepare_settings_batch`), so both
-windows get it; the new window's Settings page names the playlists before
-asking. Each test reproduces a change that, on b478b0a, was saved and left a
-playlist the compiler refuses.
+a playlist plays is refused in the settings write itself, so both windows
+get it: since round 3, by a dry run of the real scan on the authoring
+worker before ``settings.toml`` is written (`dry_run.sources`, from
+`Application._prepare_settings_batch`). The new window's Settings page asks
+as it does for any folder, and says what the refusal names. Each test
+reproduces a change that, on b478b0a, was saved and left a playlist the
+compiler refuses.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -35,7 +38,7 @@ from tests.test_ui_runtime import _close as _close_application  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
-from wall_in_one.library import displays, playlists, scan, schedules  # noqa: E402
+from wall_in_one.library import displays, playlists, scan, schedules, workshop  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui import playlists_page, preferences  # noqa: E402
 from wall_in_one.ui.app import _Commands  # noqa: E402
@@ -69,24 +72,45 @@ def shown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Shown]:
     sandboxed_runtime(monkeypatch, tmp_path)
     monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
     walls, walls2 = tmp_path / "wallpapers", tmp_path / "wallpapers2"
-    walls2.mkdir()
-    (walls2 / "rain.png").write_bytes(b"placeholder image bytes")
-    steam = tmp_path / "steam" / "123"
-    steam.mkdir(parents=True)
-    (steam / "loop.mp4").write_bytes(b"placeholder video bytes")
+    for path in (walls / "dawn.png", walls / "dusk.jpg", walls2 / "rain.png"):
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"placeholder image bytes")
+    steam = tmp_path / "steam"
+    installed = steam / "steamapps" / "workshop" / "content" / workshop.APP_ID / "123"
+    installed.mkdir(parents=True)
+    (installed / "project.json").write_text(
+        json.dumps({"type": "video", "title": "Loop", "file": "loop.mp4"}), encoding="utf-8"
+    )
+    (installed / "loop.mp4").write_bytes(b"placeholder video bytes")
+    monkeypatch.setattr(workshop, "steam_roots", lambda *_a, **_k: (steam,))
     config.update({"roots": (walls, walls2), "scan_workshop": True})
     opened = _open(monkeypatch)
     application = opened.application
     spin_until(lambda: application._library_scan_future is None, 10, what="no scan running")
-    dawn = MediaItem(walls / "dawn.png", Kind.STILL, 5, 1)
-    rain = MediaItem(walls2 / "rain.png", Kind.STILL, 5, 1)
-    loop = MediaItem(steam / "loop.mp4", Kind.VIDEO, 5, 1, provider=scan.WORKSHOP_PROVIDER)
-    items = (dawn, MediaItem(walls / "dusk.jpg", Kind.STILL, 5, 1), rain, loop)
-    application.session.adopt_library(Library((walls, walls2), items), reconcile_workshop=False)
+    library = scan.scan(
+        (walls, walls2),
+        dict(application.session.pairings.records),
+        include_workshop=True,
+        workshop_roots=(steam,),
+    )
+    application.session.adopt_library(library, reconcile_workshop=False)
     settings = application.settings
     application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+
+    def found(path: Path) -> MediaItem:
+        item = library.find(path)
+        assert item is not None, path
+        return item
+
     try:
-        yield Shown(opened, walls, walls2, rain, loop, dawn)
+        yield Shown(
+            opened,
+            walls,
+            walls2,
+            found(walls2 / "rain.png"),
+            found(installed / "loop.mp4"),
+            found(walls / "dawn.png"),
+        )
     finally:
         _close(opened)
 
@@ -111,7 +135,7 @@ def _builds(shown: Shown) -> bool:
 # -- the new window ------------------------------------------------------------------------
 
 
-def test_removing_a_folder_a_used_playlist_needs_is_refused_and_named_first(
+def test_removing_a_folder_a_used_playlist_needs_is_refused_and_named(
     shown: Shown,
 ) -> None:
     opened = shown.opened
@@ -120,23 +144,21 @@ def test_removing_a_folder_a_used_playlist_needs_is_refused_and_named_first(
     application.update_settings(active_playlist=evening.id)
     page = opened.page
 
+    # The page asks as for any folder: what a change leaves is known only by doing it,
+    # for pretend, on the worker.
     dialog = page.confirm_remove(str(shown.walls2))
     assert dialog is not None
-    assert dialog.get_heading() == "This folder can\u2019t be removed now"
-    assert "\u201cEvening\u201d (used by the default) would have nothing left to play" in (
-        dialog.get_body()
-    )
+    assert dialog.get_heading() == "Remove from library?"
     dialog.force_close()
 
-    # Past the dialog, the head of the lane decides.
     assert page.access is not None
     page.access.remove_folder(str(shown.walls2))
     opened.wait("the removal to settle")
     assert config.load().roots == (shown.walls, shown.walls2), "nothing was removed"
     assert opened.reports[-1] == (
         "Library folders were not saved; nothing changed: that change to the library folders "
-        "would take wallpapers out of the library: \u201cEvening\u201d (used by the default) "
-        "would have nothing left to play"
+        "would break playback: \u201cEvening\u201d (used by the default) would have nothing "
+        "left to play: rain.png would no longer be in the library"
     )
     assert _builds(shown)
 
@@ -179,9 +201,11 @@ def test_turning_off_workshop_scanning_a_used_playlist_needs_is_refused_in_both_
     application.session.pairings.choose_still(shown.loop, shown.dawn.path)  # it plays
     scenes = _playlist(shown, "Scenes", [shown.loop])
     application.session.schedules.add(scenes.id)
+    application.session.refresh(mutate_removals=False)
     refusal = (
-        "turning off Wallpaper Engine scanning would take wallpapers out of the library: "
-        "\u201cScenes\u201d (used by 1 schedule rule) would have nothing left to play"
+        "turning off Wallpaper Engine scanning would break playback: "
+        "\u201cScenes\u201d (used by 1 schedule rule) would have nothing left to play: "
+        "loop.mp4 would no longer be in the library"
     )
 
     row = opened.row("scan_workshop")

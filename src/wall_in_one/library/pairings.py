@@ -692,7 +692,7 @@ def resolve(
         return default
 
     chosen = saved.still
-    missing = chosen is not None and not chosen.is_file()
+    missing = chosen is not None and not pairing.present(chosen)
     return replace(
         default,
         still=default.still if chosen is None or missing else chosen,

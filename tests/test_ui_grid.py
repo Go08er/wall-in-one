@@ -34,7 +34,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import settle  # noqa: E402
 from wall_in_one.library.filter import Query, Sort  # noqa: E402
-from wall_in_one.library.model import Kind, Library, MediaItem, Ownership  # noqa: E402
+from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE, WallpaperGrid, WallpaperTile  # noqa: E402
 from wall_in_one.ui.thumbnails import Callback, ThumbnailLoader  # noqa: E402
 from wall_in_one.ui.window import ACCELERATORS, MainWindow  # noqa: E402
@@ -200,7 +200,7 @@ def test_visible_tile_actions_fit_compact_layout_and_keyboard_activation_dispatc
     settle(0.3)
     try:
         apply = tile._apply_targets if independent else tile._apply
-        assert apply.get_label() == ("Apply to…" if independent else "Apply")
+        assert apply.get_label() == ("Apply to\u2026" if independent else "Apply")
         assert tile._edit.get_label() == "Edit"
         assert apply.get_visible() and tile._edit.get_visible()
         assert not apply.has_css_class("wio-tile-action")
@@ -448,7 +448,7 @@ def test_large_library_initial_work_is_bounded_and_fast(loader: CountingLoader, 
     assert len(loader.requested) == MEDIA_PAGE_SIZE
     assert grid._more.get_visible()
     assert grid._more.get_label() == (
-        f"Load {MEDIA_PAGE_SIZE} more · {MEDIA_PAGE_SIZE} of {count} shown"
+        f"Load {MEDIA_PAGE_SIZE} more \u00b7 {MEDIA_PAGE_SIZE} of {count} shown"
     )
     assert elapsed < 1.0, f"bounded initial grid took {elapsed:.3f}s for {count} items"
 
@@ -465,7 +465,7 @@ def test_load_more_adds_one_page_without_replacing_existing_tiles(
     assert len(grid._tiles) == MEDIA_PAGE_SIZE * 2
     assert len(loader.requested) == MEDIA_PAGE_SIZE * 2
     assert grid._tiles[items[0].path] is first
-    assert grid._more.get_label() == f"Load 56 more · {MEDIA_PAGE_SIZE * 2} of 200 shown"
+    assert grid._more.get_label() == f"Load 56 more \u00b7 {MEDIA_PAGE_SIZE * 2} of 200 shown"
 
 
 def test_search_matches_the_complete_inventory_without_loading_preceding_tiles(
@@ -517,7 +517,7 @@ def test_off_page_current_displays_are_materialised_and_keep_borked_badges(
     assert borked._health_badge.get_visible()
     assert borked._health_badge.get_tooltip_text() == "renderer crashed"
     assert grid._more.get_label() == (
-        f"Load {MEDIA_PAGE_SIZE} more · {MEDIA_PAGE_SIZE + 2} of 600 shown"
+        f"Load {MEDIA_PAGE_SIZE} more \u00b7 {MEDIA_PAGE_SIZE + 2} of 600 shown"
     )
 
     # MainWindow performs a model rescan and then refreshes runtime truth.
@@ -914,8 +914,6 @@ def test_changing_roots_requests_a_scan_and_redraw_instead_of_only_a_highlight(
         def __init__(self) -> None:
             self.settings = config.Settings()
             self.synced = 0
-            # A folder change asks what would leave the library: nothing here.
-            self.library = Library(roots=(), items=())
 
         def update_settings(
             self, settings: config.Settings, *, rescan_library: bool = True
@@ -951,6 +949,9 @@ def test_changing_roots_requests_a_scan_and_redraw_instead_of_only_a_highlight(
     monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)
     monkeypatch.setattr(application, "sync_cycle_timer", lambda: None)
     monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+    # The dry run of the new folders (`dry_run.sources`) needs a real session; it is
+    # tested over real files in test_codex030_round1c and test_dry_run.
+    monkeypatch.setattr(application, "_sources_check", lambda: lambda _before, _after: None)
 
     def finish_scan() -> None:
         session.sync_with_noctalia()
@@ -1699,7 +1700,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     )
     subtitle = window._subtitle.get_subtitle()
     assert len(subtitle) < 300
-    assert "…" in subtitle
+    assert "\u2026" in subtitle
     assert subtitle.endswith("attributable tail")
     assert window._subtitle.get_tooltip_text() == long_error
     window.show_runtime_status(
@@ -1716,7 +1717,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
             "last_error": "mpvpaper exited for evening-second",
         }
     )
-    assert "Renderer stopped · Retry available" in window._runtime_control_status.get_text()
+    assert "Renderer stopped \u00b7 Retry available" in window._runtime_control_status.get_text()
     assert "Retry motion" in (window._runtime_play.get_tooltip_text() or "")
     window._runtime_play.emit("clicked")
     assert calls[-1] == ("play", None)

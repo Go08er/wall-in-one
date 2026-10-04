@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from wall_in_one import config, file_io
 from wall_in_one.library import (
@@ -39,6 +40,9 @@ from wall_in_one.library.playlists import Playlist as NamedPlaylist
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
+
+if TYPE_CHECKING:
+    from wall_in_one.dry_run import Uses
 
 Scanner = Callable[[Sequence[Path] | None], Library]
 
@@ -153,6 +157,9 @@ class RemovalResult:
     cancellation_failures: tuple[str, ...] = ()
     cleanups: tuple[RemovalCleanup, ...] = ()
     repaired_faults: tuple[tuple[str, str], ...] = ()
+    #: The library as the removal leaves it, as the dry run before it scanned
+    #: (`wall_in_one.dry_run.removal`); the post-removal library once it commits.
+    library_after: Library | None = None
 
 
 def _physically_removed_adoption(
@@ -268,6 +275,11 @@ class RemovalPlan:
     #: it to a deletion-capable generation proof with ``authority_for``;
     #: neither this path nor the old basename is authority on its own.
     adopted_capture: Path | None = None
+    #: The accepted library, what uses each playlist, and the session's
+    #: injected scanner (tests), for the dry run before anything is touched.
+    library: Library = field(default_factory=lambda: Library(roots=(), items=()))
+    uses: Uses | None = None
+    scanner: Scanner | None = None
 
     def run(self) -> RemovalResult:
         """Perform prepare, physical commit and cleanup on this worker."""
@@ -316,6 +328,16 @@ class RemovalPlan:
                 error_message=blocked[1],
                 repaired_faults=repaired_faults,
             )
+        # Still before anything is touched: the removal for pretend. A refusal
+        # (a playlist would break) or a dry run that can't run raises, and the
+        # task fails with nothing written.
+        library_after = _dry_run_removal(
+            self,
+            adopted_authority=adopted_authority,
+            favourite_store=favourite_store,
+            pairing_store=pairing_store,
+            playlist_store=playlist_store,
+        )
         snapshot = Session(
             self.settings,
             favourite_store=favourite_store,
@@ -465,6 +487,7 @@ class RemovalPlan:
                     cleanup_failures=cleanup_failures,
                     cleanups=tuple(cleanups),
                     repaired_faults=repaired_faults,
+                    library_after=library_after,
                 )
 
             cleanup_failures = snapshot.commit_removal(
@@ -494,6 +517,7 @@ class RemovalPlan:
                 cleanup_failures=cleanup_failures,
                 cleanups=tuple(cleanups),
                 repaired_faults=repaired_faults,
+                library_after=library_after,
             )
         finally:
             try:
@@ -501,6 +525,44 @@ class RemovalPlan:
                     source_context.close()
             finally:
                 snapshot.shutdown()
+
+
+def _dry_run_removal(
+    plan: RemovalPlan,
+    *,
+    adopted_authority: adopted.Authority | None,
+    favourite_store: favourites.Store,
+    pairing_store: pairings.Store,
+    playlist_store: playlists.Store,
+) -> Library:
+    """`wall_in_one.dry_run.removal` for ``plan``; refuses by raising, as a prepare does."""
+    from wall_in_one import dry_run, runtime_config  # dry_run builds Sessions
+
+    if plan.uses is None:  # pragma: no cover - prepare_removal_plan always sets it
+        raise ValueError("removal plan has no snapshot of what uses each playlist")
+    try:
+        verdict = dry_run.removal(
+            plan.item,
+            settings=plan.settings,
+            library=plan.library,
+            roots=plan.roots,
+            adopted_authority=adopted_authority,
+            favourite_store=favourite_store,
+            pairing_store=pairing_store,
+            playlist_store=playlist_store,
+            uses=plan.uses,
+            scanner=plan.scanner,
+        )
+    except Exception as error:
+        raise dry_run.CheckFailed(
+            f"{plan.item.name} was not removed: what removing it would leave could not be "
+            f"checked: {error}"
+        ) from error
+    if verdict.refusals:
+        raise runtime_config.PlaybackGuardError(
+            f"{plan.item.name} was not removed: {runtime_config.listed(verdict.refusals)}."
+        )
+    return verdict.library
 
 
 @dataclass(frozen=True, slots=True)
@@ -740,6 +802,11 @@ class Session:
         return self._library
 
     @property
+    def scanner(self) -> Scanner | None:
+        """The injected scanner (a test double), or None: the real scan."""
+        return self._scanner
+
+    @property
     def playlist(self) -> Playlist:
         return self._playlist
 
@@ -940,6 +1007,8 @@ class Session:
 
     def prepare_removal_plan(self, item: MediaItem, *, trash: bool) -> RemovalPlan:
         """Snapshot a detached removal without doing filesystem I/O on GTK."""
+        from wall_in_one import dry_run  # it builds Sessions
+
         roots = tuple(self._library.roots)
         adopted_matches = tuple(
             capture for source, capture in self._library.adopted_stills if source == item.path
@@ -955,6 +1024,25 @@ class Session:
             playlist_store=self._playlists.worker_copy(),
             removal_store=self._removals.worker_copy(),
             adopted_capture=adopted_capture,
+            library=self._library,
+            uses=dry_run.Uses.of(self),
+            scanner=self._scanner,
+        )
+
+    def check_removal(self, item: MediaItem) -> Library:
+        """The dry run a `RemovalPlan` runs on its worker, synchronously, for the headless service.
+
+        That service removes without an adopted capture's authority, so none
+        is excluded. Raises `runtime_config.PlaybackGuardError` when a playlist
+        would break; returns the library the removal would leave.
+        """
+        plan = self.prepare_removal_plan(item, trash=False)
+        return _dry_run_removal(
+            plan,
+            adopted_authority=None,
+            favourite_store=plan.favourite_store.worker_copy(rebase=True),
+            pairing_store=plan.pairing_store.worker_copy(rebase=True),
+            playlist_store=plan.playlist_store.worker_copy(rebase=True),
         )
 
     def cancel_removal(self, intent: removals.Intent) -> None:

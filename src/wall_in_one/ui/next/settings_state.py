@@ -369,10 +369,6 @@ class SettingsAccess(Protocol):
 
     def remove_folder(self, path: str) -> None: ...
 
-    def folder_removal_blocked(self, path: str) -> str:
-        """Each playlist removing ``path`` would break, as one clause, or empty."""
-        ...
-
     def make_download_folder(self, path: str) -> None:
         """Move ``path`` to the front: downloads and generated stills go there."""
         ...

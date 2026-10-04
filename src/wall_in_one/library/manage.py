@@ -584,6 +584,11 @@ def _logical_preserved_artifact(
     return companion.parent / relative
 
 
+def provider_sidecar_paths(source: Path) -> tuple[Path, ...]:
+    """The provider sidecars beside ``source`` a removal takes with it, there or not."""
+    return tuple(source.with_name(source.name + suffix) for suffix in _PROVIDER_SIDECAR_PROVIDERS)
+
+
 def pairing_artifact_paths(
     item: MediaItem,
     roots: Sequence[Path] = (),

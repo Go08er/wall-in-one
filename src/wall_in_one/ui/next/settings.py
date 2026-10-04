@@ -607,23 +607,6 @@ class SettingsPage(Page):
         if path not in folders:
             return None
         escaped = GLib.markup_escape_text(path)
-        blocked = access.folder_removal_blocked(path)
-        if blocked:
-            # Said up front, rather than as a refusal after Remove.
-            dialog = Adw.AlertDialog(
-                heading="This folder can\u2019t be removed now",
-                body=(
-                    f"<b>{escaped}</b> holds wallpapers that playlists need: without them, "
-                    f"{GLib.markup_escape_text(blocked)}.\n\nAdd other wallpapers to those "
-                    "playlists, or use other playlists where they are used, first."
-                ),
-                body_use_markup=True,
-            )
-            dialog.add_response("close", "OK")
-            dialog.set_default_response("close")
-            dialog.set_close_response("close")
-            self._present(dialog)
-            return dialog
         body = f"<b>{escaped}</b> leaves the library. Its files stay on disk."
         if folders[0] == path and len(folders) > 1:
             following = GLib.markup_escape_text(folders[1])

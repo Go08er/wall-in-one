@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -330,131 +330,6 @@ def _walk(
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
-def would_find(
-    item: MediaItem,
-    roots: Sequence[Path],
-    include_workshop: bool,
-    linked: frozenset[Path] = frozenset(),
-) -> bool:
-    """Whether a scan of ``roots`` (and of the Workshop, if included) finds ``item`` again.
-
-    Decided from the accepted library alone, so nothing on disk is read, by
-    the walk's own rules (`_walk`): a file is found under a root by its
-    lexical path, by whole components (``/a/b`` holds ``/a/b/x``, never
-    ``/a/bc/x``), never through a hidden name, at most `MAX_DEPTH` folders
-    down, and never through a symbolic link: `scan` skips a root that is one
-    and the walk follows none. No accepted path runs through a link below
-    its own root, so the only links a new root can meet on the way are the
-    ones above the scanned roots, ``linked`` (`Library.linked_ancestors`):
-    a root that is one, or holds one above the item, does not find it. A
-    Workshop item, and a scene always, comes back from the Workshop scan
-    only, which runs while it is included. The scan's budgets (`MAX_ITEMS`,
-    `MAX_ENTRIES_EXAMINED`) are not predicted.
-    """
-    if item.kind is not Kind.SCENE:
-        for root in roots:
-            if not item.path.is_relative_to(root):
-                continue
-            if root in linked or any(
-                link != root and link.is_relative_to(root) and item.path.is_relative_to(link)
-                for link in linked
-            ):
-                continue
-            parts = item.path.relative_to(root).parts
-            if (
-                parts
-                and len(parts) - 1 <= MAX_DEPTH
-                and not any(part.startswith(".") for part in parts)
-            ):
-                return True
-    return include_workshop and item.provider == WORKSHOP_PROVIDER
-
-
-def known_stills(library: Library) -> frozenset[Path]:
-    """Every still file the accepted library says was there at its scan.
-
-    Its still items and the still inventory (every still the walk found,
-    captures included), every moving item's representative, and the
-    sidecar and adopted targets the scan recorded.
-    """
-    found = {item.path for item in library.items if item.kind is Kind.STILL}
-    found.update(item.path for item in library.still_inventory)
-    found.update(item.paired_still for item in library.items if item.paired_still is not None)
-    found.update(target for _video, target in library.sidecar_stills)
-    found.update(capture for _video, capture in library.adopted_stills)
-    return frozenset(found)
-
-
-def projected_still(
-    item: MediaItem,
-    library: Library,
-    chosen: Path | None,
-    roots: Sequence[Path],
-    *,
-    removed: Collection[Path] = frozenset(),
-    present: frozenset[Path] | None = None,
-) -> Path | None:
-    """The representative still the next scan would give moving ``item``, from memory.
-
-    In the scan's own order (`pairings.resolve`, `pairings.synthesize`,
-    `pairing.find_still`): ``chosen`` (its pairing's chosen still, as it will
-    be after the change) if that is there; else, for a video, the still its
-    sidecar names, a capture under ``roots`` (the first root holding one),
-    its adopted capture, then a sibling (``foo-still.*``, then ``foo.*``);
-    for a scene, its capture under ``roots``. A file is "there" when the
-    accepted library says it was (`known_stills`, or ``present``) and it is
-    not in ``removed``. A chosen still is found wherever it is, roots or not,
-    as the scan finds it; a capture only under ``roots``. A capture under a
-    root the last scan didn't walk isn't known, so a capture still to be made
-    never counts. Nothing on disk is read.
-    """
-    gone = frozenset(removed)
-    known = known_stills(library) if present is None else present
-
-    def there(path: Path) -> bool:
-        return path not in gone and path in known
-
-    if (
-        chosen is not None
-        and (chosen == item.paired_still or chosen in known)
-        and chosen not in gone
-    ):
-        return chosen
-    extensions = pairing.still_extensions()
-    if item.kind is Kind.SCENE:
-        for root in roots:
-            for extension in extensions:
-                capture = pairing.still_directory(root) / f"{item.scene}{extension}"
-                if item.scene and there(capture):
-                    return capture
-        return None
-    if item.kind is not Kind.VIDEO:
-        return item.path
-    sidecar = dict(library.sidecar_stills).get(item.path)
-    if sidecar is not None and sidecar not in gone:
-        return sidecar
-    stem = pairing.automatic_still_stem(item.path)
-    for root in roots:
-        for extension in extensions:
-            capture = pairing.still_directory(root) / f"{stem}{extension}"
-            if there(capture):
-                return capture
-    adopted_still = dict(library.adopted_stills).get(item.path)
-    if (
-        adopted_still is not None
-        and there(adopted_still)
-        and any(adopted_still.is_relative_to(root) for root in roots)
-    ):
-        # Approximate: adoption also needs its own root among the roots.
-        return adopted_still
-    for name in (item.path.stem + pairing.STILL_NAME_SUFFIX, item.path.stem):
-        for extension in extensions:
-            sibling = item.path.with_name(name + extension)
-            if sibling != item.path and there(sibling):
-                return sibling
-    return None
-
-
 def workshop_items(
     steam_roots: Sequence[Path] | None = None,
     *,
@@ -528,6 +403,7 @@ def scan(
     workshop_content_directories: Sequence[Path] | None = None,
     adoption_candidates: Sequence[adopted.Authority] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    excluded: pairing.Exclusion | None = None,
 ) -> Library:
     """Build a `Library` from ``roots`` (or the default roots).
 
@@ -536,7 +412,36 @@ def scan(
     is honouring -- and because pairing has to happen exactly once. Resolving
     a second time somewhere else would recompute the defaults from disk and
     overwrite whatever this pass decided.
+
+    ``excluded`` are files to scan as if they were already deleted: a dry
+    run of a removal (`wall_in_one.dry_run`). Every existence test the scan
+    makes honors them (the walk, and `library.pairing.present` for every
+    still convention and chosen still), by file identity
+    (`pairing.Exclusion`), so a path reaching a deleted file through a linked
+    folder is gone too. Nothing here writes, so a dry run changes nothing.
     """
+    with pairing.excluding(excluded):
+        return _scan(
+            roots,
+            records,
+            include_workshop=include_workshop,
+            workshop_roots=workshop_roots,
+            workshop_content_directories=workshop_content_directories,
+            adoption_candidates=adoption_candidates,
+            cancelled=cancelled,
+        )
+
+
+def _scan(
+    roots: Sequence[Path] | None,
+    records: Mapping[str, pairings.Pairing] | None,
+    *,
+    include_workshop: bool,
+    workshop_roots: Sequence[Path] | None,
+    workshop_content_directories: Sequence[Path] | None,
+    adoption_candidates: Sequence[adopted.Authority] | None,
+    cancelled: Callable[[], bool] | None,
+) -> Library:
     resolved_roots = tuple(roots) if roots is not None else default_roots()
     candidate_internal_captures: tuple[tuple[Path, file_io.FileFingerprint], ...] = ()
     if adoption_candidates is None:
@@ -564,20 +469,12 @@ def scan(
     ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
 
-    linked: set[Path] = set()
     for root in resolved_roots:
         if cancelled is not None and cancelled():
             raise ScanCancelledError
         if root.is_symlink() or not root.is_dir():
             skipped.append(f"{root}: not a directory")
             continue
-        for parent in root.parents:
-            # What a root above this one would meet on the way (`would_find`).
-            try:
-                if parent.is_symlink():
-                    linked.add(parent)
-            except OSError:
-                continue
         for path in _walk(root, budget, skipped, cancelled):
             if len(items) >= MAX_ITEMS:
                 skipped.append(f"{root}: stopped at {MAX_ITEMS} wallpapers")
@@ -592,6 +489,8 @@ def scan(
                 generation = file_io.file_fingerprint(info)
             except OSError, ValueError:
                 continue
+            if pairing.is_excluded(path, info):
+                continue  # a dry run: as if already deleted, wherever it is reached from
             seen.add(path)
             observed_generations[path] = (generation, info.st_uid, info.st_nlink)
 
@@ -667,12 +566,6 @@ def scan(
     )
     if cancelled is not None and cancelled():
         raise ScanCancelledError
-    sidecars: list[tuple[Path, Path]] = []
-    for item in items:
-        # What `pairing.find_still` reads first; kept so a change can be
-        # projected from memory (`projected_still`).
-        if item.kind is Kind.VIDEO and (target := pairing.read_sidecar(item.path)) is not None:
-            sidecars.append((item.path, target))
     paired = pairings.apply(
         items,
         resolved_roots,
@@ -698,6 +591,4 @@ def scan(
         skipped=tuple(skipped),
         still_inventory=still_inventory,
         adopted_stills=adopted_pairs,
-        linked_ancestors=frozenset(linked),
-        sidecar_stills=tuple(sidecars),
     )

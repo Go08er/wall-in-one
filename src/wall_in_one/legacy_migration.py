@@ -46,7 +46,7 @@ from wall_in_one.library import (
     workshop,
 )
 from wall_in_one.library import pairing as pairing_conventions
-from wall_in_one.library.model import Kind, MediaItem, classify
+from wall_in_one.library.model import Kind, classify
 from wall_in_one.providers import credentials
 from wall_in_one.providers.base import ProviderError
 from wall_in_one.providers.wallhaven import normalise_api_key
@@ -1051,9 +1051,9 @@ def _convert(source: _LegacySource) -> _Converted:
     nothing_to_play = _nothing_to_play(
         converted_playlists,
         converted_settings,
+        converted_pairings,
         converted_schedules,
         converted_displays,
-        workshop_paths,
         notes,
     )
     api_key = _api_key(source.plugin_settings, notes)
@@ -1092,60 +1092,76 @@ def _convert(source: _LegacySource) -> _Converted:
 def _nothing_to_play(
     converted: dict[str, playlists.Playlist],
     settings: config.Settings,
+    pairing_records: dict[str, pairings.Pairing],
     rules: tuple[schedules.Rule, ...],
     assignments: dict[str, str],
-    workshop_paths: dict[str, _WorkshopResolution],
     notes: list[str],
 ) -> tuple[str, ...]:
-    """Each imported playlist holding entries but none the library will have, by name.
+    """Each imported playlist holding entries but nothing the compiler can use, by name.
 
     Its entries are kept as they were (an unmounted drive is not a deletion),
     but the compiler refuses a document with such a playlist, used or not,
     so until one of its wallpapers is back, or it is emptied, no change
     reaches playback. Said here, naming it, so the import report is honest;
-    the app says it too once it publishes. Worked out as the scan will find
-    the files (`scan.would_find`): there, and in an imported library folder,
-    or installed in Steam while Workshop scanning is on.
+    the app says it too once it publishes. Found as the app will find it:
+    the real scan of the imported library folders (and Steam, while Workshop
+    scanning is on) with the imported pairings, judged by the compiler's own
+    rule (`runtime_config.entry_playability`). The scan only reads.
     """
+    # Imported here: the module stays importable where the app's isn't.
+    from wall_in_one import runtime_config
+    from wall_in_one.session import Session
+
     include_workshop = settings.scan_workshop and bool(settings.roots)
-    installed = {resolution.path for resolution in workshop_paths.values()}
+    library = scan.scan(
+        settings.roots,
+        pairing_records,
+        include_workshop=include_workshop,
+        workshop_roots=workshop.steam_roots() if include_workshop else (),
+        adoption_candidates=(),
+    )
+    view = Session(
+        settings,
+        pairing_store=pairings.Store(pairing_records),
+        playlist_store=playlists.Store(converted),
+        favourite_store=favourites.Store(),
+        schedule_store=schedules.Store(),
+        display_store=displays.Store(),
+        removal_store=removals.Store(),
+        owns_playback=False,
+    )
+    try:
+        view.adopt_library(library, reconcile_workshop=False)
+        known = runtime_config.library_index(view)
 
-    def found(source: Path) -> bool:
-        try:
-            if not source.exists():
-                return False
-            directory = source.is_dir()
-        except OSError:
-            return False
-        if source in installed:
-            return include_workshop
-        if directory:
-            return False
-        item = MediaItem(source, classify(source) or Kind.STILL, 0, 0)
-        return scan.would_find(item, settings.roots, include_workshop)
+        def found(source: Path) -> bool:
+            return runtime_config.entry_playability(known.get(source), view).compiles
 
-    names: list[str] = []
-    for playlist in converted.values():
-        if not playlist.entries or any(found(entry.path) for entry in playlist.entries):
-            continue
-        uses = []
-        if settings.active_playlist == playlist.id:
-            uses.append("the default uses it")
-        if any(rule.playlist == playlist.id for rule in rules):
-            uses.append("a schedule rule uses it")
-        if any(assigned == playlist.id for assigned in assignments.values()):
-            uses.append("a display uses it")
-        used = f" ({', '.join(uses)})" if uses else ""
-        count = len(playlist.entries)
-        notes.append(
-            f"\u201c{playlist.name}\u201d has nothing to play yet{used}: none of its {count} "
-            f"wallpaper{'' if count == 1 else 's'} is in the imported library folders now. "
-            "Its entries were kept. Until one of them is back, or the playlist is emptied, "
-            "Wall-in-One can\u2019t build the wallpaper service\u2019s configuration, so "
-            "changes won\u2019t reach playback; the app says so until then."
-        )
-        names.append(playlist.name)
-    return tuple(names)
+        names: list[str] = []
+        for playlist in converted.values():
+            if not playlist.entries or any(found(entry.path) for entry in playlist.entries):
+                continue
+            uses = []
+            if settings.active_playlist == playlist.id:
+                uses.append("the default uses it")
+            if any(rule.playlist == playlist.id for rule in rules):
+                uses.append("a schedule rule uses it")
+            if any(assigned == playlist.id for assigned in assignments.values()):
+                uses.append("a display uses it")
+            used = f" ({', '.join(uses)})" if uses else ""
+            count = len(playlist.entries)
+            notes.append(
+                f"\u201c{playlist.name}\u201d has nothing to play yet{used}: none of its {count} "
+                f"wallpaper{'' if count == 1 else 's'} can play from the imported library "
+                "folders now. "
+                "Its entries were kept. Until one of them is back, or the playlist is emptied, "
+                "Wall-in-One can\u2019t build the wallpaper service\u2019s configuration, so "
+                "changes won\u2019t reach playback; the app says so until then."
+            )
+            names.append(playlist.name)
+        return tuple(names)
+    finally:
+        view.shutdown()
 
 
 def _report_unmapped_plugin_settings(plugin: dict[str, Any], notes: list[str]) -> None:

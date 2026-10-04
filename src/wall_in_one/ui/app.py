@@ -20,7 +20,15 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config, file_io, legacy_migration, paths, runtime_config, runtime_health
+from wall_in_one import (
+    config,
+    dry_run,
+    file_io,
+    legacy_migration,
+    paths,
+    runtime_config,
+    runtime_health,
+)
 from wall_in_one.browse import Browser, source_page_url
 from wall_in_one.control import client, server
 from wall_in_one.control.protocol import Response
@@ -3103,8 +3111,6 @@ class Application(Adw.Application):
                     skipped=library.skipped,
                     still_inventory=library.still_inventory,
                     adopted_stills=library.adopted_stills,
-                    linked_ancestors=library.linked_ancestors,
-                    sidecar_stills=library.sidecar_stills,
                 ),
                 reconcile_workshop=False,
             )
@@ -4582,11 +4588,12 @@ class Application(Adw.Application):
                 item.provider,
             ):
                 raise ValueError(f"{item.path} changed before removal could start")
-            # Every entry naming it goes with it. Checked here, at the head of
-            # the lane, against what is saved by now: a rule, assignment or
-            # default saved after the gesture is seen, and a playlist something
-            # uses never loses the last wallpaper it can play.
-            runtime_config.refuse_library_removal([current], self._session)
+            # Whether a playlist would break is the removal's own dry run, on
+            # the worker before anything is touched (`RemovalPlan.run`,
+            # `wall_in_one.dry_run.removal`): the real scan, cleanup and
+            # compiler, so a rule, assignment or default saved after the
+            # gesture is seen, and so is every still another wallpaper plays
+            # through.
             plan = self._session.prepare_removal_plan(current, trash=trash)
             self._invalidate_runtime_for_pending_removal()
             self._removal_active = True
@@ -4656,79 +4663,64 @@ class Application(Adw.Application):
         self.release()
         self._maybe_finish_requested_quit()
 
-    def _adopt_filtered_library_after_removal(self, result: RemovalResult) -> None:
-        """Make deleted identities disappear before any later actor prepare.
+    def _adopt_removal_library(self, library: Library, *, rescan: bool) -> None:
+        """Install a committed removal's dry-run library as a finished scan is installed.
 
-        A moving wallpaper that stays but showed a deleted file as its still
-        gets the still the next scan would give it (`scan.projected_still`,
-        from memory; none if there is none), so the publication that follows
-        at once never names a file that was just deleted.
+        The same steps as a completed scan (`refresh_library` without a
+        window): adopted, its sources accepted, shown and published, and the
+        runtime's library barrier and the removal's convergence released at
+        its generation. With ``rescan``, the barrier stays for the scan that
+        follows instead.
         """
-        removed = {result.item.path}
-        for cleanup in result.cleanups:
-            removed.update(cleanup.removed_stills)
-        current = self._session.library
-        present = scan.known_stills(current)
-        records = self._session.pairings
-
-        def kept(item: MediaItem) -> MediaItem:
-            if not item.is_moving or item.paired_still not in removed:
-                return item
-            record = records.get(pairings.Identity.of(item))
-            chosen = record.still if record is not None else None
-            return item.with_still(
-                scan.projected_still(
-                    item,
-                    current,
-                    chosen,
-                    self._settings.roots,
-                    removed=removed,
-                    present=present,
-                )
-            )
-
-        filtered = Library(
-            roots=current.roots,
-            items=tuple(kept(item) for item in current.items if item.path not in removed),
-            skipped=current.skipped,
-            still_inventory=tuple(
-                item for item in current.still_inventory if item.path not in removed
-            ),
-            adopted_stills=tuple(
-                pair
-                for pair in current.adopted_stills
-                if pair[0] not in removed and pair[1] not in removed
-            ),
-            linked_ancestors=current.linked_ancestors,
-            sidecar_stills=tuple(
-                pair
-                for pair in current.sidecar_stills
-                if pair[0] not in removed and pair[1] not in removed
-            ),
+        generation = self._library_scan_generation
+        before = self._session.library
+        # Whatever it took away, under any spelling (an alias through a linked
+        # folder too), stays taboo until a later scan finds it again.
+        kept = {item.path for item in (*library.items, *library.still_inventory)}
+        self._removed_item_paths.update(
+            item.path for item in (*before.items, *before.still_inventory) if item.path not in kept
         )
-        self._removed_item_paths.update(removed)
-        self._session.adopt_library(filtered, reconcile_workshop=False)
-        if self._window is not None:
-            self._window.show_library(self._session)
+        self._session.adopt_library(library, reconcile_workshop=False)
+        if rescan:
+            # A partial removal: show and publish what is known now; the scan
+            # that follows owns the barrier and the convergence.
+            if self._window is not None:
+                self._window.show_library(self._session)
+            self._publish_runtime_for_context()
+            return
+        self._removal_convergence_scan_generation = generation
+        self._adopt_runtime_library_scan(generation)
+        self._finish_library_refresh(scan_generation=generation)
+        self._finish_runtime_library_scan(generation)
 
     def _adopt_item_removal(self, result: RemovalResult) -> None:
-        """Install only semantic worker deltas after its lease is released."""
+        """Install only semantic worker deltas after its lease is released.
+
+        A committed removal's library is the one its dry run scanned before
+        anything was touched (`RemovalResult.library_after`): the real post-
+        removal library, adopted as a completed scan is, and published at once,
+        so no generation names a deleted file. Only a removal that committed
+        with a failure (or a refresh asked for meanwhile) scans again.
+        """
         self._removal_active = False
         self._session.adopt_library_cleanups(result.cleanups)
         self._session.adopt_library_fault_repairs(result.repaired_faults)
-        refresh = result.committed or self._refresh_after_removal
+        partial = bool(result.error_message or result.cleanup_failures)
+        library = result.library_after
+        refresh = self._refresh_after_removal or (result.committed and (partial or library is None))
         self._refresh_after_removal = False
         if result.committed:
+            self._removed_item_paths.add(result.item.path)
+            for cleanup in result.cleanups:
+                self._removed_item_paths.update(cleanup.removed_stills)
             self._invalidate_library_scan_after_removal()
             self._finish_runtime_removal_invalidation()
-            self._adopt_filtered_library_after_removal(result)
             self._stills.forget(result.item.path)
             self._begin_removal_convergence()
-            # Publish the immutable filtered Library immediately.  The fresh
-            # scan below remains authoritative for reinstall detection, but a
-            # failed scan can no longer leave Rust naming a deleted source.
-            self._publish_runtime_for_context()
-            # A new detached refresh starts only after the removal worker has
+            if library is not None:
+                self._adopt_removal_library(library, rescan=refresh)
+            # Otherwise the rescan below is the post-removal library. A new
+            # detached refresh starts only after the removal worker has
             # released its operation lease and the actor has adopted every
             # semantic cleanup delta.
         if refresh:
@@ -5412,13 +5404,14 @@ class Application(Adw.Application):
 
         On GTK, after every write queued before it has saved: a default
         playlist that has nothing to play by now (its last wallpaper removed
-        meanwhile, say), and library folders or Wallpaper Engine scanning
-        changed so that a playlist would lose what it plays, are refused here
-        (`runtime_config.settings_refusal`), whichever page or window asked,
-        so the runtime configuration can still be built. A refusal fails the
-        whole batch, as a failed write does: every control goes back to what
-        is saved. Changes arriving after this snapshot stay pending and start
-        their own batch.
+        meanwhile, say) is refused here (`runtime_config.settings_refusal`),
+        whichever page or window asked, so the runtime configuration can still
+        be built. A change to the library folders or Wallpaper Engine scanning
+        is checked on the worker, before ``settings.toml`` is written, by a dry
+        run of the real scan and compiler (`wall_in_one.dry_run.sources`). A
+        refusal fails the whole batch, as a failed write does: every control
+        goes back to what is saved. Changes arriving after this snapshot stay
+        pending and start their own batch.
         """
         with self._settings_authoring_lock:
             generation = self._settings_authoring_generation
@@ -5432,15 +5425,75 @@ class Application(Adw.Application):
         if refusal:
             # Its kind keeps the reply a sentence (`control.server.failed`).
             raise runtime_config.PlaybackGuardError(refusal)
-        return lambda: self._persist_settings_batch(generation, changes)
+        sources = (
+            self._sources_check()
+            if any(key in {"roots", "scan_workshop"} for key, _gen, _value in changes)
+            else None
+        )
+        return lambda: self._persist_settings_batch(generation, changes, sources)
+
+    def _sources_check(self) -> Callable[[config.Settings, config.Settings], None]:
+        """A worker-side dry run of new library sources (`dry_run.sources`), refusing by raising.
+
+        Captured on GTK: the accepted library, copies of the stores, what
+        uses each playlist and the session's scanner; the worker reads the
+        durable stores and scans.
+        """
+        session = self._session
+        library = session.library
+        scanner = session.scanner
+        uses = dry_run.Uses.of(session)
+        pairing_store = session.pairings.worker_copy()
+        playlist_store = session.playlists.worker_copy()
+        favourite_store = session.favourites.worker_copy()
+
+        def check(before: config.Settings, after: config.Settings) -> None:
+            if before.roots != after.roots:
+                what = "that change to the library folders"
+            elif before.scan_workshop != after.scan_workshop:
+                what = (
+                    "turning on Wallpaper Engine scanning"
+                    if after.scan_workshop
+                    else "turning off Wallpaper Engine scanning"
+                )
+            else:
+                return
+            try:
+                verdict = dry_run.sources(
+                    before,
+                    after,
+                    library=library,
+                    pairing_store=pairing_store.worker_copy(rebase=True),
+                    playlist_store=playlist_store.worker_copy(rebase=True),
+                    favourite_store=favourite_store.worker_copy(rebase=True),
+                    uses=uses,
+                    scanner=scanner,
+                )
+            except Exception as error:
+                raise dry_run.CheckFailed(
+                    f"what {what} would leave could not be checked: {error}"
+                ) from error
+            if verdict.refusals:
+                raise runtime_config.PlaybackGuardError(
+                    f"{what} would break playback: {runtime_config.listed(verdict.refusals)}"
+                )
+
+        return check
 
     def _persist_settings_batch(
-        self, generation: int, changes: tuple[tuple[str, int, Any], ...]
+        self,
+        generation: int,
+        changes: tuple[tuple[str, int, Any], ...],
+        sources: Callable[[config.Settings, config.Settings], None] | None = None,
     ) -> _SettingsResult:
         def persist() -> _SettingsResult:
             if not changes:  # pragma: no cover - guarded by the GTK scheduler
                 return _SettingsResult(generation, config.load_strict(), ())
             change_map = {key: value for key, _field_generation, value in changes}
+            if sources is not None:
+                # Before anything is written: the new sources, for pretend.
+                durable = config.load_strict()
+                sources(durable, replace(durable, **change_map).validated())
             wanted_default = change_map.get("active_playlist")
             if (
                 isinstance(wanted_default, str)
@@ -5545,15 +5598,19 @@ class Application(Adw.Application):
     def update_settings(self, **changes: Any) -> config.Settings:
         """Save a settings change now, for the headless service and non-GUI callers.
 
-        The same check as the window's batched writes (`runtime_config.settings_refusal`):
-        a default playlist with nothing to play is refused before anything
-        is written.
+        The same checks as the window's batched writes: a default playlist with
+        nothing to play (`runtime_config.settings_refusal`), and new library
+        sources by a dry run (`dry_run.sources`), before anything is written.
         """
         if self._settings_unknown_keys:
             raise config.SettingsReadOnlyError(self._settings_unknown_keys)
         refusal = runtime_config.settings_refusal(changes, self._session)
         if refusal:
             raise config.ConfigError(refusal)
+        if "roots" in changes or "scan_workshop" in changes:
+            # The same dry run as the batch's, synchronous like everything here.
+            durable = self._settings
+            self._sources_check()(durable, replace(durable, **changes).validated())
         previous = self._settings
         # Explicit legacy-service and non-GUI callers retain a synchronous
         # boundary.  They still rebase semantic fields so a stale process
@@ -6549,15 +6606,16 @@ class _Commands:
 
             def remove_legacy() -> Response:
                 item = server.resolve(session.library, value, verb="remove")
-                try:
-                    runtime_config.refuse_library_removal([item], self._app.session)
-                except runtime_config.PlaybackGuardError as error:
-                    return server.failed(error)
                 # Before the journal intent and the physical step, as a
                 # RemovalPlan does on its worker.
                 blocked = session.removal_cleanup_blocker(item)
                 if blocked is not None:
                     return Response.failure(blocked[1], kind=blocked[0])
+                try:
+                    # The same dry run, synchronous like everything here.
+                    session.check_removal(item)
+                except ValueError as error:
+                    return server.failed(error)
                 try:
                     intent = self._app.prepare_item_removal(item)
                 except removals.RemovalJournalError as error:
@@ -6663,7 +6721,7 @@ class _Commands:
                     "busy", "another wallpaper removal or cleanup refresh is still in progress"
                 )
             item = server.resolve(self._app.session.library, value, verb="remove")
-            runtime_config.refuse_library_removal([item], self._app.session)
+            # Checked on the worker by the plan's own dry run (`RemovalPlan.run`).
             plan = self._app.session.prepare_removal_plan(item, trash=not item.deletable)
             self._app._invalidate_runtime_for_pending_removal()
             self._app._removal_active = True

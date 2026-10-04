@@ -160,7 +160,7 @@ def _allowed_removal_publishes_no_deleted_still(
     dawn: Path,
 ) -> None:
     """Add ``dawn`` to the playlist, remove ``forest``: allowed, and the interim
-    publication (the filtered library, before the rescan) names no deleted file."""
+    publication (the dry run's library, adopted without a rescan) names no deleted file."""
     session = application.session
     still = forest.path
     session.playlists.add(pid, dawn)
@@ -185,7 +185,8 @@ def _allowed_removal_publishes_no_deleted_still(
     assert str(still) not in document, "no runtime.toml names the deleted still"
     assert str(dawn) in document
     kept = session.library.find(video)
-    assert kept is not None and kept.paired_still is None, "the filtered library knows"
+    assert kept is not None and kept.paired_still is None, "the dry run's library knows"
+    assert rescans == [], "a removal that commits in full is not scanned again (round 3)"
     assert _builds(application)
 
 
@@ -237,13 +238,14 @@ def test_folder_guard_misses_a_retained_scenes_automatic_still(tmp_path: Path, m
     assert _builds(application)
     errors: list[str] = []
 
-    assert "\u201cScenes\u201d (used by 1 schedule rule) would have nothing left to play" in (
-        runtime_config.settings_refusal({"roots": (b,)}, session)
-    )
     application.update_settings_async(roots=(b,), on_error=errors.append)
     spin_until(lambda: _lane_idle(application), 5, what="the folder change to settle")
 
     assert config.load_strict().roots == (a, b), "nothing was saved"
-    assert len(errors) == 1 and "\u201cScenes\u201d" in errors[0]
+    assert errors == [
+        "that change to the library folders would break playback: \u201cScenes\u201d (used by "
+        "1 schedule rule) would have nothing left to play: 123 plays through 123.png, which "
+        "would no longer be its still"
+    ]
     assert capture.exists()
     assert _builds(application)

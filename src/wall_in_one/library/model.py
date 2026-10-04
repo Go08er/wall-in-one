@@ -166,16 +166,6 @@ class Library:
     #: deployed application.  These pairs are accepted scan truth: consumers
     #: must not rediscover them later from a filename convention.
     adopted_stills: tuple[tuple[Path, Path], ...] = ()
-    #: Directories above a scanned root that are symbolic links. The walk
-    #: never follows one, so a root above one of these does not reach what is
-    #: under it; recorded by the scan so that is known from memory
-    #: (`scan.would_find`) without reading the disk again.
-    linked_ancestors: frozenset[Path] = frozenset()
-    #: (video, still) for each video whose sidecar named a still that was
-    #: there: the one convention that leaves no other trace in memory, and
-    #: the first one tried (`library.pairing.find_still`). Recorded by the
-    #: scan, so what a change would leave a video is known from memory.
-    sidecar_stills: tuple[tuple[Path, Path], ...] = ()
 
     def __len__(self) -> int:
         return len(self.items)

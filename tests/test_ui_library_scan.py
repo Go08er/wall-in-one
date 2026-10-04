@@ -170,11 +170,14 @@ def test_gui_scan_yields_to_gtk_and_only_the_newest_generation_lands(
     spin_until(lambda: bool(heartbeat))
     assert window.libraries == [], "the blocked worker must not block or mutate GTK"
 
-    application.update_settings(roots=(second,))
+    application.update_settings_async(roots=(second,))
+    # Saved once its dry run has scanned the new folder on the authoring worker
+    # (`dry_run.sources`); adopted, it asks for a new generation.
+    spin_until(lambda: application.settings.roots == (second,))
     release.set()
     spin_until(lambda: window.libraries == [(second,)])
 
-    assert scans == [(first,), (second,)]
+    assert scans == [(first,), (second,), (second,)], "the dry run's, then the refresh's"
     assert worker_threads and all(identifier != gtk_thread for identifier in worker_threads)
     assert session.library.roots == (second,)
     assert window.libraries == [(second,)], "the stale first generation must never land"
@@ -187,6 +190,7 @@ def test_gui_scan_yields_to_gtk_and_only_the_newest_generation_lands(
     application._library_scan_jobs.shutdown(wait=True, cancel_futures=True)
     application._library_scan_jobs = None
     application._shutdown_theme_jobs(wait=True)
+    application._shutdown_authoring_jobs()
     application._window = None
     session.shutdown()
 
@@ -201,21 +205,17 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
     item.path.write_bytes(b"image")
     first_started = threading.Event()
     release_first = threading.Event()
-    second_started = threading.Event()
-    release_second = threading.Event()
+    first_returned = threading.Event()
     scans = 0
 
     def scanner(roots: Sequence[Path] | None) -> Library:
         nonlocal scans
         scans += 1
         resolved = tuple(roots or ())
-        if scans == 1:
-            first_started.set()
-            assert release_first.wait(10)
-            return Library(resolved, (item,))
-        second_started.set()
-        assert release_second.wait(10)
-        return Library(resolved, ())
+        first_started.set()
+        assert release_first.wait(10)
+        first_returned.set()
+        return Library(resolved, (item,))
 
     settings = config.Settings(roots=(root,), scan_workshop=False).validated()
     session = Session(settings, scanner=scanner)
@@ -238,24 +238,21 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
         # without racing the held scanner's own deadline.
         spin_until(lambda: removed == [True], timeout=10)
         assert item.path in application._removed_item_paths
-        # The committed delete synchronously redraws the filtered immutable
-        # Library; this is not the held pre-delete scan landing.
+        # The committed delete installs and redraws the library its dry run
+        # found (round 3); this is not the held pre-delete scan landing.
         assert session.library.items == ()
         assert window.libraries == [(root,)]
         window.libraries.clear()
 
         release_first.set()
-        spin_until(second_started.is_set, timeout=10)
-        assert window.libraries == []
-        assert item.path in application._removed_item_paths
-
-        release_second.set()
-        spin_until(lambda: len(window.libraries) == 1, timeout=10)
+        assert first_returned.wait(10)
+        settle(0.3)
+        assert window.libraries == [], "the pre-delete scan never lands"
+        assert scans == 1, "and nothing scans again: the dry run's library is the new one"
         assert session.library.items == ()
         assert item.path in application._removed_item_paths
     finally:
         release_first.set()
-        release_second.set()
         _stop_scan_application(application, session)
 
 

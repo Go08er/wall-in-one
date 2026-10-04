@@ -18,15 +18,15 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings, scan, state_file
-from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library import pairings, scan, state_file, stills
+from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.session import Session
 from wall_in_one.wallpaper import scenes
@@ -484,9 +484,22 @@ def _palette(policy: pairings.PalettePolicy, generator: str) -> str:
     )
 
 
+class CompileView(Protocol):
+    """What the compiler's entry rule reads of a `Session`: a projected one will do."""
+
+    @property
+    def pairings(self) -> pairings.Store: ...
+
+    @property
+    def library(self) -> Library: ...
+
+    @property
+    def settings(self) -> config.Settings: ...
+
+
 def _resolved_entry(
     item: MediaItem,
-    session: Session,
+    session: CompileView,
     entry_id: str,
 ) -> tuple[str, ...] | None:
     _bounded_text(entry_id, label="playlist entry id", maximum_bytes=MAX_IDENTIFIER_BYTES)
@@ -551,7 +564,7 @@ class Playability:
     reason: str = ""
 
 
-def entry_playability(item: MediaItem | None, session: Session) -> Playability:
+def entry_playability(item: MediaItem | None, session: CompileView) -> Playability:
     """Whether ``item`` (``None``: not in the library) compiles and plays.
 
     The compiler's `_resolved_entry` itself decides, over the session's
@@ -739,6 +752,173 @@ def entries_refusal(
     )
 
 
+def _changed_playlists(
+    session: Session,
+    settings: config.Settings,
+    *,
+    dropped: Collection[Path],
+    losses: Mapping[Path, Playability],
+    uses_of: Callable[[Playlist], Sequence[str]] | None,
+    label_of: Callable[[Playlist], str],
+) -> list[str]:
+    """Each refusal (`change_refusal`) for a change to the library, playlist by playlist.
+
+    ``dropped``: sources whose entries go with them (a file deleted).
+    ``losses``: entries that stay but would give the compiler what is
+    mapped (a wallpaper that leaves the library but keeps its entries, or one
+    that would lose its still). A playlist neither touches is not looked at.
+    """
+    known = library_index(session)
+    found: list[str] = []
+    for playlist in session.playlists.all():
+        kept = [entry for entry in playlist.entries if entry.path not in dropped]
+        if len(kept) == len(playlist.entries) and not any(entry.path in losses for entry in kept):
+            continue
+        after = tuple(
+            losses[entry.path]
+            if entry.path in losses
+            else entry_playability(known.get(entry.path), session)
+            for entry in kept
+        )
+        refusal = change_refusal(
+            label_of(playlist),
+            playlist_playability(playlist.entries, session, known),
+            after,
+            (
+                uses_of(playlist)
+                if uses_of is not None
+                else playlist_uses(playlist.id, settings, session)
+            ),
+        )
+        if refusal:
+            found.append(refusal)
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class _Projected:
+    """A `CompileView` of the library and pairings as a change would leave them."""
+
+    pairings: pairings.Store
+    library: Library
+    settings: config.Settings
+
+
+def still_losses(
+    session: Session,
+    *,
+    removed: Collection[Path] = (),
+    roots: Sequence[Path] | None = None,
+    include_workshop: bool | None = None,
+) -> dict[Path, Playability]:
+    """Retained moving wallpapers that a change would leave without a still, by path.
+
+    A video or scene plays through its representative still, which may be
+    another file: one chosen for it, a capture, a sibling. Deleting that
+    file (``removed``: deleted files, captures included), or no longer
+    scanning the folder a capture is in (``roots``, ``include_workshop``:
+    the library sources after the change), takes it away though the
+    wallpaper itself stays. For each wallpaper that stays and compiles now,
+    the still the next scan would give it is projected from accepted memory
+    (`scan.projected_still`, the scan's own order), and the compiler's own
+    rule (`entry_playability`) decides on a projected view: its pairing
+    with a chosen still that is deleted cleared, as the removal's cleanup
+    clears it, and the library without what leaves. Those that would no
+    longer compile are returned, with what they would give the compiler.
+    A capture still to be made never counts. Nothing on disk is read.
+    """
+    library = session.library
+    settings = session.settings
+    gone = frozenset(removed)
+    after_roots = tuple(settings.roots if roots is None else roots)
+    workshop = (
+        (settings.scan_workshop and bool(settings.roots))
+        if include_workshop is None
+        else include_workshop
+    )
+
+    sources_change = roots is not None or include_workshop is not None
+
+    def stays(item: MediaItem) -> bool:
+        if item.path in gone:
+            return False
+        return not sources_change or scan.would_find(
+            item, after_roots, workshop, library.linked_ancestors
+        )
+
+    present = scan.known_stills(library)
+    candidates = [
+        item
+        for item in library.items
+        if item.is_moving
+        and stays(item)
+        and (
+            sources_change
+            # A deletion changes only what depends on the deleted files.
+            or session.pairings.resolve_accepted(item, library).still in gone
+        )
+    ]
+    if not candidates:
+        return {}
+    records = {
+        key: replace(record, still=None) if record.still in gone else record
+        for key, record in session.pairings.records.items()
+    }
+    view = _Projected(
+        pairings.Store(records),
+        Library(
+            roots=after_roots,
+            items=tuple(item for item in library.items if stays(item)),
+            still_inventory=tuple(
+                item
+                for item in library.still_inventory
+                if item.path not in gone
+                and (
+                    not sources_change
+                    or scan.would_find(item, after_roots, False, library.linked_ancestors)
+                )
+            ),
+            adopted_stills=library.adopted_stills,
+            linked_ancestors=library.linked_ancestors,
+            sidecar_stills=library.sidecar_stills,
+        ),
+        settings,
+    )
+    losses: dict[Path, Playability] = {}
+    for item in candidates:
+        if not entry_playability(item, session).compiles:
+            continue  # already lost: the change takes nothing away
+        record = records.get(pairings.Identity.of(item).key)
+        projected = scan.projected_still(
+            item,
+            library,
+            record.still if record is not None else None,
+            after_roots,
+            removed=gone,
+            present=present,
+        )
+        after = entry_playability(item.with_still(projected), view)
+        if not after.compiles:
+            losses[item.path] = Playability(
+                False, False, after.reason or "it would have no still for playback to show"
+            )
+    return losses
+
+
+def removal_set(sources: Iterable[Path], session: Session) -> frozenset[Path]:
+    """The files deleting ``sources`` deletes: each one, and a moving one's own captures."""
+    known = library_index(session)
+    gone = set(sources)
+    for source in tuple(gone):
+        item = known.get(source)
+        if item is not None and item.is_moving:
+            for root in session.settings.roots:
+                capture = stills.automatic_destination(item, root)
+                if capture is not None:
+                    gone.add(capture)
+    return frozenset(gone)
+
+
 def emptied_by_removing(
     sources: Iterable[Path],
     settings: config.Settings,
@@ -749,33 +929,24 @@ def emptied_by_removing(
 ) -> list[str]:
     """Each refusal (`change_refusal`) that taking ``sources`` out of the library earns.
 
-    For wallpapers leaving the library: every entry naming one goes with it.
-    Checked against what is saved now, so at the head of the authoring lane
-    it is the guarantee; earlier it is only advice. ``uses_of`` and
-    ``label_of`` put a playlist's uses and name in a page's own words (a
-    page may count a default it asked for and that has not saved yet);
-    `playlist_uses` and its quoted name otherwise.
+    For wallpapers deleted: every entry naming one goes with it, and a
+    video or scene that stays but played through one of them as its still
+    (chosen, sidecar, capture or sibling) loses it unless the scan would find
+    another (`still_losses`). Checked against what is saved now, so at the
+    head of the authoring lane it is the guarantee; earlier it is only
+    advice. ``uses_of`` and ``label_of`` put a playlist's uses and name in a
+    page's own words (a page may count a default it asked for and that has
+    not saved yet); `playlist_uses` and its quoted name otherwise.
     """
-    leaving = set(sources)
-    known = library_index(session)
-    found: list[str] = []
-    for playlist in session.playlists.all():
-        kept = [entry for entry in playlist.entries if entry.path not in leaving]
-        if len(kept) == len(playlist.entries):
-            continue
-        refusal = change_refusal(
-            label_of(playlist),
-            playlist_playability(playlist.entries, session, known),
-            playlist_playability(kept, session, known),
-            (
-                uses_of(playlist)
-                if uses_of is not None
-                else playlist_uses(playlist.id, settings, session)
-            ),
-        )
-        if refusal:
-            found.append(refusal)
-    return found
+    leaving = frozenset(sources)
+    return _changed_playlists(
+        session,
+        settings,
+        dropped=leaving,
+        losses=still_losses(session, removed=removal_set(leaving, session)),
+        uses_of=uses_of,
+        label_of=label_of,
+    )
 
 
 def pairing_refusal(
@@ -921,19 +1092,32 @@ def sources_refusal(after: config.Settings, session: Session) -> list[str]:
     """Each refusal (`change_refusal`) that scanning ``after``'s library sources earns.
 
     A library folder removed, or Wallpaper Engine scanning turned off, takes
-    wallpapers out of the library, and every playlist entry naming one then
-    names nothing the compiler can use. Which ones leave is worked out from
-    the accepted library by the scan's own rules (`scan.would_find`), so
-    nothing on disk is read; uses are counted as ``after`` has them.
+    wallpapers out of the library. Their entries stay in their playlists,
+    naming nothing the compiler can use (a missing drive isn't a deletion).
+    And a video or scene that stays can lose its still: a capture under a
+    folder no longer scanned isn't found (`still_losses`), while a chosen
+    still is, wherever it is. Worked out from the accepted library by the
+    scan's own rules (`scan.would_find`, `scan.projected_still`), so nothing
+    on disk is read; uses are counted as ``after`` has them.
     """
     include_workshop = after.scan_workshop and bool(after.roots)
     library = session.library
-    leaving = [
-        item.path
+    losses: dict[Path, Playability] = {
+        item.path: Playability(False, False, "it would no longer be in the library")
         for item in library.items
         if not scan.would_find(item, after.roots, include_workshop, library.linked_ancestors)
-    ]
-    return emptied_by_removing(leaving, after, session) if leaving else []
+    }
+    losses.update(still_losses(session, roots=after.roots, include_workshop=include_workshop))
+    if not losses:
+        return []
+    return _changed_playlists(
+        session,
+        after,
+        dropped=(),
+        losses=losses,
+        uses_of=None,
+        label_of=_quoted_name,
+    )
 
 
 #: The settings that decide which playlist is the default and what is in the library.

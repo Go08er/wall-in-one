@@ -76,7 +76,7 @@ LEGACY_AUTOMATIC_KIND: Final = "automatic-still"
 _STILL_EXTENSION_ORDER: Final[tuple[str, ...]] = (".png", ".webp", ".avif", ".jpg", ".jpeg")
 
 
-def _still_extensions() -> tuple[str, ...]:
+def still_extensions() -> tuple[str, ...]:
     """Image extensions, preferred ones first, and never `.gif`.
 
     A gif pairing a video would itself be played as a video, which defeats the
@@ -177,7 +177,7 @@ def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
     """Look for a generated still under a managed `Automatic Stills` directory."""
     for root in roots:
         directory = still_directory(root)
-        for extension in _still_extensions():
+        for extension in still_extensions():
             candidate = directory / (automatic_still_stem(video) + extension)
             if candidate.is_file():
                 return candidate
@@ -187,7 +187,7 @@ def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
 def _sibling_still(video: Path) -> Path | None:
     """`foo.mp4` -> `foo-still.png`, else `foo.png`."""
     for stem in (video.stem + STILL_NAME_SUFFIX, video.stem):
-        for extension in _still_extensions():
+        for extension in still_extensions():
             candidate = video.with_name(stem + extension)
             if candidate != video and candidate.is_file():
                 return candidate
@@ -201,7 +201,7 @@ def preview_beside(video: Path) -> Path | None:
     which wants a wallpaper. See `PREVIEW_STEM`.
     """
     directory = video.parent
-    for extension in (*_still_extensions(), ".gif", ".mp4", ".webm"):
+    for extension in (*still_extensions(), ".gif", ".mp4", ".webm"):
         candidate = directory / f"{PREVIEW_STEM}{extension}"
         if candidate != video and candidate.is_file():
             return candidate
@@ -216,7 +216,7 @@ def scene_still(scene: str, roots: Iterable[Path] = ()) -> Path | None:
     """
     for root in roots:
         directory = still_directory(root)
-        for extension in _still_extensions():
+        for extension in still_extensions():
             candidate = directory / f"{scene}{extension}"
             if candidate.is_file():
                 return candidate

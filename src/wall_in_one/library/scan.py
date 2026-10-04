@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -370,6 +370,91 @@ def would_find(
     return include_workshop and item.provider == WORKSHOP_PROVIDER
 
 
+def known_stills(library: Library) -> frozenset[Path]:
+    """Every still file the accepted library says was there at its scan.
+
+    Its still items and the still inventory (every still the walk found,
+    captures included), every moving item's representative, and the
+    sidecar and adopted targets the scan recorded.
+    """
+    found = {item.path for item in library.items if item.kind is Kind.STILL}
+    found.update(item.path for item in library.still_inventory)
+    found.update(item.paired_still for item in library.items if item.paired_still is not None)
+    found.update(target for _video, target in library.sidecar_stills)
+    found.update(capture for _video, capture in library.adopted_stills)
+    return frozenset(found)
+
+
+def projected_still(
+    item: MediaItem,
+    library: Library,
+    chosen: Path | None,
+    roots: Sequence[Path],
+    *,
+    removed: Collection[Path] = frozenset(),
+    present: frozenset[Path] | None = None,
+) -> Path | None:
+    """The representative still the next scan would give moving ``item``, from memory.
+
+    In the scan's own order (`pairings.resolve`, `pairings.synthesize`,
+    `pairing.find_still`): ``chosen`` (its pairing's chosen still, as it will
+    be after the change) if that is there; else, for a video, the still its
+    sidecar names, a capture under ``roots`` (the first root holding one),
+    its adopted capture, then a sibling (``foo-still.*``, then ``foo.*``);
+    for a scene, its capture under ``roots``. A file is "there" when the
+    accepted library says it was (`known_stills`, or ``present``) and it is
+    not in ``removed``. A chosen still is found wherever it is, roots or not,
+    as the scan finds it; a capture only under ``roots``. A capture under a
+    root the last scan didn't walk isn't known, so a capture still to be made
+    never counts. Nothing on disk is read.
+    """
+    gone = frozenset(removed)
+    known = known_stills(library) if present is None else present
+
+    def there(path: Path) -> bool:
+        return path not in gone and path in known
+
+    if (
+        chosen is not None
+        and (chosen == item.paired_still or chosen in known)
+        and chosen not in gone
+    ):
+        return chosen
+    extensions = pairing.still_extensions()
+    if item.kind is Kind.SCENE:
+        for root in roots:
+            for extension in extensions:
+                capture = pairing.still_directory(root) / f"{item.scene}{extension}"
+                if item.scene and there(capture):
+                    return capture
+        return None
+    if item.kind is not Kind.VIDEO:
+        return item.path
+    sidecar = dict(library.sidecar_stills).get(item.path)
+    if sidecar is not None and sidecar not in gone:
+        return sidecar
+    stem = pairing.automatic_still_stem(item.path)
+    for root in roots:
+        for extension in extensions:
+            capture = pairing.still_directory(root) / f"{stem}{extension}"
+            if there(capture):
+                return capture
+    adopted_still = dict(library.adopted_stills).get(item.path)
+    if (
+        adopted_still is not None
+        and there(adopted_still)
+        and any(adopted_still.is_relative_to(root) for root in roots)
+    ):
+        # Approximate: adoption also needs its own root among the roots.
+        return adopted_still
+    for name in (item.path.stem + pairing.STILL_NAME_SUFFIX, item.path.stem):
+        for extension in extensions:
+            sibling = item.path.with_name(name + extension)
+            if sibling != item.path and there(sibling):
+                return sibling
+    return None
+
+
 def workshop_items(
     steam_roots: Sequence[Path] | None = None,
     *,
@@ -582,6 +667,12 @@ def scan(
     )
     if cancelled is not None and cancelled():
         raise ScanCancelledError
+    sidecars: list[tuple[Path, Path]] = []
+    for item in items:
+        # What `pairing.find_still` reads first; kept so a change can be
+        # projected from memory (`projected_still`).
+        if item.kind is Kind.VIDEO and (target := pairing.read_sidecar(item.path)) is not None:
+            sidecars.append((item.path, target))
     paired = pairings.apply(
         items,
         resolved_roots,
@@ -608,4 +699,5 @@ def scan(
         still_inventory=still_inventory,
         adopted_stills=adopted_pairs,
         linked_ancestors=frozenset(linked),
+        sidecar_stills=tuple(sidecars),
     )

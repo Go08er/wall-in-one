@@ -3102,7 +3102,9 @@ class Application(Adw.Application):
                     ),
                     skipped=library.skipped,
                     still_inventory=library.still_inventory,
+                    adopted_stills=library.adopted_stills,
                     linked_ancestors=library.linked_ancestors,
+                    sidecar_stills=library.sidecar_stills,
                 ),
                 reconcile_workshop=False,
             )
@@ -4655,19 +4657,54 @@ class Application(Adw.Application):
         self._maybe_finish_requested_quit()
 
     def _adopt_filtered_library_after_removal(self, result: RemovalResult) -> None:
-        """Make deleted identities disappear before any later actor prepare."""
+        """Make deleted identities disappear before any later actor prepare.
+
+        A moving wallpaper that stays but showed a deleted file as its still
+        gets the still the next scan would give it (`scan.projected_still`,
+        from memory; none if there is none), so the publication that follows
+        at once never names a file that was just deleted.
+        """
         removed = {result.item.path}
         for cleanup in result.cleanups:
             removed.update(cleanup.removed_stills)
         current = self._session.library
+        present = scan.known_stills(current)
+        records = self._session.pairings
+
+        def kept(item: MediaItem) -> MediaItem:
+            if not item.is_moving or item.paired_still not in removed:
+                return item
+            record = records.get(pairings.Identity.of(item))
+            chosen = record.still if record is not None else None
+            return item.with_still(
+                scan.projected_still(
+                    item,
+                    current,
+                    chosen,
+                    self._settings.roots,
+                    removed=removed,
+                    present=present,
+                )
+            )
+
         filtered = Library(
             roots=current.roots,
-            items=tuple(item for item in current.items if item.path not in removed),
+            items=tuple(kept(item) for item in current.items if item.path not in removed),
             skipped=current.skipped,
             still_inventory=tuple(
                 item for item in current.still_inventory if item.path not in removed
             ),
+            adopted_stills=tuple(
+                pair
+                for pair in current.adopted_stills
+                if pair[0] not in removed and pair[1] not in removed
+            ),
             linked_ancestors=current.linked_ancestors,
+            sidecar_stills=tuple(
+                pair
+                for pair in current.sidecar_stills
+                if pair[0] not in removed and pair[1] not in removed
+            ),
         )
         self._removed_item_paths.update(removed)
         self._session.adopt_library(filtered, reconcile_workshop=False)

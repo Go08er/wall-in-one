@@ -171,6 +171,11 @@ class Library:
     #: under it; recorded by the scan so that is known from memory
     #: (`scan.would_find`) without reading the disk again.
     linked_ancestors: frozenset[Path] = frozenset()
+    #: (video, still) for each video whose sidecar named a still that was
+    #: there: the one convention that leaves no other trace in memory, and
+    #: the first one tried (`library.pairing.find_still`). Recorded by the
+    #: scan, so what a change would leave a video is known from memory.
+    sidecar_stills: tuple[tuple[Path, Path], ...] = ()
 
     def __len__(self) -> int:
         return len(self.items)

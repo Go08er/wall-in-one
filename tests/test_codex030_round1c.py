@@ -191,8 +191,12 @@ def test_turning_off_workshop_scanning_is_refused_when_a_used_playlist_needs_it(
     refusal = runtime_config.settings_refusal({"scan_workshop": False}, session)
     assert refusal.startswith("turning off Wallpaper Engine scanning would take wallpapers")
     assert "\u201cScenes\u201d (used by the default) would have nothing left to play" in refusal
-    # Asked together with a new default elsewhere, the uses are counted as they would be.
-    assert (
-        runtime_config.settings_refusal({"scan_workshop": False, "active_playlist": ""}, session)
-        == ""
+    # Asked together with a new default elsewhere, the uses are counted as they would be:
+    # unused then, but its entries stay (a source out of reach isn't a deletion), naming
+    # nothing the compiler can use, which would stop every publication.
+    assert runtime_config.settings_refusal(
+        {"scan_workshop": False, "active_playlist": ""}, session
+    ) == (
+        "turning off Wallpaper Engine scanning would take wallpapers out of the library: "
+        "\u201cScenes\u201d would hold only wallpapers playback can\u2019t use"
     )

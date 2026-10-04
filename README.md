@@ -585,7 +585,7 @@ choice for that start. With neither, the app is classic.
 
     MotionBGS browses latest, 4K, HD or a genre, and its quality picks the file
     a download takes.
-  - **Results** come 40 to a page with Previous and Next.
+  - Results come 40 to a page with Previous and Next.
   - **Downloads** go into your first library folder, one at a time, with
     "Downloading 2 of 5" and no pretend progress or cancel.
     - "Download & apply" and "Show in Library" wait for the library rescan

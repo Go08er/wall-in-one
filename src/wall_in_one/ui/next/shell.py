@@ -5,7 +5,8 @@ pages, the player bar and the frosted backdrop.
 it over its own `AppState` and hands it the pages to show. The app passes the
 Library and "not in the new interface yet" placeholders; the prototype passes
 its own pages for the rest. Subclasses add menu sections
-(`extra_menu_sections`) and wrap the body (`wrap_body`).
+(`extra_menu_sections`), wrap the body (`wrap_body`) and add bars under the
+page side's header (`content_view`).
 
 Glass: the window carries ``wio-glass`` in the translucent and frosted styles,
 which is what the app stylesheet's glass layers are scoped to
@@ -95,7 +96,8 @@ class ShellWindow(Adw.ApplicationWindow):
             page = factory(state) if factory is not None else Placeholder(state, name, title, icon)
             self.pages[name] = page
             self.stack.add_named(page.widget, name)
-        content_view = Adw.ToolbarView()
+        # The page side's bars: a subclass may add its own under these.
+        self.content_view = content_view = Adw.ToolbarView()
         content_view.add_top_bar(self.header)
         content_view.add_top_bar(self.notice)
         content_view.add_top_bar(self.banner)

@@ -1,10 +1,14 @@
-"""The predecessor decision is the first GUI question and never overwrites silently."""
+"""The predecessor decision is the first GUI question and never overwrites silently.
+
+The questions are the application's, asked the same way in both interfaces: as
+dialogs over the classic window and on the new window's welcome screen, whose
+buttons answer them. Tests about the question run against both.
+"""
 
 from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -16,6 +20,13 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tests.first_run_windows import (  # noqa: E402
+    UIS,
+    Ui,
+    application_with_window,
+    capture_questions,
+    respond,
+)
 from tests.gtk_helpers import spin_until  # noqa: E402
 from wall_in_one import cli, config, deployed_upgrade, legacy_migration, paths  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
@@ -24,7 +35,7 @@ from wall_in_one.ui.app import (  # noqa: E402
     _Commands,
     _PlaylistReferenceRepairResult,
 )
-from wall_in_one.ui.window import MainWindow  # noqa: E402
+from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -36,11 +47,8 @@ def toolkit() -> None:
     Adw.init()
 
 
-def _application() -> tuple[Application, Gtk.Window]:
-    application = Application()
-    parent = Gtk.Window()
-    application._window = cast(MainWindow, parent)
-    return application, parent
+def _application(ui: Ui = "classic") -> tuple[Application, Gtk.Window]:
+    return application_with_window(ui)
 
 
 def _close(application: Application, parent: Gtk.Window) -> None:
@@ -54,22 +62,18 @@ def _close(application: Application, parent: Gtk.Window) -> None:
 
 
 def _capture_dialog(monkeypatch: pytest.MonkeyPatch) -> list[Adw.AlertDialog]:
-    shown: list[Adw.AlertDialog] = []
-    monkeypatch.setattr(
-        Adw.AlertDialog,
-        "present",
-        lambda dialog, _parent: shown.append(dialog),
-    )
-    return shown
+    return capture_questions(monkeypatch)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_fresh_service_preparation_does_not_block_the_library_folder_prompt(
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
     assert cli.main(["--service-startup-prepare"]) == cli.EXIT_CONFIG
     assert cli._run_graphical_startup_upgrade(require_legacy_safe=False) is None
     assert not legacy_migration.probe().needs_decision
-    application, parent = _application()
+    application, parent = _application(ui)
     shown = _capture_dialog(monkeypatch)
     monkeypatch.setattr(application, "reload_palette", lambda: None)
     # The absent-data probe and authoring gate have dedicated worker tests.
@@ -84,15 +88,18 @@ def test_fresh_service_preparation_does_not_block_the_library_folder_prompt(
         assert not paths.settings_path().exists()
         assert not paths.runtime_config_path().exists()
         assert deployed_upgrade.probe().status == "absent"
-        shown[0].emit("response", "later")
+        respond(parent, shown[0], "later")
     finally:
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_import_safely_is_offered_first_and_reopens_every_imported_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     source = tmp_path / "legacy"
     found = legacy_migration.Probe(
         "ready",
@@ -147,7 +154,7 @@ def test_import_safely_is_offered_first_and_reopens_every_imported_store(
         assert dialog.get_response_label("fresh") == "Start fresh"
         assert dialog.get_response_label("later") == "Not now"
 
-        dialog.emit("response", "import")
+        respond(parent, dialog, "import")
         assert shown[-1].get_heading() == "Importing older data"
         assert not shown[-1].get_can_close()
         spin_until(lambda: bool(reopened))
@@ -162,10 +169,13 @@ def test_import_safely_is_offered_first_and_reopens_every_imported_store(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_not_now_is_process_local_and_does_not_continue_into_empty_root_setup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=5)
     shown = _capture_dialog(monkeypatch)
     postponed: list[Path] = []
@@ -190,7 +200,7 @@ def test_not_now_is_process_local_and_does_not_continue_into_empty_root_setup(
     try:
         assert application._prompt_for_legacy_migration()
         spin_until(lambda: len(shown) == 2)
-        shown[-1].emit("response", "later")
+        respond(parent, shown[-1], "later")
         spin_until(lambda: application._legacy_migration_deferred)
 
         assert postponed == [found.source]
@@ -200,14 +210,25 @@ def test_not_now_is_process_local_and_does_not_continue_into_empty_root_setup(
         blocked = _Commands(application).authoring_gate()
         assert blocked is not None
         assert blocked.kind == "migration-decision-required"
+        if isinstance(parent, NextWindow):
+            # The welcome screen steps aside; a notice says changes wait, and asks again.
+            spin_until(lambda: not parent.welcome_shown)
+            notice = parent.state.banner()
+            assert notice is not None and notice.action == "older-data"
+            assert "waiting for your choice" in notice.title
+            assert "can\u2019t be saved" in notice.title
+            assert parent.banner.get_revealed() and parent.banner.get_button_label() == "Review…"
     finally:
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_start_fresh_persists_the_exact_source_decision_then_continues(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=4)
     shown = _capture_dialog(monkeypatch)
     declined: list[Path] = []
@@ -232,7 +253,7 @@ def test_start_fresh_persists_the_exact_source_decision_then_continues(
     try:
         assert application._prompt_for_legacy_migration()
         spin_until(lambda: len(shown) == 2)
-        shown[-1].emit("response", "fresh")
+        respond(parent, shown[-1], "fresh")
         spin_until(lambda: bool(continued))
 
         assert declined == [found.source]
@@ -242,10 +263,13 @@ def test_start_fresh_persists_the_exact_source_decision_then_continues(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_existing_current_authoring_shows_conflicts_and_never_offers_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     conflict = tmp_path / "config" / "settings.toml"
     found = legacy_migration.Probe(
         "conflict",
@@ -267,11 +291,13 @@ def test_existing_current_authoring_shows_conflicts_and_never_offers_import(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_interrupted_import_only_offers_resume_and_not_now(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe(
         "in-progress",
         "an interrupted import can resume",
@@ -292,11 +318,13 @@ def test_interrupted_import_only_offers_resume_and_not_now(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_blocked_probe_keeps_gtk_responsive_before_any_first_run_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=5)
     started = threading.Event()
     release = threading.Event()
@@ -397,10 +425,12 @@ def test_control_gate_stays_truthfully_busy_through_absent_probe_and_repair(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_probe_failure_changes_control_gate_from_checking_to_decision_required(
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     shown = _capture_dialog(monkeypatch)
     reports: list[str] = []
 
@@ -444,11 +474,13 @@ def test_failed_current_authoring_repair_is_not_mislabeled_as_a_migration_decisi
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_blocked_import_keeps_gtk_responsive_and_duplicate_response_is_ignored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=5)
     outcome = legacy_migration.Outcome(True, "imported", tmp_path / "report.md")
     settings = config.Settings(roots=(tmp_path / "wallpapers",))
@@ -480,8 +512,14 @@ def test_blocked_import_keeps_gtk_responsive_and_duplicate_response_is_ignored(
         assert application._prompt_for_legacy_migration()
         spin_until(lambda: len(shown) == 2)
         choice = shown[-1]
-        choice.emit("response", "import")
-        choice.emit("response", "import")
+        if isinstance(parent, NextWindow):
+            spin_until(lambda: parent.welcome.question is choice)
+            button = parent.welcome.buttons["import"]
+            button.emit("clicked")
+            button.emit("clicked")  # a double click: the question has moved on
+        else:
+            choice.emit("response", "import")
+            choice.emit("response", "import")
         assert started.wait(1)
         processing = _Commands(application).authoring_gate()
         assert processing == Response.failure(
@@ -511,11 +549,13 @@ def test_blocked_import_keeps_gtk_responsive_and_duplicate_response_is_ignored(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_closed_window_discards_a_late_import_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=5)
     started = threading.Event()
     release = threading.Event()
@@ -541,7 +581,7 @@ def test_closed_window_discards_a_late_import_result(
     try:
         assert application._prompt_for_legacy_migration()
         spin_until(lambda: len(shown) == 2)
-        shown[-1].emit("response", "import")
+        respond(parent, shown[-1], "import")
         assert started.wait(1)
         assert not application._on_close_request(parent)
         release.set()
@@ -555,11 +595,13 @@ def test_closed_window_discards_a_late_import_result(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_shutdown_invalidates_a_running_import_delivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=5)
     started = threading.Event()
     release = threading.Event()
@@ -595,7 +637,7 @@ def test_shutdown_invalidates_a_running_import_delivery(
     try:
         assert application._prompt_for_legacy_migration()
         spin_until(lambda: len(shown) == 2)
-        shown[-1].emit("response", "import")
+        respond(parent, shown[-1], "import")
         assert started.wait(1)
 
         application._shutdown_legacy_migration_jobs(wait=False)
@@ -612,11 +654,13 @@ def test_shutdown_invalidates_a_running_import_delivery(
         _close(application, parent)
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_import_failure_reopens_the_safe_choice_without_continuing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    ui: Ui,
 ) -> None:
-    application, parent = _application()
+    application, parent = _application(ui)
     found = legacy_migration.Probe("ready", "ready", tmp_path / "legacy", schema=5)
     shown = _capture_dialog(monkeypatch)
     reports: list[str] = []
@@ -633,7 +677,7 @@ def test_import_failure_reopens_the_safe_choice_without_continuing(
     try:
         assert application._prompt_for_legacy_migration()
         spin_until(lambda: len(shown) == 2)
-        shown[-1].emit("response", "import")
+        respond(parent, shown[-1], "import")
         spin_until(lambda: len(shown) == 4)
 
         retry = shown[-1]

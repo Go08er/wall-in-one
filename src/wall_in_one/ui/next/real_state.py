@@ -346,6 +346,10 @@ class RealAppState(GObject.Object):
         self._view = backend.status_model.view
         self._player = Player()
         self._banner: Banner | None = None
+        #: A condition the window raises itself (first run, the authoring
+        #: gate), and what its button does; it outranks the runtime's.
+        self._window_banner: Banner | None = None
+        self._window_banner_activated: Callable[[str], None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
         self._unfollow_prefs: Callable[[], None] | None = None
         self._controls = RuntimeControls(backend, self, self._authoring_blocked)
@@ -787,10 +791,30 @@ class RealAppState(GObject.Object):
 
     # -- persistent conditions ------------------------------------------------------
     def banner(self) -> Banner | None:
+        if self._window_banner is not None:
+            return self._window_banner
         return self._banner
 
     def banner_activated(self, action: str) -> None:
-        """No banner here has a button yet."""
+        """Only the window's own banners have a button; the runtime's say what is so."""
+        banner, activated = self._window_banner, self._window_banner_activated
+        if banner is not None and activated is not None and action == banner.action:
+            activated(action)
+
+    def set_window_banner(
+        self, banner: Banner | None, activated: Callable[[str], None] | None = None
+    ) -> None:
+        """Show ``banner`` above the runtime's (None: the runtime's again).
+
+        For what the window knows and the runtime doesn't: a first-run
+        question put off, or changes paused by the authoring gate.
+        ``activated`` is called with the banner's action when its button is
+        pressed.
+        """
+        self._window_banner_activated = activated
+        if banner != self._window_banner:
+            self._window_banner = banner
+            self.emit_changed("system")
 
     def _newer_files(self) -> tuple[str, ...]:
         return self._session.newer_version_files()

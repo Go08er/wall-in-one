@@ -55,7 +55,7 @@ from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, S
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.tidy_section import TidyLane
 from wall_in_one.ui.window import ACCELERATORS, MainWindow
-from wall_in_one.ui.window_services import DEFAULT_UI, UiKind, WindowServices
+from wall_in_one.ui.window_services import DEFAULT_UI, FirstRunHost, UiKind, WindowServices
 from wall_in_one.wallpaper import outputs
 from wall_in_one.wallpaper.applier import Applied, ApplyError
 
@@ -720,6 +720,7 @@ class Application(Adw.Application):
         if result.failures:
             self._authoring_repair_started = False
             self._authoring_gate_state = "repair"
+            self._first_run_changed()
             return Response.failure(
                 "current authoring has dangling playlist references which could not be "
                 "repaired; writes remain paused: " + "; ".join(result.failures[:3]),
@@ -738,6 +739,7 @@ class Application(Adw.Application):
         if self._activation_waiting_for_repair and self._window is not None:
             self._activation_waiting_for_repair = False
             self._continue_first_activation()
+        self._first_run_changed()
         return Response.success("authoring references are consistent")
 
     def _start_windowless_migration_probe(self) -> None:
@@ -767,7 +769,7 @@ class Application(Adw.Application):
         future.add_done_callback(
             # Ends the progress spinner; plain idle (200) starves below GTK's redraw (120).
             lambda done: GLib.idle_add(  # type: ignore[call-arg]
-                self._finish_legacy_migration_job, request, done, priority=GLib.PRIORITY_DEFAULT
+                self._deliver_legacy_migration_job, request, done, priority=GLib.PRIORITY_DEFAULT
             )
         )
 
@@ -984,7 +986,7 @@ class Application(Adw.Application):
         dialog.set_close_response("later")
         dialog.connect("response", self._on_legacy_migration_response, found)
         self._legacy_migration_prompt = dialog
-        dialog.present(self._dialog_parent())
+        self._ask(dialog)
 
     def _show_legacy_migration_progress(self, heading: str, body: str) -> None:
         """Show a modal progress state which cannot start another operation."""
@@ -998,13 +1000,14 @@ class Application(Adw.Application):
         dialog.set_response_enabled("working", False)
         dialog.set_can_close(False)
         self._legacy_migration_prompt = dialog
-        dialog.present(self._dialog_parent())
+        self._ask(dialog)
 
     def _close_legacy_migration_dialog(self) -> None:
         dialog = self._legacy_migration_prompt
         self._legacy_migration_prompt = None
         if dialog is not None:
             dialog.force_close()
+            self._first_run_changed()
 
     def _legacy_migration_pool(self) -> ThreadPoolExecutor:
         """Return the sole ordered worker used by the one-time migration UI."""
@@ -1050,7 +1053,7 @@ class Application(Adw.Application):
         future.add_done_callback(
             # Ends the progress spinner; plain idle (200) starves below GTK's redraw (120).
             lambda done: GLib.idle_add(  # type: ignore[call-arg]
-                self._finish_legacy_migration_job, request, done, priority=GLib.PRIORITY_DEFAULT
+                self._deliver_legacy_migration_job, request, done, priority=GLib.PRIORITY_DEFAULT
             )
         )
         return True
@@ -1079,6 +1082,17 @@ class Application(Adw.Application):
         except Exception as error:  # pragma: no cover - defensive worker boundary
             detail = str(error) or error.__class__.__name__
             return _LegacyMigrationResult(request, error=f"migration worker failed: {detail}")
+
+    def _deliver_legacy_migration_job(
+        self,
+        request: _LegacyMigrationRequest,
+        future: Future[_LegacyMigrationResult],
+    ) -> bool:
+        """`_finish_legacy_migration_job`, then tell a window that asks in place."""
+        try:
+            return self._finish_legacy_migration_job(request, future)
+        finally:
+            self._first_run_changed()
 
     def _finish_legacy_migration_job(
         self,
@@ -1222,7 +1236,7 @@ class Application(Adw.Application):
         dialog.set_close_response("later")
         dialog.connect("response", self._on_legacy_probe_failure_response)
         self._legacy_migration_prompt = dialog
-        dialog.present(self._dialog_parent())
+        self._ask(dialog)
 
     def _on_legacy_probe_failure_response(
         self,
@@ -1235,6 +1249,7 @@ class Application(Adw.Application):
         if response == "later":
             self._legacy_migration_deferred = True
             self.window_report("Older-data check postponed; the choice will return next launch")
+            self._first_run_changed()
             return
         if response == "retry":
             self._legacy_migration_prompted = False
@@ -1339,7 +1354,7 @@ class Application(Adw.Application):
         dialog.set_close_response("later")
         dialog.connect("response", self._on_library_root_response, suggested)
         self._library_root_prompt = dialog
-        dialog.present(self._dialog_parent())
+        self._ask(dialog)
 
     def _on_library_root_response(
         self,
@@ -1385,6 +1400,113 @@ class Application(Adw.Application):
                 f"Library folder was not saved; nothing changed: {error}"
             ),
         )
+
+    # -- first run, as a window shows it ----------------------------------
+
+    def _ask(self, dialog: Adw.AlertDialog) -> None:
+        """Put one first-run question to the user.
+
+        A window that asks in place (`FirstRunHost`, the new interface's
+        welcome screen) is handed the dialog and answers through its
+        ``response`` signal; any other window gets it presented, as always.
+        """
+        window: object = self._window
+        if isinstance(window, FirstRunHost):
+            window.ask(dialog)
+            return
+        dialog.present(self._dialog_parent())
+
+    def _first_run_changed(self) -> None:
+        """Tell a window that asks in place that a question or the gate moved."""
+        window: object = self._window
+        if isinstance(window, FirstRunHost):
+            window.first_run_changed()
+
+    @property
+    def first_run_question(self) -> Adw.AlertDialog | None:
+        """The first-run question open now (`_ask`): older data, or the library folder."""
+        if self._legacy_migration_prompt is not None:
+            return self._legacy_migration_prompt
+        return self._library_root_prompt
+
+    @property
+    def first_run_pending(self) -> bool:
+        """The first window's setup goes on without an answer: the older-data
+        check, or the repair that follows it, is still running for this window.
+
+        A welcome screen that is up stays up through these, rather than
+        flashing the window between one question and the next.
+        """
+        if self._window is None or self._legacy_migration_deferred:
+            return False
+        return self._legacy_migration_future is not None or (
+            self._activation_waiting_for_repair and self._authoring_repair_started
+        )
+
+    @property
+    def first_activation_done(self) -> bool:
+        """The process's first window has passed the gate and loaded (or asked for) a library."""
+        return self._first_activation_done
+
+    @property
+    def authoring_gate(self) -> str:
+        """``open``, or why changes can't be saved yet: ``checking``,
+        ``decision`` (older data awaits a choice), ``probe-failed`` or ``repair``."""
+        if self._authoring_migration_ready:
+            return "open"
+        return self._authoring_gate_state
+
+    def reconsider_older_data(self) -> bool:
+        """Check for older data and ask about it again, now rather than next launch.
+
+        For a window's notice while the decision is outstanding ("Not now", or
+        a check that failed). It is the probe failure's own Try again: a fresh
+        check off GTK, then the same question. False when there is nothing to
+        reconsider now.
+        """
+        if (
+            self._window is None
+            or self._authoring_migration_ready
+            or self._authoring_gate_state not in ("decision", "probe-failed")
+            or self._legacy_migration_future is not None
+            or self._legacy_migration_prompt is not None
+        ):
+            return False
+        self._legacy_migration_prompted = False
+        return self._prompt_for_legacy_migration()
+
+    def retry_authoring_repair(self) -> bool:
+        """Run the startup repair of dangling playlist references once more.
+
+        The same transaction the gate runs before it opens; False unless that
+        repair failed and nothing is running.
+        """
+        if (
+            self._authoring_migration_ready
+            or self._authoring_gate_state != "repair"
+            or self._authoring_repair_started
+        ):
+            return False
+        self._open_authoring_after_migration()
+        return True
+
+    def ask_for_library_folder(self) -> bool:
+        """Ask for the first library folder again, after "Not now" in this process.
+
+        The question is the first run's own: the exact detected folder as a
+        suggestion, or a chooser. False when a folder is set, or the question
+        can't be asked yet.
+        """
+        if (
+            self._window is None
+            or self._settings.roots
+            or not self._first_activation_done
+            or self._library_root_prompt is not None
+        ):
+            return False
+        self._library_root_prompted = False
+        self._prompt_for_library_root()
+        return self._library_root_prompt is not None
 
     def do_shutdown(self) -> None:
         # A deliberate quit (`ctl quit` in --service mode) ends the loop with

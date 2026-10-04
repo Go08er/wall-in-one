@@ -1,9 +1,12 @@
-"""The first library write destination is a choice, never an inference."""
+"""The first library write destination is a choice, never an inference.
+
+The question is the application's, so it is asked the same way in both
+interfaces: a dialog over the classic window, the welcome screen in the new one.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -15,11 +18,18 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
+from tests.first_run_windows import (  # noqa: E402
+    UIS,
+    Ui,
+    application_with_window,
+    capture_questions,
+    respond,
+)
 from tests.gtk_helpers import spin_until  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library.model import Library  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
-from wall_in_one.ui.window import MainWindow  # noqa: E402
+from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -40,22 +50,16 @@ def _close(application: Application, parent: Gtk.Window | None = None) -> None:
     application.session.shutdown()
 
 
+@pytest.mark.parametrize("ui", UIS)
 def test_unconfigured_app_asks_once_with_both_choices_and_the_exact_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui: Ui
 ) -> None:
     suggested = tmp_path / "Noctalia wallpapers"
     suggested.mkdir()
-    application = Application()
-    parent = Gtk.Window()
-    application._window = cast(MainWindow, parent)
-    shown: list[Adw.AlertDialog] = []
+    application, parent = application_with_window(ui)
     selected: list[Path] = []
     monkeypatch.setattr("wall_in_one.ui.app.scan.default_roots", lambda: (suggested,))
-    monkeypatch.setattr(
-        Adw.AlertDialog,
-        "present",
-        lambda dialog, _parent: shown.append(dialog),
-    )
+    shown = capture_questions(monkeypatch)
     monkeypatch.setattr(application, "_save_initial_library_root", selected.append)
 
     try:
@@ -70,10 +74,17 @@ def test_unconfigured_app_asks_once_with_both_choices_and_the_exact_default(
         assert dialog.get_response_label("default") == "Use default"
         assert dialog.get_response_label("manual") == "Choose folder manually"
         assert dialog.get_close_response() == "later"
+        if isinstance(parent, NextWindow):
+            welcome = parent.welcome
+            assert parent.welcome_shown and welcome.title_text == "Choose a library folder"
+            assert str(suggested) in welcome.body_text, "the exact folder, before any choice"
+            assert list(welcome.buttons) == ["default", "manual", "later"]
 
-        dialog.emit("response", "default")
+        respond(parent, dialog, "default")
         assert selected == [suggested]
         assert application._library_root_prompt is None
+        if isinstance(parent, NextWindow):
+            spin_until(lambda: not parent.welcome_shown)
     finally:
         _close(application, parent)
 

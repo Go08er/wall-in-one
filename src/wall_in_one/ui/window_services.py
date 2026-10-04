@@ -17,6 +17,11 @@ Three things deliberately stay out:
 * The pages' own collaborators (`AppServices` in the R9 notes) are a separate
   seam: pages talk to the application, never to this Protocol.
 
+One capability is optional, so it is its own Protocol: `FirstRunHost`, a window
+that asks the first-run questions on its own welcome screen. The application
+checks for it with ``isinstance`` and presents its dialogs over any other
+window, so the classic window, and the plain test windows, are unchanged.
+
 Which window gets built is the process's ``--ui`` choice (`UiKind`). The
 classic `MainWindow` is the default; ``next`` builds the new interface while it
 is being ported, behind the flag.
@@ -27,9 +32,11 @@ choices without loading GTK.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from gi.repository import Adw
+
     from wall_in_one import config
     from wall_in_one.session import Session
     from wall_in_one.theme import source
@@ -98,3 +105,24 @@ class WindowServices(Protocol):
 
     def set_runtime_busy(self, busy: bool) -> None:
         """Show whether the single in-flight playback command is still running."""
+
+
+@runtime_checkable
+class FirstRunHost(Protocol):
+    """A window that asks the first-run questions itself, in place of dialogs.
+
+    Optional, unlike `WindowServices`: the application checks for it with
+    ``isinstance`` and presents its dialogs over any other window, as it always
+    has. The questions are the older-data check (its progress, its choice and
+    its failure) and the library folder. Each is the application's own
+    ``Adw.AlertDialog``, with the same heading, body and responses; the window
+    shows it inside itself and answers by emitting that dialog's ``response``
+    signal, so the handlers, guards and workers that act on the answer are the
+    ones every window uses.
+    """
+
+    def ask(self, question: Adw.AlertDialog) -> None:
+        """Show ``question`` now, in place of whatever question was showing."""
+
+    def first_run_changed(self) -> None:
+        """A question closed, or the authoring gate moved: read the application again."""

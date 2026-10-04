@@ -322,8 +322,14 @@ def test_a_failed_check_says_so_on_the_welcome_screen_and_tries_again(
 def test_an_existing_profile_never_shows_the_welcome_screen(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The older-data check runs at every start; it is not a reason to cover the window."""
+    """The older-data check runs at every start; it is not a reason to cover the window.
+
+    The policy, not the machine's speed: a check that finishes within its grace
+    never covers the window, so the grace here is longer than any check takes.
+    (`test_a_long_check_shows_its_progress_after_a_moment` shortens it instead.)
+    """
     sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(next_window, "CHECK_GRACE_MS", 60_000)
     application = Application(ui="next")
     shown: list[str] = []
 

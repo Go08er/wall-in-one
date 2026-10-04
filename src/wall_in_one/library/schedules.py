@@ -615,10 +615,15 @@ class Store:
         connector: str = "",
         rule_id: str | None = None,
         name: str | None = None,
+        enabled: bool = True,
+        at: int | None = None,
     ) -> Rule:
         """Append a rule. Later rules win, so appending is how you override.
 
-        A ``name`` moves the file to format version 3; see `FORMAT_VERSION`.
+        ``enabled`` False makes it switched off from the start, and ``at``
+        puts it at that position (clamped) instead of last; either way it is
+        one save. A ``name`` moves the file to format version 3; see
+        `FORMAT_VERSION`.
         """
         if bool(start) != bool(end):
             raise ScheduleError("invalid-time", "a window needs both a start and an end")
@@ -642,6 +647,7 @@ class Store:
             weekdays=parse_weekdays(weekdays),
             start=parse_time(start) if start else None,
             end=parse_time(end) if end else None,
+            enabled=enabled,
             name=chosen_name,
         )
         if not rule.playlist:
@@ -655,7 +661,10 @@ class Store:
                     "identity-conflict",
                     f"there is already a schedule rule named {rule.id}",
                 )
-            rules.append(rule)
+            if at is None:
+                rules.append(rule)
+            else:
+                rules.insert(max(0, min(len(rules), at)), rule)
             return rule, True
 
         return self._mutate(append)
@@ -711,8 +720,12 @@ class Store:
         start: str = "",
         end: str = "",
         connector: str = "",
+        enabled: bool | None = None,
     ) -> Rule:
-        """Edit a rule in place without changing its id, name or priority."""
+        """Edit a rule in place without changing its id, name or priority, in one save.
+
+        ``enabled`` turns it on or off in the same save; None keeps it as it is.
+        """
         if bool(start) != bool(end):
             raise ScheduleError("invalid-time", "a window needs both a start and an end")
         if not playlist.strip():
@@ -742,7 +755,7 @@ class Store:
                     weekdays=chosen_weekdays,
                     start=chosen_start,
                     end=chosen_end,
-                    enabled=rule.enabled,
+                    enabled=rule.enabled if enabled is None else enabled,
                     name=rule.name,
                 )
                 rules[index] = updated
@@ -750,6 +763,30 @@ class Store:
             raise ScheduleError("no-such-rule", f"no rule {rule_id}")
 
         return self._mutate(update)
+
+    def copy(self, rule_id: str, *, copy_id: str | None = None) -> Rule:
+        """A copy of rule ``rule_id`` just above it (one place higher), in one save.
+
+        The copy has the original's playlist, display, days, months, times
+        and switch, a new id and no name; the original keeps its place.
+        """
+        identifier = copy_id or new_id()
+
+        def copy(rules: list[Rule]) -> tuple[Rule, bool]:
+            if len(rules) >= MAX_RULES:
+                raise ScheduleError("full", f"there are already {MAX_RULES} rules")
+            if any(current.id == identifier for current in rules):
+                raise ScheduleError(
+                    "identity-conflict", f"there is already a schedule rule named {identifier}"
+                )
+            for index, rule in enumerate(rules):
+                if rule.id == rule_id:
+                    made = replace(rule, id=identifier, name=None)
+                    rules.insert(index + 1, made)
+                    return made, True
+            raise ScheduleError("no-such-rule", f"no rule {rule_id}")
+
+        return self._mutate(copy)
 
     def move(self, rule_id: str, position: int) -> Rule:
         """Move one stable rule to ``position``; later rows keep priority."""

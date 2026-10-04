@@ -545,17 +545,12 @@ class RealScheduling:
         enabled = draft.enabled
 
         def add() -> object:
-            rule = store.add(draft.playlist, **arguments)
-            if not enabled:
-                # The store adds rules switched on; a second write turns it off.
-                rule = store.set_enabled(rule.id, False)
-            return rule
+            # One save: the rule, switched as asked, last (the highest priority).
+            return store.add(draft.playlist, enabled=enabled, **arguments)
 
         def update() -> object:
-            rule = store.update(rule_id, draft.playlist, **arguments)
-            if rule.enabled != enabled:
-                rule = store.set_enabled(rule_id, enabled)
-            return rule
+            # One save: its times, days, months, display, playlist and switch.
+            return store.update(rule_id, draft.playlist, enabled=enabled, **arguments)
 
         self._store_write(
             update if rule_id else add,
@@ -582,21 +577,9 @@ class RealScheduling:
             self._refuse(settled, "That rule no longer exists", "schedule")
             return
         store = self._session.schedules
-        arguments = store_arguments(original)
-
-        def work() -> object:
-            copy = store.add(original.playlist, **arguments)
-            if not original.enabled:
-                store.set_enabled(copy.id, False)
-            rules = store.rules
-            index = next((at for at, rule in enumerate(rules) if rule.id == rule_id), None)
-            if index is not None:
-                # Added last (the highest priority): one place above the original.
-                store.move(copy.id, index + 1)
-            return copy
-
         self._store_write(
-            work,
+            # One save: the copy, switched like the original, just above it.
+            lambda: store.copy(rule_id),
             what="The copy of the rule",
             topics=("schedule",),
             publish=self._backend.schedule_edited,

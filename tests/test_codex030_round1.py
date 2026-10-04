@@ -14,15 +14,17 @@ from typing import Any
 
 import pytest
 
+from tests.test_next_schedule_mapping import Owner
 from tests.test_next_state import FakeApplication, _adapter, _library, _session
 from wall_in_one import runtime_config
-from wall_in_one.library import playlists
+from wall_in_one.library import playlists, schedules
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.ui.next import real_schedule
 from wall_in_one.ui.next.real_playlists import RealPlaylists
 from wall_in_one.ui.next.real_schedule import RealScheduling
 from wall_in_one.ui.next.real_state import RealAppState
+from wall_in_one.ui.next.schedule_state import RuleView
 
 
 @pytest.fixture(autouse=True)
@@ -154,6 +156,96 @@ def test_p3_the_rule_is_the_compilers_entry_resolution(
         assert built == compiles, item.name
         for rule in session.schedules.rules:
             session.schedules.remove(rule.id)
+
+
+# -- P-4: one rule action, one write -----------------------------------------------------------
+
+
+def _scheduling(backend: FakeApplication) -> RealScheduling:
+    return RealScheduling(backend, Owner(), lambda: "")
+
+
+def test_p4_a_new_disabled_rule_is_one_write(
+    backend: FakeApplication, items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = _evening(backend.session, items)
+    adapter = _scheduling(backend)
+    results: list[bool] = []
+
+    # The single write fails: nothing at all is saved, and it says so.
+    failing = {1}
+    writes = _writes(monkeypatch, schedules, failing)
+    adapter.save_rule("", RuleView("", pid, enabled=False), results.append)
+    backend.run_authoring()
+    assert results == [False] and writes == [1]
+    assert schedules.Store.open().rules == ()
+    assert "nothing changed" in backend.reports[-1]
+
+    # Saved, it is one write, and the rule is off from the start.
+    failing.clear()
+    writes.clear()
+    adapter.save_rule("", RuleView("", pid, enabled=False), results.append)
+    backend.run_authoring()
+    assert results[-1] is True and writes == [1]
+    assert [rule.enabled for rule in schedules.Store.open().rules] == [False]
+
+
+def test_p4_an_edit_with_its_switch_is_one_write(
+    backend: FakeApplication, items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = backend.session
+    pid = _evening(session, items)
+    rule = session.schedules.add(pid, start="07:00", end="09:00")
+    adapter = _scheduling(backend)
+    edited = RuleView(rule.id, pid, start=18 * 60, end=22 * 60, enabled=False)
+    results: list[bool] = []
+
+    failing = {1}
+    writes = _writes(monkeypatch, schedules, failing)
+    adapter.save_rule(rule.id, edited, results.append)
+    backend.run_authoring()
+    assert results == [False] and writes == [1]
+    (durable,) = schedules.Store.open().rules
+    assert (durable.start, durable.end, durable.enabled) == (7 * 60, 9 * 60, True), "unchanged"
+
+    failing.clear()
+    writes.clear()
+    adapter.save_rule(rule.id, edited, results.append)
+    backend.run_authoring()
+    assert results[-1] is True and writes == [1]
+    (durable,) = schedules.Store.open().rules
+    assert (durable.start, durable.end, durable.enabled) == (18 * 60, 22 * 60, False)
+
+
+def test_p4_a_copy_of_a_disabled_rule_is_one_write(
+    backend: FakeApplication, items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = backend.session
+    pid = _evening(session, items)
+    first = session.schedules.add(pid)
+    original = session.schedules.add(pid, weekdays=["sat"])
+    session.schedules.set_enabled(original.id, False)
+    last = session.schedules.add(pid)
+    adapter = _scheduling(backend)
+    results: list[bool] = []
+
+    failing = {1}
+    writes = _writes(monkeypatch, schedules, failing)
+    adapter.copy_rule(original.id, results.append)
+    backend.run_authoring()
+    assert results == [False] and writes == [1]
+    assert [rule.id for rule in schedules.Store.open().rules] == [first.id, original.id, last.id]
+
+    failing.clear()
+    writes.clear()
+    adapter.copy_rule(original.id, results.append)
+    backend.run_authoring()
+    assert results[-1] is True and writes == [1]
+    rules = schedules.Store.open().rules
+    assert [rule.id for rule in rules][:2] == [first.id, original.id]
+    assert rules[3].id == last.id, "the highest priority is still the last rule"
+    copy = rules[2]
+    assert (copy.playlist, copy.weekdays, copy.enabled) == (pid, frozenset({5}), False)
 
 
 # -- P-5: a playlist made with its wallpapers is one write -------------------------------------

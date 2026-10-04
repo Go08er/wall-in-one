@@ -308,6 +308,71 @@ def test_a_rule_can_be_edited_without_changing_identity_or_priority(store: Store
     assert updated.describe() == "months 12 sat,sun 22:00-06:00"
 
 
+def test_a_rule_can_be_added_switched_off_and_in_place(tmp_path: Path) -> None:
+    """``enabled`` and ``at`` are part of the one save that adds the rule."""
+    target = tmp_path / "schedules.json"
+    store = Store(path=target)
+    store.add("Morning", rule_id="first")
+    store.add("Evening", rule_id="last")
+
+    off = store.add("Night", rule_id="off", enabled=False, at=1)
+    store.add("Late", rule_id="past", at=99)
+
+    assert off.enabled is False
+    reopened = Store.open(target).rules
+    assert [rule.id for rule in reopened] == ["first", "off", "last", "past"]
+    assert [rule.enabled for rule in reopened] == [True, False, True, True]
+
+
+def test_an_edit_can_switch_a_rule_in_the_same_save(store: Store) -> None:
+    rule = store.add("Morning", weekdays=["mon"])
+
+    off = store.update(rule.id, "Morning", weekdays=["tue"], enabled=False)
+    assert (off.enabled, off.weekdays) == (False, frozenset({1}))
+    assert store.update(rule.id, "Evening").enabled is False, "no switch given: kept"
+    assert store.update(rule.id, "Evening", enabled=True).enabled is True
+
+
+def test_a_copy_sits_just_above_its_original(tmp_path: Path) -> None:
+    target = tmp_path / "schedules.json"
+    store = Store(path=target)
+    store.add("Morning", rule_id="first")
+    original = store.add(
+        "Evening", weekdays=["sat"], connector="DP-9", rule_id="original", name="Saturdays"
+    )
+    store.set_enabled(original.id, False)
+    store.add("Night", rule_id="last")
+
+    copy = store.copy(original.id, copy_id="copy")
+
+    reopened = Store.open(target).rules
+    assert [rule.id for rule in reopened] == ["first", "original", "copy", "last"]
+    assert (copy.playlist, copy.weekdays, copy.connector, copy.enabled, copy.name) == (
+        "Evening",
+        frozenset({5}),
+        "DP-9",
+        False,
+        None,
+    )
+    assert reopened[1].name == "Saturdays", "the original keeps its name and place"
+
+
+def test_a_copy_of_a_missing_rule_or_past_the_cap_is_refused(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rule = store.add("Morning")
+
+    with pytest.raises(ScheduleError) as missing:
+        store.copy("gone")
+    assert missing.value.kind == "no-such-rule"
+
+    monkeypatch.setattr(schedules, "MAX_RULES", 1)
+    with pytest.raises(ScheduleError) as full:
+        store.copy(rule.id)
+    assert full.value.kind == "full"
+    assert [kept.id for kept in store.rules] == [rule.id]
+
+
 def test_a_connector_target_survives_add_edit_and_reload(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     store = Store(path=target)

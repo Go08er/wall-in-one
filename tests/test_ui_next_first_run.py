@@ -41,6 +41,7 @@ from wall_in_one.control import client  # noqa: E402
 from wall_in_one.theme import noctalia  # noqa: E402
 from wall_in_one.ui.app import Application, _PlaylistReferenceRepairResult  # noqa: E402
 from wall_in_one.ui.next import window as next_window  # noqa: E402
+from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 
 
@@ -145,6 +146,9 @@ def test_a_fresh_profile_opens_on_the_welcome_screen_and_not_now_saves_nothing(
         assert window.banner.get_button_label() == "Choose a Folder…"
         assert not paths.settings_path().exists(), "Not now saves nothing"
         assert application.settings.roots == ()
+        library = window.pages["library"]
+        assert isinstance(library, LibraryPage)
+        assert library._empty.get_title() == "No wallpapers yet", "not a search that failed"
 
         window.banner.emit("button-clicked")
         yield "the same question again", lambda: _asking(window, "Choose a library folder")

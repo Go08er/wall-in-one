@@ -166,6 +166,7 @@ class LibraryPage(Page):
         clear = Gtk.Button(label="Clear filters")
         clear.add_css_class("pill")
         clear.connect("clicked", lambda *_: self._clear_filters())
+        self._clear = clear
         store = Gtk.Button(label="Browse the Store")
         store.add_css_class("pill")
         store.connect("clicked", lambda *_: self.state.navigate("store"))
@@ -578,6 +579,16 @@ class LibraryPage(Page):
             text += " · scanning…"
         self._count.set_label(text)
         self._grid_stack.set_visible_child_name("grid" if shown else "empty")
+        # An empty library is not a search that found nothing: say which.
+        none = total == 0
+        self._empty.set_icon_name("folder-pictures-symbolic" if none else "edit-find-symbolic")
+        self._empty.set_title("No wallpapers yet" if none else "No wallpapers match")
+        self._empty.set_description(
+            "Your library is empty for now. Find wallpapers in the Store."
+            if none
+            else "Try another word, or clear the filters."
+        )
+        self._clear.set_visible(not none)
         remaining = shown - len(self._cards)
         self._more.set_visible(remaining > 0)
         if remaining > 0:

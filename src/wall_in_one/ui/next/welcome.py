@@ -80,16 +80,17 @@ class Welcome:
         self._buttons = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER
         )
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, halign=Gtk.Align.CENTER)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         box.append(self.body)
         box.append(self.spinner)
         box.append(self._buttons)
-        self.status.set_child(box)
+        # A readable measure for the body; a long path still wraps.
+        self.status.set_child(Adw.Clamp(maximum_size=640, child=box))
 
         # A flat header bar: window controls, and something to drag the window by.
         header = Adw.HeaderBar()
         header.add_css_class("flat")
-        header.set_title_widget(Adw.WindowTitle(title="Wall-in-One"))
+        header.set_title_widget(Adw.WindowTitle(title=WELCOME))
         view = Adw.ToolbarView(content=self.status)
         view.add_top_bar(header)
         view.add_css_class("background")  # one solid layer in every window style
@@ -149,8 +150,12 @@ class Welcome:
             )
             self._buttons.append(button)
             self.buttons[response] = button
-        if offered:
-            self.buttons[offered[0]].grab_focus()
+
+    def focus(self) -> None:
+        """Put the keyboard on the first answer, the one offered first."""
+        first = next(iter(self.buttons.values()), None)
+        if first is not None:
+            first.grab_focus()
 
     def _fill(self, title: str, body: str, *, waiting: bool) -> None:
         self.status.set_title(title)

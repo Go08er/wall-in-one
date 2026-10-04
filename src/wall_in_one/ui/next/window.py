@@ -99,17 +99,19 @@ NOT_PORTED_HINT: Final = CLASSIC_HINT
 CHECK_GRACE_MS: Final = 1000
 
 #: The window's own notices (`_window_banner`) and their buttons' actions.
+#: The library is loaded only once the older data has its answer (an import
+#: may bring other folders), so these say that too.
 OLDER_DATA_WAITING: Final = (
     "Settings and playlists from the older Noctalia plugin are waiting for your choice. "
-    "Until then, library, playlist and settings changes can\u2019t be saved."
+    "Until then, the library isn\u2019t loaded and changes can\u2019t be saved."
 )
 OLDER_DATA_UNCHECKED: Final = (
     "Wall-in-One couldn\u2019t check for settings from the older Noctalia plugin. "
-    "Until it can, library, playlist and settings changes can\u2019t be saved."
+    "Until it can, the library isn\u2019t loaded and changes can\u2019t be saved."
 )
 REPAIR_NEEDED: Final = (
-    "Wall-in-One couldn\u2019t repair references to playlists that are gone, so "
-    "library, playlist and settings changes can\u2019t be saved."
+    "Wall-in-One couldn\u2019t repair references to playlists that are gone, so the "
+    "library isn\u2019t loaded and changes can\u2019t be saved."
 )
 NO_FOLDER: Final = (
     "There\u2019s no wallpaper folder yet, so the library is empty and nothing is downloaded."
@@ -387,6 +389,7 @@ class NextWindow(ShellWindow):
             self._check_grace = GLib.timeout_add(CHECK_GRACE_MS, self._check_overdue, question)
         else:
             self._reveal_welcome()
+            self.welcome.focus()
         self._refresh_window_banner()
 
     def first_run_changed(self) -> None:

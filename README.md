@@ -534,8 +534,9 @@ choice for that start. With neither, the app is classic.
     chooser.
 
   "Not now" saves nothing and the question comes back at the next start. Until
-  then a notice under the header says what is waiting, and that changes can't
-  be saved while the import question is open, and its button asks again.
+  then a notice under the header says what is waiting, and its button asks
+  again. While the import question is open, the library isn't loaded and
+  changes can't be saved, and the notice says so.
 
 - **After an update.** Classic's one-time Tidy up card is above every page;
   Review opens Settings → Tidy up. Nothing there runs until you press its

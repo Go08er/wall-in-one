@@ -466,15 +466,15 @@ class Application(Adw.Application):
         self._runtime_status_again = False
         self._runtime_health_pending = False
         self._runtime_health_request: _RuntimeHealthRequest | None = None
+        #: This session's log, in memory only: what the user was told and what
+        #: the runtime's status said as it changed (the new interface shows it).
+        self.activity_log = ActivityLog()
         # The Rust snapshot is the sole playback truth for every GUI surface.
         # Keep the last valid answer through a transient deadline so the
         # header and authoring pages cannot briefly contradict one another.
         # Every runtime-status answer is published to this model and to
         # nothing else; the forwarding subscriber below hands each publication
         # to the window exactly as the call sites used to.
-        #: This session's log, in memory only: what the user was told and what
-        #: the runtime's status said as it changed (the new interface shows it).
-        self.activity_log = ActivityLog()
         self._status_model = RuntimeStatusModel()
         self._status_model.subscribe(self._forward_runtime_status)
         self._taboo_omitted_seen = 0

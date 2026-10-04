@@ -1,6 +1,8 @@
-"""The redesigned interface, built behind ``--ui=next`` while it is ported.
+"""The redesigned interface, built behind ``--ui=next``.
 
-Only a placeholder window lives here today. The pages arrive from
-``prototypes/ui-redesign`` one at a time; until then ``--ui=classic`` (the
-default) is the complete application.
+Every page is here: the Library, Store, Playlists, Schedule, Displays and
+Settings, shared with ``prototypes/ui-redesign``, which runs them over its
+dummy data. ``window.py`` is the app's window and ``real_*.py`` its side of
+the `AppState` boundary. It is a preview: classic stays the default, and
+Settings → Appearance → Interface (or ``--ui``) chooses which one starts.
 """

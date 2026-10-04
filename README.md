@@ -509,152 +509,224 @@ XDG directories -- never the real one.
 
 ### The new interface behind `--ui=next`
 
-The redesigned interface is being ported from `prototypes/ui-redesign` as a
-preview. Choose **Settings → Appearance → Interface → New (preview)** (or, in
-the new interface, its Settings page) and the next start builds
-`ui/next/window.py`'s `NextWindow` instead of the classic window; the choice is
+The redesigned interface from `prototypes/ui-redesign` now has every page:
+the Library, Playlists, Schedule, Displays, the Store and Settings, all over
+the app's real library, stores and runtime status. It is still a preview, and classic
+stays the default.
+
+Choose **Settings → Appearance → Interface → New (preview)** in classic, or the
+same row on the new interface's Settings page. The next start then builds
+`ui/next/window.py`'s `NextWindow` instead of the classic window. The choice is
 saved in `ui.toml` and takes effect the next time Wall-in-One starts. The
 hidden flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved
 choice for that start. With neither, the app is classic.
 
-- **What it has so far.** The redesign's sidebar, header and player bar, a
-  paged Library grid with the details pane beside it, the Store, and the
-  Playlists, Schedule, Displays and Settings pages, all over the app's real
-  library, stores and runtime status. Beyond the **Library** (next item),
-  downloading from the **Store**, **playlists**, the **schedule**, **displays**
-  and **Settings** (below) it changes **Apply** (to all displays, or the
-  display the player bar is scoped to), **favorites**, and **playback**,
-  through the player bar's live controls: play/pause, next,
-  previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
-  schedule. Every playback control acts on the displays the player bar is
-  scoped to, all of them or one; mirrored displays, or a display that has gone
-  away, get the command for all of them. They are the classic window's runtime
-  commands, sent the same way. A "<display> only" chosen from a card's or the
-  details pane's Apply menu is never widened like that: if that display has
-  gone, or the displays are mirrored, nothing is sent and a notice says so.
-  Apply, favorites and playback have no undo yet. The player bar says what the
-  runtime reports and why ("Evening · from schedule", "Your pick").
-- **The Library's edits.** The details pane changes what classic's tile menu
-  and pairing editor change, through the same saves: a wallpaper's **colours**
-  (From wallpaper with the Settings scheme or one pinned for it, each scheme
-  previewed from its still; a palette; or Don't change) and **Light or dark**;
-  a moving wallpaper's **still** (a library image instead, the automatic one
-  again, or a new capture of a scene); **Reset to defaults**; and **Try again**
-  for a wallpaper playback skips, whose Apply is off with the reason meanwhile.
-  **Add to playlist** (from a card, the details pane, a drag to the sidebar or
-  the Playlists page, or several selected at once, into a playlist or a new
-  one made with them in it) is the Playlists page's own save: one save, never
-  a wallpaper playback skips, never "Your pick". **Remove** is named for what
-  it does: a download Wall-in-One made is deleted after a question, your own
-  file goes to the Trash, and a Workshop scene or a file outside the library
-  folders is not Wall-in-One's to remove; one wallpaper at a time, and never
-  the last one in a playlist something uses. Removing has no Undo, because its
-  favorite, colours and playlist entries go with the file. Selecting several
-  also favorites them together. **Add a folder** in the header is Settings'
-  own folder path (scanned once saved); F5 rescans; Ctrl+Shift+R, Ctrl+B,
-  Ctrl+P and Ctrl+W work as in classic. Each change is shown once it is
-  saved; a colour choice shows while it is being saved and goes back to what
-  is saved if that fails. Per-wallpaper motion, "Use frame" and a log are not
-  there yet.
-- **Playlists.** The Playlists page edits your own playlists: create, rename,
-  duplicate and delete them (Delete names the schedule rules, display
-  assignments and default that go with it), add several wallpapers at once
-  from its picker or drop one from the Library where it should go, reorder by
-  a row's handle or Ctrl+↑/↓, and remove entries, with Undo. A playlist can
-  have its own interval and shuffle, or follow the defaults. Play now and Use
-  as schedule default follow the classic page's rules. Each change is one
-  save on the app's ordered authoring lane, and the page shows what was
-  saved: moves apply in order, each from where the entry is when it is saved,
-  and a change that fails is reported and the page goes back to what is
-  saved. A playlist that a schedule rule, the default or a display uses can't
-  lose its last wallpaper that plays, and one with nothing that plays can't
-  become the default. "Your pick" stays hidden. Long playlists show 72 rows at
-  a time.
-- **Schedule.** A week calendar and the rules, highest priority on top (the
-  stored order, where the last matching rule wins, reversed). Drag on the
-  calendar or use Add rule; drag a rule by its handle (or Ctrl+↑/↓) to change
-  its priority; its menu edits, duplicates or moves it, and deletes it after
-  asking. "When nothing is scheduled"
-  is the default playlist. The "Now" card and its "Why?" are the runtime's
-  answer, its rule and its "until"; the calendar only projects the week. A
-  rule aimed at one display is kept but shown inactive while displays are
-  mirrored. A time window that starts and ends on the same minute, or a
-  playlist with nothing to play, can't be saved.
-- **Displays.** "Same on all displays" or "Each display separately" (refused
-  while no display is connected for the desktop colors), the compositor's
-  layout, and for each display what it shows and why, Play now, its Cycle
-  and Shuffle with "Use saved defaults" (runtime choices, never saved), its
-  own playlist for when nothing is scheduled, whether that playlist beats the
-  shared rules (kept in `runtime-overrides.toml`, never in `runtime.toml`), and
-  which display the desktop colors follow. The mode and the colors' display
-  are the same settings, saved the same way, as Settings → Displays. A display
-  that is not connected keeps what is saved for it until you forget it.
-- **Settings.** Every setting classic Settings has, each saved to the same
-  `settings.toml` key the same way (a save that fails is reported and every
-  row goes back to what is saved), in searchable groups: library folders (add,
-  remove, and make one the folder downloads and generated stills go to; a
-  folder found on this machine is only suggested), playback defaults, displays
-  and which one colours follow, the app's colours and default scheme, the
-  Wallhaven key, video and Wallpaper Engine renderer settings, Tidy up, and the
-  Interface and GPU acceleration rows, so you can go back to classic from
-  inside the new interface. **Palettes** opens the palette manager: browse
-  every installed palette, apply one through Noctalia, duplicate one into
-  yours and edit its colours, and preview each scheme on a still to use it as
-  the default or keep it as a palette. Like classic, it has no delete.
-- **The Store.** It searches Wallhaven and MotionBGS through the classic
-  Store's code, and opens on what is popular once you first show it. Its
-  filters sit inline under the provider row (never in a popover): sort, "Top
-  list covers" for the top list, minimum size, aspect ratio, categories,
-  content rating and Wallhaven's 29 search colours; MotionBGS browses latest,
-  4K, HD or a genre, and its quality picks the file a download takes. Results
-  come 40 to a page with Previous and Next. Downloads go into your first
-  library folder, one at a time, with "Downloading 2 of 5" and no pretend
-  progress or cancel; "Download & apply" and "Show in Library" wait for the
-  library rescan that follows, and a download that landed in a folder Settings
-  replaced meanwhile is said so and not applied. NSFW results need a Wallhaven
-  API key; the Store says so in Wallhaven's words and links to the Settings
-  page's Wallhaven key, where it is saved. Space picks a result, Ctrl+A picks
-  the page, Ctrl+D downloads the picks, and the ⋯ menu hands off to the Steam
-  Workshop when Steam is installed.
-- **When it can't change things.** A store saved by a newer version turns
-  Apply, favorites, library changes and the playback controls off and says so
-  in a notice under the header; the Playlists page says so too and changes
-  nothing, and so do the Schedule and Displays pages. Settings keys this version doesn't know are named in that notice as
-  read-only, and the Settings rows that write `settings.toml` are off. The
-  playback controls are also off until the wallpaper service has answered, and
-  while it isn't running; the app doesn't start the service.
-- **Its own preferences.** The window style (solid, translucent or frosted), its
-  opacity and frost dials (in the window menu and Settings → Appearance) and
-  the thumbnail size live in `ui.toml`, written only when you change one of
-  them.
-- **One set of widgets.** The shell, player bar, Library, details pane and
-  Playlists page in `ui/next/` are the prototype's: `prototypes/ui-redesign`
-  runs the same modules over its dummy data, through the `AppState` Protocol
-  in `ui/next/state.py` (and `PlaylistEditing` in `ui/next/playlists_state.py`).
-  `ui/next/real_state.py` and `ui/next/real_playlists.py` are the app's side of
-  that boundary.
+- **How it saves.** Each change goes through the save classic uses for it, one
+  at a time on the app's ordered authoring lane. Each page shows what was
+  saved: a change that fails is reported, and the page goes back to what is
+  saved.
 
-- **One process, one interface.** The choice belongs to the process that starts
-  the app: the desktop entry, `ctl open` with no app running, and `--service`
-  all read the saved choice when they start it. A second launch that reaches an
-  already-running instance presents that instance's window unchanged (a second
-  `wall-in-one --ui=…` prints a note that its `--ui` was not applied); close the
-  app and start it again to switch. The forwarded activation carries only the
-  package and the page, because older builds fix its shape.
-- **`ctl open <page>`** presents the window either way. In the new interface it
-  answers `not-in-new-ui`, with exit status 1, until that page is ported; the
-  Library (`media`), the Store (`browse`), Playlists (`playlists`), Settings
-  (`settings`) and Schedule (`schedules`, and its alias `displays`) are: every
-  page is. When no app is running, `ctl open` launches the
-  interface chosen in Settings.
-- **Rolling back.** 0.2.0 and 0.2.1 don't know the choice and start classic
-  (`--ui=next` still works there). See [docs/updating.md](docs/updating.md) for
-  what choosing New (preview) does to `ui.toml` for them.
-- **The seams.** `Application` talks to its window only through the
-  `WindowServices` Protocol (`ui/window_services.py`), which mypy checks both
-  windows against. Runtime status goes through one `RuntimeStatusModel`
-  (`ui/status_model.py`). The classic window receives it through a forwarding
-  subscriber; the new window subscribes directly.
+- **The player bar.**
+  - **What it says:** what the runtime reports and why ("Evening · from
+    schedule", "Your pick").
+  - **Live controls:** play/pause, next, previous, random, Stop, shuffle,
+    "Change wallpaper automatically" and Resume schedule. They are the classic
+    window's runtime commands, sent the same way.
+  - Every playback control acts on the displays the player bar is scoped to,
+    all of them or one. Mirrored displays, or a display that has
+    gone away, get the command for all of them.
+  - **Apply** goes to all displays, or to the display the bar is scoped to.
+    - A "<display> only" chosen from a card's or the details pane's Apply menu
+      is never widened like that. If that display has gone, or the displays
+      are mirrored, nothing is sent and a notice says so.
+    - Apply, favorites and playback have no undo yet.
+
+- **The Library.** A paged grid with the details pane beside it. The pane
+  changes what classic's tile menu and pairing editor change, through the same
+  saves:
+  - **Colours:** From wallpaper, with the Settings scheme or one pinned for it,
+    each scheme previewed from its still; a palette; or Don't change. Also
+    **Light or dark**. A colour choice shows while it is being saved.
+  - **Still**, for a moving wallpaper: a library image instead, the automatic
+    one again, or a new capture of a scene.
+  - **Reset to defaults.**
+  - **Try again**, for a wallpaper playback skips. Its Apply is off, with the
+    reason, until then.
+  - **Add to playlist**, from:
+    - a card or the details pane;
+    - a drag to the sidebar or the Playlists page;
+    - several selected at once.
+
+    It adds to a playlist, or to a new one made with them in it. It is the
+    Playlists page's own save: one save, never a wallpaper playback skips,
+    never "Your pick". Selecting several also favorites them together.
+  - **Remove** is named for what it does:
+    - a download Wall-in-One made is deleted after a question;
+    - your own file goes to the Trash;
+    - a Workshop scene, or a file outside the library folders, is not
+      Wall-in-One's to remove.
+
+    It removes one wallpaper at a time, and never the last one in a playlist
+    something uses. Removing has no Undo, because its favorite, colours and
+    playlist entries go with the file.
+  - **Add a folder**, in the header, uses Settings' own folder path and scans
+    once the folder is saved.
+  - **Keys:** F5 rescans; Ctrl+Shift+R, Ctrl+B, Ctrl+P and Ctrl+W work as in
+    classic.
+  - Not there yet: per-wallpaper motion, "Use frame" and a log.
+
+- **The Store.** It searches Wallhaven and MotionBGS through the classic
+  Store's code, and opens on what is popular once you first show it.
+  - **Filters** sit inline under the provider row (never in a popover):
+    - sort, and "Top list covers" for the top list;
+    - minimum size and aspect ratio;
+    - categories and content rating;
+    - Wallhaven's 29 search colours.
+
+    MotionBGS browses latest, 4K, HD or a genre, and its quality picks the file
+    a download takes.
+  - **Results** come 40 to a page with Previous and Next.
+  - **Downloads** go into your first library folder, one at a time, with
+    "Downloading 2 of 5" and no pretend progress or cancel.
+    - "Download & apply" and "Show in Library" wait for the library rescan
+      that follows.
+    - A download that landed in a folder Settings replaced meanwhile is said
+      so and not applied.
+  - **NSFW results** need a Wallhaven API key. The Store says so in Wallhaven's
+    words and links to the Settings page's Wallhaven key, where it is saved.
+  - **Keys:** Space picks a result, Ctrl+A picks the page and Ctrl+D downloads
+    the picks.
+  - **Steam Workshop:** the ⋯ menu hands off to it when Steam is installed.
+
+- **Playlists.** The page edits your own playlists:
+  - create, rename, duplicate and delete them. Delete names the schedule rules,
+    display assignments and default that go with it.
+  - add several wallpapers at once from its picker, or drop one from the
+    Library where it should go;
+  - reorder by a row's handle or Ctrl+↑/↓; moves apply in order, each from
+    where the entry is when it is saved;
+  - remove entries, with Undo.
+
+  Also:
+  - A playlist can have its own interval and shuffle, or follow the defaults.
+  - Play now and Use as schedule default follow the classic page's rules.
+  - A playlist that a schedule rule, the default or a display uses can't lose
+    its last wallpaper that plays.
+  - One with nothing that plays can't become the default.
+  - "Your pick" stays hidden.
+  - Long playlists show 72 rows at a time.
+
+- **Schedule.** A week calendar and the rules, highest priority on top. That is
+  the stored order reversed, where the last matching rule wins.
+  - **Adding:** drag on the calendar, or use Add rule.
+  - **Priority:** drag a rule by its handle, or use Ctrl+↑/↓.
+  - **The rule menu** edits, duplicates or moves a rule, and deletes it after
+    asking.
+  - **"When nothing is scheduled"** is the default playlist.
+  - The "Now" card and its "Why?" are the runtime's answer: its rule and its
+    "until". The calendar only projects the week.
+  - **Mirrored displays:** a rule aimed at one display is kept but shown
+    inactive while they are mirrored.
+  - **Refused:** a time window that starts and ends on the same minute, or a
+    playlist with nothing to play, can't be saved.
+
+- **Displays.**
+  - **The mode:** "Same on all displays", or "Each display separately", which is
+    refused while no display is connected for the desktop colors.
+  - **The compositor's layout.**
+  - **For each display:**
+    - what it shows and why, and Play now;
+    - its Cycle and Shuffle, with "Use saved defaults". These are runtime
+      choices, never saved.
+    - its own playlist, for when nothing is scheduled;
+    - whether that playlist beats the shared rules. This is kept in
+      `runtime-overrides.toml`, never in `runtime.toml`.
+  - **Which display the desktop colors follow.** It and the mode are the same
+    settings, saved the same way, as Settings → Displays.
+  - **A display that is not connected** keeps what is saved for it until you
+    forget it.
+
+- **Settings.** Every setting classic Settings has, each saved to the same
+  `settings.toml` key the same way, in searchable groups:
+  - library folders: add, remove, and make one the folder downloads and
+    generated stills go to. A folder found on this machine is only suggested.
+  - playback defaults;
+  - displays, and which one the colours follow;
+  - the app's colours and default scheme;
+  - the Wallhaven key;
+  - video and Wallpaper Engine renderer settings;
+  - Tidy up;
+  - the Interface and GPU acceleration rows, so you can go back to classic
+    from inside the new interface.
+
+  A save that fails is reported, and every row goes back to what is saved.
+
+  **Palettes** opens the palette manager:
+  - browse every installed palette and apply one through Noctalia;
+  - duplicate one into yours and edit its colours;
+  - preview each scheme on a still, then use it as the default or keep it as
+    a palette.
+
+  Like classic, it has no delete.
+
+- **When it can't change things.**
+  - **A store saved by a newer version** turns Apply, favorites, library changes
+    and the playback controls off and says so in a notice under the header;
+    the Playlists page says so too and changes nothing, and so do the Schedule
+    and Displays pages.
+  - Settings keys this version doesn't know are named in that notice as
+    read-only, and the Settings rows that write `settings.toml` are off.
+  - **The playback controls** are also off until the wallpaper service has
+    answered, and while it isn't running; the app doesn't start the service.
+
+- **Its own preferences.** These live in `ui.toml` and are written only when
+  you change one of them:
+  - the window style: solid, translucent or frosted;
+  - its opacity and frost dials, in the window menu and Settings → Appearance;
+  - the thumbnail size.
+
+- **One set of widgets.** Every page in `ui/next/` is the prototype's own:
+  `prototypes/ui-redesign` runs the same modules over its dummy data.
+  - **The boundary** is the `AppState` Protocol in `ui/next/state.py`, plus
+    one Protocol per page area: `store_state.py`, `playlists_state.py`,
+    `schedule_state.py` and `settings_state.py`.
+  - **The app's side** is `ui/next/real_state.py` and its `real_*.py`
+    modules.
+
+- **One process, one interface.**
+  - **The choice belongs to the process that starts the app:** the desktop
+    entry, `ctl open` with no app running, and `--service` all read the saved
+    choice when they start it.
+  - **A second launch** that reaches an already-running instance presents that
+    instance's window unchanged. A second `wall-in-one --ui=…` prints a note
+    that its `--ui` was not applied. Close the app and start it again to
+    switch.
+  - **The forwarded activation** carries only the package and the page,
+    because older builds fix its shape.
+
+- **`ctl open <page>`** presents the window either way.
+  - Every page is in the new interface: the Library (`media`), the Store
+    (`browse`), Playlists (`playlists`), Settings (`settings`) and Schedule
+    (`schedules`, and its alias `displays`).
+  - A page the new interface lacks would answer `not-in-new-ui`, with exit
+    status 1.
+  - When no app is running, `ctl open` launches the interface chosen in
+    Settings.
+
+- **Rolling back.**
+  - 0.2.0 and 0.2.1 don't know the choice and start classic. `--ui=next`
+    still works there.
+  - **0.2.2** knows the choice, but its new interface has only the Library;
+    use classic there for the rest.
+  - See [docs/updating.md](docs/updating.md) for what choosing New (preview)
+    does to `ui.toml` for them.
+
+- **The seams.**
+  - `Application` talks to its window only through the `WindowServices`
+    Protocol (`ui/window_services.py`), which mypy checks both windows against.
+  - Runtime status goes through one `RuntimeStatusModel`
+    (`ui/status_model.py`). The classic window receives it through a
+    forwarding subscriber; the new window subscribes directly.
 
 ## Licence
 

@@ -34,7 +34,9 @@ keeps, which playback does not skip, so a video still waiting for its
 still does not count. Removing the last entry a used playlist can play is
 refused at the head of the queue, against the saved rules, assignments and
 default (plus a default this adapter asked for that has not settled yet).
-Making a playlist with nothing to play the default is refused when asked.
+Making a playlist with nothing to play the default is refused when asked,
+and again by the application at its own settings write
+(`Application._prepare_settings_batch`), whichever page asked.
 
 **Hidden playlists.** "Your pick" is the ``quick-choice`` playlist and its
 per-display ``quick-choice:<hash>`` siblings; "All wallpapers" is generated

@@ -695,8 +695,14 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
     source = root / "personal.png"
     source.write_bytes(b"image")
     item = MediaItem(source, Kind.STILL, 5, 1)
+    # A second wallpaper keeps the default playable once ``personal.png`` goes;
+    # removing a default's only wallpaper is refused before anything moves.
+    kept = root / "kept.png"
+    kept.write_bytes(b"image")
+    other = MediaItem(kept, Kind.STILL, 5, 1)
     playlist = application.session.playlists.create("Saved", entry_id="saved")
     application.session.playlists.add(playlist.id, item.path)
+    application.session.playlists.add(playlist.id, other.path)
     settings = replace(
         application.settings,
         roots=(root,),
@@ -706,7 +712,7 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
     application._settings = settings
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
-    application.session.adopt_library(Library((root,), (item,)))
+    application.session.adopt_library(Library((root,), (item, other)))
     application._accepted_library_sources = (settings.roots, settings.scan_workshop)
     compile_started = threading.Event()
     release_compile = threading.Event()
@@ -775,8 +781,14 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
     source = root / "personal.png"
     source.write_bytes(b"image")
     item = MediaItem(source, Kind.STILL, 5, 1)
+    # A second wallpaper keeps the default playable once ``personal.png`` goes;
+    # removing a default's only wallpaper is refused before anything moves.
+    kept = root / "kept.png"
+    kept.write_bytes(b"image")
+    other = MediaItem(kept, Kind.STILL, 5, 1)
     playlist = application.session.playlists.create("Saved", entry_id="saved")
     application.session.playlists.add(playlist.id, item.path)
+    application.session.playlists.add(playlist.id, other.path)
     settings = replace(
         application.settings,
         roots=(root,),
@@ -786,7 +798,7 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
     application._settings = settings
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
-    application.session.adopt_library(Library((root,), (item,)))
+    application.session.adopt_library(Library((root,), (item, other)))
     application._accepted_library_sources = (settings.roots, settings.scan_workshop)
     reload_started = threading.Event()
     release_reload = threading.Event()

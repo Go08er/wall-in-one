@@ -638,6 +638,61 @@ def leaves_nothing_to_play(before: Sequence[Playability], after: Sequence[Playab
     return any(entry.plays for entry in before) or not any(entry.compiles for entry in after)
 
 
+def playlist_uses(pid: str, settings: config.Settings, session: Session) -> tuple[str, ...]:
+    """Every saved use of playlist ``pid`` the compiler builds, in words.
+
+    The default, every schedule rule (turned off or aimed at one display,
+    which are kept and can come back into force) and every display's own
+    playlist (dormant while mirrored, live again in independent mode).
+    """
+
+    def names(reference: str) -> bool:
+        found = find_playlist(reference, session)
+        return found is not None and found.id == pid
+
+    found: list[str] = []
+    if settings.active_playlist and names(settings.active_playlist):
+        found.append("the default")
+    rules = sum(names(rule.playlist) for rule in session.schedules.rules)
+    if rules:
+        found.append(f"{rules} schedule rule{'' if rules == 1 else 's'}")
+    found.extend(
+        f"{connector}\u2019s own playlist"
+        for connector, assigned in session.displays.all()
+        if names(assigned)
+    )
+    return tuple(found)
+
+
+def _listed(words: Sequence[str]) -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + f" and {words[-1]}"
+
+
+def emptied_by_removing(
+    sources: Iterable[Path], settings: config.Settings, session: Session
+) -> list[str]:
+    """Each used playlist that would have nothing left to play without ``sources``.
+
+    For wallpapers leaving the library: every entry naming one goes with it.
+    Checked against what is saved now, so at the head of the authoring lane
+    it is the guarantee; earlier it is only advice.
+    """
+    leaving = set(sources)
+    known = library_index(session)
+    found: list[str] = []
+    for playlist in session.playlists.all():
+        kept = [entry for entry in playlist.entries if entry.path not in leaving]
+        if len(kept) == len(playlist.entries):
+            continue
+        uses = playlist_uses(playlist.id, settings, session)
+        if uses and leaves_nothing_to_play(
+            playlist_playability(playlist.entries, session, known),
+            playlist_playability(kept, session, known),
+        ):
+            found.append(f"\u201c{playlist.name}\u201d (used by {_listed(uses)})")
+    return found
+
+
 def _validate_playlist_identity(
     compiled: list[tuple[str, str, tuple[tuple[str, ...], ...]]],
 ) -> None:

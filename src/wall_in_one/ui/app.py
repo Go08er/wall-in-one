@@ -4474,6 +4474,23 @@ class Application(Adw.Application):
                 item.provider,
             ):
                 raise ValueError(f"{item.path} changed before removal could start")
+            # Every entry naming it goes with it. Checked here, at the head of
+            # the lane, against what is saved by now: a rule, assignment or
+            # default saved after the gesture is seen, and a playlist something
+            # uses never loses the last wallpaper it can play.
+            emptied = runtime_config.emptied_by_removing(
+                [current.path], self._settings, self._session
+            )
+            if emptied:
+                listed = (
+                    emptied[0]
+                    if len(emptied) == 1
+                    else ", ".join(emptied[:-1]) + f" and {emptied[-1]}"
+                )
+                raise ValueError(
+                    f"{current.name} was not removed: {listed} would have nothing left to "
+                    "play. Add another wallpaper there first."
+                )
             plan = self._session.prepare_removal_plan(current, trash=trash)
             self._invalidate_runtime_for_pending_removal()
             self._removal_active = True
@@ -5160,8 +5177,9 @@ class Application(Adw.Application):
 
     def _start_settings_authoring(self) -> bool:
         return self.authoring_action_async(
-            self._persist_settings_batch,
+            self._unprepared_settings_batch,
             self._finish_settings_batch,
+            prepare=self._prepare_settings_batch,
             failure=self._fail_settings_batch,
             # A newer field was already accepted while the current batch was
             # in flight.  Explicit quit refuses new gestures but must drain
@@ -5175,14 +5193,39 @@ class Application(Adw.Application):
             guard_migration_transaction=False,
         )
 
-    def _persist_settings_batch(self) -> _SettingsResult:
+    @staticmethod
+    def _unprepared_settings_batch() -> _SettingsResult:  # pragma: no cover - prepare replaces it
+        raise RuntimeError("settings batch was not prepared")
+
+    def _prepare_settings_batch(self) -> Callable[[], _SettingsResult]:
+        """Take the coalesced batch at the head of the lane, and check it against what is saved.
+
+        On GTK, after every write queued before it has saved: a default
+        playlist that has nothing to play by now (its last wallpaper removed
+        meanwhile, say) is refused here, whichever page or window asked for
+        it, so the runtime configuration can still be built. A refusal fails
+        the whole batch, as a failed write does: every control goes back to
+        what is saved. Changes arriving after this snapshot stay pending and
+        start their own batch.
+        """
         with self._settings_authoring_lock:
             generation = self._settings_authoring_generation
             changes = tuple(
                 (key, field_generation, value)
                 for key, (field_generation, value) in self._settings_authoring_pending.items()
             )
+        wanted_default = {key: value for key, _gen, value in changes}.get("active_playlist")
+        if isinstance(wanted_default, str) and wanted_default:
+            refusal = runtime_config.use_refusal(wanted_default, self._session)
+            if refusal:
+                raise config.ConfigError(
+                    f"the chosen default playlist can\u2019t be used: {refusal}"
+                )
+        return lambda: self._persist_settings_batch(generation, changes)
 
+    def _persist_settings_batch(
+        self, generation: int, changes: tuple[tuple[str, int, Any], ...]
+    ) -> _SettingsResult:
         def persist() -> _SettingsResult:
             if not changes:  # pragma: no cover - guarded by the GTK scheduler
                 return _SettingsResult(generation, config.load_strict(), ())

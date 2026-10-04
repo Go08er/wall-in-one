@@ -22,7 +22,8 @@ editor, the playlists page) already makes, through the same calls:
   colors and playlist entries too, so there is no Undo: nothing could put
   them back. One wallpaper at a time, because each removal holds the library
   until its rescan lands, and never the last thing a playlist in use can
-  play (the Playlists page's own rule, `RealPlaylists.emptied_by_removing`).
+  play (the Playlists page's own rule, `RealPlaylists.emptied_by_removing`), and
+  the application checks it again when the removal reaches the head of the lane.
 * **Playlists**: adding, and making a playlist with wallpapers in it, is the
   Playlists page's own save (`real_playlists.RealPlaylists`): one task,
   refused for a wallpaper playback skips, never "your pick" or All.

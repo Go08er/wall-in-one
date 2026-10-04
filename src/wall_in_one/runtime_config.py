@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +27,7 @@ from typing import Final
 from wall_in_one import config, file_io, paths, runtime_compatibility
 from wall_in_one.library import pairings, state_file
 from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.session import Session
 from wall_in_one.wallpaper import scenes
 
@@ -526,6 +527,115 @@ def _resolved_entry(
         lines.append(f"scene_id = {_quote(item.scene)}")
     lines.append(f"palette = {_palette(bundle.palette, session.settings.preview_scheme)}")
     return tuple(lines)
+
+
+# -- what can play: the compiler's own answer, for every page that asks ---------------
+
+#: The id a lone entry is compiled under to ask `_resolved_entry`; never written.
+_PROBE_ENTRY_ID: Final = "playability-probe"
+
+
+@dataclass(frozen=True, slots=True)
+class Playability:
+    """What one playlist entry gives the runtime, by the compiler's own answer.
+
+    ``compiles``: `_resolved_entry` keeps it, so it becomes an entry in
+    ``runtime.toml`` (a library item with a representative still, its video
+    for a moving one, a numeric scene id). ``plays``: it compiles and
+    playback does not skip it (it is not marked as one the runtime refused).
+    ``reason`` says why it doesn't play, for a person.
+    """
+
+    compiles: bool
+    plays: bool
+    reason: str = ""
+
+
+def entry_playability(item: MediaItem | None, session: Session) -> Playability:
+    """Whether ``item`` (``None``: not in the library) compiles and plays.
+
+    The compiler's `_resolved_entry` itself decides, over the session's
+    accepted memory (`pairings.Store.resolve_accepted`): no file is read, so
+    the GTK thread may ask, and the pages and the compiler cannot disagree.
+    """
+    if item is None:
+        return Playability(False, False, "it is not in the library now")
+    try:
+        kept = _resolved_entry(item, session, _PROBE_ENTRY_ID) is not None
+    except RuntimeConfigError:
+        kept = False
+    health = session.pairings.health(pairings.Identity.of(item))
+    if health.is_borked:
+        # The runtime's own refusal says most about why it doesn't play.
+        return Playability(kept, False, health.reason or "playback skips it")
+    if not kept:
+        still = session.pairings.resolve_accepted(item, session.library).still
+        reason = (
+            "it has no still for playback to show yet"
+            if still is None
+            else "playback can\u2019t use it"
+        )
+        return Playability(False, False, reason)
+    return Playability(True, True)
+
+
+def library_index(session: Session) -> dict[Path, MediaItem]:
+    """The session's library by path, for asking about many entries at once."""
+    return {item.path: item for item in session.library.items}
+
+
+def playlist_playability(
+    entries: Iterable[Entry],
+    session: Session,
+    known: Mapping[Path, MediaItem] | None = None,
+) -> tuple[Playability, ...]:
+    """`entry_playability` for each of ``entries``, in order."""
+    index = library_index(session) if known is None else known
+    return tuple(entry_playability(index.get(entry.path), session) for entry in entries)
+
+
+def find_playlist(reference: str, session: Session) -> Playlist | None:
+    """The playlist ``reference`` names, as `runtime_playlist` resolves it: id, then name."""
+    found = session.playlists.get(reference)
+    return found if found is not None else session.playlists.by_name(reference)
+
+
+def use_refusal(reference: str, session: Session) -> str:
+    """Why ``reference`` can't be the default, a rule's or a display's playlist; empty if it can.
+
+    The compiler refuses a document naming a playlist it can't build
+    (`runtime_playlist`), and the service then keeps the previous one; a
+    playlist whose every wallpaper playback skips compiles but never shows
+    anything. "All media" can always be used.
+    """
+    if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
+        return ""
+    playlist = find_playlist(reference, session)
+    if playlist is None:
+        return "That playlist no longer exists"
+    entries = playlist_playability(playlist.entries, session)
+    if not any(entry.compiles for entry in entries):
+        return f"\u201c{playlist.name}\u201d has nothing to play yet; add wallpapers to it first"
+    if not any(entry.plays for entry in entries):
+        return (
+            f"Playback skips everything in \u201c{playlist.name}\u201d, "
+            "so it can\u2019t be used here"
+        )
+    return ""
+
+
+def leaves_nothing_to_play(before: Sequence[Playability], after: Sequence[Playability]) -> bool:
+    """Whether a removal takes away the last thing a used playlist can play.
+
+    Refused when nothing that plays would remain where something did, and
+    also when nothing that compiles would remain: a used playlist the
+    compiler can't build stops every later publication. A playlist that
+    already had nothing playing may still lose skipped entries while one
+    that compiles remains, so it can be cleaned up.
+    """
+    if any(entry.plays for entry in after):
+        return False
+    return any(entry.plays for entry in before) or not any(entry.compiles for entry in after)
 
 
 def _validate_playlist_identity(

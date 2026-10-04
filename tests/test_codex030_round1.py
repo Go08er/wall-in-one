@@ -15,8 +15,9 @@ from typing import Any
 import pytest
 
 from tests.test_next_state import FakeApplication, _adapter, _library, _session
+from wall_in_one import runtime_config
 from wall_in_one.library import playlists
-from wall_in_one.library.model import MediaItem
+from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.ui.next import real_schedule
 from wall_in_one.ui.next.real_playlists import RealPlaylists
@@ -75,6 +76,84 @@ def _evening(session: Session, items: tuple[MediaItem, ...]) -> str:
     return session.playlists.create(
         "Evening", entries=[playlists.Entry("e0", str(items[0].path))]
     ).id
+
+
+# -- P-3: one playability rule, the compiler's -------------------------------------------------
+
+
+def _video(items: tuple[MediaItem, ...]) -> MediaItem:
+    video = next(item for item in items if item.kind is Kind.VIDEO)
+    assert video.paired_still is None, "the fixture's video has no still"
+    return video
+
+
+def test_p3_an_unresolved_video_does_not_count_as_playable_anywhere(
+    backend: FakeApplication, items: tuple[MediaItem, ...]
+) -> None:
+    """A playlist with a still and a video that has no still: the video can't play.
+
+    The review: removing the still was allowed (Playlists counted the video),
+    Schedule said nothing could play, and the compiler then refused the
+    saved rule's playlist.
+    """
+    session = backend.session
+    still, video = items[0], _video(items)
+    made = session.playlists.create("Evening", entry_id="evening")
+    session.playlists.add(made.id, still.path, entry_id="e-still")
+    session.playlists.add(made.id, video.path, entry_id="e-video")
+    session.schedules.add(made.id)
+    runtime_config.render(session.settings, session)  # the still compiles: fine
+    _state, editing, scheduling = _parts(backend)
+
+    # Removing the still would leave the rule's playlist with nothing that plays.
+    editing.remove_entries(made.id, ["e-still"])
+    backend.run_authoring()
+    kept = playlists.Store.open().get(made.id)
+    assert kept is not None and [entry.id for entry in kept.entries] == ["e-still", "e-video"]
+    assert "would have nothing left to play" in backend.reports[-1]
+    runtime_config.render(session.settings, session)  # still buildable
+
+    # Every view gives the compiler's answer: the video doesn't play.
+    detail = editing.detail(made.id)
+    assert detail is not None and detail.usable == 1
+    video_row = next(entry for entry in detail.entries if entry.id == "e-video")
+    assert not video_row.usable and "no still" in video_row.problem
+    assert runtime_config.entry_playability(video, session).compiles is False
+    assert runtime_config.entry_playability(still, session).plays is True
+
+    # The Schedule and the Playlists page refuse a video-only playlist alike.
+    only = session.playlists.create("Video only")
+    session.playlists.add(only.id, video.path)
+    assert "nothing to play" in scheduling.playlist_blocked(only.id)
+    only_detail = editing.detail(only.id)
+    assert only_detail is not None and only_detail.default_blocked
+
+    # And adding the video is refused at the gesture, saying why.
+    editing.add_entries(made.id, [str(video.path)])
+    assert not backend.authoring
+    assert "no still" in backend.reports[-1]
+
+
+def test_p3_the_rule_is_the_compilers_entry_resolution(
+    backend: FakeApplication, items: tuple[MediaItem, ...]
+) -> None:
+    """For every item, "compiles" is exactly whether the compiled playlist keeps it."""
+    session = backend.session
+    for item in items:
+        made = session.playlists.create(
+            f"Only {item.name}", entries=[playlists.Entry("x", str(item.path))]
+        )
+        compiles = runtime_config.entry_playability(item, session).compiles
+        session.schedules.add(made.id)
+        try:
+            runtime_config.render(session.settings, session)
+        except runtime_config.RuntimeConfigError:
+            built = False
+        else:
+            built = True
+        assert built == compiles, item.name
+        for rule in session.schedules.rules:
+            session.schedules.remove(rule.id)
 
 
 # -- P-5: a playlist made with its wallpapers is one write -------------------------------------

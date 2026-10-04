@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
 from typing import Any, Final, Protocol, TypeVar
 
 import gi
@@ -51,8 +50,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk
 
 from wall_in_one import config, display_policy, runtime_config
-from wall_in_one.library import pairings, schedules
-from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library import schedules
 from wall_in_one.library.playlists import (
     DISPLAY_QUICK_CHOICE_ID_PREFIX,
     DISPLAY_QUICK_CHOICE_NAME_PREFIX,
@@ -209,18 +207,6 @@ def draft_problem(view: RuleView) -> str:
     if any(month not in range(1, 13) for month in view.months):
         return "A month is 1 to 12"
     return schedule_model.window_problem(view.start, view.end)
-
-
-def _playable(item: MediaItem, session: Session) -> bool:
-    """Whether the compiler can play ``item`` (`runtime_config` skips it otherwise)."""
-    bundle = session.pairings.resolve_accepted(item, session.library)
-    if bundle.still is None or not Path(bundle.still).is_absolute():
-        return False
-    if item.kind is Kind.VIDEO:
-        return bundle.motion is not None and Path(bundle.motion).is_absolute()
-    if item.kind is Kind.SCENE:
-        return item.scene.isdigit()
-    return True
 
 
 # -- the adapter ------------------------------------------------------------------------
@@ -457,26 +443,8 @@ class RealScheduling:
         return playlist.name
 
     def playlist_blocked(self, pid: str) -> str:
-        if pid == runtime_config.FALLBACK_PLAYLIST_ID:
-            return ""
-        session = self._session
-        playlist = session.playlists.get(pid)
-        if playlist is None:
-            return "That playlist no longer exists"
-        # The Playlists page's rule: something in the library that playback
-        # doesn't skip (the compiler would also drop what it can't resolve).
-        known = {item.path: item for item in session.library.items}
-        present = False
-        for entry in playlist.entries:
-            item = known.get(entry.path)
-            if item is None or not _playable(item, session):
-                continue
-            present = True
-            if not session.pairings.health(pairings.Identity.of(item)).is_borked:
-                return ""
-        if present:
-            return f"Playback skips everything in “{playlist.name}”, so it can\u2019t be used here"
-        return f"“{playlist.name}” has nothing to play yet; add wallpapers to it first"
+        """The one rule every page uses (`runtime_config.use_refusal`), on what is saved now."""
+        return runtime_config.use_refusal(pid, self._session)
 
     # -- writing: the shared shape --------------------------------------------------------
     def _settle(self, settled: Settled | None, saved: bool) -> None:

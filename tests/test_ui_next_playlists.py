@@ -287,6 +287,7 @@ def test_the_picker_adds_several_in_one_task_in_pick_order(
     backend: FakeApplication, make: Any
 ) -> None:
     _evening(backend, count=1)
+    _give_the_video_a_still(backend)
     shown = make()
     page = shown.page
     picker = page.open_picker()
@@ -325,8 +326,15 @@ def test_the_picker_never_offers_a_wallpaper_playback_skips(
     )
 
 
+def _give_the_video_a_still(backend: FakeApplication) -> None:
+    """The fixture's video has no still of its own, so playback could not show it."""
+    items = backend.session.library.items
+    backend.session.pairings.choose_still(items[3], items[0].path)
+
+
 def test_a_library_drop_lands_where_it_is_dropped(backend: FakeApplication, make: Any) -> None:
     _evening(backend, count=2)
+    _give_the_video_a_still(backend)
     shown = make()
     shown.settle()
     page = shown.page

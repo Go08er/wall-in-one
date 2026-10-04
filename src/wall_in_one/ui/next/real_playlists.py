@@ -28,11 +28,13 @@ ones; `PlaylistDetail.busy` says that changes to them are still queued.
 **Nothing playable.** A playlist that a schedule rule, the schedule's
 default or a display uses must keep something to play: the runtime
 configuration cannot be built otherwise (``runtime_config._compile``), and
-the service would keep the previous one. So removing the last entry it can
-play is refused, and so is making a playlist with nothing to play the
-default. Both are checked at the head of the queue, against the saved
-rules, assignments and default, plus a default this adapter asked for that
-has not settled yet.
+the service would keep the previous one. What "plays" means is the
+compiler's own answer (`runtime_config.entry_playability`): an entry it
+keeps, which playback does not skip, so a video still waiting for its
+still does not count. Removing the last entry a used playlist can play is
+refused at the head of the queue, against the saved rules, assignments and
+default (plus a default this adapter asked for that has not settled yet).
+Making a playlist with nothing to play the default is refused when asked.
 
 **Hidden playlists.** "Your pick" is the ``quick-choice`` playlist and its
 per-display ``quick-choice:<hash>`` siblings; "All wallpapers" is generated
@@ -48,14 +50,14 @@ left it; otherwise it says why and changes nothing.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol, TypeVar
 
 from wall_in_one import config, runtime_config
-from wall_in_one.library import pairings, playlists
+from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
 from wall_in_one.library.schedules import Rule
+from wall_in_one.runtime_config import Playability, leaves_nothing_to_play
 from wall_in_one.session import QUICK_CHOICE_ID, Session
 from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.playlists_state import (
@@ -174,28 +176,6 @@ def hidden(pid: str) -> bool:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class Playability:
-    """What one entry offers playback: there at all, and playable."""
-
-    present: bool
-    usable: bool
-
-
-def leaves_nothing_to_play(before: Sequence[Playability], after: Sequence[Playability]) -> bool:
-    """Whether a removal takes away the last thing a used playlist can play.
-
-    Refused when nothing usable would remain where something did, and also
-    when nothing at all would remain that the library has: a used playlist
-    with no entries in the library cannot be compiled. A playlist that
-    already had nothing usable may still lose skipped entries while one the
-    library has remains, so it can be cleaned up.
-    """
-    if any(entry.usable for entry in after):
-        return False
-    return any(entry.usable for entry in before) or not any(entry.present for entry in after)
-
-
 def rule_words(rule: Rule) -> str:
     """A rule in words: ``Weekdays 07:00\u201318:00``, ``Weekends, all day``, ``All of Dec``.
 
@@ -289,18 +269,24 @@ class RealPlaylists:
     def _editable(self, pid: str) -> playlists.Playlist | None:
         return None if hidden(pid) else self._store.get(pid)
 
-    def _entry_view(self, entry: playlists.Entry) -> EntryView:
+    def _entry_view(self, entry: playlists.Entry, can: Playability | None = None) -> EntryView:
+        """One entry as shown; usable exactly when the compiler keeps it and it plays."""
         view = self._shown.library_entry(entry.source)
         if view is None:
             return EntryView(entry.id, entry.source, Path(entry.source).name, missing=True)
-        return EntryView(entry.id, entry.source, view.name, problem=view.problem)
+        if can is None:
+            can = runtime_config.entry_playability(view.item, self._session)
+        problem = "" if can.plays else (view.problem or can.reason)
+        return EntryView(entry.id, entry.source, view.name, problem=problem)
 
-    def _playability(self, entries: Iterable[playlists.Entry]) -> list[Playability]:
-        found: list[Playability] = []
-        for entry in entries:
-            view = self._shown.library_entry(entry.source)
-            found.append(Playability(view is not None, view is not None and not view.problem))
-        return found
+    def _playability(self, entries: Iterable[playlists.Entry]) -> tuple[Playability, ...]:
+        """The compiler's answer for each entry (`runtime_config.entry_playability`)."""
+        return runtime_config.playlist_playability(entries, self._session)
+
+    def _refusal(self, item: MediaItem) -> str:
+        """Why ``item`` can't go into a playlist (playback would skip it), or empty."""
+        can = runtime_config.entry_playability(item, self._session)
+        return "" if can.plays else can.reason
 
     def _default_pid(self) -> str:
         pending = self._defaults.get(_DEFAULT)
@@ -310,7 +296,14 @@ class RealPlaylists:
         playlist = self._editable(pid)
         if playlist is None:
             return None
-        entries = tuple(self._entry_view(entry) for entry in playlist.entries)
+        known = runtime_config.library_index(self._session)
+        entries = tuple(
+            self._entry_view(
+                entry,
+                runtime_config.entry_playability(known.get(entry.path), self._session),
+            )
+            for entry in playlist.entries
+        )
         usable = sum(entry.usable for entry in entries)
         name = self._names[pid][0] if pid in self._names else playlist.name
         blocked = self.editing_blocked()
@@ -513,6 +506,16 @@ class RealPlaylists:
 
         return settle
 
+    def _require_playing(self, items: Iterable[MediaItem]) -> None:
+        """At the head of the queue: refuse a wallpaper playback would skip, saying why."""
+        for item in items:
+            refusal = self._refusal(item)
+            if refusal:
+                raise RefusedError(
+                    f"playback became unavailable for {item.name}; it can\u2019t be added: "
+                    f"{refusal}"
+                )
+
     def _require(self, pid: str, what: str) -> playlists.Playlist:
         """The saved playlist at the head of the queue, or a refusal."""
         playlist = self._store.get(pid)
@@ -538,9 +541,10 @@ class RealPlaylists:
             )
             return ""
         for view in views:
-            if view.problem:
+            refusal = self._refusal(view.item)
+            if refusal:
                 self._backend.window_report(
-                    f"Playback unavailable for {view.name}; it can\u2019t be added: {view.problem}"
+                    f"Playback unavailable for {view.name}; it can\u2019t be added: {refusal}"
                 )
                 return ""
         pid = playlists.new_id()
@@ -550,13 +554,7 @@ class RealPlaylists:
 
         def prepare() -> Callable[[], playlists.Playlist]:
             items = [backend.current_item_for_authoring(view.item) for view in views]
-            for item in items:
-                health = self._session.pairings.health(pairings.Identity.of(item))
-                if health.is_borked:
-                    raise RefusedError(
-                        f"playback became unavailable for {item.name}; "
-                        f"it can\u2019t be added: {health.reason}"
-                    )
+            self._require_playing(items)
             entries = [playlists.Entry(playlists.new_id(), str(item.path)) for item in items]
             # One save: the playlist and its wallpapers, or nothing at all.
             return lambda: store.create(name, entry_id=pid, entries=entries)
@@ -713,9 +711,10 @@ class RealPlaylists:
         if playlist is None or not views:
             return
         for view in views:
-            if view.problem:
+            refusal = self._refusal(view.item)
+            if refusal:
                 self._backend.window_report(
-                    f"Playback unavailable for {view.name}; it can\u2019t be added: {view.problem}"
+                    f"Playback unavailable for {view.name}; it can\u2019t be added: {refusal}"
                 )
                 return
         backend = self._backend
@@ -725,13 +724,7 @@ class RealPlaylists:
         def prepare() -> Callable[[], playlists.Playlist]:
             current = self._require(pid, "the wallpapers")
             items = [backend.current_item_for_authoring(view.item) for view in views]
-            for item in items:
-                health = self._session.pairings.health(pairings.Identity.of(item))
-                if health.is_borked:
-                    raise RefusedError(
-                        f"playback became unavailable for {item.name}; "
-                        f"it can\u2019t be added: {health.reason}"
-                    )
+            self._require_playing(items)
             at = len(current.entries) if position is None else position
             placed = [
                 (at + index, playlists.Entry(playlists.new_id(), str(item.path)))

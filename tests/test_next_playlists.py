@@ -20,6 +20,7 @@ from tests.test_next_state import FakeApplication, _adapter, _library, _session,
 from wall_in_one import paths
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
+from wall_in_one.runtime_config import Playability, leaves_nothing_to_play
 from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME
 from wall_in_one.ui.next.playlists_state import (
     EDITS_TOPIC,
@@ -28,10 +29,8 @@ from wall_in_one.ui.next.playlists_state import (
     usage_words,
 )
 from wall_in_one.ui.next.real_playlists import (
-    Playability,
     RealPlaylists,
     hidden,
-    leaves_nothing_to_play,
     rule_words,
 )
 from wall_in_one.ui.next.real_state import RealAppState
@@ -476,9 +475,9 @@ def test_a_default_asked_for_counts_before_it_is_saved(backend: FakeApplication)
 
 
 def test_cleanup_of_an_already_unplayable_used_playlist_is_allowed() -> None:
-    usable = Playability(present=True, usable=True)
-    skipped = Playability(present=True, usable=False)
-    missing = Playability(present=False, usable=False)
+    usable = Playability(compiles=True, plays=True)
+    skipped = Playability(compiles=True, plays=False)
+    missing = Playability(compiles=False, plays=False)
     assert leaves_nothing_to_play([usable, skipped], [skipped])
     assert not leaves_nothing_to_play([usable, usable], [usable])
     assert not leaves_nothing_to_play([skipped, skipped], [skipped]), "nothing usable to lose"

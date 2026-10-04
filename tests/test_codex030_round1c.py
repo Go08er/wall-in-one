@@ -64,6 +64,55 @@ def test_workshop_items_come_back_only_from_the_workshop_scan() -> None:
     assert not scan.would_find(scene, (Path("/steam"),), False)
 
 
+def test_the_prediction_is_what_the_scan_finds_for_every_set_of_roots(tmp_path: Path) -> None:
+    """`scan.would_find` against the real walk: every accepted wallpaper, every other root set.
+
+    Hidden folders, a folder deeper than MAX_DEPTH, a symlinked folder and
+    file under a root, a symlinked root, a root reached through a symlinked
+    parent, nested and prefix-alike roots.
+    """
+    real = tmp_path / "real"
+    pics = real / "pics"
+    for path in (
+        pics / "a.png",
+        pics / "sub" / "b.png",
+        pics / ".hidden" / "c.png",
+        pics.joinpath(*(f"d{n}" for n in range(scan.MAX_DEPTH)), "deep.png"),
+        tmp_path / "pics2" / "z.png",
+        tmp_path / "other" / "x.png",
+        tmp_path / "top.png",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"placeholder image bytes")
+    (pics / "sub" / "link").symlink_to(tmp_path / "other", target_is_directory=True)
+    (pics / "linked.png").symlink_to(pics / "a.png")
+    (tmp_path / "via").symlink_to(real, target_is_directory=True)
+    (tmp_path / "rootlink").symlink_to(tmp_path / "other", target_is_directory=True)
+    through = tmp_path / "via" / "pics"  # a real folder, reached through a symlinked parent
+
+    def scanned(roots: tuple[Path, ...]) -> Library:
+        return scan.scan(roots, {}, adoption_candidates=())
+
+    accepted = scanned((pics, tmp_path / "pics2", through, tmp_path / "rootlink"))
+    assert accepted.items, "the fixture has wallpapers"
+    for roots in (
+        (pics,),
+        (pics / "sub",),
+        (tmp_path / "pics2",),
+        (tmp_path / "pics",),
+        (real,),
+        (tmp_path,),
+        (tmp_path / "via",),
+        (through,),
+        (pics, tmp_path / "pics2", through),
+        (),
+    ):
+        found = {item.path for item in scanned(roots).items}
+        for item in accepted.items:
+            predicted = scan.would_find(item, roots, False, accepted.linked_ancestors)
+            assert predicted == (item.path in found), (item.path, roots)
+
+
 # -- the refusal ---------------------------------------------------------------------------
 
 

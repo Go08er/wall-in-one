@@ -927,10 +927,11 @@ def sources_refusal(after: config.Settings, session: Session) -> list[str]:
     nothing on disk is read; uses are counted as ``after`` has them.
     """
     include_workshop = after.scan_workshop and bool(after.roots)
+    library = session.library
     leaving = [
         item.path
-        for item in session.library.items
-        if not scan.would_find(item, after.roots, include_workshop)
+        for item in library.items
+        if not scan.would_find(item, after.roots, include_workshop, library.linked_ancestors)
     ]
     return emptied_by_removing(leaving, after, session) if leaving else []
 

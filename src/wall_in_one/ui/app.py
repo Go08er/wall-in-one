@@ -3102,6 +3102,7 @@ class Application(Adw.Application):
                     ),
                     skipped=library.skipped,
                     still_inventory=library.still_inventory,
+                    linked_ancestors=library.linked_ancestors,
                 ),
                 reconcile_workshop=False,
             )
@@ -4666,6 +4667,7 @@ class Application(Adw.Application):
             still_inventory=tuple(
                 item for item in current.still_inventory if item.path not in removed
             ),
+            linked_ancestors=current.linked_ancestors,
         )
         self._removed_item_paths.update(removed)
         self._session.adopt_library(filtered, reconcile_workshop=False)

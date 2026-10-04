@@ -330,22 +330,35 @@ def _walk(
                 skipped.append(f"{entry.path}: {error.strerror or error}")
 
 
-def would_find(item: MediaItem, roots: Sequence[Path], include_workshop: bool) -> bool:
+def would_find(
+    item: MediaItem,
+    roots: Sequence[Path],
+    include_workshop: bool,
+    linked: frozenset[Path] = frozenset(),
+) -> bool:
     """Whether a scan of ``roots`` (and of the Workshop, if included) finds ``item`` again.
 
-    Decided from the item's accepted path alone, so nothing on disk is read,
-    by the walk's own rules (`_walk`): a file is found under a root by its
+    Decided from the accepted library alone, so nothing on disk is read, by
+    the walk's own rules (`_walk`): a file is found under a root by its
     lexical path, by whole components (``/a/b`` holds ``/a/b/x``, never
     ``/a/bc/x``), never through a hidden name, at most `MAX_DEPTH` folders
-    down. The walk follows no symlinked directory and `scan` skips a root
-    that is a symlink, so no accepted path runs through one, and a path is
-    never resolved here either. A Workshop item, and a scene always, comes
-    back from the Workshop scan only, which runs while it is included. The
-    scan's budgets (`MAX_ITEMS`, `MAX_ENTRIES_EXAMINED`) are not predicted.
+    down, and never through a symbolic link: `scan` skips a root that is one
+    and the walk follows none. No accepted path runs through a link below
+    its own root, so the only links a new root can meet on the way are the
+    ones above the scanned roots, ``linked`` (`Library.linked_ancestors`):
+    a root that is one, or holds one above the item, does not find it. A
+    Workshop item, and a scene always, comes back from the Workshop scan
+    only, which runs while it is included. The scan's budgets (`MAX_ITEMS`,
+    `MAX_ENTRIES_EXAMINED`) are not predicted.
     """
     if item.kind is not Kind.SCENE:
         for root in roots:
             if not item.path.is_relative_to(root):
+                continue
+            if root in linked or any(
+                link != root and link.is_relative_to(root) and item.path.is_relative_to(link)
+                for link in linked
+            ):
                 continue
             parts = item.path.relative_to(root).parts
             if (
@@ -466,12 +479,20 @@ def scan(
     ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
 
+    linked: set[Path] = set()
     for root in resolved_roots:
         if cancelled is not None and cancelled():
             raise ScanCancelledError
         if root.is_symlink() or not root.is_dir():
             skipped.append(f"{root}: not a directory")
             continue
+        for parent in root.parents:
+            # What a root above this one would meet on the way (`would_find`).
+            try:
+                if parent.is_symlink():
+                    linked.add(parent)
+            except OSError:
+                continue
         for path in _walk(root, budget, skipped, cancelled):
             if len(items) >= MAX_ITEMS:
                 skipped.append(f"{root}: stopped at {MAX_ITEMS} wallpapers")
@@ -586,4 +607,5 @@ def scan(
         skipped=tuple(skipped),
         still_inventory=still_inventory,
         adopted_stills=adopted_pairs,
+        linked_ancestors=frozenset(linked),
     )

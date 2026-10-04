@@ -36,7 +36,7 @@ from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session  # n
 from wall_in_one.ui.next import schedule  # noqa: E402
 from wall_in_one.ui.next.prefs import UiPrefsKeeper  # noqa: E402
 from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
-from wall_in_one.ui.next.schedule import SchedulePage  # noqa: E402
+from wall_in_one.ui.next.schedule import RuleRow, SchedulePage  # noqa: E402
 from wall_in_one.ui.next.schedule_editor import RuleEditor  # noqa: E402
 
 
@@ -425,5 +425,73 @@ def test_a_rule_on_your_pick_is_named_not_missing(
         assert editor._name.get_label() == "Your pick"
         assert QUICK_CHOICE_ID in editor._playlist_ids
         editor.force_close()
+    finally:
+        view.close()
+
+
+def _drag(page: SchedulePage, source: int, target: int) -> None:
+    """Carry list row ``source`` just past row ``target``'s middle, and drop it."""
+    rows = page.rule_list.get_rows()
+    heights = page.rule_list.row_heights()
+    page.rule_list.begin_drag(rows[source])
+    tops = [sum(heights[:index]) for index in range(len(heights))]
+    lean = 0.6 if target > source else 0.4
+    middle = tops[target] + heights[target] * lean
+    page.rule_list.update_drag(middle - (tops[source] + heights[source] / 2))
+    page.rule_list.end_drag()
+
+
+def test_dragging_a_rule_to_the_top_gives_it_the_highest_priority(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    pid = _playlist(backend.session, "Day", items[0])
+    store = backend.session.schedules
+    a, b, c = store.add(pid), store.add(pid), store.add(pid)
+    view = Shown(backend)
+    try:
+        page = view.page
+        spin_until(lambda: min(page.rule_list.row_heights() or [0]) > 0, 5, what="row heights")
+        assert [row.rule.id for row in page.rule_rows] == [c.id, b.id, a.id]
+        _drag(page, 2, 0)  # the lowest priority to the top of the list
+        spin_until(lambda: not page.rule_list.busy, 5, what="the dropped row to settle")
+        assert len(backend.authoring) == 1, "one relative move for the drop"
+        assert [rule.id for rule in store.rules] == [a.id, b.id, c.id], "nothing saved yet"
+        view.settle()
+        assert [rule.id for rule in store.rules] == [b.id, c.id, a.id]
+        assert [row.rule.id for row in page.rule_rows] == [a.id, c.id, b.id]
+        rebuilt = page.rule_list
+        spin_until(lambda: min(rebuilt.row_heights() or [0]) > 0, 5, what="the new rows' heights")
+        _drag(page, 0, 1)  # and one place back down
+        spin_until(lambda: not page.rule_list.busy, 5, what="the dropped row to settle")
+        view.settle()
+        assert [row.rule.id for row in page.rule_rows] == [c.id, a.id, b.id]
+        assert [rule.id for rule in store.rules] == [b.id, a.id, c.id]
+    finally:
+        view.close()
+
+
+def test_a_drop_whose_move_fails_goes_back_to_the_saved_order(
+    backend: Publishing, items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = _playlist(backend.session, "Day", items[0])
+    store = backend.session.schedules
+    a, b = store.add(pid), store.add(pid)
+
+    def refuse(_rule_id: str, _step: int) -> schedules.Rule:
+        raise schedules.ScheduleError("local-io", "the disk is full")
+
+    monkeypatch.setattr(store, "move_relative", refuse)
+    view = Shown(backend)
+    try:
+        page = view.page
+        spin_until(lambda: min(page.rule_list.row_heights() or [0]) > 0, 5, what="row heights")
+        _drag(page, 1, 0)
+        spin_until(lambda: not page.rule_list.busy, 5, what="the dropped row to settle")
+        dropped = [row.rule.id for row in page.rule_list.get_rows() if isinstance(row, RuleRow)]
+        assert dropped == [a.id, b.id], "shown where it was dropped"
+        view.settle()
+        assert [rule.id for rule in store.rules] == [a.id, b.id]
+        assert [row.rule.id for row in page.rule_rows] == [b.id, a.id], "back on what is saved"
+        assert "nothing changed" in backend.reports[-1]
     finally:
         view.close()

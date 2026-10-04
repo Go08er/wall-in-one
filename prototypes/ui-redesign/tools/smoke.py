@@ -328,6 +328,18 @@ def schedule_actions(state, window) -> None:
     page.move_rule(twin, -1)
     ids = [r.id for r in state.rules]
     assert ids.index(twin) < ids.index(rule.id)
+    # Dragging the bottom rule to the top of the list makes it the last stored rule.
+    page.flush()
+    settle(lambda: page.rule_list.row_heights() and min(page.rule_list.row_heights()) > 0)
+    rows = page.rule_list.get_rows()
+    heights = page.rule_list.row_heights()
+    bottom = rows[-1].rule.id
+    page.rule_list.begin_drag(rows[-1])
+    page.rule_list.update_drag(-(sum(heights[:-1]) + heights[-1] / 2 - heights[0] * 0.4))
+    page.rule_list.end_drag()
+    settle(lambda: not page.rule_list.busy)
+    assert state.rules[-1].id == bottom, [r.id for r in state.rules]
+    page.move_rule(bottom, -(len(state.rules) - 1))
     # The switch on the row.
     page.flush()
     page.row(rule.id).switch.set_active(False)
@@ -572,6 +584,7 @@ def build_steps(app, holder):
             "week:1",
             "seasonal",
             "menu:daytime",
+            "reorder",
             "display:HDMI-A-1",
             "",
         ],

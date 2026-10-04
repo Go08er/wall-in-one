@@ -572,8 +572,9 @@ choice for that start. With neither, the app is classic.
   a time.
 - **Schedule.** A week calendar and the rules, highest priority on top (the
   stored order, where the last matching rule wins, reversed). Drag on the
-  calendar or use Add rule; a rule's menu edits, duplicates, moves it up or
-  down (or Ctrl+↑/↓) and deletes it after asking. "When nothing is scheduled"
+  calendar or use Add rule; drag a rule by its handle (or Ctrl+↑/↓) to change
+  its priority; its menu edits, duplicates or moves it, and deletes it after
+  asking. "When nothing is scheduled"
   is the default playlist. The "Now" card and its "Why?" are the runtime's
   answer, its rule and its "until"; the calendar only projects the week. A
   rule aimed at one display is kept but shown inactive while displays are

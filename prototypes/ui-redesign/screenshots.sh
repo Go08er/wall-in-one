@@ -31,7 +31,7 @@ TOUR=(
   "schedule"
   "schedule+why"
   "schedule+edit:weekend-days"
-  "schedule+menu:daytime"
+  "schedule+reorder"
   "light@schedule"
   "displays"
   "mirrored@displays"

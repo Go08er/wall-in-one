@@ -7,6 +7,11 @@ The calendar projects the week with the app's own matching
 answer (`Scheduling.routes`, its rule id and "until"), never recomputed: the
 other rules only get words for why they are not it.
 
+Rules move by their handle (the shared `reorder.ReorderList`, which never
+gains or loses a row mid-drag: a rebuild waits for it to settle), by their
+menu, or by Ctrl+Up/Down; each move is one relative step in stored order
+from where the rule is when it is saved.
+
 While displays are mirrored, a rule aimed at one display is kept but does not
 apply; its row says so. A playlist that would play nothing can't be chosen
 for a rule or the default (the adapter refuses it and says why).
@@ -36,6 +41,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 from wall_in_one.ui.next import schedule_model as model
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.page import Page, not_ported
+from wall_in_one.ui.next.reorder import ReorderList
 from wall_in_one.ui.next.schedule_calendar import WeekCalendar
 from wall_in_one.ui.next.schedule_editor import (
     MISSING,
@@ -136,6 +142,8 @@ class RuleRow(Gtk.ListBoxRow):
         self.warning = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
         self.note = Gtk.Label(xalign=0, wrap=True)
         self.menu_button = Gtk.MenuButton(icon_name="view-more-symbolic")
+        #: What a drag grabs (`ReorderList`): a picture, never a button.
+        self.handle = Gtk.Image.new_from_icon_name("list-drag-handle-symbolic")
 
 
 class SchedulePage(Page):
@@ -259,8 +267,8 @@ class SchedulePage(Page):
         order.add_css_class("dimmed")
         order.add_css_class("caption")
         order.set_tooltip_text(
-            "Where rules overlap, the higher one plays. Move a rule with its menu, "
-            "or Ctrl+↑ / Ctrl+↓."
+            "Where rules overlap, the higher one plays. Drag a rule by its handle, "
+            "use its menu, or Ctrl+↑ / Ctrl+↓."
         )
         heading.append(order)
         rules.append(heading)
@@ -268,10 +276,12 @@ class SchedulePage(Page):
         self.blocked_label.add_css_class("warning")
         self.blocked_label.set_visible(False)
         rules.append(self.blocked_label)
-        self.rule_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.rule_list.add_css_class("boxed-list")
+        self.rule_list = ReorderList()
         self.rule_list.add_css_class("rules-list")
         self.rule_list.connect("row-activated", self._on_row_activated)
+        self.rule_list.connect("reordered", self._on_reordered)
+        self.rule_list.connect("settled", self._on_settled)
+        self._rules_deferred = False
         empty = Adw.StatusPage(
             icon_name="x-office-calendar-symbolic",
             title="No rules",
@@ -299,6 +309,7 @@ class SchedulePage(Page):
         )
         self._rules_scroller.set_child(self._rules_clamp)
         self._rules_scroller.set_size_request(360, -1)
+        self.rule_list.attach(self._rules_scroller)
 
         # -- layout ---------------------------------------------------------------
         columns = Gtk.Box(spacing=18)
@@ -377,6 +388,7 @@ class SchedulePage(Page):
             self._editor.force_close()
         self.why_popover.popdown()
         self.calendar.clear_selection()
+        self.rule_list.cancel_drag()
         what, _, argument = scene.partition(":")
         rules = {rule.id: rule for rule in self.scheduling.schedule_rules}
         if what in ("edit", "editend") and argument in rules:
@@ -399,6 +411,13 @@ class SchedulePage(Page):
             for row in self.rule_rows:
                 if row.rule.id == argument:
                     row.menu_button.popup()
+        elif what == "reorder":
+            # Hold a drag: the last rule lifted a little past the middle of the one above.
+            rows = self.rule_list.get_rows()
+            heights = self.rule_list.row_heights()
+            if len(rows) >= 2 and all(heights):
+                self.rule_list.begin_drag(rows[-1])
+                self.rule_list.update_drag(-(heights[-2] / 2 + heights[-1] / 2) * 1.24)
 
     # -- dates ------------------------------------------------------------------------
     def _monday(self, offset: int | None = None) -> dt.date:
@@ -846,6 +865,11 @@ class SchedulePage(Page):
 
     # -- the rules list ---------------------------------------------------------------
     def _rebuild_rules(self, rules: list[RuleView], never: set[str], independent: bool) -> None:
+        if self.rule_list.busy:
+            # Never pull rows out from under a drag or a settling row.
+            self._rules_deferred = True
+            return
+        self._rules_deferred = False
         focused = self._focused_rule()
         blocked = self.scheduling.schedule_blocked()
         self.blocked_label.set_label(blocked)
@@ -873,7 +897,7 @@ class SchedulePage(Page):
                 missing=self._name(rule.playlist) == MISSING,
                 blocked=blocked,
             )
-            self.rule_list.append(row)
+            self.rule_list.append(row, None if blocked else row.handle)
             self.rule_rows.append(row)
         remaining = len(shown) - len(visible)
         self.more_button.set_visible(remaining > 0)
@@ -928,6 +952,12 @@ class SchedulePage(Page):
         row.set_tooltip_text("Edit rule")
         body = Gtk.Box(spacing=8)
         body.add_css_class("rule-body")
+        row.handle.set_tooltip_text("Drag up or down to change priority (Ctrl+↑ / Ctrl+↓)")
+        row.handle.update_property(
+            [Gtk.AccessibleProperty.LABEL], [f"Reorder {rule_title(self.state, rule)}"]
+        )
+        row.handle.set_visible(not blocked)
+        body.append(row.handle)
         dot = Dot(self._colors().get(rule.playlist, model.FALLBACK_COLOR), 14)
         dot.add_css_class("rule-dim")
         body.append(dot)
@@ -1026,6 +1056,24 @@ class SchedulePage(Page):
             self.confirm_delete(rule_id)
             return True
         return False
+
+    def _on_reordered(self, _list: ReorderList, row: object, origin: int, target: int) -> None:
+        """A drag settled: one relative move in stored order, from where the rule is saved."""
+        if not isinstance(row, RuleRow) or origin == target:
+            return
+        now = [shown.rule.id for shown in self.rule_list.get_rows() if isinstance(shown, RuleRow)]
+        before = list(now)
+        before.insert(origin, before.pop(target))
+        order = [rule.id for rule in reversed(self.scheduling.schedule_rules)]
+        if row.rule.id not in order or before[target] not in order:
+            return
+        step = model.stored_step(order.index(row.rule.id), order.index(before[target]))
+        if step:
+            self.scheduling.shift_rule(row.rule.id, step)
+
+    def _on_settled(self, _list: ReorderList) -> None:
+        if self._rules_deferred:
+            self.refresh(force=True)
 
     def _on_row_activated(self, _list: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
         if isinstance(row, RuleRow):

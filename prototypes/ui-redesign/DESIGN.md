@@ -53,8 +53,6 @@ wio_demo/
   shell.py              MainWindow: the app's ShellWindow + Demo menu, welcome screen, glass.Look
   glass.py              the demo's colors (simulated or read-only live Noctalia); glass layers are the app's
   pages/__init__.py     re-exports the app's Page contract
-  pages/schedule.py     week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
-  pages/displays.py     monitor arrangement + per-display assignment; displays_arrangement.py
 src/wall_in_one/ui/next/   (the app's; shared with this prototype)
   state.py              the AppState Protocol, PlaybackControls, LibraryEditing, view types
   widgets.py            Thumb, WallpaperCard, CardGrid, Swatches, pill(), heading(), dim(), add_css()
@@ -69,6 +67,9 @@ src/wall_in_one/ui/next/   (the app's; shared with this prototype)
   playlists_state.py    the PlaylistEditing Protocol the page reads
   reorder.py            the handle-driven live sortable list
   playlists_picker.py   "Add wallpapers": pick several, paged
+  schedule.py           week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
+  displays.py           monitor arrangement + per-display choices; displays_arrangement.py
+  schedule_state.py     the Scheduling Protocol both pages read (rule convention, writes that settle)
   settings.py           Settings: searchable groups, folders, key, look; settings_palettes.py
   settings_state.py     the SettingsAccess and PaletteManager Protocols, row choices
   store.py              Store: providers, inline filters, 40-card pages, downloads (StoreAccess)

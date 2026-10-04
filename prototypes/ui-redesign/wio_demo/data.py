@@ -535,21 +535,23 @@ RUNTIME_LOG_EXTRA = [
     "11:02:15  renderer  Scene output saved to /home/goober/.local/state/wall-in-one/scenes/neon-rain.log",
 ]
 
-# Settings rows that only the Settings page shows.
+# Settings only the Settings page shows, by their settings.toml keys (the rest
+# are AppState attributes the other pages act on, see AppState.setting).
 PREFERENCES = {
-    "workshop": True,
+    "scan_workshop": True,
     "shuffle": False,
-    "autostart": True,
-    "covered": "pause",
-    "theme_mode": "auto",
-    "purity": "sketchy",
-    "decoding": "auto",
-    "smoothing": "off",
-    "sound": False,
-    "volume": 100,
-    "run_scenes": True,
-    "fps": "30",
-    "scaling": "",
-    "edges": "",
-    "hide_paths": True,
+    "cycle_enabled": True,
+    "cycle_interval": 1800,
+    "cycle_favourites_only": False,
+    "dynamics_enabled": True,
+    "video_when_hidden": "pause",
+    "video_muted": True,
+    "video_volume": 100,
+    "video_hardware_decode": True,
+    "video_interpolation": "off",
+    "own_scene_renderer": True,
+    "scene_fps": 30,
+    "scene_scaling": "",
+    "scene_clamp": "",
+    "opacity": 1.0,
 }

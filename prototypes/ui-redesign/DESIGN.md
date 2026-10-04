@@ -57,7 +57,6 @@ wio_demo/
   pages/playlists.py    one playlist (sidebar lists them); playlists_picker.py
   pages/schedule.py     week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
   pages/displays.py     monitor arrangement + per-display assignment; displays_arrangement.py
-  pages/settings.py     grouped settings + runtime log; settings_widgets.py, settings_palettes.py
 src/wall_in_one/ui/next/   (the app's; shared with this prototype)
   state.py              the AppState Protocol, PlaybackControls, LibraryEditing, view types
   widgets.py            Thumb, WallpaperCard, CardGrid, Swatches, pill(), heading(), dim(), add_css()
@@ -68,6 +67,8 @@ src/wall_in_one/ui/next/   (the app's; shared with this prototype)
   playerbar.py          persistent bottom bar: what's on screen, why, controls
   library.py            Library grid + filters + selection + drag to playlists
   inspector.py          wallpaper details: still, motion, colors (pairing editor)
+  settings.py           Settings: searchable groups, folders, key, look; settings_palettes.py
+  settings_state.py     the SettingsAccess and PaletteManager Protocols, row choices
   backdrop.py           the frosted style's blurred wallpaper
 tools/smoke.sh          headless smoke test; tools/typecheck.sh the Protocol check
 run.sh                  launch the interactive demo
@@ -96,12 +97,12 @@ A page module exposes `create(state) -> Page`. A `Page` has:
 - `demo(scene)` — screenshot hook.
 
 Pages never import each other. They talk through `state`:
-- `state.navigate("playlist:frog-day")`, `state.navigate("settings:log")`;
+- `state.navigate("playlist:frog-day")`, `state.navigate("settings:colors")`;
 - `state.toast(text, undo=callable_or_None)` — prefer reversible actions with **Undo**;
 - listen with `state.connect("changed", lambda _s, topic: ...)`. Topics: `now`,
   `playback`, `library`, `playlists` (the shell rebuilds the sidebar), `schedule`,
   `displays`, `settings`, `system`, `theme`, `appearance`, `scope`, `clock`,
-  `folders`, `preferences`, `display-settings`.
+  `folders`, `palettes`, `display-settings`.
 
 `AppState` is the only boundary between pages and data, so the real-app
 adapter (`ui/next/real_state.py`) replaces it without touching the shipped

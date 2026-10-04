@@ -11,6 +11,7 @@ from __future__ import annotations
 from wio_demo.state import AppState as DemoAppState
 from wio_demo.thumbs import Loader
 
+from wall_in_one.ui.next.settings_state import PaletteManager, SettingsAccess
 from wall_in_one.ui.next.state import AppState, LibraryEditing, LibraryFolders, PlaybackControls
 from wall_in_one.ui.next.thumbs import ThumbnailProvider
 
@@ -29,6 +30,14 @@ def _editing(state: DemoAppState) -> LibraryEditing:
 
 def _folders(state: DemoAppState) -> LibraryFolders:
     return state
+
+
+def _settings(state: DemoAppState) -> SettingsAccess:
+    return state
+
+
+def _palettes(state: DemoAppState) -> PaletteManager:
+    return state.palette_manager
 
 
 def _pictures(loader: Loader) -> ThumbnailProvider:

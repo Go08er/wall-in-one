@@ -161,23 +161,36 @@ def library_bulk_favorite(state, library) -> None:
 
 
 def palette_actions(state, settings) -> None:
-    dialog = settings._open_palettes()
-    dialog._duplicate(state.find_palette("Nord"))
-    copy = state.find_palette("Nord copy")
-    assert copy is not None and copy.editable
-    state.save_palette("Nord copy", "Nord mine", copy.light, copy.dark)
-    dialog._apply(state.find_palette("Nord mine"))
+    """The shared palette manager over the demo: duplicate, edit, apply, schemes."""
+    dialog = settings.open_palettes()
+    nord = next(item for item in dialog.manager.palette_list().items if item.name == "Nord")
+    dialog.edit(nord, copy=True)
+    editor = dialog.nav.get_visible_page()
+    assert editor.draft.renamable and editor.name.get_text() == "Nord copy"
+    editor.name.set_text("Nord mine")
+    editor.set_color("dark", "primary", "#123456")
+    editor.save()
+    mine = state.find_palette("Nord mine")
+    assert mine is not None and mine.editable and mine.dark["primary"] == "#123456"
+    dialog.manager.apply_catalog_palette("Nord mine")
     assert state.applied_palette().name == "Nord mine"
-    dialog.delete(state.find_palette("Nord mine"))
-    assert state.applied_palette() is None and state.find_palette("Nord mine") is None
-    copy, undo = state.duplicate_palette("Dracula")
-    undo()
-    assert state.find_palette(copy.name) is None
-    undo = state.delete_palette("Ayu")
-    undo()
-    assert state.find_palette("Ayu") is not None
-    undo = state.apply_palette("Gruvbox")
-    undo()
+    dialog.edit(next(i for i in dialog.manager.palette_list().items if i.name == "Nord mine"), copy=False)
+    editor = dialog.nav.get_visible_page()
+    assert not editor.draft.renamable and not editor.name.get_editable()
+    editor.set_color("light", "surface", "#fafafa")
+    editor.save()
+    assert state.find_palette("Nord mine").light["surface"] == "#fafafa"
+    dialog.views.set_visible_child_name("schemes")
+    assert dialog._source and all(card.preview is not None for card in dialog._cards.values())
+    dialog.use_scheme("soft")
+    assert state.default_scheme == "soft"
+    dialog.save_scheme("vibrant")
+    editor = dialog.nav.get_visible_page()
+    editor.name.set_text("Mine vibrant")
+    editor.save()
+    assert state.find_palette("Mine vibrant") is not None
+    dialog.use_scheme("m3-tonal-spot")
+    dialog.search.set_text("nord")
     dialog.force_close()
 
 
@@ -328,63 +341,52 @@ def schedule_actions(state, window) -> None:
 
 
 def settings_actions(state, window) -> None:
+    """The shared Settings page over the demo: rows save by real keys, folders, the key."""
     window.navigate("settings")
     page = window.pages["settings"]
     page.demo("")
-    # Folders: add (scans for a moment), locate, choose the download folder, remove.
-    page._add_folder()
-    added = state.folders[-1]
-    assert added.path == "~/Downloads/Wallpapers" and added.scanning
-    settle(lambda: not added.scanning, 3)
-    assert not added.scanning
-    undo = state.add_library_folder("~/Pictures/Backgrounds")
-    undo()
-    assert [f.path for f in state.folders][-1] == "~/Downloads/Wallpapers"
-    missing = next(f for f in state.folders if f.missing)
-    undo = state.locate_folder(missing.path, "/run/media/goober/Archive/wallpapers")
-    assert not missing.missing
-    undo()
-    assert missing.missing
+    # Folders: add, make one the download folder, remove (confirmed).
+    page.add_folder("~/Downloads/Wallpapers")
+    assert state.folders[-1].path == "~/Downloads/Wallpapers"
+    settle(lambda: not state.folders[-1].scanning, 3)
+    page.add_folder("~/Downloads/Wallpapers")  # already there: nothing added
+    assert [f.path for f in state.folders].count("~/Downloads/Wallpapers") == 1
     first, second = state.folders[0].path, state.folders[1].path
-    undo = state.set_download_folder(second)
+    page.make_download_folder(second)
     assert state.folders[0].path == second and state.download_folder == second
-    undo()
-    assert state.folders[0].path == first and state.download_folder == first
-    undo = state.remove_library_folder(first)  # downloads move to the next folder
-    assert state.download_folder == second
-    undo()
-    assert state.download_folder == first and state.folders[0].path == first
-    state.remove_library_folder("~/Downloads/Wallpapers")
-    # Preferences, playback defaults, colors and the template.
-    state.set_setting("volume", 40)
-    assert state.setting("volume") == 40
-    state.set_setting("volume", 100)
-    page._interval.set_selected(4)
+    page.make_download_folder(first)
+    dialog = page.confirm_remove("~/Downloads/Wallpapers")
+    dialog.emit("response", "remove")
+    assert "~/Downloads/Wallpapers" not in [f.path for f in state.folders]
+    # Rows save their real settings keys, and show what is saved.
+    rows = {binding.key: binding.row for binding in page._bindings}
+    rows["video_volume"].set_value(40)
+    assert state.setting("video_volume") == 40
+    rows["video_volume"].set_value(100)
+    rows["cycle_interval"].set_value(3600)
     assert state.default_interval == 60
-    page._interval.set_selected(3)
-    page._battery.set_active(False)
+    rows["cycle_interval"].set_value(1800)
+    rows["stop_animations_on_battery"].set_active(False)
     assert not state.stop_on_battery
-    page._battery.set_active(True)
-    dialog = page._open_scheme_dialog()
-    dialog.pick("vibrant")
-    assert state.default_scheme == "vibrant"
-    dialog.pick("m3-tonal-spot")
-    dialog.force_close()
-    undo = state.set_default_scheme("soft")
-    undo()
-    assert state.default_scheme == "m3-tonal-spot"
-    page._reinstall_template()
-    assert state.template_status == "busy" and state.template_ok
-    settle(lambda: state.template_status == "working", 3)
-    state.set_template_status("missing")
-    assert not state.template_ok
-    state.set_template_status("working")
-    page._forget_key(toast=False)
-    assert not state.wallhaven_key_saved
-    page._set_key_saved(True)
-    page._follow.set_active(False)
+    rows["stop_animations_on_battery"].set_active(True)
+    rows["follow_noctalia_palette"].set_active(False)
     assert not state.follow_noctalia_colors
-    page._follow.set_active(True)
+    rows["follow_noctalia_palette"].set_active(True)
+    rows["preview_scheme"].set_selected(5)  # vibrant
+    assert state.default_scheme == "vibrant"
+    rows["preview_scheme"].set_selected(0)
+    rows["scene_scaling"].set_selected(3)  # fill
+    assert state.setting("scene_scaling") == "fill"
+    # The Wallhaven key.
+    page.clear_key()
+    assert not state.wallhaven_key_saved
+    page._key_entry.set_text("short")
+    page.save_key()
+    assert not state.wallhaven_key_saved and page._key_entry.has_css_class("error")
+    page._key_entry.set_text("a" * 32)
+    page.save_key()
+    assert state.wallhaven_key_saved and page._key_entry.get_text() == ""
+    # The window's look.
     page._style_toggle.set_active_name("frosted")
     assert state.window_style == "frosted"
     page._style_toggle.set_active_name("solid")
@@ -544,15 +546,13 @@ def build_steps(app, holder):
         ],
         "settings": [
             "search:battery",
-            "group:log",
+            "search:nothing-matches-this",
+            "group:colors",
             "advanced",
             "remove-folder",
             "palettes",
-            "palette-edit",
-            "scheme",
-            "download-folder",
+            "schemes",
             "no-key",
-            "template-missing",
         ],
     }.items():
         for scene in scenes:
@@ -651,7 +651,7 @@ def build_steps(app, holder):
         w().navigate("settings")
         return w().pages["settings"]
 
-    steps.append(("palette apply", lambda: (settings_page(), s().apply_palette("Nord"))))
+    steps.append(("palette apply", lambda: (settings_page(), s().palette_manager.apply_catalog_palette("Nord"))))
     steps.append(("palette dialog", lambda: settings_page().demo("palettes")))
     steps.append(("palette actions", lambda: palette_actions(s(), settings_page())))
     steps.append(
@@ -666,7 +666,6 @@ def build_steps(app, holder):
             lambda: (settings_page(), s().set_desktop_colors(True)),
         )
     )
-    steps.append(("template missing", lambda: settings_page().demo("template-missing")))
     steps.append(
         (
             "keep wallpaper",

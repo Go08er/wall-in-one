@@ -14,14 +14,18 @@ Nothing here talks to a real runtime: the demo's data is shared module state
 
 It implements the app's ``wall_in_one.ui.next.state.AppState`` Protocol (and
 its optional ``PlaybackControls`` and ``LibraryEditing``), so the shell,
-player bar, Library and inspector the app ships run over it unchanged; the
+player bar, Library, inspector and Settings the app ships run over it unchanged; the
 app's own adapter is ``wall_in_one.ui.next.real_state.RealAppState``.
 
 Pages observe ``changed(topic)`` and repaint. Topics: now, playback, library,
 playlists, schedule, displays, settings, system (battery/service banners),
 theme, appearance (window style and dials), scope (the player bar's display
-scope), clock (the demo clock ticked), folders (library folders), preferences
-(rows only Settings shows) and display-settings (per-display renderer settings).
+scope), clock (the demo clock ticked), folders (library folders), palettes (the
+palette manager) and display-settings (per-display renderer settings).
+
+It also implements the app's ``SettingsAccess`` (``settings_access`` is the
+state itself, by settings.toml's real keys) and, through ``palette_manager``,
+its ``PaletteManager``, so the app's Settings page runs over it too.
 """
 
 from __future__ import annotations
@@ -29,15 +33,28 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import gi
 
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
+from wall_in_one.ui.next.settings_state import (
+    KEY_REFUSED,
+    KEY_SAVED,
+    AppPalette,
+    KeyStatus,
+    PaletteDraft,
+    PaletteItem,
+    PaletteList,
+    SchemePreview,
+    SchemeSources,
+    ThemeSources,
+)
+from wall_in_one.ui.next.settings_state import Folder as FolderView
 from wall_in_one.ui.next.state import (
     UNCHANGED,
     Banner,
@@ -184,7 +201,8 @@ class AppState(GObject.Object):
             for path, note, _primary in data.LIBRARY_FOLDERS
         ]
         # Preferences only the Settings page shows (nothing else in the demo acts on them).
-        self.preferences = dict(data.PREFERENCES)
+        self.preferences: dict[str, Any] = dict(data.PREFERENCES)
+        self._palette_manager: DemoPalettes | None = None
         # Window look: "solid", "translucent" (the compositor shows/blurs the
         # desktop behind) or "frosted" (the app draws your wallpaper, blurred).
         self.window_style = "solid"
@@ -386,8 +404,9 @@ class AppState(GObject.Object):
         return None
 
     @property
-    def settings_access(self) -> None:
-        return None
+    def settings_access(self) -> AppState:
+        """The shared Settings page over the demo's preferences, folders and palettes."""
+        return self
 
     def banner(self) -> Banner | None:
         if not self.service_running:
@@ -1325,22 +1344,118 @@ class AppState(GObject.Object):
 
         return undo
 
-    # -- settings -------------------------------------------------------------
+    # -- settings (the app's SettingsAccess) ------------------------------------
     @property
     def template_ok(self) -> bool:
         """Noctalia's template is installed (a reinstall in progress counts)."""
         return self.template_status != "missing"
 
-    def setting(self, key: str):
-        """A preference the rest of the demo doesn't act on (Settings rows only)."""
-        return self.preferences[key]
+    #: settings.toml keys the rest of the demo acts on: (getter, setter).
+    def _live_setting(self, key: str) -> tuple[Callable[[], Any], Callable[[Any], None]] | None:
+        live: dict[str, tuple[Callable[[], Any], Callable[[Any], None]]] = {
+            "stop_animations_on_battery": (lambda: self.stop_on_battery, self.set_stop_on_battery),
+            "follow_noctalia_palette": (
+                lambda: self.follow_noctalia_colors,
+                self.set_follow_noctalia_colors,
+            ),
+            "display_mode": (lambda: self.display_mode, self.set_display_mode),
+            "theme_source_connector": (lambda: self.color_display, self.set_color_display),
+            "preview_scheme": (lambda: data.DEFAULT_SCHEME, self.set_default_scheme),
+        }
+        return live.get(key)
 
-    def runtime_log(self) -> list[str]:
-        return list(data.RUNTIME_LOG) + list(data.RUNTIME_LOG_EXTRA)
+    def setting(self, key: str) -> Any:
+        """A settings.toml value, by its real key."""
+        live = self._live_setting(key)
+        return live[0]() if live is not None else self.preferences[key]
 
-    def set_setting(self, key: str, value) -> None:
-        self.preferences[key] = value
-        self.emit_changed("preferences")
+    def change_settings(self, **changes: Any) -> None:
+        for key, value in changes.items():
+            live = self._live_setting(key)
+            if live is not None:
+                live[1](value)
+                continue
+            self.preferences[key] = value
+            if key == "cycle_interval":
+                self.default_interval = max(1, round(value / 60))
+        self.emit_changed("settings")
+
+    def settings_blocked(self) -> str:
+        return ""
+
+    def folder_list(self) -> list[FolderView]:
+        return [FolderView(folder.path, folder.path.rsplit("/", 1)[-1], folder.missing) for folder in self.folders]
+
+    def suggested_folder(self) -> str:
+        return "" if self.folders else "~/Pictures/Wallpapers"
+
+    def add_folder(self, path: str) -> None:
+        if any(folder.path == path for folder in self.folders):
+            self.toast(f"{path} is already in the library")
+            return
+        undo = self.add_library_folder(path)
+        self.emit_changed("settings")
+        self.toast(f"Scanning {path}", lambda: (undo(), self.emit_changed("settings")))
+
+    def remove_folder(self, path: str) -> None:
+        undo = self.remove_library_folder(path)
+        self.emit_changed("settings")
+        self.toast(f"Removed {path} · files stay on disk", lambda: (undo(), self.emit_changed("settings")))
+
+    def make_download_folder(self, path: str) -> None:
+        undo = self.set_download_folder(path)
+        self.toast(f"Downloads now go to {path}", undo)
+
+    def battery_note(self) -> str:
+        if not self.stop_on_battery:
+            return ""
+        if self.on_battery:
+            return "Animations stopped on battery"
+        return "Plugged in · animations follow your playback settings"
+
+    def scenes_available(self) -> bool:
+        return True
+
+    def theme_sources(self) -> ThemeSources:
+        return ThemeSources(
+            tuple((connector, True) for connector in self.connectors()),
+            self.color_display,
+            "Noctalia has one shell-wide palette; it follows this display",
+        )
+
+    def key_status(self) -> KeyStatus:
+        if self.wallhaven_key_saved:
+            return KeyStatus("Saved · only you can read it", True)
+        return KeyStatus("Not set. Searches work; NSFW results are out of reach.")
+
+    def save_key(self, key: str, done: Callable[[str], None]) -> None:
+        key = key.strip()
+        if len(key) < 20 or not key.isalnum():
+            self.toast("That doesn't look like a Wallhaven key")
+            done(KEY_REFUSED)
+            return
+        self.set_wallhaven_key_saved(True)
+        self.toast("Wallhaven key saved")
+        done(KEY_SAVED)
+
+    def clear_key(self) -> None:
+        self.set_wallhaven_key_saved(False)
+        self.toast("Wallhaven key removed", lambda: self.set_wallhaven_key_saved(True))
+
+    def app_palette(self) -> AppPalette:
+        wallpaper = self.color_wallpaper()
+        scheme = self.scheme_name(wallpaper.scheme or self.default_scheme)
+        return AppPalette(f"Generated from “{wallpaper.name}” · {scheme}", tuple(self.desktop_swatches()))
+
+    def reload_app_palette(self) -> None:
+        self.toast("Palette reloaded from Noctalia")
+        self.emit_changed("theme")
+
+    @property
+    def palette_manager(self) -> DemoPalettes:
+        if self._palette_manager is None:
+            self._palette_manager = DemoPalettes(self)
+        return self._palette_manager
 
     def set_default_interval(self, minutes: int) -> None:
         self.default_interval = minutes
@@ -1553,3 +1668,113 @@ class AppState(GObject.Object):
         for connector in unassign:
             self.assigned[connector] = ""
         self._schedule_changed()
+
+
+class DemoPalettes:
+    """The palette manager over the demo's palettes (`PaletteManager`)."""
+
+    def __init__(self, state: AppState) -> None:
+        self.state = state
+
+    def open_palettes(self) -> None:
+        pass
+
+    def close_palettes(self) -> None:
+        pass
+
+    def palette_list(self) -> PaletteList:
+        details = {"custom": "Yours", "builtin": "Comes with Noctalia", "community": "Cached yesterday"}
+        return PaletteList(
+            "ready",
+            tuple(
+                PaletteItem(
+                    key=palette.name,
+                    name=palette.name,
+                    origin=palette.origin,
+                    detail=details.get(palette.origin, ""),
+                    dark=tuple(palette.strip(True)),
+                    light=tuple(palette.strip(False)),
+                    can_edit=palette.editable,
+                )
+                for palette in self.state.palettes()
+            ),
+        )
+
+    def rescan_palettes(self) -> None:
+        self.state.toast("Community palettes are up to date")
+        self.state.emit_changed("palettes")
+
+    def apply_catalog_palette(self, key: str) -> None:
+        undo = self.state.apply_palette(key)
+        self.state.emit_changed("palettes")
+        self.state.toast(f"“{key}” is on the desktop until the wallpaper changes", undo)
+
+    def palette_draft(self, key: str, *, copy: bool, done: Callable[[PaletteDraft | None], None]) -> None:
+        palette = self.state.find_palette(key)
+        if palette is None:
+            done(None)
+            return
+        done(
+            PaletteDraft(
+                title=f"Duplicate {key}" if copy else f"Edit {key}",
+                name=self.state._unique_palette_name(f"{key} copy") if copy else key,
+                renamable=copy,
+                colors={"dark": dict(palette.dark), "light": dict(palette.light)},
+                origin=None if copy else key,
+            )
+        )
+
+    def save_palette_draft(
+        self,
+        draft: PaletteDraft,
+        name: str,
+        colors: Mapping[str, Mapping[str, str]],
+        done: Callable[[bool], None],
+    ) -> None:
+        light, dark = dict(colors.get("light", {})), dict(colors.get("dark", {}))
+        if isinstance(draft.origin, str):
+            self.state.save_palette(draft.origin, draft.origin, light, dark)
+        elif self.state.find_palette(name) is not None:
+            self.state.toast(f"You already have a palette called {name}; choose another name")
+            done(False)
+            return
+        else:
+            self.state._palettes.insert(len(self.state.palettes("custom")), Palette(name, "custom", light, dark))
+            self.state.emit_changed("settings")
+        self.state.emit_changed("palettes")
+        self.state.toast(f"Saved “{name}”")
+        done(True)
+
+    def scheme_sources(self) -> SchemeSources:
+        stills = [wallpaper for wallpaper in self.state.wallpapers if wallpaper.kind == "still"]
+        current = self.state.color_wallpaper()
+        selected = stills.index(current) if current in stills else 0
+        return SchemeSources(tuple((wallpaper.id, wallpaper.name) for wallpaper in stills), selected)
+
+    def preview_schemes(self, source: str, deliver: Callable[[SchemePreview], None]) -> None:
+        wallpaper = self.state.wallpaper(source)
+        for scheme, _name, _description in data.SCHEMES:
+            deliver(
+                SchemePreview(
+                    source,
+                    scheme,
+                    tuple(data.scheme_swatches(wallpaper, scheme, True)),
+                    tuple(data.scheme_swatches(wallpaper, scheme, False)),
+                )
+            )
+
+    def scheme_draft(self, source: str, scheme: str) -> PaletteDraft | None:
+        wallpaper = self.state.wallpaper(source)
+        base = self.state.palettes("builtin")[0]
+        colors: dict[str, dict[str, str]] = {}
+        for mode, dark in (("dark", True), ("light", False)):
+            values = dict(base.dark if dark else base.light)
+            swatches = data.scheme_swatches(wallpaper, scheme, dark)
+            values.update(zip(("surface", "primary", "secondary", "tertiary", "error"), swatches, strict=False))
+            colors[mode] = values
+        return PaletteDraft(f"Save {self.state.scheme_name(scheme)}", f"{wallpaper.name} {scheme}", True, colors)
+
+    def use_scheme(self, scheme: str, *, sync_noctalia: bool) -> None:
+        undo = self.state.set_default_scheme(scheme)
+        also = " and Noctalia's" if sync_noctalia else ""
+        self.state.toast(f"Default scheme{also} is now {self.state.scheme_name(scheme)}", undo)

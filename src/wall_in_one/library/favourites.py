@@ -471,6 +471,26 @@ class Store:
 
         return self._mutate(add)
 
+    def add_many(self, paths: Iterable[Path]) -> int:
+        """Mark every one of ``paths`` in one write; return how many were new.
+
+        One transaction, so several wallpapers chosen together are starred
+        together or (on a failed write) not at all.
+        """
+        wanted = tuple(dict.fromkeys(paths))
+        added = 0
+
+        def add(current: Favourites) -> tuple[bool, Favourites]:
+            nonlocal added
+            updated = current
+            for path in wanted:
+                updated = updated.with_added(path)
+            added = len(updated.entries) - len(current.entries)
+            return updated is not current, updated
+
+        self._mutate(add)
+        return added
+
     def discard(self, path: Path) -> bool:
         """Unmark ``path``. False if it was not marked."""
 

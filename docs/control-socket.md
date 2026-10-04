@@ -182,6 +182,16 @@ does not silently substitute the whole library. Restore the media or repair
 the playlist before retrying. A playlist whose name has a space in it is
 referred to by the id `playlists` prints beside it.
 
+Whichever window or verb asks, a change is refused when it would leave a
+playlist that the default, a schedule rule or a display uses with nothing to
+play, or any playlist holding only wallpapers playback can't use (the wallpaper
+service could not build its configuration around it): `playlist-remove`, a
+`playlist-add` to an empty playlist, `schedule-add` and `display-assign` with a
+playlist that has nothing to play, `remove`, `select` of a video waiting for
+its still, and `still <video> default` or `reset-pairing` that would leave a
+video without one. The reply's kind is `nothing-to-play`, and nothing is
+written.
+
 Pairing commands use ` :: ` between their two operands. That delimiter is
 required when both sides may contain spaces—for example a video path and a
 representative-still path, or a wallpaper path and `community:Tokyo Night`.

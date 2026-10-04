@@ -75,9 +75,13 @@ A video finds its still in this order:
 4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
 
 Until a video has a still, playback can't show it: the wallpaper service's
-compiler leaves it out, and every page counts it the same way. It can't be
-added to a playlist, and a playlist something uses can't keep it as its only
-wallpaper that plays.
+compiler leaves it out, and every page counts it the same way. Its Library
+card says **No still** and its Apply is off, the playlist picker doesn't offer
+it, the new window won't add it to a playlist, and Quick choice refuses it
+anywhere. A playlist something uses can't keep it as its only wallpaper that
+plays, and no playlist may hold only such videos: the service couldn't build
+its configuration around one. Clearing or resetting a video's chosen still is
+refused when it would leave a playlist either way.
 
 Automatic captures, including verified captures from older releases, stay
 internal to their moving wallpaper. A sibling or manually added image is
@@ -416,11 +420,11 @@ already there) without those occurrences becoming interchangeable. Removing
 entries, with the row's − button, `Delete`, or **Select** for several, shows a
 toast with **Undo**.
 
-The picker greys out a wallpaper that playback skips, and adding one any other
-way is refused with the reason. A video whose still isn't there yet can't play
-either (see [Videos and the stills behind them](#videos-and-the-stills-behind-them)),
-so adding it is refused the same way, saying it has no still for playback to
-show yet. An older playlist occurrence is retained and
+The picker doesn't offer a wallpaper that playback skips, nor a video whose
+still isn't there yet, since that can't play either (see
+[Videos and the stills behind them](#videos-and-the-stills-behind-them));
+hovering one says why, and adding one any other way in the new window is
+refused with the reason. An older playlist occurrence is retained and
 labelled (`Missing · <file>` or `Playback unavailable · <name>`) so it can be
 removed deliberately; playback skips it when another usable occurrence exists,
 and **Play now** is off when every entry is missing or skipped.

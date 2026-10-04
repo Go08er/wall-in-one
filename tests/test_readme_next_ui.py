@@ -125,6 +125,8 @@ def test_the_readme_says_what_the_playlists_page_does() -> None:
         '"Your pick" stays hidden',
         "can't lose its last wallpaper that plays",
         "a video waiting for its still doesn't play yet, so it can't be added",
+        "The picker doesn't offer it and says why",
+        "No playlist, used or not, can be left holding only wallpapers playback can't",
         "A wallpaper dropped below the last row shown goes to the end of the playlist",
     ):
         assert words in guide, words

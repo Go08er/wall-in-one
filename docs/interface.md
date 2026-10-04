@@ -87,6 +87,8 @@ A paged grid with the details pane beside it.
   - **Reset to defaults.**
   - **Try again**, for a wallpaper playback skips. Its Apply is off, with the
     reason, until then.
+  - A video waiting for its still says **No still** on its card, and its
+    Apply is off with the reason until it has one.
 - **Add to playlist**, from:
   - a card or the details pane;
   - a drag to a playlist in the sidebar or onto the Playlists page;
@@ -162,9 +164,13 @@ Also:
 - Play now and Use as schedule default follow the classic page's rules.
 - A wallpaper is counted as one that plays by the same rule the wallpaper
   service compiles with: a video waiting for its still doesn't play yet, so it
-  can't be added, and adding it says why.
+  can't be added. The picker doesn't offer it and says why, and adding it any
+  other way is refused, saying why.
 - A playlist that a schedule rule, the default or a display uses can't lose
   its last wallpaper that plays.
+- No playlist, used or not, can be left holding only wallpapers playback can't
+  use: the service couldn't build its configuration around it. It can be
+  emptied.
 - One with nothing that plays can't become the default.
 - "Your pick" stays hidden.
 - Long playlists show 72 rows at a time. A wallpaper dropped below the last row

@@ -52,11 +52,13 @@ Three properties of the list are worth knowing:
   Wallpaper Engine scanning, takes its wallpapers out of the library. It is
   refused when that would leave a playlist something uses with nothing to
   play, or any playlist holding only wallpapers playback can't use, and the
-  refusal names them; the new interface says so before it asks to remove.
-  `/a/b` never counts as holding `/a/bc`. A video or scene that stays counts
-  too when its still goes: a capture under a folder no longer scanned isn't
-  found any more. An image you chose for one is still found, wherever it is,
-  so that alone is no reason to refuse.
+  refusal names them and what each would lose. The change is tried for
+  pretend with the real scan first, so what counts is what that scan finds
+  (see [How a change is checked](#how-a-change-is-checked)): `/a/b` never
+  holds `/a/bc`; a video or scene that stays counts too when its still goes,
+  as a capture under a folder no longer scanned does, or a capture adopted
+  for a folder that is no longer one. An image you chose for one is still
+  found, wherever it is, so that alone is no reason to refuse.
 
 Scanning may still show files reached through an intentionally configured
 symbolic link, but Delete and Move to Trash refuse destructive authority
@@ -270,11 +272,48 @@ details pane and the selection bar, one wallpaper at a time.
   outside your library folders, and neither removes the last wallpaper that
   plays from a playlist something uses. That includes an image another video
   plays through, as the still you chose for it or its sibling, when the video
-  would have no other: removing the image takes its still away. Removing has
-  no Undo in the app.
+  would have no other: removing the image takes its still away, under any path
+  it is reached by. So does removing a video whose capture another video was
+  given. Removing has no Undo in the app.
 
 *In the classic interface* the same two entries are named **Remove** and
 **Move to Trash**.
+
+### How a change is checked
+
+A change that can take away what a playlist plays (Delete from disk, Move to
+Trash, removing a library folder, turning off Wallpaper Engine scanning) is
+first made for pretend, after you ask and before anything is moved, deleted or
+saved, on the same worker that then makes it:
+
+- the real scan of the library as the change would leave it. A file the
+  removal deletes (the wallpaper, its sidecars and the stills that go with
+  it) counts as gone under every path that reaches it: through a linked
+  folder, or a symbolic link to it. Another hard link to it stays, as it does
+  on disk;
+- the removal's own cleanup of favourites, playlist entries and still choices,
+  on copies;
+- the build of the runtime configuration from what is left.
+
+The change is refused when a playlist something uses would have nothing left
+to play, or any playlist would hold only wallpapers playback can't use. The
+refusal names the playlist, the entry and the still, for example: *forest was
+not removed: “Alias” (used by 1 schedule rule) would have nothing left to
+play: rain.mp4 plays through forest.png, which this removes.* Nothing is
+written while it is tried.
+
+What pages show as you go is early feedback from what the app already knows:
+a card's **No still**, a wallpaper the playlist picker doesn't offer, a
+removal refused as you choose it. The check above is the guarantee.
+
+After a removal, the library that check found is the new library. It is shown
+and published at once, without scanning again, so no runtime configuration
+names a deleted file. Only a removal that went through with a problem (a
+cleanup that failed) is followed by a rescan.
+
+The check costs about one scan and one build of the runtime configuration: on
+a library of about 2,100 wallpapers, all in one playlist, about half a second,
+on the worker rather than in the window.
 
 Only the home trash is implemented. A wallpaper on another filesystem cannot be
 renamed into it: the action reports the problem and leaves the file in place.

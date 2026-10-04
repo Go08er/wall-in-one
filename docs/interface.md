@@ -225,9 +225,11 @@ the same way, in searchable groups:
 
 - library folders: add, remove, and make one the folder downloads and generated
   stills go to. A folder found on this machine is only suggested. One whose
-  wallpapers a playlist needs can't be removed, and the playlists are named
-  before Remove is offered; turning off Wallpaper Engine scanning is refused
-  the same way.
+  wallpapers a playlist needs can't be removed: Settings asks as it does for
+  any folder, then the change is tried for pretend before it is saved and
+  refused, naming the playlist and what it would lose; turning off Wallpaper
+  Engine scanning is refused the same way (see
+  [How a change is checked](library.md#how-a-change-is-checked)).
 - playback defaults;
 - displays, and which one the colours follow;
 - the app's colours and default scheme, the palette manager, and Noctalia's

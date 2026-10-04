@@ -339,6 +339,15 @@ class StoreAccess(Protocol):
         """Ask ``query.provider`` for its page ``page`` (1 starts a new search)."""
         ...
 
+    def searching(self) -> bool:
+        """Whether the latest search's answer is still on its way.
+
+        False once it has been delivered, and also when it never will be:
+        the adapter was closed (the window went away) while it was out. A
+        page still waiting for an answer then asks again.
+        """
+        ...
+
     def item_pictures(self, items: Sequence[StoreItemView], done: PictureDone) -> None:
         """Fetch these cards' pictures, first first; anything not listed is dropped."""
         ...

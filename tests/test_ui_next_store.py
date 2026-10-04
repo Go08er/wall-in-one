@@ -473,6 +473,27 @@ def test_a_superseded_search_never_reaches_the_grid(store: Store) -> None:
     assert page._heading.get_label() == "Results for “new”"
 
 
+def test_p7_a_reused_page_asks_again_for_the_search_its_closed_adapter_dropped(
+    store: Store,
+) -> None:
+    """Codex P-7: the adapter closed while the opening search was out; the page is shown again."""
+    gate = threading.Event()
+    store.script.gates[""] = gate
+    page = store.page()
+    page.activate(None)
+    spin_until(lambda: len(store.script.queries) == 1, 5)
+    assert page.loading and store.store.searching()
+    store.store.close()  # the window went away: its answer will never come
+    assert not store.store.searching()
+    gate.set()
+    page.activate(None)  # the window is back, with the same page
+    _searched(page)
+    assert len(store.script.queries) == 2, "the dropped search was asked for again"
+    assert _shown(page) == ids(3)
+    page.activate(None)  # shown again with nothing outstanding: no new search
+    assert len(store.script.queries) == 2
+
+
 # -- what the library holds ------------------------------------------------------------------
 
 

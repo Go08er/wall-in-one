@@ -290,6 +290,8 @@ class RealStore:
         # -- searching
         self._search_generation = 0
         self._search_future: Future[SearchResult] | None = None
+        #: The latest search's answer is still to come (see `searching`).
+        self._awaiting = False
         self._seed = ""
         self._searched = False
         # -- pictures
@@ -330,6 +332,7 @@ class RealStore:
         self._search_generation += 1
         self._picture_generation += 1
         self._owned_generation += 1
+        self._awaiting = False  # whatever was out will never be answered now
         self._search_future = self._owned_future = self._facts_future = None
         self._busy.clear()
         self._then.clear()
@@ -357,10 +360,14 @@ class RealStore:
                 self._host.emit_changed("store")
 
     # -- searching --------------------------------------------------------------------
+    def searching(self) -> bool:
+        return self._awaiting
+
     def search_store(self, query: StoreQuery, page: int, done: SearchDone) -> None:
         lanes = self._open()
         self._search_generation += 1
         generation = self._search_generation
+        self._awaiting = True
         if page <= 1:
             self._seed = ""  # a fresh search re-rolls a random one
         try:
@@ -416,6 +423,7 @@ class RealStore:
         done: SearchDone,
     ) -> None:
         if self._current(lanes) and generation == self._search_generation:
+            self._awaiting = False
             done(answer)
 
     # -- pictures ---------------------------------------------------------------------

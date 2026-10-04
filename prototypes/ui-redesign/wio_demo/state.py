@@ -293,6 +293,7 @@ class AppState(GObject.Object):
         self._store_counts = [0, 0]  # queued, finished
         self._store_landed: list[DemoStoreItem] = []
         self._store_generation = 0
+        self._store_awaiting = False
         self.folders = [
             Folder(path, "" if "not found" in note.lower() else note.split(" · ")[0], "not found" in note.lower())
             for path, note, _primary in data.LIBRARY_FOLDERS
@@ -864,14 +865,20 @@ class AppState(GObject.Object):
     # The real app's adapter is ``wall_in_one.ui.next.real_store``; this one
     # answers from ``store_catalog`` and pretends the network on GLib timers.
 
+    def searching(self) -> bool:
+        """Whether the dummy catalog's latest answer is still to be delivered."""
+        return self._store_awaiting
+
     def search_store(self, query: StoreQuery, page: int, done) -> None:
         """A provider page of the dummy catalog, answered on the main loop."""
         self._store_generation += 1
         generation = self._store_generation
         answer = self._store_answer(query, page)
+        self._store_awaiting = True
 
         def deliver() -> bool:
             if generation == self._store_generation:
+                self._store_awaiting = False
                 done(answer)
             return GLib.SOURCE_REMOVE
 

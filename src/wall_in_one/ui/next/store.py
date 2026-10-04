@@ -503,6 +503,10 @@ class StorePage(Page):
         if not self._started:
             self._started = True
             self.refresh()
+        elif (self.loading or self.fetching) and not self.store.searching():
+            # Shown again while still waiting, but the answer will never come:
+            # the adapter was closed while it was out. Ask again.
+            self.refresh()
 
     # -- searching ---------------------------------------------------------------------
     def refresh(self) -> None:

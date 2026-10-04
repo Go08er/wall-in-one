@@ -526,6 +526,21 @@ choice for that start. With neither, the app is classic.
   saved: a change that fails is reported, and the page goes back to what is
   saved.
 
+- **First run.** The new interface asks classic's first-run questions, in the
+  same words, on a welcome screen instead of in dialogs:
+  - whether to import settings and playlists from the older Noctalia plugin
+    (Import safely, Start fresh, Not now), and Try again if that check fails;
+  - the library folder: the exact folder it found, Use default, or a folder
+    chooser.
+
+  "Not now" saves nothing and the question comes back at the next start. Until
+  then a notice under the header says what is waiting, and that changes can't
+  be saved while the import question is open, and its button asks again.
+
+- **After an update.** Classic's one-time Tidy up card is above every page;
+  Review opens Settings → Tidy up. Nothing there runs until you press its
+  button, including the fix for Noctalia's old palette template name.
+
 - **The player bar.**
   - **What it says:** what the runtime reports and why ("Evening · from
     schedule", "Your pick").
@@ -573,7 +588,7 @@ choice for that start. With neither, the app is classic.
     once the folder is saved.
   - **Keys:** F5 rescans; Ctrl+Shift+R, Ctrl+B, Ctrl+P and Ctrl+W work as in
     classic.
-  - Not there yet: per-wallpaper motion, "Use frame" and a log.
+  - Not there yet: per-wallpaper motion and "Use frame".
 
 - **The Store.** It searches Wallhaven and MotionBGS through the classic
   Store's code, and opens on what is popular once you first show it.
@@ -657,7 +672,10 @@ choice for that start. With neither, the app is classic.
   - video and Wallpaper Engine renderer settings;
   - Tidy up;
   - the Interface and GPU acceleration rows, so you can go back to classic
-    from inside the new interface.
+    from inside the new interface;
+  - a log of what Wall-in-One and the wallpaper service reported since the app
+    started, kept in memory only, with **Copy** and **Hide file paths** (on at
+    every start, never saved). Classic has no log.
 
   A save that fails is reported, and every row goes back to what is saved.
 

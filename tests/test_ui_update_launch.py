@@ -25,6 +25,7 @@ from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.theme import source  # noqa: E402
 from wall_in_one.theme.palette import Colour, Palette  # noqa: E402
 from wall_in_one.ui import app, readonly_palette, update_prompt  # noqa: E402
+from wall_in_one.ui.window_services import DEFAULT_UI, UiKind  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -50,20 +51,37 @@ def test_application_exports_read_only_package_identity() -> None:
         application._session.shutdown()
 
 
+#: How a start names its interface, as (``--ui``, the choice in Settings).
+INTERFACES: list[tuple[UiKind | None, UiKind | None]] = [
+    (None, None),
+    ("classic", None),
+    ("next", None),
+    (None, "next"),
+]
+
+
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("source", [None, "older-package", app.PACKAGE_SOURCE])
 @pytest.mark.parametrize("service", [False, True])
+@pytest.mark.parametrize("interface", INTERFACES, ids=["unnamed", "classic", "next", "chosen-next"])
 def test_launch_registration_precedes_generation_checked_activation(
-    monkeypatch: pytest.MonkeyPatch, remote: bool, source: str | None, service: bool
+    monkeypatch: pytest.MonkeyPatch,
+    remote: bool,
+    source: str | None,
+    service: bool,
+    interface: tuple[UiKind | None, UiKind | None],
 ) -> None:
+    """The update notice, and every check before it, are the same for either interface:
+    the window is built only by a process that owns the instance."""
     events: list[object] = []
+    built: list[object] = []
 
     class StubApplication:
         _stills = SimpleNamespace(shutdown=lambda: events.append("local stills closed"))
         _session = SimpleNamespace(shutdown=lambda: events.append("local session closed"))
 
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+        def __init__(self, **kwargs: object) -> None:
+            built.append(kwargs.get("ui"))
 
         def register(self, _cancel: object) -> None:
             events.append("registered")
@@ -99,9 +117,11 @@ def test_launch_registration_precedes_generation_checked_activation(
         return 0
 
     monkeypatch.setattr(update_prompt, "run", show_notice)
-    assert app.run(initial_page="settings", service=service) == (
+    ui, chosen = interface
+    assert app.run(initial_page="settings", service=service, ui=ui, preferred_ui=chosen) == (
         75 if remote and service and source != app.PACKAGE_SOURCE else 0
     )
+    assert built == [ui or chosen or DEFAULT_UI]
     if not remote:
         assert events == ["registered", "primary run"]
     elif source == app.PACKAGE_SOURCE:

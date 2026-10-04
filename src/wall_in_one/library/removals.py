@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import secrets
 import stat
@@ -51,6 +52,15 @@ OriginalGenerationState = Literal[
     "ambiguous",
     "unavailable",
 ]
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _lock_trouble(message: str, path: Path) -> str:
+    """``message``, for a person; the lock's ``path`` goes to the log only."""
+    LOGGER.warning("%s: %s", message, path)
+    return message
 
 
 class RemovalJournalError(Exception):
@@ -629,7 +639,11 @@ class Store:
                 or opened.st_uid != os.getuid()
                 or opened.st_nlink != 1
             ):
-                raise OSError(f"removal operation lock {lock_path} is not a private regular file")
+                raise OSError(
+                    _lock_trouble(
+                        "the removal operation lock is not a private regular file", lock_path
+                    )
+                )
             os.fchmod(descriptor, 0o600)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -651,7 +665,11 @@ class Store:
                 or stat.S_IMODE(secured.st_mode) != 0o600
                 or stat.S_IMODE(current.st_mode) != 0o600
             ):
-                raise OSError(f"removal operation lock {lock_path} changed while it was secured")
+                raise OSError(
+                    _lock_trouble(
+                        "the removal operation lock changed while it was secured", lock_path
+                    )
+                )
         except RemovalJournalError:
             if descriptor is not None:
                 with contextlib.suppress(OSError):

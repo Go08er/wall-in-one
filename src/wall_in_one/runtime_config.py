@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -113,14 +114,26 @@ _LOCAL_COMPILER_GATE = threading.RLock()
 _COMPILER_LOCK_STATE = _CompilerLockState()
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+def _lock_trouble(message: str, path: Path) -> str:
+    """``message``, for a person; the lock's ``path`` goes to the log only."""
+    LOGGER.warning("%s: %s", message, path)
+    return message
+
+
 def _compiler_lock_path(target: Path) -> Path:
     return target.absolute().with_name(f".{target.name}.compiler.lock")
 
 
 def _lock_timeout(path: Path, seconds: float) -> RuntimeConfigError:
     return RuntimeConfigError(
-        f"timed out after {seconds:g}s waiting for runtime compiler lock {path}; "
-        "the last-known-good runtime configuration was left untouched"
+        _lock_trouble(
+            f"timed out after {seconds:g}s waiting for the runtime compiler lock; "
+            "the last-known-good runtime configuration was left untouched",
+            path,
+        )
     )
 
 
@@ -134,19 +147,27 @@ def _open_compiler_lock(path: Path) -> int:
         )
     except OSError as error:
         raise RuntimeConfigError(
-            f"cannot safely open runtime compiler lock {path}: {error}"
+            _lock_trouble(
+                f"cannot safely open the runtime compiler lock: {error.strerror or error}", path
+            )
         ) from error
 
     try:
         opened = os.fstat(descriptor)
         current = path.lstat()
         if not stat.S_ISREG(opened.st_mode):
-            raise RuntimeConfigError(f"runtime compiler lock {path} is not a regular file")
+            raise RuntimeConfigError(
+                _lock_trouble("the runtime compiler lock is not a regular file", path)
+            )
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise RuntimeConfigError(f"runtime compiler lock {path} changed while being opened")
+            raise RuntimeConfigError(
+                _lock_trouble("the runtime compiler lock changed while being opened", path)
+            )
         if opened.st_uid != os.getuid() or opened.st_nlink != 1:
             raise RuntimeConfigError(
-                f"runtime compiler lock {path} is not a private file owned by this user"
+                _lock_trouble(
+                    "the runtime compiler lock is not a private file owned by this user", path
+                )
             )
         os.fchmod(descriptor, 0o600)
         return descriptor
@@ -160,9 +181,15 @@ def _verify_open_lock(path: Path, descriptor: int) -> None:
         opened = os.fstat(descriptor)
         current = path.lstat()
     except OSError as error:
-        raise RuntimeConfigError(f"cannot verify runtime compiler lock {path}: {error}") from error
+        raise RuntimeConfigError(
+            _lock_trouble(
+                f"cannot verify the runtime compiler lock: {error.strerror or error}", path
+            )
+        ) from error
     if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-        raise RuntimeConfigError(f"runtime compiler lock {path} changed while waiting for it")
+        raise RuntimeConfigError(
+            _lock_trouble("the runtime compiler lock changed while waiting for it", path)
+        )
 
 
 @contextmanager
@@ -193,8 +220,10 @@ def compiler_lock(
         if held is not None:
             if held.path != lock_path:
                 raise RuntimeConfigError(
-                    f"cannot acquire runtime compiler lock {lock_path} while already holding "
-                    f"{held.path}"
+                    _lock_trouble(
+                        "cannot take one runtime compiler lock while holding another",
+                        lock_path,
+                    )
                 )
             held.depth += 1
             try:
@@ -218,7 +247,10 @@ def compiler_lock(
                     time.sleep(min(COMPILER_LOCK_POLL_SECONDS, remaining))
                 except OSError as error:
                     raise RuntimeConfigError(
-                        f"cannot acquire runtime compiler lock {lock_path}: {error}"
+                        _lock_trouble(
+                            f"cannot acquire the runtime compiler lock: {error.strerror or error}",
+                            lock_path,
+                        )
                     ) from error
             _verify_open_lock(lock_path, descriptor)
             _COMPILER_LOCK_STATE.held = _HeldCompilerLock(lock_path, descriptor)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -926,6 +927,15 @@ def write_atomic_bytes(
         raise PublishedNotDurableError(path, error) from error
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+def _lock_trouble(message: str, path: Path) -> str:
+    """``message``, for a person; the lock's ``path`` goes to the log only."""
+    LOGGER.warning("%s: %s", message, path)
+    return message
+
+
 @contextlib.contextmanager
 def mutation_lock(
     target: Path,
@@ -950,7 +960,10 @@ def mutation_lock(
     if process_gate:
         if not _MUTATION_GATE.acquire(timeout=remaining):
             raise TimeoutError(
-                f"timed out after {timeout:g}s waiting for {description} mutation lock {lock_path}"
+                _lock_trouble(
+                    f"timed out after {timeout:g}s waiting for the {description} mutation lock",
+                    lock_path,
+                )
             )
         gate_acquired = True
 
@@ -967,12 +980,19 @@ def mutation_lock(
         opened = os.fstat(descriptor)
         current = lock_path.lstat()
         if not stat.S_ISREG(opened.st_mode):
-            raise OSError(f"{description} mutation lock {lock_path} is not a regular file")
+            raise OSError(
+                _lock_trouble(f"the {description} mutation lock is not a regular file", lock_path)
+            )
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise OSError(f"{description} mutation lock {lock_path} changed while opening")
+            raise OSError(
+                _lock_trouble(f"the {description} mutation lock changed while opening", lock_path)
+            )
         if opened.st_uid != os.getuid() or opened.st_nlink != 1:
             raise OSError(
-                f"{description} mutation lock {lock_path} is not a private file owned by this user"
+                _lock_trouble(
+                    f"the {description} mutation lock is not a private file owned by this user",
+                    lock_path,
+                )
             )
         os.fchmod(descriptor, 0o600)
         while True:
@@ -984,14 +1004,19 @@ def mutation_lock(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"timed out after {timeout:g}s waiting for {description} mutation lock "
-                        f"{lock_path}"
+                        _lock_trouble(
+                            f"timed out after {timeout:g}s waiting for the {description} "
+                            "mutation lock",
+                            lock_path,
+                        )
                     ) from None
                 time.sleep(min(MUTATION_LOCK_POLL_SECONDS, remaining))
         opened = os.fstat(descriptor)
         current = lock_path.lstat()
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise OSError(f"{description} mutation lock {lock_path} changed while waiting")
+            raise OSError(
+                _lock_trouble(f"the {description} mutation lock changed while waiting", lock_path)
+            )
         yield
     finally:
         try:

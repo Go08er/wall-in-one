@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import logging
 import os
 import secrets
 import stat
@@ -102,6 +103,15 @@ def source_page_url(provider: str, identifier: str) -> str:
     return ""
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+def _lock_trouble(message: str, path: Path) -> str:
+    """``message``, for a person; the lock's ``path`` goes to the log only."""
+    LOGGER.warning("%s: %s", message, path)
+    return message
+
+
 def _claim_path(root: Path, provider: str, identifier: str) -> Path:
     # Resolve the destination before a potentially minutes-long network call,
     # but do not make it part of the lease identity. Provider/id is the
@@ -124,9 +134,11 @@ def _claim_path(root: Path, provider: str, identifier: str) -> Path:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            raise OSError(f"download claim path is not a real directory: {directory}")
+            raise OSError(_lock_trouble("the download claims are not a real directory", directory))
         if info.st_uid != os.getuid():
-            raise OSError(f"download claim path is not owned by this user: {directory}")
+            raise OSError(
+                _lock_trouble("the download claims are not owned by this user", directory)
+            )
         os.chmod(directory, 0o700, follow_symlinks=False)
     except OSError as error:
         raise ProviderError("local-io", f"cannot prepare download claims: {error}") from error
@@ -153,7 +165,9 @@ def _download_claim(root: Path, provider: str, identifier: str) -> Iterator[None
             or opened.st_uid != os.getuid()
             or opened.st_nlink != 1
         ):
-            raise OSError(f"download claim {lock_path} is not a private regular file")
+            raise OSError(
+                _lock_trouble("a download claim is not a private regular file", lock_path)
+            )
         os.fchmod(descriptor, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -166,7 +180,9 @@ def _download_claim(root: Path, provider: str, identifier: str) -> Iterator[None
         opened = os.fstat(descriptor)
         current = lock_path.lstat()
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise OSError(f"download claim {lock_path} changed while it was being locked")
+            raise OSError(
+                _lock_trouble("a download claim changed while it was being locked", lock_path)
+            )
         yield
     except ProviderError:
         raise

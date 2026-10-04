@@ -27,6 +27,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -262,19 +263,45 @@ def _lifecycle_material(path: Path, kind: Kind, scene: str = "") -> bytes:
     return b"\0".join((kind.value.encode("ascii"), source))
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+class LifecycleBusy(TimeoutError):  # noqa: N818 - reads as what it says
+    """A file's lifecycle lock was held elsewhere for longer than the wait.
+
+    Its message is for a person, about the file: the lock's own path goes to
+    the log only (`_flocked`).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("something else is saving or removing it right now; try again in a moment")
+
+
+def _lock_problem(problem: str, path: Path, error: OSError | None = None) -> OSError:
+    """An error about a lifecycle lock, for a person; the lock's path goes to the log only."""
+    LOGGER.warning("media lifecycle lock %s: %s%s", path, problem, f" ({error})" if error else "")
+    return OSError(f"the app's media lifecycle lock {problem}")
+
+
 def _lifecycle_lock_path_from_material(material: bytes) -> Path:
     """Private flock path for one stable, namespaced lifecycle identity."""
     identity = hashlib.sha256(material).hexdigest()
     directory = paths.runtime_dir() / LIFECYCLE_LOCK_DIRECTORY
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    opened = directory.lstat()
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        opened = directory.lstat()
+    except OSError as error:
+        raise _lock_problem("directory could not be made", directory, error) from error
     if (
         not stat.S_ISDIR(opened.st_mode)
         or stat.S_ISLNK(opened.st_mode)
         or opened.st_uid != os.getuid()
     ):
-        raise OSError(f"media lifecycle path is not a private directory: {directory}")
-    os.chmod(directory, 0o700, follow_symlinks=False)
+        raise _lock_problem("directory is not private", directory)
+    try:
+        os.chmod(directory, 0o700, follow_symlinks=False)
+    except OSError as error:
+        raise _lock_problem("directory could not be made private", directory, error) from error
     return directory / f"{identity}.lock"
 
 
@@ -289,6 +316,17 @@ def _lifecycle_lock(
     timeout: float | None = None,
 ) -> Iterator[None]:
     """Hold one trusted lifecycle flock for a bounded commit section."""
+    with _flocked(lock_path, timeout=timeout):
+        yield
+
+
+@contextlib.contextmanager
+def _flocked(
+    lock_path: Path,
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
+    """Take the lifecycle flock at ``lock_path`` on a fresh descriptor."""
     wait = LIFECYCLE_LOCK_TIMEOUT_SECONDS if timeout is None else timeout
     if wait < 0:
         raise OSError("media lifecycle lock timeout cannot be negative")
@@ -296,20 +334,27 @@ def _lifecycle_lock(
     descriptor: int | None = None
     locked = False
     try:
-        descriptor = os.open(
-            lock_path,
-            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        opened = os.fstat(descriptor)
-        current = lock_path.lstat()
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_CLOEXEC
+                | os.O_NONBLOCK
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            opened = os.fstat(descriptor)
+            current = lock_path.lstat()
+        except OSError as error:
+            raise _lock_problem("could not be opened", lock_path, error) from error
         if (
             not stat.S_ISREG(opened.st_mode)
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
             or opened.st_uid != os.getuid()
             or opened.st_nlink != 1
         ):
-            raise OSError(f"media lifecycle lock {lock_path} is not a private regular file")
+            raise _lock_problem("is not a private regular file", lock_path)
         os.fchmod(descriptor, 0o600)
         while True:
             try:
@@ -319,14 +364,18 @@ def _lifecycle_lock(
             except BlockingIOError:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(
-                        f"timed out after {wait:g}s waiting for media lifecycle lock {lock_path}"
-                    ) from None
+                    LOGGER.warning(
+                        "timed out after %gs waiting for media lifecycle lock %s", wait, lock_path
+                    )
+                    raise LifecycleBusy from None
                 time.sleep(min(LIFECYCLE_LOCK_POLL_SECONDS, remaining))
-        opened = os.fstat(descriptor)
-        current = lock_path.lstat()
+        try:
+            opened = os.fstat(descriptor)
+            current = lock_path.lstat()
+        except OSError as error:
+            raise _lock_problem("could not be checked", lock_path, error) from error
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise OSError(f"media lifecycle lock {lock_path} changed while waiting")
+            raise _lock_problem("changed while waiting", lock_path)
         yield
     finally:
         if descriptor is not None:
@@ -354,11 +403,14 @@ def _source_lifecycle_lock(
         yield
 
 
+def _media_path_lock_path(path: Path) -> Path:
+    return _lifecycle_lock_path_from_material(b"media-path\0" + os.fsencode(path.absolute()))
+
+
 @contextlib.contextmanager
 def media_path_lifecycle_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     """Serialize provider publication and removal at one logical media path."""
-    material = b"media-path\0" + os.fsencode(path.absolute())
-    with _lifecycle_lock(_lifecycle_lock_path_from_material(material), timeout=timeout):
+    with _lifecycle_lock(_media_path_lock_path(path), timeout=timeout):
         yield
 
 

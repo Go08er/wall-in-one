@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 from collections.abc import Callable
@@ -659,6 +660,22 @@ def test_marker_lock_can_exclude_migration_without_owning_every_state_gate(
         target.write_text("saved", encoding="utf-8")
 
     assert target.read_text(encoding="utf-8") == "saved"
+
+
+def test_a_mutation_lock_that_times_out_names_no_lock_path(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The message can reach a person; the lock's path goes to the log only."""
+    target = tmp_path / "playlists.json"
+    with (
+        caplog.at_level(logging.WARNING, logger=state_file.__name__),
+        state_file.mutation_lock(target, description="playlists", process_gate=False),
+        pytest.raises(TimeoutError) as caught,
+        state_file.mutation_lock(target, description="playlists", timeout=0.05, process_gate=False),
+    ):
+        pass
+    assert str(caught.value) == "timed out after 0.05s waiting for the playlists mutation lock"
+    assert ".lock" in caplog.text
 
 
 # -- forward compatibility: newer versions and unknown keys -------------------

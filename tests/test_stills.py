@@ -10,6 +10,7 @@ Nothing here touches the user's library. Every path is under `tmp_path`.
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import re
@@ -1731,3 +1732,22 @@ def test_a_still_is_taken_at_the_wallpapers_own_resolution(root: Path) -> None:
         text=True,
     )
     assert probe.stdout.strip().rstrip(",") == "320,180"
+
+
+def test_a_lifecycle_lock_that_times_out_names_no_lock_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whatever carries it to a person says what is going on; the path is in the log."""
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.05)
+    source = tmp_path / "clip.mp4"
+    with (
+        caplog.at_level(logging.WARNING, logger=stills.__name__),
+        stills.media_path_lifecycle_lock(source),
+        pytest.raises(stills.LifecycleBusy) as caught,
+        stills.media_path_lifecycle_lock(source),
+    ):
+        pass
+    assert str(caught.value) == (
+        "something else is saving or removing it right now; try again in a moment"
+    )
+    assert ".lock" in caplog.text

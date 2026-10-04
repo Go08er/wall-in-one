@@ -195,50 +195,51 @@ def palette_actions(state, settings) -> None:
 
 
 def playlist_actions(state, window) -> None:
+    """The app's Playlists page over the demo state (its PlaylistEditing)."""
     window.navigate("playlist:mc-day")
     page = window.pages["playlist"]
-    undo = state.rename_playlist("mc-day", "MC days")
-    assert state.playlist("mc-day").name == "MC days"
-    undo()
-    assert state.playlist("mc-day").name == "MC day"
-    page._interval.set_selected(4)  # every hour
-    assert state.playlist("mc-day").interval == 60
-    page._interval.set_selected(2)
-    page._shuffle.set_active(True)
+    assert page.pid == "mc-day" and [row.entry.wallpaper for row in page.rows] == state.playlist("mc-day").entries
+    state.rename_playlist("mc-day", "MC days")
+    assert state.playlist("mc-day").name == "MC days" and page.detail().name == "MC days"
+    state.rename_playlist("mc-day", "MC day")
+    page.interval_row.set_selected(4)  # Default, 5 min, 15 min, 30 min, every hour
+    assert state.playlist("mc-day").interval == 60 and page.detail().rotation.interval == 3600
+    page.interval_row.set_selected(0)
+    assert page.detail().rotation.interval is None
+    page.shuffle_row.set_selected(1)
     assert state.playlist("mc-day").shuffle
-    page._shuffle.set_active(False)
-    page.insert_entries(1, ["alpine"])
+    page.shuffle_row.set_selected(0)
+    page.add_entries(["alpine"], 1)
     assert state.playlist("mc-day").entries[1] == "alpine"
-    page.remove_entries([1])
-    page.move_entry(0, 2)
-    page._list.flush()
+    page.remove_entries([page.rows[1].entry_id])
+    assert state.playlist("mc-day").entries == ["blocky-sunrise", "overworld-noon", "alpine", "summit-glow"]
+    page.move(page.rows[0].entry_id, 2)
     assert state.playlist("mc-day").entries[2] == "blocky-sunrise"
-    page.move_entry(2, 0)
-    page._list.flush()
+    page.move_to_end(page.rows[2].entry_id, -1)
+    assert state.playlist("mc-day").entries[0] == "blocky-sunrise"
     page.demo("select")
-    page._move_selected_to_top()
-    assert state.playlist("mc-day").entries[:2] == ["overworld-noon", "summit-glow"]
-    state.reorder_entries("mc-day", ["blocky-sunrise", "overworld-noon", "alpine", "summit-glow"])
-    page.play_from(2)
-    assert state.current["DP-1"] == "alpine" and state.manual["DP-1"] == "mc-day"
-    state.resume_schedule("all")
+    page.select_all()
+    page._select.set_active(False)
     # A second "Frog day" gets its own id instead of replacing the first.
     twin = state.create_playlist("Frog day")
     assert twin != "frog-day" and state.playlist("frog-day").name == "Frog day"
     window.navigate(f"playlist:{twin}")
     page.duplicate()
-    copy = page._pid
+    copy = page.pid
     assert copy == f"{twin}-copy", copy
     assert window._nav_keys[window.sidebar.get_selected()] == f"playlist:{copy}", "the sidebar should follow"
-    page._delete()
+    state.delete_playlist(copy)
     assert not state.has_playlist(copy)
-    restore = state.delete_playlist(twin)
-    restore()
-    assert state.has_playlist(twin)
+    settle(lambda: page.pid not in (None, copy))
     state.delete_playlist(twin)
-    copy, _name, undo = state.duplicate_playlist("mc-night")
-    undo()
+    assert not state.has_playlist(twin)
+    copy = state.duplicate_playlist("mc-night")
+    state.delete_playlist(copy)
     assert not state.has_playlist(copy)
+    window.navigate("playlist:mc-day")
+    page.play()
+    assert all(state.manual.get(c) == "mc-day" for c in state.targets("all"))
+    state.resume_schedule("all")
 
 
 def display_actions(state, window) -> None:
@@ -511,10 +512,13 @@ def build_steps(app, holder):
             "compact",
             "rename",
             "delete",
+            "new",
+            "picker-search:pond",
             "added",
             "removed",
             "drag",
             "select",
+            "playlist-menu",
         ],
         "schedule": [
             "edit:weekend-days",

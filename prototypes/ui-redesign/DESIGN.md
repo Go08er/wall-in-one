@@ -54,7 +54,6 @@ wio_demo/
   glass.py              the demo's colors (simulated or read-only live Noctalia); glass layers are the app's
   pages/__init__.py     re-exports the app's Page contract
   pages/store.py        Store (online providers); store_widgets.py
-  pages/playlists.py    one playlist (sidebar lists them); playlists_picker.py
   pages/schedule.py     week calendar + rules; schedule_model.py, schedule_calendar.py, schedule_editor.py
   pages/displays.py     monitor arrangement + per-display assignment; displays_arrangement.py
 src/wall_in_one/ui/next/   (the app's; shared with this prototype)
@@ -67,6 +66,10 @@ src/wall_in_one/ui/next/   (the app's; shared with this prototype)
   playerbar.py          persistent bottom bar: what's on screen, why, controls
   library.py            Library grid + filters + selection + drag to playlists
   inspector.py          wallpaper details: still, motion, colors (pairing editor)
+  playlists.py          one playlist (sidebar lists them): live reorder, picker, Undo
+  playlists_state.py    the PlaylistEditing Protocol the page reads
+  reorder.py            the handle-driven live sortable list
+  playlists_picker.py   "Add wallpapers": pick several, paged
   settings.py           Settings: searchable groups, folders, key, look; settings_palettes.py
   settings_state.py     the SettingsAccess and PaletteManager Protocols, row choices
   backdrop.py           the frosted style's blurred wallpaper

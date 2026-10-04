@@ -58,7 +58,8 @@ def test_the_readme_keeps_the_real_restrictions() -> None:
     assert "turns Apply, favorites and the playback controls off" in section
     assert "Settings keys this version doesn't know are named in that notice" in section
     assert "off until the wallpaper service has answered, and while it isn't running" in section
-    assert "There is no undo yet." in section
+    assert "Apply, favorites and playback have no undo yet." in section
+    assert "the Playlists page says so too and changes nothing" in section
 
 
 def test_the_readme_says_every_control_follows_the_bar_scope() -> None:
@@ -86,3 +87,18 @@ def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> 
     assert "`--ui=classic` overrides the saved choice for that start" in section
     assert "When no app is running, `ctl open` launches the interface chosen in Settings" in section
     assert "0.2.0 and 0.2.1 don't know the choice and start classic" in section
+
+
+def test_the_readme_says_what_the_playlists_page_does() -> None:
+    """R5: Playlists is ported; the README says so, and what it changes."""
+    section = _section()
+    assert "Store, Schedule and Displays say they are not in the new interface" in section
+    assert "Playlists say" not in section and "Store, Playlists" not in section
+    for words in (
+        "with Undo",
+        "its own interval and shuffle",
+        '"Your pick" stays hidden',
+        "can't lose its last wallpaper that plays",
+        "Library (`media`), Playlists (`playlists`) and Settings (`settings`) are",
+    ):
+        assert words in section, words

@@ -33,7 +33,8 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import random
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -42,6 +43,7 @@ import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
+from wall_in_one.ui.next.playlists_state import EntryView, PlaylistDetail, Rotation, Usage
 from wall_in_one.ui.next.settings_state import (
     KEY_REFUSED,
     KEY_SAVED,
@@ -67,7 +69,7 @@ from wall_in_one.ui.next.state import (
 )
 
 from . import art, data, store_catalog
-from .catalog import KIND_LABEL
+from .catalog import DAYS, KIND_LABEL, MONTHS
 from .models import Display, Folder, Palette, Playlist, RememberedDisplay, Rule, StoreItem, Wallpaper
 
 #: An Undo callback, as returned by the actions that pages offer Undo for.
@@ -125,6 +127,34 @@ def resolve(rules: list[Rule], at: dt.datetime, display: str | None = None) -> R
         if rule_matches(rule, at, display):
             chosen = rule
     return chosen
+
+
+def _rule_words(rule: Rule) -> str:
+    """A rule in the Playlists page's "Used by" words: ``Weekdays 07:00–18:00``, ``All of Dec``."""
+    days = sorted(set(rule.days))
+    if not days or len(days) == 7:
+        day_text = "Every day"
+    elif days == [0, 1, 2, 3, 4]:
+        day_text = "Weekdays"
+    elif days == [5, 6]:
+        day_text = "Weekends"
+    else:
+        day_text = ", ".join(DAYS[day] for day in days)
+    timed = bool(rule.start and rule.end and rule.start != rule.end)
+    if timed:
+        text = f"{day_text} {rule.start}–{rule.end}"
+    elif rule.days:
+        text = f"{day_text}, all day"
+    elif rule.months:
+        text = ""
+    else:
+        text = "Always"
+    if rule.months:
+        months = ", ".join(MONTHS[month] for month in sorted(set(rule.months)))
+        text = f"{text} in {months}" if text else f"All of {months}"
+    if rule.display:
+        text += f" · {rule.display}"
+    return text
 
 
 # Demo scenes start the schedule from the original rules, copied at import
@@ -217,6 +247,8 @@ class AppState(GObject.Object):
         self.library_scanning = False
         self._rng = random.Random(4)
         self._rule_serial = 0
+        #: A playlist's own (interval in seconds, shuffle); None for the default.
+        self._own_rotation: dict[str, tuple[int | None, bool | None]] = {}
 
     def emit_changed(self, *topics: str) -> None:
         for topic in topics:
@@ -396,8 +428,9 @@ class AppState(GObject.Object):
         return None
 
     @property
-    def playlist_editing(self) -> None:
-        return None
+    def playlist_editing(self) -> AppState:
+        """The Playlists page is the app's (wall_in_one.ui.next.playlists)."""
+        return self
 
     @property
     def scheduling(self) -> None:
@@ -890,8 +923,107 @@ class AppState(GObject.Object):
         self.emit_changed("playlists")
         return pid
 
-    def rename_playlist(self, pid: str, name: str) -> Undo:
-        playlist = self.playlist(pid)
+    # The Playlists page's part (wall_in_one.ui.next.playlists_state.PlaylistEditing):
+    # entries are wallpaper ids here, so an entry's id is its wallpaper and which
+    # occurrence it is ("alpine#2"); every change is saved at once.
+    @staticmethod
+    def _entry_ids(entries: list[str]) -> list[str]:
+        seen: Counter[str] = Counter()
+        ids = []
+        for wid in entries:
+            seen[wid] += 1
+            ids.append(f"{wid}#{seen[wid]}")
+        return ids
+
+    def _editable(self, pid: str) -> Playlist | None:
+        playlist = self._playlist_index.get(pid)
+        return None if playlist is None or playlist.automatic else playlist
+
+    def detail(self, pid: str) -> PlaylistDetail | None:
+        playlist = self._editable(pid)
+        if playlist is None:
+            return None
+        entries = []
+        for entry_id, wid in zip(self._entry_ids(playlist.entries), playlist.entries, strict=True):
+            if wid in self._wallpaper_index:
+                wallpaper = self.wallpaper(wid)
+                entries.append(EntryView(entry_id, wid, wallpaper.name, problem=wallpaper.problem))
+            else:
+                entries.append(EntryView(entry_id, wid, wid, missing=True))
+        usable = sum(entry.usable for entry in entries)
+        usage: list[Usage] = []
+        if self.fallback == pid:
+            usage.append(Usage("default", "When nothing is scheduled", "Plays whenever no schedule rule applies"))
+        for rule in self.rules:
+            if rule.playlist == pid:
+                usage.append(
+                    Usage(
+                        "rule",
+                        _rule_words(rule),
+                        "Schedule rule \u2014 open the Schedule",
+                        off=not rule.enabled,
+                    )
+                )
+        for connector, assigned in self.assigned.items():
+            if assigned == pid:
+                usage.append(Usage("display", connector, f"{connector} plays this playlist \u2014 open Displays", target="displays"))
+        playing = [c for c in self.connectors() if self.effective_playlist(c) == pid] if self.service_running else []
+        on_screen = ""
+        if playing:
+            everywhere = len(playing) == len(self.connectors()) or self.display_mode == "mirrored"
+            where = "On screen now" if everywhere else f"On {' and '.join(playing)} now"
+            if any(c in self.manual for c in playing):
+                why = "your pick"
+            elif all(self.assigned.get(c) == pid for c in playing):
+                why = "this display\u2019s playlist"
+            else:
+                why = "from schedule"
+            on_screen = f"{where} · {why}"
+        ids = dict(zip(playlist.entries, self._entry_ids(playlist.entries), strict=False))
+        showing = tuple((ids[self.current[c]], c) for c in playing if self.current.get(c) in ids)
+        blocked = "" if usable else ("Add wallpapers to it first" if not entries else "Nothing in it can play")
+        own = self._own_rotation.get(pid, (None, None))
+        return PlaylistDetail(
+            id=pid,
+            name=playlist.name,
+            entries=tuple(entries),
+            usage=tuple(usage),
+            on_screen=on_screen,
+            playing=bool(playing) and len(playing) == len(self.connectors()) and all(self.manual.get(c) == pid for c in playing),
+            showing=showing,
+            play_blocked=blocked,
+            is_default=self.fallback == pid,
+            default_blocked=blocked,
+            rotation=Rotation(
+                interval=own[0],
+                shuffle=own[1],
+                default_interval=self.default_interval * 60,
+                default_shuffle=False,
+            ),
+        )
+
+    def editing_blocked(self) -> str:
+        return ""
+
+    def creating(self, pid: str) -> bool:
+        return False  # the demo saves at once
+
+    def create_playlist(self, name: str) -> str:
+        """A new, empty playlist after the user's others; returns its id."""
+        base = name.lower().replace(" ", "-")
+        pid, number = base, 2
+        while pid in self._playlist_index:  # a second "Frog day" must not replace the first
+            pid, number = f"{base}-{number}", number + 1
+        playlist = Playlist(pid, name, [])
+        self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
+        self._playlist_index[pid] = playlist
+        self.emit_changed("playlists")
+        return pid
+
+    def rename_playlist(self, pid: str, name: str) -> None:
+        playlist = self._editable(pid)
+        if playlist is None or name == playlist.name:
+            return
         old = playlist.name
         playlist.name = name
         self.emit_changed("playlists")
@@ -900,20 +1032,41 @@ class AppState(GObject.Object):
             playlist.name = old
             self.emit_changed("playlists")
 
-        return undo
+        self.toast(f"Renamed to “{name}”", undo)
 
-    def set_playlist_interval(self, pid: str, minutes: int) -> None:
-        """How often a playlist changes wallpaper (0 = it doesn't)."""
-        self.playlist(pid).interval = minutes
+    def set_playlist_interval(self, pid: str, seconds: int | None) -> None:
+        """A playlist's own interval (None: the default)."""
+        playlist = self._editable(pid)
+        if playlist is None:
+            return
+        own = self._own_rotation.get(pid, (None, None))
+        self._own_rotation[pid] = (seconds, own[1])
+        playlist.interval = seconds // 60 if seconds else self.default_interval
         self.emit_changed("playlists", "playback")
 
-    def set_playlist_shuffle(self, pid: str, shuffle: bool) -> None:
-        self.playlist(pid).shuffle = shuffle
+    def set_playlist_shuffle(self, pid: str, shuffle: bool | None) -> None:
+        playlist = self._editable(pid)
+        if playlist is None:
+            return
+        own = self._own_rotation.get(pid, (None, None))
+        self._own_rotation[pid] = (own[0], shuffle)
+        playlist.shuffle = bool(shuffle)
         self.emit_changed("playlists", "playback")
 
-    def duplicate_playlist(self, pid: str) -> tuple[str, str, Undo]:
+    def make_default(self, pid: str) -> None:
+        detail = self.detail(pid)
+        if detail is None or detail.default_blocked:
+            return
+        undo = self.set_fallback(pid)
+        if undo is not None:
+            self.toast(f"“{detail.name}” plays when nothing is scheduled", undo)
+
+    def play(self, pid: str) -> None:
+        self.play_playlist(pid)
+
+    def duplicate_playlist(self, pid: str) -> str:
         """Copy a playlist, just after it (or after the user's own ones for an
-        automatic one). Returns (new id, new name, undo)."""
+        automatic one); returns the copy's id and toasts with Undo."""
         source, playlists = self.playlist(pid), self.playlists
         base = f"{source.name} (copy)"
         name, number = base, 2
@@ -924,6 +1077,8 @@ class AppState(GObject.Object):
         while copy_id in self._playlist_index:
             copy_id, number = f"{source.id}-copy-{number}", number + 1
         copy = Playlist(copy_id, name, list(source.entries), interval=source.interval, shuffle=source.shuffle)
+        if pid in self._own_rotation:
+            self._own_rotation[copy_id] = self._own_rotation[pid]
         user_count = len([p for p in playlists if not p.automatic])
         playlists.insert(playlists.index(source) + 1 if not source.automatic else user_count, copy)
         self._playlist_index[copy_id] = copy
@@ -935,11 +1090,26 @@ class AppState(GObject.Object):
             self._playlist_index.pop(copy_id, None)
             self.emit_changed("playlists")
 
-        return copy_id, name, undo
+        self.toast(f"Duplicated as “{name}”", undo)
+        return copy_id
 
-    def delete_playlist(self, pid: str) -> Undo:
+    def delete_warning(self, pid: str) -> str:
+        rules = [rule for rule in self.rules if rule.playlist == pid]
+        screens = [c for c, p in self.assigned.items() if p == pid]
+        body = ["Its wallpapers stay in your Library."]
+        if rules:
+            body.append(
+                "1 schedule rule uses it and will be removed too."
+                if len(rules) == 1
+                else f"{len(rules)} schedule rules use it and will be removed too."
+            )
+        if screens:
+            body.append(f"{' and '.join(screens)} will follow the schedule instead.")
+        return " ".join(body)
+
+    def delete_playlist(self, pid: str) -> None:
         """Delete a playlist with the rules that use it; displays that played it
-        follow the schedule again, and so does a pick of it."""
+        follow the schedule again, and so does a pick of it. Toasts with Undo."""
         playlist, playlists = self.playlist(pid), self.playlists
         position = playlists.index(playlist)
         rules = [(i, rule) for i, rule in enumerate(self.rules) if rule.playlist == pid]
@@ -966,7 +1136,7 @@ class AppState(GObject.Object):
             self.manual.update(manual)
             self.emit_changed("playlists", "schedule", "displays", "now", "playback")
 
-        return undo
+        self.toast(f"Deleted “{playlist.name}”", undo)
 
     def add_to_playlist(self, pid: str, wids: list[str]) -> None:
         playlist = self.playlist(pid)
@@ -980,23 +1150,37 @@ class AppState(GObject.Object):
 
         self.toast(f"Added {noun} to “{playlist.name}”", undo)
 
-    def insert_entries(self, pid: str, position: int, wids: list[str]) -> Undo:
-        """Put wallpapers into a playlist at ``position`` (the drop line)."""
-        entries = self.playlist(pid).entries
-        entries[position:position] = wids
+    def add_entries(self, pid: str, wids: Sequence[str], position: int | None = None) -> None:
+        """Put wallpapers into a playlist at ``position`` (the drop line), or at the end."""
+        playlist = self._editable(pid)
+        wids = [wid for wid in wids if wid in self._wallpaper_index]
+        if playlist is None or not wids:
+            return
+        if position is None or position >= len(playlist.entries):
+            self.add_to_playlist(pid, wids)
+            return
+        entries = playlist.entries
+        at = max(0, position)
+        entries[at:at] = wids
         self.emit_changed("playlists")
 
         def undo() -> None:
-            del entries[position : position + len(wids)]
+            del entries[at : at + len(wids)]
             self.emit_changed("playlists")
 
-        return undo
+        noun = f"“{self.wallpaper(wids[0]).name}”" if len(wids) == 1 else f"{len(wids)} wallpapers"
+        self.toast(f"Added {noun} to “{playlist.name}”", undo)
 
-    def remove_entries(self, pid: str, indices: list[int]) -> tuple[list[tuple[int, str]], Undo]:
-        """Take entries out of a playlist; returns [(index, wallpaper id)] and an undo
-        that puts each back where it was."""
-        entries = self.playlist(pid).entries
-        removed = [(i, entries[i]) for i in sorted(set(indices)) if 0 <= i < len(entries)]
+    def remove_entries(self, pid: str, entry_ids: Sequence[str]) -> None:
+        """Take entries out of a playlist; the toast's Undo puts each back where it was."""
+        playlist = self._editable(pid)
+        if playlist is None:
+            return
+        entries = playlist.entries
+        chosen = set(entry_ids)
+        removed = [(i, wid) for i, (eid, wid) in enumerate(zip(self._entry_ids(entries), entries, strict=True)) if eid in chosen]
+        if not removed:
+            return
         for index, _wid in reversed(removed):
             del entries[index]
         self.emit_changed("playlists")
@@ -1006,24 +1190,23 @@ class AppState(GObject.Object):
                 entries.insert(min(index, len(entries)), wid)
             self.emit_changed("playlists")
 
-        return removed, undo
+        what = f"“{self.wallpaper(removed[0][1]).name}”" if len(removed) == 1 else f"{len(removed)} wallpapers"
+        self.toast(f"Removed {what} from “{playlist.name}”", undo)
 
-    def reorder_entries(self, pid: str, wids: list[str]) -> None:
-        """Store a playlist's entries in a new order (a finished drag or keyboard move).
-        Ignored unless ``wids`` holds exactly the current entries: a move that settled
-        after entries were added or removed must not drop or bring back any."""
-        entries = self.playlist(pid).entries
-        if sorted(wids) != sorted(entries):
+    def move_entry(self, pid: str, entry_id: str, step: int) -> None:
+        """Move one entry ``step`` places (clamped at the ends)."""
+        playlist = self._editable(pid)
+        if playlist is None:
             return
-        entries[:] = wids
-        self.emit_changed("playlists")
-
-    def move_entries_to_top(self, pid: str, indices: list[int]) -> None:
-        entries = self.playlist(pid).entries
-        chosen = set(indices)
-        picked = [entries[i] for i in sorted(chosen)]
-        rest = [wid for i, wid in enumerate(entries) if i not in chosen]
-        entries[:] = picked + rest
+        ids = self._entry_ids(playlist.entries)
+        if entry_id not in ids:
+            return
+        index = ids.index(entry_id)
+        target = max(0, min(len(ids) - 1, index + step))
+        if target == index:
+            return
+        wid = playlist.entries.pop(index)
+        playlist.entries.insert(target, wid)
         self.emit_changed("playlists")
 
     # -- schedule -------------------------------------------------------------

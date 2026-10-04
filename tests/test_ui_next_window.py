@@ -251,7 +251,7 @@ def control(
 def test_next_ui_survives_the_whole_application_lifecycle(
     runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application = Application(ui="next", initial_page="playlists")
+    application = Application(ui="next", initial_page="schedules")
     changes: list[StatusChange] = []
     application.status_model.subscribe(lambda change, _view: changes.append(change))
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
@@ -264,7 +264,7 @@ def test_next_ui_survives_the_whole_application_lifecycle(
         assert isinstance(window, NextWindow), "--ui=next must build the new window"
         assert application.ui == "next"
         shown.append(window)
-        assert window.note_text.startswith("Playlists is not in the new interface yet")
+        assert window.note_text.startswith("Schedule is not in the new interface yet")
         monkeypatch.setattr(window, "show_palette", palettes.append)
 
         yield (

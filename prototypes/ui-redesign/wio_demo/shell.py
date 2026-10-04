@@ -1,10 +1,10 @@
 """The demo's window: the app's own shell (``wall_in_one.ui.next.shell``) plus demo extras.
 
-The sidebar, header, banners, player bar, frosted backdrop, Library and
-inspector, and Settings are the widgets the app ships. This subclass adds only what is
-demo-only: the prototype's other pages, the ☰ menu's Demo switches, the
-welcome screen, and the colors that follow the simulated (or real, read-only)
-Noctalia (``glass.Look``).
+The sidebar, header, banners, player bar, frosted backdrop, Library,
+inspector, Playlists and Settings are the widgets the app ships. This subclass
+adds only what is demo-only: the prototype's other pages, the ☰ menu's Demo
+switches, the welcome screen, and the colors that follow the simulated (or
+real, read-only) Noctalia (``glass.Look``).
 """
 
 from __future__ import annotations
@@ -17,22 +17,21 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from wall_in_one.ui.next import library, settings
+from wall_in_one.ui.next import library, playlists, settings
 from wall_in_one.ui.next.shell import PAGES, PageFactory, ShellWindow
 
 from . import art, glass
 from .pages import Page, Placeholder
 
-MODULE_FOR = {"playlist": "playlists"}
+#: The pages the app ships; the prototype runs them over its demo state.
+SHARED = {"library": library.create, "playlist": playlists.create, "settings": settings.create}
 
 
 def _factory(name: str, title: str, icon: str) -> PageFactory:
-    if name == "library":
-        return library.create
-    if name == "settings":
-        return settings.create
+    if name in SHARED:
+        return SHARED[name]
     try:
-        module = importlib.import_module(f".pages.{MODULE_FOR.get(name, name)}", __package__)
+        module = importlib.import_module(f".pages.{name}", __package__)
     except ModuleNotFoundError:
         return lambda state: Placeholder(state, name, title, icon)
     return module.create

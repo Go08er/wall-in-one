@@ -2,10 +2,11 @@
 
 `NextWindow` is the prototype's `ShellWindow` -- sidebar, header, banners,
 player bar, frosted backdrop -- over a `RealAppState`, with the real Library
-page and inspector, and the real Settings page (`settings.SettingsPage`, with
-the palette manager), which also offers the interface to start, so the new
-one can be left from inside. Store, Playlists, Schedule and Displays are
-honest "not in the new interface yet" pages until they are ported.
+page and inspector, the real Playlists page, and the real Settings page
+(`settings.SettingsPage`, with the palette manager), which also offers the
+interface to start, so the new one can be left from inside. Store, Schedule
+and Displays are honest "not in the new interface yet" pages until they are
+ported.
 
 It implements every `WindowServices` member. Runtime status reaches it
 through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
@@ -36,7 +37,7 @@ from wall_in_one import __version__, config
 from wall_in_one.session import Session
 from wall_in_one.theme import source
 from wall_in_one.ui.launch_rows import LaunchRows
-from wall_in_one.ui.next import library, status_line, thumbs
+from wall_in_one.ui.next import library, playlists, status_line, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
 from wall_in_one.ui.next.page import Placeholder, not_ported
@@ -59,7 +60,7 @@ _PAGES: Final = {
     "settings": "settings",
 }
 #: The pages this interface has. Every other one is a placeholder for now.
-PORTED: Final = frozenset({"media", "settings"})
+PORTED: Final = frozenset({"media", "playlists", "settings"})
 #: Kept for callers of the placeholder era.
 NOT_PORTED_HINT: Final = CLASSIC_HINT
 
@@ -96,7 +97,7 @@ class NextWindow(ShellWindow):
             {
                 "library": library.create,
                 "store": not_ported("store", "Store", "folder-download-symbolic"),
-                "playlist": not_ported("playlist", "Playlists", "view-list-symbolic"),
+                "playlist": playlists.create,
                 "schedule": not_ported("schedule", "Schedule", "x-office-calendar-symbolic"),
                 "displays": not_ported("displays", "Displays", "video-display-symbolic"),
                 "settings": lambda state: settings_page(state, self._prefs, application),

@@ -10,8 +10,9 @@ from __future__ import annotations
 import tomllib
 from collections import deque
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, get_protocol_members
+from typing import TYPE_CHECKING, Any, TypeVar, get_protocol_members
 
 import pytest
 
@@ -70,6 +71,13 @@ class FakeApplication:
         self.published = 0
         self.authoring: deque[Callable[[], None]] = deque()
         self.after_favourites: Callable[[], None] = lambda: None
+        # The Playlists page's part (`real_playlists.PlaylistBackend`).
+        self._settings = session.settings
+        self.playlist_changes = 0
+        self.after_playlists: Callable[[], None] = lambda: None
+        self.activated: list[str] = []
+        #: When set, the next settings write fails with this message.
+        self.settings_failure = ""
 
     @property
     def session(self) -> Session:
@@ -81,7 +89,7 @@ class FakeApplication:
 
     @property
     def settings(self) -> config.Settings:
-        return self._session.settings
+        return self._settings
 
     @property
     def settings_unknown_keys(self) -> tuple[str, ...]:
@@ -150,6 +158,62 @@ class FakeApplication:
     def set_window_glass(self, glass: css.Glass | None) -> None:
         self.glass.append(glass)
 
+    # -- the Playlists page's part -------------------------------------------------
+    def playlists_changed(self) -> None:
+        """Republish, and hand the window the session (which reloads the adapter)."""
+        self.playlist_changes += 1
+        self.after_playlists()
+
+    def delete_playlist_async(
+        self,
+        reference: str,
+        on_complete: Callable[[Any, tuple[str, ...]], None],
+        *,
+        on_error: Callable[[str], None] | None = None,
+    ) -> bool:
+        """The application's delete: the playlist, then its rules, assignments and default."""
+        session = self._session
+
+        def work() -> str:
+            session.playlists.delete(reference)
+            session.schedules.forget_playlist(reference)
+            session.displays.forget_playlist(reference)
+            return reference
+
+        def finish(deleted: str) -> None:
+            if self._settings.active_playlist == deleted:
+                self._settings = replace(self._settings, active_playlist="")
+            self.playlists_changed()
+            on_complete(deleted, ())
+
+        return self.authoring_action_async(work, finish, failure=on_error)
+
+    def update_settings_async(
+        self,
+        *,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+        **changes: Any,
+    ) -> bool:
+        """Saved when the authoring queue runs, or failed with `settings_failure`."""
+
+        def work() -> config.Settings:
+            if self.settings_failure:
+                failure, self.settings_failure = self.settings_failure, ""
+                raise ValueError(failure)
+            return replace(self._settings, **changes)
+
+        def finish(saved: config.Settings) -> None:
+            self._settings = saved
+            if on_success is not None:
+                on_success(saved)
+
+        return self.authoring_action_async(work, finish, failure=on_error)
+
+    def activate_playlist_async(self, reference: str) -> bool:
+        self.activated.append(reference)
+        return True
+
 
 NAMES = ("alpine.png", "city-dusk.png", "lily-pond.png", "rain.mp4")
 
@@ -192,6 +256,7 @@ def _adapter(backend: FakeApplication) -> tuple[RealAppState, UiPrefsKeeper]:
     keeper = UiPrefsKeeper(backend.window_report)
     adapter = RealAppState(backend, keeper)
     backend.after_favourites = adapter.reload
+    backend.after_playlists = adapter.reload_playlists
     return adapter, keeper
 
 

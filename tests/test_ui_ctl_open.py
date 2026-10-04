@@ -267,10 +267,10 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         calls = count_first_activation_work(application, monkeypatch)
         libraries = record_library_shown(NextWindow, monkeypatch)
 
-        for page in ("schedules", "media", "settings", "schedules"):
+        for page in ("schedules", "media", "settings", "playlists", "schedules"):
             opened = control(requests, "open", page)
             yield f"ctl open {page}", opened.done
-            if page in ("media", "settings"):  # the Library and Settings are ported
+            if page in ("media", "settings", "playlists"):  # these are ported
                 assert opened.result() == Response.success(f"opened {page}")
             else:
                 not_in_new_ui(opened.result(), page)
@@ -282,13 +282,13 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         first.close()
         assert application._window is None
         add_wallpaper(tmp_path, "noon.png")
-        opened = control(requests, "open", "playlists")
-        yield "ctl open playlists with no window", opened.done
-        not_in_new_ui(opened.result(), "playlists")
+        opened = control(requests, "open", "schedules")
+        yield "ctl open schedules with no window", opened.done
+        not_in_new_ui(opened.result(), "schedules")
         second = window_now(application)
         assert isinstance(second, NextWindow) and second is not first
         assert libraries[0] == (second, 2), "the held library is shown at once"
-        assert second.note_text.startswith("Playlists is not in the new interface yet")
+        assert second.note_text.startswith("Schedule is not in the new interface yet")
 
         yield (
             "the rebuilt window's scan to find the added file",

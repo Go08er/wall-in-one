@@ -517,12 +517,13 @@ saved in `ui.toml` and takes effect the next time Wall-in-One starts. The
 hidden flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved
 choice for that start. With neither, the app is classic.
 
-- **What it has so far.** The redesign's sidebar, header and player bar, and a
-  paged Library grid with the details pane beside it, all over the app's real
-  library, stores and runtime status, and the Settings page below. Beyond
-  Settings it can change three things: **Apply** (to all displays, or the
-  display the player bar is scoped to), **favorites**, and **playback**,
-  through the player bar's live controls: play/pause, next,
+- **What it has so far.** The redesign's sidebar, header and player bar, a
+  paged Library grid with the details pane beside it, the Playlists page and
+  the Settings page, all over the app's real library, stores and runtime
+  status. Beyond **playlists** and **Settings** (below) it can change three
+  things: **Apply** (to all displays, or the display the player bar is scoped
+  to), **favorites**, and **playback**, through the player bar's live
+  controls: play/pause, next,
   previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
   schedule. Every playback control acts on the displays the player bar is
   scoped to, all of them or one; mirrored displays, or a display that has gone
@@ -530,9 +531,23 @@ choice for that start. With neither, the app is classic.
   commands, sent the same way. A "<display> only" chosen from a card's or the
   details pane's Apply menu is never widened like that: if that display has
   gone, or the displays are mirrored, nothing is sent and a notice says so.
-  There is no undo yet. The player bar says what the runtime reports and why
-  ("Evening · from schedule", "Your pick"). Store, Playlists, Schedule and
-  Displays say they are not in the new interface yet.
+  Apply, favorites and playback have no undo yet. The player bar says what the
+  runtime reports and why ("Evening · from schedule", "Your pick"). Store,
+  Schedule and Displays say they are not in the new interface yet.
+- **Playlists.** The Playlists page edits your own playlists: create, rename,
+  duplicate and delete them (Delete names the schedule rules, display
+  assignments and default that go with it), add several wallpapers at once
+  from its picker or drop one from the Library where it should go, reorder by
+  a row's handle or Ctrl+↑/↓, and remove entries, with Undo. A playlist can
+  have its own interval and shuffle, or follow the defaults. Play now and Use
+  as schedule default follow the classic page's rules. Each change is one
+  save on the app's ordered authoring lane, and the page shows what was
+  saved: moves apply in order, each from where the entry is when it is saved,
+  and a change that fails is reported and the page goes back to what is
+  saved. A playlist that a schedule rule, the default or a display uses can't
+  lose its last wallpaper that plays, and one with nothing that plays can't
+  become the default. "Your pick" stays hidden. Long playlists show 72 rows at
+  a time.
 - **Settings.** Every setting classic Settings has, each saved to the same
   `settings.toml` key the same way (a save that fails is reported and every
   row goes back to what is saved), in searchable groups: library folders (add,
@@ -547,17 +562,21 @@ choice for that start. With neither, the app is classic.
   the default or keep it as a palette. Like classic, it has no delete.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites and the playback controls off and says so in a notice under
-  the header. Settings keys this version doesn't know are named in that notice
-  as read-only, and the Settings rows that write `settings.toml` are off. The playback controls are also off until the wallpaper service
-  has answered, and while it isn't running; the app doesn't start the service.
+  the header; the Playlists page says so too and changes nothing. Settings keys
+  this version doesn't know are named in that notice as read-only, and the
+  Settings rows that write `settings.toml` are off. The playback controls are
+  also off until the wallpaper service has answered, and while it isn't
+  running; the app doesn't start the service.
 - **Its own preferences.** The window style (solid, translucent or frosted), its
   opacity and frost dials (in the window menu and Settings → Appearance) and
   the thumbnail size live in `ui.toml`, written only when you change one of
   them.
-- **One set of widgets.** The shell, player bar, Library and details pane in
-  `ui/next/` are the prototype's: `prototypes/ui-redesign` runs the same modules
-  over its dummy data, through the `AppState` Protocol in `ui/next/state.py`.
-  `ui/next/real_state.py` is the app's side of that boundary.
+- **One set of widgets.** The shell, player bar, Library, details pane and
+  Playlists page in `ui/next/` are the prototype's: `prototypes/ui-redesign`
+  runs the same modules over its dummy data, through the `AppState` Protocol
+  in `ui/next/state.py` (and `PlaylistEditing` in `ui/next/playlists_state.py`).
+  `ui/next/real_state.py` and `ui/next/real_playlists.py` are the app's side of
+  that boundary.
 
 - **One process, one interface.** The choice belongs to the process that starts
   the app: the desktop entry, `ctl open` with no app running, and `--service`
@@ -568,7 +587,8 @@ choice for that start. With neither, the app is classic.
   package and the page, because older builds fix its shape.
 - **`ctl open <page>`** presents the window either way. In the new interface it
   answers `not-in-new-ui`, with exit status 1, until that page is ported; the
-  Library (`media`) and Settings (`settings`) are. When no app is running, `ctl open` launches the
+  Library (`media`), Playlists (`playlists`) and Settings (`settings`) are.
+  When no app is running, `ctl open` launches the
   interface chosen in Settings.
 - **Rolling back.** 0.2.0 and 0.2.1 don't know the choice and start classic
   (`--ui=next` still works there). See [docs/updating.md](docs/updating.md) for

@@ -11,14 +11,16 @@ default), its playlist and its entry, resolved to a library item by
 runtime's own per-display timing, and stay empty with a service that does not
 report it.
 
-**Writes.** Apply, Favorite and the player bar's playback controls, and
-nothing else. Apply is the classic window's Quick choice (`play_item_async`,
-or `play_item_on_async` for one display); Favorite is the classic star, on
-the authoring lane; the playback controls are the classic runtime verbs
-(`real_controls.RuntimeControls`). All of them report their failures through
-the application; none changes what the window shows until the store or the
-runtime says so (the favourite comes back through `reload`, what plays
-through the next status). There is no undo.
+**Writes.** Apply, Favorite, the player bar's playback controls and the
+Playlists page. Apply is the classic window's Quick choice
+(`play_item_async`, or `play_item_on_async` for one display); Favorite is
+the classic star, on the authoring lane; the playback controls are the
+classic runtime verbs (`real_controls.RuntimeControls`); playlist editing is
+`real_playlists.RealPlaylists`, on the authoring lane too. All of them report
+their failures through the application; none changes what the window shows
+until the store or the runtime says so (the favourite and playlists come back
+through `reload`, what plays through the next status). Only removing
+playlist entries offers Undo.
 
 **Settings.** The Settings page's part (`settings_access`) is
 `real_settings.RealSettings`: the classic Settings page's saves, rollback and
@@ -65,6 +67,7 @@ from wall_in_one.ui.next.library_thumbnails import StillSource
 from wall_in_one.ui.next.playlists_state import PlaylistEditing
 from wall_in_one.ui.next.prefs import DIAL_SAVE_DELAY_MS, UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
+from wall_in_one.ui.next.real_playlists import PlaylistBackend, RealPlaylists
 from wall_in_one.ui.next.real_settings import RealSettings, SettingsBackend
 from wall_in_one.ui.next.schedule_state import Scheduling
 from wall_in_one.ui.next.settings_state import SettingsAccess
@@ -100,7 +103,7 @@ _ROUTES: Final[dict[str, Route]] = {
 }
 
 
-class Backend(RuntimeBackend, Protocol):
+class Backend(RuntimeBackend, PlaylistBackend, Protocol):
     """What the adapter uses of `wall_in_one.ui.app.Application`."""
 
     @property
@@ -299,6 +302,7 @@ class RealAppState(GObject.Object):
         self._unsubscribe: Callable[[], None] | None = None
         self._unfollow_prefs: Callable[[], None] | None = None
         self._controls = RuntimeControls(backend, self, self._authoring_blocked)
+        self._playlist_editing = RealPlaylists(backend, self, self._authoring_blocked)
         #: The Settings page's part, made when the page first asks for it.
         self._settings_part: RealSettings | None = None
         self.reload()
@@ -344,9 +348,8 @@ class RealAppState(GObject.Object):
 
     # -- signals ----------------------------------------------------------------
     def toast(self, text: str, undo: Undo | None = None, action: ToastButton | None = None) -> None:
-        """Show ``text``. There is no undo in this adapter, so ``undo`` is ignored."""
-        del undo
-        self.emit("toast", text, action)
+        """Show ``text``, with an Undo button when ``undo`` is given (else ``action``'s)."""
+        self.emit("toast", text, ("Undo", undo) if undo is not None else action)
 
     def navigate(self, page: str) -> None:
         self.emit("navigate", page)
@@ -565,6 +568,10 @@ class RealAppState(GObject.Object):
 
     def has_wallpaper(self, wid: str) -> bool:
         return wid in self._index
+
+    def library_entry(self, wid: str) -> LibraryWallpaper | None:
+        """The library's wallpaper ``wid`` with its `MediaItem`, or None."""
+        return self._index.get(wid)
 
     def library_sorts(self) -> Sequence[tuple[str, str]]:
         return [(sort.value, sort.label) for sort in library_filter.SORT_CHOICES]
@@ -876,7 +883,7 @@ class RealAppState(GObject.Object):
 
     @property
     def playlist_editing(self) -> PlaylistEditing | None:
-        return None
+        return self._playlist_editing
 
     @property
     def scheduling(self) -> Scheduling | None:

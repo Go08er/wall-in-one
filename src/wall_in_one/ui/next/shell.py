@@ -274,7 +274,7 @@ class ShellWindow(Adw.ApplicationWindow):
             else:
                 cover = state.playlist_cover(playlist.id, 64)
                 add(lists, key, playlist.name, "view-list-symbolic", cover, count=count)
-        if state.editing is not None:
+        if state.editing is not None or state.playlist_editing is not None:
             add(lists, "new-playlist", "New playlist", "list-add-symbolic")
         self.sidebar.append(lists)
 
@@ -409,7 +409,9 @@ class ShellWindow(Adw.ApplicationWindow):
 
     # -- dialogs ---------------------------------------------------------------
     def _new_playlist(self) -> None:
-        editing = self.state.editing
+        # The Playlists page's part when it is offered: it opens the new
+        # playlist once it is saved. Otherwise the Library's.
+        editing = self.state.playlist_editing or self.state.editing
         if editing is None:
             return
         dialog = Adw.AlertDialog(
@@ -430,7 +432,8 @@ class ShellWindow(Adw.ApplicationWindow):
             name = entry.get_text().strip() or "Untitled playlist"
             pid = editing.create_playlist(name)  # the sidebar rebuilds on "playlists"
             self.navigate(f"playlist:{pid}")
-            self.state.toast(f"Created {quoted(name)}")
+            if self.state.playlist_editing is None:
+                self.state.toast(f"Created {quoted(name)}")
 
         dialog.connect("response", done)
         dialog.present(self)
@@ -483,7 +486,7 @@ class ShellWindow(Adw.ApplicationWindow):
             simple("play", controls.toggle_play, ["<Control>space"])
             simple("next", lambda: controls.step(1), ["<Control>Right"])
             simple("previous", lambda: controls.step(-1), ["<Control>Left"])
-        if self.state.editing is not None:
+        if self.state.editing is not None or self.state.playlist_editing is not None:
             simple("new-playlist", self._new_playlist, ["<Control>n"])
         for index, (name, _title, _icon) in enumerate(PAGES, start=1):
             simple(f"go-{name}", functools.partial(self._go, name), [f"<Alt>{index}"])
@@ -522,7 +525,7 @@ class ShellWindow(Adw.ApplicationWindow):
             ("Settings", "<Control>comma"),
             ("Keyboard shortcuts", "<Control>question"),
         ]
-        if self.state.editing is not None:
+        if self.state.editing is not None or self.state.playlist_editing is not None:
             general.insert(2, ("New playlist", "<Control>n"))
         groups = [("General", general)]
         if self.state.controls is not None:

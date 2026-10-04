@@ -204,7 +204,8 @@ Wall-in-One opens on your Library. The sidebar lists the pages, and `Alt+1` to
   display the desktop colours follow.
 - **Settings** manages library folders, playback defaults, displays, colours
   and palettes, the window's look, the Wallhaven key, the video and scene
-  renderers, Tidy up, and the interface to start.
+  renderers, Tidy up, and the interface to start, and keeps a log of this
+  session.
 
 The player bar along the bottom says what is on screen and why. It has
 shuffle, previous, play/pause, next and "Change wallpaper automatically"; its ⋯
@@ -212,23 +213,30 @@ menu adds Resume schedule, Random wallpaper, Stop animation and "Why this
 wallpaper?". While displays run separately it can act on one display.
 
 On first run, Wall-in-One does not silently turn a detected Noctalia wallpaper
-directory into a place it may write. A one-time prompt shows the exact detected
-default and offers either **Use default** or a folder chooser. Until one is
-chosen, scans are empty and downloads and generated stills stay disabled.
-Existing configured roots are left alone.
+directory into a place it may write. A welcome screen shows the exact detected
+default and offers **Use default**, **Choose folder manually** or **Not now**.
+Until one is chosen, scans are empty and downloads and generated stills stay
+disabled. **Not now** saves nothing: a notice under the header asks again, and
+so does the next start. Existing configured roots are left alone. Settings from
+the older Noctalia plugin are asked about first, on the same screen (see the
+[migration guide](docs/migrating.md#importing-the-retired-noctalia-luau-plugin)).
 
-To use the classic window instead, choose **Settings → Appearance → Interface →
-Classic**. It takes effect the next time Wall-in-One starts, and **New** in the
-same row brings the new interface back. If the new interface doesn't open,
-start `wall-in-one --ui=classic` and choose Classic in Settings → Appearance →
-Interface. The classic window has the same workflows on a bottom navigation
-(Store, Library, Playlists, Schedules and Settings), with a full-size pairing
-editor where the new one has its details pane.
+Wall-in-One opens the interface saved in Settings → Appearance → Interface, or,
+with nothing saved there, the new one, the default. To use the classic window
+instead, choose **Settings → Appearance → Interface → Classic**. It takes
+effect the next time Wall-in-One starts, and **New** in the same row brings the
+new interface back. `wall-in-one --ui=next` or `--ui=classic` overrides the
+saved choice for that start, and `wall-in-one --help` lists it. If the new
+interface doesn't open, start `wall-in-one --ui=classic` and choose Classic in
+Settings → Appearance → Interface. The classic window has the same workflows on
+a bottom navigation (Store, Library, Playlists, Schedules and Settings), with a
+full-size pairing editor where the new one has its details pane.
 
-[`docs/library.md`](docs/library.md) is the detail: multiple library folders,
-how a video finds the still that stands behind it, how search matches, what
-favourites do to the rotation, which removal you get and why, and where
-everything is stored.
+[`docs/interface.md`](docs/interface.md) describes every page of the new
+interface in detail. [`docs/library.md`](docs/library.md) is the detail on the
+library: multiple library folders, how a video finds the still that stands
+behind it, how search matches, what favourites do to the rotation, which
+removal you get and why, and where everything is stored.
 
 ### Keyboard shortcuts
 
@@ -239,7 +247,7 @@ everything is stored.
 | `Ctrl+Left` | Previous wallpaper |
 | `Ctrl+Shift+R` | Random wallpaper |
 | `Ctrl+F` | Search: the Library's, or the Store's or Settings' while one is shown |
-| `F5` | Rescan the library |
+| `F5` | Rescan the library (also in the main menu) |
 | `Ctrl+B` | Open Store |
 | `Ctrl+N` | New playlist |
 | `Ctrl+,` | Settings |
@@ -372,8 +380,11 @@ $ wall-in-one --install-theme-template
 $ noctalia msg templates-apply
 ```
 
-That registers a `[theme.templates.user.wall-in-one]` entry in Noctalia's
-settings. It is a real schema field, so Noctalia round-trips it through its own
+Settings → Colours → **Noctalia template** shows whether that is done and does
+the same install or repair with one button. Installing doesn't render; the
+**Render the colours now** row asks Noctalia to re-render all of its templates
+until it has rendered Wall-in-One's. Either way, that registers a
+`[theme.templates.user.wall-in-one]` entry in Noctalia's settings. It is a real schema field, so Noctalia round-trips it through its own
 settings writes rather than dropping it. The bundled template is copied once to
 a content-addressed file under Wall-in-One's state directory, without replacing
 an existing name. The settings block is fenced with markers, the previous file
@@ -409,8 +420,11 @@ the next ones; a wallpaper's palette choices in the Library list the community
 palettes 24 at a time the same way. A rescan says "Refreshing installed
 palettes…" while it runs, and a palette saved by this app invalidates the old
 snapshot until the post-write generation lands, so an edited entry cannot be
-resurrected by a late scan. The manager also duplicates a palette into yours and
-edits its colours, and previews every scheme on one of your stills.
+resurrected by a late scan. The manager also duplicates a palette into yours,
+named "<name> copy" (numbered if that is taken), and edits its colours, and
+previews every scheme on one of your stills. No two palettes you can pick
+share a name: the editor says so as you type, and Save waits until the name
+is free.
 
 No two palettes you can pick share a name. A copy starts as "Nord copy"
 ("Nord copy 2" when that is taken), and saving a new palette under a name a
@@ -555,206 +569,24 @@ XDG directories -- never the real one.
 The redesigned interface from `prototypes/ui-redesign` has every page:
 the Library, Playlists, Schedule, Displays, the Store and Settings, all over
 the app's real library, stores and runtime status. It is what Wall-in-One
-opens: `ui/next/window.py`'s `NextWindow`.
+opens: `ui/next/window.py`'s `NextWindow`. What each page does is in
+[`docs/interface.md`](docs/interface.md); this section is how it is built.
 
-To use the classic window instead, choose
-**Settings → Appearance → Interface → Classic** on the new interface's
-Settings page (classic Settings has the same row, and **New** brings you
-back). The choice is saved in `ui.toml` and takes effect the next time
-Wall-in-One starts. The flag `wall-in-one --ui=next` or `--ui=classic`
-overrides the saved choice for that start, and `wall-in-one --help` lists it.
-With neither, the app opens the new interface. If the new interface doesn't
-open, start `wall-in-one --ui=classic` and choose Classic in Settings →
-Appearance → Interface.
+The interface is chosen in **Settings → Appearance → Interface → Classic** (or
+New), saved in `ui.toml`, and takes effect the next time Wall-in-One starts.
+The flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved choice
+for that start. Without the flag, the app opens the interface saved in
+Settings, otherwise the default, which is now New. With neither, the app opens
+the new interface.
 
 - **How it saves.** Each change goes through the save classic uses for it, one
   at a time on the app's ordered authoring lane. Each page shows what was
   saved: a change that fails is reported, and the page goes back to what is
   saved.
 
-- **First run.** The new interface asks classic's first-run questions, in the
-  same words, on a welcome screen instead of in dialogs:
-  - whether to import settings and playlists from the older Noctalia plugin
-    (Import safely, Start fresh, Not now), and Try again if that check fails;
-  - the library folder: the exact folder it found, Use default, or a folder
-    chooser.
-
-  "Not now" saves nothing and the question comes back at the next start. Until
-  then a notice under the header says what is waiting, and its button asks
-  again. While the import question is open, the library isn't loaded and
-  changes can't be saved, and the notice says so.
-
-- **After an update.** Classic's one-time Tidy up card is above every page;
-  Review opens Settings → Tidy up. Nothing there runs until you press its
-  button, including the fix for Noctalia's old palette template name.
-
-- **The player bar.**
-  - **What it says:** what the runtime reports and why ("Evening · from
-    schedule", "Your pick").
-  - **Live controls:** play/pause, next, previous, random, Stop, shuffle,
-    "Change wallpaper automatically" and Resume schedule. They are the classic
-    window's runtime commands, sent the same way.
-  - Every playback control acts on the displays the player bar is scoped to,
-    all of them or one. Mirrored displays, or a display that has
-    gone away, get the command for all of them.
-  - **Apply** goes to all displays, or to the display the bar is scoped to.
-    - A "<display> only" chosen from a card's or the details pane's Apply menu
-      is never widened like that. If that display has gone, or the displays
-      are mirrored, nothing is sent and a notice says so.
-    - Apply, favorites and playback have no undo yet.
-
-- **The Library.** A paged grid with the details pane beside it. The pane
-  changes what classic's tile menu and pairing editor change, through the same
-  saves:
-  - **Colours:** From wallpaper, with the Settings scheme or one pinned for it,
-    each scheme previewed from its still; a palette; or Don't change. Also
-    **Light or dark**. A colour choice shows while it is being saved.
-  - **Still**, for a moving wallpaper: a library image instead, the automatic
-    one again, or a new capture of a scene.
-  - **Reset to defaults.**
-  - **Try again**, for a wallpaper playback skips. Its Apply is off, with the
-    reason, until then.
-  - **Add to playlist**, from:
-    - a card or the details pane;
-    - a drag to the sidebar or the Playlists page;
-    - several selected at once.
-
-    It adds to a playlist, or to a new one made with them in it. It is the
-    Playlists page's own save: one save, never a wallpaper playback skips,
-    never "Your pick". Selecting several also favorites them together.
-  - **Remove** is named for what it does:
-    - a download Wall-in-One made is deleted after a question;
-    - your own file goes to the Trash;
-    - a Workshop scene, or a file outside the library folders, is not
-      Wall-in-One's to remove.
-
-    It removes one wallpaper at a time, and never the last one in a playlist
-    something uses. Removing has no Undo, because its favorite, colours and
-    playlist entries go with the file.
-  - **Add a folder**, in the header, uses Settings' own folder path and scans
-    once the folder is saved.
-  - **Keys:** F5 rescans; Ctrl+Shift+R, Ctrl+B, Ctrl+P and Ctrl+W work as in
-    classic.
-  - Not there yet: per-wallpaper motion and "Use frame".
-
-- **The Store.** It searches Wallhaven and MotionBGS through the classic
-  Store's code, and opens on what is popular once you first show it.
-  - **Filters** sit inline under the provider row (never in a popover):
-    - sort, and "Top list covers" for the top list;
-    - minimum size and aspect ratio;
-    - categories and content rating;
-    - Wallhaven's 29 search colours.
-
-    MotionBGS browses latest, 4K, HD or a genre, and its quality picks the file
-    a download takes.
-  - Results come 40 to a page with Previous and Next.
-  - **Downloads** go into your first library folder, one at a time, with
-    "Downloading 2 of 5" and no pretend progress or cancel.
-    - "Download & apply" and "Show in Library" wait for the library rescan
-      that follows.
-    - A download that landed in a folder Settings replaced meanwhile is said
-      so and not applied.
-  - **NSFW results** need a Wallhaven API key. The Store says so in Wallhaven's
-    words and links to the Settings page's Wallhaven key, where it is saved.
-  - **Keys:** Space picks a result, Ctrl+A picks the page and Ctrl+D downloads
-    the picks.
-  - **Steam Workshop:** the ⋯ menu hands off to it when Steam is installed.
-
-- **Playlists.** The page edits your own playlists:
-  - create, rename, duplicate and delete them. Delete names the schedule rules,
-    display assignments and default that go with it.
-  - add several wallpapers at once from its picker, or drop one from the
-    Library where it should go;
-  - reorder by a row's handle or Ctrl+↑/↓; moves apply in order, each from
-    where the entry is when it is saved;
-  - remove entries, with Undo.
-
-  Also:
-  - A playlist can have its own interval and shuffle, or follow the defaults.
-  - Play now and Use as schedule default follow the classic page's rules.
-  - A playlist that a schedule rule, the default or a display uses can't lose
-    its last wallpaper that plays.
-  - One with nothing that plays can't become the default.
-  - "Your pick" stays hidden.
-  - Long playlists show 72 rows at a time.
-
-- **Schedule.** A week calendar and the rules, highest priority on top. That is
-  the stored order reversed, where the last matching rule wins.
-  - **Adding:** drag on the calendar, or use Add rule.
-  - **Priority:** drag a rule by its handle, or use Ctrl+↑/↓.
-  - **The rule menu** edits, duplicates or moves a rule, and deletes it after
-    asking.
-  - **"When nothing is scheduled"** is the default playlist.
-  - The "Now" card and its "Why?" are the runtime's answer: its rule and its
-    "until". The calendar only projects the week.
-  - **Mirrored displays:** a rule aimed at one display is kept but shown
-    inactive while they are mirrored.
-  - **Refused:** a time window that starts and ends on the same minute, or a
-    playlist with nothing to play, can't be saved.
-
-- **Displays.**
-  - **The mode:** "Same on all displays", or "Each display separately", which is
-    refused while no display is connected for the desktop colors.
-  - **The compositor's layout.**
-  - **For each display:**
-    - what it shows and why, and Play now;
-    - its Cycle and Shuffle, with "Use saved defaults". These are runtime
-      choices, never saved.
-    - its own playlist, for when nothing is scheduled;
-    - whether that playlist beats the shared rules. This is kept in
-      `runtime-overrides.toml`, never in `runtime.toml`.
-  - **Which display the desktop colors follow.** It and the mode are the same
-    settings, saved the same way, as Settings → Displays.
-  - **A display that is not connected** keeps what is saved for it until you
-    forget it.
-
-- **Settings.** Every setting classic Settings has, each saved to the same
-  `settings.toml` key the same way, in searchable groups:
-  - library folders: add, remove, and make one the folder downloads and
-    generated stills go to. A folder found on this machine is only suggested.
-  - playback defaults;
-  - displays, and which one the colours follow;
-  - the app's colours and default scheme;
-  - the Wallhaven key;
-  - video and Wallpaper Engine renderer settings;
-  - Tidy up;
-  - the Interface and GPU acceleration rows, so you can go back to classic
-    from inside the new interface;
-  - a log of what Wall-in-One and the wallpaper service reported since the app
-    started, kept in memory only, with **Copy** and **Hide file paths** (on at
-    every start, never saved). Classic has no log.
-
-  A save that fails is reported, and every row goes back to what is saved.
-
-  **Palettes** opens the palette manager:
-  - browse every installed palette and apply one through Noctalia;
-  - duplicate one into yours and edit its colours;
-  - preview each scheme on a still, then use it as the default or keep it as
-    a palette.
-
-  Like classic, it has no delete. A new palette's name is checked as you type:
-  Save waits, with the reason, until no other palette has it.
-
-  **Noctalia template** says whether Noctalia renders your colours for
-  Wall-in-One, and installs or repairs that when you press its button.
-  Installing doesn't render; **Render now**, offered until Noctalia has, asks it
-  to re-render all of its templates.
-
-- **When it can't change things.**
-  - **A store saved by a newer version** turns Apply, favorites, library changes
-    and the playback controls off and says so in a notice under the header;
-    the Playlists page says so too and changes nothing, and so do the Schedule
-    and Displays pages.
-  - Settings keys this version doesn't know are named in that notice as
-    read-only, and the Settings rows that write `settings.toml` are off.
-  - **The playback controls** are also off until the wallpaper service has
-    answered, and while it isn't running; the app doesn't start the service.
-
-- **Its own preferences.** These live in `ui.toml` and are written only when
-  you change one of them:
-  - the window style: solid, translucent or frosted;
-  - its opacity and frost dials, in the window menu and Settings → Appearance;
-  - the thumbnail size.
+- **First run** is the application's (`Application._ask`): the new window is
+  a `FirstRunHost` and asks the same questions on its welcome screen, while
+  classic gets them as dialogs.
 
 - **One set of widgets.** Every page in `ui/next/` is the prototype's own:
   `prototypes/ui-redesign` runs the same modules over its dummy data.

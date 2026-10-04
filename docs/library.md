@@ -16,9 +16,10 @@ mpvpaper animates it while a still wallpaper of an animated gif shows only the
 first frame.
 
 A scan is bounded: at most 4096 wallpapers, 65536 directory entries examined,
-and 8 directories deep. Anything past that is left out and recorded as skipped
-rather than silently dropped; the classic window's subtitle counts those, while
-the new interface doesn't show the count yet.
+and 8 directories deep. Anything past that is left out and counted as skipped
+rather than silently dropped: the Library's count says `· 5 skipped`, and
+names the first few when you point at it (the classic window's subtitle counts
+them too).
 
 ## Roots
 
@@ -28,10 +29,13 @@ settings file -- **Settings → Library** is the same list, with **Add folder…
 
 With none listed, the library is not configured. On first graphical launch the
 app shows the exact directory detected from Noctalia (or the local fallback)
-and asks whether to use it or open a folder chooser. Detection is a suggestion,
+and asks whether to use it, open a folder chooser, or decide later (the new
+interface asks on its welcome screen, classic in a dialog). **Not now** saves
+nothing; the question comes back at the next start, and the new interface's
+notice under the header asks again before then. Detection is a suggestion,
 not permission to write: until a root is chosen the scan is empty, downloads
-are refused, and generated stills stay disabled. Choosing either route saves
-the root, so configured users are not asked again.
+are refused, and generated stills stay disabled. Choosing a folder either way
+saves the root, so configured users are not asked again.
 
 Three properties of the list are worth knowing:
 
@@ -69,6 +73,11 @@ A video finds its still in this order:
    order;
 3. a verified legacy capture recorded by the upgrade migration;
 4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
+
+Until a video has a still, playback can't show it: the wallpaper service's
+compiler leaves it out, and every page counts it the same way. It can't be
+added to a playlist, and a playlist something uses can't keep it as its only
+wallpaper that plays.
 
 Automatic captures, including verified captures from older releases, stay
 internal to their moving wallpaper. A sibling or manually added image is
@@ -407,7 +416,10 @@ entries, with the row's − button, `Delete`, or **Select** for several, shows a
 toast with **Undo**.
 
 The picker greys out a wallpaper that playback skips, and adding one any other
-way is refused with the reason. An older playlist occurrence is retained and
+way is refused with the reason. A video whose still isn't there yet can't play
+either (see [Videos and the stills behind them](#videos-and-the-stills-behind-them)),
+so adding it is refused the same way, saying it has no still for playback to
+show yet. An older playlist occurrence is retained and
 labelled (`Missing · <file>` or `Playback unavailable · <name>`) so it can be
 removed deliberately; playback skips it when another usable occurrence exists,
 and **Play now** is off when every entry is missing or skipped.

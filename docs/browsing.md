@@ -55,11 +55,11 @@ It is shown rather than quietly swallowed because a sudden jump in that number
 means the remote's schema or markup has moved, and a mysteriously short grid is
 a much worse way to find that out.
 
-A failed search replaces the results with a page that says what went wrong,
-with **Try again** for a rate limit, a browser check the site wants, or a site
-it can't reach, and **Reset filters** (when filters are on) for a search that
-can't be made. A failure loading the next page, or a download's, arrives as a
-toast reading `kind: message`, where the kind is the machine-readable half of a
+A failed search replaces the results with a page that says what went wrong in
+the site's words, with **Try again** for a rate limit, a browser check the site
+wants, or a site it can't reach, and **Reset filters** (when filters are on)
+for a search that can't be made. A failure loading the next page, or a
+download's, arrives as a toast reading `kind: message`, where the kind is the machine-readable half of a
 `ProviderError` — `credential`, `rate-limit`, `challenge`, `site-markup`,
 `redirects`, `size-limit` and so on. The kind is what the code branches on; the
 message is for you.
@@ -372,9 +372,11 @@ configured library root, so a whole install is one directory to inspect or
 delete. On first graphical launch Wall-in-One may suggest Noctalia's wallpaper
 directory, `~/Pictures/Wallpapers`, or `~/Pictures`, but that suggestion does
 not become a writable root until the user chooses **Use default** or selects a
-folder. With no configured root the Store refuses the download ("Downloads go
-into your first library folder, and there is none yet"), and `ctl download`
-fails with a `no-root` error, rather than inventing a location. The Store's
+folder. With no configured root, rather than inventing a location, the Store's
+Download is off with the reason as its tooltip, a download asked for anyway is
+refused ("Downloads go into your first library folder, and there is none yet.
+Add one in Settings → Library", with a **Settings** button that opens that
+group), and `ctl download` fails with a `no-root` error. The Store's
 heading row says where downloads go (`Saves to ~/…`), or `No library folder yet`.
 
 | | Wallhaven | MotionBGS |

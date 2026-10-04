@@ -63,12 +63,12 @@ to make an existing installation look like a fresh install.
    launcher; the companion prepares and starts a direct runtime when needed.
    Check playback, then apply any temporary playback choices you want again.
 
-After an update, Settings → Tidy up lists what older versions left behind:
-leftover claim folders, a stale palette template name in Noctalia's settings,
-or the retired plugin's settings. The classic interface also offers it once in
-a **Tidy up** card at the top of its window. Nothing changes until you review
-each item in Settings → Tidy up and choose Apply; every change is archived or
-backed up first and can be undone there. See [Tidy up](settings.md#tidy-up).
+After an update, the app may show a **Tidy up** card at the top of its window,
+in either interface, when older versions left things behind: leftover claim
+folders, a stale palette template name in Noctalia's settings, or the retired
+plugin's settings. Nothing changes until you review each item in Settings →
+Tidy up and choose Apply; every change is archived or backed up first and can
+be undone there. See [Tidy up](settings.md#tidy-up).
 
 Keep **Stop animations on battery** off until the running service supports it.
 The app refuses to enable it against an older runtime or unverified loaded

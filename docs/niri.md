@@ -42,7 +42,7 @@ same on any compositor.
 *In the classic interface* the setting is **Settings → Appearance → Window
 opacity**, which will not go below 0.30, where the window stops being legible
 against a busy wallpaper and no amount of blur rescues it. In the new
-interface's Settings that row is **Classic window opacity**, and it changes
+interface's Settings that row is under **Classic interface**, and it changes
 only the classic window.
 
 ```kdl

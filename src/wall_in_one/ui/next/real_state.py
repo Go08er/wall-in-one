@@ -56,8 +56,11 @@ from wall_in_one.theme import css
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next import status_line
 from wall_in_one.ui.next.library_thumbnails import StillSource
+from wall_in_one.ui.next.playlists_state import PlaylistEditing
 from wall_in_one.ui.next.prefs import DIAL_SAVE_DELAY_MS, UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
+from wall_in_one.ui.next.schedule_state import Scheduling
+from wall_in_one.ui.next.settings_state import SettingsAccess
 from wall_in_one.ui.next.state import (
     Banner,
     LibraryEditing,
@@ -74,6 +77,7 @@ from wall_in_one.ui.next.state import (
     not_on_its_own,
     solo_displays,
 )
+from wall_in_one.ui.next.store_state import StoreAccess
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui_prefs import GLASS_STYLES, GlassOpacity
 
@@ -850,6 +854,23 @@ class RealAppState(GObject.Object):
     @property
     def library_folders(self) -> LibraryFolders | None:
         """Folders are still added in the classic Settings; no button pretends here."""
+        return None
+
+    # -- pages still to port: each shows its placeholder while its part is None ---------
+    @property
+    def store_access(self) -> StoreAccess | None:
+        return None
+
+    @property
+    def playlist_editing(self) -> PlaylistEditing | None:
+        return None
+
+    @property
+    def scheduling(self) -> Scheduling | None:
+        return None
+
+    @property
+    def settings_access(self) -> SettingsAccess | None:
         return None
 
 

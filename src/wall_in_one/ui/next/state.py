@@ -41,6 +41,11 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 if TYPE_CHECKING:
     from gi.repository import Gdk
 
+    from wall_in_one.ui.next.playlists_state import PlaylistEditing
+    from wall_in_one.ui.next.schedule_state import Scheduling
+    from wall_in_one.ui.next.settings_state import SettingsAccess
+    from wall_in_one.ui.next.store_state import StoreAccess
+
 #: An Undo callback, as returned by the editing actions that offer Undo.
 Undo = Callable[[], None]
 #: A toast's single button: (label, callback).
@@ -507,6 +512,20 @@ class AppState(Protocol):
 
     @property
     def library_folders(self) -> LibraryFolders | None: ...
+
+    # Each page below shows its placeholder while its part is None.
+
+    @property
+    def store_access(self) -> StoreAccess | None: ...
+
+    @property
+    def playlist_editing(self) -> PlaylistEditing | None: ...
+
+    @property
+    def scheduling(self) -> Scheduling | None: ...
+
+    @property
+    def settings_access(self) -> SettingsAccess | None: ...
 
 
 def solo_displays(state: AppState) -> list[DisplayView]:

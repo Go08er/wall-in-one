@@ -372,6 +372,23 @@ class AppState(GObject.Object):
         """The Library's "Add a folder" adds to the demo's folder list."""
         return self
 
+    # The demo's own pages still render these; the shared ones arrive with each port.
+    @property
+    def store_access(self) -> None:
+        return None
+
+    @property
+    def playlist_editing(self) -> None:
+        return None
+
+    @property
+    def scheduling(self) -> None:
+        return None
+
+    @property
+    def settings_access(self) -> None:
+        return None
+
     def banner(self) -> Banner | None:
         if not self.service_running:
             return Banner("The wallpaper service isn't running, so nothing changes on schedule", "Start", "start")

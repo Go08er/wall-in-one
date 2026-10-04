@@ -413,7 +413,9 @@ GTK uses the GPU when it can. Off starts the window with GTK's software
 renderer by setting `GSK_RENDERER=cairo`, which GTK programs the app starts
 inherit too. A `GSK_RENDERER` you set yourself always wins over the setting.
 It takes effect the next time Wall-in-One starts, is saved in `ui.toml`, and
-0.2.0 and 0.2.1 ignore it.
+0.2.0 and 0.2.1 ignore it. An instance that is already running keeps the
+renderer it started with, a `--service` one included (closing its window
+doesn't end it): quit the app and start it again to switch.
 
 ## Upgrades and migration
 

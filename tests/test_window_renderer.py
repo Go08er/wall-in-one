@@ -159,6 +159,7 @@ def test_the_docs_name_the_override_and_both_rollback_cases() -> None:
     readme = _words("README.md")
     assert "A `GSK_RENDERER` you set yourself always wins over the setting" in readme
     assert "which GTK programs the app starts inherit too" in readme
+    assert "An instance that is already running keeps the renderer it started with" in readme
     settings = _words("docs/settings.md")
     assert "`false` sets `GSK_RENDERER=cairo`" in settings
     assert "it starts at version 2 and there is no backup" in settings

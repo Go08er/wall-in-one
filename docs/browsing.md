@@ -1,9 +1,11 @@
 # Searching and downloading wallpapers
 
 Wall-in-One can pull wallpapers from two sites: **Wallhaven** for stills and
-**MotionBGS** for video wallpapers. The search button in the window header, and
-**Store** in the bottom navigation and **Store** in the menu both
-open the same main-window tab.
+**MotionBGS** for video wallpapers. **Store** in the sidebar (or `Ctrl+B`, or
+`Alt+2`) opens the page that searches both: a Wallhaven / MotionBGS switch, a
+search box in the header, and the filters inline under the provider row behind
+the **Filters** chip. Typing searches after a short pause, and Enter searches
+at once.
 
 Wallhaven provides a JSON API; MotionBGS listings are read from public HTML.
 Both providers validate responses before displaying results or downloading
@@ -25,53 +27,60 @@ the next search, and two searches at once would only fight over the cache.
 
 Each answer is capped at 48 results per page whatever the site returns, and each
 provider keeps a small in-process cache of recent pages with a fifteen-minute
-expiry. Paging back to somewhere you have already been is answered from that
-cache rather than re-fetched, and the summary line at the bottom of the Store tab
-says `cached` when it was.
+expiry, so repeating a recent search is answered from that cache rather than
+re-fetched.
 
-The GTK result surface is separately paged at no more than 40 live photo cards.
-Previous and Next retain cheap candidate metadata, selections, downloaded/busy
-badges, the search cursor and filter state, while the old page's widgets and
-decoded paintables are released. This is deliberate rather than infinite scroll:
-the former surface retained 600 card trees and could approach 600 MB. Candidate
-metadata has its own 10,000-result ceiling, enough for the measured 7,380-item 4K
-catalogue, and the footer says when that defensive ceiling is reached. The offline
+The Store shows at most 40 results to a page, with **Previous** and **Next**
+under them and a label such as `Page 2 of 3 · more online`. The pages it has
+already fetched are kept as cheap result records, so going back makes no request
+at all; Next asks the site for more only after every kept page has been seen.
+Your picks, the downloaded and busy badges, the search and the filters survive a
+page change, while the old page's cards and pictures are released. This is
+deliberate rather than infinite scroll: the former surface retained 600 card
+trees and could approach 600 MB. The kept records have their own 10,000-result
+ceiling, enough for the measured 7,380-item 4K catalogue. The offline
 production-widget probe is `benchmarks/browse_rss.py`.
 
-That summary line is worth reading:
+The summary beside the heading is worth reading:
 
 ```
-24 results - of about 1130 - page 2 - 3 unreadable - cached
+64 results of about 1,200 · 3 unreadable
 ```
+
+It counts every result kept so far, and says `the first 10,000 results` once
+that ceiling is reached.
 
 `unreadable` counts results the provider returned that we refused to normalise.
 It is shown rather than quietly swallowed because a sudden jump in that number
 means the remote's schema or markup has moved, and a mysteriously short grid is
 a much worse way to find that out.
 
-Failures arrive as a toast reading `kind: message`, where the kind is the
-machine-readable half of a `ProviderError` — `credential`, `rate-limit`,
-`challenge`, `site-markup`, `redirects`, `size-limit` and so on. The kind is
-what the code branches on; the message is for you.
+A failed search replaces the results with a page that says what went wrong,
+with **Try again** for a rate limit, a browser check the site wants, or a site
+it can't reach, and **Reset filters** (when filters are on) for a search that
+can't be made. A failure loading the next page, or a download's, arrives as a
+toast reading `kind: message`, where the kind is the machine-readable half of a
+`ProviderError` — `credential`, `rate-limit`, `challenge`, `site-markup`,
+`redirects`, `size-limit` and so on. The kind is what the code branches on; the
+message is for you.
 
 Submitting a fresh search also ends the previous result selection immediately.
 If the new request fails, its error page therefore cannot leave a batch
-Download action pointing at checked cards which are no longer visible. Loading
+**Download** pointing at picked cards which are no longer visible. Loading
 the next page is different: a failure there keeps the results already on
 screen and simply stops offering the failed next page.
 
 Previews come from the sites' own CDNs, fetched by up to four workers, bounded
-at 4 MB each with a ten-second timeout, and cached by URL for the life of the
-tab. MotionBGS serves WebP, which this closure's GdkPixbuf cannot decode, so
-previews are transcoded through ffmpeg before they reach GTK. Without ffmpeg
-installed those cards keep a blank frame; the download button still works.
+at 4 MB each with a ten-second timeout, and kept in bounded caches. MotionBGS
+serves WebP, which this closure's GdkPixbuf cannot decode, so previews are
+transcoded through ffmpeg before they reach GTK. Without ffmpeg installed those
+cards keep a plain placeholder; Download still works.
 
-The Store tab is a single instance. Pressing the search button again while it is
-open re-presents the one that exists, keeping its results and its preview cache
-instead of throwing away a page of downloads. Switching to another tab does not
-cancel its work. Shutting the application down does: queued search, detail,
-preview and download work is cancelled, active HTTP response sockets and preview
-transcodes are interrupted, and late replies are suppressed. A request still
+The Store page is built once with the window. Switching to another page keeps
+its results, filters and picks, and its downloads keep going. Closing the
+window ends its work: queued search, detail, preview and download work is
+cancelled, active HTTP response sockets and preview transcodes are interrupted,
+and late replies are suppressed. A request still
 inside system DNS is the OS-defined residual; connect/TLS has a separate
 five-second bound. Providers stage bytes under hidden temporary names, commit
 the media without replacement, and only then bind and publish its exact
@@ -93,8 +102,8 @@ wall-in-one ctl download <provider> <identifier> [hd|4k]
 The query is everything after the provider name, spaces and all, so quoting it
 is optional: `ctl search wallhaven aurora over the fjord` is one query, not four
 arguments. The variant on `download` is MotionBGS's quality; left off, the
-provider takes the best it is offered, which is what the Store tab's download
-button does too.
+provider takes the best it is offered, which is what the Store's Download does
+too while its **Download quality** is **Best available**.
 
 Output is **one row per line with tab-separated fields**, and everything that is
 not a row is a `#` comment. That is the format both readers of it already
@@ -117,8 +126,9 @@ $ wall-in-one ctl download wallhaven o5jvv1
 downloaded wallhaven-o5jvv1.jpg (2.4 MB) -> /home/you/Pictures/Wallpapers/Wall-in-One/Wallhaven/wallhaven-o5jvv1.jpg
 ```
 
-The summary comment is word-for-word the one under the Store grid, including
-`unreadable` and `cached`. An empty field prints as `-`, and a result with no
+The summary comment counts what the provider returned, including the
+`unreadable` results and whether the page came from its cache; the Store page
+words the same counts its own way. An empty field prints as `-`, and a result with no
 title prints its identifier instead, exactly as the cards do. `ctl providers`
 prints `name, media, usable, limitations` the same way, which is how a script
 finds out that NSFW results are unreachable before asking for them.
@@ -126,14 +136,14 @@ finds out that NSFW results are unreachable before asking for them.
 Only the first page is reachable: the protocol carries one argument per request,
 and spending it on a page number would cost the query its spaces. There is no
 filter surface either — categories, purity, sorting and MotionBGS's browse modes
-are the Store tab's, not the socket's.
+are the Store page's, not the socket's.
 
 The control server accepts requests on the GTK main
 loop, so a handler that waited for a website would freeze every frame the app
 draws for as long as the site took. `search` and `download` therefore answer
 *later*: the verb hands its work to a single-worker pool, returns without a
 response, and the reply is written when the worker comes back through
-`GLib.idle_add` — the same arrangement the Store tab uses, for the same two calls.
+`GLib.idle_add` — the same arrangement the Store page uses, for the same two calls.
 The client's connection simply stays open until then, which costs one file
 descriptor and keeps `ctl search` an ordinary blocking command that prints its
 results. `ctl` allows a minute for a search and ten for a download. Other
@@ -142,17 +152,17 @@ A timed-out mutation may already have completed, so verify its result before
 retrying.
 
 A failure comes back on stderr with a non-zero exit, reading `kind: message` —
-the same sentence the Store tab toasts. The kind also travels as its own field in
+the same sentence the Store page shows. The kind also travels as its own field in
 the reply, so a client can branch on `rate-limit` without parsing the English
 next to it. An unreachable network is a failed response, never a traceback and
 never a dead app: whatever the transport raises is caught on the worker and
 turned into one.
 
-Downloads from here are indistinguishable from downloads from the Store tab. They
+Downloads from here are indistinguishable from downloads from the Store page. They
 run the provider's own install path, so the directory marker and the per-file
 sidecar come out identical, and they land in the first configured root for the
-same reason the Store tab's do. A finished one rescans the library, so the file is
-in the grid of an open window without being asked for.
+same reason the Store's do. A finished one rescans the library, so the file is
+in the Library of an open window without being asked for.
 
 ## Driving the library from the socket
 
@@ -173,9 +183,9 @@ everything after it is the query, spaces and all, exactly as `search` reads a
 provider off the front — so `ctl list videos snow village` is one query. A first
 word that names no kind is a usage error rather than a query, because
 `ctl list videos` would otherwise be ambiguous. The selecting, the matching and
-the ordering are `library/filter.py`'s, the same code behind the window's search
-box and kind dropdown, so the two cannot come to disagree about which wallpapers
-a word names.
+the ordering are `library/filter.py`'s, the same code behind the Library's
+search box and sort, so the two cannot come to disagree about which wallpapers a
+word names.
 
 ```
 $ wall-in-one ctl list videos snow
@@ -191,7 +201,8 @@ ours"](#what-makes-a-file-ours): `managed` is a file this app downloaded and
 `user` is one of yours.
 
 `list` reports the scan the window is already showing rather than re-reading the
-disk; the refresh button and a finished download are what re-read it. One reply
+disk; `F5` in the window, adding a library folder and a finished download are
+what re-read it. One reply
 has to fit in a single 64 KB message, so a very large library is cut between two
 rows and the summary says how many did not fit — narrow it with a query. A
 wallpaper whose *name* contains a tab or a newline cannot be printed in a
@@ -232,17 +243,17 @@ your file manager can put it back. Ownership is re-derived from disk at
 the moment of deletion rather than taken from the listing, which may be minutes
 old, and a file that fails that check comes back refused with the kind
 `not-ours` and is left exactly where it was. The wallpaper also loses its star,
-and the open window rescans, so no tile outlives the file it was drawing.
+and the open window rescans, so no card outlives the file it was drawing.
 
 ### Favourites
 
-`favourite` and `unfavourite` write the same starred list the tiles show — the
+`favourite` and `unfavourite` write the same starred list the Library's stars show — the
 running app's own, so a star set from a terminal appears in the window and
 narrows the rotation when **Cycle favourites only** is on.
 
 The two are deliberately not symmetrical. `favourite` needs a wallpaper the
 library has; a star on something we cannot see would be a line in a file with no
-tile and no rotation entry. `unfavourite` takes any absolute path, because a
+card and no rotation entry. `unfavourite` takes any absolute path, because a
 favourite whose file is not here — an unmounted drive, a root removed from the
 settings — is kept rather than pruned, and taking the star off by hand is the
 only thing left to do with one. Requiring a lookup there would make the entries
@@ -300,9 +311,14 @@ A comma-separated list must round-trip unchanged after normalisation, so
 `1920x1080,` and `01920x1080` are errors rather than filters that quietly become
 something else.
 
-The Store tab exposes four of these: sort, categories, rating, and a minimum size
-box that fills in `atleast`. The rest are reachable from `SearchQuery.options`
-in code; there is no settings key or command-line flag for them.
+The Store page sets most of these from its own controls: the sort (`sorting`),
+**Reverse order** (`order`), **Top list covers** for the Popular sort
+(`top_range`), **Minimum size** (a choice from 1080p to 5K that fills in
+`atleast`), **Aspect ratio** (`ratios`), **Categories**, **Content rating**
+(`purity`) and **Main colour** (`colors`, Wallhaven's 29). Random sends its
+own `seed`. `resolutions` is reachable only from `SearchQuery.options` in code;
+there is no settings key or command-line flag for any of them. The page opens
+on Popular over the last week, SFW only.
 
 ## MotionBGS browse modes
 
@@ -330,20 +346,24 @@ someone else's page.
   slug. Passing `genre` in any other mode is an error, as is passing query text
   in any mode other than `search`.
 
-The Store tab's mode dropdown offers Latest, 4K, HD and Genre — `search` is not
-listed, because typing into the box is what selects it. Whenever the box is
-non-empty the request goes out as a search regardless of the dropdown, since
-MotionBGS rejects a query and a browse mode together. The genre field only
-appears when Genre is selected.
+The Store's **Browse** choice offers Latest, 4K, HD and By genre — `search` is
+not listed, because typing into the box is what selects it. Whenever the box is
+non-empty the request goes out as a search, and Browse and Genre are greyed out
+with a hint to clear the box, since MotionBGS rejects a query and a browse mode
+together. The genre field only appears for By genre, and applies when you
+press Enter.
 
 Two failure modes are told apart deliberately. A page that says "no wallpapers"
 is an empty result; a page with no recognisable cards and no such wording is
 reported as `site-markup`, meaning the public markup has probably changed. An
 anti-bot challenge is reported as `challenge`, and no bypass is attempted.
 
-Each card carries the quality badge from the listing, `hd` or `4k`, and that is
-the file downloaded. Where the listing did not say, the detail page's best
-option is taken: 4K first, then HD — a video wallpaper is worth the bytes.
+Each card carries the quality badge from the listing, `HD` or `4K`, and that is
+the file downloaded while **Download quality** is **Best available**. Where the
+listing did not say, the detail page's best option is taken: 4K first, then HD —
+a video wallpaper is worth the bytes. Choosing 4K or HD there, or in a
+preview's Quality toggle, asks for that file, and a wallpaper that doesn't
+offer it fails with a `validation` error.
 
 ## Where downloads land
 
@@ -352,8 +372,10 @@ configured library root, so a whole install is one directory to inspect or
 delete. On first graphical launch Wall-in-One may suggest Noctalia's wallpaper
 directory, `~/Pictures/Wallpapers`, or `~/Pictures`, but that suggestion does
 not become a writable root until the user chooses **Use default** or selects a
-folder. With no configured root a download fails with a `no-root` error rather
-than inventing a location.
+folder. With no configured root the Store refuses the download ("Downloads go
+into your first library folder, and there is none yet"), and `ctl download`
+fails with a `no-root` error, rather than inventing a location. The Store's
+heading row says where downloads go (`Saves to ~/…`), or `No library folder yet`.
 
 | | Wallhaven | MotionBGS |
 |---|---|---|
@@ -409,8 +431,9 @@ The library scan calls a file `Ownership.MANAGED` only when **both** are true:
 A marker on its own is never enough. That is the whole point: a wallpaper you
 copied into `Wall-in-One/Wallhaven/` by hand has no sidecar, so it stays
 `Ownership.USER`. Ownership is what decides whether a file counts as deletable
-by the app, and it is also what puts the provider's name on a tile as a badge in
-the library grid — an unbadged tile in a managed directory is yours, not ours.
+by the app, and it is also what the Library's details pane reports as the
+**Source**: "Downloaded from Wallhaven" for ours, "Your folder" for a file in a
+managed directory that is yours.
 At Remove time the app pins the exact media and sidecar again, hashes that media
 inode, and requires the recorded byte count and SHA-256 before withdrawing all
 matching authority and vacating the public name. A stale or unbound sidecar is
@@ -436,8 +459,9 @@ start. It is read as one line and nothing else, and it is ignored — as though
 absent — if it is a symlink, not a regular file, larger than 4096 bytes, or if
 its first line is not 1–256 characters of `A-Za-z0-9_-`. A malformed key file
 must not stop the app starting, so Wallhaven simply runs unauthenticated and
-reports that as a limitation, which is what greys out the NSFW checkbox in the
-inline filter revealer under the search bar and gives it a tooltip saying why.
+reports that as a limitation, which is what greys out the **NSFW** chip under
+**Content rating** in the Store's filters, says why next to it, and offers
+**Add a key in Settings**, which opens Settings → Online sources.
 
 The key travels as an `X-API-Key` request header. It is never put on a command
 line: the previous implementation shelled out to `curl` and had to pass the key

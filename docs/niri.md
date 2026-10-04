@@ -7,7 +7,7 @@ That split is deliberate. niri exposes blur through
 but it also lets you turn blur on from the config for any window, with no
 protocol code in the application at all. Since the config route needs nothing
 from us and survives the app not being able to reach the Wayland socket, the app
-ships a **Window opacity** setting and this page instead of a protocol binding.
+ships its own window styles and this page instead of a protocol binding.
 
 Everything below is verified against **niri 26.04** and its bundled wiki
 (`share/doc/niri/wiki/Window-Effects.md`,
@@ -27,10 +27,23 @@ name -- is what a window rule has to match. Confirmed by reading
 
 ## Minimum config
 
-Set **Settings -> Appearance -> Window opacity** to something below 1.0 first:
-a fully opaque window covers the blur completely and nothing will look
-different. It will not go below 0.30, which is where the window stops being
-legible against a busy wallpaper and no amount of blur rescues it.
+Choose the **Translucent** window style first, in the main menu's **Window
+style** or Settings → Appearance: the default, **Solid**, covers the blur
+completely and nothing will look different. Translucent and Frosted have two
+dials, in the main menu's **Opacity and frost…** and in Settings → Appearance:
+**Background opacity** for the page behind the grid, and **Panel opacity** for
+the sidebar, header, player bar and cards. They run from 0 to 100%, and each
+style keeps its own values in `ui.toml`.
+
+The **Frosted** style needs no compositor blur: the window draws the wallpaper
+on screen behind its panels, blurred by its own **Frost** dial, so it looks the
+same on any compositor.
+
+*In the classic interface* the setting is **Settings → Appearance → Window
+opacity**, which will not go below 0.30, where the window stops being legible
+against a busy wallpaper and no amount of blur rescues it. In the new
+interface's Settings that row is **Classic window opacity**, and it changes
+only the classic window.
 
 ```kdl
 window-rule {
@@ -140,16 +153,16 @@ window-rule {
 ## Older niri
 
 `background-effect` is `Since: 26.04`. On anything older the window rule is a
-config error, so leave it out -- the app's opacity setting still works, you just
-get plain translucency with no blur behind it. Nothing in the app depends on
-blur being available.
+config error, so leave it out -- the Translucent style still works, you just
+get plain translucency with no blur behind it, and Frosted blurs on its own.
+Nothing in the app depends on blur being available.
 
 ## In-app opacity vs the niri `opacity` rule
 
 They are not the same thing, and the app's own setting is usually what you want.
 
-- The **app's** opacity makes background colours translucent and leaves text and
-  icons fully opaque, so contrast survives.
+- The **app's** opacity dials make background colours translucent and leave
+  text and icons fully opaque, so contrast survives.
 - niri's `opacity` window rule fades the *entire* window, text included, which
   gets hard to read fast.
 

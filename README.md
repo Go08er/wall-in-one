@@ -107,7 +107,7 @@ linux-wallpaperengine renders true Workshop scenes and captures their stills.
 The engine is deliberately a runtime dependency rather than an ambient-PATH
 option because a packaged application must not make scene support depend on
 how the desktop happened to launch it. A checkout/non-Nix launch reports the
-renderer status under **Settings -> Playback**.
+renderer status under **Settings → Advanced → Scenes**.
 
 Noctalia is the wallpaper-and-colour application endpoint. The library and
 authoring screens still open without it, but applying a resolved entry requires
@@ -161,7 +161,7 @@ remain fatal until the reported problem is resolved.
 ### Test it away from your desktop
 
 The flake includes a bootable niri + Noctalia development desktop and an
-automated NixOS test that saves screenshots of all five workflow tabs:
+automated NixOS test that saves screenshots of five workflow pages:
 
 ```console
 $ nix run .#vm
@@ -176,37 +176,40 @@ software-rendering/Steam/multi-monitor limits.
 
 ## Using it
 
-Wall-in-One opens the new interface, with a sidebar of pages: see
-[The new interface](#the-new-interface-the-default) below for what each one
-does and how to choose the classic window instead. The rest of this section
-describes the classic window, which works as it always has.
+Wall-in-One opens on your Library. The sidebar lists the pages, and `Alt+1` to
+`Alt+6` reach them in order:
 
-The classic window's bottom navigation offers **Store, Library, Playlists,
-Schedules and Settings**. The window opens on your Library. A **pairing**
-brings together a wallpaper's still image, optional animation and colour
-policy:
-
+- **Library** shows every wallpaper in your library folders. Click one to open
+  its details beside the grid: Apply, its favourite star, its colours and light
+  or dark, and for a video or scene the still that stands behind it. A card's
+  menu (right-click, or ⋯) applies it to all displays or one, adds it to a
+  playlist, resets it or removes it, and **Select** acts on several cards at
+  once. Applying uses the hidden one-entry "Your pick" playlist.
 - **Store** searches and downloads from Wallhaven and MotionBGS without
   leaving the main window.
-- **Library** contains your pairings, independent of what is currently playing.
-  Clicking a wallpaper or **Edit** opens its full-size pairing editor. Use the
-  visible **Apply** action to play it; independent-display mode offers an
-  explicit display choice. Right-click opens the actions menu without changing
-  the wallpaper. Applying uses the one-entry **Quick choice** playlist.
-  The editor also lets you choose the representative still and colours.
-- **Playlists** creates, renames and deletes ordered rotations. Add pairings from
-  the searchable Library rows with **+**, double-click, Enter or drag-and-drop.
-  Drag a playlist row's handle to reorder it, or focus the row and use
-  `Ctrl+Up` / `Ctrl+Down`. A pairing can appear more than once. Unavailable
-  entries stay visible but are skipped; Play is disabled if none can play.
-  See [playlist behavior and limits](docs/library.md#playlist-behavior-and-limits).
-- **Schedules** chooses the default playlist and when other playlists take
-  over, using month, weekday and local-time selectors. You can also choose a
-  playlist temporarily or resume calendar control. Independent mode adds
-  playlist assignments and playback controls for each display. Rules lower in
-  the list have higher priority: the last matching rule wins.
-- **Settings** manages library folders, playback defaults, providers, colours
-  and appearance.
+- **Playlists** has a sidebar row for each of your playlists, then **All
+  wallpapers**, which follows the library, and **New playlist**. A playlist's
+  page adds wallpapers from a picker or a drag from the Library, reorders them
+  by a row's handle or `Ctrl+Up` / `Ctrl+Down`, removes them with Undo, and can
+  give the playlist its own interval and shuffle. A wallpaper can appear more
+  than once. Entries that are missing or that playback skips stay visible and
+  are skipped; **Play now** is off if none can play. See [playlist behavior and
+  limits](docs/library.md#playlist-behavior-and-limits).
+- **Schedule** shows the week and the rules that choose a playlist by day, time
+  of day, month and display. Where rules overlap, the higher one in the list
+  plays. **When nothing is scheduled** is the default playlist, and the **Now**
+  card says what is playing and why.
+- **Displays** puts the same wallpaper on every display or runs each display
+  separately, with its own playlist, cycle and shuffle, and chooses which
+  display the desktop colours follow.
+- **Settings** manages library folders, playback defaults, displays, colours
+  and palettes, the window's look, the Wallhaven key, the video and scene
+  renderers, Tidy up, and the interface to start.
+
+The player bar along the bottom says what is on screen and why. It has
+shuffle, previous, play/pause, next and "Change wallpaper automatically"; its ⋯
+menu adds Resume schedule, Random wallpaper, Stop animation and "Why this
+wallpaper?". While displays run separately it can act on one display.
 
 On first run, Wall-in-One does not silently turn a detected Noctalia wallpaper
 directory into a place it may write. A one-time prompt shows the exact detected
@@ -214,30 +217,44 @@ default and offers either **Use default** or a folder chooser. Until one is
 chosen, scans are empty and downloads and generated stills stay disabled.
 Existing configured roots are left alone.
 
+To use the classic window instead, choose **Settings → Appearance → Interface →
+Classic**. It takes effect the next time Wall-in-One starts, and **New** in the
+same row brings the new interface back. If the new interface doesn't open,
+start `wall-in-one --ui=classic` and choose Classic in Settings → Appearance →
+Interface. The classic window has the same workflows on a bottom navigation
+(Store, Library, Playlists, Schedules and Settings), with a full-size pairing
+editor where the new one has its details pane.
+
 [`docs/library.md`](docs/library.md) is the detail: multiple library folders,
 how a video finds the still that stands behind it, how search matches, what
-favourites do to the rotation, which removal verb you get and why, and where
+favourites do to the rotation, which removal you get and why, and where
 everything is stored.
 
 ### Keyboard shortcuts
 
 | key | action |
 |---|---|
+| `Ctrl+Space` | Play or pause animation |
 | `Ctrl+Right` | Next wallpaper |
 | `Ctrl+Left` | Previous wallpaper |
 | `Ctrl+Shift+R` | Random wallpaper |
-| `Ctrl+F` | Search the library |
+| `Ctrl+F` | Search: the Library's, or the Store's or Settings' while one is shown |
 | `F5` | Rescan the library |
 | `Ctrl+B` | Open Store |
+| `Ctrl+N` | New playlist |
 | `Ctrl+,` | Settings |
 | `Ctrl+P` | Palettes |
+| `Alt+1` … `Alt+6` | Library, Store, Playlists, Schedule, Displays, Settings |
+| `Enter` / `Ctrl+Enter` | On a Library card: open its details / apply it |
 | `Ctrl+?` | Keyboard shortcuts |
 | `Ctrl+W` | Close the window |
 
-The same list is in the app under **Keyboard Shortcuts** in the menu. These
-shortcuts use modifier keys so typing in the search box does not change the
-wallpaper. The dialogue needs libadwaita 1.9 or newer; on anything older the
-keys still work and the menu item reports that it cannot list them.
+The same list is in the app under **Keyboard shortcuts**, in the main menu and
+in Settings → About. These shortcuts use modifier keys so typing in a search
+box does not change the wallpaper. The list needs a libadwaita that has its
+shortcuts dialog; on an older one the keys still work and the menu item does
+nothing. The classic window has the same keys except `Ctrl+Space`, `Ctrl+N`
+and the `Alt` keys.
 
 ## Video wallpapers
 
@@ -245,7 +262,7 @@ Videos are played by mpvpaper, with the paired still set through Noctalia
 underneath first, so the palette matches what is on screen even if the renderer
 dies.
 
-**Animate wallpapers** (`Settings -> Playback`, or `wall-in-one ctl dynamics off`)
+**Animate wallpapers** (Settings → Playback, or `wall-in-one ctl dynamics off`)
 controls both videos and Wallpaper Engine scenes. Turning it off releases their
 renderers and shows paired still images. This also avoids repeatedly blurring
 moving wallpaper behind translucent windows; see [`docs/niri.md`](docs/niri.md).
@@ -303,23 +320,24 @@ above for what has and has not been watched on physical multi-monitor hardware.
 
 ## Finding wallpapers
 
-The search button in the header -- or **Store** in the menu, or
-`Ctrl+B` -- opens Store, which searches [Wallhaven](https://wallhaven.cc) for
-stills and [MotionBGS](https://motionbgs.com) for video wallpapers. Downloads
-land under the explicitly chosen first library root, and the library is
-rescanned when one finishes, so the file shows up in the grid without being
-asked for. With no root configured, Store refuses the download and points to
-Settings instead of guessing a destination.
+**Store** in the sidebar (or `Ctrl+B`) searches
+[Wallhaven](https://wallhaven.cc) for stills and
+[MotionBGS](https://motionbgs.com) for video wallpapers. Type in its search box,
+or browse what is popular; the filters sit inline under the provider row.
+Downloads go one at a time into the explicitly chosen first library folder, and
+the library is rescanned when one finishes, so the file shows up in the Library
+without being asked for. With no library folder configured, the Store refuses
+the download instead of guessing a destination.
 
-Store uses explicit Previous/Next photo pages with at most 40 heavyweight GTK
-cards alive at once. A 250-result MotionBGS search remains fully reachable, but
-walking it no longer leaves hundreds of decoded card widgets consuming memory;
-search text, cursor, filters and batch picks survive page changes.
+The Store shows at most 40 results to a page, with Previous and Next. A
+250-result MotionBGS search remains fully reachable, but walking it no longer
+leaves hundreds of decoded card widgets consuming memory; the search, the
+filters and your picks survive page changes.
 
 Wallhaven works without an API key. The one thing a key buys is NSFW results.
-Supply one through `WALLHAVEN_API_KEY`, or save it in **Settings -> Providers**,
-which writes `~/.config/wall-in-one/wallhaven-api-key` at mode 0600 through a
-temporary name.
+Supply one through `WALLHAVEN_API_KEY`, or save it in **Settings → Online
+sources**, which writes `~/.config/wall-in-one/wallhaven-api-key` at mode 0600
+through a temporary name.
 
 That file is refused, with the reason and the `chmod` that mends it, when it is
 a symlink, is not a regular file, is owned by another user, is readable or
@@ -377,20 +395,22 @@ same light/dark mode. If app colours stop matching, check
 `wall-in-one --theme-status` and retry `noctalia msg templates-apply`; follow
 any reported registration or template error before trying again.
 
-**Palettes** in the menu browses what is installed: the ten built-ins,
+**Palettes** (Settings → Colours → Palettes → **Manage…**, or `Ctrl+P`)
+browses what is installed: the ten built-ins,
 community palettes Noctalia has cached, your own custom ones, and a fourth
 group for the pre-5.x `colorschemes/` layout. That fourth group is listed with
 Apply disabled and the reason stated -- Noctalia v5 cannot apply that legacy format,
 so its Apply button is unavailable. The built-ins are listed without
 swatches for a related reason: their names are strings in the binary and their
 colours are not. Palette directories are discovered and parsed on one bounded
-filesystem worker rather than GTK's interface thread. The browser and each
-pairing's colour-policy picker search the complete catalogue but construct only
-24 rows at a time, with an explicit loader for the next page. An ordinary
-rescan keeps unchanged row, focus and scroll identity while showing
-"Refreshing"; a palette saved by this app invalidates the old snapshot until
-the post-write generation lands, so an edited entry cannot be resurrected by a
-late scan.
+filesystem worker rather than GTK's interface thread. The manager searches the
+complete catalogue but builds only 24 rows at a time, with a button that loads
+the next ones; a wallpaper's palette choices in the Library list the community
+palettes 24 at a time the same way. A rescan says "Refreshing installed
+palettes…" while it runs, and a palette saved by this app invalidates the old
+snapshot until the post-write generation lands, so an edited entry cannot be
+resurrected by a late scan. The manager also duplicates a palette into yours and
+edits its colours, and previews every scheme on one of your stills.
 
 No two palettes you can pick share a name. A copy starts as "Nord copy"
 ("Nord copy 2" when that is taken), and saving a new palette under a name a
@@ -401,8 +421,10 @@ comes back.
 
 ## Translucency and blur
 
-The app draws its own translucency; blur behind it is the compositor's job. On
-niri 26.04 that is a four-line window rule. See [`docs/niri.md`](docs/niri.md)
+The app draws its own translucency: choose the Translucent or Frosted window
+style in the main menu or Settings → Appearance. Frosted blurs the wallpaper
+itself; behind Translucent, blur is the compositor's job. On niri 26.04 that is
+a four-line window rule. See [`docs/niri.md`](docs/niri.md)
 -- it covers the app-id to match, the xray caveat that matters when a video
 wallpaper is running, and what to do on older niri.
 
@@ -415,7 +437,7 @@ The complete verb reference and the behaviour behind it are in
 
 ## Settings
 
-The Settings tab writes `~/.config/wall-in-one/settings.toml`, which can also be
+Settings writes `~/.config/wall-in-one/settings.toml`, which can also be
 edited by hand. Invalid or unreadable settings at startup open a recovery
 window instead of the main window. Use **Open settings file**, repair the
 reported problem, then select **Try again**. Settings edits also refuse to
@@ -539,10 +561,11 @@ To use the classic window instead, choose
 **Settings → Appearance → Interface → Classic** on the new interface's
 Settings page (classic Settings has the same row, and **New** brings you
 back). The choice is saved in `ui.toml` and takes effect the next time
-Wall-in-One starts. The hidden flag `wall-in-one --ui=next` or `--ui=classic`
-overrides the saved choice for that start; `--ui=classic` is also the way
-back if the new interface ever fails to open. With neither, the app opens
-the new interface.
+Wall-in-One starts. The flag `wall-in-one --ui=next` or `--ui=classic`
+overrides the saved choice for that start, and `wall-in-one --help` lists it.
+With neither, the app opens the new interface. If the new interface doesn't
+open, start `wall-in-one --ui=classic` and choose Classic in Settings →
+Appearance → Interface.
 
 - **How it saves.** Each change goes through the save classic uses for it, one
   at a time on the app's ordered authoring lane. Each page shows what was

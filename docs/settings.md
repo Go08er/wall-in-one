@@ -1,13 +1,18 @@
 # Settings
 
-The Settings tab writes `~/.config/wall-in-one/settings.toml` (or
+Settings (the last page in the sidebar, or `Ctrl+,`) writes
+`~/.config/wall-in-one/settings.toml` (or
 `$XDG_CONFIG_HOME/wall-in-one/settings.toml` when that variable is set). You can
-also edit it by hand.
+also edit it by hand. Its groups are Library, Playback, Displays, Colours,
+Appearance, Online sources, Advanced (the video and Wallpaper Engine renderer
+settings), Tidy up and About, and the search box in its header shows the rows
+whose title, description or keywords contain every word you type. The classic
+interface's Settings has the same settings in its own layout.
 
 Normal startup checks saved settings before opening the main window. Invalid
 or unreadable settings lead to a configuration-recovery window with the error,
 **Open settings file**, and **Try again**. It does not reset your settings or
-open the normal Settings tab with clamped defaults. Repair the named file,
+open the normal window with clamped defaults. Repair the named file,
 then retry; the Rust wallpaper service does not need to be running.
 
 Each Settings edit also strictly reloads the persisted document before saving.
@@ -51,8 +56,9 @@ Since 0.2.0, a key this version doesn't know never stops anything. Instead:
 
 - Every reader uses the keys it knows. The unknown ones are ignored, never
   removed.
-- Settings become read-only. The Settings page shows a banner naming the keys
-  and its controls are disabled. Any other way of changing a saved setting
+- Settings become read-only. A banner under the window's header names the keys,
+  the top of Settings says why nothing there can be changed, and every row that
+  writes `settings.toml` is off. Any other way of changing a saved setting
   (the default-playlist pickers, the first-run folder choice, `ctl dynamics`
   and `ctl cycle-interval`, deleting the playlist that is the saved default)
   is refused with the same message. Wall-in-One doesn't write the file while
@@ -94,11 +100,11 @@ and 0.1.4 can't use a file with one at all.
   classic interface also reads it for whether you dismissed the Tidy up card
   after an update (`tidy_offer_dismissed`), and writes it only when you do or
   when you change Settings → Appearance → Interface or GPU acceleration. The
-  new interface reads it when its window opens and writes it
-  only when you change the window style, an opacity or frost dial, the
-  thumbnail size, or the Interface or GPU acceleration row on its Settings
-  page. Its other Settings rows write `settings.toml`, the same keys the same
-  way as classic Settings.
+  new interface reads it when its window opens and writes it only when you
+  change the window style or an opacity or frost dial (in the main menu or
+  Settings → Appearance), the thumbnail size (in the Library's sort menu), or
+  the Interface or GPU acceleration row. Its other Settings rows write
+  `settings.toml`, the same keys the same way as classic Settings.
   Neither writes it on start or while idle, and there is no unconditional
   save on close: a pending change you made (a dial you had just let go of) is
   flushed when the window closes or the app quits. Neither saves the page to
@@ -146,17 +152,18 @@ that folder.
 | Remove the old plugin's settings | Removes the keys the retired Wall-in-One plugin left under `[plugin_settings."goober/wall-in-one"]`. The current companion uses the same id, so every key it reads stays. | The same backups and Undo as the template fix. |
 | Clear the thumbnail cache | Deletes the cached thumbnails. | Nothing is needed: it is only a cache, rebuilt as you browse, so there is no archive and no Undo. |
 
-After an update, a card at the top of the window offers the first four once,
-when there is something to tidy. Showing it writes nothing; choosing Review
-or Not Now records the dismissal in `ui.toml` (creating it, and its
-`.ui.toml.mutation.lock`, if they don't exist yet).
+*In the classic interface*, after an update, a card at the top of the window
+offers the first four once, when there is something to tidy. Showing it writes
+nothing; choosing Review or Not Now records the dismissal in `ui.toml`
+(creating it, and its `.ui.toml.mutation.lock`, if they don't exist yet). The
+new interface doesn't show that card; Settings → Tidy up is always there.
 
 ## Settings reference
 
 | key | meaning | default |
 |---|---|---|
 | `roots` | Folders scanned for wallpapers. Empty is unconfigured and triggers the graphical first-run choice; the first chosen root receives downloads and generated stills. | `[]` |
-| `opacity` | Window background opacity, 0.30-1.0; `1.0` is fully opaque. | `1.0` |
+| `opacity` | The classic window's background opacity, 0.30-1.0; `1.0` is fully opaque. Settings → Appearance → **Classic window opacity**; the new window's translucency is its window style instead (see [`niri.md`](niri.md)). | `1.0` |
 | `preview_scheme` | Default adaptive colour scheme for previews and pairings that inherit it. Explicit pairing schemes take precedence; the app's Noctalia-following UI colours are separate. | `"m3-tonal-spot"` |
 | `follow_noctalia_palette` | Apply Noctalia's palette to the app's own chrome. | `true` |
 | `cycle_enabled` | Change wallpaper on a timer. | `false` |

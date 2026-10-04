@@ -145,7 +145,7 @@ would still present the window and answer with kind `not-in-new-ui` and exit
 status 1.
 
 `providers`, `search` and `download` reach the same provider code the Store
-tab uses, so a wallpaper can be found and pulled into the library without
+page uses, so a wallpaper can be found and pulled into the library without
 opening the window. `providers` and `search` print tab-separated rows with `#`
 comment lines around them, which is what `cut -f1` and `while read` already
 understand; the identifier comes first because it is the field `download` takes
@@ -153,8 +153,8 @@ back. Because `search` and `download` wait on a website, they are answered from
 a worker rather than from the main loop, so the window does not freeze for the
 duration.
 
-`list` selects and orders through the same code the window's search box uses,
-so the two cannot disagree about what `stills snow` means. `favourites` is a
+`list` matches and orders through the same code the Library's search box and
+sort use, so the two cannot disagree about which wallpapers `snow` names. `favourites` is a
 separate listing from `list favourites` because it has to show entries whose
 file is not in the library right now -- an unmounted drive -- which by
 definition `list` cannot.
@@ -203,11 +203,12 @@ default window produces a small portrait screenshot; when niri cannot be asked,
 no scene still is taken. A managed scene still smaller than the display in both
 directions (the old portrait captures) is regenerated automatically and
 atomically; one that is merely another shape, say after plugging in a 16:9
-monitor, is kept. Custom still choices are never overwritten. A manual
-**Regenerate** control is also available in a scene's pairing editor.
+monitor, is kept. Custom still choices are never overwritten. A scene's
+details in the Library also offer **Capture a new still** (in the classic
+interface, **Regenerate** in its pairing editor).
 
-**Play Wallpaper Engine scenes** is on by default and is visible under
-**Settings -> Playback**. The engine is single-instance per output and other
+**Play Wallpaper Engine scenes** is on by default and is under
+**Settings → Advanced → Scenes**. The engine is single-instance per output and other
 things drive it -- Noctalia's own `linux-wallpaperengine-controller` plugin
 among them -- so Wall-in-One checks for an existing owner before it starts one.
 If another engine already holds the screen, the app says so and leaves the
@@ -220,9 +221,10 @@ a rule with none of them matches always. Times are local, inclusive at the
 start and exclusive at the end, and a window whose end is before its start
 wraps midnight -- `from=22:00 to=06:00` is one window. The **last** matching
 rule wins, so adding a rule is how you carve an exception out of an earlier
-one. When nothing matches, the configured default playlist applies. An
-on-demand playlist choice sits above the calendar until **Follow schedule** is
-selected. The Rust runtime evaluates the local-time rules while the GUI is
+one. The Schedule page lists the rules the other way up: there the top rule
+wins, and a rule you add lands on top. When nothing matches, the configured
+default playlist applies. An on-demand playlist choice sits above the calendar
+until you resume the schedule (**Resume schedule**, or `ctl schedule-follow`). The Rust runtime evaluates the local-time rules while the GUI is
 closed; the rules themselves have one-minute resolution, and a boundary change
 is applied without waiting for the Python app.
 
@@ -240,9 +242,10 @@ edit version 3: after a rollback, its next schedule edit drops the names (see
 confirmation dialogue to fall back on. So the path must be absolute and must
 match a wallpaper the scan actually produced; anything else is refused before
 it reaches the code that deletes. What happens then is the same split as the
-tile menu -- a downloaded wallpaper is deleted and the reply says it cannot be
-undone, one of your own is moved to the trash, and if the trash is on another
-filesystem it is refused rather than quietly unlinked.
+Library's **Delete from disk…** and **Move to Trash** -- a downloaded wallpaper
+is deleted and the reply says it cannot be undone, one of your own is moved to
+the trash, and if the trash is on another filesystem it is refused rather than
+quietly unlinked.
 
 ### Deadlines and an unknown outcome
 

@@ -16,13 +16,15 @@ mpvpaper animates it while a still wallpaper of an animated gif shows only the
 first frame.
 
 A scan is bounded: at most 4096 wallpapers, 65536 directory entries examined,
-and 8 directories deep. Anything past that is reported in the window's subtitle
-as skipped rather than silently dropped.
+and 8 directories deep. Anything past that is left out and recorded as skipped
+rather than silently dropped; the classic window's subtitle counts those, while
+the new interface doesn't show the count yet.
 
 ## Roots
 
 Roots are the folders that get scanned, and they are the `roots` key in the
-settings file -- **Settings -> Library** is the same list with an Add button.
+settings file -- **Settings → Library** is the same list, with **Add folder…**
+(the Library page's **+** button does the same).
 
 With none listed, the library is not configured. On first graphical launch the
 app shows the exact directory detected from Noctalia (or the local fallback)
@@ -34,14 +36,14 @@ the root, so configured users are not asked again.
 Three properties of the list are worth knowing:
 
 - **Order is kept, and the first one is special.** Downloads and generated
-  stills land under the first root. It is marked in the Settings tab with
-  a download icon and **Downloads & generated stills**.
+  stills land under the first root. Settings marks it **Downloads & stills**;
+  the download button on any other folder makes that one the first.
 - **Duplicates are dropped.** Paths are expanded and made absolute first, so
   `~/Pictures` and `/home/you/Pictures` count as one entry rather than putting
   every wallpaper in it into the rotation twice.
 - **A root that is not there right now is kept, not removed.** An unmounted
-  drive shows in the Settings tab as `-- not there right now` and comes
-  back when the drive does.
+  drive shows in Settings as `<path> · not there right now`, with a warning
+  icon, and comes back when the drive does.
 
 Scanning may still show files reached through an intentionally configured
 symbolic link, but Delete and Move to Trash refuse destructive authority
@@ -49,8 +51,8 @@ through symbolic-link directory components. Configure the real absolute root
 when you want those actions available. This keeps a link swapped between scan
 and removal from redirecting an operation outside the selected library.
 
-Changing the list rescans immediately. Removing a folder from this list stops
-scanning it; it does not delete the wallpapers in it.
+Changing the list rescans immediately. Removing a folder from this list (Settings
+asks first) stops scanning it; it does not delete the wallpapers in it.
 
 ## Videos and the stills behind them
 
@@ -87,11 +89,12 @@ not kept as permanent backups. Unrecognized or modified files, manual images
 and captures still explicitly referenced by saved choices are left untouched.
 
 An explicit representative choice must already be a still item in the latest
-library scan. The picker and `wall-in-one ctl still` refuse an outside file, an
-unindexed file, or an indexed video. Wall-in-One does not silently import,
-copy, move, or later delete an external picture. To use one, copy or move it
-into a configured library folder, or add its folder under **Settings**, refresh
-the library, and choose the newly indexed still. Automatic generated captures
+library scan. The details pane's **Use an image file instead…** and
+`wall-in-one ctl still` refuse an outside file, an unindexed file, or an
+indexed video. Wall-in-One does not silently import, copy, move, or later
+delete an external picture. To use one, copy or move it into a configured
+library folder, or add its folder under **Settings → Library**, rescan the
+library (`F5`), and choose the newly indexed still. Automatic generated captures
 remain internal defaults rather than separate choices in the picker.
 
 ### Stills the app makes for itself
@@ -120,7 +123,7 @@ than silently overwriting each other.
 - Each wallpaper is attempted once per session, so a failed capture does not
   keep retrying on every rescan.
 - It needs `ffmpeg`. The Nix package puts it on the app's `PATH`; without it
-  the video still plays and simply keeps its "Video (no still)" badge.
+  the video still plays, and its details simply keep saying "No still yet".
 - Switching dynamics off takes a still from the video playing at that moment
   first, so the wallpaper you were watching is not swapped out from under you.
 
@@ -138,40 +141,48 @@ public file.
 
 ## Finding one
 
-The row under the header bar is a search box, a kind filter, and a sort. All
-three work over the complete scanned inventory without rescanning the
-filesystem. Search, kind and sort reset between launches, so the next launch
-starts with the full library visible.
+The Library's search box sits in the header (`Ctrl+F` focuses it), and the
+filter row has the kind filter, a **Favorites** chip, the count, and a menu for
+the sort and the thumbnail size. All of them work over the complete scanned
+inventory without rescanning the filesystem. Search, kind and sort reset
+between launches, so the next launch starts with the full library visible.
 
-The grid initially materialises 72 tiles and thumbnail requests, then offers a
-labelled **Load more** page. Matching and sorting still cover all 4096 supported
-items: an exact search for the last item loads that result immediately rather
-than requiring 56 page clicks. This bounds GTK widget and thumbnail work while
-keeping the complete library reachable. Loaded pages, surviving tile objects,
-the scroll adjustment and keyboard focus survive rescans. A thumbnail is
-requested when its tile is first materialised; the on-disk cache prevents a
-repeat decode unless the media changed.
+The grid builds 72 cards at first, then offers **Show 72 more · 72 of 300
+shown**, one page at a time. Matching and sorting still cover all 4096
+supported items, and the wallpaper on screen and the one whose details are open
+always get a card. This bounds GTK widget and thumbnail work while keeping the
+complete library reachable. A new search, filter or sort starts again from 72.
+A thumbnail is requested when its card is first built; the on-disk cache
+prevents a repeat decode unless the media changed.
 
 **Search** splits what you type on whitespace and requires every word to appear
-somewhere in the filename stem, in any order. `snow vil` finds
+somewhere in the wallpaper's name, in any order: the filename without its
+extension, or a Wallpaper Engine item's title. `snow vil` finds
 `snowy-village-still`. Matching folds accents and case, so `cafe` finds `Café`.
-Folder names and extensions are not searched. Escape clears the box.
+Folder names and extensions are not searched.
 
-**Kind** offers Everything, Stills only, Videos only, and Favourites only.
+**Kind** offers All, Images, Videos and Scenes; the **Favorites** chip narrows
+any of them to your favourites.
 
 **Sort** offers Name, Newest first (modification time), and Largest first.
 Ties fall back to name and then path, so the grid does not reshuffle equal-sized
-files on every rescan.
+files on every rescan. The same menu switches between large and small
+thumbnails, which is saved in `ui.toml`.
 
-While anything is being hidden the window's subtitle says both numbers, as
-`Showing 3 of 41` in front of the usual counts -- 41 being how many wallpapers
-are playable, not how many are on screen. Sorting alone does not narrow the
-results or trigger that count.
+Beside the filters the count reads `300 wallpapers`, or `3 of 300` while the
+search or a filter hides some, with `· scanning…` during a scan. Sorting alone
+does not narrow the results.
+
+*In the classic interface* the search, kind and sort sit in a row under the
+header, Kind offers Everything, Stills only, Videos only and Favourites only,
+and the grid offers **Load more**.
 
 ## Favourites
 
-Use the star in the corner of a tile to mark a favourite. Favourites are saved
-separately from settings in `~/.local/state/wall-in-one/favourites.json`.
+Use the star on a Library card (it appears when you point at the card, and
+stays on a favourite) or in its details to mark a favourite; **Select** stars
+several at once. Favourites are saved separately from settings in
+`~/.local/state/wall-in-one/favourites.json`.
 
 Favourites are kept in the order you starred them. Each change must be saved
 before the app adopts it. If saving fails, the star stays in its previous
@@ -181,38 +192,61 @@ state and an error is shown; there is no session-only favourite change.
 the scan, disconnecting a drive or reaching the scan limit does not clear its
 star. Unstarring the item or explicitly removing its wallpaper clears it.
 
-**Settings -> Playback -> Cycle favourites only** narrows the rotation to them.
+**Settings → Playback → Cycle favourites only** narrows the rotation to them.
 If no favourites are available to play, rotation falls back to the whole
 library.
 
 ## Using or taking away an item
 
-Each Library tile separates editing from applying:
+Clicking a Library card opens its details beside the grid; it never applies
+the wallpaper. On a focused card, Enter does the same and `Ctrl+Enter` applies
+it. The details pane has:
 
-- **Left-click** or **Edit** opens that item's full pairing editor: representative still,
-  moving source and palette policy.
-- **Apply** plays the pairing through the one-entry **Quick choice** playlist.
-  Independent-display mode offers explicit display targets before applying.
-- **Right-click** or the **actions button** opens the keyboard-reachable menu
-  for Quick choice, favourites, representative still, colours, reset and
-  removal. Opening the menu does not apply the wallpaper. Entries which do not
-  apply to that item are omitted.
+- **Apply**, to the displays the player bar is set to, or from its arrow to all
+  displays or to one display only (offered while displays run separately). It
+  plays the wallpaper through the hidden one-entry **Your pick** playlist: one
+  for all displays, or one per display.
+- the favourite star;
+- **Still**, for a video or a scene: **Use an image file instead…**, **Use the
+  automatic still**, or, for a scene, **Capture a new still**;
+- **Colors**: **From wallpaper**, with the Settings scheme (Default) or one of
+  Noctalia's ten schemes; a **Palette**; or **Don't change**. Then **Light or
+  dark** and **Reset to defaults**;
+- **In playlists**, with **Add…**;
+- **File**: where it is, **Show in Files**, where it came from, and how it can
+  be removed.
 
-The editor's adaptive colour choices offer all ten Noctalia generators with
-previews. Community and custom palettes show their stored colours. Built-ins
-have no colour preview because Noctalia does not expose their colours without
-applying them.
+A card's menu (right-click, the ⋯ button, the Menu key or `Shift+F10`) has
+Apply to all displays or one, Edit details, Add to playlist, the favourite,
+Reset to defaults, Show in Files, and the removal. Opening the menu does not
+apply the wallpaper; entries which do not apply to that item are omitted.
+**Select** picks several cards to add to a playlist or favourite together.
 
-The last menu entry is **Remove** or **Move to Trash**.
+The palette choices list Noctalia's built-ins, your palettes, and the
+community palettes 24 at a time. Built-ins have no colour preview because
+Noctalia does not expose their colours without applying them.
 
-- **Remove** appears for a downloaded file whose app ownership can be verified.
-  It permanently deletes the wallpaper and its verified app-owned sidecars and
-  generated stills. It asks for confirmation and cannot be undone through Trash.
+*In the classic interface* clicking a tile opens its full-size pairing editor
+instead, and Apply is a button on the tile.
+
+The removal is **Delete from disk…** or **Move to Trash**, in the card menu, the
+details pane and the selection bar, one wallpaper at a time.
+
+- **Delete from disk…** appears for a downloaded file whose app ownership can
+  be verified. It permanently deletes the wallpaper and its verified app-owned
+  sidecars and generated stills. It asks for confirmation and cannot be undone
+  through Trash.
 - **Move to Trash** appears for your own files inside a configured library
   root. It moves them to the freedesktop home trash under
   `~/.local/share/Trash`, where a file manager can restore the media. It does not
   ask for confirmation. Restoring the file does not restore the app metadata
   cleared by removal, such as favourites and playlist occurrences.
+- Neither is offered for a Steam Workshop item (unsubscribe in Steam) or a file
+  outside your library folders, and neither removes the last wallpaper that
+  plays from a playlist something uses. Removing has no Undo in the app.
+
+*In the classic interface* the same two entries are named **Remove** and
+**Move to Trash**.
 
 Only the home trash is implemented. A wallpaper on another filesystem cannot be
 renamed into it: the action reports the problem and leaves the file in place.
@@ -359,24 +393,33 @@ observed uninstall reaches the removal journal, its cleanup is restart-safe.
 
 ## Playlist behavior and limits
 
-The Playlists tab adds pairings from the searchable Library list with **+**,
-double-click, Enter or drag-and-drop. Drag a playlist row's handle to reorder
-it, or focus the row and press `Ctrl+Up` / `Ctrl+Down`. Reordering preserves
-each occurrence's stable entry ID, so the same pairing can appear more than
-once without those occurrences becoming interchangeable.
+A playlist's page adds wallpapers with **Add wallpapers…**: a picker with its
+own search and kind filter, where the wallpapers you click are numbered in the
+order they will go in, then **Add N** (or `Ctrl+Enter`) adds them in one save.
+You can also drag a Library card onto the playlist's row in the sidebar, or
+use **Add to playlist** in a card's menu or the details pane.
+Drag a playlist row's handle to reorder it, or focus the row and press
+`Ctrl+Up` / `Ctrl+Down` (`Ctrl+Home` / `Ctrl+End` for the top and bottom); the
+row's menu has the same moves. Reordering preserves each occurrence's stable
+entry ID, so the same wallpaper can appear more than once (the picker marks one
+already there) without those occurrences becoming interchangeable. Removing
+entries, with the row's − button, `Delete`, or **Select** for several, shows a
+toast with **Undo**.
 
-A Library row with playback disabled remains visible with its diagnostic, but
-its Add button and drag source are disabled. An older playlist occurrence is
-retained and labelled unavailable so it can be removed deliberately; playback
-skips it when another usable occurrence exists and is disabled when every
-entry has playback disabled or is missing.
+The picker greys out a wallpaper that playback skips, and adding one any other
+way is refused with the reason. An older playlist occurrence is retained and
+labelled (`Missing · <file>` or `Playback unavailable · <name>`) so it can be
+removed deliberately; playback skips it when another usable occurrence exists,
+and **Play now** is off when every entry is missing or skipped.
 
-Playlists can contain up to 10,000 entries. The order pane initially builds
-72 rows and offers a labelled **Load more** page; loaded rows keep their
-identity for keyboard and drag reordering. Clicking Add for an item appended
-beyond the loaded range temporarily keeps that new row visible to confirm the
-addition. The stored order is complete throughout: paging limits interface
-work, not the runtime playlist or the entries written to disk.
+Playlists can contain up to 10,000 entries. The page initially builds 72 rows
+and offers **Show N more**; loaded rows keep their identity for keyboard and
+drag reordering. The stored order is complete throughout: paging limits
+interface work, not the runtime playlist or the entries written to disk.
+
+*In the classic interface* the Playlists tab adds wallpapers from a searchable
+Library list with **+**, double-click, Enter or drag-and-drop, and its order
+pane offers **Load more**.
 
 ## Thumbnails
 

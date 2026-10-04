@@ -138,8 +138,9 @@ verifies that:
   preflight without starting the Rust main process, socket, or renderer; the
   test holds its invocation/restart counters stable across two retry windows
   and then proves recovery after restoring schema 4;
-- Store, Library, Playlists, Schedules, and Settings open in the
-  running app; each capture first verifies the page-specific compositor title,
+- Store, Library, Playlists, Schedule, and Settings open in the running
+  app, which is the new interface, the default; each capture first verifies
+  the page-specific compositor title,
   and its comparison image excludes Noctalia's clock-bearing panel so a stuck
   app cannot pass merely because the clock changed;
 - closing the GUI leaves the same service process alive and rotation advances;
@@ -192,7 +193,7 @@ installed, no Workshop content is copied into it, and no Wallpaper Engine scene
 is available to render. The app therefore reports an empty scene library and
 degrades normally. The VM proves the application/service lifecycle, still
 rotation, video discovery in the library, Noctalia/plugin integration,
-schedule control, the five GTK tabs, and mpvpaper's process/argument lifecycle
+schedule control, five pages of the new interface, and mpvpaper's process/argument lifecycle
 through an instrumented renderer substitute. It does **not** prove actual video
 decoding or GPU rendering, Wallpaper Engine scene playback, Steam integration,
 or physical multi-monitor behavior. Independent routing, schedules, cursors,

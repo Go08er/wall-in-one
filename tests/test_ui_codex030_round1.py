@@ -1,15 +1,25 @@
-"""Codex's 0.3.0 round-1 findings P-1 and P-2, in the real application with the lane held.
+"""Codex's 0.3.0 round-1 findings P-1 and P-2, in the real application.
 
-Each runs `Application.run` with the new window over a sandboxed profile
-(``dawn.png`` and ``dusk.jpg``) and a fake runtime, as ``test_ui_next_editing``
-does, holds the authoring lane, queues the review's two gestures in the
-review's order, then lets go: the second write is checked when it reaches
-the head of the lane, against what the first one saved.
+The fix is the application's own: the settings write and a Library removal
+check what is saved when they reach the head of the authoring lane. So each
+finding has two tests:
+
+* the review's scenario in the running application with the new window:
+  `Application.run` over a sandboxed profile (``dawn.png`` and ``dusk.jpg``)
+  and a fake runtime, as ``test_ui_next_editing`` does; it holds the
+  authoring lane, queues the review's two gestures in the review's order,
+  then lets go, and the second write is refused against what the first one
+  saved;
+* the application's boundary with no page in front of it (a recording
+  window, as ``test_ui_runtime`` uses, standing in for either window): the
+  write is refused even though no page checked it first, so the classic
+  window's pages get the same guarantee.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +32,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_ui_next_editing import (  # noqa: E402
     first_scan,
     hold_the_lane,
@@ -35,8 +46,12 @@ from tests.test_ui_next_window import (  # noqa: E402
     sandboxed_runtime,
     settled,
 )
+from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
 from wall_in_one import config, runtime_config  # noqa: E402
+from wall_in_one.control import client  # noqa: E402
+from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import playlists, schedules  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.real_playlists import RealPlaylists  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
@@ -145,3 +160,87 @@ def test_p2_a_removal_queued_behind_the_rule_that_uses_its_playlist_is_refused(
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
+
+
+# -- the application's own boundary, whichever window asked -----------------------------
+
+
+def _windowless(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Application, FakeWindow, tuple[MediaItem, MediaItem]]:
+    """An application with a recording window, a library of two stills and a quiet runtime."""
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    found: list[MediaItem] = []
+    for name in ("dawn.png", "dusk.png"):
+        (root / name).write_bytes(b"image")
+        found.append(MediaItem(root / name, Kind.STILL, 5, 1))
+    settings = replace(application.settings, roots=(root,)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.adopt_library(Library((root,), tuple(found)))
+    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    return application, window, (found[0], found[1])
+
+
+def test_p1_the_application_refuses_a_default_with_nothing_to_play_from_any_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No page checks here: the settings write itself refuses, then accepts once it can play."""
+    application, _window, (dawn, _dusk) = _windowless(tmp_path, monkeypatch)
+    session = application.session
+    lone = session.playlists.create("Lone")  # its last wallpaper already removed
+    saved: list[config.Settings] = []
+    errors: list[str] = []
+    try:
+        application.update_settings_async(
+            active_playlist=lone.id, on_success=saved.append, on_error=errors.append
+        )
+        spin_until(lambda: bool(saved or errors))
+        assert saved == [] and len(errors) == 1
+        assert "can\u2019t be used" in errors[0] and "nothing to play" in errors[0]
+        assert config.load_strict().active_playlist == ""
+        assert application.settings.active_playlist == ""
+        runtime_config.render(application.settings, session)  # still buildable
+
+        session.playlists.add(lone.id, dawn.path)
+        application.update_settings_async(
+            active_playlist=lone.id, on_success=saved.append, on_error=errors.append
+        )
+        spin_until(lambda: bool(saved) or len(errors) > 1)
+        assert len(errors) == 1, errors
+        assert config.load_strict().active_playlist == lone.id
+    finally:
+        _close(application)
+
+
+def test_p2_the_application_refuses_a_removal_that_empties_a_used_playlist_from_any_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No page checks here: the removal's own preparation refuses before anything moves."""
+    application, window, (dawn, _dusk) = _windowless(tmp_path, monkeypatch)
+    session = application.session
+    lone = session.playlists.create("Lone")
+    session.playlists.add(lone.id, dawn.path, entry_id="dawn-entry")
+    session.schedules.add(lone.id)
+    finished: list[object] = []
+    try:
+        application.remove_item_async(dawn, trash=True, finish=finished.append)
+        spin_until(lambda: any("was not removed" in text for text in window.reports))
+        refused = next(text for text in window.reports if "was not removed" in text)
+        assert "\u201cLone\u201d (used by 1 schedule rule)" in refused
+        assert "nothing left to play" in refused
+        assert finished == [], "the removal never started"
+        assert dawn.path.exists(), "nothing was moved to the Trash"
+        kept = playlists.Store.open().get(lone.id)
+        assert kept is not None and [entry.id for entry in kept.entries] == ["dawn-entry"]
+        assert not application._removal_active
+        runtime_config.render(application.settings, session)  # still buildable
+    finally:
+        _close(application)

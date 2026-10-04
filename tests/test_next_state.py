@@ -70,9 +70,10 @@ class FakeApplication:
         self.glass: list[css.Glass | None] = []
         self.published = 0
         self.authoring: deque[Callable[[], None]] = deque()
+        #: Settings edits asked for, in order.
+        self.settings_changes: list[dict[str, Any]] = []
         self.after_favourites: Callable[[], None] = lambda: None
         # The Playlists page's part (`real_playlists.PlaylistBackend`).
-        self._settings = session.settings
         self.playlist_changes = 0
         self.after_playlists: Callable[[], None] = lambda: None
         self.activated: list[str] = []
@@ -89,7 +90,7 @@ class FakeApplication:
 
     @property
     def settings(self) -> config.Settings:
-        return self._settings
+        return self._session.settings
 
     @property
     def settings_unknown_keys(self) -> tuple[str, ...]:
@@ -120,6 +121,22 @@ class FakeApplication:
     def resume_schedule_on_async(self, connector: str) -> bool:
         self.sent.append((connector, "schedule-follow", None))
         return True
+
+    # -- what the Schedule and Displays pages use (`real_schedule.ScheduleBackend`) --
+    def reset_display_modes_on_async(self, connector: str) -> bool:
+        self.sent.append((connector, "cycle", "default"))
+        self.sent.append((connector, "shuffle", "default"))
+        return True
+
+    def activate_playlist_on_async(self, connector: str, reference: str) -> bool:
+        self.sent.append((connector, "playlist-use", reference))
+        return True
+
+    def schedule_edited(self) -> None:
+        self.published += 1
+
+    def runtime_config_changed(self) -> None:
+        self.published += 1
 
     def authoring_action_async(
         self,
@@ -181,8 +198,8 @@ class FakeApplication:
             return reference
 
         def finish(deleted: str) -> None:
-            if self._settings.active_playlist == deleted:
-                self._settings = replace(self._settings, active_playlist="")
+            if self._session.settings.active_playlist == deleted:
+                self._session.update_settings(replace(self._session.settings, active_playlist=""))
             self.playlists_changed()
             on_complete(deleted, ())
 
@@ -195,16 +212,21 @@ class FakeApplication:
         on_error: Callable[[str], None] | None = None,
         **changes: Any,
     ) -> bool:
-        """Saved when the authoring queue runs, or failed with `settings_failure`."""
+        """Saved when the authoring queue runs, or failed with `settings_failure`.
+
+        Every edit asked for is recorded in `settings_changes`; a saved one is
+        adopted by the session, as the application's adoption does.
+        """
+        self.settings_changes.append(dict(changes))
 
         def work() -> config.Settings:
             if self.settings_failure:
                 failure, self.settings_failure = self.settings_failure, ""
                 raise ValueError(failure)
-            return replace(self._settings, **changes)
+            return replace(self._session.settings, **changes).validated()
 
         def finish(saved: config.Settings) -> None:
-            self._settings = saved
+            self._session.update_settings(saved)
             if on_success is not None:
                 on_success(saved)
 

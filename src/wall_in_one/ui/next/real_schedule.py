@@ -1,0 +1,857 @@
+"""The real `Scheduling`: the schedule, display and settings stores, and the runtime's status.
+
+**Reads.** Rules come from the session's schedule store (`library.schedules`)
+in stored order, converted to `RuleView` (weekdays Monday=0, months 1-12,
+minutes; the store already holds them so, and writes them as ``mon``..``sun``
+and ``HH:MM``). Assignments and the "beats the shared rules" opt-in come from
+the display store; the default playlist, display mode and desktop colors'
+display from the settings. What each display shows and why (`routes`,
+`rule_truth`) is the runtime's own status, never resolved here. Known
+displays are GTK's monitors (layout, scale, refresh rate) merged with the
+runtime's connected displays, then every display something is saved for:
+an assignment, a rule, the colors' choice.
+
+**Writes** go through the application's ordered authoring lane
+(`authoring_action_async`): rules and assignments are store transactions
+whose completion republishes the runtime configuration (``schedule_edited``
+or ``runtime_config_changed``, as the classic Schedules page does); the
+default, the mode and the colors' display are settings edits
+(`update_settings_async`). Each write settles exactly once: saved, failed
+(reported, "nothing changed"), or refused before it was queued. A playlist
+that would compile to nothing is refused for a rule, an assignment or the
+default, both at the gesture and again when the write reaches the head of
+the lane. "Beats the shared rules" is the display store's version-2 field;
+the compiler puts it in ``runtime-overrides.toml`` and never in
+``runtime.toml``.
+
+**Runtime commands** (per-display Cycle and Shuffle, "Use saved defaults",
+play now) are the classic window's runtime verbs. They are not stored: the
+runtime keeps them until its saved defaults are asked for, and the next
+status shows the result.
+
+**Change notification.** `adopt` runs with every status publication the
+adapter takes and names the topics whose answers changed: when a
+route, its rule or its rotation did (topic ``routes``), ``schedule`` and ``displays`` when the
+stores or settings did (including edits made by ``ctl`` while the window is
+open). GTK's monitor list is followed for hotplug.
+"""
+
+from __future__ import annotations
+
+import datetime
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Final, Protocol, TypeVar
+
+import gi
+
+gi.require_version("Gdk", "4.0")
+
+from gi.repository import Gdk
+
+from wall_in_one import config, display_policy, runtime_config
+from wall_in_one.library import schedules
+from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library.playlists import DISPLAY_QUICK_CHOICE_ID_PREFIX
+from wall_in_one.session import QUICK_CHOICE_ID, Session
+from wall_in_one.ui import runtime_truth
+from wall_in_one.ui.next import schedule_model
+from wall_in_one.ui.next.schedule_state import (
+    ColorSource,
+    DisplayInfo,
+    ForgetPlan,
+    RouteView,
+    RuleTruth,
+    RuleView,
+    Settled,
+)
+from wall_in_one.ui.next.state import Route
+from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView
+
+_T = TypeVar("_T")
+
+_ROUTES: Final[dict[str, Route]] = {
+    "manual": "pick",
+    "schedule": "schedule",
+    "assignment": "display",
+    "default": "default",
+}
+#: Converted rules kept for `rule_applies`; cleared past this many.
+_MATCHER_CACHE: Final = 1024
+
+
+class ScheduleBackend(Protocol):
+    """What `RealScheduling` uses of `wall_in_one.ui.app.Application`."""
+
+    @property
+    def session(self) -> Session: ...
+
+    @property
+    def status_model(self) -> RuntimeStatusModel: ...
+
+    @property
+    def settings(self) -> config.Settings: ...
+
+    @property
+    def settings_unknown_keys(self) -> tuple[str, ...]: ...
+
+    def authoring_action_async(
+        self,
+        work: Callable[[], _T],
+        finish: Callable[[_T], None],
+        *,
+        prepare: Callable[[], Callable[[], _T]] | None = None,
+        failure: Callable[[str], None] | None = None,
+    ) -> bool: ...
+
+    def update_settings_async(
+        self,
+        *,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+        **changes: Any,
+    ) -> bool: ...
+
+    def schedule_edited(self) -> None: ...
+
+    def runtime_config_changed(self) -> None: ...
+
+    def runtime_action_async(self, verb: str, argument: str | None = None) -> bool: ...
+
+    def runtime_action_on_async(
+        self, connector: str, verb: str, argument: str | None = None
+    ) -> bool: ...
+
+    def reset_display_modes_on_async(self, connector: str) -> bool: ...
+
+    def activate_playlist_async(self, reference: str) -> bool: ...
+
+    def activate_playlist_on_async(self, connector: str, reference: str) -> bool: ...
+
+    def resume_schedule_async(self) -> bool: ...
+
+    def resume_schedule_on_async(self, connector: str) -> bool: ...
+
+    def window_report(self, message: str) -> None: ...
+
+
+class Notified(Protocol):
+    """What `RealScheduling` needs of the adapter that owns it."""
+
+    def emit_changed(self, *topics: str) -> None: ...
+
+
+# -- conversions ------------------------------------------------------------------------
+
+
+def _is_quick_choice(playlist_id: str) -> bool:
+    return playlist_id == QUICK_CHOICE_ID or playlist_id.startswith(DISPLAY_QUICK_CHOICE_ID_PREFIX)
+
+
+def rule_view(rule: schedules.Rule) -> RuleView:
+    """A stored rule in the pages' convention (the store's own numbers)."""
+    return RuleView(
+        id=rule.id,
+        playlist=rule.playlist,
+        weekdays=frozenset(rule.weekdays),
+        months=frozenset(rule.months),
+        start=rule.start,
+        end=rule.end,
+        connector=rule.connector,
+        enabled=rule.enabled,
+        name=rule.name,
+    )
+
+
+def stored_rule(view: RuleView) -> schedules.Rule:
+    """The store's rule for ``view`` (for matching only; never saved as is)."""
+    return schedules.Rule(
+        id=view.id or "draft",
+        playlist=view.playlist,
+        connector=view.connector,
+        months=frozenset(view.months),
+        weekdays=frozenset(view.weekdays),
+        start=view.start,
+        end=view.end,
+        enabled=view.enabled,
+        name=view.name,
+    )
+
+
+def store_arguments(view: RuleView) -> dict[str, Any]:
+    """`schedules.Store.add`/``update`` keyword arguments for ``view``."""
+    timed = view.start is not None and view.end is not None
+    return {
+        "months": sorted(view.months),
+        "weekdays": [schedules.WEEKDAY_NAMES[day] for day in sorted(view.weekdays)],
+        "start": schedules.format_time(view.start) if timed and view.start is not None else "",
+        "end": schedules.format_time(view.end) if timed and view.end is not None else "",
+        "connector": view.connector,
+    }
+
+
+def draft_problem(view: RuleView) -> str:
+    """Why ``view`` can't be saved as a rule, or empty (the playlist is checked apart)."""
+    if not view.playlist:
+        return "A rule needs a playlist"
+    if any(day not in range(7) for day in view.weekdays):
+        return "A weekday is Monday (0) to Sunday (6)"
+    if any(month not in range(1, 13) for month in view.months):
+        return "A month is 1 to 12"
+    return schedule_model.window_problem(view.start, view.end)
+
+
+def _playable(item: MediaItem, session: Session) -> bool:
+    """Whether the compiler can play ``item`` (`runtime_config` skips it otherwise)."""
+    bundle = session.pairings.resolve_accepted(item, session.library)
+    if bundle.still is None or not Path(bundle.still).is_absolute():
+        return False
+    if item.kind is Kind.VIDEO:
+        return bundle.motion is not None and Path(bundle.motion).is_absolute()
+    if item.kind is Kind.SCENE:
+        return item.scene.isdigit()
+    return True
+
+
+# -- the adapter ------------------------------------------------------------------------
+
+
+class RealScheduling:
+    """`Scheduling` over the application's stores, settings and runtime status."""
+
+    def __init__(
+        self,
+        backend: ScheduleBackend,
+        owner: Notified,
+        runtime_off: Callable[[], str],
+    ) -> None:
+        self._backend = backend
+        self._owner = owner
+        #: Why runtime commands are off now (the playback controls' answer).
+        self._runtime_off = runtime_off
+        self._matchers: dict[RuleView, schedules.Rule] = {}
+        self._routes_key: object = None
+        self._schedule_key: object = None
+        self._displays_key: object = None
+        self._monitors: Any = None
+        self._monitor_handler = 0
+
+    # -- lifetime --------------------------------------------------------------------
+    def listen(self) -> None:
+        """Follow GTK's monitors (hotplug changes what is connected and where)."""
+        if self._monitor_handler:
+            return
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        self._monitors = display.get_monitors()
+        self._monitor_handler = self._monitors.connect(
+            "items-changed", lambda *_args: self._monitors_changed()
+        )
+
+    def close(self) -> None:
+        if self._monitor_handler and self._monitors is not None:
+            self._monitors.disconnect(self._monitor_handler)
+        self._monitor_handler = 0
+        self._monitors = None
+
+    def _monitors_changed(self) -> None:
+        self._displays_key = None
+        self._owner.emit_changed("displays")
+
+    # -- following the app ------------------------------------------------------------
+    @property
+    def _session(self) -> Session:
+        return self._backend.session
+
+    @property
+    def _view(self) -> RuntimeStatusView:
+        return self._backend.status_model.view
+
+    def _truth(self) -> runtime_truth.RuntimeTruth | None:
+        view = self._view
+        return view.truth if view.service == "running" else None
+
+    def adopt(self, view: RuntimeStatusView) -> list[str]:
+        """The topics whose answers changed since the last call (see the module)."""
+        topics: list[str] = []
+        truth = view.truth if view.service == "running" else None
+        routes = self._read_routes(truth)
+        rules = truth.schedules if truth is not None else ()
+        routes_key = (routes, rules, view.service)
+        if routes_key != self._routes_key:
+            self._routes_key = routes_key
+            topics.append("routes")
+        settings = self._backend.settings
+        session = self._session
+        schedule_key = (session.schedules.rules, settings.active_playlist)
+        if schedule_key != self._schedule_key:
+            self._schedule_key = schedule_key
+            topics.append("schedule")
+        displays_key = (
+            session.displays.all(),
+            tuple(c for c, _p in session.displays.all() if session.displays.beats_global_rules(c)),
+            settings.display_mode,
+            settings.theme_source_connector,
+            truth.theme_source if truth is not None else None,
+            runtime_config.runtime_applies_overrides(view.status),
+            tuple((d.connector, d.connected) for d in truth.displays) if truth else (),
+        )
+        if displays_key != self._displays_key:
+            self._displays_key = displays_key
+            topics.append("displays")
+        return topics
+
+    # -- Scheduling: reading -----------------------------------------------------------
+    def clock(self) -> datetime.datetime:
+        return datetime.datetime.now()
+
+    @property
+    def schedule_rules(self) -> Sequence[RuleView]:
+        return tuple(rule_view(rule) for rule in self._session.schedules.rules)
+
+    def schedule_rule(self, rule_id: str) -> RuleView | None:
+        return next((rule for rule in self.schedule_rules if rule.id == rule_id), None)
+
+    def rule_applies(self, rule: RuleView, at: datetime.datetime, connector: str = "") -> bool:
+        """`schedules.Rule.matches`: the app's own semantics, for projection only."""
+        stored = self._matchers.get(rule)
+        if stored is None:
+            if len(self._matchers) >= _MATCHER_CACHE:
+                self._matchers.clear()
+            stored = self._matchers[rule] = stored_rule(rule)
+        return stored.matches(at, connector)
+
+    def saved_display_mode(self) -> str:
+        return self._backend.settings.display_mode
+
+    @property
+    def default_playlist(self) -> str:
+        return self._backend.settings.active_playlist or runtime_config.FALLBACK_PLAYLIST_ID
+
+    def display_assignments(self) -> Mapping[str, str]:
+        return dict(self._session.displays.all())
+
+    def beats_global_rules(self, connector: str) -> bool:
+        return self._session.displays.beats_global_rules(connector)
+
+    def known_displays(self) -> Sequence[DisplayInfo]:
+        found: list[DisplayInfo] = list(_monitor_displays())
+        seen = {display.connector for display in found}
+        truth = self._truth()
+        if truth is not None and truth.status_version == 2:
+            for record in truth.displays:
+                if record.connected and record.connector not in seen:
+                    found.append(DisplayInfo(record.connector))
+                    seen.add(record.connector)
+        session = self._session
+        kept = {connector for connector, _playlist in session.displays.all()}
+        kept.update(rule.connector for rule in session.schedules.rules if rule.connector)
+        if self._backend.settings.theme_source_connector:
+            kept.add(self._backend.settings.theme_source_connector)
+        if truth is not None:
+            kept.update(record.connector for record in truth.displays if not record.connected)
+        for connector in sorted(kept - seen):
+            found.append(DisplayInfo(connector, connected=False))
+        return tuple(found)
+
+    def _read_routes(self, truth: runtime_truth.RuntimeTruth | None) -> tuple[RouteView, ...]:
+        if truth is None:
+            return ()
+        if truth.status_version == 2:
+            return tuple(
+                RouteView(
+                    connector=display.connector,
+                    route=_ROUTES.get(display.route_source, "default"),
+                    playlist_id=display.playlist_id,
+                    playlist=display.playlist,
+                    rule_id=display.schedule_rule_id,
+                    until="" if display.route_source == "manual" else display.until or "",
+                    quick=_is_quick_choice(display.playlist_id),
+                    playback=display.playback_state,
+                    cycle=display.cycle_enabled,
+                    cycle_default=display.cycle_default,
+                    cycle_manual=display.cycle_source == "manual",
+                    shuffle=display.shuffle,
+                    shuffle_default=display.shuffle_default,
+                    shuffle_manual=display.shuffle_source == "manual",
+                )
+                for display in truth.displays
+                if display.connected
+            )
+        return (
+            RouteView(
+                connector="",
+                route="pick" if truth.is_manual else "schedule",
+                playlist_id=truth.playlist_id,
+                playlist=truth.playlist,
+                rule_id=truth.schedule_rule_id,
+                quick=_is_quick_choice(truth.playlist_id),
+            ),
+        )
+
+    def routes(self) -> Sequence[RouteView]:
+        return self._read_routes(self._truth())
+
+    def rule_truth(self, rule_id: str) -> RuleTruth | None:
+        truth = self._truth()
+        record = truth.schedule_rule(rule_id) if truth is not None else None
+        if record is None:
+            return None
+        return RuleTruth(record.selected, record.in_force)
+
+    def color_source(self) -> ColorSource:
+        truth = self._truth()
+        if truth is not None and truth.theme_source is not None:
+            reported = truth.theme_source
+            return ColorSource(reported.configured, reported.effective or "", reported.fallback)
+        connected = [display.connector for display in self.known_displays() if display.connected]
+        resolved = display_policy.resolve_theme_source(
+            self._backend.settings.theme_source_connector, connected
+        )
+        return ColorSource(resolved.configured, resolved.effective, resolved.is_fallback)
+
+    def overrides_apply(self) -> bool:
+        return runtime_config.runtime_applies_overrides(self._view.status)
+
+    def schedule_blocked(self) -> str:
+        newer = self._session.newer_version_files()
+        if not newer:
+            return ""
+        names = newer[0] if len(newer) == 1 else ", ".join(newer[:-1]) + f" and {newer[-1]}"
+        verb = "is" if len(newer) == 1 else "are"
+        return (
+            f"Schedule and display changes are off while {names} {verb} from a newer "
+            "version of Wall-in-One"
+        )
+
+    def settings_blocked(self) -> str:
+        unknown = self._backend.settings_unknown_keys
+        if unknown:
+            return f"Settings are read-only: {config.read_only_message(unknown)}"
+        return self.schedule_blocked()
+
+    def runtime_blocked(self) -> str:
+        return self._runtime_off()
+
+    def playlist_blocked(self, pid: str) -> str:
+        if pid == runtime_config.FALLBACK_PLAYLIST_ID:
+            return ""
+        session = self._session
+        playlist = session.playlists.get(pid)
+        if playlist is None:
+            return "That playlist no longer exists"
+        known = {item.path: item for item in session.library.items}
+        for entry in playlist.entries:
+            item = known.get(entry.path)
+            if item is not None and _playable(item, session):
+                return ""
+        return f"“{playlist.name}” has nothing to play yet; add wallpapers to it first"
+
+    # -- writing: the shared shape --------------------------------------------------------
+    def _settle(self, settled: Settled | None, saved: bool) -> None:
+        if settled is not None:
+            settled(saved)
+
+    def _refuse(self, settled: Settled | None, message: str, *topics: str) -> None:
+        self._backend.window_report(message)
+        self._owner.emit_changed(*topics)
+        self._settle(settled, False)
+
+    def _store_write(
+        self,
+        work: Callable[[], object],
+        *,
+        what: str,
+        topics: tuple[str, ...],
+        publish: Callable[[], None],
+        settled: Settled | None,
+        recheck: Callable[[], str] | None = None,
+    ) -> None:
+        """One store transaction on the authoring lane, settled exactly once."""
+        blocked = self.schedule_blocked()
+        if blocked:
+            self._refuse(settled, blocked, *topics)
+            return
+        reported = False
+
+        def prepare() -> Callable[[], object]:
+            # At the head of the lane: the playlist may have emptied since.
+            problem = recheck() if recheck is not None else ""
+            if problem:
+                raise ValueError(problem)
+            return work
+
+        def finish(_result: object) -> None:
+            publish()
+            self._owner.emit_changed(*topics)
+            self._settle(settled, True)
+
+        def failed(error: str) -> None:
+            nonlocal reported
+            reported = True
+            self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
+            self._owner.emit_changed(*topics)
+            self._settle(settled, False)
+
+        accepted = self._backend.authoring_action_async(
+            work, finish, prepare=prepare, failure=failed
+        )
+        if not accepted and not reported:
+            # Refused without a report (shutting down, or authoring not open yet).
+            self._owner.emit_changed(*topics)
+            self._settle(settled, False)
+
+    def _settings_write(
+        self,
+        *,
+        what: str,
+        topics: tuple[str, ...],
+        settled: Settled | None,
+        after: Callable[[], None] | None = None,
+        **changes: Any,
+    ) -> None:
+        """One settings edit, settled exactly once."""
+        blocked = self.settings_blocked()
+        if blocked:
+            self._refuse(settled, blocked, *topics)
+            return
+        reported = False
+
+        def saved(_settings: config.Settings) -> None:
+            if after is not None:
+                after()
+            self._owner.emit_changed(*topics)
+            self._settle(settled, True)
+
+        def failed(error: str) -> None:
+            nonlocal reported
+            reported = True
+            self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
+            self._owner.emit_changed(*topics)
+            self._settle(settled, False)
+
+        accepted = self._backend.update_settings_async(on_success=saved, on_error=failed, **changes)
+        if not accepted and not reported:
+            self._owner.emit_changed(*topics)
+            self._settle(settled, False)
+
+    # -- Scheduling: the schedule -----------------------------------------------------------
+    def save_rule(self, rule_id: str, draft: RuleView, settled: Settled | None = None) -> None:
+        problem = draft_problem(draft) or self.playlist_blocked(draft.playlist)
+        if problem:
+            self._refuse(settled, f"The rule was not saved: {problem}", "schedule")
+            return
+        store = self._session.schedules
+        arguments = store_arguments(draft)
+        enabled = draft.enabled
+
+        def add() -> object:
+            rule = store.add(draft.playlist, **arguments)
+            if not enabled:
+                # The store adds rules switched on; a second write turns it off.
+                rule = store.set_enabled(rule.id, False)
+            return rule
+
+        def update() -> object:
+            rule = store.update(rule_id, draft.playlist, **arguments)
+            if rule.enabled != enabled:
+                rule = store.set_enabled(rule_id, enabled)
+            return rule
+
+        self._store_write(
+            update if rule_id else add,
+            what="The rule",
+            topics=("schedule",),
+            publish=self._backend.schedule_edited,
+            settled=settled,
+            recheck=lambda: self.playlist_blocked(draft.playlist),
+        )
+
+    def remove_rule(self, rule_id: str, settled: Settled | None = None) -> None:
+        store = self._session.schedules
+        self._store_write(
+            lambda: store.remove(rule_id),
+            what="Deleting the rule",
+            topics=("schedule",),
+            publish=self._backend.schedule_edited,
+            settled=settled,
+        )
+
+    def copy_rule(self, rule_id: str, settled: Settled | None = None) -> None:
+        original = self.schedule_rule(rule_id)
+        if original is None:
+            self._refuse(settled, "That rule no longer exists", "schedule")
+            return
+        store = self._session.schedules
+        arguments = store_arguments(original)
+
+        def work() -> object:
+            copy = store.add(original.playlist, **arguments)
+            if not original.enabled:
+                store.set_enabled(copy.id, False)
+            rules = store.rules
+            index = next((at for at, rule in enumerate(rules) if rule.id == rule_id), None)
+            if index is not None:
+                # Added last (the highest priority): one place above the original.
+                store.move(copy.id, index + 1)
+            return copy
+
+        self._store_write(
+            work,
+            what="The copy of the rule",
+            topics=("schedule",),
+            publish=self._backend.schedule_edited,
+            settled=settled,
+            recheck=lambda: self.playlist_blocked(original.playlist),
+        )
+
+    def enable_rule(self, rule_id: str, enabled: bool, settled: Settled | None = None) -> None:
+        store = self._session.schedules
+        self._store_write(
+            lambda: store.set_enabled(rule_id, enabled),
+            what="Turning the rule " + ("on" if enabled else "off"),
+            topics=("schedule",),
+            publish=self._backend.schedule_edited,
+            settled=settled,
+        )
+
+    def shift_rule(self, rule_id: str, step: int, settled: Settled | None = None) -> None:
+        store = self._session.schedules
+        self._store_write(
+            lambda: store.move_relative(rule_id, step),
+            what="The rule's priority",
+            topics=("schedule",),
+            publish=self._backend.schedule_edited,
+            settled=settled,
+        )
+
+    def choose_default_playlist(self, pid: str, settled: Settled | None = None) -> None:
+        problem = self.playlist_blocked(pid)
+        if problem:
+            self._refuse(settled, f"The default playlist was not saved: {problem}", "schedule")
+            return
+        wanted = "" if pid == runtime_config.FALLBACK_PLAYLIST_ID else pid
+        self._settings_write(
+            what="The default playlist",
+            topics=("schedule",),
+            settled=settled,
+            after=self._backend.schedule_edited,
+            active_playlist=wanted,
+        )
+
+    # -- Scheduling: displays ---------------------------------------------------------------
+    def assign_display(self, connector: str, pid: str, settled: Settled | None = None) -> None:
+        problem = self.playlist_blocked(pid) if pid else ""
+        if problem:
+            self._refuse(
+                settled, f"{connector}\u2019s playlist was not saved: {problem}", "displays"
+            )
+            return
+        store = self._session.displays
+
+        def work() -> object:
+            if pid:
+                store.assign(connector, pid)
+                return None
+            return store.unassign(connector)
+
+        self._store_write(
+            work,
+            what=f"{connector}\u2019s playlist",
+            topics=("displays",),
+            publish=self._backend.runtime_config_changed,
+            settled=settled,
+            recheck=(lambda: self.playlist_blocked(pid)) if pid else None,
+        )
+
+    def set_beats_global_rules(
+        self, connector: str, enabled: bool, settled: Settled | None = None
+    ) -> None:
+        store = self._session.displays
+        self._store_write(
+            lambda: store.set_beats_global_rules(connector, enabled),
+            what=f"{connector}\u2019s priority over the shared rules",
+            topics=("displays",),
+            publish=self._backend.runtime_config_changed,
+            settled=settled,
+        )
+
+    def choose_display_mode(self, mode: str, settled: Settled | None = None) -> None:
+        settings = self._backend.settings
+        if mode not in config.DISPLAY_MODES:
+            self._refuse(settled, f"{mode!r} is not a display mode", "displays")
+            return
+        if mode == settings.display_mode:
+            self._settle(settled, True)
+            return
+        changes: dict[str, Any] = {"display_mode": mode}
+        if mode == config.DISPLAY_MODE_INDEPENDENT and not settings.theme_source_connector:
+            connected = [d.connector for d in self.known_displays() if d.connected]
+            if not connected:
+                self._refuse(
+                    settled,
+                    "Each display separately needs a connected display for the desktop "
+                    "colors. Connect a display and try again.",
+                    "displays",
+                )
+                return
+            changes["theme_source_connector"] = connected[0]
+        self._settings_write(
+            what="The display mode", topics=("displays", "schedule"), settled=settled, **changes
+        )
+
+    def choose_color_source(self, connector: str, settled: Settled | None = None) -> None:
+        if connector == self._backend.settings.theme_source_connector:
+            self._settle(settled, True)
+            return
+        self._settings_write(
+            what="The desktop colors\u2019 display",
+            topics=("displays",),
+            settled=settled,
+            theme_source_connector=connector,
+        )
+
+    def forget_plan(self, connector: str) -> ForgetPlan:
+        session = self._session
+        settings = self._backend.settings
+        playlist = dict(session.displays.all()).get(connector, "")
+        rules = sum(rule.connector == connector for rule in session.schedules.rules)
+        colors = settings.theme_source_connector == connector
+        refused = ""
+        if any(d.connector == connector and d.connected for d in self.known_displays()):
+            refused = f"{connector} is connected; only a display that isn\u2019t can be forgotten"
+        elif colors and settings.display_mode == config.DISPLAY_MODE_INDEPENDENT:
+            refused = (
+                f"Desktop colors are saved to follow {connector}; choose another display "
+                "for them first"
+            )
+        elif not (playlist or rules or colors):
+            refused = f"Nothing is kept for {connector}"
+        else:
+            refused = self.schedule_blocked() or (self.settings_blocked() if colors else "")
+        return ForgetPlan(connector, playlist, rules, colors, refused)
+
+    def forget_display(self, connector: str, settled: Settled | None = None) -> None:
+        plan = self.forget_plan(connector)
+        if plan.refused:
+            self._refuse(settled, plan.refused, "displays", "schedule")
+            return
+        displays = self._session.displays
+        rules = self._session.schedules
+
+        def work() -> object:
+            # Never a "Your pick" playlist: those stay (hidden) whatever happens.
+            displays.unassign(connector)
+            for rule in [rule for rule in rules.rules if rule.connector == connector]:
+                rules.remove(rule.id)
+            return None
+
+        def forgotten(saved: bool) -> None:
+            if not saved or not plan.colors:
+                self._settle(settled, saved)
+                return
+            self._settings_write(
+                what=f"Forgetting {connector} as the desktop colors\u2019 display",
+                topics=("displays",),
+                settled=settled,
+                theme_source_connector="",
+            )
+
+        self._store_write(
+            work,
+            what=f"Forgetting {connector}",
+            topics=("displays", "schedule"),
+            publish=self._backend.schedule_edited,
+            settled=forgotten,
+        )
+
+    # -- Scheduling: runtime commands ----------------------------------------------------------
+    def _independent(self, connector: str) -> bool:
+        return bool(connector) and self.saved_display_mode() == config.DISPLAY_MODE_INDEPENDENT
+
+    def _runtime_ready(self) -> bool:
+        off = self.runtime_blocked()
+        if off:
+            self._backend.window_report(off)
+            return False
+        return True
+
+    def set_display_rotation(
+        self, connector: str, *, cycle: bool | None = None, shuffle: bool | None = None
+    ) -> None:
+        if not self._runtime_ready():
+            return
+        for verb, value in (("cycle", cycle), ("shuffle", shuffle)):
+            if value is None:
+                continue
+            argument = "on" if value else "off"
+            if self._independent(connector):
+                self._backend.runtime_action_on_async(connector, verb, argument)
+            else:
+                self._backend.runtime_action_async(verb, argument)
+        # The status that follows moves the switches; ask the pages to show the
+        # runtime's answer until then.
+        self._owner.emit_changed("routes")
+
+    def use_saved_rotation(self, connector: str) -> None:
+        if not self._runtime_ready():
+            return
+        if self._independent(connector):
+            self._backend.reset_display_modes_on_async(connector)
+        else:
+            self._backend.runtime_action_async("cycle", "default")
+        self._owner.emit_changed("routes")
+
+    def play_now(self, connector: str, pid: str) -> None:
+        if not self._runtime_ready():
+            self._owner.emit_changed("routes")
+            return
+        one = self._independent(connector)
+        if not pid:
+            if one:
+                self._backend.resume_schedule_on_async(connector)
+            else:
+                self._backend.resume_schedule_async()
+        else:
+            problem = self.playlist_blocked(pid)
+            if problem:
+                self._backend.window_report(problem)
+            elif one:
+                self._backend.activate_playlist_on_async(connector, pid)
+            else:
+                self._backend.activate_playlist_async(pid)
+        self._owner.emit_changed("routes")
+
+
+def _monitor_displays() -> list[DisplayInfo]:
+    """GTK's monitors with a connector name: cheap, and on this thread anyway."""
+    display = Gdk.Display.get_default()
+    if display is None:
+        return []
+    found: list[DisplayInfo] = []
+    monitors = display.get_monitors()
+    for index in range(monitors.get_n_items()):
+        monitor = monitors.get_item(index)
+        if not isinstance(monitor, Gdk.Monitor):
+            continue
+        connector = monitor.get_connector()
+        if not connector:
+            continue
+        geometry = monitor.get_geometry()
+        scale = getattr(monitor, "get_scale", None)
+        found.append(
+            DisplayInfo(
+                connector=connector,
+                model=monitor.get_model() or "",
+                connected=True,
+                x=geometry.x,
+                y=geometry.y,
+                width=max(1, geometry.width),
+                height=max(1, geometry.height),
+                placed=True,
+                scale=float(scale()) if callable(scale) else float(monitor.get_scale_factor()),
+                refresh=monitor.get_refresh_rate(),
+            )
+        )
+    return found

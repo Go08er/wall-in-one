@@ -12,7 +12,8 @@ runtime's own per-display timing, and stay empty with a service that does not
 report it.
 
 **Writes.** Apply, Favorite, the player bar's playback controls, the
-Playlists page and the Library's edits. Apply is the classic window's Quick
+Playlists page and the Library's edits; the Schedule and Displays pages'
+writes are `real_schedule.RealScheduling`'s (`scheduling`). Apply is the classic window's Quick
 choice (`play_item_async`, or `play_item_on_async` for one display);
 Favorite is the classic star, on the authoring lane; the playback controls
 are the classic runtime verbs (`real_controls.RuntimeControls`); playlist
@@ -78,6 +79,7 @@ from wall_in_one.ui.next.real_editing import EditingBackend, RealEditing, palett
 from wall_in_one.ui.next.real_editing import scheme_name as scheme_name
 from wall_in_one.ui.next.real_folders import RealFolders
 from wall_in_one.ui.next.real_playlists import PlaylistBackend, RealPlaylists
+from wall_in_one.ui.next.real_schedule import RealScheduling, ScheduleBackend
 from wall_in_one.ui.next.real_settings import RealSettings, SettingsBackend
 from wall_in_one.ui.next.real_store import RealStore, StoreBackend
 from wall_in_one.ui.next.schedule_state import Scheduling
@@ -114,7 +116,7 @@ _ROUTES: Final[dict[str, Route]] = {
 }
 
 
-class Backend(RuntimeBackend, PlaylistBackend, Protocol):
+class Backend(RuntimeBackend, PlaylistBackend, ScheduleBackend, Protocol):
     """What the adapter uses of `wall_in_one.ui.app.Application`."""
 
     @property
@@ -356,6 +358,7 @@ class RealAppState(GObject.Object):
         #: The Settings page's part, made when the page first asks for it.
         self._settings_part: RealSettings | None = None
         self._store: RealStore | None = None
+        self._scheduling = RealScheduling(backend, self, self._controls.off)
         self.reload()
         self.listen()
 
@@ -371,6 +374,7 @@ class RealAppState(GObject.Object):
             self._unfollow_prefs = self._prefs.subscribe(self._look_saved)
         if self._settings_part is not None:
             self._settings_part.listen()
+        self._scheduling.listen()
 
     def close(self) -> None:
         """Stop following the status model and the keeper; the window is going away."""
@@ -386,6 +390,7 @@ class RealAppState(GObject.Object):
             self._store.close()  # its lanes and transport start again on next use
         if self._editing is not None:
             self._editing.close()
+        self._scheduling.close()
 
     def _look_saved(self) -> None:
         """A look save came back and ui.toml holds something else: show what it holds.
@@ -549,6 +554,7 @@ class RealAppState(GObject.Object):
         if banner != self._banner:
             self._banner = banner
             topics.append("system")
+        topics.extend(self._scheduling.adopt(view))
         self.emit_changed(*topics)
 
     def _read_displays(self, truth: runtime_truth.RuntimeTruth | None) -> tuple[LiveDisplay, ...]:
@@ -997,7 +1003,8 @@ class RealAppState(GObject.Object):
 
     @property
     def scheduling(self) -> Scheduling | None:
-        return None
+        """The Schedule and Displays pages' stores, settings and runtime answers."""
+        return self._scheduling
 
     @property
     def settings_access(self) -> SettingsAccess | None:

@@ -1,8 +1,10 @@
-"""The one-time Tidy up card, in the real classic application on the golden profile.
+"""The one-time Tidy up card, in the real application on the golden profile.
 
 It must offer the tidy-up, write nothing while it is shown, and write
 ``ui.toml`` only when the user dismisses it; once dismissed it never plans
-again. (Kept apart from ``test_ui_tidy`` because these run whole applications.)
+again. The same card is in both interfaces, so each test runs against each,
+naming the interface rather than relying on the default. (Kept apart from
+``test_ui_tidy`` because these run whole applications.)
 """
 
 from __future__ import annotations
@@ -38,7 +40,11 @@ from wall_in_one import paths, tidy, ui_prefs  # noqa: E402
 from wall_in_one import thumbnails as thumbnail_cache  # noqa: E402
 from wall_in_one.library.model import MediaItem  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
+from wall_in_one.ui.next.window import NextWindow  # noqa: E402
+from wall_in_one.ui.tidy_section import TidyCard, TidySection  # noqa: E402
 from wall_in_one.ui.window import MainWindow  # noqa: E402
+from wall_in_one.ui.window_services import UiKind  # noqa: E402
 from wall_in_one.wallpaper import outputs, scenes  # noqa: E402
 
 
@@ -83,24 +89,48 @@ def _whitelist(golden: sandbox.Golden) -> list[Allowance]:
     ]
 
 
+def _card(window: object) -> TidyCard:
+    """The window's Tidy up card, whichever interface it is."""
+    if isinstance(window, MainWindow):
+        return window._tidy_card
+    assert isinstance(window, NextWindow)
+    return window.tidy_card
+
+
+def _tidy_shown(window: object) -> TidySection:
+    """Settings' Tidy up section, which must be the page on screen."""
+    if isinstance(window, MainWindow):
+        assert window._stack.get_visible_child_name() == "settings"
+        return window._settings_page.tidy
+    assert isinstance(window, NextWindow)
+    page = window.current_page
+    assert isinstance(page, SettingsPage) and isinstance(page.tidy, TidySection)
+    return page.tidy
+
+
+def _close(window: object) -> None:
+    assert isinstance(window, MainWindow | NextWindow)
+    window.close()
+
+
 def _dismissal(change: Change) -> None:
     assert change.after is not None and change.after.content is not None
     assert b"tidy_offer_dismissed = true" in change.after.content
 
 
+@pytest.mark.parametrize("ui", ["classic", "next"])
 def test_the_card_offers_tidy_up_writes_nothing_and_a_dismissal_writes_only_ui_toml(
-    golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch
+    golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch, ui: UiKind
 ) -> None:
     _quiet_machine(monkeypatch)
     home = golden.profile.home
     before = harness.snapshot(home)
-    application = Application()
+    application = Application(ui=ui)
     lanes: list[object] = []
 
     def scenario() -> Iterator[Step]:
         window = application._window
-        assert isinstance(window, MainWindow)
-        card = window._tidy_card
+        card = _card(window)
         yield (
             "the first scan and the card's check",
             lambda: settled(application) and card.checked and not application.tidy_lane.busy,
@@ -113,7 +143,7 @@ def test_the_card_offers_tidy_up_writes_nothing_and_a_dismissal_writes_only_ui_t
         assert not paths.ui_prefs_path().exists(), "showing the card writes nothing"
 
         card.review.emit("clicked")
-        section = window._settings_page.tidy
+        section = _tidy_shown(window)
         yield (
             "the dismissal saved and the section planned",
             lambda: (
@@ -123,13 +153,18 @@ def test_the_card_offers_tidy_up_writes_nothing_and_a_dismissal_writes_only_ui_t
             ),
         )
         assert not card.get_reveal_child()
-        assert window._stack.get_visible_child_name() == "settings"
+        assert _tidy_shown(window) is section
         leftovers = section.row(tidy.LEFTOVERS)
         assert leftovers is not None and leftovers.expander.get_expanded()
+        # Noctalia's stale template reference is fixed only by a button the
+        # user presses here: offered, never run by the card or the update.
+        fix = section.row(tidy.PALETTE_TEMPLATE)
+        assert fix is not None and fix.plan.ready
+        assert fix.apply.get_visible() and fix.apply.get_sensitive()
         assert ui_prefs.load().prefs.tidy_offer_dismissed
         yield "every tail to settle", lambda: settled(application)
         lanes.extend(application_lanes(application))
-        window.close()
+        _close(window)
 
     try:
         assert run_application(application, scenario()) == 0
@@ -155,8 +190,9 @@ def test_the_card_offers_tidy_up_writes_nothing_and_a_dismissal_writes_only_ui_t
     )
 
 
+@pytest.mark.parametrize("ui", ["classic", "next"])
 def test_a_dismissed_card_stays_hidden_and_never_plans(
-    golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch
+    golden: sandbox.Golden, monkeypatch: pytest.MonkeyPatch, ui: UiKind
 ) -> None:
     _quiet_machine(monkeypatch)
     ui_prefs.update({"tidy_offer_dismissed": True})
@@ -170,13 +206,12 @@ def test_a_dismissed_card_stays_hidden_and_never_plans(
     monkeypatch.setattr(tidy, "plan", counted)
     home = golden.profile.home
     before = harness.snapshot(home)
-    application = Application()
+    application = Application(ui=ui)
     lanes: list[object] = []
 
     def scenario() -> Iterator[Step]:
         window = application._window
-        assert isinstance(window, MainWindow)
-        card = window._tidy_card
+        card = _card(window)
         yield (
             "the first scan and the card's check",
             lambda: settled(application) and card.checked and not application.tidy_lane.busy,
@@ -185,7 +220,7 @@ def test_a_dismissed_card_stays_hidden_and_never_plans(
         yield "a moment idle", lambda: time.monotonic() > opened + 0.5
         assert not card.get_reveal_child() and card.plan is None and planned == []
         lanes.extend(application_lanes(application))
-        window.close()
+        _close(window)
 
     try:
         assert run_application(application, scenario()) == 0

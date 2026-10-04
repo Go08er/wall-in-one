@@ -19,6 +19,11 @@ app's thumbnail pipeline (`LibraryThumbnails`). The window style and its
 dials come from ``ui.toml`` and are rendered by the application into its own
 stylesheet (`Application.set_window_glass`).
 
+**After an update** the classic window's one-time Tidy up card sits above every
+page (`TidyCard`); its Review opens Settings at Tidy up, whose actions -- the
+palette template fix in Noctalia's settings among them -- run only when the
+user presses Apply.
+
 **First run.** The window asks the application's first-run questions on its
 own welcome screen (`welcome.Welcome`) instead of in dialogs: it is a
 `FirstRunHost`. The questions, their words and what each answer does are the
@@ -60,7 +65,7 @@ from wall_in_one.ui.next.settings import SettingsPage
 from wall_in_one.ui.next.shell import ShellWindow
 from wall_in_one.ui.next.state import AppState, Banner
 from wall_in_one.ui.next.welcome import Welcome, is_progress
-from wall_in_one.ui.tidy_section import TidySection
+from wall_in_one.ui.tidy_section import TidyCard, TidySection
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -147,6 +152,12 @@ class NextWindow(ShellWindow):
             },
             version=__version__,
         )
+        # Offered once after an update, above every page, as in the classic
+        # window: it plans when the window first appears and writes ui.toml
+        # only when dismissed. Review opens Settings at Tidy up.
+        self.tidy_card = TidyCard(application, self.open_tidy)
+        self.content_view.add_top_bar(self.tidy_card)
+        self.connect("map", lambda _window: self.tidy_card.start())
         self._state.connect("changed", self._on_state_changed)
         self._show_status()
         self.connect("realize", lambda _window: self._resume())
@@ -255,6 +266,13 @@ class NextWindow(ShellWindow):
     def show_palette(self, resolved: source.ResolvedPalette) -> None:
         """The application already applied the stylesheet; previews follow the mode."""
         self._state.emit_changed("theme")
+
+    def open_tidy(self) -> None:
+        """Settings, at Tidy up with the action the card offered open (its Review)."""
+        self.navigate("settings:tidy")
+        page = self.pages.get("settings")
+        if isinstance(page, SettingsPage) and isinstance(page.tidy, TidySection):
+            page.tidy.reveal()
 
     def open_palette_browser(self) -> None:
         """Settings, with the palette manager open over it."""

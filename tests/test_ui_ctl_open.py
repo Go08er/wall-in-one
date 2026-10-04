@@ -267,11 +267,11 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         calls = count_first_activation_work(application, monkeypatch)
         libraries = record_library_shown(NextWindow, monkeypatch)
 
-        for page in ("settings", "media", "settings"):
+        for page in ("schedules", "media", "settings", "schedules"):
             opened = control(requests, "open", page)
             yield f"ctl open {page}", opened.done
-            if page == "media":  # the Library is in the new interface
-                assert opened.result() == Response.success("opened media")
+            if page in ("media", "settings"):  # the Library and Settings are ported
+                assert opened.result() == Response.success(f"opened {page}")
             else:
                 not_in_new_ui(opened.result(), page)
             assert application._window is first
@@ -296,9 +296,9 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         )
         assert calls == ONE_RESCAN, "a rebuilt window does one scan and nothing else"
 
-        again = control(requests, "open", "settings")
-        yield "ctl open settings on the rebuilt window", again.done
-        not_in_new_ui(again.result(), "settings")
+        again = control(requests, "open", "schedules")
+        yield "ctl open schedules on the rebuilt window", again.done
+        not_in_new_ui(again.result(), "schedules")
         yield "every tail to settle", lambda: settled(application)
         assert calls == ONE_RESCAN, "ctl open on the rebuilt window added work"
         lanes.extend(application_lanes(application))

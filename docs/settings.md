@@ -95,7 +95,9 @@ and 0.1.4 can't use a file with one at all.
   when you change Settings → Appearance → Interface or GPU acceleration. The
   new interface (`--ui=next`) reads it when its window opens and writes it
   only when you change the window style, an opacity or frost dial, the
-  thumbnail size, or a row on its Settings page.
+  thumbnail size, or the Interface or GPU acceleration row on its Settings
+  page. Its other Settings rows write `settings.toml`, the same keys the same
+  way as classic Settings.
   Neither writes it on start or while idle, and there is no unconditional
   save on close: a pending change you made (a dial you had just let go of) is
   flushed when the window closes or the app quits. Neither saves the page to

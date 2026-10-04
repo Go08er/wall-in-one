@@ -46,7 +46,8 @@ from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
 from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
-from wall_in_one.ui.next.window import NextWindow, SettingsPlaceholder  # noqa: E402
+from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
+from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange  # noqa: E402
 from wall_in_one.ui.window import MainWindow  # noqa: E402
 from wall_in_one.ui.window_services import WindowServices  # noqa: E402
@@ -321,12 +322,16 @@ def test_next_ui_survives_the_whole_application_lifecycle(
         assert resolved[0] is not None and palettes, "the window was told about the palette"
 
         # -- ctl over the real control socket ------------------------------
-        opened = control(requests, "open", "settings")
+        opened = control(requests, "open", "schedules")
         yield "ctl open", opened.done
         answer = opened.result()
         assert not answer.ok and answer.kind == "not-in-new-ui"
-        assert "settings page is not available in the new UI yet" in answer.message
-        assert window.note_text.startswith("Settings is not in the new interface yet")
+        assert "schedules page is not available in the new UI yet" in answer.message
+        assert window.note_text.startswith("Schedule is not in the new interface yet")
+        opened = control(requests, "open", "settings")
+        yield "ctl open settings", opened.done
+        assert opened.result() == Response.success("opened settings"), "Settings is ported"
+        assert window.note_text == ""
 
         status = control(requests, "status")
         yield "ctl status", status.done
@@ -460,8 +465,8 @@ def test_next_window_renders_from_the_model_not_the_forwarded_calls(
         assert window.status_text == "2 displays · playing Evening"
         application.status_model.set_busy(True)
         assert window.status_text.endswith("sending a playback command…")
-        assert window.show_page("settings") is False
-        assert window.note_text.startswith("Settings is not in the new interface yet")
+        assert window.show_page("schedules") is False
+        assert window.note_text.startswith("Schedule is not in the new interface yet")
         assert window.show_page("media") is True, "the Library is ported"
         assert window.note_text == ""
     finally:
@@ -656,11 +661,11 @@ def test_the_new_interface_settings_page_chooses_the_interface_to_start() -> Non
     target = paths.ui_prefs_path()
     window.present()
     try:
-        assert window.show_page("settings") is False, "Settings is still not ported"
-        assert window.note_text.startswith("Settings is not in the new interface yet")
-        assert "choose the classic interface in Settings" in window.note_text
+        assert window.show_page("settings") is True, "Settings is ported"
+        assert window.note_text == ""
         page = window.pages["settings"]
-        assert isinstance(page, SettingsPlaceholder)
+        assert isinstance(page, SettingsPage)
+        assert page.interface_row is not None and page.gpu_row is not None
         row = page.interface_row
         assert row.get_selected() == 0, "nothing saved yet: the next start is classic"
         assert row.get_sensitive() and row.get_subtitle() == (
@@ -691,7 +696,8 @@ def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written()
     window = NextWindow(application, application.settings)
     try:
         page = window.pages["settings"]
-        assert isinstance(page, SettingsPlaceholder)
+        assert isinstance(page, SettingsPage)
+        assert page.interface_row is not None and page.gpu_row is not None
         assert not page.interface_row.get_sensitive()
         assert "newer version of Wall-in-One" in (page.interface_row.get_subtitle() or "")
         page.interface_row.set_selected(0)
@@ -719,7 +725,8 @@ def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_ret
     window.present()
     try:
         page = window.pages["settings"]
-        assert isinstance(page, SettingsPlaceholder)
+        assert isinstance(page, SettingsPage)
+        assert page.interface_row is not None and page.gpu_row is not None
         row = page.interface_row
         row.set_selected(1)
         spin_until(lambda: reports and not window.preferences.busy, what="the refusal")
@@ -750,7 +757,8 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
     window.present()
     try:
         page = window.pages["settings"]
-        assert isinstance(page, SettingsPlaceholder)
+        assert isinstance(page, SettingsPage)
+        assert page.interface_row is not None and page.gpu_row is not None
         row = page.gpu_row
         assert row.get_active() and row.get_sensitive()
         row.set_active(False)
@@ -771,7 +779,8 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
     window = NextWindow(application, application.settings)
     try:
         page = window.pages["settings"]
-        assert isinstance(page, SettingsPlaceholder)
+        assert isinstance(page, SettingsPage)
+        assert page.interface_row is not None and page.gpu_row is not None
         assert not page.gpu_row.get_sensitive() and not page.interface_row.get_sensitive()
     finally:
         window.destroy()
@@ -826,7 +835,8 @@ def test_the_new_settings_rows_stop_following_the_keeper_when_the_window_goes() 
     window.present()
     try:
         page = window.pages["settings"]
-        assert isinstance(page, SettingsPlaceholder)
+        assert isinstance(page, SettingsPage)
+        assert page.interface_row is not None and page.gpu_row is not None
         assert len(keeper._subscribers) == 2, "the window's look and its Settings rows"
         away(window)
         assert keeper._subscribers == []

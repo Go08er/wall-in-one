@@ -19,7 +19,8 @@ listen with ``state.connect("changed", lambda _state, topic: ...)``. Topics
 the slice uses: ``now`` (what is on screen), ``playback``, ``library``,
 ``playlists``, ``displays``, ``system`` (service, power and read-only
 notices), ``scope`` (the player bar's display scope), ``settings``,
-``theme`` and ``appearance`` (window style, glass dials).
+``theme``, ``appearance`` (window style, glass dials) and ``palettes`` (the
+Settings page's palette manager).
 
 **Optional parts.** `PlaybackControls`, `LibraryEditing` and
 `LibraryFolders` are separate Protocols an adapter offers through

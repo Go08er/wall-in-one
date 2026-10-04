@@ -20,6 +20,12 @@ the application; none changes what the window shows until the store or the
 runtime says so (the favourite comes back through `reload`, what plays
 through the next status). There is no undo.
 
+**Settings.** The Settings page's part (`settings_access`) is
+`real_settings.RealSettings`: the classic Settings page's saves, rollback and
+palette paths. It is made when the page first asks, follows the window as
+this adapter does (`listen`/`close`), and only for an application that offers
+what it needs (`real_settings.SettingsBackend`).
+
 **Read-only states.** A store saved by a newer version turns Apply, Favorite
 and the playback controls off (the runtime configuration cannot be compiled
 while one exists, so no change could reach the wallpaper service), and
@@ -59,6 +65,7 @@ from wall_in_one.ui.next.library_thumbnails import StillSource
 from wall_in_one.ui.next.playlists_state import PlaylistEditing
 from wall_in_one.ui.next.prefs import DIAL_SAVE_DELAY_MS, UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
+from wall_in_one.ui.next.real_settings import RealSettings, SettingsBackend
 from wall_in_one.ui.next.schedule_state import Scheduling
 from wall_in_one.ui.next.settings_state import SettingsAccess
 from wall_in_one.ui.next.state import (
@@ -292,6 +299,8 @@ class RealAppState(GObject.Object):
         self._unsubscribe: Callable[[], None] | None = None
         self._unfollow_prefs: Callable[[], None] | None = None
         self._controls = RuntimeControls(backend, self, self._authoring_blocked)
+        #: The Settings page's part, made when the page first asks for it.
+        self._settings_part: RealSettings | None = None
         self.reload()
         self.listen()
 
@@ -303,6 +312,8 @@ class RealAppState(GObject.Object):
             self._adopt_status(self._backend.status_model.view)
         if self._unfollow_prefs is None:
             self._unfollow_prefs = self._prefs.subscribe(self._look_saved)
+        if self._settings_part is not None:
+            self._settings_part.listen()
 
     def close(self) -> None:
         """Stop following the status model and the keeper; the window is going away."""
@@ -312,6 +323,8 @@ class RealAppState(GObject.Object):
         unfollow, self._unfollow_prefs = self._unfollow_prefs, None
         if unfollow is not None:
             unfollow()
+        if self._settings_part is not None:
+            self._settings_part.close()
 
     def _look_saved(self) -> None:
         """A look save came back and ui.toml holds something else: show what it holds.
@@ -871,7 +884,12 @@ class RealAppState(GObject.Object):
 
     @property
     def settings_access(self) -> SettingsAccess | None:
-        return None
+        """The application's settings, folders, key and palettes (`real_settings`)."""
+        if self._settings_part is None and isinstance(self._backend, SettingsBackend):
+            self._settings_part = RealSettings(self._backend, self)
+            if self._unsubscribe is not None:  # the window is open: follow it now
+                self._settings_part.listen()
+        return self._settings_part
 
 
 def _monitor_models() -> dict[str, str]:

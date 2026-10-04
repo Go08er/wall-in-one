@@ -519,9 +519,10 @@ choice for that start. With neither, the app is classic.
 
 - **What it has so far.** The redesign's sidebar, header and player bar, and a
   paged Library grid with the details pane beside it, all over the app's real
-  library, stores and runtime status. It can change three things: **Apply** (to
-  all displays, or the display the player bar is scoped to), **favorites**, and
-  **playback**, through the player bar's live controls: play/pause, next,
+  library, stores and runtime status, and the Settings page below. Beyond
+  Settings it can change three things: **Apply** (to all displays, or the
+  display the player bar is scoped to), **favorites**, and **playback**,
+  through the player bar's live controls: play/pause, next,
   previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
   schedule. Every playback control acts on the displays the player bar is
   scoped to, all of them or one; mirrored displays, or a display that has gone
@@ -530,18 +531,29 @@ choice for that start. With neither, the app is classic.
   details pane's Apply menu is never widened like that: if that display has
   gone, or the displays are mirrored, nothing is sent and a notice says so.
   There is no undo yet. The player bar says what the runtime reports and why
-  ("Evening · from schedule", "Your pick"). Store, Playlists, Schedule,
-  Displays and Settings say they are not in the new interface yet; Settings
-  already offers the Interface choice, so you can go back to classic from
-  inside the new interface.
+  ("Evening · from schedule", "Your pick"). Store, Playlists, Schedule and
+  Displays say they are not in the new interface yet.
+- **Settings.** Every setting classic Settings has, each saved to the same
+  `settings.toml` key the same way (a save that fails is reported and every
+  row goes back to what is saved), in searchable groups: library folders (add,
+  remove, and make one the folder downloads and generated stills go to; a
+  folder found on this machine is only suggested), playback defaults, displays
+  and which one colours follow, the app's colours and default scheme, the
+  Wallhaven key, video and Wallpaper Engine renderer settings, Tidy up, and the
+  Interface and GPU acceleration rows, so you can go back to classic from
+  inside the new interface. **Palettes** opens the palette manager: browse
+  every installed palette, apply one through Noctalia, duplicate one into
+  yours and edit its colours, and preview each scheme on a still to use it as
+  the default or keep it as a palette. Like classic, it has no delete.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites and the playback controls off and says so in a notice under
   the header. Settings keys this version doesn't know are named in that notice
-  as read-only. The playback controls are also off until the wallpaper service
+  as read-only, and the Settings rows that write `settings.toml` are off. The playback controls are also off until the wallpaper service
   has answered, and while it isn't running; the app doesn't start the service.
 - **Its own preferences.** The window style (solid, translucent or frosted), its
-  opacity and frost dials and the thumbnail size live in `ui.toml`, written only
-  when you change one of them.
+  opacity and frost dials (in the window menu and Settings → Appearance) and
+  the thumbnail size live in `ui.toml`, written only when you change one of
+  them.
 - **One set of widgets.** The shell, player bar, Library and details pane in
   `ui/next/` are the prototype's: `prototypes/ui-redesign` runs the same modules
   over its dummy data, through the `AppState` Protocol in `ui/next/state.py`.
@@ -556,7 +568,7 @@ choice for that start. With neither, the app is classic.
   package and the page, because older builds fix its shape.
 - **`ctl open <page>`** presents the window either way. In the new interface it
   answers `not-in-new-ui`, with exit status 1, until that page is ported; the
-  Library (`media`) is. When no app is running, `ctl open` launches the
+  Library (`media`) and Settings (`settings`) are. When no app is running, `ctl open` launches the
   interface chosen in Settings.
 - **Rolling back.** 0.2.0 and 0.2.1 don't know the choice and start classic
   (`--ui=next` still works there). See [docs/updating.md](docs/updating.md) for

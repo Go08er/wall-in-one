@@ -2,9 +2,10 @@
 
 `NextWindow` is the prototype's `ShellWindow` -- sidebar, header, banners,
 player bar, frosted backdrop -- over a `RealAppState`, with the real Library
-page and inspector. Store, Playlists, Schedule, Displays and Settings are
-honest "not in the new interface yet" pages until they are ported; Settings
-already offers the interface to start, so the new one can be left from inside.
+page and inspector, and the real Settings page (`settings.SettingsPage`, with
+the palette manager), which also offers the interface to start, so the new
+one can be left from inside. Store, Playlists, Schedule and Displays are
+honest "not in the new interface yet" pages until they are ported.
 
 It implements every `WindowServices` member. Runtime status reaches it
 through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
@@ -22,7 +23,6 @@ change that is still waiting, and stops its thumbnail workers.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Final
 
 import gi
@@ -42,8 +42,10 @@ from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
 from wall_in_one.ui.next.page import Placeholder, not_ported
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_state import RealAppState
+from wall_in_one.ui.next.settings import SettingsPage
 from wall_in_one.ui.next.shell import ShellWindow
 from wall_in_one.ui.next.state import AppState
+from wall_in_one.ui.tidy_section import TidySection
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -57,35 +59,24 @@ _PAGES: Final = {
     "settings": "settings",
 }
 #: The pages this interface has. Every other one is a placeholder for now.
-PORTED: Final = frozenset({"media"})
+PORTED: Final = frozenset({"media", "settings"})
 #: Kept for callers of the placeholder era.
 NOT_PORTED_HINT: Final = CLASSIC_HINT
 
 
-class SettingsPlaceholder(Placeholder):
-    """Settings is not ported yet, except how the next start opens.
+def settings_page(state: AppState, keeper: UiPrefsKeeper, application: Application) -> SettingsPage:
+    """Settings over the application: its rows, the next start's interface, Tidy up.
 
-    Someone who chose the new interface must be able to choose classic again
-    from inside it. The rows (`LaunchRows`) write ui.toml through the window's
-    keeper, like every window preference here, show what was saved, and are
-    off while ui.toml cannot be written.
+    The interface and GPU rows (`LaunchRows`) write ui.toml through the
+    window's keeper, like every window preference here, show what was saved,
+    and are off while ui.toml cannot be written. Tidy up is the classic
+    section itself, on the application's own lane.
     """
-
-    def __init__(self, state: AppState, keeper: UiPrefsKeeper, report: Callable[[str], None]):
-        super().__init__(
-            state,
-            "settings",
-            "Settings",
-            "emblem-system-symbolic",
-            f"Settings is not in the new interface yet. {CLASSIC_HINT}",
-        )
-        self.launch = LaunchRows(keeper, report)
-        self.interface_row = self.launch.interface
-        self.gpu_row = self.launch.gpu
-        group = Adw.PreferencesGroup()
-        for row in self.launch.rows:
-            group.add(row)
-        self.status.set_child(Adw.Clamp(child=group, maximum_size=480))
+    return SettingsPage(
+        state,
+        launch=LaunchRows(keeper, application.window_report),
+        tidy=TidySection(application),
+    )
 
 
 class NextWindow(ShellWindow):
@@ -108,9 +99,7 @@ class NextWindow(ShellWindow):
                 "playlist": not_ported("playlist", "Playlists", "view-list-symbolic"),
                 "schedule": not_ported("schedule", "Schedule", "x-office-calendar-symbolic"),
                 "displays": not_ported("displays", "Displays", "video-display-symbolic"),
-                "settings": lambda state: SettingsPlaceholder(
-                    state, self._prefs, application.window_report
-                ),
+                "settings": lambda state: settings_page(state, self._prefs, application),
             },
             version=__version__,
         )
@@ -127,14 +116,14 @@ class NextWindow(ShellWindow):
         self._prefs.reopen()
         self._state.listen()
         settings = self.pages.get("settings")
-        if isinstance(settings, SettingsPlaceholder):
+        if isinstance(settings, SettingsPage) and settings.launch is not None:
             settings.launch.listen()
         self._show_status()
 
     def _teardown(self) -> None:
         self._state.close()
         settings = self.pages.get("settings")
-        if isinstance(settings, SettingsPlaceholder):
+        if isinstance(settings, SettingsPage) and settings.launch is not None:
             settings.launch.close()  # as classic Settings does
         self._prefs.close()
         provider, self._thumbnails = self._thumbnails, None
@@ -190,7 +179,7 @@ class NextWindow(ShellWindow):
 
     # -- WindowServices: settings and theme ---------------------------------------
     def apply_settings(self, settings: config.Settings) -> None:
-        """Keep the latest settings snapshot; nothing here edits settings yet."""
+        """Adopt a durable (or rolled-back) snapshot: every Settings row shows it."""
         self._settings = settings
         self._state.settings_changed()
 
@@ -203,8 +192,12 @@ class NextWindow(ShellWindow):
         self._state.emit_changed("theme")
 
     def open_palette_browser(self) -> None:
-        """Palettes are not ported yet; say so instead of opening nothing."""
-        self.report(f"Palettes are not in the new interface yet. {CLASSIC_HINT}")
+        """Settings, with the palette manager open over it."""
+        page = self.pages.get("settings")
+        if isinstance(page, SettingsPage) and page.access is not None:
+            self.navigate("settings:palettes")
+        else:
+            self.report(f"Palettes are not in the new interface yet. {CLASSIC_HINT}")
 
     # -- WindowServices: library and authoring -------------------------------------
     def show_library(self, session: Session) -> None:

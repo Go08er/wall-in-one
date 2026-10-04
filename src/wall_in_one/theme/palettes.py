@@ -31,6 +31,7 @@ raised. A directory that does not exist is simply an empty source.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -783,12 +784,78 @@ def document_from_pair(pair: PalettePair) -> dict[str, object]:
     return {"dark": variant_document(pair.dark), "light": variant_document(pair.light)}
 
 
-def _write_atomic(target: Path, serialised: str) -> None:
+def _ensure_parent(target: Path) -> None:
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
         raise PaletteWriteError(f"cannot create {target.parent}: {error}") from error
 
+
+#: A new palette's permission bits, as the replacing writer's private temporary has.
+_NEW_PALETTE_MODE: Final = 0o600
+#: ``open(O_TMPFILE)`` refusals that mean "this filesystem can't", not "this failed".
+_NO_TMPFILE: Final = frozenset({errno.EOPNOTSUPP, errno.EISDIR, errno.EINVAL})
+
+
+def _publish_new(target: Path, serialised: str, name: str) -> None:
+    """Publish a new palette at ``target``, never over anything already there.
+
+    The name check before it can't stop another writer creating the file
+    while the palette is rendered, so publication itself refuses. The bytes
+    go into an anonymous ``O_TMPFILE`` inode in the palette folder, synced,
+    then linked in under ``target``: the link fails if anything is there by
+    then, which is left exactly as it is. The inode never had a name, so a
+    refusal leaves nothing behind and nothing is ever unlinked by name.
+    Raises `PaletteNameTakenError` for an existing target; the folder is
+    synced after a successful link.
+
+    A filesystem without ``O_TMPFILE`` uses the stores' own no-replace
+    publication instead (`state_file.write_atomic_text` with
+    ``replace_existing=False``, ``renameat2(RENAME_NOREPLACE)``), which keeps
+    a refused temporary as an inert hidden claim rather than unlinking it.
+    """
+    _ensure_parent(target)
+    data = serialised.encode("utf-8")
+    try:
+        descriptor = os.open(
+            target.parent, os.O_TMPFILE | os.O_WRONLY | os.O_CLOEXEC, _NEW_PALETTE_MODE
+        )
+    except OSError as error:
+        if error.errno not in _NO_TMPFILE:
+            raise PaletteWriteError(f"cannot write {target}: {error}") from error
+        _publish_new_by_rename(target, serialised, name)
+        return
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(descriptor, view) :]
+            os.fsync(descriptor)
+            os.link(f"/proc/self/fd/{descriptor}", target, follow_symlinks=True)
+        except FileExistsError as error:
+            raise PaletteNameTakenError(name_taken_message(name, None)) from error
+        except OSError as error:
+            raise PaletteWriteError(f"cannot write {target}: {error}") from error
+    finally:
+        os.close(descriptor)
+    try:
+        state_file.fsync_parent(target)
+    except OSError as error:
+        raise PaletteWriteError(str(state_file.PublishedNotDurableError(target, error))) from error
+
+
+def _publish_new_by_rename(target: Path, serialised: str, name: str) -> None:
+    try:
+        state_file.write_atomic_text(target, serialised, replace_existing=False)
+    except FileExistsError as error:
+        raise PaletteNameTakenError(name_taken_message(name, None)) from error
+    except OSError as error:
+        raise PaletteWriteError(f"cannot write {target}: {error}") from error
+
+
+def _replace_in_place(target: Path, serialised: str) -> None:
+    """Rewrite one of the user's own palettes, deliberately replacing it (`save_edits`)."""
+    _ensure_parent(target)
     try:
         state_file.write_atomic_text(target, serialised)
     except OSError as error:
@@ -822,7 +889,8 @@ def write_custom(
 
     Never over another palette: a name any palette a person can pick already
     has (`name_clash`), or a file already at the target, is refused with
-    `PaletteNameTakenError` and nothing is written. Editing one of yours in
+    `PaletteNameTakenError` and nothing is written, including a file another
+    writer creates after that check (`_publish_new`). Editing one of yours in
     place is `save_edits`.
     """
     target_directory = directory if directory is not None else custom_directory()
@@ -832,10 +900,8 @@ def write_custom(
     if clash is not None or os.path.lexists(target):
         raise PaletteNameTakenError(name_taken_message(chosen, clash))
     serialised, colours = _serialise(document, target)
-    _write_atomic(target, serialised)
-    return PaletteEntry(
-        name=validate_name(name), origin=Origin.CUSTOM, path=target, colours=colours
-    )
+    _publish_new(target, serialised, chosen)
+    return PaletteEntry(name=chosen, origin=Origin.CUSTOM, path=target, colours=colours)
 
 
 def save_edits(entry: PaletteEntry, document: Mapping[str, object]) -> PaletteEntry:
@@ -846,7 +912,7 @@ def save_edits(entry: PaletteEntry, document: Mapping[str, object]) -> PaletteEn
     """
     target = target_for(entry)
     serialised, colours = _serialise(document, target)
-    _write_atomic(target, serialised)
+    _replace_in_place(target, serialised)
     return PaletteEntry(name=entry.name, origin=entry.origin, path=target, colours=colours)
 
 

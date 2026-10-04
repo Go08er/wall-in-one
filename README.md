@@ -176,9 +176,15 @@ software-rendering/Steam/multi-monitor limits.
 
 ## Using it
 
-The bottom navigation offers **Store, Library, Playlists, Schedules and
-Settings**. The window opens on your Library. A **pairing** brings together a
-wallpaper's still image, optional animation and colour policy:
+Wall-in-One opens the new interface, with a sidebar of pages: see
+[The new interface](#the-new-interface-the-default) below for what each one
+does and how to choose the classic window instead. The rest of this section
+describes the classic window, which works as it always has.
+
+The classic window's bottom navigation offers **Store, Library, Playlists,
+Schedules and Settings**. The window opens on your Library. A **pairing**
+brings together a wallpaper's still image, optional animation and colour
+policy:
 
 - **Store** searches and downloads from Wallhaven and MotionBGS without
   leaving the main window.
@@ -522,19 +528,21 @@ desktop or Noctalia session.
 Anything touching Noctalia's settings file is tested against a sandboxed set of
 XDG directories -- never the real one.
 
-### The new interface behind `--ui=next`
+### The new interface (the default)
 
-The redesigned interface from `prototypes/ui-redesign` now has every page:
+The redesigned interface from `prototypes/ui-redesign` has every page:
 the Library, Playlists, Schedule, Displays, the Store and Settings, all over
-the app's real library, stores and runtime status. It is still a preview, and classic
-stays the default.
+the app's real library, stores and runtime status. It is what Wall-in-One
+opens: `ui/next/window.py`'s `NextWindow`.
 
-Choose **Settings → Appearance → Interface → New (preview)** in classic, or the
-same row on the new interface's Settings page. The next start then builds
-`ui/next/window.py`'s `NextWindow` instead of the classic window. The choice is
-saved in `ui.toml` and takes effect the next time Wall-in-One starts. The
-hidden flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved
-choice for that start. With neither, the app is classic.
+To use the classic window instead, choose
+**Settings → Appearance → Interface → Classic** on the new interface's
+Settings page (classic Settings has the same row, and **New** brings you
+back). The choice is saved in `ui.toml` and takes effect the next time
+Wall-in-One starts. The hidden flag `wall-in-one --ui=next` or `--ui=classic`
+overrides the saved choice for that start; `--ui=classic` is also the way
+back if the new interface ever fails to open. With neither, the app opens
+the new interface.
 
 - **How it saves.** Each change goes through the save classic uses for it, one
   at a time on the app's ordered authoring lane. Each page shows what was
@@ -757,9 +765,12 @@ choice for that start. With neither, the app is classic.
   - 0.2.0 and 0.2.1 don't know the choice and start classic. `--ui=next`
     still works there.
   - **0.2.2** knows the choice, but its new interface has only the Library;
-    use classic there for the rest.
-  - See [docs/updating.md](docs/updating.md) for what choosing New (preview)
-    does to `ui.toml` for them.
+    use classic there for the rest. With nothing chosen it starts classic,
+    its own default. It keeps a saved Classic only until it next saves a
+    window preference; 0.3.0 then opens the new interface again.
+  - Choosing an interface, Classic included, moves `ui.toml` to version 2,
+    which 0.2.0 and 0.2.1 only read. See [docs/updating.md](docs/updating.md)
+    for what that means for them.
 
 - **The seams.**
   - `Application` talks to its window only through the `WindowServices`

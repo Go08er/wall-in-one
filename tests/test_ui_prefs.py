@@ -430,96 +430,119 @@ def test_the_tidy_offer_dismissal_is_written_only_once_true() -> None:
 #: ui_prefs.py exactly as 0.2.0 and 0.2.1 shipped it (identical in both tags):
 #: the reader a rollback meets. Kept verbatim, outside the linters, as a fixture.
 RELEASED_READER = Path(__file__).parent / "fixtures" / "ui_prefs_v0_2.py.frozen"
+#: ui_prefs.py exactly as 0.2.2 shipped it: the first release with version 2,
+#: whose default was classic. Kept verbatim the same way.
+RELEASED_READER_0_2_2 = Path(__file__).parent / "fixtures" / "ui_prefs_v0_2_2.py.frozen"
 
 
-def _released(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    name = "ui_prefs_as_released_in_0_2"
-    loader = importlib.machinery.SourceFileLoader(name, str(RELEASED_READER))
+def _released(
+    monkeypatch: pytest.MonkeyPatch, reader: Path = RELEASED_READER, version: int = 1
+) -> ModuleType:
+    name = f"ui_prefs_as_released_{reader.name.split('.')[0]}"
+    loader = importlib.machinery.SourceFileLoader(name, str(reader))
     spec = importlib.util.spec_from_loader(name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)  # dataclasses look their module up
     loader.exec_module(module)
-    assert module.VERSION == 1
+    assert version == module.VERSION, "the reader is the release it claims to be"
     return module
 
 
 def test_the_interfaces_are_the_ones_the_app_builds() -> None:
-    from wall_in_one.ui.window_services import UI_KINDS
+    from wall_in_one.ui.window_services import DEFAULT_UI, UI_KINDS
 
     assert ui_prefs.INTERFACES == UI_KINDS
-    assert UiPrefs().interface == "classic"
-    assert UiPrefs.from_mapping({"interface": "fancy"}).interface == "classic"
-    assert UiPrefs.from_mapping({"interface": 2}).interface == "classic"
+    assert ui_prefs.DEFAULT_INTERFACE == DEFAULT_UI == "next", "0.3.0: the new one by default"
+    assert UiPrefs().interface is None, "nothing is chosen until the user chooses"
+    assert UiPrefs().interface_to_start == "next"
+    for invalid in ("fancy", 2, "", "Classic"):
+        prefs = UiPrefs.from_mapping({"interface": invalid})
+        assert prefs.interface is None and prefs.interface_to_start == "next", invalid
+    for chosen in ("classic", "next"):
+        prefs = UiPrefs.from_mapping({"interface": chosen})
+        assert prefs.interface == prefs.interface_to_start == chosen
 
 
-def test_a_profile_that_never_chooses_the_new_interface_stays_at_version_1() -> None:
+def test_a_profile_that_never_chooses_an_interface_stays_at_version_1() -> None:
     ui_prefs.update({"window_style": "frosted"})
     ui_prefs.update({"tidy_offer_dismissed": True})
-    ui_prefs.update({"interface": "classic"})
+    ui_prefs.update({"gpu_acceleration": True})
 
     document = tomllib.loads(paths.ui_prefs_path().read_text())
     assert document["version"] == 1 and "interface" not in document
     assert _siblings() == {"ui.toml", ".ui.toml.mutation.lock"}, "no backup without a bump"
+    assert ui_prefs.launch_interface() == "next", "and it starts the default, the new one"
 
 
-def test_choosing_the_new_interface_bumps_once_and_keeps_the_version_1_bytes() -> None:
+@pytest.mark.parametrize(("chosen", "other"), [("classic", "next"), ("next", "classic")])
+def test_choosing_an_interface_bumps_once_and_keeps_the_version_1_bytes(
+    chosen: str, other: str
+) -> None:
+    """Classic is written as a choice now: without it, a start builds the new interface."""
     target = paths.ui_prefs_path()
     ui_prefs.update({"window_style": "frosted"})
     version_1 = target.read_bytes()
 
-    ui_prefs.update({"interface": "next"})
+    ui_prefs.update({"interface": chosen})
 
     document = tomllib.loads(target.read_text())
-    assert document["version"] == 2 and document["interface"] == "next"
+    assert document["version"] == 2 and document["interface"] == chosen
     assert document["window_style"] == "frosted"
     backup = paths.app_config_dir() / "ui.toml.v1-backup"
     assert backup.read_bytes() == version_1
     assert stat.S_IMODE(backup.stat().st_mode) == stat.S_IMODE(os.stat(target).st_mode)
-    assert ui_prefs.load().prefs.interface == "next"
+    assert ui_prefs.load().prefs.interface == chosen
+    assert ui_prefs.launch_interface() == chosen
 
-    # Back to classic: the key goes, the version stays (a file never moves down).
-    ui_prefs.update({"interface": "classic"})
+    # The other one: written too, and the version stays (a file never moves down).
+    ui_prefs.update({"interface": other})
     document = tomllib.loads(target.read_text())
-    assert document["version"] == 2 and "interface" not in document
-    ui_prefs.update({"interface": "next"})
+    assert document["version"] == 2 and document["interface"] == other
+    assert ui_prefs.launch_interface() == other
+    ui_prefs.update({"interface": chosen})
     assert backup.read_bytes() == version_1, "the one backup is never overwritten"
 
 
-def test_a_first_file_that_chooses_the_new_interface_needs_no_backup() -> None:
-    ui_prefs.update({"interface": "next"})
+@pytest.mark.parametrize("chosen", ["classic", "next"])
+def test_a_first_file_that_chooses_an_interface_needs_no_backup(chosen: str) -> None:
+    ui_prefs.update({"interface": chosen})
 
-    assert tomllib.loads(paths.ui_prefs_path().read_text())["version"] == 2
+    document = tomllib.loads(paths.ui_prefs_path().read_text())
+    assert document["version"] == 2 and document["interface"] == chosen
     assert _siblings() == {"ui.toml", ".ui.toml.mutation.lock"}
 
 
-def test_no_backup_means_no_bump() -> None:
+@pytest.mark.parametrize("chosen", ["classic", "next"])
+def test_no_backup_means_no_bump(chosen: str) -> None:
     target = paths.ui_prefs_path()
     ui_prefs.update({"frost": 0.25})
     before = target.read_bytes()
     (paths.app_config_dir() / "ui.toml.v1-backup").mkdir()
 
     with pytest.raises(ui_prefs.UiPrefsError, match="Nothing was changed"):
-        ui_prefs.update({"interface": "next"})
+        ui_prefs.update({"interface": chosen})
 
     assert target.read_bytes() == before
     ui_prefs.update({"frost": 0.5})  # an edit version 1 can hold still saves
     assert tomllib.loads(target.read_text())["version"] == 1
 
 
+@pytest.mark.parametrize("chosen", ["classic", "next"])
 def test_0_2_releases_read_a_version_2_file_but_never_write_it(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, chosen: str
 ) -> None:
+    """Choosing Classic now moves the file to version 2 too, so 0.2.0 and 0.2.1 only read it."""
     released = _released(monkeypatch)
     target = paths.ui_prefs_path()
     ui_prefs.update({"window_style": "translucent", "thumbnail_size": "small"})
-    # Until the new interface is chosen, a 0.2 release keeps editing the file.
+    # Until an interface is chosen, a 0.2 release keeps editing the file.
     assert released.load().writable
     released.update({"frost": 0.3})
     assert ui_prefs.load().prefs.frost == 0.3
 
-    ui_prefs.update({"interface": "next"})
-    chosen = target.read_bytes()
+    ui_prefs.update({"interface": chosen})
+    chosen_bytes = target.read_bytes()
     seen = released.load()
 
     assert seen.prefs.window_style == "translucent" and seen.prefs.thumbnail_size == "small"
@@ -528,9 +551,79 @@ def test_0_2_releases_read_a_version_2_file_but_never_write_it(
         released.update({"frost": 0.9})
     with pytest.raises(released.UiPrefsReadOnlyError):
         released.update({"tidy_offer_dismissed": True})
-    assert target.read_bytes() == chosen, "read-only, never broken or rewritten"
+    assert target.read_bytes() == chosen_bytes, "read-only, never broken or rewritten"
     backup = paths.app_config_dir() / "ui.toml.v1-backup"
     assert released.load(backup).writable, "the backup is a file the release can edit again"
+
+
+def test_0_2_2_reads_an_explicit_classic_and_its_next_save_drops_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rollback caveat in docs/updating.md, pinned against 0.2.2's own code.
+
+    ``interface = "classic"`` is a value 0.2.2 knows: it starts classic and
+    keeps saving the file. But it renders classic, its default, by leaving the
+    key out, so its next save of any window preference drops the choice, and
+    0.3.0 then finds none and starts the new interface.
+    """
+    released = _released(monkeypatch, RELEASED_READER_0_2_2, version=2)
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"window_style": "frosted"})
+    ui_prefs.update({"interface": "classic"})
+
+    seen = released.load()
+    assert seen.writable and seen.prefs.interface == "classic"
+    assert released.launch_interface() is None, "0.2.2's None is its classic interface"
+
+    released.update({"frost": 0.3})  # any 0.2.2 save: a dial, the Tidy card, GPU
+
+    document = tomllib.loads(target.read_text())
+    assert document["version"] == 2, "never moved back down"
+    assert "interface" not in document and document["frost"] == 0.3
+    assert ui_prefs.load().prefs.interface is None
+    assert ui_prefs.launch_interface() == "next", "the choice 0.2.2 dropped is gone"
+
+    # The new interface, chosen in 0.3.0, survives 0.2.2's saves and starts there.
+    ui_prefs.update({"interface": "next"})
+    assert released.launch_interface() == "next"
+    released.update({"frost": 0.4})
+    assert ui_prefs.launch_interface() == "next"
+
+
+def test_a_0_2_2_return_to_classic_is_indistinguishable_from_no_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unavoidable loss: 0.2.2 wrote nothing for Classic, so 0.3.0 starts new once.
+
+    Neither the missing key nor the version tells it apart from a profile that
+    never chose: turning GPU acceleration off also moves the file to version 2.
+    """
+    released = _released(monkeypatch, RELEASED_READER_0_2_2, version=2)
+    released.update({"interface": "next"})
+    released.update({"interface": "classic"})
+    went_back = tomllib.loads(paths.ui_prefs_path().read_text())
+    assert went_back["version"] == 2 and "interface" not in went_back
+
+    assert ui_prefs.launch_interface() == "next"
+    paths.ui_prefs_path().unlink()
+    released.update({"gpu_acceleration": False})
+    gpu_off = tomllib.loads(paths.ui_prefs_path().read_text())
+    assert gpu_off["version"] == 2 and "interface" not in gpu_off
+    assert ui_prefs.launch_interface() == "next", "the version is not read as a choice"
+
+
+def test_0_2_2_starts_classic_for_a_profile_0_3_0_left_unchosen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rolling back with no choice made: 0.2.2's own default, classic, and nothing changes."""
+    released = _released(monkeypatch, RELEASED_READER_0_2_2, version=2)
+    ui_prefs.update({"window_style": "frosted"})
+    before = paths.ui_prefs_path().read_bytes()
+
+    seen = released.load()
+    assert seen.writable and seen.prefs.window_style == "frosted"
+    assert released.launch_interface() is None
+    assert paths.ui_prefs_path().read_bytes() == before
 
 
 def _config_files() -> dict[str, bytes] | None:
@@ -543,14 +636,16 @@ def _config_files() -> dict[str, bytes] | None:
 @pytest.mark.parametrize(
     ("document", "expected", "logged"),
     [
-        (None, None, False),
+        (None, "next", False),
+        ('version = 1\nwindow_style = "frosted"\n', "next", False),
+        ("version = 2\ngpu_acceleration = false\n", "next", False),
         ('version = 2\ninterface = "next"\n', "next", False),
-        ('version = 2\ninterface = "classic"\n', None, False),
-        ('interface = "next"\n', "next", False),
-        ('version = 7\ninterface = "next"\n', "next", False),
-        ('version = 2\ninterface = "fancy"\n', None, True),
-        ("version = 2\ninterface = 2\n", None, True),
-        ("version = 2\ninterface =\n", None, True),
+        ('version = 2\ninterface = "classic"\n', "classic", False),
+        ('interface = "classic"\n', "classic", False),
+        ('version = 7\ninterface = "classic"\n', "classic", False),
+        ('version = 2\ninterface = "fancy"\n', "next", True),
+        ("version = 2\ninterface = 2\n", "next", True),
+        ("version = 2\ninterface =\n", "next", True),
     ],
 )
 def test_the_launch_reads_the_interface_and_never_writes(
@@ -570,11 +665,12 @@ def test_the_launch_reads_the_interface_and_never_writes(
     assert len(caplog.records) == (1 if logged else 0), "one line, only for an unusable value"
 
 
-def test_an_unreadable_file_starts_the_classic_interface(caplog: pytest.LogCaptureFixture) -> None:
+def test_an_unreadable_file_starts_the_new_interface(caplog: pytest.LogCaptureFixture) -> None:
+    """Like a missing one: the default. ``--ui=classic`` still reaches classic."""
     paths.ui_prefs_path().mkdir(parents=True)
     with caplog.at_level(logging.INFO, logger="wall_in_one.ui_prefs"):
-        assert ui_prefs.launch_interface() is None
-    assert len(caplog.records) == 1 and "starting the classic interface" in caplog.text
+        assert ui_prefs.launch_interface() == "next"
+    assert len(caplog.records) == 1 and "starting the new interface" in caplog.text
 
 
 # -- version 2: GPU acceleration for the window ---------------------------------------------
@@ -658,3 +754,22 @@ def test_the_launch_reads_gpu_acceleration_and_never_writes(
 def test_an_unreadable_file_leaves_gpu_acceleration_on() -> None:
     paths.ui_prefs_path().mkdir(parents=True)
     assert ui_prefs.launch_gpu_acceleration() is True
+
+
+def test_gpu_acceleration_and_the_interface_stay_independent() -> None:
+    """Either choice can change without touching the other, in the file and at launch."""
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"interface": "classic"})
+    ui_prefs.update({"gpu_acceleration": False})
+    assert (ui_prefs.launch_interface(), ui_prefs.launch_gpu_acceleration()) == ("classic", False)
+
+    ui_prefs.update({"gpu_acceleration": True})
+    document = tomllib.loads(target.read_text())
+    assert document["interface"] == "classic" and "gpu_acceleration" not in document
+    assert (ui_prefs.launch_interface(), ui_prefs.launch_gpu_acceleration()) == ("classic", True)
+
+    ui_prefs.update({"gpu_acceleration": False})
+    ui_prefs.update({"interface": "next"})
+    document = tomllib.loads(target.read_text())
+    assert document["interface"] == "next" and document["gpu_acceleration"] is False
+    assert (ui_prefs.launch_interface(), ui_prefs.launch_gpu_acceleration()) == ("next", False)

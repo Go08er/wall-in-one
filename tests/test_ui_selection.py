@@ -1,4 +1,4 @@
-"""``--ui`` picks the window; the default launch is exactly the classic one.
+"""``--ui`` picks the window; without it, the one chosen in Settings, else the new one.
 
 No GTK here: the GUI entry point is replaced by a recording stub, the same
 way `test_control` checks ``--service`` and ``--open-page``. The display-backed
@@ -62,15 +62,18 @@ def _install_gui(monkeypatch: pytest.MonkeyPatch, events: list[object]) -> list[
     return calls
 
 
-def test_the_default_is_classic_and_calls_run_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_default_is_the_new_interface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0.3.0: no ``--ui`` and nothing chosen in Settings builds the new interface."""
     events: list[object] = []
     calls = _install_gui(monkeypatch, events)
 
     assert cli.main([]) == 0
+    assert cli.main(["--service"]) == 0
 
-    assert DEFAULT_UI == "classic"
-    assert calls == [(False, None, None, None)], "no ui keyword reaches run() without --ui"
-    assert events == ["upgrade gate", "run"]
+    assert DEFAULT_UI == "next"
+    assert calls == [(False, None, None, "next"), (True, None, None, "next")]
+    assert events == ["upgrade gate", "run"] * 2
+    assert not paths.ui_prefs_path().exists(), "starting writes nothing"
 
 
 @pytest.mark.parametrize("choice", UI_KINDS)
@@ -109,7 +112,8 @@ def test_an_unknown_ui_is_refused_before_any_upgrade_work(
     assert "invalid choice: 'modern'" in capsys.readouterr().err
 
 
-def test_the_flag_stays_out_of_help_while_the_new_ui_is_a_placeholder() -> None:
+def test_the_flag_stays_out_of_help() -> None:
+    """Settings → Appearance → Interface is the documented way to choose; --ui stays hidden."""
     assert "--ui" not in cli._build_parser().format_help()
 
 
@@ -143,14 +147,36 @@ def test_the_interface_chosen_in_settings_is_built_without_the_flag(
     assert paths.ui_prefs_path().read_bytes() == before, "the launch only reads it"
 
 
+def test_classic_chosen_in_settings_is_built_without_the_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _choose("classic")
+    before = paths.ui_prefs_path().read_bytes()
+    calls = _install_gui(monkeypatch, [])
+
+    assert cli.main(["--open-page", "media"]) == 0
+    assert cli.main(["--service"]) == 0
+
+    assert calls == [(False, "media", None, "classic"), (True, None, None, "classic")]
+    assert paths.ui_prefs_path().read_bytes() == before, "the launch only reads it"
+
+
 @pytest.mark.parametrize(
     ("saved", "flag", "expected"),
-    [("next", "classic", "classic"), ("classic", "next", "next"), ("next", "next", "next")],
+    [
+        ("next", "classic", "classic"),
+        (None, "classic", "classic"),
+        ("classic", "next", "next"),
+        ("next", "next", "next"),
+        (None, "next", "next"),
+    ],
 )
 def test_an_explicit_flag_always_wins(
-    monkeypatch: pytest.MonkeyPatch, saved: str, flag: UiKind, expected: UiKind
+    monkeypatch: pytest.MonkeyPatch, saved: str | None, flag: UiKind, expected: UiKind
 ) -> None:
-    _choose(saved)
+    """``--ui=classic`` reaches classic over a saved New and over no choice at all."""
+    if saved is not None:
+        _choose(saved)
     calls = _install_gui(monkeypatch, [])
 
     assert cli.main([f"--ui={flag}"]) == 0
@@ -160,9 +186,15 @@ def test_an_explicit_flag_always_wins(
 
 @pytest.mark.parametrize(
     "document",
-    [None, 'version = 2\ninterface = "fancy"\n', "not toml [[", "version = 9\nfrost = 0.1\n"],
+    [
+        None,
+        'version = 2\ninterface = "fancy"\n',
+        "not toml [[",
+        "version = 9\nfrost = 0.1\n",
+        "version = 2\ngpu_acceleration = false\n",
+    ],
 )
-def test_a_missing_unusable_or_unknown_choice_starts_classic_as_before(
+def test_a_missing_unusable_or_unknown_choice_starts_the_new_interface(
     monkeypatch: pytest.MonkeyPatch, document: str | None
 ) -> None:
     target = paths.ui_prefs_path()
@@ -173,7 +205,7 @@ def test_a_missing_unusable_or_unknown_choice_starts_classic_as_before(
 
     assert cli.main(["--open-page", "media"]) == 0
 
-    assert calls == [(False, "media", None, None)], "run() is called exactly as before"
+    assert calls == [(False, "media", None, "next")], "the default"
     if document is None:
         assert not target.exists(), "nothing is created"
     else:
@@ -184,7 +216,7 @@ def test_ctl_open_with_no_instance_starts_the_interface_chosen_in_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`ctl open` starts a plain `wall-in-one --open-page <page>`, which reads the choice."""
-    _choose("next")
+    _choose("classic")
     started: list[list[str]] = []
 
     def no_socket(*_arguments: object, **_keywords: object) -> object:
@@ -204,4 +236,4 @@ def test_ctl_open_with_no_instance_starts_the_interface_chosen_in_settings(
     arguments = argv[argv.index("--open-page") :]
     calls = _install_gui(monkeypatch, [])
     assert cli.main(arguments) == 0
-    assert calls == [(False, "settings", None, "next")]
+    assert calls == [(False, "settings", None, "classic")]

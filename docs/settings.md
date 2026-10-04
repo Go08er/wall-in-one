@@ -81,8 +81,9 @@ and 0.1.4 can't use a file with one at all.
   thumbnail size, the page to reopen, the interface to start, GPU
   acceleration) go in `ui.toml`, beside `settings.toml`. A start that opens a
   window reads it, without writing, for two keys. `interface` (`classic` or
-  `next`) is the interface it builds; a missing or unusable value means
-  classic, and `--ui=classic` or `--ui=next` always overrides it.
+  `next`) is the interface it builds; a missing or unusable value means the
+  new interface, the default since 0.3.0 (0.2.2's default was classic), and
+  `--ui=classic` or `--ui=next` always overrides it.
   `gpu_acceleration` (`true` or `false`, written only when `false`) is whether
   the window may render on the GPU: `false` sets `GSK_RENDERER=cairo`, GTK's
   software renderer, for the app and the GTK programs it starts, while `true`,
@@ -93,7 +94,7 @@ and 0.1.4 can't use a file with one at all.
   classic interface also reads it for whether you dismissed the Tidy up card
   after an update (`tidy_offer_dismissed`), and writes it only when you do or
   when you change Settings → Appearance → Interface or GPU acceleration. The
-  new interface (`--ui=next`) reads it when its window opens and writes it
+  new interface reads it when its window opens and writes it
   only when you change the window style, an opacity or frost dial, the
   thumbnail size, or the Interface or GPU acceleration row on its Settings
   page. Its other Settings rows write `settings.toml`, the same keys the same
@@ -107,15 +108,19 @@ and 0.1.4 can't use a file with one at all.
 
 `ui.toml` carries a `version`. A release that finds a newer version uses the
 preferences it understands and never writes the file. Version 2 adds
-`interface` and `gpu_acceleration`. A file moves to it only when you first
-choose New (preview) or turn GPU acceleration off. If `ui.toml` already
+`interface` and `gpu_acceleration`. `interface` is absent until you choose an
+interface, and absent means the default: the new interface since 0.3.0.
+Choosing either one writes it, Classic included (0.2.2, whose default was
+classic, wrote only `next`). A file moves to version 2 only when you first
+choose an interface or turn GPU acceleration off. If `ui.toml` already
 existed, its version 1 bytes are kept first as `ui.toml.v1-backup` (never
 overwritten, and without it nothing is saved); if that choice is what created
 `ui.toml`, it starts at version 2 and there is no backup, because there was
-nothing to keep. Either way it stays at version 2 after that, even if you go
-back to Classic or turn GPU acceleration on again. A profile that never makes
-either choice stays at version 1, which 0.2.0 and 0.2.1 keep reading and
-writing. A row whose change could not be saved goes back to what `ui.toml`
+nothing to keep. Either way it stays at version 2 after that, even if you
+turn GPU acceleration on again. A profile that never makes either choice
+stays at version 1, which 0.2.0 and 0.2.1 keep reading and writing. See
+[Updating](updating.md#going-back-from-030-to-022-021-or-020) for what older
+releases do with a chosen interface. A row whose change could not be saved goes back to what `ui.toml`
 holds and says why. Keys it doesn't know are
 kept through every save, an invalid value falls back to that preference's
 default, and a missing file means defaults. An unreadable or malformed

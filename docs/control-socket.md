@@ -137,11 +137,12 @@ then rescans the library once in the background, because nothing watches the
 library folders and files may have been added meanwhile. F5 rescans an open
 window. The `displays` spelling is an alias for the Display schedules page, so
 a shell or panel integration does not have to know that both concepts share one
-screen. An app started with the `--ui=next` preview interface opens every
-page there too: `media` (the Library), `browse` (the Store), `playlists`,
-`settings` and `schedules` (Schedule, which `displays` also opens). A page
-the new interface lacked would still present the window and answer with kind
-`not-in-new-ui` and exit status 1.
+screen. The new interface, which an app starts with unless Classic is chosen
+in Settings (or `--ui=classic` given), opens every page too: `media` (the
+Library), `browse` (the Store), `playlists`, `settings` and `schedules`
+(Schedule, which `displays` also opens). A page the new interface lacked
+would still present the window and answer with kind `not-in-new-ui` and exit
+status 1.
 
 `providers`, `search` and `download` reach the same provider code the Store
 tab uses, so a wallpaper can be found and pulled into the library without

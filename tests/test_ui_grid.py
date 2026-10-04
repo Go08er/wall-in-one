@@ -648,7 +648,7 @@ def test_every_declared_accelerator_is_actually_installed(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     from wall_in_one.ui.app import Application
 
-    application = Application()
+    application = Application(ui="classic")
     application._install_accelerators()
 
     def normalised(accelerator: str) -> str | None:
@@ -667,8 +667,8 @@ def test_service_mode_suppresses_the_initial_window(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     from wall_in_one.ui.app import Application
 
-    service = Application(service=True)
-    graphical = Application()
+    service = Application(service=True, ui="classic")
+    graphical = Application(ui="classic")
 
     assert service.get_flags() & Gio.ApplicationFlags.IS_SERVICE
     assert not (graphical.get_flags() & Gio.ApplicationFlags.IS_SERVICE)
@@ -681,7 +681,7 @@ def test_closing_the_window_keeps_only_the_service_reference(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     from wall_in_one.ui.app import Application
 
-    application = Application()
+    application = Application(ui="classic")
     window = object()
     application._window = window  # type: ignore[assignment]
 
@@ -708,7 +708,7 @@ def test_closing_without_an_edit_preserves_settings_bytes(
     target = paths.settings_path()
     target.parent.mkdir(parents=True)
     target.write_text(document, encoding="utf-8")
-    application = Application()
+    application = Application(ui="classic")
     window = object()
     application._window = window  # type: ignore[assignment]
 
@@ -939,7 +939,7 @@ def test_changing_roots_requests_a_scan_and_redraw_instead_of_only_a_highlight(
         def show_current(self, _session: object) -> None:
             self.highlights += 1
 
-    application = Application()
+    application = Application(ui="classic")
     application._session.shutdown()
     session = StubSession()
     window = StubWindow()
@@ -973,7 +973,7 @@ def test_failed_settings_save_is_not_adopted_by_application_or_session(
     from wall_in_one import config
     from wall_in_one.ui.app import Application
 
-    application = Application()
+    application = Application(ui="classic")
     before = application.settings
 
     def fail(_changes: object, _path: Path | None = None) -> config.Settings:

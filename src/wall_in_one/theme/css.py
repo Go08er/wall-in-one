@@ -11,7 +11,7 @@ Translucency is applied only to the window background. Making every surface
 translucent stacks alpha and turns text muddy -- one translucent plane with the
 compositor blurring behind it is what actually looks right.
 
-The new interface (``--ui=next``) has its own see-through styles instead,
+The new interface (``ui/next``) has its own see-through styles instead,
 chosen in ``ui.toml``: a page-background dial and a panel dial. `render` adds
 them as one extra section, scoped to ``window.wio-glass``, so the classic
 window never matches it; see `glass_layers`.

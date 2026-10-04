@@ -1090,22 +1090,22 @@ def test_a_failed_save_goes_back_and_the_same_choice_then_saves(
     target = _obstructed_bump()
     before = target.read_bytes()
     keeper = UiPrefsKeeper(backend.window_report)
-    shown: list[str] = []
+    shown: list[str | None] = []
     keeper.subscribe(lambda: shown.append(keeper.prefs.interface))
 
-    keeper.change(interface="next")
+    keeper.change(interface="classic")  # a choice now, so it needs version 2
     spin_until(lambda: backend.reports, what="the failed save's report")
 
     assert "Nothing was changed" in backend.reports[0]
-    assert keeper.prefs.interface == "classic" and shown == ["classic"], "back to ui.toml"
+    assert keeper.prefs.interface is None and shown == [None], "back to ui.toml: no choice"
     assert target.read_bytes() == before
 
     (target.parent / "ui.toml.v1-backup").rmdir()
-    keeper.change(interface="next")  # the very same choice, once more
-    spin_until(lambda: ui_prefs.load().prefs.interface == "next", what="the retried save")
+    keeper.change(interface="classic")  # the very same choice, once more
+    spin_until(lambda: ui_prefs.load().prefs.interface == "classic", what="the retried save")
     keeper.close(wait=True)
     assert keeper.saves == 2 and len(backend.reports) == 1
-    assert keeper.prefs.interface == "next"
+    assert keeper.prefs.interface == "classic"
 
 
 def test_an_earlier_failure_never_reverts_a_later_queued_choice(
@@ -1113,19 +1113,19 @@ def test_an_earlier_failure_never_reverts_a_later_queued_choice(
 ) -> None:
     target = _obstructed_bump()
     keeper = UiPrefsKeeper(backend.window_report)
-    shown: list[tuple[str, str]] = []
+    shown: list[tuple[str | None, str]] = []
     keeper.subscribe(lambda: shown.append((keeper.prefs.interface, keeper.prefs.window_style)))
 
-    keeper.change(interface="next")  # needs version 2: refused, no backup possible
+    keeper.change(interface="classic")  # needs version 2: refused, no backup possible
     keeper.change(window_style="frosted")  # version 1 holds it: saved
     assert keeper.saves == 2
     spin_until(lambda: backend.reports and not keeper.busy, what="both saves")
     keeper.close(wait=True)
 
     durable = ui_prefs.load().prefs
-    assert (durable.interface, durable.window_style) == ("classic", "frosted")
-    assert (keeper.prefs.interface, keeper.prefs.window_style) == ("classic", "frosted")
-    assert shown == [("classic", "frosted")], "only the latest save reconciled, once"
+    assert (durable.interface, durable.window_style) == (None, "frosted")
+    assert (keeper.prefs.interface, keeper.prefs.window_style) == (None, "frosted")
+    assert shown == [(None, "frosted")], "only the latest save reconciled, once"
     assert len(backend.reports) == 1
     assert tomllib.loads(target.read_text())["version"] == 1
 

@@ -264,7 +264,7 @@ def test_service_mode_reaches_the_windowless_application(
     """The CLI flag must survive the lazy GTK import unchanged."""
     from wall_in_one import cli
 
-    calls: list[tuple[bool, str | None]] = []
+    calls: list[tuple[bool, str | None, str | None]] = []
     fake = types.ModuleType("wall_in_one.ui.app")
 
     def run(
@@ -272,21 +272,23 @@ def test_service_mode_reaches_the_windowless_application(
         *,
         service: bool = False,
         initial_page: str | None = None,
+        preferred_ui: str | None = None,
     ) -> int:
-        calls.append((service, initial_page))
+        calls.append((service, initial_page, preferred_ui))
         return 17
 
     fake.run = run  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wall_in_one.ui.app", fake)
 
     assert cli.main(["--service"]) == 17
-    assert calls == [(True, None)]
+    # The interface the service builds when activated: the default, nothing chosen.
+    assert calls == [(True, None, "next")]
 
 
 def test_open_page_reaches_the_gui_application(monkeypatch: pytest.MonkeyPatch) -> None:
     from wall_in_one import cli
 
-    calls: list[tuple[bool, str | None]] = []
+    calls: list[tuple[bool, str | None, str | None]] = []
     fake = types.ModuleType("wall_in_one.ui.app")
 
     def run(
@@ -294,15 +296,16 @@ def test_open_page_reaches_the_gui_application(monkeypatch: pytest.MonkeyPatch) 
         *,
         service: bool = False,
         initial_page: str | None = None,
+        preferred_ui: str | None = None,
     ) -> int:
-        calls.append((service, initial_page))
+        calls.append((service, initial_page, preferred_ui))
         return 0
 
     fake.run = run  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wall_in_one.ui.app", fake)
 
     assert cli.main(["--open-page", "schedules"]) == 0
-    assert calls == [(False, "schedules")]
+    assert calls == [(False, "schedules", "next")]
 
 
 def test_open_launches_the_gui_when_only_the_runtime_exists(

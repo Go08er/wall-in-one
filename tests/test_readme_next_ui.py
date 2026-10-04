@@ -1,4 +1,4 @@
-"""The README's `--ui=next` section says what the preview really changes.
+"""The README's new-interface section says what the new interface really changes.
 
 Final 0.2.0 review D-2: it said the playback controls were "shown but off",
 while the player bar's transport controls are live. The controls named here are
@@ -33,7 +33,7 @@ CONTROLS: Final = {
 
 def _section() -> str:
     readme = README.read_text(encoding="utf-8")
-    section = readme.split("### The new interface behind `--ui=next`", 1)[1]
+    section = readme.split("### The new interface (the default)", 1)[1]
     section = section.split("\n### ", 1)[0].split("\n## ", 1)[0]
     return " ".join(section.split())
 
@@ -81,13 +81,21 @@ def test_the_readme_says_every_control_follows_the_bar_scope() -> None:
 
 
 def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> None:
-    """The interface is chosen in Settings; --ui overrides it; 0.2.0 and 0.2.1 ignore it."""
+    """The interface is chosen in Settings; --ui overrides it; 0.2.0 and 0.2.1 ignore it.
+
+    0.3.0 made the new interface the default, so the README now says how to
+    choose Classic (it said how to choose "New (preview)") and that a start
+    with no choice opens the new interface.
+    """
     section = _section()
-    assert "Settings → Appearance → Interface → New (preview)" in section
+    assert "Settings → Appearance → Interface → Classic" in section
+    assert "New (preview)" not in section and "classic stays the default" not in section
+    assert "With neither, the app opens the new interface" in section
     assert "takes effect the next time Wall-in-One starts" in section
     assert "`--ui=classic` overrides the saved choice for that start" in section
     assert "When no app is running, `ctl open` launches the interface chosen in Settings" in section
     assert "0.2.0 and 0.2.1 don't know the choice and start classic" in section
+    assert "It keeps a saved Classic only until it next saves a window preference" in section
 
 
 def test_the_readme_says_what_the_playlists_page_does() -> None:

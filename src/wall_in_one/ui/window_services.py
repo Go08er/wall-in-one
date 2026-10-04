@@ -22,9 +22,9 @@ that asks the first-run questions on its own welcome screen. The application
 checks for it with ``isinstance`` and presents its dialogs over any other
 window, so the classic window, and the plain test windows, are unchanged.
 
-Which window gets built is the process's ``--ui`` choice (`UiKind`). The
-classic `MainWindow` is the default; ``next`` builds the new interface while it
-is being ported, behind the flag.
+Which window gets built is the process's ``--ui`` choice (`UiKind`), else the
+interface chosen in Settings, else `DEFAULT_UI`: since 0.3.0 the new
+interface (``next``, `NextWindow`). ``classic`` builds `MainWindow`.
 
 GTK-free on purpose: annotations only, so the command line can import the
 choices without loading GTK.
@@ -41,10 +41,11 @@ if TYPE_CHECKING:
     from wall_in_one.session import Session
     from wall_in_one.theme import source
 
-#: The window a process builds: today's interface, or the one being ported.
+#: The window a process builds: the classic interface, or the new one.
 UiKind = Literal["classic", "next"]
 UI_KINDS: Final[tuple[UiKind, ...]] = ("classic", "next")
-DEFAULT_UI: Final[UiKind] = "classic"
+#: Built when neither ``--ui`` nor Settings chose: the ui_prefs module's ``DEFAULT_INTERFACE``.
+DEFAULT_UI: Final[UiKind] = "next"
 
 
 class WindowServices(Protocol):

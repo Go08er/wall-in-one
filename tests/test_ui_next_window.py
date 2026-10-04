@@ -399,15 +399,41 @@ def test_next_ui_survives_the_whole_application_lifecycle(
     assert StatusChange.STATUS in changes and StatusChange.UNAVAILABLE in changes
 
 
-def test_the_default_application_still_builds_the_classic_window(runtime: FakeRuntime) -> None:
+def test_the_default_application_builds_the_new_window(runtime: FakeRuntime) -> None:
+    """0.3.0: an application nothing chose a window for builds `NextWindow`."""
     application = Application()
+    lanes: list[ThreadPoolExecutor] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert application.ui == "next"
+        assert isinstance(window, NextWindow), "the default is the new interface"
+        yield (
+            "the first scan",
+            lambda: settled(application) and window.library_text == "2 wallpapers in the library",
+        )
+        assert window.show_page("settings") is True
+        assert window.get_title() == "Wall-in-One - Settings"
+        lanes.extend(application_lanes(application))
+        window.close()
+
+    try:
+        assert run_application(application, scenario()) == 0
+    finally:
+        for lane in lanes:
+            lane.shutdown(wait=True)
+    assert application._window is None
+
+
+def test_classic_still_builds_its_window_when_chosen(runtime: FakeRuntime) -> None:
+    application = Application(ui="classic")
     lanes: list[ThreadPoolExecutor] = []
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
 
     def scenario() -> Iterator[Step]:
         window = application._window
         assert application.ui == "classic"
-        assert isinstance(window, MainWindow), "no --ui means today's window"
+        assert isinstance(window, MainWindow), "--ui=classic, or Classic in Settings"
         yield "the first scan", lambda: settled(application) and window._playable == 2
 
         runtime.answer(two_display_status())
@@ -544,7 +570,7 @@ def test_a_next_window_gone_before_its_first_layout_leaves_a_later_run_able_to_e
         shown.session.shutdown()
     assert drains(GLib.MainContext.default()), "a source re-arms forever after its window went"
 
-    application = Application()
+    application = Application(ui="classic")
     lanes: list[ThreadPoolExecutor] = []
 
     def scenario() -> Iterator[Step]:
@@ -712,19 +738,20 @@ def test_the_new_interface_settings_page_chooses_the_interface_to_start() -> Non
         assert isinstance(page, SettingsPage)
         assert page.interface_row is not None and page.gpu_row is not None
         row = page.interface_row
-        assert row.get_selected() == 0, "nothing saved yet: the next start is classic"
+        assert row.get_selected() == 1, "nothing saved yet: the next start is the new one"
         assert row.get_sensitive() and row.get_subtitle() == (
             "Takes effect the next time Wall-in-One starts."
         )
         assert not target.exists(), "showing the row writes nothing"
 
-        row.set_selected(1)
-        window.preferences.close(wait=True)
-        assert ui_prefs.load().prefs.interface == "next"
-        assert ui_prefs.launch_interface() == "next"
         row.set_selected(0)
         window.preferences.close(wait=True)
-        assert ui_prefs.launch_interface() is None
+        assert ui_prefs.load().prefs.interface == "classic"
+        assert ui_prefs.launch_interface() == "classic"
+        row.set_selected(1)
+        window.preferences.close(wait=True)
+        assert ui_prefs.load().prefs.interface == "next", "New, once chosen, is written too"
+        assert ui_prefs.launch_interface() == "next"
         assert window.preferences.saves == 2, "one write per change"
     finally:
         window.destroy()
@@ -735,7 +762,7 @@ def test_the_new_interface_settings_page_chooses_the_interface_to_start() -> Non
 def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written() -> None:
     target = paths.ui_prefs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    document = 'version = 5\ninterface = "next"\n'
+    document = 'version = 5\ninterface = "classic"\n'
     target.write_text(document)
     application = Application(ui="next")
     window = NextWindow(application, application.settings)
@@ -745,7 +772,8 @@ def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written()
         assert page.interface_row is not None and page.gpu_row is not None
         assert not page.interface_row.get_sensitive()
         assert "newer version of Wall-in-One" in (page.interface_row.get_subtitle() or "")
-        page.interface_row.set_selected(0)
+        assert page.interface_row.get_selected() == 0, "what the file chose"
+        page.interface_row.set_selected(1)
         window.preferences.close(wait=True)
         assert target.read_text() == document
     finally:
@@ -773,14 +801,14 @@ def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_ret
         assert isinstance(page, SettingsPage)
         assert page.interface_row is not None and page.gpu_row is not None
         row = page.interface_row
-        row.set_selected(1)
+        row.set_selected(0)  # Classic: a choice, so version 2
         spin_until(lambda: reports and not window.preferences.busy, what="the refusal")
         assert "Nothing was changed" in reports[0]
-        assert row.get_selected() == 0, "the row shows what ui.toml holds"
+        assert row.get_selected() == 1, "the row shows what ui.toml holds: no choice, New"
         obstacle.rmdir()
-        row.set_selected(1)
+        row.set_selected(0)
         spin_until(lambda: not window.preferences.busy, what="the retried save")
-        assert ui_prefs.load().prefs.interface == "next" and row.get_selected() == 1
+        assert ui_prefs.load().prefs.interface == "classic" and row.get_selected() == 0
         assert len(reports) == 1
     finally:
         window.destroy()
@@ -959,5 +987,5 @@ def test_a_second_default_launch_says_nothing_new(
 
     assert app_module.run(initial_page="media") == 0
 
-    assert events[0] == ("constructed", "classic")
+    assert events[0] == ("constructed", "next"), "no choice at all: the new interface"
     assert capsys.readouterr().err == ""

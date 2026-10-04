@@ -603,11 +603,15 @@ pkgs.testers.runNixOSTest {
         assert ctl("cycle off") == "cycle off (manual)"
         machine.succeed("rm -f ${driverLog}")
         page_hashes = {}
+        # The new interface, the default since 0.3.0, titles its window
+        # "Wall-in-One - <page>" with its pages' own titles, "Playlist" and
+        # "Schedule" among them. Classic's "Playlists" and "Schedules" contain
+        # them, so each grep -F below matches either window.
         page_titles = {
             "browse": "Store",
             "media": "Library",
-            "playlists": "Playlists",
-            "schedules": "Schedules",
+            "playlists": "Playlist",
+            "schedules": "Schedule",
             "settings": "Settings",
         }
         for page, title in page_titles.items():

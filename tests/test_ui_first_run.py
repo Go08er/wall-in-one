@@ -94,7 +94,7 @@ def test_a_chosen_default_is_persisted_and_prevents_the_next_prompt(
 ) -> None:
     root = tmp_path / "wallpapers"
     root.mkdir()
-    application = Application()
+    application = Application(ui="classic")
     application._authoring_migration_ready = True
     # This test is about the durable settings boundary; a service is not
     # running in the isolated XDG fixture and does not need a runtime document.
@@ -123,7 +123,7 @@ def test_unconfigured_state_never_generates_into_a_detected_scan_root(
 ) -> None:
     detected = tmp_path / "detected"
     detected.mkdir()
-    application = Application()
+    application = Application(ui="classic")
     application.session.adopt_library(Library(roots=(detected,), items=()))
     requested: list[object] = []
     monkeypatch.setattr(

@@ -116,7 +116,7 @@ def _application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Application
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    application = Application()
+    application = Application(ui="classic")
     # Runtime/authoring tests start after first-run migration disposition; the
     # dedicated migration suite owns the blocked-gate lifecycle itself.
     application._authoring_migration_ready = True

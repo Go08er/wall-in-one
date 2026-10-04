@@ -162,7 +162,7 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
     monkeypatch.setattr(StillMaker, "request", spy)
     profile = golden.profile
     before = harness.snapshot(profile.home)
-    application = Application() if ui == "classic" else Application(ui="next")
+    application = Application(ui="classic") if ui == "classic" else Application(ui="next")
     lanes: list[object] = []
 
     def stills_idle() -> bool:

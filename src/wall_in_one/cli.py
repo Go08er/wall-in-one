@@ -128,10 +128,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="present the GUI on one workflow page",
     )
-    # Which window the GUI builds. Hidden while the new interface is a
-    # preview; when absent, the interface chosen in Settings (ui.toml) is
-    # built, and classic when there is none. Only a process that starts the
-    # app applies either: see ui.app.run for a running instance.
+    # Which window the GUI builds. Hidden from --help, as it always was;
+    # when absent, the interface chosen in Settings (ui.toml) is built, and
+    # the new one when there is none. Only a process that starts the app
+    # applies either: see ui.app.run for a running instance.
     parser.add_argument(
         "--ui",
         choices=UI_KINDS,
@@ -814,11 +814,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run(service=options.service, initial_page=options.open_page, ui=options.ui)
     # Every GUI start comes through here: the desktop entry, `ctl open` with
     # no instance running (it starts `wall-in-one --open-page <page>`) and
-    # --service. Read-only: an unusable ui.toml means classic, never a write.
-    if ui_prefs.launch_interface() == "next":
-        return run(service=options.service, initial_page=options.open_page, preferred_ui="next")
-    # The default launch calls run() exactly as before --ui existed.
-    return run(service=options.service, initial_page=options.open_page)
+    # --service. Read-only: no choice, or an unusable ui.toml, means the
+    # default (the new interface), never a write.
+    return run(
+        service=options.service,
+        initial_page=options.open_page,
+        preferred_ui=ui_prefs.launch_interface(),
+    )
 
 
 if __name__ == "__main__":

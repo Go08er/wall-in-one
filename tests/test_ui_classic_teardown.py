@@ -150,7 +150,7 @@ def test_closing_with_previews_pending_stops_the_windows_workers(
     gate = _Gate(monkeypatch)
     shutdowns = _Shutdowns(monkeypatch)
     image = tmp_path / "wallpapers" / "dawn.png"
-    application = Application()
+    application = Application(ui="classic")
     lanes: list[ThreadPoolExecutor] = []
     pools: list[ThreadPoolExecutor] = []
     components: dict[str, int] = {}
@@ -185,7 +185,7 @@ def test_a_resident_window_is_torn_down_on_close_and_reopens_fresh(
     gate = _Gate(monkeypatch)
     shutdowns = _Shutdowns(monkeypatch)
     image = tmp_path / "wallpapers" / "dawn.png"
-    application = Application(service=True)
+    application = Application(service=True, ui="classic")
     lanes: list[ThreadPoolExecutor] = []
     pools: list[ThreadPoolExecutor] = []
 
@@ -251,7 +251,7 @@ def test_a_resident_quit_with_the_window_open_stops_its_workers(
     gate = _Gate(monkeypatch)
     shutdowns = _Shutdowns(monkeypatch)
     image = tmp_path / "wallpapers" / "dawn.png"
-    application = Application(service=True)
+    application = Application(service=True, ui="classic")
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
     lanes: list[ThreadPoolExecutor] = []
     pools: list[ThreadPoolExecutor] = []

@@ -68,7 +68,8 @@ class LaunchRows:
         keys = [key for key, _label in INTERFACE_CHOICES]
         self._showing = True
         try:
-            self.interface.set_selected(keys.index(prefs.interface))
+            # Nothing chosen yet shows the default the next start builds.
+            self.interface.set_selected(keys.index(prefs.interface_to_start))
             self.gpu.set_active(prefs.gpu_acceleration)
         finally:
             self._showing = False

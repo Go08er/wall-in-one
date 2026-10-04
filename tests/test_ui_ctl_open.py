@@ -138,7 +138,7 @@ def record_library_shown(
 def test_repeated_ctl_open_navigates_the_open_window_and_does_nothing_else(
     runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application = Application()
+    application = Application(ui="classic")
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
     lanes: list[ThreadPoolExecutor] = []
 
@@ -179,7 +179,7 @@ def test_repeated_ctl_open_navigates_the_open_window_and_does_nothing_else(
 def test_a_window_rebuilt_by_ctl_open_shows_the_held_library_then_rescans_once(
     runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    application = Application()
+    application = Application(ui="classic")
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
     lanes: list[ThreadPoolExecutor] = []
     palettes: list[MainWindow] = []

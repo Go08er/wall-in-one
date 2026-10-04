@@ -139,7 +139,7 @@ def test_gui_scan_yields_to_gtk_and_only_the_newest_generation_lands(
         resolved = tuple(roots or ())
         return Library(roots=resolved, items=(_item(resolved[0]),))
 
-    application = Application()
+    application = Application(ui="classic")
     application._session.shutdown()
     settings = config.Settings(roots=(first,), scan_workshop=False).validated()
     session = Session(settings, scanner=scanner)
@@ -220,7 +220,7 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
     settings = config.Settings(roots=(root,), scan_workshop=False).validated()
     session = Session(settings, scanner=scanner)
     session.adopt_library(Library((root,), (item,)))
-    application = Application()
+    application = Application(ui="classic")
     window = _ScanWindow()
     _wire_scan_application(application, session, window, monkeypatch)
     removed: list[bool] = []
@@ -296,7 +296,7 @@ def test_held_removal_replay_yields_and_stale_cleanup_cannot_resurrect_metadata(
     )
     session.adopt_library(Library((first,), (removed,)))
     journal.record_external(removed, (first,))
-    application = Application()
+    application = Application(ui="classic")
     window = _ScanWindow()
     _wire_scan_application(application, session, window, monkeypatch)
 
@@ -387,7 +387,7 @@ def test_held_workshop_uninstall_cleanup_yields_and_lands_only_explicit_deltas(
     session.adopt_library(Library((root,), (scene,)))
     installation.rmdir()
 
-    application = Application()
+    application = Application(ui="classic")
     window = _ScanWindow()
     _wire_scan_application(application, session, window, monkeypatch)
     authoring_started = threading.Event()
@@ -470,7 +470,7 @@ def test_scan_shutdown_cancels_active_plan_and_discards_late_delivery(
 
     settings = config.Settings(roots=(root,), scan_workshop=False).validated()
     session = Session(settings, scanner=scanner)
-    application = Application()
+    application = Application(ui="classic")
     window = _ScanWindow()
     _wire_scan_application(application, session, window, monkeypatch)
 
@@ -625,7 +625,7 @@ def test_live_wallpaper_query_is_off_gtk_and_cannot_land_in_a_newer_scan(
             return first_item.path
         return second_item.path
 
-    application = Application()
+    application = Application(ui="classic")
     application._session.shutdown()
     settings = config.Settings(roots=(first,), scan_workshop=False).validated()
     session = Session(settings, scanner=scanner)

@@ -33,13 +33,22 @@ The contract every build keeps:
   ``gpu_acceleration`` joined version 2 before any release shipped it, so no
   released build knows a version 2 without it. Both follow the owner-approved
   format guards of :mod:`wall_in_one.library.state_file`: the file moves to
-  version 2 only when ``interface = "next"`` or ``gpu_acceleration = false``
-  is first saved (a lazy bump; a profile that never chooses either stays at
+  version 2 only when an ``interface`` or ``gpu_acceleration = false`` is
+  first saved (a lazy bump; a profile that makes neither choice stays at
   version 1, which 0.2.0 and 0.2.1 keep writing), the version 1 bytes are
   first copied to ``ui.toml.v1-backup`` (one time, never overwritten; without
   it the save is refused; nothing to copy when there was no file), and the
   file never moves back down. 0.2.0 and 0.2.1 read a version 2 file for the
   keys they know and leave it unwritten.
+* ``interface`` is absent until the user chooses one, and absent means the
+  default (`DEFAULT_INTERFACE`): the new interface since 0.3.0, classic in
+  0.2.2. So 0.3.0 writes either choice, ``"classic"`` included, while 0.2.2
+  wrote only ``"next"``. ``"classic"`` is not a new value: 0.2.2 reads it as
+  classic and keeps saving the file. But 0.2.2 leaves the key out whenever it
+  saves with classic chosen, so after a 0.2.2 save 0.3.0 finds no choice and
+  starts the new interface. Absence can't tell "never chose" from "0.2.2
+  went back to Classic", and the version can't either (turning GPU
+  acceleration off also makes it 2), so neither is inferred.
 """
 
 from __future__ import annotations
@@ -52,13 +61,13 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 
 #: Version 1 is what 0.2.0 and 0.2.1 read and write; version 2 adds ``interface``
-#: and ``gpu_acceleration``.
+#: and ``gpu_acceleration`` (0.2.2).
 FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=2)
 VERSION: Final = FORMATS.current
 LOGGER: Final = logging.getLogger(__name__)
@@ -69,8 +78,13 @@ WINDOW_STYLES: Final[tuple[str, ...]] = ("solid", "translucent", "frosted")
 #: The styles that see through the window and so have opacity dials.
 GLASS_STYLES: Final[tuple[str, ...]] = ("translucent", "frosted")
 THUMBNAIL_SIZES: Final[tuple[str, ...]] = ("small", "large")
+#: An interface a start without ``--ui`` can build (``ui.window_services.UiKind``).
+Interface = Literal["classic", "next"]
 #: The windows a start without ``--ui`` can build (``ui.window_services.UI_KINDS``).
-INTERFACES: Final[tuple[str, ...]] = ("classic", "next")
+INTERFACES: Final[tuple[Interface, ...]] = ("classic", "next")
+#: What a start builds when no interface was chosen (``ui.window_services.DEFAULT_UI``):
+#: the new interface since 0.3.0. 0.2.2 started classic.
+DEFAULT_INTERFACE: Final[Interface] = "next"
 MAX_PAGE_CHARS: Final = 256
 
 _GLASS_TABLES: Final[tuple[str, ...]] = ("background_opacity", "panel_opacity")
@@ -137,6 +151,14 @@ def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
     return value if isinstance(value, str) and value in choices else default
 
 
+def _interface(value: object) -> Interface | None:
+    """The interface ``value`` names, or None: nothing (valid) was chosen."""
+    for choice in INTERFACES:
+        if isinstance(value, str) and value == choice:
+            return choice
+    return None
+
+
 def _page(value: object, default: str) -> str:
     if (
         not isinstance(value, str)
@@ -172,11 +194,17 @@ class UiPrefs:
     last_page: str = "library"
     #: The user dismissed the one-time Tidy up card shown after an update.
     tidy_offer_dismissed: bool = False
-    #: The window the next start builds when no ``--ui`` is given (version 2).
-    interface: str = "classic"
+    #: The window the next start builds when no ``--ui`` is given (version 2),
+    #: once chosen. None until then: the start builds `DEFAULT_INTERFACE`.
+    interface: Interface | None = None
     #: Whether the next start's window may render on the GPU (version 2). Off
     #: starts it with GTK's software renderer.
     gpu_acceleration: bool = True
+
+    @property
+    def interface_to_start(self) -> Interface:
+        """The window a start without ``--ui`` builds: the one chosen, else the default."""
+        return _interface(self.interface) or DEFAULT_INTERFACE
 
     def validated(self) -> UiPrefs:
         """Replace each invalid field with its own default."""
@@ -215,15 +243,15 @@ class UiPrefs:
             tidy_offer_dismissed=_flag(
                 raw.get("tidy_offer_dismissed"), defaults.tidy_offer_dismissed
             ),
-            interface=_choice(raw.get("interface"), INTERFACES, defaults.interface),
+            interface=_interface(raw.get("interface")),
             gpu_acceleration=_flag(raw.get("gpu_acceleration"), defaults.gpu_acceleration),
         )
 
 
 def required_version(prefs: UiPrefs) -> int:
-    """The oldest version that can hold ``prefs``: 2 for the new interface or no GPU."""
+    """The oldest version that can hold ``prefs``: 2 once an interface is chosen, or no GPU."""
     prefs = prefs.validated()
-    return 2 if prefs.interface != "classic" or not prefs.gpu_acceleration else 1
+    return 2 if prefs.interface is not None or not prefs.gpu_acceleration else 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,8 +407,9 @@ def render(
         # Written only once true, like settings.toml's battery key: a window
         # preference save before any dismissal keeps its familiar shape.
         scalars["tidy_offer_dismissed"] = True
-    if prefs.interface != "classic":
-        # Only the new interface needs version 2; classic is the default.
+    if prefs.interface is not None:
+        # Written once chosen, classic too: absent means the default, which
+        # 0.3.0 made the new interface. Only a choice needs version 2.
         scalars["interface"] = prefs.interface
     if not prefs.gpu_acceleration:
         # Omitted while on (the default), so only turning it off needs version 2.
@@ -430,7 +459,7 @@ def mutate(
     that has not changed is not rewritten.
 
     The file keeps its version unless the change needs a newer one (choosing
-    the new interface, or turning GPU acceleration off, needs 2); before that
+    an interface, or turning GPU acceleration off, needs 2); before that
     first bump its old bytes are kept as ``ui.toml.v1-backup``, or nothing is
     saved.
     """
@@ -479,27 +508,29 @@ def _back_up_before_bump(
         ) from error
 
 
-def launch_interface(path: Path | None = None) -> str | None:
-    """``"next"`` when a start without ``--ui`` should build the new interface, else None.
+def launch_interface(path: Path | None = None) -> Interface:
+    """The window a start without ``--ui`` builds: the one chosen in Settings, else the default.
 
-    Read-only: it never writes and never raises. A missing file, an
-    unreadable or malformed one, and an unknown value all mean the classic
-    interface (None); the last two are logged in one line. A file from a newer
-    version is read for this key like every key this build knows.
+    Read-only: it never writes and never raises. A missing file, or one that
+    chose nothing, means `DEFAULT_INTERFACE`, the new interface. So do an
+    unreadable or malformed file and an unknown value; those two are logged
+    in one line. A file from a newer version is read for this key like every
+    key this build knows.
     """
     document = load(path)
     if document.read_only and not document.raw:
-        LOGGER.info("%s; starting the classic interface", document.read_only)
-        return None
-    chosen = document.raw.get("interface", "classic")
-    if chosen not in INTERFACES:
+        LOGGER.info("%s; starting the new interface, the default", document.read_only)
+        return DEFAULT_INTERFACE
+    saved = document.raw.get("interface", DEFAULT_INTERFACE)
+    chosen = _interface(saved)
+    if chosen is None:
         LOGGER.info(
             "ui.toml names an interface this version doesn't know (%s); "
-            "starting the classic interface",
-            _clipped(chosen),
+            "starting the new interface, the default",
+            _clipped(saved),
         )
-        return None
-    return None if chosen == "classic" else str(chosen)
+        return DEFAULT_INTERFACE
+    return chosen
 
 
 def launch_gpu_acceleration(path: Path | None = None) -> bool:

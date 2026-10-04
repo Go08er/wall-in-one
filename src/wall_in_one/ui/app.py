@@ -864,7 +864,7 @@ class Application(Adw.Application):
         window.show_library(self._session)
 
     def _build_window(self) -> MainWindow | NextWindow:
-        """The window this process was started with: classic unless ``--ui=next``."""
+        """The window this process was started with: `NextWindow` unless it is classic."""
         if self._ui == "next":
             return NextWindow(self, self._settings)
         return MainWindow(self, self._settings)
@@ -6531,7 +6531,8 @@ def run(
     """Start, or hand off to, the single Wall-in-One instance.
 
     ``ui`` is None unless ``--ui`` was given. Without it the window is
-    ``preferred_ui``, the interface chosen in Settings, or classic. Either
+    ``preferred_ui``, the interface chosen in Settings, or `DEFAULT_UI` (the
+    new interface). Either
     choice belongs to the process that starts: a launch which finds an
     instance already running presents that instance's window unchanged, and
     notes that only for an explicit ``--ui``.

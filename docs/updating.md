@@ -130,13 +130,41 @@ repair the configuration. Preserve current files before restoring
 any backup, since a whole-folder restore would discard changes made after that
 backup.
 
+### Going back from 0.3.0 to 0.2.2, 0.2.1 or 0.2.0
+
+0.3.0 opens the new interface unless you choose Classic in Settings →
+Appearance → Interface. The choice is saved as `interface` in
+`~/.config/wall-in-one/ui.toml`, Classic included; until you choose, the key
+is absent and the new interface, the default, opens. The first choice moves
+`ui.toml` to version 2 the way 0.2.2's choices did, keeping the version 1
+file as `ui.toml.v1-backup`. Choosing an interface changes no other file.
+
+- **0.2.2** reads either choice and keeps saving `ui.toml`. With no choice
+  saved it starts classic, its own default. With New saved it starts its new
+  interface, which has only the Library there; choose Classic for the rest.
+  With Classic saved it starts classic, but 0.2.2 saves Classic, its default,
+  by leaving the key out: the next time 0.2.2 saves a window preference (the
+  window style, an opacity or frost dial, the thumbnail size, GPU
+  acceleration, or dismissing the Tidy up card), the saved Classic is gone,
+  and 0.3.0 opens the new interface again. Choose Classic again there, or
+  start it with `--ui=classic`.
+- **0.2.1 and 0.2.0** don't know the choice and start classic. A choice of
+  either interface moved `ui.toml` to version 2, which they read but never
+  save; the next section says how to let them save window preferences again.
+
+One case can't be told apart. In 0.2.2, choosing New and then going back to
+Classic left no trace in `ui.toml`, exactly like never choosing (0.2.2 wrote
+only New). 0.3.0 therefore opens the new interface once for that profile.
+Choose Classic in its Settings and it stays classic from then on.
+
 ### Going back to 0.2.1 or 0.2.0 after choosing the new interface or turning GPU acceleration off
 
 0.2.0 and 0.2.1 don't know Settings → Appearance → Interface or GPU
 acceleration: they start the classic interface (`--ui=next` still works
 there) and leave the renderer to GTK (`GSK_RENDERER=cairo` in the environment
-still works there too). A profile that never chose New (preview) and never
-turned GPU acceleration off is unaffected.
+still works there too). A profile that never chose an interface (New in
+0.2.2, either one in 0.3.0) and never turned GPU acceleration off is
+unaffected.
 
 Either choice moved `~/.config/wall-in-one/ui.toml` to version 2. 0.2.0 and
 0.2.1 read a version 2 `ui.toml` for the preferences they know (window style,

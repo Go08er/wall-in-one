@@ -269,7 +269,7 @@ def test_application_side_settings_refresh_the_open_preferences_page(
     from wall_in_one.ui.app import Application
     from wall_in_one.ui.window import MainWindow
 
-    application = Application()
+    application = Application(ui="classic")
     application._authoring_migration_ready = True
     window = MainWindow(application, application.settings)
     application._window = window
@@ -351,22 +351,21 @@ def test_the_interface_row_saves_ui_toml_once_and_only_on_a_change(tmp_path: Pat
     target = paths.ui_prefs_path()
     model = row.get_model()
     assert isinstance(model, Gtk.StringList)
-    assert [model.get_string(i) for i in range(model.get_n_items())] == [
-        "Classic",
-        "New (preview)",
-    ]
-    assert row.get_selected() == 0 and row.get_sensitive()
+    assert [model.get_string(i) for i in range(model.get_n_items())] == ["Classic", "New"]
+    assert row.get_selected() == 1, "nothing chosen: the next start builds the new interface"
+    assert row.get_sensitive()
     assert row.get_subtitle() == "Takes effect the next time Wall-in-One starts."
     assert not target.exists(), "opening Settings writes nothing"
 
-    row.set_selected(1)
+    row.set_selected(0)
     page._ui_prefs.close(wait=True)
 
-    assert ui_prefs.load().prefs.interface == "next"
+    assert ui_prefs.load().prefs.interface == "classic", "Classic is written as a choice"
+    assert ui_prefs.launch_interface() == "classic"
     assert page._ui_prefs.saves == 1
     assert application.changes == [], "settings.toml is not touched"
     again = PreferencesPage(application)  # type: ignore[arg-type]
-    assert again._interface.get_selected() == 1, "the next Settings shows the saved choice"
+    assert again._interface.get_selected() == 0, "the next Settings shows the saved choice"
     again._ui_prefs.close(wait=True)
     assert again._ui_prefs.saves == 0
 
@@ -374,7 +373,7 @@ def test_the_interface_row_saves_ui_toml_once_and_only_on_a_change(tmp_path: Pat
 def test_the_interface_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path) -> None:
     target = paths.ui_prefs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    document = 'version = 9\ninterface = "next"\n'
+    document = 'version = 9\ninterface = "classic"\n'
     target.write_text(document)
     application = SettingsApp(tmp_path)
     page = PreferencesPage(application)  # type: ignore[arg-type]
@@ -382,8 +381,8 @@ def test_the_interface_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path
 
     assert not row.get_sensitive()
     assert "newer version of Wall-in-One" in (row.get_subtitle() or "")
-    assert row.get_selected() == 1, "it still shows what the file chose"
-    row.set_selected(0)  # even asked directly, nothing is written
+    assert row.get_selected() == 0, "it still shows what the file chose"
+    row.set_selected(1)  # even asked directly, nothing is written
     page._ui_prefs.close(wait=True)
     assert target.read_text() == document
     assert application.reports and "newer version" in application.reports[-1]
@@ -402,16 +401,16 @@ def test_a_failed_interface_save_goes_back_and_the_same_choice_then_saves(
     page = PreferencesPage(application)  # type: ignore[arg-type]
     row = page._interface
 
-    row.set_selected(1)
+    row.set_selected(0)  # Classic: a choice, so version 2
     spin_until(lambda: application.reports and not page._ui_prefs.busy, what="the refusal")
 
     assert "Nothing was changed" in application.reports[0]
-    assert row.get_selected() == 0, "the row shows what ui.toml holds"
+    assert row.get_selected() == 1, "the row shows what ui.toml holds: no choice, New"
     assert target.read_bytes() == before
     obstacle.rmdir()
-    row.set_selected(1)  # the same choice again
+    row.set_selected(0)  # the same choice again
     spin_until(lambda: not page._ui_prefs.busy, what="the retried save")
-    assert ui_prefs.load().prefs.interface == "next" and row.get_selected() == 1
+    assert ui_prefs.load().prefs.interface == "classic" and row.get_selected() == 0
     assert len(application.reports) == 1 and page._ui_prefs.saves == 2
     page._ui_prefs.close(wait=True)
 

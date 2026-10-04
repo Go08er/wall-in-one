@@ -13,7 +13,10 @@ now.
 
 It implements every `WindowServices` member. Runtime status reaches it
 through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
-``show_runtime_*`` calls are no-ops; library, playlist and health changes
+``show_runtime_*`` calls only say once, in a toast, what the classic window
+toasts: a renderer that stopped, degraded display discovery, an invalid status
+reply. Rescan is in the main menu as well as on F5, as classic has it in the
+header. Library, playlist and health changes
 arrive as the application hands over its `Session`. Pictures come from the
 app's thumbnail pipeline (`LibraryThumbnails`). The window style and its
 dials come from ``ui.toml`` and are rendered by the application into its own
@@ -42,6 +45,7 @@ change that is still waiting, and stops its thumbnail workers.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final
 
 import gi
@@ -49,7 +53,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import __version__, config
 from wall_in_one.session import Session
@@ -134,6 +138,9 @@ class NextWindow(ShellWindow):
         self._root: Gtk.Stack | None = None
         self._first_run_idle = 0
         self._check_grace = 0
+        #: What was last said about the runtime, so each is said once (as classic).
+        self._runtime_error = ""
+        self._protocol_error = ""
         self._thumbnails: LibraryThumbnails | None = LibraryThumbnails()
         thumbs.install(self._thumbnails)
         self._prefs = UiPrefsKeeper(application.window_report)
@@ -168,6 +175,14 @@ class NextWindow(ShellWindow):
             self._reveal_welcome()
         # After the activation that builds this window has asked what it asks.
         self.first_run_changed()
+
+    def extra_menu_sections(self) -> Sequence[tuple[str | None, Gio.Menu]]:
+        """Rescan, which classic has as a header button; F5 does the same."""
+        if self._state.library_folders is None:
+            return ()
+        library = Gio.Menu()
+        library.append("Rescan the Library", "win.refresh")
+        return [(None, library)]
 
     def wrap_body(self, body: Gtk.Widget) -> Gtk.Widget:
         """The window's body, with the welcome screen beside it."""
@@ -305,16 +320,41 @@ class NextWindow(ShellWindow):
 
     # -- WindowServices: runtime status, rendered from the model subscription ------
     def show_runtime_status(self, status: dict[str, object]) -> None:
-        """Rendered from the status model; nothing more to do."""
+        """Rendered from the status model; a new renderer or display error is also said.
+
+        Once per error, by the classic window's rule: a renderer's
+        ``last_error`` first, else ``output_discovery_error``; the same error
+        again says nothing until it clears or the service goes away.
+        """
+        if not isinstance(status.get("playlist"), str) or not isinstance(status.get("source"), str):
+            return
+        self._protocol_error = ""
+        last_error = status.get("last_error")
+        output_error = status.get("output_discovery_error")
+        if isinstance(last_error, str) and last_error:
+            if last_error != self._runtime_error:
+                self.report(last_error)
+            self._runtime_error = last_error
+        elif isinstance(output_error, str) and output_error:
+            if output_error != self._runtime_error:
+                self.report(f"Display discovery is degraded: {output_error}")
+            self._runtime_error = output_error
+        else:
+            self._runtime_error = ""
 
     def show_runtime_unavailable(self) -> None:
-        """Rendered from the status model; nothing more to do."""
+        """Rendered from the status model; an error seen before may be said again later."""
+        self._runtime_error = ""
+        self._protocol_error = ""
 
     def show_runtime_delayed(self) -> None:
-        """Rendered from the status model; nothing more to do."""
+        """Rendered from the status model (the bar's "status delayed"); nothing more to do."""
 
     def show_runtime_protocol_error(self, message: str) -> None:
-        """Rendered from the status model; the classic window toasts, this one marks the bar."""
+        """The bar marks the reply invalid; the reason is also said, once, as classic does."""
+        if message != self._protocol_error:
+            self.report(message)
+        self._protocol_error = message
 
     def set_runtime_busy(self, busy: bool) -> None:
         """Rendered from the status model; nothing more to do."""

@@ -76,8 +76,17 @@ service commands, before writing an incompatible configuration.
 
 ### What opening the app writes
 
-Opening the app and leaving it idle changes none of your settings, playlists,
-schedules, displays, favourites or window preferences. It writes only:
+Opening the app and leaving it idle changes none of your choices: what your
+settings, playlists, schedules, displays, favourites and window preferences
+mean stays the same. The bytes of a few files can change, and it writes only:
+
+- `settings.toml`, `schedules.json` and `displays.json`, when the start-up
+  reference repair finds work, before any change can be saved. A default,
+  schedule rule or display assignment that names a playlist by its name (as an
+  older profile may) is given that playlist's id, so it keeps naming the same
+  playlist and stays correct through a rename. One that names a playlist that
+  no longer exists at all, by id or name, is removed (the default goes back to
+  All wallpapers), as an interrupted deletion would have finished.
 
 - `runtime.toml`, when the document compiled on this machine differs from the
   one on disk, for example on the first start after an update or on another

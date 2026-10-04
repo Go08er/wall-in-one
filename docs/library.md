@@ -53,7 +53,10 @@ Three properties of the list are worth knowing:
   refused when that would leave a playlist something uses with nothing to
   play, or any playlist holding only wallpapers playback can't use, and the
   refusal names them; the new interface says so before it asks to remove.
-  `/a/b` never counts as holding `/a/bc`.
+  `/a/b` never counts as holding `/a/bc`. A video or scene that stays counts
+  too when its still goes: a capture under a folder no longer scanned isn't
+  found any more. An image you chose for one is still found, wherever it is,
+  so that alone is no reason to refuse.
 
 Scanning may still show files reached through an intentionally configured
 symbolic link, but Delete and Move to Trash refuse destructive authority
@@ -141,8 +144,11 @@ than silently overwriting each other.
   [What opening the app writes](updating.md#what-opening-the-app-writes)).
 - Each wallpaper is attempted once per session, so a failed capture does not
   keep retrying on every rescan.
-- It needs `ffmpeg`. The Nix package puts it on the app's `PATH`; without it
-  the video still plays, and its details simply keep saying "No still yet".
+- It needs `ffmpeg`. The Nix package puts it on the app's `PATH`. Without it,
+  a video that already has a representative still (a sibling, a capture made
+  earlier, or one you chose) plays as usual. One with none says "No still yet"
+  and can't play until it has one: choose an image for it in its details, or
+  make capture available.
 - Switching dynamics off takes a still from the video playing at that moment
   first, so the wallpaper you were watching is not swapped out from under you.
 
@@ -262,7 +268,10 @@ details pane and the selection bar, one wallpaper at a time.
   cleared by removal, such as favourites and playlist occurrences.
 - Neither is offered for a Steam Workshop item (unsubscribe in Steam) or a file
   outside your library folders, and neither removes the last wallpaper that
-  plays from a playlist something uses. Removing has no Undo in the app.
+  plays from a playlist something uses. That includes an image another video
+  plays through, as the still you chose for it or its sibling, when the video
+  would have no other: removing the image takes its still away. Removing has
+  no Undo in the app.
 
 *In the classic interface* the same two entries are named **Remove** and
 **Move to Trash**.

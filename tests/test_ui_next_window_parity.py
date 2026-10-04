@@ -22,7 +22,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_next_status_line import two_display_status  # noqa: E402
-from wall_in_one.ui.activity_log import HIDDEN  # noqa: E402
+from wall_in_one import config  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.log_section import LogSection  # noqa: E402
 from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
@@ -118,8 +118,16 @@ def test_rescan_is_in_the_new_windows_main_menu_as_in_the_classic_header(
         application.session.shutdown()
 
 
-def test_settings_shows_this_sessions_log_with_file_paths_hidden() -> None:
-    """What the user was told and what the runtime said, as it changed; Copy copies it."""
+def test_settings_shows_this_sessions_log_with_file_paths_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the user was told and what the runtime said, as it changed; Copy copies it,
+    with the home folder, the library folders and the login name hidden."""
+    monkeypatch.setenv("LOGNAME", "wio-tester")
+    monkeypatch.setenv("USER", "wio-tester")
+    library = Path.home() / 'Walls "for" Bob\u2019s desk'
+    library.mkdir(parents=True)
+    config.update({"roots": (library,)})
     application = Application(ui="next")
     window = NextWindow(application, application.settings)
     application._window = window
@@ -134,25 +142,27 @@ def test_settings_shows_this_sessions_log_with_file_paths_hidden() -> None:
         assert isinstance(section, LogSection)
         application.window_report(f"Using {home}/walls as the wallpaper library")
         application.status_model.adopt(
-            two_display_status(extra={"last_error": f"mpv could not open {home}/walls/a.mp4"})
+            two_display_status(extra={"last_error": f"mpv could not open {library}/a b.mp4"})
         )
+        application.window_report("Steam says /home/wio-tester/.steam is missing")
         window.navigate("settings:logs")
         spin_until(section.get_mapped)
         assert section.shown_lines == [
-            f"Using {HIDDEN} as the wallpaper library",
+            "Using ~/walls as the wallpaper library",
             "The wallpaper service is running",
             "Playing Evening (schedule)",
-            f"mpv could not open {HIDDEN}",
+            "mpv could not open <library 1>/a b.mp4",
+            "Steam says /home/<user>/.steam is missing",
         ]
         assert section.hiding.get_active(), "on whenever Wall-in-One starts"
-        assert "4 entries, 1 problem." in (section.get_description() or "")
+        assert "5 entries, 1 problem." in (section.get_description() or "")
 
         section.hiding.set_active(False)
-        assert section.shown_lines[-1] == f"mpv could not open {home}/walls/a.mp4"
+        assert section.shown_lines[3] == f"mpv could not open {library}/a b.mp4"
         section.hiding.set_active(True)
 
         section.copy.emit("clicked")
-        assert toasts == ["Copied 4 lines with file paths hidden"]
+        assert toasts == ["Copied 5 lines with file paths hidden"]
         copied: list[str | None] = []
 
         def read(clipboard: Gdk.Clipboard, result: Gio.AsyncResult) -> None:
@@ -161,7 +171,9 @@ def test_settings_shows_this_sessions_log_with_file_paths_hidden() -> None:
         window.get_clipboard().read_text_async(None, read)
         spin_until(lambda: bool(copied))
         assert copied[0] == section.text()
-        assert copied[0] is not None and str(home) not in copied[0]
+        assert copied[0] is not None
+        for secret in (str(home), "wio-tester", "Bob\u2019s"):
+            assert secret not in copied[0]
 
         application.window_report("one more")  # followed while shown
         assert section.shown_lines[-1] == "one more"

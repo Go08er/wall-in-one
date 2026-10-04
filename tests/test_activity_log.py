@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import datetime
+import json
 from pathlib import Path
+
+import pytest
 
 from tests.test_next_status_line import BATTERY, two_display_status
 from wall_in_one import paths
-from wall_in_one.ui.activity_log import HIDDEN, MAX_TEXT, ActivityLog, as_text, hide_paths
+from wall_in_one.ui.activity_log import MAX_TEXT, ActivityLog
 from wall_in_one.ui.status_model import RuntimeStatusModel
 
 
@@ -78,9 +81,10 @@ def test_it_keeps_only_the_newest_entries_and_bounded_text() -> None:
     log.record("app", "   ")  # nothing to say
     assert [entry.text for entry in log.entries] == ["message 2", "message 3", "message 4"]
     log.record("renderer", "x" * (MAX_TEXT + 50), "error")
-    assert len(log.entries[-1].text) == MAX_TEXT and log.entries[-1].text.endswith("…")
+    assert len(log.entries[-1].text) == MAX_TEXT and log.entries[-1].text.endswith("\u2026")
     log.record("app", "one\n  line")
-    assert log.entries[-1].text == "one line"
+    assert log.entries[-1].text == "one\n  line", "kept as written"
+    assert log.shown(log.entries[-1], hide=False) == "one line", "shown on one line"
 
 
 def test_listeners_hear_each_new_entry_until_they_leave() -> None:
@@ -94,24 +98,84 @@ def test_listeners_hear_each_new_entry_until_they_leave() -> None:
     assert heard == ["first"]
 
 
-def test_paths_are_hidden_for_showing_and_copying_but_kept() -> None:
-    home = Path.home()
-    assert hide_paths(f"Scanned {home}/Pictures/Wallpapers, 12 files") == (
-        f"Scanned {HIDDEN}, 12 files"
-    )
-    assert hide_paths(f"Using {home} as the library.") == "Using ~ as the library."
-    assert hide_paths("Using /mnt/walls as the library.") == f"Using {HIDDEN} as the library."
-    assert hide_paths(f"{paths.settings_path()} is read-only") == f"{HIDDEN} is read-only"
-    for untouched in (
-        "https://wallhaven.cc/w/abc123 is 404",
-        "1/2 done, and/or later",
-        "Animations stopped on battery",
+def _profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A home folder with a space, both quotes and a non-ASCII letter, and that login."""
+    home = tmp_path / 'J\u00fcrgen\'s "home" dir'
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOGNAME", "j\u00fcrgen")
+    monkeypatch.setenv("USER", "j\u00fcrgen")
+    return home
+
+
+def test_known_folders_are_hidden_whole_whatever_their_names_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _profile(tmp_path, monkeypatch)
+    inside = home / "My Walls (2024) \u00fc"  # a library inside the home folder
+    shared = tmp_path / "mnt" / 'Shared "walls" here'
+    # The home folder inside a library's path, under some other prefix.
+    mirror = Path("/srv/backup") / str(home).lstrip("/") / "walls"
+    folders = [inside, shared, mirror]
+    log = ActivityLog(clock=_clock, folders=lambda: folders)
+    for text, hidden in (
+        (f"Using {inside} as the wallpaper library", "Using <library 1> as the wallpaper library"),
+        (f"Using {inside}/ now.", "Using <library 1>/ now."),
+        (f"Scanned {shared}/neon rain.mp4, 3 files", "Scanned <library 2>/neon rain.mp4, 3 files"),
+        (f"Copied {mirror}/a b.png", "Copied <library 3>/a b.png"),
+        (f"{home}/Downloads/x y.png is read-only", "~/Downloads/x y.png is read-only"),
+        (f"Settings live in {home}.", "Settings live in ~."),
+        (
+            f"{paths.settings_path()} is read-only",
+            "<config>/wall-in-one/settings.toml is read-only",
+        ),
+        ("Steam is at /opt/j\u00fcrgen/steam", "Steam is at /opt/<user>/steam"),
+        ("https://wallhaven.cc/w/abc123 is 404", "https://wallhaven.cc/w/abc123 is 404"),
     ):
-        assert hide_paths(untouched) == untouched
-    log = ActivityLog(clock=_clock)
-    log.record("app", f"Using {home}/walls as the wallpaper library")
-    assert log.entries[0].text == f"Using {home}/walls as the wallpaper library"
-    assert as_text(log.entries, hide=True) == (
-        f"09:30:00  app       Using {HIDDEN} as the wallpaper library"
-    )
-    assert str(home) in as_text(log.entries, hide=False)
+        log.record("app", text)
+        assert log.shown(log.entries[-1], hide=True) == hidden, text
+        assert log.shown(log.entries[-1], hide=False) == text, "the entry keeps its words"
+
+
+def test_paths_quoted_in_other_forms_are_hidden_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _profile(tmp_path, monkeypatch)
+    real = tmp_path / "real home"
+    real.mkdir()
+    linked = tmp_path / "linked home"
+    linked.symlink_to(real)
+    monkeypatch.setenv("HOME", str(linked))  # /home a link, as on some systems
+    library = linked / "Walls \u00e9t\u00e9"
+    hider = ActivityLog(folders=lambda: [library, home]).hider
+    picture = str(library / "a b.png")
+    assert hider(f"open {Path(picture).as_uri()}") == "open file://<library 1>/a%20b.png"
+    assert hider(json.dumps({"path": picture})) == '{"path": "<library 1>/a b.png"}'
+    assert hider(repr(str(home / "x"))) == "'<library 2>/x'"
+    assert hider(json.dumps(str(home / "x"))) == '"<library 2>/x"'
+    assert hider(f"mpv: cannot open {real}/clip.mp4") == "mpv: cannot open ~/clip.mp4"
+    assert hider(f'Error: "{library}/a.mp4"') == 'Error: "<library 1>/a.mp4"'
+
+
+def test_copying_with_paths_hidden_never_leaks_the_user_or_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _profile(tmp_path, monkeypatch)
+    library = home / "Walls"
+    folders = [library]
+    log = ActivityLog(clock=_clock, folders=lambda: folders)
+    log.record("app", f"Using {library} as the wallpaper library")
+    folders.clear()  # the folder removed later: still hidden, still number 1
+    log.record("renderer", f"mpv could not open {library}/clip one.mp4", "error")
+    long = "x" * (MAX_TEXT - 10) + f"{home}/far/away.png"
+    log.record("renderer", long, "error")  # cut before the home folder, never inside it
+    assert log.entries[-1].text == "x" * (MAX_TEXT - 10) + "\u2026"
+    copied = log.as_text(hide=True)
+    assert copied.splitlines() == [
+        "09:30:00  app       Using <library 1> as the wallpaper library",
+        "09:30:00  renderer  mpv could not open <library 1>/clip one.mp4",
+        "09:30:00  renderer  " + "x" * (MAX_TEXT - 10) + "\u2026",
+    ]
+    for secret in (str(home), "j\u00fcrgen", "J\u00fcrgen", str(tmp_path)):
+        assert secret not in copied
+    assert str(library) in log.as_text(hide=False)

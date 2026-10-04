@@ -4,7 +4,9 @@ A bounded, read-only list, newest last: the time, what said it (Wall-in-One
 itself, the wallpaper service, a renderer, display discovery, playback or
 power) and its words, with problems marked. "Copy" puts exactly what is shown
 on the clipboard. "Hide file paths" is on whenever Wall-in-One starts and is
-never saved: it changes what is shown and copied, not the log.
+never saved: it changes what is shown and copied, not the log. It replaces the
+folders the app knows (home, the library folders, its XDG folders) and the
+login name, wherever they appear (`activity_log.PathHider`).
 
 The log lives in the application for the whole process; this section follows
 it only while it is realized, and catches up when it is shown again.
@@ -23,7 +25,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, GObject, Gtk, Pango
 
-from wall_in_one.ui.activity_log import ActivityLog, Entry, as_text, hide_paths
+from wall_in_one.ui.activity_log import ActivityLog, Entry
 
 #: The list's height: enough to read, never the whole page.
 LIST_HEIGHT: Final = 260
@@ -112,7 +114,7 @@ class LogSection(Adw.PreferencesGroup):
 
     def text(self) -> str:
         """What Copy copies: every entry, paths hidden while the switch is on."""
-        return as_text(self._log.entries, hide=self.hiding.get_active())
+        return self._log.as_text(hide=self.hiding.get_active())
 
     # -- drawing -----------------------------------------------------------------------
     def _added(self, entry: Entry) -> None:
@@ -145,7 +147,7 @@ class LogSection(Adw.PreferencesGroup):
         )
         source.add_css_class("heading" if entry.problem else "dim-label")
         words = Gtk.Label(
-            label=hide_paths(entry.text) if hide else entry.text,
+            label=self._log.shown(entry, hide=hide),
             xalign=0,
             wrap=True,
             wrap_mode=Pango.WrapMode.WORD_CHAR,

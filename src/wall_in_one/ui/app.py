@@ -468,7 +468,7 @@ class Application(Adw.Application):
         self._runtime_health_request: _RuntimeHealthRequest | None = None
         #: This session's log, in memory only: what the user was told and what
         #: the runtime's status said as it changed (the new interface shows it).
-        self.activity_log = ActivityLog()
+        self.activity_log = ActivityLog(folders=lambda: self._settings.roots)
         # The Rust snapshot is the sole playback truth for every GUI surface.
         # Keep the last valid answer through a transient deadline so the
         # header and authoring pages cannot briefly contradict one another.

@@ -16,11 +16,16 @@ through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
 ``show_runtime_*`` calls only say once, in a toast, what the classic window
 toasts: a renderer that stopped, degraded display discovery, an invalid status
 reply. Rescan is in the main menu as well as on F5, as classic has it in the
-header. Library, playlist and health changes
-arrive as the application hands over its `Session`. Pictures come from the
-app's thumbnail pipeline (`LibraryThumbnails`). The window style and its
-dials come from ``ui.toml`` and are rendered by the application into its own
-stylesheet (`Application.set_window_glass`).
+header. Library, playlist and health changes arrive as the application hands
+over its `Session`. Pictures come from the app's thumbnail pipeline
+(`LibraryThumbnails`). The window style and its dials come from ``ui.toml``
+and are rendered by the application into its own stylesheet
+(`Application.set_window_glass`).
+
+**The log.** Settings ends with this session's log (`log_section.LogSection`):
+what the application told the user and what the runtime's status said as it
+changed, kept in memory by the application (`activity_log.ActivityLog`), with
+file paths hidden unless the user shows them. The classic window has no log.
 
 **After an update** the classic window's one-time Tidy up card sits above every
 page (`TidyCard`); its Review opens Settings at Tidy up, whose actions -- the
@@ -62,6 +67,7 @@ from wall_in_one.ui.launch_rows import LaunchRows
 from wall_in_one.ui.next import displays, library, playlists, schedule, status_line, store, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
+from wall_in_one.ui.next.log_section import LogSection
 from wall_in_one.ui.next.page import Placeholder
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_state import RealAppState
@@ -114,17 +120,20 @@ LIBRARY_FOLDER: Final = "library-folder"
 
 
 def settings_page(state: AppState, keeper: UiPrefsKeeper, application: Application) -> SettingsPage:
-    """Settings over the application: its rows, the next start's interface, Tidy up.
+    """Settings over the application: its rows, the next start's interface, Tidy up, the log.
 
     The interface and GPU rows (`LaunchRows`) write ui.toml through the
     window's keeper, like every window preference here, show what was saved,
     and are off while ui.toml cannot be written. Tidy up is the classic
-    section itself, on the application's own lane.
+    section itself, on the application's own lane. The log is the
+    application's session log (`Application.activity_log`); what Copy says
+    is a toast, not another log entry.
     """
     return SettingsPage(
         state,
         launch=LaunchRows(keeper, application.window_report),
         tidy=TidySection(application),
+        log=LogSection(application.activity_log, state.toast),
     )
 
 

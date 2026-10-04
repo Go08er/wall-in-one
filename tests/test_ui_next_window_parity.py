@@ -7,6 +7,7 @@ Each test that describes shared behaviour runs against both windows, built by
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -17,10 +18,14 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
+from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_next_status_line import two_display_status  # noqa: E402
+from wall_in_one.ui.activity_log import HIDDEN  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.next.log_section import LogSection  # noqa: E402
+from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.window_services import UiKind  # noqa: E402
 
@@ -108,6 +113,60 @@ def test_rescan_is_in_the_new_windows_main_menu_as_in_the_classic_header(
         window.activate_action("win.refresh", None)
         assert rescans == [True]
     finally:
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()
+
+
+def test_settings_shows_this_sessions_log_with_file_paths_hidden() -> None:
+    """What the user was told and what the runtime said, as it changed; Copy copies it."""
+    application = Application(ui="next")
+    window = NextWindow(application, application.settings)
+    application._window = window
+    toasts: list[str] = []
+    window.state.connect("toast", lambda _state, text, _button: toasts.append(text))
+    window.present()
+    home = Path.home()
+    try:
+        page = window.pages["settings"]
+        assert isinstance(page, SettingsPage)
+        section = page.log
+        assert isinstance(section, LogSection)
+        application.window_report(f"Using {home}/walls as the wallpaper library")
+        application.status_model.adopt(
+            two_display_status(extra={"last_error": f"mpv could not open {home}/walls/a.mp4"})
+        )
+        window.navigate("settings:logs")
+        spin_until(section.get_mapped)
+        assert section.shown_lines == [
+            f"Using {HIDDEN} as the wallpaper library",
+            "The wallpaper service is running",
+            "Playing Evening (schedule)",
+            f"mpv could not open {HIDDEN}",
+        ]
+        assert section.hiding.get_active(), "on whenever Wall-in-One starts"
+        assert "4 entries, 1 problem." in (section.get_description() or "")
+
+        section.hiding.set_active(False)
+        assert section.shown_lines[-1] == f"mpv could not open {home}/walls/a.mp4"
+        section.hiding.set_active(True)
+
+        section.copy.emit("clicked")
+        assert toasts == ["Copied 4 lines with file paths hidden"]
+        copied: list[str | None] = []
+
+        def read(clipboard: Gdk.Clipboard, result: Gio.AsyncResult) -> None:
+            copied.append(clipboard.read_text_finish(result))
+
+        window.get_clipboard().read_text_async(None, read)
+        spin_until(lambda: bool(copied))
+        assert copied[0] == section.text()
+        assert copied[0] is not None and str(home) not in copied[0]
+
+        application.window_report("one more")  # followed while shown
+        assert section.shown_lines[-1] == "one more"
+    finally:
+        application._window = None
         window.destroy()
         application._stills.shutdown()
         application.session.shutdown()

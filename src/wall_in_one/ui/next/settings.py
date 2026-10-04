@@ -4,11 +4,12 @@ The redesign's page (a search field in the header filters rows; other pages
 deep-link with ``settings:<section>``) over the classic Settings page's
 settings, each row bound to the same ``settings.toml`` key. Everything here
 goes through `SettingsAccess` (``state.settings_access``); the window's own
-look goes through the `AppState` (``ui.toml``), and two parts are handed in
+look goes through the `AppState` (``ui.toml``), and three parts are handed in
 by whoever builds the page: the rows choosing how the next start opens
-(`LaunchRows`, which needs the window's ``ui.toml`` keeper) and Tidy up (the
-classic `TidySection`, which needs the application). The prototype passes
-neither.
+(`LaunchRows`, which needs the window's ``ui.toml`` keeper), Tidy up (the
+classic `TidySection`, which needs the application) and the session's log
+(`log_section.LogSection`, over the application's log). The prototype passes
+none of them.
 
 **What a row shows.** A row saves when the user changes it and then shows
 what the adapter reports, on the ``settings`` topic: the saved value, or,
@@ -104,6 +105,8 @@ ALIASES: Final = {
     "look": "appearance",
     "interface": "appearance.interface",
     "tidy-up": "tidy",
+    "logs": "log",
+    "diagnostics": "log",
 }
 STYLES: Final = (
     ("solid", "Solid", "Opaque window"),
@@ -177,6 +180,7 @@ class SettingsPage(Page):
         *,
         launch: LaunchRows | None = None,
         tidy: Gtk.Widget | None = None,
+        log: Gtk.Widget | None = None,
     ) -> None:
         super().__init__(state)
         global _css_added
@@ -187,6 +191,7 @@ class SettingsPage(Page):
         self.interface_row = launch.interface if launch is not None else None
         self.gpu_row = launch.gpu if launch is not None else None
         self.tidy = tidy
+        self.log = log
         self._dialogs: list[Adw.Dialog] = []
         self._sections: dict[str, _Section] = {}
         self._targets: dict[str, Gtk.Widget] = {}
@@ -234,6 +239,7 @@ class SettingsPage(Page):
         self._build_online(access)
         self._build_advanced(access)
         self._build_tidy()
+        self._build_log()
         self._build_about()
 
         empty = Adw.StatusPage(
@@ -1115,6 +1121,19 @@ class SettingsPage(Page):
         holder.entries.append(_Entry(tidy, "tidy up clean leftovers archive cache"))
         section.groups.append(holder)
         section.box.append(tidy)
+
+    def _build_log(self) -> None:
+        log = self.log
+        if not isinstance(log, Adw.PreferencesGroup):
+            return
+        section = _Section("log", Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18))
+        section.box.add_css_class("st-section")
+        self._sections["log"] = section
+        self._content.append(section.box)
+        holder = _Group(log, "Log", "log logs diagnostics errors problems events copy paths")
+        holder.entries.append(_Entry(log, "log logs diagnostics errors problems events copy"))
+        section.groups.append(holder)
+        section.box.append(log)
 
     def _build_about(self) -> None:
         section = self._section("about")

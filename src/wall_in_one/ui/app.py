@@ -50,6 +50,7 @@ from wall_in_one.session import (
     Session,
 )
 from wall_in_one.theme import css, noctalia, source
+from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.window import NextWindow
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
@@ -471,6 +472,9 @@ class Application(Adw.Application):
         # Every runtime-status answer is published to this model and to
         # nothing else; the forwarding subscriber below hands each publication
         # to the window exactly as the call sites used to.
+        #: This session's log, in memory only: what the user was told and what
+        #: the runtime's status said as it changed (the new interface shows it).
+        self.activity_log = ActivityLog()
         self._status_model = RuntimeStatusModel()
         self._status_model.subscribe(self._forward_runtime_status)
         self._taboo_omitted_seen = 0
@@ -1617,7 +1621,9 @@ class Application(Adw.Application):
         Publications happen exactly where the window used to be called, so
         this is the only place runtime status reaches the window. A window
         that renders from the model itself may implement these as no-ops.
+        The session log hears every publication too, window or not.
         """
+        self.activity_log.observe(change, view)
         window = self._window
         if window is None:
             return
@@ -2133,7 +2139,8 @@ class Application(Adw.Application):
             self._window.open_palette_browser()
 
     def window_report(self, message: str) -> None:
-        """Put a management-page result in the window's toast overlay."""
+        """Put a management-page result in the window's toast overlay (and the log)."""
+        self.activity_log.record("app", message)
         if self._window is not None:
             self._window.report(message)
 

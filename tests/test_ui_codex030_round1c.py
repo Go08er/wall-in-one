@@ -39,10 +39,10 @@ from wall_in_one.library import displays, playlists, scan, schedules  # noqa: E4
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui import playlists_page, preferences  # noqa: E402
 from wall_in_one.ui.app import _Commands  # noqa: E402
+from wall_in_one.ui.next import window as next_window  # noqa: E402
 from wall_in_one.ui.next.real_playlists import RealPlaylists  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 from wall_in_one.ui.next.schedule_state import RuleView  # noqa: E402
-from wall_in_one.ui.next.window import PUBLICATION_FAILED  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -264,8 +264,11 @@ def test_the_startup_repair_keeps_an_older_profiles_references_by_name(shown: Sh
     _by_name(shown, evening)
     application.session.schedules.add("Gone")  # names nothing: still removed
 
-    result = application._repair_dangling_playlist_references()
-    application._finish_playlist_reference_repair(result)
+    # As a start does: writes stay closed until the repair, on its worker, is adopted.
+    application._authoring_migration_ready = False
+    application._authoring_repair_started = False
+    application._open_authoring_after_migration()
+    shown.opened.wait("the repair", lambda: application._authoring_migration_ready)
 
     assert config.load().active_playlist == evening.id
     assert [rule.playlist for rule in schedules.Store.open().rules] == [evening.id]
@@ -414,7 +417,7 @@ def test_the_new_window_keeps_saying_why_changes_arent_reaching_playback(shown: 
 
     application._set_publication_problem(problem)
     banner = opened.window.state.banner()
-    assert banner is not None and banner.title == f"{PUBLICATION_FAILED} {problem}"
+    assert banner is not None and banner.title == f"{next_window.PUBLICATION_FAILED} {problem}"
     assert banner.button == "Playlists"
     opened.window.state.banner_activated(banner.action)
     assert opened.window.current_page is opened.window.pages["playlist"]

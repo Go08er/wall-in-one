@@ -1148,6 +1148,75 @@ class Store:
 
         return self._mutate(remove)
 
+    def insert_entries(self, identifier: str, placed: Sequence[tuple[int, Entry]]) -> Playlist:
+        """Put several entries in, in one transaction: all of them or none.
+
+        ``placed`` is ``(position, entry)`` pairs applied in order, each
+        position counted in the list as it stands after the pairs before it
+        and clamped to its ends. Adding wallpapers at one spot is ``(p, a),
+        (p + 1, b), ...``; putting removed entries back where they were is
+        their old positions, smallest first. Entry ids are kept as given, so
+        a restored entry is the same entry. An id the playlist already holds
+        is refused (``identity-conflict``), as is a source that is not an
+        absolute path (``validation``) or going past `MAX_ENTRIES`
+        (``full``); nothing is written then. Nothing is written for an empty
+        ``placed`` either.
+        """
+        wanted = tuple(placed)
+        for _position, entry in wanted:
+            if not entry.id.strip() or entry.id != entry.id.strip():
+                raise PlaylistError("validation", f"entry id {entry.id!r} is not usable")
+            if not entry.source.strip() or not Path(entry.source).is_absolute():
+                raise PlaylistError(
+                    "validation", f"{entry.source!r} is not an absolute path to a wallpaper"
+                )
+
+        def insert(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            playlist = self._find_in(authored, identifier)
+            if len(playlist.entries) + len(wanted) > MAX_ENTRIES:
+                raise PlaylistError(
+                    "full", f"{playlist.name} can hold at most {MAX_ENTRIES} wallpapers"
+                )
+            entries = list(playlist.entries)
+            present = {entry.id for entry in entries}
+            for position, entry in wanted:
+                if entry.id in present:
+                    raise PlaylistError(
+                        "identity-conflict", f"{playlist.name} already has entry {entry.id}"
+                    )
+                present.add(entry.id)
+                entries.insert(max(0, min(len(entries), position)), entry)
+            updated = replace(playlist, entries=tuple(entries))
+            authored[updated.id] = updated
+            return updated, bool(wanted)
+
+        return self._mutate(insert)
+
+    def remove_entries(self, identifier: str, entries: Iterable[str]) -> Playlist:
+        """Take several entries out in one transaction: all of them or none.
+
+        Every named entry has to be there (``no-such-entry`` otherwise, and
+        nothing is written), so a removal that raced another one says so
+        instead of quietly doing half.
+        """
+        wanted = frozenset(entries)
+
+        def remove(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
+            playlist = self._find_in(authored, identifier)
+            missing = wanted - {entry.id for entry in playlist.entries}
+            if missing:
+                raise PlaylistError(
+                    "no-such-entry",
+                    f"{playlist.name} has no entr{'y' if len(missing) == 1 else 'ies'} "
+                    + ", ".join(sorted(missing)),
+                )
+            kept = tuple(entry for entry in playlist.entries if entry.id not in wanted)
+            updated = replace(playlist, entries=kept)
+            authored[updated.id] = updated
+            return updated, bool(wanted)
+
+        return self._mutate(remove)
+
     def move_entry(self, identifier: str, entry: str, position: int) -> Playlist:
         def move(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
             updated = self._find_in(authored, identifier).moved(entry, position)

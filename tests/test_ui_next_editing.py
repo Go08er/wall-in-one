@@ -22,7 +22,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tests.golden import harness  # noqa: E402
 from tests.test_next_status_line import two_display_status  # noqa: E402
@@ -41,7 +41,7 @@ from tests.test_ui_next_window import (  # noqa: E402
 )
 from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.library import favourites, pairings, playlists  # noqa: E402
-from wall_in_one.library.model import Kind, MediaItem  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.session import QUICK_CHOICE_ID  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.inspector import Inspector  # noqa: E402
@@ -471,6 +471,107 @@ def test_add_a_folder_saves_it_then_scans_it(
         page.add_folder(str(extra))
         assert said[-1] == "more walls is already in the library"
         assert config.load().roots == (*first, extra)
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_the_library_search_says_it_matches_names_and_does(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It used to promise tags and folders; like classic's, it matches the name only."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        page = library_page(window)
+        assert page.search.get_placeholder_text() == "Search by name"
+        page.search.set_text("dawn")
+        page.search.emit("search-changed")
+        assert page.count_text == "1 of 2"
+        page.search.set_text("wallpapers")  # the folder both are in
+        page.search.emit("search-changed")
+        assert page.count_text == "0 of 2", "folders are not searched"
+        page.search.set_text("")
+        page.search.emit("search-changed")
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_the_library_counts_what_the_scan_left_out_as_classic_does(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the scan's limits, or unreadable: counted beside the total, named on hover."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        page = library_page(window)
+        assert page.count_text == "2 wallpapers"
+        assert page._count.get_tooltip_text() is None
+        session = application.session
+        skipped = tuple(f"/w/deep/{index}: deeper than 8 levels" for index in range(5))
+        session.adopt_library(
+            Library(roots=session.library.roots, items=session.library.items, skipped=skipped),
+            reconcile_workshop=False,
+        )
+        window._state.reload()
+        assert page.count_text == "2 wallpapers · 5 skipped"
+        tip = page._count.get_tooltip_text() or ""
+        assert tip.startswith("Not in the library: /w/deep/0: deeper than 8 levels")
+        assert tip.endswith("; and 2 more")
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_ctrl_space_is_play_pause_and_only_ctrl_enter_applies_a_card(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A focused card used to take Ctrl+Space as Apply, over the window's play/pause."""
+    dawn = wallpaper(tmp_path, "dawn.png")
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        _ok, key, mods = Gtk.accelerator_parse("<Control>space")
+        assert any(
+            Gtk.accelerator_parse(text)[1:] == (key, mods)
+            for text in application.get_accels_for_action("win.play")
+        ), "Ctrl+Space is the window's play/pause"
+        page = library_page(window)
+        card = page._cards[dawn]
+        applied: list[str] = []
+        opened: list[str] = []
+
+        def press(keyval: int, state: Gdk.ModifierType) -> bool:
+            return bool(
+                card._on_key(
+                    Gtk.EventControllerKey(),
+                    keyval,
+                    0,
+                    state,
+                    lambda view: opened.append(view.id),
+                    lambda view: applied.append(view.id),
+                )
+            )
+
+        control = Gdk.ModifierType.CONTROL_MASK
+        assert not press(Gdk.KEY_space, control), "left to the window's play/pause"
+        assert applied == [] and opened == []
+        assert press(Gdk.KEY_Return, control) and applied == [dawn]
+        assert press(Gdk.KEY_Return, Gdk.ModifierType(0)) and opened == [dawn]
+        assert press(Gdk.KEY_space, Gdk.ModifierType(0)) and opened == [dawn, dawn]
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)

@@ -477,6 +477,12 @@ class AppState(Protocol):
     @property
     def library_scanning(self) -> bool: ...
 
+    #: What the last scan left out, one line each: past its limits (4096
+    #: wallpapers, 8 folders deep...) or unreadable. The Library counts them,
+    #: as classic's subtitle does.
+    @property
+    def library_skipped(self) -> Sequence[str]: ...
+
     # -- playlists ----------------------------------------------------------------
 
     @property

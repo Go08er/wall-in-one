@@ -507,6 +507,8 @@ class WallpaperCard(Gtk.Box):
     ) -> bool:
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
             applies = state & Gdk.ModifierType.CONTROL_MASK
+            if applies and keyval == Gdk.KEY_space:
+                return False  # Ctrl+Space is the window's play/pause; Ctrl+Enter applies
             if applies and on_apply is not None:
                 if self.apply_button is None or self.apply_button.get_sensitive():
                     on_apply(self.wallpaper)

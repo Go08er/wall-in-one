@@ -15,7 +15,7 @@ itself; the page toasts only a change already made (`LibraryEditing`).
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Final
 
 import gi
@@ -47,6 +47,17 @@ PAGE_SIZE: Final = MEDIA_PAGE_SIZE
 KINDS: Final = (("all", "All"), ("still", "Images"), ("video", "Videos"), ("scene", "Scenes"))
 #: Card widths for the two thumbnail sizes (ui.toml's ``thumbnail_size``).
 CARD_WIDTHS: Final = {"large": 208, "small": 156}
+#: How many of the scan's skipped paths the count's tooltip names.
+SKIPPED_SHOWN: Final = 3
+
+
+def _skipped_tip(skipped: Sequence[str]) -> str:
+    """What the scan left out, for the count's tooltip: the first few, then how many more."""
+    if not skipped:
+        return ""
+    named = "; ".join(skipped[:SKIPPED_SHOWN])
+    more = len(skipped) - SKIPPED_SHOWN
+    return f"Not in the library: {named}" + (f"; and {more} more" if more > 0 else "")
 
 
 class LibraryPage(Page):
@@ -73,7 +84,8 @@ class LibraryPage(Page):
         self._matched: set[str] = set()
 
         # -- header ------------------------------------------------------------
-        self.search = Gtk.SearchEntry(placeholder_text="Search wallpapers, tags, folders")
+        # What the app's search matches: the name (`library.filter.matches`), as classic's.
+        self.search = Gtk.SearchEntry(placeholder_text="Search by name")
         self.search.set_hexpand(True)
         self.search.connect("search-changed", self._on_search)
         self._title_box = Adw.Clamp(maximum_size=460, child=self.search)
@@ -575,9 +587,14 @@ class LibraryPage(Page):
         text = f"{shown} of {total}" if shown != total else f"{total} wallpapers"
         if total == 1 and shown == total:
             text = "1 wallpaper"
+        skipped = self.state.library_skipped
+        if skipped:
+            # Left out by the scan's limits, or unreadable: said, never dropped quietly.
+            text += f" · {len(skipped)} skipped"
         if self.state.library_scanning:
             text += " · scanning…"
         self._count.set_label(text)
+        self._count.set_tooltip_text(_skipped_tip(skipped) or None)
         self._grid_stack.set_visible_child_name("grid" if shown else "empty")
         # An empty library is not a search that found nothing: say which.
         none = total == 0

@@ -1694,7 +1694,10 @@ class PlaylistPage(Page):
         wid = value if isinstance(value, str) else ""
         if not self.state.has_wallpaper(wid):
             return False
-        self.add_entries([wid], position)
+        # Below the last row shown is the end of the playlist: rows past a
+        # long playlist's shown page are not built, so that slot's index
+        # would land mid-list.
+        self.add_entries([wid], position if position < len(self.rows) else None)
         return True
 
     def _on_append_drop(self, value: object) -> bool:

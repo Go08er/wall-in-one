@@ -22,8 +22,9 @@ pytestmark = pytest.mark.gui
 gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
+gi.require_version("Graphene", "1.0")
 
-from gi.repository import Adw, Gdk, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Graphene, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_next_state import FakeApplication, _adapter, _library, _session  # noqa: E402
@@ -350,6 +351,42 @@ def test_a_library_drop_lands_where_it_is_dropped(backend: FakeApplication, make
     assert target.emit("drop", wid, 10.0, 1.0)
     shown.run()
     assert backend.session.playlists.find("evening").entries[0].source == wid
+
+
+def test_a_drop_below_the_shown_rows_of_a_long_playlist_lands_at_its_end(
+    backend: FakeApplication, make: Any
+) -> None:
+    """Only the first page of rows is built; below the last one is the true end."""
+    store = backend.session.playlists
+    store.create("Evening", entry_id="evening")
+    sources = [str(item.path) for item in backend.session.library.items[:3]]
+    placed = [
+        (index, store_module.Entry(f"e{index}", sources[index % len(sources)]))
+        for index in range(ENTRY_PAGE_SIZE + 28)
+    ]
+    store.insert_entries("evening", placed)
+    _give_the_video_a_still(backend)
+    shown = make()
+    shown.settle()
+    page = shown.page
+    assert len(page.rows) == ENTRY_PAGE_SIZE and page.more.get_visible()
+    target = next(
+        controller
+        for controller in page._list_wrap.observe_controllers()
+        if isinstance(controller, Gtk.DropTarget)
+    )
+    last = page.rows[-1]
+    ok, bounds = last.compute_bounds(page.list)
+    below = (bounds.get_y() + bounds.get_height() + 4.0) if ok else 1e6
+    assert page.drop_position(below) == ENTRY_PAGE_SIZE, "the line shows under the last row"
+    ok, point = page.list.compute_point(page._list_wrap, Graphene.Point().init(10.0, below))
+    wid = str(backend.session.library.items[3].path)
+    assert target.emit("drop", wid, 10.0, point.y if ok else below)
+    shown.run()
+    entries = backend.session.playlists.find("evening").entries
+    assert len(entries) == ENTRY_PAGE_SIZE + 29
+    assert entries[-1].source == wid, "at the end, never after the last row shown"
+    assert all(entry.source != wid for entry in entries[:-1])
 
 
 # -- reordering ------------------------------------------------------------------------------------

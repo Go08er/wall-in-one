@@ -709,6 +709,10 @@ class RealAppState(GObject.Object):
     def library_scanning(self) -> bool:
         return self._scanning
 
+    @property
+    def library_skipped(self) -> Sequence[str]:
+        return tuple(self._session.library.skipped)
+
     # -- playlists ----------------------------------------------------------------
     @property
     def playlists(self) -> Sequence[LibraryPlaylist]:

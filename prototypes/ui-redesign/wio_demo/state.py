@@ -313,6 +313,7 @@ class AppState(GObject.Object):
         self.scope = "all"  # player-bar scope: "all" or a connector
         self.thumbnail_size = "large"  # the Library's cards: "large" or "small"
         self.library_scanning = False
+        self.library_skipped: list[str] = []  # the demo's scans never hit a limit
         self._rng = random.Random(4)
         self._rule_serial = 0
         #: A playlist's own (interval in seconds, shuffle); None for the default.
@@ -963,7 +964,13 @@ class AppState(GObject.Object):
         return Downloads(busy=tuple(view.id for view in self._store_queue), text=text)
 
     def download_blocked(self) -> str:
-        return "" if self.folders else "Downloads go into your first library folder, and there is none yet"
+        return (
+            ""
+            if self.folders
+            else (
+                "Downloads go into your first library folder, and there is none yet. Add one in Settings \u2192 Library"
+            )
+        )
 
     def download(self, item, *, variant: str = "", then: str = "") -> None:
         if any(view.id == item.id for view in self._store_queue):

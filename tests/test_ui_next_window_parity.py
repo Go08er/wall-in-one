@@ -155,6 +155,7 @@ def test_settings_shows_this_sessions_log_with_file_paths_hidden(
             "Steam says /home/<user>/.steam is missing",
         ]
         assert section.hiding.get_active(), "on whenever Wall-in-One starts"
+        assert "File names stay readable" in (section.hiding.get_subtitle() or ""), "not anonymity"
         assert "5 entries, 1 problem." in (section.get_description() or "")
 
         section.hiding.set_active(False)

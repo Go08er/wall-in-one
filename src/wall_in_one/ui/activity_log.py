@@ -27,11 +27,17 @@ The longest wins, so a library inside the home folder reads ``<library 1>``.
 Each is matched as written, with spaces, quotes or any other characters in
 it, and in the other forms messages quote paths in: through symlinks (the
 home folder's real path), in a ``file://`` URI, and escaped inside a quoted
-string (JSON, Python, Rust). Last, the user's login name is replaced wherever
-it stands as a word, so it can't survive in some form not listed. What
-follows a known folder (a file's name) stays readable. Entries keep their
-real text, so hiding can be turned off again; it applies to what is shown
-and copied.
+string (JSON, Python, Rust). Last, the user's login name is replaced, in the
+same spellings: wherever it is a whole path component (``/mnt/ann/x``,
+``ann/x``), whatever its length, and, for a login of two or more characters,
+wherever it stands as a word, so it can't survive in some form not listed. A
+one-letter login is not replaced as a word in a sentence: every "a" or "u"
+would go.
+
+It is not anonymization. What follows a known folder (a file's name) stays
+readable, and so does a path under no known folder, apart from the login.
+Entries keep their real text, so hiding can be turned off again; it applies
+to what is shown and copied.
 
 GTK-free and main-thread only, like the status model it reads.
 """
@@ -57,7 +63,7 @@ from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange
 MAX_ENTRIES: Final = 500
 #: Characters kept of one entry's text (a renderer's error can be long).
 MAX_TEXT: Final = 2000
-#: What the user's login name reads as, wherever it is a word of its own.
+#: What the user's login name reads as, as a path component or a word of its own.
 USER: Final = "<user>"
 
 Level = Literal["info", "warning", "error"]
@@ -84,10 +90,14 @@ class Entry:
         return self.level != "info"
 
 
-def spellings(path: str, *, resolve: bool = False) -> set[str]:
+def spellings(path: str, *, resolve: bool = False, shortest: int = 2) -> set[str]:
     """How a message may spell ``path``: as written (and, with ``resolve``,
     through its symlinks), in a ``file://`` URI, or escaped inside a quoted
-    string as JSON, Python's ``repr`` or Rust's ``{:?}`` write it."""
+    string as JSON, Python's ``repr`` or Rust's ``{:?}`` write it.
+
+    Spellings shorter than ``shortest`` are left out (a folder of one
+    character would match every slash).
+    """
     written = {path}
     if resolve:
         written.add(os.path.realpath(path))
@@ -101,7 +111,7 @@ def spellings(path: str, *, resolve: bool = False) -> set[str]:
         backslashed = spelling.replace("\\", "\\\\")
         found.add(backslashed.replace("'", "\\'"))
         found.add(backslashed.replace('"', '\\"'))
-    return {spelling for spelling in found if len(spelling) > 1}
+    return {spelling for spelling in found if len(spelling) >= shortest}
 
 
 def _folder(path: Path | str) -> str:
@@ -158,15 +168,23 @@ class PathHider:
             else None
         )
         login = user if user is not None else _login_name()
-        logins = sorted(spellings(login), key=len, reverse=True) if len(login) > 1 else []
-        # A name already put in place is skipped (a login could be "library").
-        self._login = (
-            re.compile(
-                r"<[^<>\s]+(?: \d+)?>|(?<!\w)(?:" + "|".join(map(re.escape, logins)) + r")(?!\w)"
-            )
-            if logins
-            else None
-        )
+        logins = sorted(spellings(login, shortest=1), key=len, reverse=True) if login else []
+        self._login: re.Pattern[str] | None = None
+        if logins:
+            either = "(?:" + "|".join(map(re.escape, logins)) + ")"
+            branches = [
+                # A name already put in place is skipped (a login could be "library").
+                r"<[^<>\s]+(?: \d+)?>",
+                # A whole path component, of any length: after a separator, up to
+                # where the name ends ...
+                r"(?<=/)" + either + _AFTER,
+                # ... or a path's first component, just before a separator.
+                r"(?<![\w\-.%\\])" + either + r"(?=/|\\/)",
+            ]
+            if len(login) > 1:
+                # A word of its own; never for one letter, in a sentence.
+                branches.append(r"(?<!\w)" + either + r"(?!\w)")
+            self._login = re.compile("|".join(branches))
 
     def __call__(self, text: str) -> str:
         if self._folders is not None:

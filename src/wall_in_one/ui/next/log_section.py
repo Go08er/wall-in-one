@@ -6,7 +6,8 @@ power) and its words, with problems marked. "Copy" puts exactly what is shown
 on the clipboard. "Hide file paths" is on whenever Wall-in-One starts and is
 never saved: it changes what is shown and copied, not the log. It replaces the
 folders the app knows (home, the library folders, its XDG folders) and the
-login name, wherever they appear (`activity_log.PathHider`).
+login name, wherever they appear (`activity_log.PathHider`), and says plainly
+that file names stay readable: it is not anonymization.
 
 The log lives in the application for the whole process; this section follows
 it only while it is realized, and catches up when it is shown again.
@@ -32,6 +33,11 @@ LIST_HEIGHT: Final = 260
 DESCRIPTION: Final = (
     "What Wall-in-One and the wallpaper service reported since Wall-in-One started. "
     "It is kept in memory only, never written to disk."
+)
+#: What "Hide file paths" does, and what it doesn't: it is not anonymization.
+HIDE_SUBTITLE: Final = (
+    "Replaces your home, library and app folders and your login name in what is shown "
+    "and copied. File names stay readable. On whenever Wall-in-One starts"
 )
 _SOURCES: Final = {
     "app": "Wall-in-One",
@@ -87,7 +93,7 @@ class LogSection(Adw.PreferencesGroup):
 
         self.hiding = Adw.SwitchRow(
             title="Hide file paths",
-            subtitle="In the log above and in what Copy copies; on each time Wall-in-One starts",
+            subtitle=HIDE_SUBTITLE,
             active=True,
         )
         self.hiding.connect("notify::active", lambda _row, _param: self._render())

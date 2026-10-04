@@ -18,6 +18,7 @@ def test_the_readme_describes_first_run_tidy_up_and_the_log() -> None:
     assert "Classic's one-time Tidy up card is above every page" in section
     assert "Nothing there runs until you press its button" in section
     assert "kept in memory only, with **Copy** and **Hide file paths**" in section
+    assert "It is not anonymization: file names stay readable" in section
     assert '"Use frame" and a log' not in section, "the log is there now"
     contract = " ".join((activity_log.__doc__ or "").split())
     assert "Nothing is written to disk" in contract, "as the code says"

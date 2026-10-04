@@ -241,7 +241,10 @@ the same way, in searchable groups:
 - Tidy up;
 - a log of what Wall-in-One and the wallpaper service reported since the app
   started, kept in memory only, with **Copy** and **Hide file paths** (on at
-  every start, never saved). Classic has no log.
+  every start, never saved). Classic has no log. Hide file paths replaces your
+  home folder, your library folders, the app's own folders and your login
+  name. It is not anonymization: file names stay readable, and so does a path
+  outside those folders (apart from your login name in it).
 
 A save that fails is reported, and every row goes back to what is saved.
 

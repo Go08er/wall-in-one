@@ -10,7 +10,7 @@ import pytest
 
 from tests.test_next_status_line import BATTERY, two_display_status
 from wall_in_one import paths
-from wall_in_one.ui.activity_log import MAX_TEXT, ActivityLog
+from wall_in_one.ui.activity_log import MAX_TEXT, ActivityLog, PathHider
 from wall_in_one.ui.status_model import RuntimeStatusModel
 
 
@@ -179,3 +179,43 @@ def test_copying_with_paths_hidden_never_leaks_the_user_or_home(
     for secret in (str(home), "j\u00fcrgen", "J\u00fcrgen", str(tmp_path)):
         assert secret not in copied
     assert str(library) in log.as_text(hide=False)
+
+
+def _hider(user: str) -> PathHider:
+    """Codex's probe: a home of ``/home/<login>`` and no other folder in play."""
+    return PathHider(home=f"/home/{user}", places=(), user=user)
+
+
+def test_a_single_letter_login_is_hidden_where_it_is_a_path_component() -> None:
+    """Q-4 (round 2): a one-letter login was never hidden, even inside a path."""
+    hide = _hider("u")
+    assert hide("cannot open /mnt/u/private/a.png") == "cannot open /mnt/<user>/private/a.png"
+    assert hide("files under /srv/u") == "files under /srv/<user>"
+    assert hide("files under /srv/u.") == "files under /srv/<user>."
+    assert hide("relative u/private/a.png") == "relative <user>/private/a.png"
+    assert hide("/home/u/x and /mnt/u/y") == "~/x and /mnt/<user>/y"
+    # Not a component of its own: another name that starts or ends with it.
+    for kept in ("/mnt/users/a.png", "/mnt/menu/a.png", "/mnt/u.bak/a.png", "/mnt/u-2/a"):
+        assert hide(kept) == kept
+
+
+def test_a_single_letter_login_is_hidden_in_uri_and_json_spellings() -> None:
+    hide = _hider("\u00fc")  # a login of one non-ASCII letter: its spellings differ
+    picture = "/mnt/\u00fc/private/a b.png"
+    assert hide(f"open {Path(picture).as_uri()}") == "open file:///mnt/<user>/private/a%20b.png"
+    assert hide(json.dumps({"path": picture})) == '{"path": "/mnt/<user>/private/a b.png"}'
+    assert hide(json.dumps({"path": picture}, ensure_ascii=False)) == (
+        '{"path": "/mnt/<user>/private/a b.png"}'
+    )
+    assert hide(picture) == "/mnt/<user>/private/a b.png"
+    assert hide(r'"\/mnt\/\u00fc\/private"') == r'"\/mnt\/<user>\/private"'
+
+
+def test_a_single_letter_login_is_left_alone_as_a_word_in_a_sentence() -> None:
+    for login, sentence in (
+        ("u", "u can't play this: the file is u-shaped, see section u"),
+        ("a", "Added a wallpaper to a playlist"),
+    ):
+        assert _hider(login)(sentence) == sentence
+    # A longer login still goes as a word, as before.
+    assert _hider("ann")("Steam belongs to ann today") == "Steam belongs to <user> today"

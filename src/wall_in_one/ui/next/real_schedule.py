@@ -51,7 +51,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk
 
 from wall_in_one import config, display_policy, runtime_config
-from wall_in_one.library import schedules
+from wall_in_one.library import pairings, schedules
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import (
     DISPLAY_QUICK_CHOICE_ID_PREFIX,
@@ -463,11 +463,19 @@ class RealScheduling:
         playlist = session.playlists.get(pid)
         if playlist is None:
             return "That playlist no longer exists"
+        # The Playlists page's rule: something in the library that playback
+        # doesn't skip (the compiler would also drop what it can't resolve).
         known = {item.path: item for item in session.library.items}
+        present = False
         for entry in playlist.entries:
             item = known.get(entry.path)
-            if item is not None and _playable(item, session):
+            if item is None or not _playable(item, session):
+                continue
+            present = True
+            if not session.pairings.health(pairings.Identity.of(item)).is_borked:
                 return ""
+        if present:
+            return f"Playback skips everything in “{playlist.name}”, so it can\u2019t be used here"
         return f"“{playlist.name}” has nothing to play yet; add wallpapers to it first"
 
     # -- writing: the shared shape --------------------------------------------------------

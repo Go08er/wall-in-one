@@ -705,3 +705,17 @@ def test_a_detached_display_is_not_one_to_follow(
     results: list[bool] = []
     adapter.choose_display_mode(config.DISPLAY_MODE_INDEPENDENT, results.append)
     assert results == [False] and backend.settings_changes == []
+
+
+def test_a_playlist_playback_skips_entirely_is_refused_too(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    """The Playlists page's rule: something must play, not just be there."""
+    session = backend.session
+    pid = _playlist(session, "Skipped", items[0])
+    session.pairings.mark_borked(items[0], "the renderer crashed", "runtime")
+    adapter, _owner = _scheduling(backend)
+    assert "Playback skips everything" in adapter.playlist_blocked(pid)
+    results: list[bool] = []
+    adapter.assign_display("DP-1", pid, results.append)
+    assert results == [False] and not backend.authoring

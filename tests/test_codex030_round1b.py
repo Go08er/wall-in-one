@@ -152,3 +152,24 @@ def test_library_removal_of_an_unused_playlists_last_usable_entry_is_refused(
         "city-dusk was not removed: \u201cMixed\u201d would hold only wallpapers playback "
         "can\u2019t use. Add another wallpaper there first."
     ]
+
+
+# -- the Library and the picker: what can't play is shown so ---------------------------------
+
+
+def test_the_library_shows_a_video_without_a_still_as_not_playable(
+    adapter: RealAppState, backend: EditingApplication, library: tuple[MediaItem, ...]
+) -> None:
+    video = _video(library)
+    view = adapter.wallpaper(str(video.path))
+    assert view.unplayable == "it has no still for playback to show yet"
+    assert not view.problem, "not skipped after a problem: it never got that far"
+    assert adapter.apply_blocked(str(video.path)) == (
+        "Playback unavailable: it has no still for playback to show yet"
+    )
+    assert adapter.wallpaper(str(library[0].path)).unplayable == ""
+
+    backend.session.pairings.choose_still(video, library[0].path)
+    adapter.reload()
+    assert adapter.wallpaper(str(video.path)).unplayable == ""
+    assert adapter.apply_blocked(str(video.path)) == ""

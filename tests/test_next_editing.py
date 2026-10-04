@@ -624,6 +624,8 @@ def test_try_again_clears_the_warning_and_republishes(
 ) -> None:
     editing = editing_of(adapter)
     item, target = library[3], wid(library, 3)
+    # The video has a still, so the skip is all that keeps Apply off.
+    backend.session.pairings.choose_still(item, library[0].path)
     backend.session.pairings.choose_palette(item, pairings.PalettePolicy("keep"))
     backend.session.pairings.mark_borked(item, "codec missing", "runtime")
     adapter.reload()

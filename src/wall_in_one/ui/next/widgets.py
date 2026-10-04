@@ -399,6 +399,13 @@ class WallpaperCard(Gtk.Box):
             warn = pill("", "dialog-warning-symbolic", "warning")
             warn.set_tooltip_text("Skipped after a playback problem")
             top.append(warn)
+        elif wallpaper.unplayable:
+            waiting = pill("No still", "dialog-warning-symbolic", "warning")
+            waiting.set_tooltip_text(
+                f"Playback can\u2019t use it yet: {wallpaper.unplayable}. Choose a still "
+                "for it in its details"
+            )
+            top.append(waiting)
         if on_favorite is not None or wallpaper.favorite:
             favorite = wallpaper.favorite
             fav = Gtk.Button(icon_name="starred-symbolic" if favorite else "non-starred-symbolic")
@@ -432,8 +439,8 @@ class WallpaperCard(Gtk.Box):
 
         self.apply_button: Gtk.Button | None = None
         if on_apply is not None:
-            unavailable = bool(wallpaper.problem)
-            apply = Gtk.Button(label="Skipped" if unavailable else "Apply")
+            unavailable = bool(wallpaper.problem or wallpaper.unplayable)
+            apply = Gtk.Button(label="Skipped" if wallpaper.problem else "Apply")
             for css in ("pill", "suggested-action", "hover-only", "apply-button"):
                 apply.add_css_class(css)
             apply.set_halign(Gtk.Align.END)
@@ -441,10 +448,12 @@ class WallpaperCard(Gtk.Box):
             apply.set_margin_end(8)
             apply.set_margin_bottom(8)
             apply.set_sensitive(not unavailable and not apply_blocked)
-            if unavailable:
+            if wallpaper.problem:
                 apply.set_tooltip_text(
                     "Skipped after a playback problem \u2014 open details to see why"
                 )
+            elif unavailable:
+                apply.set_tooltip_text(f"Playback can\u2019t use it yet: {wallpaper.unplayable}")
             elif apply_blocked:
                 apply.set_tooltip_text(apply_blocked)
             elif apply_tooltip is not None:

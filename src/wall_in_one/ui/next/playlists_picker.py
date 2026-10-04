@@ -212,6 +212,11 @@ class PlaylistPicker(Adw.Dialog):
                 f"{wallpaper.name} \u2014 playback skips it, so it can\u2019t be added: "
                 f"{wallpaper.problem}"
             )
+        elif wallpaper.unplayable:
+            card.set_tooltip_text(
+                f"{wallpaper.name} \u2014 playback can\u2019t use it yet, so it can\u2019t "
+                f"be added: {wallpaper.unplayable}"
+            )
         else:
             pick = widgets.PickBadge(halign=Gtk.Align.END, valign=Gtk.Align.END)
             pick.set_margin_end(8)
@@ -224,7 +229,10 @@ class PlaylistPicker(Adw.Dialog):
         return card
 
     def toggle(self, wid: str) -> None:
-        if not self.state.has_wallpaper(wid) or self.state.wallpaper(wid).problem:
+        if not self.state.has_wallpaper(wid):
+            return
+        wallpaper = self.state.wallpaper(wid)
+        if wallpaper.problem or wallpaper.unplayable:
             return
         if wid in self._picked:
             self._picked.remove(wid)

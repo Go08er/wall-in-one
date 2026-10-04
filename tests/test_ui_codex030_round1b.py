@@ -35,7 +35,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.test_next_state import FakeApplication, _library, _session  # noqa: E402
 from tests.test_ui_next_editing import hold_the_lane  # noqa: E402
+from tests.test_ui_next_playlists import Shown  # noqa: E402
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _attach, _close  # noqa: E402
 from wall_in_one import config, runtime_config  # noqa: E402
@@ -46,6 +48,8 @@ from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.session import QUICK_CHOICE_ID  # noqa: E402
 from wall_in_one.ui import playlists_page, schedules_page  # noqa: E402
 from wall_in_one.ui.app import Application, _Commands  # noqa: E402
+from wall_in_one.ui.next import widgets  # noqa: E402
+from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
 
 #: `runtime_config.PlaybackGuardError.kind`, spelled out so this file imports on f442d1e too.
 GUARD = "nothing-to-play"
@@ -490,3 +494,46 @@ def test_the_synchronous_settings_write_refuses_a_default_with_nothing_to_play(
     assert config.load_strict().active_playlist == ""
     assert application.settings.active_playlist == ""
     assert _builds(profile)
+
+
+# -- the new window: what can't play is shown so, and not offered ---------------------------
+
+
+@pytest.fixture
+def next_backend(tmp_path: Path) -> Iterator[FakeApplication]:
+    session = _session(_library(tmp_path / "home" / "Pictures" / "Wallpapers"))
+    try:
+        yield FakeApplication(session)
+    finally:
+        session.shutdown()
+
+
+def test_the_picker_and_the_library_card_show_a_video_without_a_still_as_not_playable(
+    next_backend: FakeApplication,
+) -> None:
+    session = next_backend.session
+    video = next(item for item in session.library.items if item.kind is Kind.VIDEO)
+    store = session.playlists
+    store.create("Evening", entry_id="evening")
+    store.add("evening", session.library.items[0].path, entry_id="e0")
+    shown = Shown(next_backend, "evening")
+    try:
+        picker = shown.page.open_picker()
+        assert picker is not None
+        picker.toggle(str(video.path))
+        assert picker.picked == [], "not offered: adding it would be refused"
+        assert "playback can\u2019t use it yet, so it can\u2019t be added: it has no still" in (
+            picker._cards[str(video.path)].get_tooltip_text() or ""
+        )
+
+        state = shown.state
+        assert isinstance(state, RealAppState)
+        card = widgets.WallpaperCard(state.wallpaper(str(video.path)), on_apply=lambda _w: None)
+        assert card.apply_button is not None
+        assert not card.apply_button.get_sensitive()
+        assert card.apply_button.get_label() == "Apply", "not \u201cSkipped\u201d: it never played"
+        assert "it has no still for playback to show yet" in (
+            card.apply_button.get_tooltip_text() or ""
+        )
+    finally:
+        shown.close()

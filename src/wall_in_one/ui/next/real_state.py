@@ -185,6 +185,7 @@ class LibraryWallpaper:
     duration: str = ""
     still_note: str = ""
     tags: tuple[str, ...] = ()
+    unplayable: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +256,7 @@ def wallpaper_view(
     health: pairings.Health,
     shown: pairings.PalettePolicy | None = None,
     still_missing: bool = False,
+    unplayable: str = "",
 ) -> LibraryWallpaper:
     """What the new interface shows of ``item``, from the stores alone.
 
@@ -288,6 +290,7 @@ def wallpaper_view(
         problem=health.reason if health.is_borked else "",
         item=item,
         still_note=_still_note(item, pairing, still_missing),
+        unplayable="" if health.is_borked else unplayable,
     )
 
 
@@ -432,6 +435,8 @@ class RealAppState(GObject.Object):
         pairing = store.get(identity)
         chosen = pairing.still if pairing is not None and pairing.customized else None
         missing = chosen is not None and chosen != item.paired_still and chosen not in indexed()
+        # The compiler's own answer, from accepted memory (no file is read).
+        can = runtime_config.entry_playability(item, session)
         return wallpaper_view(
             item,
             favourite=item.path in session.favourites.paths,
@@ -439,6 +444,7 @@ class RealAppState(GObject.Object):
             health=store.health(identity),
             shown=self._editing.pending_policy(item) if self._editing is not None else None,
             still_missing=missing,
+            unplayable="" if can.compiles else can.reason,
         )
 
     def _indexed_stills(self) -> Callable[[], frozenset[Path]]:
@@ -858,6 +864,8 @@ class RealAppState(GObject.Object):
             return "Not in the library"
         if view.problem:
             return f"Playback unavailable: {view.problem}"
+        if view.unplayable:
+            return f"Playback unavailable: {view.unplayable}"
         return ""
 
     def apply(self, wid: str, scope: str = "all") -> None:

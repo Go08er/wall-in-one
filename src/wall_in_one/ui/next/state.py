@@ -137,6 +137,11 @@ class WallpaperView(Protocol):
     @property
     def problem(self) -> str: ...
 
+    #: Why playback can't use it yet though it isn't skipped (a video still
+    #: waiting for its still), or empty. It can't be added or applied then.
+    @property
+    def unplayable(self) -> str: ...
+
     @property
     def tags(self) -> tuple[str, ...]: ...
 

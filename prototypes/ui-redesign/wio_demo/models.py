@@ -37,6 +37,7 @@ class Wallpaper:
     still_note: str = ""
     problem: str = ""  # a renderer failure the runtime reported, if any
     tags: tuple[str, ...] = ()
+    unplayable: str = ""  # why playback can't use it yet (no still), if so
 
     @property
     def key(self) -> ArtKey:

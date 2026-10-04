@@ -292,8 +292,14 @@ def test_the_real_adapter_defines_every_member_of_the_protocol() -> None:
         assert hasattr(RealAppState, name), name
 
 
-def test_the_real_adapter_offers_no_folder_authoring_yet(backend: FakeApplication) -> None:
-    """Folders are still added in the classic Settings: no "Add a folder" that pretends."""
+def test_without_the_authoring_calls_the_adapter_offers_no_editing(
+    backend: FakeApplication,
+) -> None:
+    """Given only reads, Apply and Favorite, nothing pretends to edit or add folders.
+
+    The window hands the application's authoring calls over (`NextWindow`),
+    and then both parts are there: see ``tests/test_next_editing.py``.
+    """
     adapter, _keeper = _adapter(backend)
     assert adapter.library_folders is None
     assert adapter.editing is None
@@ -356,7 +362,8 @@ def test_a_media_item_becomes_a_wallpaper_view(library: tuple[MediaItem, ...]) -
     borked = pairings.Health.borked("renderer rejected this wallpaper", "runtime")
     view = wallpaper_view(video, favourite=True, pairing=nord, health=borked)
     assert view.is_moving and view.kind == "video" and view.favorite
-    assert (view.color_mode, view.palette, view.theme_mode) == ("palette", "Nord", "dark")
+    # The palette is named with its origin: two origins may both have a "Nord".
+    assert (view.color_mode, view.palette, view.theme_mode) == ("palette", "builtin:Nord", "dark")
     assert view.problem == "renderer rejected this wallpaper"
 
     pinned = pairings.Pairing(
@@ -398,7 +405,10 @@ def test_the_library_comes_from_the_session(backend: FakeApplication) -> None:
     ]
     by_name = {view.name: view for view in adapter.wallpapers}
     assert by_name["city-dusk"].favorite and not by_name["alpine"].favorite
-    assert (by_name["lily-pond"].color_mode, by_name["lily-pond"].palette) == ("palette", "Nord")
+    assert (by_name["lily-pond"].color_mode, by_name["lily-pond"].palette) == (
+        "palette",
+        "builtin:Nord",
+    )
     assert by_name["rain"].problem == "codec missing"
     assert adapter.has_wallpaper(str(items[0].path)) and not adapter.has_wallpaper("/nope")
 
@@ -610,7 +620,7 @@ def test_a_newer_playlists_file_turns_apply_and_favorite_off(
         assert "playlists.json" in adapter.favorite_blocked()
         notice = adapter.read_only_notice()
         assert "playlists.json was saved by a newer version of Wall-in-One" in notice
-        assert "Apply, favorites and playback controls are off" in notice
+        assert "Apply, favorites, library changes and playback controls are off" in notice
 
         adapter.apply(wid)
         adapter.toggle_favorite(wid)

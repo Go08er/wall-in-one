@@ -59,11 +59,17 @@ from wall_in_one.ui.next.settings_state import (
 )
 from wall_in_one.ui.next.settings_state import Folder as FolderView
 from wall_in_one.ui.next.state import (
+    EXTRA_BULK_REMOVE,
+    EXTRA_FRAME,
+    EXTRA_LOG,
+    EXTRA_MOTION,
     UNCHANGED,
     Banner,
+    Choices,
     OnScreen,
     Player,
     Reason,
+    Removal,
     WallpaperView,
     not_on_its_own,
     solo_displays,
@@ -617,15 +623,66 @@ class AppState(GObject.Object):
         wallpaper.favorite = not wallpaper.favorite
         self.emit_changed("library")
 
-    def favorite_wallpapers(self, wids: list[str]) -> None:
-        for wid in wids:
-            self.wallpaper(wid).favorite = True
+    def favorite_wallpapers(self, wids: list[str]) -> Undo:
+        """Star them all; returns an undo that unstars the ones this starred."""
+        starred = [self.wallpaper(wid) for wid in wids if not self.wallpaper(wid).favorite]
+        for wallpaper in starred:
+            wallpaper.favorite = True
         self.emit_changed("library")
+
+        def undo() -> None:
+            for wallpaper in starred:
+                wallpaper.favorite = False
+            self.emit_changed("library")
+
+        return undo
 
     def retry_wallpaper(self, wid: str) -> None:
         """Forget a playback problem so the runtime tries the wallpaper again."""
-        self.wallpaper(wid).problem = ""
+        wallpaper = self.wallpaper(wid)
+        wallpaper.problem = ""
         self.emit_changed("library")
+        self.toast(f"\u201c{wallpaper.name}\u201d will be tried again")
+
+    # -- the inspector's other edits (LibraryEditing) ---------------------------
+    #: The demo shows every control the design has, backend or not.
+    extras = frozenset({EXTRA_MOTION, EXTRA_FRAME, EXTRA_LOG, EXTRA_BULK_REMOVE})
+
+    # editing_blocked: one definition serves both parts (see the Playlists part below).
+
+    def removal(self, wid: str) -> Removal:
+        """Downloads are deleted, your own files trashed, Workshop scenes left alone."""
+        source = self.wallpaper(wid).source
+        if source == "Workshop":
+            return Removal("", "Steam installed it: unsubscribe in Steam, then rescan")
+        return Removal("delete" if source in ("Wallhaven", "MotionBGS") else "trash")
+
+    def choices(self, wid: str) -> Choices:
+        wallpaper = self.wallpaper(wid)
+        customized = (wallpaper.color_mode, wallpaper.scheme, wallpaper.theme_mode) != (
+            "adaptive",
+            None,
+            "auto",
+        )
+        return Choices(customized=customized, regenerate=wallpaper.kind == "scene")
+
+    def reset_wallpaper(self, wid: str) -> None:
+        wallpaper = self.wallpaper(wid)
+        wallpaper.color_mode, wallpaper.scheme, wallpaper.palette = "adaptive", None, None
+        wallpaper.theme_mode = "auto"
+        self.emit_changed("library")
+        self.toast(f"\u201c{wallpaper.name}\u201d is back to its defaults")
+
+    def regenerate_still(self, wid: str) -> None:
+        self.toast(f"Capturing a new still for \u201c{self.wallpaper(wid).name}\u201d")
+
+    def choose_still(self, wid: str, path: str | None) -> None:
+        wallpaper = self.wallpaper(wid)
+        wallpaper.still_note = f"Chosen by hand: {path.rsplit('/', 1)[-1]}" if path else ""
+        self.emit_changed("library")
+
+    def show_in_files(self, wid: str) -> None:
+        self.toast("Would open the folder in Files")
 
     def library_sorts(self) -> list[tuple[str, str]]:
         return list(LIBRARY_SORTS)
@@ -1104,18 +1161,6 @@ class AppState(GObject.Object):
         return f"{base} {index}"
 
     # -- playlists ------------------------------------------------------------
-    def create_playlist(self, name: str) -> str:
-        """A new, empty playlist after the user's others; returns its id."""
-        base = name.lower().replace(" ", "-")
-        pid, number = base, 2
-        while pid in self._playlist_index:  # a second "Frog day" must not replace the first
-            pid, number = f"{base}-{number}", number + 1
-        playlist = Playlist(pid, name, [])
-        self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
-        self._playlist_index[pid] = playlist
-        self.emit_changed("playlists")
-        return pid
-
     # The Playlists page's part (wall_in_one.ui.next.playlists_state.PlaylistEditing):
     # entries are wallpaper ids here, so an entry's id is its wallpaper and which
     # occurrence it is ("alpine#2"); every change is saved at once.
@@ -1201,16 +1246,24 @@ class AppState(GObject.Object):
     def creating(self, pid: str) -> bool:
         return False  # the demo saves at once
 
-    def create_playlist(self, name: str) -> str:
-        """A new, empty playlist after the user's others; returns its id."""
+    def create_playlist(self, name: str, wids: Sequence[str] = ()) -> str:
+        """A new playlist (holding ``wids``) after the user's others; returns its id.
+
+        One definition for both parts: the Playlists page's "New playlist" and
+        the Library's "New playlist…" with wallpapers in it (said, as the app's
+        part says it).
+        """
         base = name.lower().replace(" ", "-")
         pid, number = base, 2
         while pid in self._playlist_index:  # a second "Frog day" must not replace the first
             pid, number = f"{base}-{number}", number + 1
-        playlist = Playlist(pid, name, [])
+        playlist = Playlist(pid, name, list(wids))
         self.playlists.insert(len([p for p in self.playlists if not p.automatic]), playlist)
         self._playlist_index[pid] = playlist
         self.emit_changed("playlists")
+        if wids:
+            what = f"\u201c{self.wallpaper(wids[0]).name}\u201d" if len(wids) == 1 else f"{len(wids)} wallpapers"
+            self.toast(f"Created \u201c{name}\u201d with {what}")
         return pid
 
     def rename_playlist(self, pid: str, name: str) -> None:
@@ -1922,6 +1975,21 @@ class AppState(GObject.Object):
         return ""
 
     # -- library folders ------------------------------------------------------
+    def add_folder_blocked(self) -> str:
+        return ""
+
+    def rescan(self) -> None:
+        """F5: the demo's folders do not change, so a scan is only a moment."""
+        self.library_scanning = True
+        self.emit_changed("system")
+
+        def scanned() -> bool:
+            self.library_scanning = False
+            self.emit_changed("system")
+            return False
+
+        GLib.timeout_add(800, scanned)
+
     def add_library_folder(self, path: str) -> Undo:
         """Add a folder; it shows as scanning for a moment."""
         folder = Folder(path, "38 files", scanning=True)

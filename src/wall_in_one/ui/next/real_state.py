@@ -11,27 +11,34 @@ default), its playlist and its entry, resolved to a library item by
 runtime's own per-display timing, and stay empty with a service that does not
 report it.
 
-**Writes.** Apply, Favorite, the player bar's playback controls and the
-Playlists page. Apply is the classic window's Quick choice
-(`play_item_async`, or `play_item_on_async` for one display); Favorite is
-the classic star, on the authoring lane; the playback controls are the
-classic runtime verbs (`real_controls.RuntimeControls`); playlist editing is
-`real_playlists.RealPlaylists`, on the authoring lane too. All of them report
-their failures through the application; none changes what the window shows
-until the store or the runtime says so (the favourite and playlists come back
-through `reload`, what plays through the next status). Only removing
-playlist entries offers Undo.
+**Writes.** Apply, Favorite, the player bar's playback controls, the
+Playlists page and the Library's edits. Apply is the classic window's Quick
+choice (`play_item_async`, or `play_item_on_async` for one display);
+Favorite is the classic star, on the authoring lane; the playback controls
+are the classic runtime verbs (`real_controls.RuntimeControls`); playlist
+editing is `real_playlists.RealPlaylists`, on the authoring lane too. Given
+the application's authoring calls (``authoring``), the library edits are
+`real_editing.RealEditing` (colors, still, reset, try again, remove, bulk
+favorites, and adding to playlists through `RealPlaylists`), and adding a
+library folder is the Settings part's own path (`real_folders.RealFolders`).
+All of them report their failures through the application; none changes what
+the window shows until the store or the runtime says so (the favourite and
+playlists come back through `reload`, what plays through the next status) --
+except a color choice still being saved, which its view shows until the last
+queued one settles. Only removing playlist entries offers Undo.
 
 **Settings.** The Settings page's part (`settings_access`) is
 `real_settings.RealSettings`: the classic Settings page's saves, rollback and
 palette paths. It is made when the page first asks, follows the window as
 this adapter does (`listen`/`close`), and only for an application that offers
-what it needs (`real_settings.SettingsBackend`).
+what it needs (`real_settings.SettingsBackend`). The Library's "Add a folder"
+is its folder path too (`real_folders.RealFolders`).
 
-**Read-only states.** A store saved by a newer version turns Apply, Favorite
-and the playback controls off (the runtime configuration cannot be compiled
-while one exists, so no change could reach the wallpaper service), and
-unknown settings keys are named in the notice; see `read_only_notice`.
+**Read-only states.** A store saved by a newer version turns Apply, Favorite,
+library edits and the playback controls off (the runtime configuration cannot
+be compiled while one exists, so no change could reach the wallpaper
+service), and unknown settings keys are named in the notice; see
+`read_only_notice`.
 
 **The look.** The window style, opacity dials, frost and thumbnail size live
 in ``ui.toml`` (`UiPrefsKeeper`); the glass dials are handed to the
@@ -67,6 +74,9 @@ from wall_in_one.ui.next.library_thumbnails import StillSource
 from wall_in_one.ui.next.playlists_state import PlaylistEditing
 from wall_in_one.ui.next.prefs import DIAL_SAVE_DELAY_MS, UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import RuntimeBackend, RuntimeControls
+from wall_in_one.ui.next.real_editing import EditingBackend, RealEditing, palette_key
+from wall_in_one.ui.next.real_editing import scheme_name as scheme_name
+from wall_in_one.ui.next.real_folders import RealFolders
 from wall_in_one.ui.next.real_playlists import PlaylistBackend, RealPlaylists
 from wall_in_one.ui.next.real_settings import RealSettings, SettingsBackend
 from wall_in_one.ui.next.real_store import RealStore, StoreBackend
@@ -141,6 +151,12 @@ class Backend(RuntimeBackend, PlaylistBackend, Protocol):
     def set_window_glass(self, glass: css.Glass | None) -> None: ...
 
 
+class AuthoringBackend(EditingBackend, Protocol):
+    """The application's authoring calls the library edits use, and its rescan."""
+
+    def refresh_library(self) -> None: ...
+
+
 # -- view records ---------------------------------------------------------------------
 
 
@@ -211,23 +227,47 @@ def _source(item: MediaItem) -> str:
     return "Local"
 
 
+def _still_note(item: MediaItem, pairing: pairings.Pairing | None, missing: bool) -> str:
+    """Where a moving wallpaper's still comes from, in words."""
+    if not item.is_moving:
+        return ""
+    chosen = pairing.still if pairing is not None and pairing.customized else None
+    if chosen is not None and not missing:
+        return f"Chosen by hand: {chosen.name}"
+    automatic = (
+        "Captured from the scene"
+        if item.kind is Kind.SCENE
+        else "Taken from the video automatically"
+    )
+    note = automatic if item.paired_still is not None else "No still yet"
+    if chosen is not None:
+        return f"{note} (the chosen {chosen.name} is not in the library now)"
+    return note
+
+
 def wallpaper_view(
     item: MediaItem,
     *,
     favourite: bool,
     pairing: pairings.Pairing | None,
     health: pairings.Health,
+    shown: pairings.PalettePolicy | None = None,
+    still_missing: bool = False,
 ) -> LibraryWallpaper:
-    """What the new interface shows of ``item``, from the stores alone."""
+    """What the new interface shows of ``item``, from the stores alone.
+
+    ``shown`` is a color choice still being saved, shown in place of the
+    record's until it settles.
+    """
     policy = pairing.palette if pairing is not None and pairing.customized else None
-    policy = policy or pairings.PalettePolicy()
+    policy = shown or policy or pairings.PalettePolicy()
     if policy.keeps_palette:
         mode, scheme, palette = "keep", None, None
     elif policy.is_adaptive:
         pinned = policy.adaptive_scheme("")
         mode, scheme, palette = "adaptive", pinned or None, None
     else:
-        mode, scheme, palette = "palette", None, policy.name or policy.kind
+        mode, scheme, palette = "palette", None, palette_key(policy) or policy.encode()
     added = datetime.datetime.fromtimestamp(item.mtime).strftime("%-d %b %Y") if item.mtime else ""
     return LibraryWallpaper(
         id=str(item.path),
@@ -245,12 +285,8 @@ def wallpaper_view(
         theme_mode=policy.mode.value,
         problem=health.reason if health.is_borked else "",
         item=item,
+        still_note=_still_note(item, pairing, still_missing),
     )
-
-
-def scheme_name(key: str) -> str:
-    """``m3-tonal-spot`` -> ``Tonal Spot``."""
-    return key.removeprefix("m3-").replace("-", " ").title()
 
 
 def _is_quick_choice(playlist_id: str) -> bool:
@@ -284,10 +320,18 @@ class RealAppState(GObject.Object):
         "navigate": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, backend: Backend, prefs: UiPrefsKeeper) -> None:
+    def __init__(
+        self,
+        backend: Backend,
+        prefs: UiPrefsKeeper,
+        *,
+        authoring: AuthoringBackend | None = None,
+    ) -> None:
         super().__init__()
         self._backend = backend
         self._prefs = prefs
+        self._authoring = authoring
+        self._folders: RealFolders | None = None
         self._scope = "all"
         self._scanning = False
         self._wallpapers: tuple[LibraryWallpaper, ...] = ()
@@ -304,6 +348,11 @@ class RealAppState(GObject.Object):
         self._unfollow_prefs: Callable[[], None] | None = None
         self._controls = RuntimeControls(backend, self, self._authoring_blocked)
         self._playlist_editing = RealPlaylists(backend, self, self._authoring_blocked)
+        #: Library edits, when the application's authoring is given; they add to
+        #: and make playlists through the Playlists part, the one way to.
+        self._editing = (
+            RealEditing(authoring, self, self._playlist_editing) if authoring is not None else None
+        )
         #: The Settings page's part, made when the page first asks for it.
         self._settings_part: RealSettings | None = None
         self._store: RealStore | None = None
@@ -313,6 +362,8 @@ class RealAppState(GObject.Object):
     # -- lifetime ----------------------------------------------------------------
     def listen(self) -> None:
         """Follow the status model and the ui.toml keeper (again, after `close`)."""
+        if self._editing is not None:
+            self._editing.listen()
         if self._unsubscribe is None:
             self._unsubscribe = self._backend.status_model.subscribe(self._on_status)
             self._adopt_status(self._backend.status_model.view)
@@ -333,6 +384,8 @@ class RealAppState(GObject.Object):
             self._settings_part.close()
         if self._store is not None:
             self._store.close()  # its lanes and transport start again on next use
+        if self._editing is not None:
+            self._editing.close()
 
     def _look_saved(self) -> None:
         """A look save came back and ui.toml holds something else: show what it holds.
@@ -363,22 +416,44 @@ class RealAppState(GObject.Object):
     def _session(self) -> Session:
         return self._backend.session
 
+    def _view_of(self, item: MediaItem, indexed: Callable[[], frozenset[Path]]) -> LibraryWallpaper:
+        session = self._session
+        store = session.pairings
+        identity = pairings.Identity.of(item)
+        pairing = store.get(identity)
+        chosen = pairing.still if pairing is not None and pairing.customized else None
+        missing = chosen is not None and chosen != item.paired_still and chosen not in indexed()
+        return wallpaper_view(
+            item,
+            favourite=item.path in session.favourites.paths,
+            pairing=pairing,
+            health=store.health(identity),
+            shown=self._editing.pending_policy(item) if self._editing is not None else None,
+            still_missing=missing,
+        )
+
+    def _indexed_stills(self) -> Callable[[], frozenset[Path]]:
+        """Every still image the latest scan found, worked out once and only if asked."""
+        found: list[frozenset[Path]] = []
+
+        def indexed() -> frozenset[Path]:
+            if not found:
+                library = self._session.library
+                found.append(
+                    frozenset(
+                        candidate.path
+                        for candidate in (*library.items, *library.still_inventory)
+                        if candidate.kind is Kind.STILL
+                    )
+                )
+            return found[0]
+
+        return indexed
+
     def reload(self) -> None:
         """Adopt the session's newly installed library, playlists and favourites."""
-        session = self._session
-        favourites = session.favourites.paths
-        store = session.pairings
-        views = []
-        for item in session.library.items:
-            identity = pairings.Identity.of(item)
-            views.append(
-                wallpaper_view(
-                    item,
-                    favourite=item.path in favourites,
-                    pairing=store.get(identity),
-                    health=store.health(identity),
-                )
-            )
+        indexed = self._indexed_stills()
+        views = [self._view_of(item, indexed) for item in self._session.library.items]
         self._wallpapers = tuple(views)
         self._index = {view.id: view for view in views}
         self._playlists = self._read_playlists()
@@ -401,6 +476,27 @@ class RealAppState(GObject.Object):
             icon="view-grid-symbolic",
         )
         return (*authored, everything)
+
+    def item_of(self, wid: str) -> MediaItem | None:
+        """The library item behind ``wid``, as the views last saw it."""
+        view = self._index.get(wid)
+        return view.item if view is not None else None
+
+    def restate(self, wid: str) -> bool:
+        """Rebuild ``wid``'s view from the session (and queued colors); True if it changed.
+
+        Quiet: the caller says when the change is worth a "library" redraw.
+        """
+        view = self._index.get(wid)
+        if view is None:
+            return False
+        item = self._session.library.find(view.item.path) or view.item
+        fresh = self._view_of(item, self._indexed_stills())
+        if fresh == view:
+            return False
+        self._index[wid] = fresh
+        self._wallpapers = tuple(fresh if other.id == wid else other for other in self._wallpapers)
+        return True
 
     def reload_playlists(self) -> None:
         """Adopt a playlist store mutation (the library itself did not change)."""
@@ -700,8 +796,8 @@ class RealAppState(GObject.Object):
             verb, pronoun = ("was", "it") if len(newer) == 1 else ("were", "them")
             parts.append(
                 f"{_listed(newer)} {verb} saved by a newer version of Wall-in-One, so Apply, "
-                f"favorites and playback controls are off here. Open that version to change "
-                f"{pronoun}."
+                f"favorites, library changes and playback controls are off here. Open that "
+                f"version to change {pronoun}."
             )
         unknown = self._backend.settings_unknown_keys
         if unknown:
@@ -791,8 +887,10 @@ class RealAppState(GObject.Object):
         return scheme_name(key)
 
     def wallpaper_swatches(self, wallpaper: WallpaperView, dark: bool = True) -> list[str]:
-        """Unknown until Noctalia generates them; cards show no dots."""
-        return []
+        """The colors it puts on the desktop once known (generated or installed), else none."""
+        if self._editing is None:
+            return []
+        return self._editing.effective_swatches(wallpaper, dark)
 
     # -- this window's look: ui.toml ---------------------------------------------------
     @property
@@ -866,19 +964,24 @@ class RealAppState(GObject.Object):
     def appearance_blocked(self) -> str:
         return self._prefs.read_only
 
-    # -- optional parts: the playback controls; no editing or folders yet ---------------
+    # -- optional parts: the playback controls, library edits and folders --------------
     @property
     def controls(self) -> PlaybackControls | None:
         return self._controls
 
     @property
     def editing(self) -> LibraryEditing | None:
-        return None
+        """Library edits, when the application's authoring calls were given."""
+        return self._editing
 
     @property
     def library_folders(self) -> LibraryFolders | None:
-        """Folders are still added in the classic Settings; no button pretends here."""
-        return None
+        """Adding a folder (the Settings part's own path) and rescanning, given authoring."""
+        if self._folders is None and self._authoring is not None:
+            settings = self.settings_access
+            if settings is not None:
+                self._folders = RealFolders(settings, self._authoring.refresh_library)
+        return self._folders
 
     # -- pages still to port: each shows its placeholder while its part is None ---------
     @property

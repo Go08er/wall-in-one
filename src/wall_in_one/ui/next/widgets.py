@@ -694,7 +694,9 @@ class CardGrid(Gtk.Widget):
 
 def color_tooltip(state: AppState, wallpaper: WallpaperView) -> str:
     if wallpaper.color_mode == "palette":
-        return f"Colors: {wallpaper.palette} palette"
+        # A key may name its origin (``community:Nord``); the name is what to say.
+        palette = wallpaper.palette or ""
+        return f"Colors: {palette.partition(':')[2] or palette} palette"
     if wallpaper.color_mode == "keep":
         return "Colors: don't change"
     scheme = state.scheme_name(wallpaper.scheme or state.default_scheme)

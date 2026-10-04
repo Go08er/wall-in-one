@@ -19,16 +19,17 @@ listen with ``state.connect("changed", lambda _state, topic: ...)``. Topics
 the slice uses: ``now`` (what is on screen), ``playback``, ``library``,
 ``playlists``, ``displays``, ``system`` (service, power and read-only
 notices), ``scope`` (the player bar's display scope), ``settings``,
-``theme``, ``appearance`` (window style, glass dials) and ``palettes`` (the
-Settings page's palette manager).
+``theme``, ``appearance`` (window style, glass dials), ``palettes`` (the
+Settings page's palette manager) and ``colors`` (scheme previews or the
+palette list arrived: only the inspector's colors redraw).
 
 **Optional parts.** `PlaybackControls`, `LibraryEditing` and
 `LibraryFolders` are separate Protocols an adapter offers through
 ``controls``, ``editing`` and ``library_folders``, or not at all (``None``).
 Widgets hide or disable what an adapter does not offer, so the real adapter
-never has to pretend: in this slice its only writes are Apply, Favorite and
-the playback controls. Undo exists only on the editing and folder paths, so
-it never shows under an adapter without them.
+never has to pretend. Undo exists only on the editing and folder paths, so
+it never shows under an adapter without them, and there only where the
+adapter can honestly undo (see `LibraryEditing`).
 
 GTK-free: annotations only.
 """
@@ -119,6 +120,7 @@ class WallpaperView(Protocol):
     @property
     def scheme(self) -> str | None: ...
 
+    #: The chosen palette as its `PaletteView.key` names it, or None.
     @property
     def palette(self) -> str | None: ...
 
@@ -175,6 +177,13 @@ class PaletteView(Protocol):
     @property
     def name(self) -> str: ...
 
+    #: What ``set_wallpaper_colors(palette=...)`` takes and `WallpaperView.palette`
+    #: holds: unique across origins (two origins may both have a "Nord").
+    @property
+    def key(self) -> str: ...
+
+    #: ``[surface, primary, secondary, tertiary, error]``, or empty when unknown
+    #: (Noctalia does not say what its built-in palettes look like).
     def strip(self, dark: bool) -> list[str]: ...
 
 
@@ -304,18 +313,94 @@ class PlaybackControls(Protocol):
     def start_service(self) -> None: ...
 
 
+#: `LibraryEditing.extras`: inspector controls an adapter backs beyond the
+#: Protocol's methods. Without one, its control is not shown at all.
+#: Per-wallpaper Animate, Sound and frame rate, and the motion preview.
+EXTRA_MOTION: Final = "motion"
+#: "Use frame": the still taken from a chosen moment of a video.
+EXTRA_FRAME: Final = "frame"
+#: "Show log" beside a playback problem.
+EXTRA_LOG: Final = "log"
+#: Removing several selected wallpapers in one go.
+EXTRA_BULK_REMOVE: Final = "bulk-remove"
+
+
+@dataclass(frozen=True, slots=True)
+class Removal:
+    """How one wallpaper would leave the library (`LibraryEditing.removal`)."""
+
+    #: ``delete``: a download Wall-in-One owns, deleted for good. ``trash``:
+    #: the user's own file, moved to the Trash. Empty: not Wall-in-One's to
+    #: remove (a Workshop scene, a file outside the library folders).
+    how: Literal["delete", "trash", ""]
+    #: Why it cannot be removed here, when ``how`` is empty.
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Choices:
+    """What was chosen by hand for one wallpaper (`LibraryEditing.choices`)."""
+
+    #: Anything at all (colors, light or dark, still): Reset to defaults applies.
+    customized: bool = False
+    #: A still chosen by hand: "Use the automatic still" applies.
+    still: bool = False
+    #: Its automatic still can be captured again (a scene): Regenerate applies.
+    regenerate: bool = False
+
+
 class LibraryEditing(Protocol):
-    """Changing the library beyond Apply and Favorite. Absent: those controls are hidden."""
+    """Changing the library beyond Apply and Favorite. Absent: those controls are hidden.
 
-    def add_to_playlist(self, pid: str, wids: list[str]) -> None: ...
+    **Who says what happened.** An action that returns an `Undo` has already
+    made its change (an adapter that writes synchronously); the page words the
+    toast and offers the Undo. One that returns None saves asynchronously:
+    the adapter reports the outcome itself once the store has it, with an
+    Undo only where an inverse is honest. Other actions always report
+    themselves.
+    """
 
-    def favorite_wallpapers(self, wids: list[str]) -> None: ...
+    #: Controls beyond these methods that this adapter backs (``EXTRA_*``).
+    @property
+    def extras(self) -> frozenset[str]: ...
 
-    def remove_wallpapers(self, wids: list[str]) -> Undo: ...
+    def editing_blocked(self) -> str:
+        """Why nothing here can change now (files from a newer version), or empty."""
+        ...
 
-    def create_playlist(self, name: str) -> str: ...
+    def add_to_playlist(self, pid: str, wids: list[str]) -> None:
+        """Append ``wids`` to playlist ``pid``; refused for a wallpaper playback skips."""
+        ...
 
-    def retry_wallpaper(self, wid: str) -> None: ...
+    def favorite_wallpapers(self, wids: list[str]) -> Undo | None: ...
+
+    def removal(self, wid: str) -> Removal: ...
+
+    def remove_wallpapers(self, wids: list[str]) -> Undo | None: ...
+
+    def create_playlist(self, name: str, wids: Sequence[str] = ()) -> str:
+        """A new playlist holding ``wids`` (in the same save); returns its id."""
+        ...
+
+    def retry_wallpaper(self, wid: str) -> None:
+        """Forget a playback problem so playback tries the wallpaper again."""
+        ...
+
+    def choices(self, wid: str) -> Choices: ...
+
+    def reset_wallpaper(self, wid: str) -> None:
+        """Forget every choice made for ``wid`` (colors, light or dark, still)."""
+        ...
+
+    def regenerate_still(self, wid: str) -> None:
+        """Capture a scene's automatic still again."""
+        ...
+
+    def choose_still(self, wid: str, path: str | None) -> None:
+        """Use the library image at ``path`` as the still; None: the automatic one."""
+        ...
+
+    def show_in_files(self, wid: str) -> None: ...
 
     def set_wallpaper_colors(
         self,
@@ -337,10 +422,18 @@ class LibraryEditing(Protocol):
 
 
 class LibraryFolders(Protocol):
-    """Adding a library folder. Absent: the Library's "Add a folder" is hidden."""
+    """Library folders. Absent: the Library's "Add a folder" (and rescan) is hidden."""
 
-    def add_library_folder(self, path: str) -> Undo:
-        """Make ``path`` a library folder and scan it."""
+    def add_library_folder(self, path: str) -> Undo | None:
+        """Make ``path`` a library folder and scan it (see `LibraryEditing` on the return)."""
+        ...
+
+    def add_folder_blocked(self) -> str:
+        """Why no folder can be added now, or empty."""
+        ...
+
+    def rescan(self) -> None:
+        """Look through every library folder again."""
         ...
 
 

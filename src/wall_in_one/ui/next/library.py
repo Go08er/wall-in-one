@@ -6,7 +6,10 @@ grid (`wall_in_one.ui.grid.MEDIA_PAGE_SIZE`), plus the wallpapers on screen
 and the one whose details are open, wherever they sort. Selection mode,
 adding to playlists and removing exist only when the adapter offers
 `AppState.editing`; the "Add a folder" button only when it offers
-`AppState.library_folders`.
+`AppState.library_folders`. Removal is named for what it does to that file
+(`LibraryEditing.removal`), and several at once only where the adapter can
+(`EXTRA_BULK_REMOVE`). Whatever the adapter saves asynchronously it reports
+itself; the page toasts only a change already made (`LibraryEditing`).
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.inspector import Inspector
 from wall_in_one.ui.next.page import Page
 from wall_in_one.ui.next.state import (
+    EXTRA_BULK_REMOVE,
     AppState,
     LibraryEditing,
     LibraryFolders,
@@ -192,10 +196,12 @@ class LibraryPage(Page):
         self._label_bar_button(add_to, "list-add-symbolic", "Add to playlist")
         add_to.set_tooltip_text("Add the selected wallpapers to a playlist")
         add_to.add_css_class("suggested-action")
+        self._add_to = add_to
         fav_all = Gtk.Button()
         self._label_bar_button(fav_all, "starred-symbolic", "Favorite")
         fav_all.set_tooltip_text("Add the selected wallpapers to favorites")
         fav_all.connect("clicked", lambda *_: self._bulk_favorite())
+        self._fav_all = fav_all
         self._remove_all = Gtk.Button()
         self._label_bar_button(self._remove_all, "user-trash-symbolic", "Remove…")
         self._remove_all.set_tooltip_text("Remove the selected wallpapers from the library")
@@ -352,10 +358,21 @@ class LibraryPage(Page):
                 self.inspect(wallpaper)
                 self.inspector.confirm_remove(wallpaper)
 
+            def new_playlist(wid: str) -> None:
+                self._ask_playlist_name(lambda name: editing.create_playlist(name, [wid]))
+
+            def bulk_new_playlist(_value: str) -> None:
+                chosen = sorted(self._selected)
+                if chosen:
+                    self._ask_playlist_name(lambda name: self._bulk_create(name, chosen))
+
             add("add", add_to)
-            add("files", lambda _wid: self.state.toast("Would open the folder in Files"))
+            add("files", editing.show_in_files)
             add("remove", remove)
+            add("reset", editing.reset_wallpaper)
+            add("new-playlist", new_playlist)
             add("bulk-add", self._bulk_add)
+            add("bulk-new-playlist", bulk_new_playlist)
         store = Gio.SimpleAction.new("store", None)
         store.connect("activate", lambda *_: self.state.navigate("store"))
         group.add_action(store)
@@ -370,6 +387,16 @@ class LibraryPage(Page):
         sizes = self._action_group.lookup_action("size")
         if isinstance(sizes, Gio.SimpleAction):
             sizes.set_enabled(not self.state.appearance_blocked())
+        blocked = self._editing.editing_blocked() if self._editing is not None else ""
+        for name in ("add", "remove", "reset", "new-playlist", "bulk-add", "bulk-new-playlist"):
+            action = self._action_group.lookup_action(name)
+            if isinstance(action, Gio.SimpleAction):
+                action.set_enabled(not blocked)
+        folders = self._folders
+        if folders is not None:
+            refused = folders.add_folder_blocked()
+            self._add.set_sensitive(not refused)
+            self._add.set_tooltip_text(refused or "Add a folder")
 
     def _favorite(self, wid: str) -> None:
         if not self.state.favorite_blocked():
@@ -399,22 +426,33 @@ class LibraryPage(Page):
                 )
         menu.append_section(None, apply)
         organize = Gio.Menu()
-        organize.append("Edit details" if self._editing else "Details", f"lib.edit::{wallpaper.id}")
-        if self._editing is not None:
+        editing = self._editing
+        organize.append("Edit details" if editing else "Details", f"lib.edit::{wallpaper.id}")
+        if editing is not None:
             playlists = Gio.Menu()
             for playlist in self.state.playlists:
                 if not playlist.automatic:
                     playlists.append(playlist.name, f"lib.add::{wallpaper.id}|{playlist.id}")
+            new = Gio.Menu()
+            new.append("New playlist\u2026", f"lib.new-playlist::{wallpaper.id}")
+            playlists.append_section(None, new)
             organize.append_submenu("Add to playlist", playlists)
         organize.append(
             "Remove from favorites" if wallpaper.favorite else "Add to favorites",
             f"lib.fav::{wallpaper.id}",
         )
+        if editing is not None and editing.choices(wallpaper.id).customized:
+            # Only when there is something to forget: a reset that does nothing lies.
+            organize.append("Reset to defaults", f"lib.reset::{wallpaper.id}")
         menu.append_section(None, organize)
-        if self._editing is not None:
+        if editing is not None:
             files = Gio.Menu()
             files.append("Show in Files", f"lib.files::{wallpaper.id}")
-            files.append("Remove from library…", f"lib.remove::{wallpaper.id}")
+            how = editing.removal(wallpaper.id).how
+            if how:
+                # Named for what it does to that file: one of them cannot be undone.
+                label = "Delete from disk\u2026" if how == "delete" else "Move to Trash"
+                files.append(label, f"lib.remove::{wallpaper.id}")
             menu.append_section(None, files)
         return menu
 
@@ -424,6 +462,9 @@ class LibraryPage(Page):
             for playlist in self.state.playlists:
                 if not playlist.automatic:
                     menu.append(playlist.name, f"lib.bulk-add::{playlist.id}")
+            new = Gio.Menu()
+            new.append("New playlist\u2026", "lib.bulk-new-playlist::new")
+            menu.append_section(None, new)
         return menu
 
     # -- building ----------------------------------------------------------------------
@@ -435,6 +476,8 @@ class LibraryPage(Page):
                 card.menu.unparent()
         self.flow.remove_all()
         self._cards = {}
+        if self._inspected is not None and not self.state.has_wallpaper(self._inspected):
+            self.close_inspector()  # it left the library (removed, or gone from disk)
         self._materialize()
         problems = [w for w in self.state.wallpapers if w.problem]
         self._notice.set_title(
@@ -549,10 +592,14 @@ class LibraryPage(Page):
 
     # -- callbacks ------------------------------------------------------------------------
     def _on_changed(self, _state: AppState, topic: str) -> None:
+        if topic == "playlists":
+            self._add_to.set_menu_model(self._bulk_playlist_menu())
         if topic in ("library", "now", "playlists"):
             self._rebuild()
-        elif topic == "system":
+            self._update_selection_bar()
+        elif topic in ("system", "settings"):
             self._update_count()
+            self._refresh_action_states()
         elif topic == "displays":
             self._refresh_card_menus()
         elif topic == "appearance":
@@ -627,8 +674,9 @@ class LibraryPage(Page):
         if folders is None:
             return
         undo = folders.add_library_folder(path)
-        name = os.path.basename(path.rstrip(os.sep)) or path
-        self.state.toast(f"Added {quoted(name)} · scanning", undo)
+        if undo is not None:  # already added: say so here (else the adapter reports)
+            name = os.path.basename(path.rstrip(os.sep)) or path
+            self.state.toast(f"Added {quoted(name)} · scanning", undo)
 
     def _follow_size(self) -> None:
         """Show the thumbnail size the state holds (a size whose save failed goes back)."""
@@ -711,7 +759,24 @@ class LibraryPage(Page):
         self._selection_label.set_label(
             "Click wallpapers to select them" if not count else f"{count} selected"
         )
-        self._remove_all.set_sensitive(bool(count))
+        editing = self._editing
+        blocked = editing.editing_blocked() if editing is not None else ""
+        several = editing is not None and EXTRA_BULK_REMOVE in editing.extras
+        self._remove_all.set_sensitive(not blocked and (count == 1 or (several and count > 1)))
+        self._remove_all.set_tooltip_text(
+            blocked
+            or (
+                "Remove one wallpaper at a time"
+                if count > 1 and not several
+                else "Remove the selected wallpapers from the library"
+            )
+        )
+        for button, tip in (
+            (self._add_to, "Add the selected wallpapers to a playlist"),
+            (self._fav_all, "Add the selected wallpapers to favorites"),
+        ):
+            button.set_sensitive(not blocked and bool(count))
+            button.set_tooltip_text(blocked or tip)
         self._action_bar.set_revealed(self._select_mode)
 
     def _bulk_add(self, pid: str) -> None:
@@ -719,22 +784,71 @@ class LibraryPage(Page):
             self._editing.add_to_playlist(pid, sorted(self._selected))
             self._select.set_active(False)
 
+    def _bulk_create(self, name: str, wids: list[str]) -> None:
+        if self._editing is not None:
+            self._editing.create_playlist(name, wids)
+            self._select.set_active(False)
+
+    def _ask_playlist_name(self, chosen: Callable[[str], object]) -> None:
+        """Name a new playlist, then hand the name on (it is made with its wallpapers)."""
+        dialog = Adw.AlertDialog(
+            heading="New playlist", body="Give it a name. The wallpapers go in with it."
+        )
+        entry = Gtk.Entry(placeholder_text="Playlist name", activates_default=True)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("create", "Create")
+        dialog.set_response_appearance("create", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("create")
+        dialog.set_close_response("cancel")
+
+        def done(_dialog: Adw.AlertDialog, response: str) -> None:
+            if response == "create":
+                chosen(entry.get_text().strip() or "Untitled playlist")
+
+        dialog.connect("response", done)
+        root = self.widget.get_root()
+        dialog.present(root if isinstance(root, Gtk.Widget) else None)
+
     def _bulk_favorite(self) -> None:
-        if self._editing is None:
+        if self._editing is None or not self._selected:
             return
-        self._editing.favorite_wallpapers(sorted(self._selected))
-        self.state.toast(f"Added {len(self._selected)} wallpapers to favorites")
+        count = len(self._selected)
+        undo = self._editing.favorite_wallpapers(sorted(self._selected))
+        if undo is not None:  # already starred: say so here (else the adapter reports)
+            self.state.toast(f"Added {count} wallpapers to favorites", undo)
         self._select.set_active(False)
 
     def _confirm_remove_selected(self) -> None:
+        editing = self._editing
         chosen = [w for w in self.state.wallpapers if w.id in self._selected]
-        if not chosen:
+        if editing is None or not chosen:
             return
-        count = len(chosen)
-        what = quoted(chosen[0].name) if count == 1 else f"{count} wallpapers"
+        if len(chosen) == 1:
+            self._select.set_active(False)
+            self.inspect(chosen[0])
+            self.inspector.confirm_remove(chosen[0])
+            return
+        if EXTRA_BULK_REMOVE not in editing.extras:
+            return
+        ways = [editing.removal(w.id).how for w in chosen]
+        removable = [w for w, how in zip(chosen, ways, strict=True) if how]
+        if not removable:
+            self.state.toast("None of these can be removed here")
+            return
+        parts = []
+        if trash := ways.count("trash"):
+            parts.append(f"{trash} of your own files go to the Trash")
+        if delete := ways.count("delete"):
+            parts.append(
+                f"{delete} downloaded by Wall-in-One {'is' if delete == 1 else 'are'}"
+                " deleted for good"
+            )
+        if kept := ways.count(""):
+            parts.append(f"{kept} can\u2019t be removed here and stay")
         dialog = Adw.AlertDialog(
-            heading=f"Remove {what} from the library?",
-            body="The files stay on disk. You can add them back by scanning the folder again.",
+            heading=f"Remove {len(removable)} wallpapers from the library?",
+            body=". ".join(parts) + ". Their favorites, colors and playlist entries go too.",
         )
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("remove", "Remove")
@@ -744,7 +858,7 @@ class LibraryPage(Page):
 
         def respond(_dialog: Adw.AlertDialog, response: str) -> None:
             if response == "remove":
-                self._remove(chosen)
+                self._remove(removable)
 
         dialog.connect("response", respond)
         root = self.widget.get_root()
@@ -755,10 +869,11 @@ class LibraryPage(Page):
             return
         self._select.set_active(False)
         undo = self._editing.remove_wallpapers([wallpaper.id for wallpaper in chosen])
-        count = len(chosen)
-        self.state.toast(
-            f"Removed {count} wallpaper{'s' if count != 1 else ''} from the library", undo
-        )
+        if undo is not None:  # already removed: say so here (else the adapter reports)
+            count = len(chosen)
+            self.state.toast(
+                f"Removed {count} wallpaper{'s' if count != 1 else ''} from the library", undo
+            )
 
 
 def create(state: AppState) -> Page:

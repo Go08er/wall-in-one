@@ -520,18 +520,63 @@ class RealPlaylists:
         return playlist
 
     # -- playlists ----------------------------------------------------------------------
-    def create_playlist(self, name: str) -> str:
+    def create_playlist(self, name: str, wids: Sequence[str] = ()) -> str:
+        """A new playlist, holding ``wids`` when given, in one task; returns its id.
+
+        The Library's "New playlist…" with wallpapers chosen comes here too,
+        so there is one way a playlist is made. Its wallpapers are checked as
+        `add_entries` checks them, before anything is written: a wallpaper
+        playback skips refuses the whole thing, and no playlist is left
+        behind that only looks like it holds them. An empty id: refused, and
+        said why.
+        """
+        views = [view for wid in wids if (view := self._shown.library_entry(wid)) is not None]
+        if wids and not views:
+            self._backend.window_report(
+                "No playlist was created: those wallpapers are no longer in the library"
+            )
+            return ""
+        for view in views:
+            if view.problem:
+                self._backend.window_report(
+                    f"Playback unavailable for {view.name}; it can\u2019t be added: {view.problem}"
+                )
+                return ""
         pid = playlists.new_id()
         store = self._store
+        backend = self._backend
         self._creating.add(pid)
 
         def prepare() -> Callable[[], playlists.Playlist]:
-            return lambda: store.create(name, entry_id=pid)
+            items = [backend.current_item_for_authoring(view.item) for view in views]
+            for item in items:
+                health = self._session.pairings.health(pairings.Identity.of(item))
+                if health.is_borked:
+                    raise RefusedError(
+                        f"playback became unavailable for {item.name}; "
+                        f"it can\u2019t be added: {health.reason}"
+                    )
+            placed = [
+                (index, playlists.Entry(playlists.new_id(), str(item.path)))
+                for index, item in enumerate(items)
+            ]
+
+            def work() -> playlists.Playlist:
+                made = store.create(name, entry_id=pid)
+                return store.insert_entries(pid, placed) if placed else made
+
+            return work
+
+        def saved(made: playlists.Playlist) -> bool:
+            if views:
+                what = quoted(views[0].name) if len(views) == 1 else f"{len(views)} wallpapers"
+                self._shown.toast(f"Created {quoted(made.name)} with {what}")
+            return True
 
         self._queue(
             f"{quoted(name.strip() or name)} was not created",
             prepare,
-            lambda _made: True,
+            saved,
             settle=lambda: self._creating.discard(pid),
         )
         return pid
@@ -663,6 +708,27 @@ class RealPlaylists:
         self._backend.delete_playlist_async(pid, deleted, on_error=failed)
 
     # -- entries --------------------------------------------------------------------------
+    def emptied_by_removing(self, sources: Iterable[str]) -> list[str]:
+        """Each playlist in use that would have nothing left to play without ``sources``.
+
+        For wallpapers leaving the library (every entry naming one goes with
+        it), by the same rule as removing entries here: as its name and what
+        uses it, for a refusal.
+        """
+        leaving = set(sources)
+        found: list[str] = []
+        for playlist in self._store.all():
+            kept = [entry for entry in playlist.entries if entry.source not in leaving]
+            if len(kept) == len(playlist.entries):
+                continue
+            used = self._references(playlist.id)
+            if used and leaves_nothing_to_play(
+                self._playability(playlist.entries), self._playability(kept)
+            ):
+                label = "\u201cYour pick\u201d" if hidden(playlist.id) else quoted(playlist.name)
+                found.append(f"{label} (used by {usage_words(used)})")
+        return found
+
     def add_entries(self, pid: str, wids: Sequence[str], position: int | None = None) -> None:
         playlist = self._editable(pid)
         views = [view for wid in wids if (view := self._shown.library_entry(wid)) is not None]

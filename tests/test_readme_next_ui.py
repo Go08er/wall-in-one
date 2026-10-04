@@ -55,11 +55,12 @@ def test_the_readme_names_every_live_playback_control() -> None:
 
 def test_the_readme_keeps_the_real_restrictions() -> None:
     section = _section()
-    assert "turns Apply, favorites and the playback controls off" in section
+    assert "turns Apply, favorites, library changes and the playback controls off" in section
     assert "Settings keys this version doesn't know are named in that notice" in section
     assert "off until the wallpaper service has answered, and while it isn't running" in section
     assert "Apply, favorites and playback have no undo yet." in section
     assert "the Playlists page says so too and changes nothing" in section
+    assert "Removing has no Undo" in section
 
 
 def test_the_readme_says_every_control_follows_the_bar_scope() -> None:

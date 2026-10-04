@@ -2,11 +2,11 @@
 
 `NextWindow` is the prototype's `ShellWindow` -- sidebar, header, banners,
 player bar, frosted backdrop -- over a `RealAppState`, with the real Library
-page and inspector, the real Playlists page, and the real Settings page
-(`settings.SettingsPage`, with the palette manager), which also offers the
-interface to start, so the new one can be left from inside. Store, Schedule
-and Displays are honest "not in the new interface yet" pages until they are
-ported.
+page and inspector, which edit through the application's authoring lane, the
+real Playlists page, and the real Settings page (`settings.SettingsPage`,
+with the palette manager), which also offers the interface to start, so the
+new one can be left from inside. Store, Schedule and Displays are honest "not
+in the new interface yet" pages until they are ported.
 
 It implements every `WindowServices` member. Runtime status reaches it
 through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
@@ -89,7 +89,7 @@ class NextWindow(ShellWindow):
         self._thumbnails: LibraryThumbnails | None = LibraryThumbnails()
         thumbs.install(self._thumbnails)
         self._prefs = UiPrefsKeeper(application.window_report)
-        self._state = RealAppState(application, self._prefs)
+        self._state = RealAppState(application, self._prefs, authoring=application)
         application.set_window_glass(self._state.glass())
         super().__init__(
             application,

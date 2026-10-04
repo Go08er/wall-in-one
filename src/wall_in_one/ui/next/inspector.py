@@ -3,14 +3,17 @@
 A wallpaper *is* its pairing, so its still, motion and colors live here, with
 Apply and Favorite on top. Without `AppState.editing` the inspector is
 read-only below those two: it says which colors a wallpaper uses and where it
-is, and leaves out every control that would change it.
+is, and leaves out every control that would change it. With it, controls the
+adapter has no backend for (`LibraryEditing.extras`) are left out too, and
+while `LibraryEditing.editing_blocked` gives a reason every change is off and
+says it.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Final
 
 import cairo
 import gi
@@ -25,17 +28,31 @@ from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango
 
 from wall_in_one.ui.next import thumbs, widgets
 from wall_in_one.ui.next.catalog import KIND_LABEL, quoted
-from wall_in_one.ui.next.state import AppState, LibraryEditing, WallpaperView, solo_displays
+from wall_in_one.ui.next.state import (
+    EXTRA_FRAME,
+    EXTRA_LOG,
+    EXTRA_MOTION,
+    AppState,
+    LibraryEditing,
+    PaletteView,
+    WallpaperView,
+    solo_displays,
+)
+
+#: Community palettes listed at first; "Show more" adds this many again.
+COMMUNITY_PAGE: Final = 24
 
 
 class DesktopPreview(Gtk.Widget):
     """A miniature desktop: the wallpaper with a Noctalia-style bar in the
     colors this wallpaper would apply. Shows the effect, not just the dots."""
 
-    def __init__(self, wallpaper: WallpaperView, colors: Sequence[str]) -> None:
+    def __init__(self, wallpaper: WallpaperView, colors: Sequence[str], unknown: str = "") -> None:
         super().__init__()
         self.wallpaper = wallpaper
         self.colors = list(colors)
+        #: Said instead of the colors while they are not known.
+        self.unknown = unknown
         self._texture: Gdk.Texture | None = None
         self.set_size_request(-1, 150)
         self.set_hexpand(True)
@@ -48,8 +65,9 @@ class DesktopPreview(Gtk.Widget):
 
         self._texture = thumbs.provider().request(wallpaper, 480, 270, deliver)
 
-    def update(self, colors: Sequence[str]) -> None:
+    def update(self, colors: Sequence[str], unknown: str = "") -> None:
         self.colors = list(colors)
+        self.unknown = unknown
         self.queue_draw()
 
     def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
@@ -96,7 +114,7 @@ class DesktopPreview(Gtk.Widget):
             cr.select_font_face("sans")
             cr.set_font_size(11)
             cr.move_to(18, 23)
-            cr.show_text("Desktop colors stay as they are")
+            cr.show_text(self.unknown or "Desktop colors stay as they are")
             return
         # The bar
         color(0, 0.92)
@@ -142,6 +160,23 @@ def _dark() -> bool:
     return Adw.StyleManager.get_default().get_dark()
 
 
+def _palette_label(key: str | None) -> str:
+    """A palette key (``community:Nord``) as its name; a bare name stays as it is."""
+    if not key:
+        return ""
+    return key.partition(":")[2] or key
+
+
+def _unknown_colors(wallpaper: WallpaperView) -> str:
+    """What the desktop preview says while a wallpaper's colors are not known."""
+    if wallpaper.color_mode == "keep":
+        return ""
+    if wallpaper.color_mode == "palette":
+        return f"{_palette_label(wallpaper.palette)}: colors show once Noctalia applies it"
+    # Not "generating": a preview Noctalia cannot make never arrives.
+    return "Colors come from this wallpaper when it shows"
+
+
 class Inspector(Gtk.Box):
     def __init__(self, state: AppState, on_close: Callable[[], None]) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
@@ -154,6 +189,16 @@ class Inspector(Gtk.Box):
         self._favorite: Gtk.ToggleButton | None = None
         self._on_screen: tuple[str, ...] = ()
         self._sections: dict[str, Gtk.Widget] = {}
+        #: Redraws the colors section in place (``colors``: previews or palettes arrived).
+        self._refresh_colors: Callable[[], None] | None = None
+        self._community_limit = COMMUNITY_PAGE
+        #: The editing controls of the wallpaper shown, while it has them.
+        self.color_mode: Adw.ToggleGroup | None = None
+        self.theme_mode: Adw.ToggleGroup | None = None
+        self.color_detail: Gtk.Box | None = None
+        self.reset_button: Gtk.Button | None = None
+        self.retry_button: Gtk.Button | None = None
+        self.remove_button: Gtk.Button | None = None
 
         header = Adw.HeaderBar(
             show_start_title_buttons=False, show_end_title_buttons=False, show_back_button=False
@@ -190,6 +235,10 @@ class Inspector(Gtk.Box):
             # A new view of the same wallpaper: the favorite, its problem, its colors.
             self.show(self.state.wallpaper(wallpaper.id))
             return
+        if topic in ("colors", "settings") and self._refresh_colors is not None:
+            # New previews or palettes, or another default scheme in Settings.
+            self._refresh_colors()
+            return
         # Rebuild for "now" only when this wallpaper's on-screen badge changes.
         on_screen = self._on_screen_now(wallpaper.id)
         if topic in ("playlists", "theme") or (topic == "now" and on_screen != self._on_screen):
@@ -200,9 +249,14 @@ class Inspector(Gtk.Box):
     def show(self, wallpaper: WallpaperView) -> None:  # type: ignore[override]
         same = self.wallpaper is not None and self.wallpaper.id == wallpaper.id
         scroll = self._scroller.get_vadjustment().get_value() if same else 0.0
+        if not same:
+            self._community_limit = COMMUNITY_PAGE
         self.wallpaper = wallpaper
         self._on_screen = self._on_screen_now(wallpaper.id)
         self._sections = {}
+        self._refresh_colors = None
+        self.color_mode = self.theme_mode = self.color_detail = None
+        self.reset_button = self.retry_button = self.remove_button = None
         if same:
 
             def restore() -> bool:
@@ -237,7 +291,7 @@ class Inspector(Gtk.Box):
                 )
             )
         overlay.add_overlay(badges)
-        if wallpaper.is_moving and self._editing is not None:
+        if wallpaper.is_moving and self._offers(EXTRA_MOTION):
             preview = Gtk.ToggleButton(icon_name="media-playback-start-symbolic")
             preview.add_css_class("circular")
             preview.add_css_class("on-image")
@@ -276,8 +330,9 @@ class Inspector(Gtk.Box):
         box.append(self._actions(wallpaper))
         if wallpaper.is_moving and self._editing is not None:
             # A plain image is its own still; only moving wallpapers need one.
-            box.append(self._still(wallpaper))
-            box.append(self._motion(wallpaper))
+            box.append(self._still(self._editing, wallpaper))
+            if self._offers(EXTRA_MOTION):
+                box.append(self._motion(wallpaper))
         box.append(self._colors(wallpaper))
         box.append(self._playlists(wallpaper))
         box.append(self._file(wallpaper))
@@ -297,6 +352,19 @@ class Inspector(Gtk.Box):
             return GLib.SOURCE_REMOVE
 
         GLib.timeout_add(150, later)
+
+    def _offers(self, extra: str) -> bool:
+        """Whether the adapter backs a control beyond the editing Protocol's methods."""
+        return self._editing is not None and extra in self._editing.extras
+
+    def _lock(self, *controls: Gtk.Widget) -> str:
+        """Turn ``controls`` off, saying why, while editing is blocked; return the reason."""
+        blocked = self._editing.editing_blocked() if self._editing is not None else ""
+        for control in controls:
+            control.set_sensitive(not blocked)
+            if blocked:
+                control.set_tooltip_text(blocked)
+        return blocked
 
     def _section(self, title: str, child: Gtk.Widget, extra: Gtk.Widget | None = None) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -326,22 +394,24 @@ class Inspector(Gtk.Box):
             buttons = Gtk.Box(spacing=6)
             retry = Gtk.Button(label="Try again")
             retry.add_css_class("pill")
+            retry.set_tooltip_text("Forget the problem, so playback tries this wallpaper again")
             retry.connect("clicked", lambda *_: self._retry(wallpaper))
-            details = Gtk.Button(label="Show log")
-            details.add_css_class("flat")
-            details.connect("clicked", lambda *_: self.state.navigate("settings:log"))
+            self._lock(retry)
+            self.retry_button = retry
             buttons.append(retry)
-            buttons.append(details)
+            if self._offers(EXTRA_LOG):
+                details = Gtk.Button(label="Show log")
+                details.add_css_class("flat")
+                details.connect("clicked", lambda *_: self.state.navigate("settings:log"))
+                buttons.append(details)
             card.append(buttons)
         return card
 
     def _retry(self, wallpaper: WallpaperView) -> None:
-        """Forget the problem so playback tries the wallpaper again."""
+        """Forget the problem so playback tries the wallpaper again (the adapter says so)."""
         if self._editing is None:
             return
         self._editing.retry_wallpaper(wallpaper.id)
-        self.show(self.state.wallpaper(wallpaper.id))
-        self.state.toast(f"{quoted(wallpaper.name)} will be tried again")
 
     def _actions(self, wallpaper: WallpaperView) -> Gtk.Box:
         row = Gtk.Box(spacing=8)
@@ -427,11 +497,12 @@ class Inspector(Gtk.Box):
             if not playlist.automatic:
                 menu.append(playlist.name, f"lib.add::{wallpaper.id}|{playlist.id}")
         new = Gio.Menu()
-        new.append("New playlist…", "win.new-playlist")
+        # Created with this wallpaper already in it, in one save.
+        new.append("New playlist\u2026", f"lib.new-playlist::{wallpaper.id}")
         menu.append_section(None, new)
         return menu
 
-    def _still(self, wallpaper: WallpaperView) -> Gtk.Box:
+    def _still(self, editing: LibraryEditing, wallpaper: WallpaperView) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         row = Gtk.Box(spacing=12)
         row.append(widgets.thumbnail(wallpaper, 112, 63, 8))
@@ -448,41 +519,98 @@ class Inspector(Gtk.Box):
         text.append(widgets.dim(wallpaper.still_note))
         row.append(text)
         box.append(row)
-        if wallpaper.kind == "video" and wallpaper.duration:
-            frame_row = Gtk.Box(spacing=8)
-            minutes, _, seconds_part = wallpaper.duration.partition(":")
-            seconds = int(minutes or 0) * 60 + int(seconds_part or 0)
-            scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, max(1, seconds), 1)
-            scale.set_value(3)
-            scale.set_hexpand(True)
-            scale.set_draw_value(False)
-            time_label = Gtk.Label(label="0:03")
-            time_label.add_css_class("frame-time")
-            time_label.add_css_class("dimmed")
-            scale.connect(
-                "value-changed",
-                lambda s: time_label.set_label(
-                    f"{int(s.get_value()) // 60}:{int(s.get_value()) % 60:02d}"
-                ),
+        if wallpaper.kind == "video" and wallpaper.duration and self._offers(EXTRA_FRAME):
+            box.append(self._frame_row(wallpaper))
+        choices = editing.choices(wallpaper.id)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        other = Gtk.Button(label="Use an image file instead\u2026")
+        other.add_css_class("link")
+        other.add_css_class("caption")
+        other.set_halign(Gtk.Align.START)
+        other.set_tooltip_text("Choose a picture already in your library")
+        other.connect("clicked", lambda *_: self._choose_still_file(editing, wallpaper))
+        buttons.append(other)
+        controls: list[Gtk.Widget] = [other]
+        if choices.still:
+            automatic = Gtk.Button(label="Use the automatic still")
+            automatic.add_css_class("link")
+            automatic.add_css_class("caption")
+            automatic.set_halign(Gtk.Align.START)
+            automatic.connect("clicked", lambda *_: editing.choose_still(wallpaper.id, None))
+            buttons.append(automatic)
+            controls.append(automatic)
+        if choices.regenerate:
+            regenerate = Gtk.Button(label="Capture a new still")
+            regenerate.add_css_class("link")
+            regenerate.add_css_class("caption")
+            regenerate.set_halign(Gtk.Align.START)
+            regenerate.set_tooltip_text(
+                "Capture the scene again at your display\u2019s size and shape"
             )
-            use = Gtk.Button(label="Use frame")
-            use.add_css_class("pill")
-            use.set_tooltip_text("Take the still from this moment of the video")
-            use.connect(
-                "clicked",
-                lambda *_: self.state.toast(f"New still captured at {time_label.get_label()}"),
-            )
-            frame_row.append(scale)
-            frame_row.append(time_label)
-            frame_row.append(use)
-            box.append(frame_row)
-        if wallpaper.is_moving:
-            other = Gtk.Button(label="Use an image file instead…")
-            other.add_css_class("link")
-            other.add_css_class("caption")
-            other.set_halign(Gtk.Align.START)
-            box.append(other)
+            regenerate.connect("clicked", lambda *_: editing.regenerate_still(wallpaper.id))
+            buttons.append(regenerate)
+            controls.append(regenerate)
+        self._lock(*controls)
+        box.append(buttons)
         return self._section("Still", box)
+
+    def _frame_row(self, wallpaper: WallpaperView) -> Gtk.Box:
+        """The prototype's "Use frame" (no backend in the app yet: `EXTRA_FRAME`)."""
+        frame_row = Gtk.Box(spacing=8)
+        minutes, _, seconds_part = wallpaper.duration.partition(":")
+        seconds = int(minutes or 0) * 60 + int(seconds_part or 0)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, max(1, seconds), 1)
+        scale.set_value(3)
+        scale.set_hexpand(True)
+        scale.set_draw_value(False)
+        time_label = Gtk.Label(label="0:03")
+        time_label.add_css_class("frame-time")
+        time_label.add_css_class("dimmed")
+        scale.connect(
+            "value-changed",
+            lambda s: time_label.set_label(
+                f"{int(s.get_value()) // 60}:{int(s.get_value()) % 60:02d}"
+            ),
+        )
+        use = Gtk.Button(label="Use frame")
+        use.add_css_class("pill")
+        use.set_tooltip_text("Take the still from this moment of the video")
+        use.connect(
+            "clicked",
+            lambda *_: self.state.toast(f"New still captured at {time_label.get_label()}"),
+        )
+        frame_row.append(scale)
+        frame_row.append(time_label)
+        frame_row.append(use)
+        return frame_row
+
+    def _choose_still_file(self, editing: LibraryEditing, wallpaper: WallpaperView) -> None:
+        """A picture from the library as the still (the classic "Choose a still...")."""
+        dialog = Gtk.FileDialog(title=f"Choose a still for {wallpaper.name}", modal=True)
+        images = Gtk.FileFilter()
+        images.set_name("Images")
+        # The library's still formats; the adapter checks it is an indexed still.
+        for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.avif"):
+            images.add_pattern(pattern)
+            images.add_pattern(pattern.upper())
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(images)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(images)
+        root = self.get_root()
+
+        def chosen(source: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                picked = source.open_finish(result)
+            except GLib.Error:
+                return  # dismissed
+            path = picked.get_path() if picked is not None else None
+            if path is None:
+                self.state.toast("That file is not on this machine\u2019s filesystem")
+                return
+            editing.choose_still(wallpaper.id, path)
+
+        dialog.open(root if isinstance(root, Gtk.Window) else None, None, chosen)
 
     def _motion(self, wallpaper: WallpaperView) -> Gtk.Box:
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
@@ -522,7 +650,11 @@ class Inspector(Gtk.Box):
             return self._section("Colors", group)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        preview = DesktopPreview(wallpaper, self.state.wallpaper_swatches(wallpaper, _dark()))
+        preview = DesktopPreview(
+            wallpaper,
+            self.state.wallpaper_swatches(wallpaper, _dark()),
+            _unknown_colors(wallpaper),
+        )
         box.append(preview)
 
         # Sized to its labels: "From wallpaper" and "Don't change" ellipsize in equal thirds.
@@ -539,38 +671,51 @@ class Inspector(Gtk.Box):
         box.append(mode_group)
         detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.append(detail)
+        self.color_mode, self.color_detail = mode_group, detail
 
         def current() -> WallpaperView:
             return self.state.wallpaper(wallpaper.id)
 
         def refresh_detail() -> None:
+            if not self.state.has_wallpaper(wallpaper.id):
+                return
             child = detail.get_first_child()
             while child is not None:
                 detail.remove(child)
                 child = detail.get_first_child()
             shown = current()
-            preview.update(self.state.wallpaper_swatches(shown, _dark()))
-            if shown.color_mode == "adaptive":
+            preview.update(self.state.wallpaper_swatches(shown, _dark()), _unknown_colors(shown))
+            # The toggle names what to choose from; the view says what is chosen.
+            # "Palette" with none chosen yet lists them and changes nothing.
+            wanted = mode_group.get_active_name() or shown.color_mode
+            if wanted == "adaptive" and shown.color_mode == "adaptive":
                 detail.append(self._scheme_grid(editing, shown, refresh_detail))
-            elif shown.color_mode == "palette":
+            elif wanted == "palette":
+                if shown.color_mode != "palette":
+                    detail.append(
+                        widgets.dim("Choose a palette below. Until you do, nothing changes.")
+                    )
                 detail.append(self._palette_list(editing, shown, refresh_detail))
-            else:
+            elif wanted == "keep" and shown.color_mode == "keep":
                 detail.append(
                     widgets.dim("When this wallpaper shows, your desktop keeps its current colors.")
                 )
 
         def on_mode(group: Adw.ToggleGroup, _param: object) -> None:
-            editing.set_wallpaper_colors(wallpaper.id, mode=group.get_active_name())
+            chosen = group.get_active_name()
+            if chosen and chosen != current().color_mode:
+                editing.set_wallpaper_colors(wallpaper.id, mode=chosen)
             refresh_detail()
 
         mode_group.connect("notify::active-name", on_mode)
         refresh_detail()
+        self._refresh_colors = refresh_detail
 
         theme_row = Gtk.Box(spacing=12)
         theme_row.append(Gtk.Label(label="Light or dark", xalign=0, hexpand=True))
         theme = Adw.ToggleGroup()
         for name, label, tip in (
-            ("auto", "Auto", "Follow the time of day"),
+            ("auto", "Auto", "Let Noctalia decide"),
             ("light", "Light", ""),
             ("dark", "Dark", ""),
             ("keep", "Don\u2019t change", "Leave the current mode"),
@@ -580,14 +725,27 @@ class Inspector(Gtk.Box):
                 toggle.set_tooltip(tip)
             theme.add(toggle)
         theme.set_active_name(wallpaper.theme_mode)
-        theme.connect(
-            "notify::active-name",
-            lambda g, _p: editing.set_wallpaper_colors(
-                wallpaper.id, theme_mode=g.get_active_name()
-            ),
-        )
+
+        def on_theme(group: Adw.ToggleGroup, _param: object) -> None:
+            chosen = group.get_active_name()
+            if chosen and chosen != current().theme_mode:
+                editing.set_wallpaper_colors(wallpaper.id, theme_mode=chosen)
+
+        theme.connect("notify::active-name", on_theme)
+        self.theme_mode = theme
         theme_row.append(theme)
         box.append(theme_row)
+        controls: list[Gtk.Widget] = [mode_group, detail, theme]
+        if editing.choices(wallpaper.id).customized:
+            reset = Gtk.Button(label="Reset to defaults")
+            reset.add_css_class("flat")
+            reset.set_halign(Gtk.Align.START)
+            reset.set_tooltip_text("Forget the colors, light or dark and still chosen for it")
+            reset.connect("clicked", lambda *_: editing.reset_wallpaper(wallpaper.id))
+            self.reset_button = reset
+            box.append(reset)
+            controls.append(reset)
+        self._lock(*controls)
         return self._section("Colors", box)
 
     def _scheme_grid(
@@ -639,32 +797,87 @@ class Inspector(Gtk.Box):
             flow.append(button)
         return flow
 
+    def _palette_row(
+        self,
+        editing: LibraryEditing,
+        wallpaper: WallpaperView,
+        palette: PaletteView,
+        refresh: Callable[[], None],
+    ) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=palette.name, activatable=True)
+        strip = palette.strip(_dark())
+        if strip:
+            row.add_prefix(widgets.Swatches(strip, size=14, overlap=True))
+        else:
+            row.set_subtitle("Colors show once Noctalia applies it")
+        if wallpaper.color_mode == "palette" and wallpaper.palette == palette.key:
+            check = Gtk.Image.new_from_icon_name("object-select-symbolic")
+            check.add_css_class("accent")
+            row.add_suffix(check)
+
+        def choose(_row: Adw.ActionRow, chosen: str = palette.key) -> None:
+            editing.set_wallpaper_colors(wallpaper.id, palette=chosen)
+            refresh()
+
+        row.connect("activated", choose)
+        return row
+
     def _palette_list(
         self, editing: LibraryEditing, wallpaper: WallpaperView, refresh: Callable[[], None]
     ) -> Gtk.ListBox:
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
+        listed: set[str] = set()
         for palette in editing.palettes("builtin"):
-            name = palette.name
-            row = Adw.ActionRow(title=name, activatable=True)
-            row.add_prefix(widgets.Swatches(palette.strip(True), size=14, overlap=True))
-            if wallpaper.palette == name:
-                check = Gtk.Image.new_from_icon_name("object-select-symbolic")
-                check.add_css_class("accent")
-                row.add_suffix(check)
+            group.append(self._palette_row(editing, wallpaper, palette, refresh))
+            listed.add(palette.key)
+        custom = list(editing.palettes("custom"))
+        if custom:
+            mine = Adw.ExpanderRow(
+                title="Your palettes", subtitle="Saved in Noctalia\u2019s folder"
+            )
+            for palette in custom:
+                mine.add_row(self._palette_row(editing, wallpaper, palette, refresh))
+                listed.add(palette.key)
+            mine.set_expanded(any(p.key == wallpaper.palette for p in custom))
+            group.append(mine)
+        community = list(editing.palettes("community"))
+        if community:
+            expander = Adw.ExpanderRow(
+                title="Community palettes", subtitle="From Noctalia\u2019s online catalog"
+            )
+            shown = community[: self._community_limit]
+            chosen = next(
+                (p for p in community[self._community_limit :] if p.key == wallpaper.palette),
+                None,
+            )
+            for palette in [*shown, *([chosen] if chosen is not None else [])]:
+                expander.add_row(self._palette_row(editing, wallpaper, palette, refresh))
+                listed.add(palette.key)
+            remaining = len(community) - len(shown)
+            if remaining > 0:
+                more = Adw.ButtonRow(title=f"Show {min(COMMUNITY_PAGE, remaining)} more")
 
-            def choose(_row: Adw.ActionRow, chosen: str = name) -> None:
-                editing.set_wallpaper_colors(wallpaper.id, palette=chosen)
-                refresh()
+                def show_more(_row: Adw.ButtonRow) -> None:
+                    self._community_limit += COMMUNITY_PAGE
+                    refresh()
 
-            row.connect("activated", choose)
-            group.append(row)
-        community = Adw.ExpanderRow(
-            title="Community palettes", subtitle="From Noctalia\u2019s online catalog"
-        )
-        for palette in editing.palettes("community"):
-            community.add_row(Adw.ActionRow(title=palette.name, activatable=True))
-        group.append(community)
+                more.connect("activated", show_more)
+                expander.add_row(more)
+            expander.set_expanded(any(p.key == wallpaper.palette for p in community))
+            group.append(expander)
+        if wallpaper.color_mode == "palette" and wallpaper.palette not in listed:
+            # A choice whose palette is not installed right now stays visible as chosen.
+            missing = Adw.ActionRow(
+                title=_palette_label(wallpaper.palette),
+                subtitle="Chosen, but not among the installed palettes right now",
+            )
+            check = Gtk.Image.new_from_icon_name("object-select-symbolic")
+            check.add_css_class("accent")
+            missing.add_suffix(check)
+            group.append(missing)
+        if not listed and wallpaper.color_mode != "palette":
+            group.append(Adw.ActionRow(title="Looking for installed palettes…"))
         return group
 
     def _playlists(self, wallpaper: WallpaperView) -> Gtk.Box:
@@ -683,6 +896,7 @@ class Inspector(Gtk.Box):
             add = Gtk.MenuButton(label="Add…", menu_model=self._playlist_menu(wallpaper))
             add.add_css_class("flat")
             add.add_css_class("chip")
+            self._lock(add)
             wrap.append(add)
         if not member:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -698,9 +912,15 @@ class Inspector(Gtk.Box):
         location = Adw.ActionRow(
             title="Location", subtitle=wallpaper.folder, subtitle_selectable=True
         )
-        if self._editing is not None:
+        editing = self._editing
+        if editing is not None:
             location.add_suffix(
-                widgets.icon_button("folder-open-symbolic", "Open folder", None, "flat")
+                widgets.icon_button(
+                    "folder-open-symbolic",
+                    "Show in Files",
+                    lambda *_: editing.show_in_files(wallpaper.id),
+                    "flat",
+                )
             )
         group.append(location)
         source = {"Local": "Your folder", "Workshop": "Wallpaper Engine (Steam Workshop)"}.get(
@@ -710,43 +930,70 @@ class Inspector(Gtk.Box):
         if wallpaper.added:
             group.append(Adw.ActionRow(title="Added", subtitle=wallpaper.added))
         box.append(group)
-        if self._editing is not None:
-            remove = Gtk.Button(label="Remove from library…")
-            remove.add_css_class("flat")
-            remove.add_css_class("error")
-            remove.set_halign(Gtk.Align.START)
-            remove.connect("clicked", lambda *_: self.confirm_remove(wallpaper))
-            box.append(remove)
+        if editing is not None:
+            removal = editing.removal(wallpaper.id)
+            if removal.how:
+                label = "Delete from disk…" if removal.how == "delete" else "Move to Trash"
+                remove = Gtk.Button(label=label)
+                remove.add_css_class("flat")
+                remove.add_css_class("error")
+                remove.set_halign(Gtk.Align.START)
+                remove.set_tooltip_text(
+                    "Wall-in-One downloaded it: deleted for good, with its favorite, colors "
+                    "and playlist entries"
+                    if removal.how == "delete"
+                    else "Your own file: moved to the Trash, with its favorite, colors and "
+                    "playlist entries removed"
+                )
+                remove.connect("clicked", lambda *_: self.confirm_remove(wallpaper))
+                self._lock(remove)
+                self.remove_button = remove
+                box.append(remove)
+            else:
+                box.append(widgets.dim(f"Wall-in-One can\u2019t remove it. {removal.reason}"))
         return self._section("File", box)
 
     def confirm_remove(self, wallpaper: WallpaperView) -> None:
+        """Remove by who owns the file: ask before deleting for good, never before the Trash.
+
+        Asking about everything trains people to confirm everything, so the
+        question is kept for the one removal nothing can undo.
+        """
         editing = self._editing
         if editing is None:
             return
-        owned = wallpaper.source in ("Wallhaven", "MotionBGS")
+        removal = editing.removal(wallpaper.id)
+        if not removal.how:
+            self.state.toast(
+                f"{quoted(wallpaper.name)} can\u2019t be removed here. {removal.reason}"
+            )
+            return
+        if removal.how == "trash":
+            self._remove_now(editing, wallpaper, "moved to the Trash")
+            return
         dialog = Adw.AlertDialog(
-            heading=f"Remove {quoted(wallpaper.name)}?",
-            body="It will be taken out of every playlist. "
-            + (
-                "The file was downloaded by Wall-in-One and can be moved to the Trash."
-                if owned
-                else "Your file stays where it is unless you move it to the Trash."
-            ),
+            heading=f"Delete {quoted(wallpaper.name)}?",
+            body="Wall-in-One downloaded it, so it is deleted from disk for good, along with "
+            "its favorite, colors and playlist entries. This cannot be undone.",
         )
         dialog.add_response("cancel", "Cancel")
-        dialog.add_response("hide", "Hide from library")
-        dialog.add_response("trash", "Move to Trash")
-        dialog.set_response_appearance("trash", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
 
         def done(_dialog: Adw.AlertDialog, response: str) -> None:
-            if response == "cancel":
-                return
-            undo = editing.remove_wallpapers([wallpaper.id])
-            self._on_close()
-            where = "moved to the Trash" if response == "trash" else "hidden from the library"
-            self.state.toast(f"{quoted(wallpaper.name)} {where}", undo)
+            if response == "delete":
+                self._remove_now(editing, wallpaper, "deleted")
 
         dialog.connect("response", done)
         root = self.get_root()
         dialog.present(root if isinstance(root, Gtk.Widget) else None)
+
+    def _remove_now(self, editing: LibraryEditing, wallpaper: WallpaperView, done: str) -> None:
+        undo = editing.remove_wallpapers([wallpaper.id])
+        if undo is not None:  # already done: say so here (else the adapter reports)
+            self._on_close()
+            self.state.toast(f"{quoted(wallpaper.name)} {done}", undo)
+        # Otherwise the details close when it leaves the library (the Library
+        # page sees to that), and stay open if the removal is refused.

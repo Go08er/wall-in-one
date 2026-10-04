@@ -613,8 +613,10 @@ def test_a_sidebar_rebuilt_while_away_is_selected_by_page_not_position() -> None
 def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real adapter has no folder path yet, so the Library shows no button
-    that only pretends; one that offers ``library_folders`` gets it, wired."""
+    """The real window's adapter adds folders through the application (what it
+    saves is ``tests/test_ui_next_editing.py``'s); without the part the Library
+    shows no button that only pretends, and an adapter whose add is already
+    done gets the page's toast with its Undo."""
     application = Application(ui="next")
     added: list[str] = []
     toasts: list[str] = []
@@ -624,12 +626,27 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
             added.append(path)
             return lambda: added.remove(path)
 
+        def add_folder_blocked(self) -> str:
+            return ""
+
+        def rescan(self) -> None:
+            """Nothing to look through here."""
+
     try:
         window = NextWindow(application, application.settings)
         try:
             page = window.pages["library"]
             assert isinstance(page, LibraryPage)
-            assert window.state.library_folders is None
+            assert window.state.library_folders is not None
+            assert page.header_start() == [page._add]
+        finally:
+            window.destroy()
+
+        monkeypatch.setattr(RealAppState, "library_folders", property(lambda _self: None))
+        window = NextWindow(application, application.settings)
+        try:
+            page = window.pages["library"]
+            assert isinstance(page, LibraryPage)
             assert page.header_start() == []
             page.add_folder("/home/someone/Pictures/Walls")
             assert added == [], "without the capability the page adds nothing"
@@ -646,7 +663,7 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
             window.state.connect("toast", lambda _state, text, _button: toasts.append(text))
             page.add_folder("/home/someone/Pictures/Walls/")
             assert added == ["/home/someone/Pictures/Walls/"]
-            assert toasts == ["Added “Walls” · scanning"]
+            assert toasts == ["Added \u201cWalls\u201d · scanning"]
         finally:
             window.destroy()
     finally:

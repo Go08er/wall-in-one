@@ -431,6 +431,8 @@ class ShellWindow(Adw.ApplicationWindow):
                 return
             name = entry.get_text().strip() or "Untitled playlist"
             pid = editing.create_playlist(name)  # the sidebar rebuilds on "playlists"
+            if not pid:
+                return  # refused, and the adapter said why
             self.navigate(f"playlist:{pid}")
             if self.state.playlist_editing is None:
                 self.state.toast(f"Created {quoted(name)}")
@@ -486,6 +488,15 @@ class ShellWindow(Adw.ApplicationWindow):
             simple("play", controls.toggle_play, ["<Control>space"])
             simple("next", lambda: controls.step(1), ["<Control>Right"])
             simple("previous", lambda: controls.step(-1), ["<Control>Left"])
+            simple("random", lambda: controls.random(), ["<Control><Shift>R"])
+        folders = self.state.library_folders
+        if folders is not None:
+            simple("refresh", folders.rescan, ["F5"])
+        # The classic window's keys, under the same action names it binds them to.
+        simple("browse", lambda: self.navigate("store"), ["<Control>B"])
+        if self.state.settings_access is not None:
+            simple("palettes", lambda: self.navigate("settings:palettes"), ["<Control>P"])
+        app.set_accels_for_action("window.close", ["<Control>W"])
         if self.state.editing is not None or self.state.playlist_editing is not None:
             simple("new-playlist", self._new_playlist, ["<Control>n"])
         for index, (name, _title, _icon) in enumerate(PAGES, start=1):
@@ -524,7 +535,10 @@ class ShellWindow(Adw.ApplicationWindow):
             ("Search", "<Control>f"),
             ("Settings", "<Control>comma"),
             ("Keyboard shortcuts", "<Control>question"),
+            ("Close the window", "<Control>W"),
         ]
+        if self.state.settings_access is not None:
+            general.insert(2, ("Palettes", "<Control>P"))
         if self.state.editing is not None or self.state.playlist_editing is not None:
             general.insert(2, ("New playlist", "<Control>n"))
         groups = [("General", general)]
@@ -533,17 +547,17 @@ class ShellWindow(Adw.ApplicationWindow):
                 ("Play or pause animation", "<Control>space"),
                 ("Next wallpaper", "<Control>Right"),
                 ("Previous wallpaper", "<Control>Left"),
+                ("Random wallpaper", "<Control><Shift>R"),
             ]
             groups.append(("Playback", playback))
         groups.append(
             ("Go to", [(title, f"<Alt>{index}") for index, (_n, title, _i) in enumerate(PAGES, 1)])
         )
-        groups.append(
-            (
-                "Library",
-                [("Open details", "Return"), ("Apply selected wallpaper", "<Control>Return")],
-            )
-        )
+        library = [("Open details", "Return"), ("Apply selected wallpaper", "<Control>Return")]
+        if self.state.library_folders is not None:
+            library.append(("Rescan the library", "F5"))
+        library.append(("Open Store", "<Control>B"))
+        groups.append(("Library", library))
         for title, items in groups:
             section = _Adw.ShortcutsSection(title=title)
             for label, accel in items:

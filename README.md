@@ -520,10 +520,11 @@ choice for that start. With neither, the app is classic.
 - **What it has so far.** The redesign's sidebar, header and player bar, a
   paged Library grid with the details pane beside it, the Store, the Playlists
   page and the Settings page, all over the app's real library, stores and
-  runtime status. Beyond downloading from the **Store**, **playlists** and
-  **Settings** (below) it can change three things: **Apply** (to all
-  displays, or the display the player bar is scoped to), **favorites**, and
-  **playback**, through the player bar's live controls: play/pause, next,
+  runtime status. Beyond the **Library** (next item), downloading
+  from the **Store**, **playlists** and **Settings** (below) it changes
+  **Apply** (to all displays, or the display the player bar is scoped to),
+  **favorites**, and **playback**, through the player bar's live controls:
+  play/pause, next,
   previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
   schedule. Every playback control acts on the displays the player bar is
   scoped to, all of them or one; mirrored displays, or a display that has gone
@@ -534,6 +535,28 @@ choice for that start. With neither, the app is classic.
   Apply, favorites and playback have no undo yet. The player bar says what the
   runtime reports and why ("Evening · from schedule", "Your pick"). Schedule
   and Displays say they are not in the new interface yet.
+- **The Library's edits.** The details pane changes what classic's tile menu
+  and pairing editor change, through the same saves: a wallpaper's **colours**
+  (From wallpaper with the Settings scheme or one pinned for it, each scheme
+  previewed from its still; a palette; or Don't change) and **Light or dark**;
+  a moving wallpaper's **still** (a library image instead, the automatic one
+  again, or a new capture of a scene); **Reset to defaults**; and **Try again**
+  for a wallpaper playback skips, whose Apply is off with the reason meanwhile.
+  **Add to playlist** (from a card, the details pane, a drag to the sidebar or
+  the Playlists page, or several selected at once, into a playlist or a new
+  one made with them in it) is the Playlists page's own save: one save, never
+  a wallpaper playback skips, never "Your pick". **Remove** is named for what
+  it does: a download Wall-in-One made is deleted after a question, your own
+  file goes to the Trash, and a Workshop scene or a file outside the library
+  folders is not Wall-in-One's to remove; one wallpaper at a time, and never
+  the last one in a playlist something uses. Removing has no Undo, because its
+  favorite, colours and playlist entries go with the file. Selecting several
+  also favorites them together. **Add a folder** in the header is Settings'
+  own folder path (scanned once saved); F5 rescans; Ctrl+Shift+R, Ctrl+B,
+  Ctrl+P and Ctrl+W work as in classic. Each change is shown once it is
+  saved; a colour choice shows while it is being saved and goes back to what
+  is saved if that fails. Per-wallpaper motion, "Use frame" and a log are not
+  there yet.
 - **Playlists.** The Playlists page edits your own playlists: create, rename,
   duplicate and delete them (Delete names the schedule rules, display
   assignments and default that go with it), add several wallpapers at once
@@ -576,12 +599,12 @@ choice for that start. With neither, the app is classic.
   the page, Ctrl+D downloads the picks, and the ⋯ menu hands off to the Steam
   Workshop when Steam is installed.
 - **When it can't change things.** A store saved by a newer version turns
-  Apply, favorites and the playback controls off and says so in a notice under
-  the header; the Playlists page says so too and changes nothing. Settings keys
-  this version doesn't know are named in that notice as read-only, and the
-  Settings rows that write `settings.toml` are off. The playback controls are
-  also off until the wallpaper service has answered, and while it isn't
-  running; the app doesn't start the service.
+  Apply, favorites, library changes and the playback controls off and says so
+  in a notice under the header; the Playlists page says so too and changes
+  nothing. Settings keys this version doesn't know are named in that notice as
+  read-only, and the Settings rows that write `settings.toml` are off. The
+  playback controls are also off until the wallpaper service has answered, and
+  while it isn't running; the app doesn't start the service.
 - **Its own preferences.** The window style (solid, translucent or frosted), its
   opacity and frost dials (in the window menu and Settings → Appearance) and
   the thumbnail size live in `ui.toml`, written only when you change one of

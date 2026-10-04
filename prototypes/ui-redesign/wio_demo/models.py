@@ -136,5 +136,10 @@ class Palette:
         return [values[key] for key in ("surface", "primary", "secondary", "tertiary", "error")]
 
     @property
+    def key(self) -> str:
+        """What a wallpaper's palette names: the demo's palette names are unique."""
+        return self.name
+
+    @property
     def editable(self) -> bool:
         return self.origin == "custom"

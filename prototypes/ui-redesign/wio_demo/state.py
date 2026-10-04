@@ -2189,6 +2189,10 @@ class AppState(GObject.Object):
     def check_template(self) -> None:
         self.emit_changed("settings")
 
+    def render_templates(self) -> None:
+        """Render now: the demo has no Noctalia to ask, so it only says so."""
+        self.toast("Noctalia was asked to re-render all of its templates")
+
     def install_template(self) -> None:
         """Pretend to install, the way the app's button does: a moment's work, then a toast."""
         if self.noctalia_template != "missing":

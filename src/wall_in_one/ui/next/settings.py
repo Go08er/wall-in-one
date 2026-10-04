@@ -26,7 +26,9 @@ stay on, as in classic Settings.
 register Wall-in-One's palette template (installed, missing, needing repair,
 or something only a hand can fix, with the reason), read without writing.
 Its Install or Repair button is the only thing here that writes Noctalia's
-settings, and only when pressed.
+settings, and only when pressed; it never renders. While the template is
+installed but not rendered yet, a separate Render now row asks Noctalia to
+re-render all of its templates, and says so before it is pressed.
 
 **Folders.** The first folder receives downloads and generated stills; another
 one is made first with its download button. There is no separate download
@@ -841,11 +843,44 @@ class SettingsPage(Page):
             "template noctalia install repair recolor desktop colours integration",
             target="colors.template",
         )
+        # Its own row and press: installing never renders, and this does more
+        # than Wall-in-One's template, so it says so before it is pressed.
+        render = Adw.ActionRow(
+            title="Render the colours now",
+            subtitle=(
+                "Asks Noctalia to re-render all of its templates, not only Wall-in-One's: "
+                "everything Noctalia themes is redrawn with its current colours."
+            ),
+            use_markup=False,
+        )
+        render.set_subtitle_lines(0)
+        self._render_button = Gtk.Button(label="Render now", valign=Gtk.Align.CENTER)
+        self._render_button.connect("clicked", lambda *_: self.render_templates())
+        render.add_suffix(self._render_button)
+        self._render_row = render
+        self._add(
+            group,
+            render,
+            "render now templates noctalia apply redraw",
+            available=self._render_offered,
+        )
 
     def install_template(self) -> None:
         """The template row's button."""
         if self.access is not None and self._template_button.get_sensitive():
             self.access.install_template()
+
+    def render_templates(self) -> None:
+        """The Render now button."""
+        if (
+            self.access is not None
+            and self._render_offered()
+            and (self._render_button.get_sensitive())
+        ):
+            self.access.render_templates()
+
+    def _render_offered(self) -> bool:
+        return self.access is not None and self.access.template_status().can_render
 
     def _sync_template(self, access: SettingsAccess) -> None:
         status = access.template_status()
@@ -869,6 +904,8 @@ class SettingsPage(Page):
         self._template_button.set_visible(bool(status.action))
         self._template_button.set_sensitive(not status.blocked and not status.busy)
         self._template_spinner.set_visible(status.busy)
+        self._render_row.set_visible(status.can_render)
+        self._render_button.set_sensitive(not status.blocked and not status.busy)
 
     def _manage_palettes(self) -> None:
         self.open_palettes()

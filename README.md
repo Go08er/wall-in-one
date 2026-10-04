@@ -357,9 +357,12 @@ is backed up first, and a hand-written entry under the same id is never
 overwritten. `--uninstall-theme-template` removes the settings block again.
 In the new interface, Settings → Colours → **Noctalia template** shows whether
 the registration is installed, missing or needs repair (with the reason), and
-its Install or Repair button does the same as `--install-theme-template`, then
-asks Noctalia to render. It writes only when you press it, and not while
-Wall-in-One's own upgrade is unfinished.
+its Install or Repair button does the same as `--install-theme-template`. It
+writes only when you press it, and not while Wall-in-One's own upgrade is
+unfinished. Noctalia renders the template the next time its colours change;
+until it has, a separate **Render now** does what `noctalia msg
+templates-apply` does, re-rendering all of Noctalia's templates, not only
+Wall-in-One's.
 
 Check what you have with `--theme-status`, `--print-palette`, or `--print-css`.
 Palette updates are event-driven. A valid template file does not prove that
@@ -703,6 +706,8 @@ choice for that start. With neither, the app is classic.
 
   **Noctalia template** says whether Noctalia renders your colours for
   Wall-in-One, and installs or repairs that when you press its button.
+  Installing doesn't render; **Render now**, offered until Noctalia has, asks it
+  to re-render all of its templates.
 
 - **When it can't change things.**
   - **A store saved by a newer version** turns Apply, favorites, library changes

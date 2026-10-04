@@ -201,6 +201,9 @@ class TemplateStatus:
     blocked: str = ""
     #: A press is being carried out.
     busy: bool = False
+    #: Installed but not rendered yet: offer Render now, which asks Noctalia to
+    #: re-render all of its templates, not only Wall-in-One's.
+    can_render: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,4 +421,8 @@ class SettingsAccess(Protocol):
 
     def install_template(self) -> None:
         """Install or repair the registration: the row's button, the only writer."""
+        ...
+
+    def render_templates(self) -> None:
+        """Render now: ask Noctalia to re-render all of its templates (its own press)."""
         ...

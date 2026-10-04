@@ -37,12 +37,14 @@ on the authoring lane rather than writing over anything.
 `template.inspect`, which never writes, on the worker. Its button is the only
 writer: `template.install` on the authoring lane, with its backups and size
 check, refused while Wall-in-One's own upgrade hasn't finished. A refusal says
-whether Noctalia's settings are byte-for-byte what they were.
+whether Noctalia's settings are byte-for-byte what they were. Installing never
+renders: Noctalia renders the template when its colours next change, and while
+it hasn't, a separate Render now press asks it to re-render all of its
+templates (`render_templates`), gated the same way.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
@@ -605,6 +607,15 @@ def upgrade_blocked() -> str:
     )
 
 
+#: What the row says while Noctalia hasn't rendered the installed template yet.
+#: Noctalia renders its templates when its colours change (`template`'s own
+#: account of the registration), so it isn't a promise of "soon".
+NOT_RENDERED: Final = (
+    " Noctalia hasn't rendered Wall-in-One's colours yet; it renders the template the "
+    "next time its colours change."
+)
+
+
 def read_template() -> TemplateStatus:
     """The row's state from `template.inspect`, which never writes."""
     check = template.inspect()
@@ -612,9 +623,11 @@ def read_template() -> TemplateStatus:
     if not check.repairable:
         action = ""
     detail = check.detail
-    if check.state == "installed" and not check.rendered:
-        detail += " Noctalia hasn't rendered the colours yet; it does at the next change."
-    return TemplateStatus(check.state, detail, action, upgrade_blocked() if action else "")
+    can_render = check.state == "installed" and not check.rendered
+    if can_render:
+        detail = "Installed." + NOT_RENDERED
+    blocked = upgrade_blocked() if action or can_render else ""
+    return TemplateStatus(check.state, detail, action, blocked, can_render=can_render)
 
 
 def _settings_digest() -> str | None:
@@ -628,7 +641,7 @@ def install_template() -> template.InstallResult:
     """Install or repair through `template.install`: its backups, size check and refusals.
 
     A refusal says whether Noctalia's settings are byte-for-byte what they were.
-    Then Noctalia is asked to render the templates, as the CLI tells you to.
+    Nothing is rendered here: that is `render_templates`, its own button.
     """
     blocked = upgrade_blocked()
     if blocked:
@@ -649,9 +662,24 @@ def install_template() -> template.InstallResult:
                 else "Noctalia's settings changed while this ran; check them."
             )
         ) from error
-    with contextlib.suppress(noctalia.NoctaliaError):
-        noctalia.apply_templates()
     return result
+
+
+def render_templates() -> None:
+    """Render now: ask Noctalia to re-render all of its templates, not only ours.
+
+    A separate, explicit press: installing never does this. Refused while
+    Wall-in-One's own upgrade hasn't finished, as installing is.
+    """
+    blocked = upgrade_blocked()
+    if blocked:
+        raise template.TemplateInstallError(blocked)
+    try:
+        noctalia.apply_templates()
+    except noctalia.NoctaliaError as error:
+        raise template.TemplateInstallError(
+            f"Noctalia didn't re-render its templates: {str(error).rstrip('.')}."
+        ) from error
 
 
 def _installed_sentence(result: template.InstallResult) -> str:
@@ -665,6 +693,10 @@ def _installed_sentence(result: template.InstallResult) -> str:
     if result.detail == "registered":
         return f"The palette template is installed{backup}"
     return f"The palette template was repaired{backup}"
+
+
+def _rendered_sentence() -> str:
+    return "Noctalia was asked to re-render all of its templates"
 
 
 # -- the part ---------------------------------------------------------------------------
@@ -1018,6 +1050,41 @@ class RealSettings:
         if not self._backend.authoring_action_async(install_template, finished, failure=failed):
             self._template_busy = False
             self._host.emit_changed("settings")
+
+    def render_templates(self) -> None:
+        """Render now: the only caller of `noctalia.apply_templates` here, and only on a press."""
+        status = self._template
+        if self._template_busy:
+            return
+        if not status.can_render or status.blocked:
+            self._report(status.blocked or status.detail)
+            return
+        if not self._backend.require_authoring_ready():
+            return
+        self._template_busy = True
+        self._host.emit_changed("settings")
+
+        def finished(_result: None) -> None:
+            self._template_busy = False
+            self._report(_rendered_sentence())
+            self._host.emit_changed("settings")
+            self.check_template()
+            # Noctalia renders after it answers; look once more when it has had a moment.
+            GLib.timeout_add(SETTLE_MS, self._check_again)
+
+        def failed(message: str) -> None:
+            self._template_busy = False
+            self._report(message.removeprefix(f"{template.TemplateInstallError.__name__}: "))
+            self._host.emit_changed("settings")
+            self.check_template()
+
+        if not self._backend.authoring_action_async(render_templates, finished, failure=failed):
+            self._template_busy = False
+            self._host.emit_changed("settings")
+
+    def _check_again(self) -> bool:
+        self.check_template()
+        return GLib.SOURCE_REMOVE
 
 
 def _connected_outputs() -> tuple[str, ...]:

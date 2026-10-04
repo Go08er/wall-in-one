@@ -409,7 +409,9 @@ def test_palettes_are_chosen_duplicated_and_edited_in_the_manager(
     spin_until(lambda: not opened.page._dialogs, what="the dialog to close")
 
 
-def test_open_idle_and_close_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_open_idle_and_close_write_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, asked: list[str]
+) -> None:
     sandboxed_runtime(monkeypatch, tmp_path)
     monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
     _noctalia_settings(NOCTALIA)  # an Install button on show: still nothing written
@@ -446,6 +448,7 @@ def test_open_idle_and_close_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_
     assert not custom.exists() or not any(custom.iterdir()), "no palette written"
     assert _noctalia_files() == noctalia_before, "Noctalia's settings untouched"
     assert not template.installed_template_path().exists(), "no template copy either"
+    assert asked == [], "Noctalia is asked nothing: no reload, no render"
 
 
 def test_the_interface_and_gpu_rows_stay_with_the_keeper(opened: Opened) -> None:
@@ -569,8 +572,31 @@ def test_the_template_row_shows_each_state_and_its_button(
         assert (label, has_button) == ("Installed", False)
         text = paths.noctalia_settings_path().read_text(encoding="utf-8")
         assert str(template.installed_template_path()) in text and stale not in text
-        assert asked == ["reload", "render"]
+        assert asked == ["reload"], "repairing never renders"
         assert shown.reports[-1].startswith("The palette template was repaired")
+
+        # Installed, not rendered yet: its own Render now, saying what it does.
+        page = shown.page
+        assert "the next time its colours change" in _template_shown(shown)[1]
+        assert page._render_row.get_visible() and page._render_button.get_sensitive()
+        assert "all of its templates, not only Wall-in-One's" in (
+            page._render_row.get_subtitle() or ""
+        )
+        monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "An upgrade is running.")
+        access.check_template()
+        spin_until(lambda: not page._render_button.get_sensitive(), what="render blocked")
+        page.render_templates()
+        assert asked == ["reload"], "refused while the upgrade runs"
+        monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "")
+        access.check_template()
+        spin_until(lambda: page._render_button.get_sensitive(), what="render back")
+        page.render_templates()  # the press
+        shown.wait("the render", lambda: "render" in asked)
+        assert asked == ["reload", "render"]
+        assert shown.reports[-1] == "Noctalia was asked to re-render all of its templates"
+        paths.palette_path().write_text("{}", encoding="utf-8")  # as Noctalia would
+        access.check_template()
+        spin_until(lambda: not page._render_row.get_visible(), what="rendered: no offer")
     finally:
         _close(shown)
 
@@ -613,6 +639,7 @@ def test_the_template_button_is_the_only_writer_and_a_refusal_changes_nothing(
         backups = [name for name in files if name.startswith("settings.toml.bak-wall-in-one-")]
         assert backups and files[backups[0]] == NOCTALIA.encode(), "backed up before the edit"
         assert "wall-in-one" in files["settings.toml"].decode()
+        assert asked == ["reload"], "installing never renders"
     finally:
         _close(shown)
 

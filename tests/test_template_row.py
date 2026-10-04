@@ -116,11 +116,15 @@ def test_an_installed_registration_offers_no_button_and_says_whether_it_rendered
     _settings(SAMPLE)
     template.install()
     row = real_settings.read_template()
-    assert (row.state, row.action) == ("installed", "")
-    assert "hasn't rendered" in row.detail
+    assert (row.state, row.action, row.can_render) == ("installed", "", True)
+    assert row.detail.endswith(
+        "Noctalia hasn't rendered Wall-in-One's colours yet; it renders the template the "
+        "next time its colours change."
+    )
     paths.palette_path().write_text("{}", encoding="utf-8")
     row = real_settings.read_template()
     assert row.state == "installed" and "hasn't rendered" not in row.detail
+    assert not row.can_render, "rendered: nothing to offer"
 
 
 @pytest.mark.parametrize(
@@ -162,7 +166,9 @@ def test_an_interrupted_change_is_offered_as_a_repair_not_finished_by_reading() 
     assert _snapshot() == before
 
 
-def test_an_upgrade_still_running_turns_the_button_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_upgrade_still_running_turns_both_buttons_off(
+    monkeypatch: pytest.MonkeyPatch, asked: list[str]
+) -> None:
     _settings(SAMPLE)
     monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "the upgrade hasn't finished")
     row = real_settings.read_template()
@@ -171,18 +177,50 @@ def test_an_upgrade_still_running_turns_the_button_off(monkeypatch: pytest.Monke
         real_settings.install_template()
     assert "wall-in-one" not in paths.noctalia_settings_path().read_text(encoding="utf-8")
 
+    monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "")
+    real_settings.install_template()
+    asked.clear()
+    monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "the upgrade hasn't finished")
+    row = real_settings.read_template()
+    assert (row.can_render, row.blocked) == (True, "the upgrade hasn't finished")
+    with pytest.raises(template.TemplateInstallError, match="hasn't finished"):
+        real_settings.render_templates()
+    assert asked == [], "Render now is refused too: Noctalia isn't asked"
+
 
 # -- the button's path ---------------------------------------------------------------------
 
 
-def test_the_button_registers_backs_up_and_asks_noctalia_to_render(asked: list[str]) -> None:
+def test_install_registers_and_backs_up_and_never_renders(asked: list[str]) -> None:
     settings = _settings(SAMPLE)
     result = real_settings.install_template()
     assert result.changed and result.detail == "registered"
     assert result.backup_path is not None and result.backup_path.read_text() == SAMPLE
     assert "[theme.templates.user.wall-in-one]" in settings.read_text(encoding="utf-8")
-    assert asked == ["reload", "render"]
+    assert asked == ["reload"], "as the CLI: reload Noctalia's settings, render nothing"
     assert real_settings.read_template().state == "installed"
+
+
+def test_render_now_is_the_only_caller_of_apply_templates(
+    monkeypatch: pytest.MonkeyPatch, asked: list[str]
+) -> None:
+    _settings(SAMPLE)
+    real_settings.read_template()
+    real_settings.install_template()
+    real_settings.read_template()
+    assert "render" not in asked
+    real_settings.render_templates()
+    assert asked.count("render") == 1
+
+    def unreachable() -> None:
+        raise noctalia.NoctaliaError("noctalia is not running")
+
+    monkeypatch.setattr(noctalia, "apply_templates", unreachable)
+    with pytest.raises(template.TemplateInstallError) as refused:
+        real_settings.render_templates()
+    assert str(refused.value) == (
+        "Noctalia didn't re-render its templates: noctalia is not running."
+    )
 
 
 def test_a_size_refusal_leaves_noctalias_files_byte_identical(asked: list[str]) -> None:

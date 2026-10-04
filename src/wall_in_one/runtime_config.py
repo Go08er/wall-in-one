@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings, scan, state_file, stills
+from wall_in_one.library import pairing, pairings, scan, state_file, stills
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.session import Session
@@ -846,20 +846,33 @@ def still_losses(
             item, after_roots, workshop, library.linked_ancestors
         )
 
-    present = scan.known_stills(library)
+    # Only what the projection's own rules say can change is looked at, by its
+    # fields alone (the accepted `paired_still` is the resolved still): a
+    # deletion reaches a wallpaper whose still or chosen still is deleted; a
+    # change of sources, one whose still is a capture under a folder dropped
+    # or an adopted one. Chosen, sidecar and sibling stills don't depend on
+    # the folders scanned.
+    current_records = {} if sources_change else session.pairings.records
+    dropped_capture_folders = frozenset(
+        pairing.still_directory(root) for root in settings.roots if root not in after_roots
+    )
+    adopted = frozenset(video for video, _capture in library.adopted_stills)
+
+    def may_lose(item: MediaItem) -> bool:
+        still = item.paired_still
+        if sources_change:
+            return item.path in adopted or (
+                still is not None and still.parent in dropped_capture_folders
+            )
+        record = current_records.get(pairings.Identity.of(item).key)
+        return still in gone or (record is not None and record.still in gone)
+
     candidates = [
-        item
-        for item in library.items
-        if item.is_moving
-        and stays(item)
-        and (
-            sources_change
-            # A deletion changes only what depends on the deleted files.
-            or session.pairings.resolve_accepted(item, library).still in gone
-        )
+        item for item in library.items if item.is_moving and may_lose(item) and stays(item)
     ]
     if not candidates:
         return {}
+    present = scan.known_stills(library)
     records = {
         key: replace(record, still=None) if record.still in gone else record
         for key, record in session.pairings.records.items()

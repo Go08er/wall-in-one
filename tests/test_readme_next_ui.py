@@ -169,3 +169,15 @@ def test_the_readme_says_what_schedule_and_displays_do_and_refuse() -> None:
     assert "runtime choices, never saved" in section
     assert "and so do the Schedule and Displays pages" in section
     assert "the same settings, saved the same way, as Settings → Displays" in section
+
+
+def test_the_guide_says_what_keeps_playback_reachable() -> None:
+    """After Codex 0.3.0 round 1: folders, Workshop scanning, and changes that don't get through."""
+    guide = _guide()
+    for words in (
+        "One whose wallpapers a playlist needs can't be removed",
+        "turning off Wallpaper Engine scanning is refused the same way",
+        "When changes stop reaching playback",
+        "the wallpaper service keeps the last setup that worked until a change gets through again",
+    ):
+        assert words in guide, words

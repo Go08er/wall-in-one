@@ -48,6 +48,12 @@ Three properties of the list are worth knowing:
 - **A root that is not there right now is kept, not removed.** An unmounted
   drive shows in Settings as `<path> · not there right now`, with a warning
   icon, and comes back when the drive does.
+- **A folder that playlists need stays.** Removing a folder, or turning off
+  Wallpaper Engine scanning, takes its wallpapers out of the library. It is
+  refused when that would leave a playlist something uses with nothing to
+  play, or any playlist holding only wallpapers playback can't use, and the
+  refusal names them; the new interface says so before it asks to remove.
+  `/a/b` never counts as holding `/a/bc`.
 
 Scanning may still show files reached through an intentionally configured
 symbolic link, but Delete and Move to Trash refuse destructive authority
@@ -428,6 +434,15 @@ refused with the reason. An older playlist occurrence is retained and
 labelled (`Missing · <file>` or `Playback unavailable · <name>`) so it can be
 removed deliberately; playback skips it when another usable occurrence exists,
 and **Play now** is off when every entry is missing or skipped.
+
+A playlist's files can still go away outside the app, or with a drive. Its
+entries are kept, and when nothing in a playlist can play any more, the
+wallpaper service keeps the last setup that worked. The app names the
+playlist, and the new interface keeps saying so under its header, with a
+button to Playlists, until a change gets through again. An older profile's
+default, schedule rule or display assignment that names a playlist by its
+name, rather than its id, keeps working: it is given the playlist's id at the
+next start, and a rename or delete takes it along.
 
 Playlists can contain up to 10,000 entries. The page initially builds 72 rows
 and offers **Show N more**; loaded rows keep their identity for keyboard and

@@ -38,6 +38,11 @@ then a notice under the header says what is waiting, and its button asks
 again. While the import question is open, the library isn't loaded and
 changes can't be saved, and the notice says so.
 
+When changes stop reaching playback (a playlist's files went away outside the
+app, say), the same notice says why, naming the playlist, with a button to
+Playlists; the wallpaper service keeps the last setup that worked until a
+change gets through again.
+
 ## After an update
 
 Classic's one-time Tidy up card is above every page; Review opens Settings →
@@ -219,7 +224,10 @@ Every setting classic Settings has, each saved to the same `settings.toml` key
 the same way, in searchable groups:
 
 - library folders: add, remove, and make one the folder downloads and generated
-  stills go to. A folder found on this machine is only suggested.
+  stills go to. A folder found on this machine is only suggested. One whose
+  wallpapers a playlist needs can't be removed, and the playlists are named
+  before Remove is offered; turning off Wallpaper Engine scanning is refused
+  the same way.
 - playback defaults;
 - displays, and which one the colours follow;
 - the app's colours and default scheme, the palette manager, and Noctalia's

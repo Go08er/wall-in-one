@@ -16,7 +16,8 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import fields, replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -33,12 +34,14 @@ from tests.test_settings_v0_1_4_keys import V0_1_4_SETTINGS_KEYS  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, ui_prefs  # noqa: E402
 from wall_in_one.providers import credentials, registry  # noqa: E402
-from wall_in_one.theme import palettes  # noqa: E402
+from wall_in_one.theme import noctalia, palettes, template  # noqa: E402
+from wall_in_one.ui import palette_browser  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next import real_settings  # noqa: E402
 from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
 from wall_in_one.ui.next.settings_palettes import PaletteEditor, PalettesDialog  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
+from wall_in_one.ui.palette_catalog import PaletteCatalog  # noqa: E402
 
 #: The keys classic Settings writes, each now a row here (the folders write `roots`).
 CLASSIC_KEYS = frozenset(
@@ -409,6 +412,8 @@ def test_palettes_are_chosen_duplicated_and_edited_in_the_manager(
 def test_open_idle_and_close_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sandboxed_runtime(monkeypatch, tmp_path)
     monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    _noctalia_settings(NOCTALIA)  # an Install button on show: still nothing written
+    noctalia_before = _noctalia_files()
     settings_file = paths.settings_path()
     before = settings_file.read_bytes()
     stamp = settings_file.stat().st_mtime_ns
@@ -439,6 +444,8 @@ def test_open_idle_and_close_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_
     assert not credentials.key_path().exists()
     custom = palettes.custom_directory()
     assert not custom.exists() or not any(custom.iterdir()), "no palette written"
+    assert _noctalia_files() == noctalia_before, "Noctalia's settings untouched"
+    assert not template.installed_template_path().exists(), "no template copy either"
 
 
 def test_the_interface_and_gpu_rows_stay_with_the_keeper(opened: Opened) -> None:
@@ -454,3 +461,258 @@ def test_the_interface_and_gpu_rows_stay_with_the_keeper(opened: Opened) -> None
 
 def test_the_settings_keys_are_still_0_1_4s() -> None:
     assert {field.name for field in fields(config.Settings)} == V0_1_4_SETTINGS_KEYS
+
+
+# -- Noctalia's palette template -------------------------------------------------------
+
+NOCTALIA = """\
+[theme]
+source = "wallpaper"
+"""
+
+
+def _noctalia_settings(body: str) -> Path:
+    path = paths.noctalia_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _noctalia_files() -> dict[str, bytes]:
+    directory = paths.noctalia_settings_path().parent
+    if not directory.exists():
+        return {}
+    return {
+        entry.name: entry.read_bytes() if entry.is_file() else b"<directory>"
+        for entry in sorted(directory.iterdir())
+    }
+
+
+def _template_shown(opened: Opened) -> tuple[str, str, bool, bool]:
+    """(pill text, subtitle, button shown, button on) as the row shows them."""
+    page = opened.page
+    pill = page._template_pill.get_first_child()
+    label = ""
+    if pill is not None:
+        child = pill.get_last_child()
+        label = child.get_label() if isinstance(child, Gtk.Label) else ""
+    button = page._template_button
+    return (
+        label,
+        page._template_row.get_subtitle() or "",
+        button.get_visible(),
+        button.get_sensitive(),
+    )
+
+
+def _template_state(opened: Opened) -> str:
+    access = opened.page.access
+    assert access is not None
+    return access.template_status().state
+
+
+@pytest.fixture
+def asked(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    monkeypatch.setattr(noctalia, "reload_config", lambda: calls.append("reload"))
+    monkeypatch.setattr(noctalia, "apply_templates", lambda: calls.append("render"))
+    return calls
+
+
+def test_the_template_row_shows_each_state_and_its_button(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, asked: list[str]
+) -> None:
+    sandboxed_runtime(monkeypatch, tmp_path)
+    shown = _open(monkeypatch)
+    try:
+        spin_until(lambda: _template_state(shown) != "checking", what="the first read")
+        label, subtitle, has_button, _on = _template_shown(shown)
+        assert (label, has_button) == ("Can't install", False)
+        assert "weren't found" in subtitle
+
+        _noctalia_settings(NOCTALIA)
+        access = shown.page.access
+        assert access is not None
+        access.check_template()
+        spin_until(lambda: _template_state(shown) == "missing", what="missing")
+        assert _template_shown(shown)[0] == "Not installed"
+        assert shown.page._template_button.get_label() == "Install"
+        assert _template_shown(shown)[2:] == (True, True)
+
+        monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "An upgrade is running.")
+        access.check_template()
+        spin_until(lambda: "upgrade is running" in _template_shown(shown)[1], what="blocked")
+        assert _template_shown(shown)[2:] == (True, False), "shown, but off, with the reason"
+        before = _noctalia_files()
+        shown.page.install_template()
+        assert _noctalia_files() == before
+
+        monkeypatch.setattr(real_settings, "upgrade_blocked", lambda: "")
+        stale = str(paths.app_state_dir() / "palette.json.tmpl")
+        _noctalia_settings(
+            NOCTALIA
+            + "# >>> wall-in-one palette template (managed) >>>\n"
+            + "[theme.templates.user.wall-in-one]\nenabled = true\n"
+            + f'input_path = "{stale}"\noutput_path = "{paths.palette_path()}"\n'
+            + "# <<< wall-in-one palette template (managed) <<<\n"
+        )
+        access.check_template()
+        spin_until(lambda: _template_state(shown) == "stale", what="stale")
+        label, subtitle, has_button, on = _template_shown(shown)
+        assert (label, has_button, on) == ("Needs repair", True, True)
+        assert "old template file name" in subtitle
+        assert shown.page._template_button.get_label() == "Repair"
+
+        shown.page.install_template()  # the button
+        shown.wait("the repair", lambda: _template_state(shown) == "installed")
+        label, subtitle, has_button, _on = _template_shown(shown)
+        assert (label, has_button) == ("Installed", False)
+        text = paths.noctalia_settings_path().read_text(encoding="utf-8")
+        assert str(template.installed_template_path()) in text and stale not in text
+        assert asked == ["reload", "render"]
+        assert shown.reports[-1].startswith("The palette template was repaired")
+    finally:
+        _close(shown)
+
+
+def test_the_template_button_is_the_only_writer_and_a_refusal_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, asked: list[str]
+) -> None:
+    sandboxed_runtime(monkeypatch, tmp_path)
+    line = "# " + "x" * 1022 + "\n"
+    room = template.MAX_NOCTALIA_SETTINGS_BYTES - len(NOCTALIA) - 64
+    oversized = NOCTALIA + line * (room // len(line)) + "#" * (room % len(line)) + "\n"
+    _noctalia_settings(oversized)
+    before = _noctalia_files()
+    shown = _open(monkeypatch)
+    try:
+        spin_until(lambda: _template_state(shown) == "missing", what="the first read")
+        idle_until = time.monotonic() + 0.5
+        spin_until(lambda: time.monotonic() > idle_until, 5, what="idling")
+        assert _noctalia_files() == before, "showing the row writes nothing"
+
+        shown.page.install_template()  # refused: the edit would pass the size limit
+        shown.wait("the refusal", lambda: shown.reports)
+        assert shown.reports[0].startswith("The palette template wasn't installed: ")
+        assert shown.reports[0].endswith(". Noctalia's settings weren't changed.")
+        assert "Nothing was changed" not in shown.reports[0]
+        assert _noctalia_files() == before, "byte-identical, no backup, no transaction"
+        spin_until(lambda: _template_state(shown) == "missing", what="the re-read")
+        assert asked == []
+
+        _noctalia_settings(NOCTALIA)
+        access = shown.page.access
+        assert access is not None
+        access.check_template()
+        spin_until(lambda: _template_state(shown) == "missing", what="missing again")
+        assert len(_noctalia_files()) == 1
+        spin_until(lambda: shown.page._template_button.get_sensitive(), what="the button back")
+        shown.page.install_template()
+        shown.wait("the install", lambda: _template_state(shown) == "installed")
+        files = _noctalia_files()
+        backups = [name for name in files if name.startswith("settings.toml.bak-wall-in-one-")]
+        assert backups and files[backups[0]] == NOCTALIA.encode(), "backed up before the edit"
+        assert "wall-in-one" in files["settings.toml"].decode()
+    finally:
+        _close(shown)
+
+
+# -- palette names: never competing ---------------------------------------------------
+
+_DOCUMENT = {
+    "dark": {key: "#202830" for key, _label in palettes.EDITABLE_KEYS},
+    "light": {key: "#f0f0f0" for key, _label in palettes.EDITABLE_KEYS},
+}
+
+
+def test_the_new_editor_names_a_copy_uniquely_and_waits_for_a_free_name(
+    opened: Opened,
+) -> None:
+    palettes.write_custom("Evening", _DOCUMENT)
+    palettes.write_custom("Evening copy", _DOCUMENT)
+    dialog = opened.page.open_palettes()
+    assert dialog is not None
+    manager = dialog.manager
+    spin_until(lambda: manager.palette_list().phase == "ready", what="the catalogue")
+    evening = next(i for i in manager.palette_list().items if i.name == "Evening")
+    dialog.edit(evening, copy=True)
+    spin_until(lambda: isinstance(dialog.nav.get_visible_page(), PaletteEditor), what="editor")
+    editor = dialog.nav.get_visible_page()
+    assert isinstance(editor, PaletteEditor)
+    assert editor.name.get_text() == "Evening copy 2", "never a name already there"
+    assert editor.save_button.get_sensitive() and not editor.problem.get_visible()
+
+    for taken, owner in (("evening", "one of your palettes"), ("NORD", "a built-in palette")):
+        editor.name.set_text(taken)
+        assert not editor.save_button.get_sensitive()
+        assert editor.problem.get_visible() and owner in editor.problem.get_label()
+        editor.save()  # Save is off; even called, nothing is written
+    editor.name.set_text("")
+    assert not editor.save_button.get_sensitive() and "needs a name" in editor.problem.get_label()
+    assert sorted(path.name for path in palettes.custom_directory().iterdir()) == [
+        "Evening copy.json",
+        "Evening.json",
+    ]
+
+    editor.name.set_text("Evening blue")
+    assert editor.save_button.get_sensitive() and not editor.problem.get_visible()
+    editor.save()
+    opened.wait("the new palette", lambda: palettes.custom_path("Evening blue").is_file())
+    dialog.force_close()
+
+
+def test_the_classic_browser_suggests_a_free_name_and_never_writes_over_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic's silent overwrite is gone: the shared write path refuses, the editor says so."""
+    original = palettes.write_custom("Evening", _DOCUMENT)
+    assert original.path is not None
+    kept = original.path.read_bytes()
+    discovery = palettes.discover()
+    catalog = PaletteCatalog(initial=discovery)
+    reports: list[str] = []
+
+    def authoring_action_async(work: Any, finish: Any, *, failure: Any = None) -> bool:
+        try:
+            result = work()
+        except Exception as error:
+            failure(str(error))
+        else:
+            finish(result)
+        return True
+
+    application = SimpleNamespace(
+        session=SimpleNamespace(library=SimpleNamespace(stills=()), cursor=None),
+        authoring_action_async=authoring_action_async,
+    )
+    editors: list[Any] = []
+    real_editor = palette_browser._PaletteEditor
+
+    class Recorded(real_editor):  # type: ignore[misc, valid-type]
+        def __init__(self, **keywords: Any) -> None:
+            super().__init__(**keywords)
+            editors.append(self)
+
+    monkeypatch.setattr(palette_browser, "_PaletteEditor", Recorded)
+    dialog = palette_browser.PaletteBrowserDialog(cast(Any, application), palette_catalog=catalog)
+    monkeypatch.setattr(dialog, "report", reports.append)
+    root = Gtk.Window()
+    root.present()
+    dialog.present(root)
+    try:
+        evening = discovery.find(palettes.Origin.CUSTOM, "Evening")
+        assert evening is not None
+        dialog._open_editor(evening, in_place=False)
+        editor = editors[-1]
+        assert editor._name.get_text() == "Evening copy"
+        editor._name.set_text("EVENING")
+        editor._on_save(editor._save)
+        assert original.path.read_bytes() == kept, "never written over"
+        assert reports == ["“EVENING” is already one of your palettes; choose another name"]
+        assert editor._name.has_css_class("error") and editor._save.get_sensitive()
+        assert sorted(p.name for p in palettes.custom_directory().iterdir()) == ["Evening.json"]
+    finally:
+        for editor in editors:
+            editor.force_close()
+        dialog.force_close()
+        root.destroy()

@@ -183,6 +183,26 @@ class AppPalette:
     swatches: tuple[str, ...] = ()
 
 
+#: The template row's states (`TemplateStatus.state`).
+TEMPLATE_STATES: Final = ("checking", "installed", "missing", "stale", "unavailable")
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateStatus:
+    """Wall-in-One's palette template in Noctalia's settings, as last read."""
+
+    #: One of `TEMPLATE_STATES`.
+    state: str = "checking"
+    #: Why, in a sentence.
+    detail: str = "Checking Noctalia's settings…"
+    #: The button's label (``Install`` or ``Repair``), or empty for no button.
+    action: str = ""
+    #: Why the button is off right now (an upgrade still running), or empty.
+    blocked: str = ""
+    #: A press is being carried out.
+    busy: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class PaletteItem:
     """One palette in the manager."""
@@ -308,6 +328,14 @@ class PaletteManager(Protocol):
         """Make ``scheme`` the default adaptive scheme; optionally Noctalia's too."""
         ...
 
+    def palette_name_problem(self, draft: PaletteDraft, name: str) -> str:
+        """Why ``draft`` can't be saved as ``name``, or empty when it can.
+
+        No two palettes a person can pick share a name: the editor's Save
+        waits until this is empty, and the write path refuses a clash too.
+        """
+        ...
+
 
 class SettingsAccess(Protocol):
     """The Settings page's view of the app."""
@@ -377,3 +405,17 @@ class SettingsAccess(Protocol):
 
     @property
     def palette_manager(self) -> PaletteManager: ...
+
+    # -- Noctalia's palette template -----------------------------------------------
+
+    def template_status(self) -> TemplateStatus:
+        """What Noctalia's settings say, read off GTK; ``checking`` until known."""
+        ...
+
+    def check_template(self) -> None:
+        """Read Noctalia's settings again (never writes)."""
+        ...
+
+    def install_template(self) -> None:
+        """Install or repair the registration: the row's button, the only writer."""
+        ...

@@ -742,7 +742,7 @@ class PaletteBrowserDialog(Adw.Dialog):
             return
         self._present_editor(
             title=f"Save {scheme}",
-            name=_suggest_name(f"{preview.image.stem} {scheme}"),
+            name=palettes.unique_name(f"{preview.image.stem} {scheme}", self._discovery.entries),
             document=palettes.document_from_pair(preview.colours),
             in_place=None,
         )
@@ -758,7 +758,11 @@ class PaletteBrowserDialog(Adw.Dialog):
             return
         self._present_editor(
             title=f"Edit {entry.name}" if in_place else f"Duplicate {entry.name}",
-            name=entry.name if in_place else _suggest_name(f"{entry.name} copy"),
+            name=(
+                entry.name
+                if in_place
+                else palettes.unique_name(f"{entry.name} copy", self._discovery.entries)
+            ),
             document=document,
             in_place=entry if in_place else None,
         )
@@ -887,17 +891,6 @@ _ORIGIN_EMPTY: Final[dict[palettes.Origin, str]] = {
 }
 
 
-def _suggest_name(raw: str) -> str:
-    """A starting point for the name field, not a substitute for validation.
-
-    `palettes.validate_name` refuses rather than rewrites, which is right for
-    something the user typed. A prefilled suggestion is the one place where
-    quietly dropping awkward characters is the kind thing to do.
-    """
-    kept = "".join(character for character in raw if character.isalnum() or character in " ._+-()")
-    return " ".join(kept.split()).lstrip(".")[:64] or "Untitled"
-
-
 # -- editing -------------------------------------------------------------
 
 
@@ -944,6 +937,7 @@ class _PaletteEditor(Adw.Dialog):
 
         self._name = Adw.EntryRow(title="Name")
         self._name.set_text(name)
+        self._name.connect("changed", lambda row: row.remove_css_class("error"))
         if in_place is not None:
             self._name.set_editable(False)
             self._name.set_tooltip_text("Editing in place; duplicate it to rename")
@@ -1036,6 +1030,11 @@ class _PaletteEditor(Adw.Dialog):
 
         def failed(message: str) -> None:
             self._save.set_sensitive(True)
+            if in_place is None:
+                # A name already in use is refused by the write path, never
+                # written over: say so where the name is typed.
+                self._name.add_css_class("error")
             self._on_error(message)
 
+        self._name.remove_css_class("error")
         self._app.authoring_action_async(work, saved, failure=failed)

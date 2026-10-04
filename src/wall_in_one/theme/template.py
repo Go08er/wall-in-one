@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
@@ -525,7 +525,10 @@ def _rename_exchange(source: Path, destination: Path) -> None:
 def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
     """Publish a durable byte copy without removing the canonical settings."""
 
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.backup-", dir=path.parent)
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.backup-", dir=path.parent)
+    except OSError as error:
+        raise TemplateInstallError(f"cannot create a backup of {path}: {error}") from error
     temporary = Path(name)
     candidate_identity: file_io.PathIdentity | None = None
     candidate_fingerprint: file_io.FileFingerprint | None = None
@@ -2623,6 +2626,125 @@ def edit_settings(expected_sha256: str, transform: Callable[[str], str]) -> Sett
         after_sha256=hashlib.sha256(updated.encode("utf-8")).hexdigest(),
         backup_path=backup,
         displaced_path=displaced,
+    )
+
+
+#: What `inspect` found: registered and current, absent, registered but
+#: needing `install` to repair it, or not something `install` can fix.
+TemplateState = Literal["installed", "missing", "stale", "unavailable"]
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateCheck:
+    """Our template's registration as Noctalia's settings have it, read without writing."""
+
+    state: TemplateState
+    #: Why, in a sentence: what is wrong, or what is installed.
+    detail: str
+    #: `install` would fix it (it would not refuse an entry it doesn't own).
+    repairable: bool = False
+    #: Noctalia has rendered the palette file at least once.
+    rendered: bool = False
+
+
+def inspect() -> TemplateCheck:
+    """Classify the registration the way `install` would act on it. Never writes.
+
+    No recovery runs here: an interrupted transaction is reported, and only a
+    user's `install` finishes or rolls it back.
+    """
+    settings_path = paths.noctalia_settings_path()
+    rendered = paths.palette_path().is_file()
+    try:
+        settings_path.lstat()
+    except FileNotFoundError:
+        return TemplateCheck(
+            "unavailable",
+            f"Noctalia's settings weren't found at {settings_path}. Start Noctalia once, "
+            "then check again.",
+        )
+    except OSError as error:
+        return TemplateCheck("unavailable", f"Noctalia's settings can't be read: {error}")
+    try:
+        text = _read_settings_text(settings_path)
+        settings = tomllib.loads(text)
+        expected = installed_template_path()
+    except TemplateInstallError as error:
+        return TemplateCheck("unavailable", str(error))
+    except (tomllib.TOMLDecodeError, RecursionError) as error:
+        return TemplateCheck("unavailable", f"{settings_path} is not valid TOML: {error}")
+    managed = _BEGIN_MARKER in text
+    if managed and _END_MARKER not in text[text.index(_BEGIN_MARKER) :]:
+        return TemplateCheck(
+            "unavailable",
+            "Wall-in-One's block in Noctalia's settings has lost its end marker; "
+            "fix it by hand, then check again.",
+        )
+    interrupted = (
+        _transaction_locator(settings_path).exists()
+        or _transaction_directory(settings_path).exists()
+    )
+    if interrupted:
+        return TemplateCheck(
+            "stale",
+            "An earlier change to Noctalia's settings was interrupted; repairing finishes "
+            "or undoes it first.",
+            repairable=True,
+            rendered=rendered,
+        )
+    entry = _existing_entry(settings)
+    if entry is None:
+        return TemplateCheck(
+            "missing",
+            "Not installed: wallpapers can't change the desktop's colours.",
+            repairable=True,
+            rendered=rendered,
+        )
+    output = paths.palette_path()
+    reasons: list[str] = []
+    if entry.get("enabled") is not True:
+        reasons.append("it is turned off in Noctalia")
+    current = entry.get("input_path")
+    if current != str(expected):
+        if current == str(paths.app_state_dir() / TEMPLATE_FILENAME):
+            reasons.append("Noctalia still reads the old template file name")
+        else:
+            reasons.append(f"Noctalia reads another template ({current})")
+    if entry.get("output_path") not in (str(output), [str(output)]):
+        reasons.append("Noctalia writes the colours where Wall-in-One doesn't read them")
+    if not reasons:
+        try:
+            document = file_io.read_regular_bytes(expected, MAX_TEMPLATE_BYTES)
+            bundled = file_io.read_regular_bytes(bundled_template(), MAX_TEMPLATE_BYTES)
+        except OSError as error:
+            return TemplateCheck("unavailable", f"cannot safely read palette template: {error}")
+        if document is None:
+            reasons.append("the template file Noctalia reads is missing")
+        elif document != bundled:
+            return TemplateCheck(
+                "unavailable",
+                f"{expected} doesn't hold this version's template; move it aside, then "
+                "check again.",
+                rendered=rendered,
+            )
+    if not reasons:
+        return TemplateCheck(
+            "installed",
+            "Installed: Noctalia renders each wallpaper's colours for Wall-in-One.",
+            rendered=rendered,
+        )
+    reason = "; ".join(reasons)
+    if not managed:
+        # `install` refuses to rewrite an entry it can't prove it wrote.
+        return TemplateCheck(
+            "unavailable",
+            f"{reason[0].upper()}{reason[1:]}, and Noctalia's "
+            f"[theme.templates.user.{TEMPLATE_ID}] entry wasn't written by Wall-in-One; "
+            "remove it by hand, then install.",
+            rendered=rendered,
+        )
+    return TemplateCheck(
+        "stale", f"{reason[0].upper()}{reason[1:]}.", repairable=True, rendered=rendered
     )
 
 

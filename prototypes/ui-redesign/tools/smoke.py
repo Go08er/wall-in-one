@@ -168,7 +168,13 @@ def palette_actions(state, settings) -> None:
     dialog.edit(nord, copy=True)
     editor = dialog.nav.get_visible_page()
     assert editor.draft.renamable and editor.name.get_text() == "Nord copy"
+    for taken in ("nord", "Dracula"):  # no competing names: Save waits, with the reason
+        editor.name.set_text(taken)
+        assert not editor.save_button.get_sensitive() and editor.problem.get_visible()
+        editor.save()
+    assert state.find_palette_named("nord").origin == "builtin"
     editor.name.set_text("Nord mine")
+    assert editor.save_button.get_sensitive()
     editor.set_color("dark", "primary", "#123456")
     editor.save()
     mine = state.find_palette("Nord mine")
@@ -405,6 +411,14 @@ def settings_actions(state, window) -> None:
     page._key_entry.set_text("a" * 32)
     page.save_key()
     assert state.wallhaven_key_saved and page._key_entry.get_text() == ""
+    # Noctalia's template: the row shows its state; only the button installs.
+    state.set_template_status("missing")
+    state.check_template()
+    assert page._template_button.get_visible() and page._template_button.get_label() == "Install"
+    page.install_template()
+    assert state.template_status().busy and not page._template_button.get_sensitive()
+    settle(lambda: state.template_status().state == "installed", 3)
+    assert state.template_status().state == "installed" and not page._template_button.get_visible()
     # The window's look.
     page._style_toggle.set_active_name("frosted")
     assert state.window_style == "frosted"

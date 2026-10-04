@@ -28,16 +28,26 @@ discovery catalogue (`PaletteCatalog`), apply through Noctalia
 (`apply_noctalia_palette_async`, then the palette is re-read), duplicate and
 edit (`palettes.write_custom` / `save_edits`), and the scheme generators
 (`SchemePreviewLoader`). Nothing deletes or renames a palette: the app never
-has. A new palette never takes the name of one of yours, so a save can't
-replace another palette by accident.
+has. No two palettes a person can pick share a name: a copy is named
+"<name> copy" (numbered if that is taken), the editor checks a typed name
+live (`palette_name_problem`), and `palettes.write_custom` refuses a clash
+on the authoring lane rather than writing over anything.
+
+**Noctalia's template.** The row reads Noctalia's settings with
+`template.inspect`, which never writes, on the worker. Its button is the only
+writer: `template.install` on the authoring lane, with its backups and size
+check, refused while Wall-in-One's own upgrade hasn't finished. A refusal says
+whether Noctalia's settings are byte-for-byte what they were.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Protocol, TypeVar, runtime_checkable
 
@@ -51,7 +61,7 @@ from wall_in_one import config, display_policy
 from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.session import Session
-from wall_in_one.theme import palettes, source
+from wall_in_one.theme import noctalia, palettes, source, template
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Colour, Mode, Palette, PaletteError
 from wall_in_one.ui import runtime_truth
@@ -69,6 +79,7 @@ from wall_in_one.ui.next.settings_state import (
     PaletteList,
     SchemePreview,
     SchemeSources,
+    TemplateStatus,
     ThemeSources,
     scheme_label,
 )
@@ -297,12 +308,6 @@ def _colors(document: Mapping[str, object]) -> dict[str, dict[str, str]]:
     return found
 
 
-def suggest_name(raw: str) -> str:
-    """A starting name: awkward characters quietly dropped (the user can still edit it)."""
-    kept = "".join(character for character in raw if character.isalnum() or character in " ._+-()")
-    return " ".join(kept.split()).lstrip(".")[:64] or "Untitled"
-
-
 @dataclass(frozen=True, slots=True)
 class _Editing:
     """A draft's handle: the document it starts from, and the entry edited in place."""
@@ -432,7 +437,11 @@ class RealPalettes:
             done(
                 PaletteDraft(
                     title=f"Duplicate {entry.name}" if copy else f"Edit {entry.name}",
-                    name=suggest_name(f"{entry.name} copy") if copy else entry.name,
+                    name=(
+                        palettes.unique_name(f"{entry.name} copy", self._entries.values())
+                        if copy
+                        else entry.name
+                    ),
                     renamable=copy,
                     colors=_colors(document),
                     origin=_Editing(document, None if copy else entry),
@@ -459,20 +468,18 @@ class RealPalettes:
             "dark": {role_key(role): value for role, value in colors.get("dark", {}).items()},
             "light": {role_key(role): value for role, value in colors.get("light", {}).items()},
         }
+        problem = self.palette_name_problem(draft, name)
+        if problem:
+            report(problem)
+            done(False)
+            return
         try:
             document = palettes.with_overrides(editing.document, overrides)
-            chosen = in_place.name if in_place is not None else palettes.validate_name(name)
         except PaletteError as error:
             report(str(error))
             done(False)
             return
-        if in_place is None and any(
-            entry.origin is palettes.Origin.CUSTOM and entry.name.casefold() == chosen.casefold()
-            for entry in self._entries.values()
-        ):
-            report(f"You already have a palette called {chosen}; choose another name")
-            done(False)
-            return
+        chosen = in_place.name if in_place is not None else name.strip()
 
         def work() -> palettes.PaletteEntry:
             if in_place is not None:
@@ -534,11 +541,24 @@ class RealPalettes:
         document = palettes.document_from_pair(generated.colours)
         return PaletteDraft(
             title=f"Save {scheme_label(scheme)}",
-            name=suggest_name(f"{Path(source).stem} {scheme}"),
+            name=palettes.unique_name(f"{Path(source).stem} {scheme}", self._entries.values()),
             renamable=True,
             colors=_colors(document),
             origin=_Editing(document),
         )
+
+    def palette_name_problem(self, draft: PaletteDraft, name: str) -> str:
+        """The live check behind the editor's Save; `palettes.write_custom` checks again."""
+        if not draft.renamable:
+            return ""  # edited in place: its name is its file
+        try:
+            chosen = palettes.validate_name(name)
+        except PaletteError as error:
+            return _sentence(str(error))
+        if self._list.phase in ("idle", "loading") and not self._list.items:
+            return "Checking the installed palettes' names…"
+        clash = palettes.name_clash(chosen, self._entries.values())
+        return _sentence(palettes.name_taken_message(chosen, clash)) if clash else ""
 
     def use_scheme(self, scheme: str, *, sync_noctalia: bool) -> None:
         backend = self._backend
@@ -562,6 +582,91 @@ class RealPalettes:
         backend.use_preview_scheme(scheme, sync_noctalia=sync_noctalia, on_complete=finished)
 
 
+def _sentence(text: str) -> str:
+    return f"{text[:1].upper()}{text[1:]}" if text else text
+
+
+# -- Noctalia's palette template (worker and authoring lane only) -------------------------
+
+
+def upgrade_blocked() -> str:
+    """Why Noctalia's settings must not change now (an upgrade still running), or ""."""
+    from wall_in_one import deployed_upgrade_transaction
+
+    try:
+        status = deployed_upgrade_transaction.probe().status
+    except Exception as error:  # a read failed: wait rather than guess
+        return f"Wall-in-One couldn't check its own upgrade ({error}), so this waits."
+    if status in ("absent", "current", "complete"):
+        return ""
+    return (
+        f"Wall-in-One's own upgrade hasn't finished (its status is {status}). Noctalia's "
+        "settings don't change until it has."
+    )
+
+
+def read_template() -> TemplateStatus:
+    """The row's state from `template.inspect`, which never writes."""
+    check = template.inspect()
+    action = {"missing": "Install", "stale": "Repair"}.get(check.state, "")
+    if not check.repairable:
+        action = ""
+    detail = check.detail
+    if check.state == "installed" and not check.rendered:
+        detail += " Noctalia hasn't rendered the colours yet; it does at the next change."
+    return TemplateStatus(check.state, detail, action, upgrade_blocked() if action else "")
+
+
+def _settings_digest() -> str | None:
+    try:
+        return hashlib.sha256(template.read_settings_document()).hexdigest()
+    except template.TemplateInstallError, OSError:
+        return None
+
+
+def install_template() -> template.InstallResult:
+    """Install or repair through `template.install`: its backups, size check and refusals.
+
+    A refusal says whether Noctalia's settings are byte-for-byte what they were.
+    Then Noctalia is asked to render the templates, as the CLI tells you to.
+    """
+    blocked = upgrade_blocked()
+    if blocked:
+        raise template.TemplateInstallError(blocked)
+    before = _settings_digest()
+    try:
+        result = template.install()
+    except (template.TemplateInstallError, OSError) as error:
+        # Said from what is on disk now, in place of the refusal's own
+        # "Nothing was changed": the bytes are what the person cares about.
+        reason = str(error).strip().removesuffix("Nothing was changed.").rstrip(" .;")
+        unchanged = _settings_digest() == before
+        raise template.TemplateInstallError(
+            f"The palette template wasn't installed: {reason}. "
+            + (
+                "Noctalia's settings weren't changed."
+                if unchanged
+                else "Noctalia's settings changed while this ran; check them."
+            )
+        ) from error
+    with contextlib.suppress(noctalia.NoctaliaError):
+        noctalia.apply_templates()
+    return result
+
+
+def _installed_sentence(result: template.InstallResult) -> str:
+    if not result.changed:
+        return "The palette template was already installed"
+    backup = (
+        f"; Noctalia's settings were backed up to {result.backup_path}"
+        if result.backup_path is not None
+        else ""
+    )
+    if result.detail == "registered":
+        return f"The palette template is installed{backup}"
+    return f"The palette template was repaired{backup}"
+
+
 # -- the part ---------------------------------------------------------------------------
 
 
@@ -577,6 +682,9 @@ class RealSettings:
         self._checking: tuple[Path, ...] | None = None
         self._key = KeyStatus("Checking…")
         self._key_known = False
+        self._template = TemplateStatus()
+        self._template_known = False
+        self._template_busy = False
         self._unsubscribe: Callable[[], None] | None = None
         self._monitors: Any = None
         self._monitor_handler = 0
@@ -607,6 +715,7 @@ class RealSettings:
         # A read dropped now is asked for again when the page next looks.
         self._checking = None
         self._key_known = False
+        self._template_known = False
 
     def _on_status(self, _change: StatusChange, _view: RuntimeStatusView) -> None:
         self._notes_may_have_moved()
@@ -862,6 +971,53 @@ class RealSettings:
     @property
     def palette_manager(self) -> RealPalettes:
         return self._palettes
+
+    # -- Noctalia's palette template --------------------------------------------------
+    def template_status(self) -> TemplateStatus:
+        if not self._template_known:
+            self.check_template()
+        return replace(self._template, busy=self._template_busy)
+
+    def check_template(self) -> None:
+        """Read Noctalia's settings on the worker; nothing is written."""
+
+        def known(status: TemplateStatus) -> None:
+            self._template = status
+            self._host.emit_changed("settings")
+
+        self._template_known = True
+        self._worker.run(read_template, known)
+
+    def install_template(self) -> None:
+        """The row's button: `template.install` on the authoring lane, never otherwise."""
+        status = self._template
+        if self._template_busy:
+            return
+        if not status.action or status.blocked:
+            self._report(status.blocked or status.detail)
+            return
+        if not self._backend.require_authoring_ready():
+            return
+        self._template_busy = True
+        self._host.emit_changed("settings")
+
+        def finished(result: template.InstallResult) -> None:
+            self._template_busy = False
+            self._report(_installed_sentence(result))
+            self._host.emit_changed("settings")
+            self.check_template()
+
+        def failed(message: str) -> None:
+            self._template_busy = False
+            # The lane names an exception's type for anything but a ValueError;
+            # this sentence already says everything.
+            self._report(message.removeprefix(f"{template.TemplateInstallError.__name__}: "))
+            self._host.emit_changed("settings")
+            self.check_template()
+
+        if not self._backend.authoring_action_async(install_template, finished, failure=failed):
+            self._template_busy = False
+            self._host.emit_changed("settings")
 
 
 def _connected_outputs() -> tuple[str, ...]:

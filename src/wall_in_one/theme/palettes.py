@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -54,6 +54,10 @@ from wall_in_one.theme.palette import (
 
 class PaletteWriteError(PaletteError):
     """A palette could not be written, or must never be."""
+
+
+class PaletteNameTakenError(PaletteWriteError):
+    """Another palette a person can pick already has this name; nothing was written."""
 
 
 class Origin(Enum):
@@ -612,6 +616,87 @@ def validate_name(name: str) -> str:
     return candidate
 
 
+# -- names a new palette may take ---------------------------------------
+#
+# A palette is picked by its name: in Noctalia, in a wallpaper's colours, in
+# the palette lists. Two that a person can pick under the same name compete,
+# so a new palette never takes the name of one already there. That covers
+# every origin Noctalia can apply (built-in, community and the user's own),
+# compared without case, since "Nord" and "nord" read as the same palette.
+# Legacy palettes are left out: Noctalia no longer reads them, and copying
+# one forward under its own name is how it comes back.
+
+
+def name_clash(name: str, entries: Iterable[PaletteEntry]) -> PaletteEntry | None:
+    """The palette among ``entries`` a person can pick that already has ``name``."""
+    wanted = name.strip().casefold()
+    for entry in entries:
+        if entry.origin.is_applicable and entry.name.casefold() == wanted:
+            return entry
+    return None
+
+
+def name_taken_message(name: str, clash: PaletteEntry | None) -> str:
+    """Why ``name`` can't be used, naming what already has it."""
+    owner = {
+        Origin.BUILTIN: "a built-in palette",
+        Origin.COMMUNITY: "a community palette",
+        Origin.CUSTOM: "one of your palettes",
+    }.get(clash.origin if clash is not None else Origin.CUSTOM, "a palette")
+    return f"“{name.strip()}” is already {owner}; choose another name"
+
+
+def suggest_name(raw: str) -> str:
+    """A starting name: awkward characters quietly dropped, short enough to keep.
+
+    `validate_name` refuses rather than rewrites, which is right for something
+    typed; a prefilled suggestion is the one place where dropping what a file
+    name can't hold is the kind thing to do.
+    """
+    kept = "".join(character for character in raw if character.isalnum() or character in " ._+-()")
+    return " ".join(kept.split()).lstrip(".")[:_MAX_NAME_LENGTH].rstrip() or "Untitled"
+
+
+def unique_name(raw: str, entries: Iterable[PaletteEntry]) -> str:
+    """`suggest_name` of ``raw``, numbered until no palette a person can pick has it.
+
+    ``Nord copy``, then ``Nord copy 2``, ``Nord copy 3``...
+    """
+    base = suggest_name(raw)
+    taken = {entry.name.casefold() for entry in entries if entry.origin.is_applicable}
+    if base.casefold() not in taken:
+        return base
+    number = 2
+    while True:
+        suffix = f" {number}"
+        candidate = base[: _MAX_NAME_LENGTH - len(suffix)].rstrip() + suffix
+        if candidate.casefold() not in taken:
+            return candidate
+        number += 1
+
+
+def _installed(custom: Path, community: Path | None = None) -> list[PaletteEntry]:
+    """The names a new palette would compete with, from file names alone.
+
+    No document is parsed: a file that doesn't read as a palette still holds
+    its name, and is never written over.
+    """
+    skipped: list[str] = []
+    found = [
+        PaletteEntry(name=name, origin=Origin.BUILTIN, path=None, colours=None)
+        for name in BUILTIN_NAMES
+    ]
+    for origin, directory in (
+        (Origin.COMMUNITY, community if community is not None else community_directory()),
+        (Origin.CUSTOM, custom),
+    ):
+        found += [
+            PaletteEntry(name=entry_name(path, origin), origin=origin, path=path, colours=None)
+            for path in _candidates(directory, skipped)
+        ]
+    return found
+
+
 def custom_path(name: str, directory: Path | None = None) -> Path:
     """Where a custom palette called ``name`` belongs.
 
@@ -733,8 +818,19 @@ def write_custom(
     document: Mapping[str, object],
     directory: Path | None = None,
 ) -> PaletteEntry:
-    """Write a custom palette, atomically, and return the entry for it."""
-    target = custom_path(name, directory if directory is not None else custom_directory())
+    """Write a new custom palette, atomically, and return the entry for it.
+
+    Never over another palette: a name any palette a person can pick already
+    has (`name_clash`), or a file already at the target, is refused with
+    `PaletteNameTakenError` and nothing is written. Editing one of yours in
+    place is `save_edits`.
+    """
+    target_directory = directory if directory is not None else custom_directory()
+    target = custom_path(name, target_directory)
+    chosen = validate_name(name)
+    clash = name_clash(chosen, _installed(target_directory))
+    if clash is not None or os.path.lexists(target):
+        raise PaletteNameTakenError(name_taken_message(chosen, clash))
     serialised, colours = _serialise(document, target)
     _write_atomic(target, serialised)
     return PaletteEntry(

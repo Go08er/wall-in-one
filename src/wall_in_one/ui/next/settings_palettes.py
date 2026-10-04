@@ -12,6 +12,10 @@ One dialog with two views, as the classic palette browser has:
   one the default adaptive scheme (optionally Noctalia's too); "Save…" keeps
   it as a palette of yours.
 
+No two palettes a person can pick share a name. A copy starts as "<name> copy"
+(numbered when taken), and the editor checks the name as it is typed: Save
+stays off, with the reason under the name, until no other palette has it.
+
 The editor is pushed inside the dialog (`Adw.NavigationView`) rather than
 stacked as a second dialog, and no configuration sits in a popover. There is
 no delete or rename: the app has neither. The palette manager
@@ -570,6 +574,9 @@ class PalettesDialog(Adw.Dialog):
     def _on_changed(self, _state: AppState, topic: str) -> None:
         if topic == "palettes":
             self.rebuild()
+            editor = self.nav.get_visible_page()
+            if isinstance(editor, PaletteEditor):
+                editor.validate()  # the names it is checked against may have moved
         elif topic == "settings":
             self._mark_default()
 
@@ -620,9 +627,14 @@ class PaletteEditor(Adw.NavigationPage):
         self.name.set_editable(draft.renamable)
         if not draft.renamable:
             self.name.set_tooltip_text("Editing in place; duplicate it to rename")
-        self.name.connect("changed", lambda row: row.remove_css_class("error"))
+        self.name.connect("changed", lambda _row: self.validate())
         names.append(self.name)
         box.append(names)
+        # Why Save waits: a name no other palette a person can pick already has.
+        self.problem = Gtk.Label(xalign=0, wrap=True, visible=False)
+        self.problem.add_css_class("error")
+        self.problem.add_css_class("caption")
+        box.append(self.problem)
 
         previews = Gtk.Box(spacing=12, homogeneous=True)
         self._previews: list[PalettePreview] = []
@@ -665,6 +677,8 @@ class PaletteEditor(Adw.NavigationPage):
         scroller.set_child(Adw.Clamp(maximum_size=640, child=box))
         view.set_content(scroller)
         self.set_child(view)
+        self._saving = False
+        self.validate()
 
     def _on_color(
         self, button: Gtk.ColorDialogButton, _param: object, mode: str, role: str
@@ -677,20 +691,29 @@ class PaletteEditor(Adw.NavigationPage):
         """Pick a colour as the colour button would."""
         self.buttons[(mode, role)].set_rgba(widgets.rgba(value))
 
-    def save(self) -> None:
-        name = self.name.get_text().strip()
-        if not name:
+    def validate(self) -> str:
+        """Check the name now; Save stays off, with the reason shown, until it is free."""
+        problem = self.owner.manager.palette_name_problem(self.draft, self.name.get_text())
+        self.problem.set_label(problem)
+        self.problem.set_visible(bool(problem))
+        if problem:
             self.name.add_css_class("error")
-            self.owner.state.toast("A palette needs a name")
+        else:
+            self.name.remove_css_class("error")
+        self.save_button.set_sensitive(not problem and not self._saving)
+        return problem
+
+    def save(self) -> None:
+        if self._saving or self.validate():
             return
+        self._saving = True
         self.save_button.set_sensitive(False)
 
         def done(saved: bool) -> None:
-            self.save_button.set_sensitive(True)
-            if saved:
-                if self.owner.nav.get_visible_page() is self:
-                    self.owner.nav.pop()
+            self._saving = False
+            if saved and self.owner.nav.get_visible_page() is self:
+                self.owner.nav.pop()
             else:
-                self.name.add_css_class("error")
+                self.validate()
 
-        self.owner.manager.save_palette_draft(self.draft, name, self.values, done)
+        self.owner.manager.save_palette_draft(self.draft, self.name.get_text(), self.values, done)

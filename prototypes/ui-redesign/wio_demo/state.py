@@ -64,6 +64,7 @@ from wall_in_one.ui.next.settings_state import (
     PaletteList,
     SchemePreview,
     SchemeSources,
+    TemplateStatus,
     ThemeSources,
 )
 from wall_in_one.ui.next.settings_state import Folder as FolderView
@@ -272,7 +273,7 @@ class AppState(GObject.Object):
         # What drives Noctalia's palette (Settings → Colors). The app follows
         # whatever the desktop shows, see desktop_swatches().
         self.desktop_colors = True
-        self.template_status = "working"  # Noctalia's template: working | busy | missing
+        self.noctalia_template = "working"  # Noctalia's template: working | busy | missing
         self._override: tuple[Palette, str] | None = None  # (palette applied by hand, wallpaper id it covers)
         self._palettes: list[Palette] = data.make_palettes()
         self._desktop_source: object | None = None  # what last set the desktop's colors
@@ -910,9 +911,7 @@ class AppState(GObject.Object):
     def item_pictures(self, items, done) -> None:
         loader = pictures.provider()
         for view in items:
-            texture = loader.request(
-                view.item, 480, 270, lambda texture, v=view: done(v, texture) if texture else None
-            )
+            texture = loader.request(view.item, 480, 270, lambda texture, v=view: done(v, texture) if texture else None)
             if texture is not None:
                 done(view, texture)
 
@@ -1134,6 +1133,11 @@ class AppState(GObject.Object):
         """Noctalia's palettes, optionally of one origin (custom, builtin, community)."""
         return [palette for palette in self._palettes if origin is None or palette.origin == origin]
 
+    def find_palette_named(self, name: str) -> Palette | None:
+        """The palette called ``name``, compared without case."""
+        wanted = name.casefold()
+        return next((palette for palette in self._palettes if palette.name.casefold() == wanted), None)
+
     def find_palette(self, name: str) -> Palette | None:
         return next((palette for palette in self._palettes if palette.name == name), None)
 
@@ -1197,11 +1201,12 @@ class AppState(GObject.Object):
         return undo
 
     def _unique_palette_name(self, base: str) -> str:
-        names = {palette.name for palette in self._palettes}
-        if base not in names:
+        """``base``, numbered until no palette has it (without case), as the app does."""
+        names = {palette.name.casefold() for palette in self._palettes}
+        if base.casefold() not in names:
             return base
         index = 2
-        while f"{base} {index}" in names:
+        while f"{base} {index}".casefold() in names:
             index += 1
         return f"{base} {index}"
 
@@ -1249,7 +1254,11 @@ class AppState(GObject.Object):
                 )
         for connector, assigned in self.assigned.items():
             if assigned == pid:
-                usage.append(Usage("display", connector, f"{connector} plays this playlist \u2014 open Displays", target="displays"))
+                usage.append(
+                    Usage(
+                        "display", connector, f"{connector} plays this playlist \u2014 open Displays", target="displays"
+                    )
+                )
         playing = [c for c in self.connectors() if self.effective_playlist(c) == pid] if self.service_running else []
         on_screen = ""
         if playing:
@@ -1272,7 +1281,9 @@ class AppState(GObject.Object):
             entries=tuple(entries),
             usage=tuple(usage),
             on_screen=on_screen,
-            playing=bool(playing) and len(playing) == len(self.connectors()) and all(self.manual.get(c) == pid for c in playing),
+            playing=bool(playing)
+            and len(playing) == len(self.connectors())
+            and all(self.manual.get(c) == pid for c in playing),
             showing=showing,
             play_blocked=blocked,
             is_default=self.fallback == pid,
@@ -1469,7 +1480,11 @@ class AppState(GObject.Object):
             return
         entries = playlist.entries
         chosen = set(entry_ids)
-        removed = [(i, wid) for i, (eid, wid) in enumerate(zip(self._entry_ids(entries), entries, strict=True)) if eid in chosen]
+        removed = [
+            (i, wid)
+            for i, (eid, wid) in enumerate(zip(self._entry_ids(entries), entries, strict=True))
+            if eid in chosen
+        ]
         if not removed:
             return
         for index, _wid in reversed(removed):
@@ -2028,7 +2043,9 @@ class AppState(GObject.Object):
     def forget_plan(self, connector: str) -> ForgetPlan:
         item = next((d for d in self.remembered_displays if d.connector == connector), None)
         if item is None:
-            return ForgetPlan(connector, refused=f"{connector} is connected; only a display that isn\u2019t can be forgotten")
+            return ForgetPlan(
+                connector, refused=f"{connector} is connected; only a display that isn\u2019t can be forgotten"
+            )
         rules = sum(rule.display == connector for rule in self.rules)
         return ForgetPlan(connector, item.playlist, rules, False)
 
@@ -2052,7 +2069,7 @@ class AppState(GObject.Object):
     @property
     def template_ok(self) -> bool:
         """Noctalia's template is installed (a reinstall in progress counts)."""
-        return self.template_status != "missing"
+        return self.noctalia_template != "missing"
 
     #: settings.toml keys the rest of the demo acts on: (getter, setter).
     def _live_setting(self, key: str) -> tuple[Callable[[], Any], Callable[[Any], None]] | None:
@@ -2161,6 +2178,32 @@ class AppState(GObject.Object):
             self._palette_manager = DemoPalettes(self)
         return self._palette_manager
 
+    def template_status(self) -> TemplateStatus:
+        """Noctalia's template, as the Settings row shows it (the demo's simulated one)."""
+        if self.noctalia_template == "busy":
+            return TemplateStatus("missing", "Installing…", "Install", busy=True)
+        if self.noctalia_template == "missing":
+            return TemplateStatus("missing", "Not installed: wallpapers can't change the desktop's colours.", "Install")
+        return TemplateStatus("installed", "Installed: Noctalia renders each wallpaper's colours.")
+
+    def check_template(self) -> None:
+        self.emit_changed("settings")
+
+    def install_template(self) -> None:
+        """Pretend to install, the way the app's button does: a moment's work, then a toast."""
+        if self.noctalia_template != "missing":
+            return
+        self.set_template_status("busy")
+        self.emit_changed("settings")
+
+        def done() -> bool:
+            self.set_template_status("working")
+            self.emit_changed("settings")
+            self.toast("The palette template is installed")
+            return False
+
+        GLib.timeout_add(900, done)
+
     def set_default_interval(self, minutes: int) -> None:
         self.default_interval = minutes
         self.emit_changed("settings")
@@ -2186,7 +2229,7 @@ class AppState(GObject.Object):
     def set_template_status(self, status: str) -> None:
         """Noctalia's template: "working", "busy" (being reinstalled) or "missing"."""
         was_ok = self.template_ok
-        self.template_status = status
+        self.noctalia_template = status
         if self.template_ok != was_ok:
             self.emit_changed("settings")
 
@@ -2451,12 +2494,14 @@ class DemoPalettes:
         done: Callable[[bool], None],
     ) -> None:
         light, dark = dict(colors.get("light", {})), dict(colors.get("dark", {}))
-        if isinstance(draft.origin, str):
-            self.state.save_palette(draft.origin, draft.origin, light, dark)
-        elif self.state.find_palette(name) is not None:
-            self.state.toast(f"You already have a palette called {name}; choose another name")
+        name = name.strip()
+        problem = self.palette_name_problem(draft, name)
+        if problem:
+            self.state.toast(problem)
             done(False)
             return
+        if isinstance(draft.origin, str):
+            self.state.save_palette(draft.origin, draft.origin, light, dark)
         else:
             self.state._palettes.insert(len(self.state.palettes("custom")), Palette(name, "custom", light, dark))
             self.state.emit_changed("settings")
@@ -2491,7 +2536,23 @@ class DemoPalettes:
             swatches = data.scheme_swatches(wallpaper, scheme, dark)
             values.update(zip(("surface", "primary", "secondary", "tertiary", "error"), swatches, strict=False))
             colors[mode] = values
-        return PaletteDraft(f"Save {self.state.scheme_name(scheme)}", f"{wallpaper.name} {scheme}", True, colors)
+        name = self.state._unique_palette_name(f"{wallpaper.name} {scheme}")
+        return PaletteDraft(f"Save {self.state.scheme_name(scheme)}", name, True, colors)
+
+    def palette_name_problem(self, draft: PaletteDraft, name: str) -> str:
+        """No two palettes share a name (without case), as in the app."""
+        if not draft.renamable:
+            return ""
+        chosen = name.strip()
+        if not chosen:
+            return "A palette needs a name"
+        clash = self.state.find_palette_named(chosen)
+        if clash is not None:
+            owner = {"builtin": "a built-in palette", "community": "a community palette"}.get(
+                clash.origin, "one of your palettes"
+            )
+            return f"“{chosen}” is already {owner}; choose another name"
+        return ""
 
     def use_scheme(self, scheme: str, *, sync_noctalia: bool) -> None:
         undo = self.state.set_default_scheme(scheme)
@@ -2535,4 +2596,3 @@ class DemoStoreItem:
     def key(self):
         """The art the demo's thumbnail loader draws."""
         return self.item.key
-

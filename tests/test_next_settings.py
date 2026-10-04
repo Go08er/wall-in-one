@@ -476,7 +476,7 @@ def test_a_palette_is_duplicated_edited_and_applied_through_noctalia(
     saved: list[bool] = []
     manager.save_palette_draft(draft, "Mine", draft.colors, saved.append)
     assert saved == [False], "never over another palette of yours"
-    assert "already have a palette called Mine" in backend.reports[-1]
+    assert backend.reports[-1] == "“Mine” is already one of your palettes; choose another name"
     colors = {
         "dark": {**draft.colors["dark"], "primary": "#445566"},
         "light": draft.colors["light"],

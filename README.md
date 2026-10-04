@@ -355,6 +355,11 @@ a content-addressed file under Wall-in-One's state directory, without replacing
 an existing name. The settings block is fenced with markers, the previous file
 is backed up first, and a hand-written entry under the same id is never
 overwritten. `--uninstall-theme-template` removes the settings block again.
+In the new interface, Settings → Colours → **Noctalia template** shows whether
+the registration is installed, missing or needs repair (with the reason), and
+its Install or Repair button does the same as `--install-theme-template`, then
+asks Noctalia to render. It writes only when you press it, and not while
+Wall-in-One's own upgrade is unfinished.
 
 Check what you have with `--theme-status`, `--print-palette`, or `--print-css`.
 Palette updates are event-driven. A valid template file does not prove that
@@ -377,6 +382,13 @@ rescan keeps unchanged row, focus and scroll identity while showing
 "Refreshing"; a palette saved by this app invalidates the old snapshot until
 the post-write generation lands, so an edited entry cannot be resurrected by a
 late scan.
+
+No two palettes you can pick share a name. A copy starts as "Nord copy"
+("Nord copy 2" when that is taken), and saving a new palette under a name a
+built-in, community or custom palette already has (ignoring case) is refused,
+with nothing written over: every window saves through the same check. A
+legacy palette's name is free to reuse, since copying it forward is how it
+comes back.
 
 ## Translucency and blur
 
@@ -686,7 +698,11 @@ choice for that start. With neither, the app is classic.
   - preview each scheme on a still, then use it as the default or keep it as
     a palette.
 
-  Like classic, it has no delete.
+  Like classic, it has no delete. A new palette's name is checked as you type:
+  Save waits, with the reason, until no other palette has it.
+
+  **Noctalia template** says whether Noctalia renders your colours for
+  Wall-in-One, and installs or repairs that when you press its button.
 
 - **When it can't change things.**
   - **A store saved by a newer version** turns Apply, favorites, library changes

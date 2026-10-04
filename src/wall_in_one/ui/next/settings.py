@@ -22,6 +22,12 @@ row that writes it is off and the page says why; the Wallhaven key, the
 window's look, the next start's interface and Tidy up write other files and
 stay on, as in classic Settings.
 
+**Noctalia's template.** The Colours group shows whether Noctalia's settings
+register Wall-in-One's palette template (installed, missing, needing repair,
+or something only a hand can fix, with the reason), read without writing.
+Its Install or Repair button is the only thing here that writes Noctalia's
+settings, and only when pressed.
+
 **Folders.** The first folder receives downloads and generated stills; another
 one is made first with its download button. There is no separate download
 folder (owner decision 4) and no "Locate" for a missing folder: it is said to
@@ -802,6 +808,67 @@ class SettingsPage(Page):
             "palettes browse custom community built-in legacy edit duplicate schemes",
             target="colors.palettes",
         )
+        self._build_template_row(access, group)
+
+    def _build_template_row(self, access: SettingsAccess, group: _Group) -> None:
+        """Noctalia's palette template: its state as read, then the one button that writes.
+
+        It writes Noctalia's settings, not settings.toml, so read-only settings
+        don't turn it off; an upgrade still running does, and says so.
+        """
+        row = Adw.ActionRow(title="Noctalia template", use_markup=False)
+        row.set_subtitle_lines(0)
+        self._template_pill = Gtk.Box(valign=Gtk.Align.CENTER)
+        row.add_suffix(self._template_pill)
+        self._template_spinner = Adw.Spinner(valign=Gtk.Align.CENTER, visible=False)
+        row.add_suffix(self._template_spinner)
+        self._template_button = Gtk.Button(valign=Gtk.Align.CENTER, visible=False)
+        self._template_button.add_css_class("suggested-action")
+        self._template_button.connect("clicked", lambda *_: self.install_template())
+        row.add_suffix(self._template_button)
+        check = widgets.icon_button(
+            "view-refresh-symbolic",
+            "Check Noctalia's settings again",
+            lambda *_: access.check_template(),
+            "flat",
+        )
+        check.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(check)
+        self._template_row = row
+        self._add(
+            group,
+            row,
+            "template noctalia install repair recolor desktop colours integration",
+            target="colors.template",
+        )
+
+    def install_template(self) -> None:
+        """The template row's button."""
+        if self.access is not None and self._template_button.get_sensitive():
+            self.access.install_template()
+
+    def _sync_template(self, access: SettingsAccess) -> None:
+        status = access.template_status()
+        pill = {
+            "checking": ("Checking…", None, ""),
+            "installed": ("Installed", "object-select-symbolic", "success"),
+            "missing": ("Not installed", "dialog-warning-symbolic", "warning"),
+            "stale": ("Needs repair", "dialog-warning-symbolic", "warning"),
+            "unavailable": ("Can't install", "dialog-warning-symbolic", "error"),
+        }.get(status.state, ("", None, ""))
+        while (child := self._template_pill.get_first_child()) is not None:
+            self._template_pill.remove(child)
+        label, icon, tone = pill
+        if label:
+            self._template_pill.append(widgets.pill(label, icon, *([tone] if tone else [])))
+        subtitle = status.detail
+        if status.blocked:
+            subtitle = f"{subtitle}\n{status.blocked}"
+        self._template_row.set_subtitle(subtitle)
+        self._template_button.set_label(status.action or "Install")
+        self._template_button.set_visible(bool(status.action))
+        self._template_button.set_sensitive(not status.blocked and not status.busy)
+        self._template_spinner.set_visible(status.busy)
 
     def _manage_palettes(self) -> None:
         self.open_palettes()
@@ -1322,6 +1389,7 @@ class SettingsPage(Page):
             "emblem-ok-symbolic" if available is not False else "dialog-warning-symbolic"
         )
         self._sync_key(access)
+        self._sync_template(access)
         self._sync_palette(access)
         self._apply_filter()
 

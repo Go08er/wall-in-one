@@ -69,8 +69,9 @@ Nothing touches Noctalia's settings while a deployed upgrade is unfinished: its
 journal pins that file. Every apply and undo holds the profile-wide transaction
 lock, which excludes the upgrade and the legacy importer.
 
-The new UI (``--ui=next``) has no Settings page yet; when it gets one, its
-AppState can expose these three functions as they are.
+Both interfaces offer these actions through the same Tidy up section
+(`wall_in_one.ui.tidy_section.TidySection`): classic Settings, and the new
+interface's Settings page.
 """
 
 from __future__ import annotations

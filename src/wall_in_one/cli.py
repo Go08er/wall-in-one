@@ -128,15 +128,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="present the GUI on one workflow page",
     )
-    # Which window the GUI builds. Hidden from --help, as it always was;
-    # when absent, the interface chosen in Settings (ui.toml) is built, and
-    # the new one when there is none. Only a process that starts the app
+    # Which window the GUI builds. When absent, the interface chosen in
+    # Settings (ui.toml) is built, and the new one when there is none. Shown
+    # in --help since the new interface became the default: --ui=classic is
+    # the way back when it won't open. Only a process that starts the app
     # applies either: see ui.app.run for a running instance.
     parser.add_argument(
         "--ui",
         choices=UI_KINDS,
         default=None,
-        help=argparse.SUPPRESS,
+        metavar="|".join(UI_KINDS),
+        help=(
+            "the interface to open, overriding the one chosen in Settings for this "
+            "start; --ui=classic opens the classic window if the new one won't open"
+        ),
     )
     parser.add_argument(
         "--write-config",

@@ -112,9 +112,15 @@ def test_an_unknown_ui_is_refused_before_any_upgrade_work(
     assert "invalid choice: 'modern'" in capsys.readouterr().err
 
 
-def test_the_flag_stays_out_of_help() -> None:
-    """Settings → Appearance → Interface is the documented way to choose; --ui stays hidden."""
-    assert "--ui" not in cli._build_parser().format_help()
+def test_the_flag_is_in_help_as_the_way_back_to_classic() -> None:
+    """With the new interface the default, ``--ui=classic`` is how to reach classic when
+    the new one won't open, so ``--help`` shows the flag and what it overrides."""
+    parser = cli._build_parser()
+    assert "--ui classic|next" in parser.format_help()
+    [flag] = [action for action in parser._actions if "--ui" in action.option_strings]
+    assert flag.help is not None
+    assert "overriding the one chosen in Settings for this start" in flag.help
+    assert "--ui=classic opens the classic window if the new one won't open" in flag.help
 
 
 def test_choosing_a_window_does_not_load_gtk_on_the_command_line() -> None:

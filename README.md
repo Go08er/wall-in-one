@@ -518,13 +518,13 @@ hidden flag `wall-in-one --ui=next` or `--ui=classic` overrides the saved
 choice for that start. With neither, the app is classic.
 
 - **What it has so far.** The redesign's sidebar, header and player bar, a
-  paged Library grid with the details pane beside it, the Store, the Playlists
-  page and the Settings page, all over the app's real library, stores and
-  runtime status. Beyond the **Library** (next item), downloading
-  from the **Store**, **playlists** and **Settings** (below) it changes
-  **Apply** (to all displays, or the display the player bar is scoped to),
-  **favorites**, and **playback**, through the player bar's live controls:
-  play/pause, next,
+  paged Library grid with the details pane beside it, the Store, and the
+  Playlists, Schedule, Displays and Settings pages, all over the app's real
+  library, stores and runtime status. Beyond the **Library** (next item),
+  downloading from the **Store**, **playlists**, the **schedule**, **displays**
+  and **Settings** (below) it changes **Apply** (to all displays, or the
+  display the player bar is scoped to), **favorites**, and **playback**,
+  through the player bar's live controls: play/pause, next,
   previous, random, Stop, shuffle, "Change wallpaper automatically" and Resume
   schedule. Every playback control acts on the displays the player bar is
   scoped to, all of them or one; mirrored displays, or a display that has gone
@@ -533,8 +533,7 @@ choice for that start. With neither, the app is classic.
   details pane's Apply menu is never widened like that: if that display has
   gone, or the displays are mirrored, nothing is sent and a notice says so.
   Apply, favorites and playback have no undo yet. The player bar says what the
-  runtime reports and why ("Evening · from schedule", "Your pick"). Schedule
-  and Displays say they are not in the new interface yet.
+  runtime reports and why ("Evening · from schedule", "Your pick").
 - **The Library's edits.** The details pane changes what classic's tile menu
   and pairing editor change, through the same saves: a wallpaper's **colours**
   (From wallpaper with the Settings scheme or one pinned for it, each scheme
@@ -571,6 +570,24 @@ choice for that start. With neither, the app is classic.
   lose its last wallpaper that plays, and one with nothing that plays can't
   become the default. "Your pick" stays hidden. Long playlists show 72 rows at
   a time.
+- **Schedule.** A week calendar and the rules, highest priority on top (the
+  stored order, where the last matching rule wins, reversed). Drag on the
+  calendar or use Add rule; a rule's menu edits, duplicates, moves it up or
+  down (or Ctrl+↑/↓) and deletes it after asking. "When nothing is scheduled"
+  is the default playlist. The "Now" card and its "Why?" are the runtime's
+  answer, its rule and its "until"; the calendar only projects the week. A
+  rule aimed at one display is kept but shown inactive while displays are
+  mirrored. A time window that starts and ends on the same minute, or a
+  playlist with nothing to play, can't be saved.
+- **Displays.** "Same on all displays" or "Each display separately" (refused
+  while no display is connected for the desktop colors), the compositor's
+  layout, and for each display what it shows and why, Play now, its Cycle
+  and Shuffle with "Use saved defaults" (runtime choices, never saved), its
+  own playlist for when nothing is scheduled, whether that playlist beats the
+  shared rules (kept in `runtime-overrides.toml`, never in `runtime.toml`), and
+  which display the desktop colors follow. The mode and the colors' display
+  are the same settings, saved the same way, as Settings → Displays. A display
+  that is not connected keeps what is saved for it until you forget it.
 - **Settings.** Every setting classic Settings has, each saved to the same
   `settings.toml` key the same way (a save that fails is reported and every
   row goes back to what is saved), in searchable groups: library folders (add,
@@ -601,7 +618,7 @@ choice for that start. With neither, the app is classic.
 - **When it can't change things.** A store saved by a newer version turns
   Apply, favorites, library changes and the playback controls off and says so
   in a notice under the header; the Playlists page says so too and changes
-  nothing. Settings keys this version doesn't know are named in that notice as
+  nothing, and so do the Schedule and Displays pages. Settings keys this version doesn't know are named in that notice as
   read-only, and the Settings rows that write `settings.toml` are off. The
   playback controls are also off until the wallpaper service has answered, and
   while it isn't running; the app doesn't start the service.
@@ -625,8 +642,9 @@ choice for that start. With neither, the app is classic.
   package and the page, because older builds fix its shape.
 - **`ctl open <page>`** presents the window either way. In the new interface it
   answers `not-in-new-ui`, with exit status 1, until that page is ported; the
-  Library (`media`), the Store (`browse`), Playlists (`playlists`) and
-  Settings (`settings`) are. When no app is running, `ctl open` launches the
+  Library (`media`), the Store (`browse`), Playlists (`playlists`), Settings
+  (`settings`) and Schedule (`schedules`, and its alias `displays`) are: every
+  page is. When no app is running, `ctl open` launches the
   interface chosen in Settings.
 - **Rolling back.** 0.2.0 and 0.2.1 don't know the choice and start classic
   (`--ui=next` still works there). See [docs/updating.md](docs/updating.md) for

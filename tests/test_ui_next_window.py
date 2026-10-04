@@ -44,8 +44,13 @@ from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.theme import css, noctalia, source  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.next import store as next_store  # noqa: E402
+from wall_in_one.ui.next import window as next_window  # noqa: E402
+from wall_in_one.ui.next.displays import DisplaysPage  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
+from wall_in_one.ui.next.page import not_ported  # noqa: E402
 from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
+from wall_in_one.ui.next.schedule import SchedulePage  # noqa: E402
 from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange  # noqa: E402
@@ -241,6 +246,20 @@ def settled(application: Application) -> bool:
     )
 
 
+def store_not_ported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the Store a "not in the new interface yet" page again, for this test.
+
+    Every page is ported now, but the window still has the path for one that
+    is not (`show_page` answers False, ``ctl open`` says ``not-in-new-ui``,
+    the page shows a placeholder), so the tests keep driving it through an
+    injected unported page.
+    """
+    monkeypatch.setattr(next_window, "PORTED", next_window.PORTED - {"browse"})
+    monkeypatch.setattr(
+        next_store, "create", not_ported("store", "Store", "folder-download-symbolic")
+    )
+
+
 def control(
     requests: ThreadPoolExecutor, verb: str, argument: str | None = None
 ) -> Future[Response]:
@@ -251,7 +270,8 @@ def control(
 def test_next_ui_survives_the_whole_application_lifecycle(
     runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application = Application(ui="next", initial_page="schedules")
+    store_not_ported(monkeypatch)
+    application = Application(ui="next", initial_page="browse")
     changes: list[StatusChange] = []
     application.status_model.subscribe(lambda change, _view: changes.append(change))
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
@@ -264,7 +284,7 @@ def test_next_ui_survives_the_whole_application_lifecycle(
         assert isinstance(window, NextWindow), "--ui=next must build the new window"
         assert application.ui == "next"
         shown.append(window)
-        assert window.note_text.startswith("Schedule is not in the new interface yet")
+        assert window.note_text.startswith("Store is not in the new interface yet")
         monkeypatch.setattr(window, "show_palette", palettes.append)
 
         yield (
@@ -322,12 +342,12 @@ def test_next_ui_survives_the_whole_application_lifecycle(
         assert resolved[0] is not None and palettes, "the window was told about the palette"
 
         # -- ctl over the real control socket ------------------------------
-        opened = control(requests, "open", "schedules")
+        opened = control(requests, "open", "browse")
         yield "ctl open", opened.done
         answer = opened.result()
         assert not answer.ok and answer.kind == "not-in-new-ui"
-        assert "schedules page is not available in the new UI yet" in answer.message
-        assert window.note_text.startswith("Schedule is not in the new interface yet")
+        assert "browse page is not available in the new UI yet" in answer.message
+        assert window.note_text.startswith("Store is not in the new interface yet")
         opened = control(requests, "open", "settings")
         yield "ctl open settings", opened.done
         assert opened.result() == Response.success("opened settings"), "Settings is ported"
@@ -452,6 +472,7 @@ def test_next_window_renders_from_the_model_not_the_forwarded_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The forwarded show_* calls are no-ops; the subscription does the work."""
+    store_not_ported(monkeypatch)
     application = Application(ui="next")
     window = NextWindow(application, application.settings)
     views: list[RuntimeStatusView] = []
@@ -465,10 +486,17 @@ def test_next_window_renders_from_the_model_not_the_forwarded_calls(
         assert window.status_text == "2 displays · playing Evening"
         application.status_model.set_busy(True)
         assert window.status_text.endswith("sending a playback command…")
-        assert window.show_page("schedules") is False
-        assert window.note_text.startswith("Schedule is not in the new interface yet")
+        assert window.show_page("browse") is False
+        assert window.note_text.startswith("Store is not in the new interface yet")
         assert window.show_page("media") is True, "the Library is ported"
         assert window.note_text == ""
+        # `ctl open schedules` (and its alias `displays`) reach the Schedule page.
+        assert window.show_page("schedules") is True, "Schedule is ported"
+        shown = window.current_page
+        assert isinstance(shown, SchedulePage) and window.note_text == ""
+        assert window.show_page("displays") is True, "and so is Displays"
+        shown_next = window.current_page
+        assert isinstance(shown_next, DisplaysPage)
     finally:
         window.destroy()
         application._stills.shutdown()

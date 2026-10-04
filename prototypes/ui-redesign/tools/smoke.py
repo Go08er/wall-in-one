@@ -1,11 +1,11 @@
 """End-to-end smoke test of the prototype (headless): drives every page and demo scene,
 reports exceptions. Run with tools/smoke.sh."""
 
-import copy
 import sys
 import threading
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -19,11 +19,12 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib
 from wio_demo import art, data, store_catalog, thumbs, ui
-from wio_demo.models import Rule, Wallpaper
+from wio_demo.models import Wallpaper
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState, DemoStoreItem
 
 from wall_in_one.ui.next import library as library_page
+from wall_in_one.ui.next.schedule_state import RuleView
 
 failures: list[str] = []
 steps_run = 0
@@ -243,102 +244,107 @@ def playlist_actions(state, window) -> None:
 
 
 def display_actions(state, window) -> None:
+    """The app's Displays page over the demo: every change goes through `Scheduling`."""
     window.navigate("displays")
     page = window.pages["displays"]
     if state.display_mode != "independent":
         state.set_display_mode("independent")  # the "mode:mirrored" scene linked them
-    page.demo("select:HDMI-A-1")  # starts from the page's first state
-    undo = state.set_display_playlist("HDMI-A-1", "mc-day")
-    assert state.assigned["HDMI-A-1"] == "mc-day"
-    assert state.set_display_playlist("HDMI-A-1", "mc-day") is None  # no change, no Undo
-    undo()
-    assert state.assigned["HDMI-A-1"] == ""
-    page._assign("HDMI-A-1", "cozy-rain")
-    # Linking keeps a display's playlist aside; unlinking brings it back.
-    undo = state.set_display_mode("mirrored")
-    assert state.current["HDMI-A-1"] == state.current["DP-1"] and state.kept_assignments() == {"HDMI-A-1": "cozy-rain"}
-    state.set_display_mode("independent")
-    assert state.assigned["HDMI-A-1"] == "cozy-rain" and not state.kept_assignments()
-    state.set_display_mode("mirrored")
-    undo()  # back to before the first switch
-    assert state.display_mode == "independent" and state.assigned["HDMI-A-1"] == "cozy-rain"
-    # Pausing one display, then the other, is plain "paused"; resuming one keeps the other held.
-    page._toggle_pause("HDMI-A-1")
-    assert state.display_paused("HDMI-A-1") and state.playback == "playing"
-    page._toggle_pause("DP-1")
-    assert state.playback == "paused"
-    page._toggle_pause("DP-1")
-    assert state.playback == "playing" and state.display_paused("HDMI-A-1") and not state.display_paused("DP-1")
-    state.toggle_play()  # the player bar's Pause clears the per-display holds
-    state.toggle_play()
-    assert not state.display_paused("HDMI-A-1")
-    page._set_color_display("HDMI-A-1")
+    page.flush()
+    page.demo("select:HDMI-A-1")
+    assert page.selected == "HDMI-A-1"
+    # Its own playlist, through the row; the demo's write settles at once.
+    page.plays_row.set_selected(page._plays_ids.index("mc-day"))
+    assert state.display_assignments()["HDMI-A-1"] == "mc-day"
+    # A playlist with nothing in it is refused, and the row shows what is saved.
+    empty = state.create_playlist("Nothing here")
+    page.refresh()
+    page.plays_row.set_selected(page._plays_ids.index(empty))
+    assert state.display_assignments()["HDMI-A-1"] == "mc-day"
+    page.refresh()
+    assert page._plays_ids[page.plays_row.get_selected()] == "mc-day"
+    state.delete_playlist(empty)
+    # Its playlist beats the shared rules, then not.
+    page.refresh()
+    page.beats_row.set_active(True)
+    assert state.beats_global_rules("HDMI-A-1")
+    page.beats_row.set_active(False)
+    assert not state.beats_global_rules("HDMI-A-1")
+    # Desktop colors, and the mode both ways.
+    page.use_for_colors("HDMI-A-1")
     assert state.color_display == "HDMI-A-1"
-    state.set_display_setting("DP-1", "sound", True)
-    assert not state.display_settings_are_default("DP-1")
-    undo = state.reset_display_settings("DP-1")
-    assert state.display_settings_are_default("DP-1")
-    undo()
-    assert state.display_settings("DP-1")["sound"]
-    page._reset_advanced("DP-1")
-    undo = state.forget_display("eDP-1")
+    page.use_for_colors("DP-1")
+    page.mode_group.set_active_name("mirrored")
+    assert state.display_mode == "mirrored"
+    page.refresh()
+    assert page.linked_note.get_visible() and not page.plays_row.get_visible()
+    page.mode_group.set_active_name("independent")
+    assert state.display_mode == "independent"
+    # Runtime choices: play a playlist now, then resume.
+    page.refresh()
+    page.play_row.set_selected(page._play_ids.index("mc-night"))
+    assert state.manual.get("HDMI-A-1") == "mc-night"
+    page._resume("HDMI-A-1")
+    assert "HDMI-A-1" not in state.manual
+    # A display that is not connected is kept until it is forgotten.
+    assert "eDP-1" in page.remembered_rows
+    page.forget("eDP-1")
     assert [d.connector for d in state.remembered_displays] == ["DP-2"]
-    undo()
-    page.demo("unscheduled:HDMI-A-1")
-    state.demo_set_pick("HDMI-A-1", "mc-night", 1)
-    page._resume_display("HDMI-A-1")
-    assert "HDMI-A-1" not in state.manual and state.current["HDMI-A-1"] == state.playlist("cozy-rain").entries[0]
+    page.flush()
+    assert "eDP-1" not in page.remembered_rows
+    state.assign_display("HDMI-A-1", "")
     page.demo("select:DP-1")
-    assert state.assigned == {"DP-1": "", "HDMI-A-1": ""} and state.color_display == "DP-1"
+    assert state.display_assignments().get("HDMI-A-1") is None and state.color_display == "DP-1"
 
 
 def schedule_actions(state, window) -> None:
+    """The app's Schedule page over the demo: the same writes the real adapter takes."""
     window.navigate("schedule")
     page = window.pages["schedule"]
-    page.demo("")  # the demo rules
-    page._save(Rule("draft", "mc-night", [2], "10:00", "11:00"), None)
+    page.flush()
+    count, fallback = len(state.rules), state.fallback
+    saved: list[bool] = []
+    page.save(RuleView("", "mc-night", weekdays=frozenset({2}), start=600, end=660), None, saved.append)
+    assert saved == [True], saved
     rule = state.rules[-1]
-    assert rule.playlist == "mc-night" and rule.id.startswith("rule-"), rule
-    edited = copy.deepcopy(rule)
-    edited.playlist = "cozy-rain"
-    page._save(edited, rule)
-    assert state.rule(rule.id).playlist == "cozy-rain"
-    assert state.update_rule(rule.id, edited) is None  # nothing changed
-    other = copy.deepcopy(edited)
-    other.days = [5, 6]
-    undo = state.update_rule(rule.id, other)
-    assert state.rule(rule.id).days == [5, 6]
-    undo()
-    assert state.rule(rule.id).days == [2]
-    page.duplicate_rule(rule)
-    page._editor.force_close()
-    twin = state.rules[state.rules.index(rule) + 1]
-    assert twin.playlist == rule.playlist and twin.id != rule.id
-    page.move_rule(twin, -1)  # rolls in the list, then commits
-    page._list.flush()
-    assert state.rules.index(twin) < state.rules.index(rule)
-    order = [r.id for r in state.rules]
-    undo = state.reorder_rules(list(reversed(order)))
-    assert [r.id for r in state.rules] == list(reversed(order))
-    undo()
-    assert [r.id for r in state.rules] == order
-    assert state.reorder_rules(order) is None
-    page._toggle(rule, False)
-    settle(lambda: not state.rule(rule.id).enabled)
+    assert (rule.playlist, rule.days, rule.start, rule.end) == ("mc-night", [2], "10:00", "11:00"), rule
+    view = state.schedule_rule(rule.id)
+    assert view is not None and view.weekdays == {2} and view.start == 600 and not view.months
+    # December is month 12 here and 11 in the demo's own data.
+    page.save(replace(view, playlist="cozy-rain", months=frozenset({12})), view, saved.append)
+    assert state.rule(rule.id).playlist == "cozy-rain" and state.rule(rule.id).months == [11]
+    # A window that starts and ends on the same minute is refused, never stored as "always".
+    page.save(replace(view, start=600, end=600), view, saved.append)
+    assert saved[-1] is False and state.rule(rule.id).start == "10:00"
+    # A drag over no time makes no rule; a whole-day drag is "all day".
+    page.create_from_calendar([1], 600, 600)
+    assert page.editor is None
+    page.create_from_calendar([1], 0, 24 * 60)
+    assert page.editor is not None and page.editor.draft.start is None
+    page.editor.force_close()
+    # Duplicate lands one place up; moving it down puts it below the original.
+    page.duplicate_rule(rule.id)
+    ids = [r.id for r in state.rules]
+    twin = ids[ids.index(rule.id) + 1]
+    page.move_rule(twin, -1)
+    ids = [r.id for r in state.rules]
+    assert ids.index(twin) < ids.index(rule.id)
+    # The switch on the row.
+    page.flush()
+    page.row(rule.id).switch.set_active(False)
     assert not state.rule(rule.id).enabled
-    state.set_rule_enabled(rule.id, True)
-    page._fallback.set_selected(page._fallback_ids.index("mc-day"))
+    page.flush()
+    assert not page.row(rule.id).switch.get_active()
+    # When nothing is scheduled.
+    page.fallback_row.set_selected(page._fallback_ids.index("mc-day"))
     assert state.fallback == "mc-day"
-    undo = state.set_fallback("frog-night")
-    undo()
-    assert state.fallback == "mc-day" and state.set_fallback("mc-day") is None
     page.delete_rule(twin)
-    undo = state.delete_rule(rule.id)
-    undo()
-    page.delete_rule(rule)
-    assert state.rule(rule.id) is None and state.delete_rule(rule.id) is None
-    page.demo("")
-    assert state.fallback == "all-media" and state.rules[0].id == "daytime"
+    page.delete_rule(rule.id)
+    assert len(state.rules) == count
+    state.set_fallback(fallback)
+    # "Why?" names the rule the (simulated) runtime decides by.
+    page.flush()
+    page.build_why()
+    assert page.why_entries
 
 
 def settings_actions(state, window) -> None:
@@ -559,31 +565,21 @@ def build_steps(app, holder):
         ],
         "schedule": [
             "edit:weekend-days",
+            "editend:weekend-days",
             "new",
             "why",
             "drag",
-            "december",
-            "rules",
-            "pick",
-            "reorder",
-            "enable",
-            "disable:daytime",
-            "assign:HDMI-A-1=cozy-rain",
-            "move:evening",
-            "delete:december",
+            "week:1",
+            "seasonal",
+            "menu:daytime",
+            "display:HDMI-A-1",
             "",
         ],
         "displays": [
             "select:HDMI-A-1",
-            "advanced",
-            "pick",
-            "assigned",
-            "unscheduled",
-            "identify",
+            "menu:HDMI-A-1",
             "forget",
-            "mode:mirrored",
-            "colors:eDP-1",
-            "paused",
+            "select:DP-1",
         ],
         "settings": [
             "search:battery",

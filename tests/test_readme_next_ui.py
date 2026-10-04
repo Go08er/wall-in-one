@@ -93,14 +93,13 @@ def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> 
 def test_the_readme_says_what_the_playlists_page_does() -> None:
     """R5: Playlists is ported; the README says so, and what it changes."""
     section = _section()
-    assert "Schedule and Displays say they are not in the new interface" in section
     assert "Playlists say" not in section and "Store, Playlists" not in section
     for words in (
         "with Undo",
         "its own interval and shuffle",
         '"Your pick" stays hidden',
         "can't lose its last wallpaper that plays",
-        "Library (`media`), the Store (`browse`), Playlists (`playlists`) and Settings",
+        "Library (`media`), the Store (`browse`), Playlists (`playlists`), Settings",
     ):
         assert words in section, words
 
@@ -116,3 +115,18 @@ def test_the_readme_says_what_the_store_does() -> None:
     assert "one at a time" in section and "no pretend progress or cancel" in section
     assert f"Wallhaven's {len(store_state.COLOURS)} search colours" in section
     assert "the Store (`browse`)" in section
+
+
+def test_the_readme_says_what_schedule_and_displays_do_and_refuse() -> None:
+    section = _section()
+    # The last pages to port: nothing says it is missing from the new interface any more.
+    assert "not in the new interface yet" not in section
+    # Schedule: the runtime's answer, and what can't be saved.
+    assert 'The "Now" card and its "Why?" are the runtime\'s answer' in section
+    assert "starts and ends on the same minute, or a playlist with nothing to play" in section
+    # Displays: what is never stored where, and what is refused.
+    assert "kept in `runtime-overrides.toml`, never in `runtime.toml`" in section
+    assert "refused while no display is connected" in section
+    assert "runtime choices, never saved" in section
+    assert "and so do the Schedule and Displays pages" in section
+    assert "the same settings, saved the same way, as Settings → Displays" in section

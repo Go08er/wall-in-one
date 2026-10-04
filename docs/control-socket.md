@@ -140,7 +140,8 @@ a shell or panel integration does not have to know that both concepts share one
 screen. An app started with the in-progress `--ui=next` interface still
 presents its window. Until that page is ported it answers with kind
 `not-in-new-ui` and exit status 1; `media` (the Library), `browse` (the Store),
-`playlists` and `settings` are ported.
+`playlists`, `settings` and `schedules` (Schedule, which `displays` also
+opens) are ported, which is every page.
 
 `providers`, `search` and `download` reach the same provider code the Store
 tab uses, so a wallpaper can be found and pulled into the library without

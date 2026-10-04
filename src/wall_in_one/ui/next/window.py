@@ -1,12 +1,15 @@
 """The new interface's window: the redesign's shell over the application's real data.
 
 `NextWindow` is the prototype's `ShellWindow` -- sidebar, header, banners,
-player bar, frosted backdrop -- over a `RealAppState`, with the real Library
-page and inspector, which edit through the application's authoring lane, the
-real Playlists page, and the real Settings page (`settings.SettingsPage`,
-with the palette manager), which also offers the interface to start, so the
-new one can be left from inside. Store, Schedule and Displays are honest "not
-in the new interface yet" pages until they are ported.
+player bar, frosted backdrop -- over a `RealAppState`, with every page real:
+the Library and its inspector, which edit through the application's
+authoring lane, the Store, Playlists, Schedule, Displays, and Settings
+(`settings.SettingsPage`, with the palette manager), which also offers the
+interface to start, so the new one can be left from inside. ``ctl open
+schedules``, and its alias ``displays``, open Schedule. A page missing from
+`PORTED` would still show its "not in the new interface yet" placeholder and
+make `show_page` answer False (``ctl open``'s ``not-in-new-ui``); none is
+now.
 
 It implements every `WindowServices` member. Runtime status reaches it
 through the adapter's own `RuntimeStatusModel` subscription, so the forwarded
@@ -37,10 +40,10 @@ from wall_in_one import __version__, config
 from wall_in_one.session import Session
 from wall_in_one.theme import source
 from wall_in_one.ui.launch_rows import LaunchRows
-from wall_in_one.ui.next import library, playlists, status_line, store, thumbs
+from wall_in_one.ui.next import displays, library, playlists, schedule, status_line, store, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
-from wall_in_one.ui.next.page import Placeholder, not_ported
+from wall_in_one.ui.next.page import Placeholder
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_state import RealAppState
 from wall_in_one.ui.next.settings import SettingsPage
@@ -57,10 +60,11 @@ _PAGES: Final = {
     "browse": "store",
     "playlists": "playlist",
     "schedules": "schedule",
+    "displays": "displays",
     "settings": "settings",
 }
-#: The pages this interface has. Every other one is a placeholder for now.
-PORTED: Final = frozenset({"media", "browse", "playlists", "settings"})
+#: The pages this interface has: every one, now. One left out would be a placeholder.
+PORTED: Final = frozenset({"media", "browse", "playlists", "settings", "schedules", "displays"})
 #: Kept for callers of the placeholder era.
 NOT_PORTED_HINT: Final = CLASSIC_HINT
 
@@ -98,8 +102,8 @@ class NextWindow(ShellWindow):
                 "library": library.create,
                 "store": store.create,
                 "playlist": playlists.create,
-                "schedule": not_ported("schedule", "Schedule", "x-office-calendar-symbolic"),
-                "displays": not_ported("displays", "Displays", "video-display-symbolic"),
+                "schedule": schedule.create,
+                "displays": displays.create,
                 "settings": lambda state: settings_page(state, self._prefs, application),
             },
             version=__version__,

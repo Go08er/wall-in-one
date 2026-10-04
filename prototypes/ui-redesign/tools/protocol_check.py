@@ -13,6 +13,7 @@ from wio_demo.state import DemoStoreItem
 from wio_demo.thumbs import Loader
 
 from wall_in_one.ui.next.playlists_state import PlaylistEditing
+from wall_in_one.ui.next.schedule_state import Scheduling
 from wall_in_one.ui.next.settings_state import PaletteManager, SettingsAccess
 from wall_in_one.ui.next.state import AppState, LibraryEditing, LibraryFolders, PlaybackControls
 from wall_in_one.ui.next.store_state import StoreAccess, StoreItemView
@@ -44,6 +45,10 @@ def _palettes(state: DemoAppState) -> PaletteManager:
 
 
 def _playlists(state: DemoAppState) -> PlaylistEditing:
+    return state
+
+
+def _scheduling(state: DemoAppState) -> Scheduling:
     return state
 
 

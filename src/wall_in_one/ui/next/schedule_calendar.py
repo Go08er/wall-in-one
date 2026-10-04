@@ -1,8 +1,11 @@
-"""The week calendar (Mon–Sun × 24 h) and the small week preview used by the editor.
+"""The week calendar (Mon-Sun x 24 h) and the small week preview the rule editor uses.
 
-Both are plain cairo drawings. The calendar draws what *plays*: each block is
-the rule that wins there; a hatched edge marks a rule it overrides. Click a
-block to edit its rule, drag anywhere to add a rule for that day and time.
+Both are plain cairo drawings of what `schedule_model` projected. The
+calendar draws what *would* play: each block is the rule that wins there by
+the app's matching; a hatched edge marks a rule it beats. Click a block to
+edit its rule; drag to add a rule for those days and times (a drag with no
+width is refused, a drag over the whole day is "all day"). Nothing here says
+what plays *now*: the page's "Now" card is the runtime's.
 """
 
 from __future__ import annotations
@@ -12,26 +15,39 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
+from typing import TYPE_CHECKING, Any, Final
 
+import cairo
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
+gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
+
 from gi.repository import Adw, Gdk, Gtk, Pango, PangoCairo
 
-from ..catalog import DAYS, DAYS_LONG, MONTHS
-from ..models import Rule
-from . import schedule_model as model
+from wall_in_one.ui.next import schedule_model as model
+from wall_in_one.ui.next.schedule_state import MINUTES_IN_A_DAY, RuleView
 
-SNAP = 15  # minutes
-NOW_RED = (0.88, 0.11, 0.14)  # calendars draw "now" in red; the accent may match a block
+#: Calendars draw "now" in red; the accent may be a block's own color.
+NOW_RED: Final = (0.88, 0.11, 0.14)
+RGB = tuple[float, float, float]
+if TYPE_CHECKING:
+    Cairo = cairo.Context[Any]
 
 
 def _rounded(
-    cr, x0: float, y0: float, x1: float, y1: float, radius: float, top: bool = True, bottom: bool = True
+    cr: Cairo,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    radius: float,
+    top: bool = True,
+    bottom: bool = True,
 ) -> None:
-    """Rounded rectangle; ``top``/``bottom`` False keeps that edge square (a continuation)."""
+    """A rounded rectangle; ``top``/``bottom`` False keeps that edge square (a continuation)."""
     r = max(0.0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
     rt, rb = (r if top else 0), (r if bottom else 0)
     cr.new_sub_path()
@@ -51,16 +67,16 @@ def _rounded(
     cr.close_path()
 
 
-def _hatch(cr, x0: float, y0: float, x1: float, y1: float, color, alpha: float, gap: float = 5) -> None:
+def _hatch(
+    cr: Cairo, x0: float, y0: float, x1: float, y1: float, color: RGB, alpha: float, gap: float = 5
+) -> None:
     cr.save()
     cr.rectangle(x0, y0, x1 - x0, y1 - y0)
     cr.clip()
     cr.set_source_rgba(*color, alpha)
     cr.set_line_width(1.6)
     height = y1 - y0
-    start = x0 - height
-    offset = y0 % gap  # keep stripes continuous across neighboring pieces
-    x = start - offset
+    x = x0 - height - (y0 % gap)  # stripes stay continuous across neighboring pieces
     while x < x1 + gap:
         cr.move_to(x, y1)
         cr.line_to(x + height, y0)
@@ -69,39 +85,53 @@ def _hatch(cr, x0: float, y0: float, x1: float, y1: float, color, alpha: float, 
     cr.restore()
 
 
+def _font(widget: Gtk.Widget) -> Pango.FontDescription:
+    """A copy of the widget's font, to size and weigh for one label."""
+    found = widget.get_pango_context().get_font_description()
+    copied = found.copy() if found is not None else None
+    return copied if copied is not None else Pango.FontDescription()
+
+
+def _rgb(color: Gdk.RGBA) -> RGB:
+    return (color.red, color.green, color.blue)
+
+
 @dataclass
-class Block:
+class _Block:
     day: int
     start: int
     end: int
-    rule: Rule | None
+    rule: RuleView | None
 
 
 @dataclass
 class Hit:
+    """Something drawn that the pointer can point at."""
+
     x0: float
     y0: float
     x1: float
     y1: float
     kind: str  # block | fallback | loser | exception
-    rule: Rule | None
+    rule: RuleView | None
     day: int
     start: int
     end: int
-    over: list[Rule]  # what the block overrides (block) or what overrides it (loser)
+    #: What the block beats (block), or what beats it (loser, exception).
+    over: list[RuleView]
 
 
 class WeekCalendar(Gtk.DrawingArea):
-    """Mon–Sun columns × 24 hours. Feed it with ``update(...)``."""
+    """Mon-Sun columns x 24 hours. Feed it with ``update(...)``."""
 
     def __init__(
         self,
-        on_edit: Callable[[Rule], None],
+        on_edit: Callable[[RuleView], None],
         on_create: Callable[[list[int], int, int], None],
-        name_of: Callable[[str], str],
+        name_of: Callable[[RuleView], str],
     ) -> None:
         super().__init__()
-        self._name_of = name_of  # playlist id -> name (state.playlist_name)
+        self._name_of = name_of
         self.add_css_class("week-calendar")
         self.set_content_height(470)
         self.set_content_width(300)
@@ -109,7 +139,8 @@ class WeekCalendar(Gtk.DrawingArea):
         self.set_vexpand(True)
         self.set_has_tooltip(True)
         self.update_property(
-            [Gtk.AccessibleProperty.LABEL], ["Week schedule. Click a block to edit its rule, drag to add a rule."]
+            [Gtk.AccessibleProperty.LABEL],
+            ["Week schedule. Click a block to edit its rule, drag to add a rule."],
         )
         self._on_edit, self._on_create = on_edit, on_create
         self.spans: list[list[model.Span]] = [[] for _ in range(7)]
@@ -120,7 +151,6 @@ class WeekCalendar(Gtk.DrawingArea):
         self.colors: dict[str, str] = {}
         self.fallback_label = ""
         self.fallback_tip = ""
-        self.mark_display = ""  # in a one-display view, the connector to tag
         self._hits: list[Hit] = []
         self._hover: Hit | None = None
         self._selection: tuple[int, int, int, int] | None = None  # day0, day1, start, end
@@ -134,23 +164,22 @@ class WeekCalendar(Gtk.DrawingArea):
         self.add_controller(drag)
         motion = Gtk.EventControllerMotion()
         motion.connect("motion", self._motion)
-        motion.connect("leave", lambda *_: self._set_hover(None))
+        motion.connect("leave", lambda *_args: self._set_hover(None))
         self.add_controller(motion)
         self.connect("query-tooltip", self._tooltip)
 
     # -- data -----------------------------------------------------------------
     def update(
         self,
-        spans,
-        exceptions,
+        spans: list[list[model.Span]],
+        exceptions: list[model.DisplayException],
         monday: dt.date,
         colors: dict[str, str],
         fallback_label: str,
         fallback_tip: str,
-        mark_display: str = "",
     ) -> None:
         self.spans, self.exceptions, self.monday = spans, exceptions, monday
-        self.colors, self.mark_display = colors, mark_display
+        self.colors = colors
         self.fallback_label, self.fallback_tip = fallback_label, fallback_tip
         self._hover = None
         self._hits = []  # rebuilt on the next draw; never point at rules that changed
@@ -167,9 +196,14 @@ class WeekCalendar(Gtk.DrawingArea):
         self.queue_draw()
 
     def show_selection(self, day0: int, day1: int, start: int, end: int) -> None:
-        """Demo hook: show a drag selection as if the pointer were still down."""
+        """Demo hook: a drag selection as if the pointer were still down."""
         self._selection = (day0, day1, start, end)
         self.queue_draw()
+
+    @property
+    def hits(self) -> list[Hit]:
+        """What the last draw put where (for tests and assistive descriptions)."""
+        return list(self._hits)
 
     # -- geometry -------------------------------------------------------------
     def _geometry(self) -> tuple[float, float, float, float]:
@@ -184,28 +218,29 @@ class WeekCalendar(Gtk.DrawingArea):
         _gutter, header, _col, hour_h = self._geometry()
         return header + minute / 60 * hour_h
 
-    def _locate(self, x: float, y: float) -> tuple[int, int] | None:
+    def locate(self, x: float, y: float) -> tuple[int, int] | None:
+        """(day, minute) under a point, or None outside the grid."""
         gutter, header, col_w, hour_h = self._geometry()
-        if x < gutter or y < header:
+        if x < gutter or y < header or col_w <= 0 or hour_h <= 0:
             return None
         day = max(0, min(6, int((x - gutter) // col_w)))
-        minute = max(0, min(model.DAY_MINUTES, (y - header) / hour_h * 60))
+        minute = max(0, min(MINUTES_IN_A_DAY, (y - header) / hour_h * 60))
         return day, int(minute)
 
     # -- drawing --------------------------------------------------------------
-    def _colors(self):
+    def _colors(self) -> tuple[bool, RGB, RGB, RGB]:
         dark = Adw.StyleManager.get_default().get_dark()
         parent = self.get_parent()
-        fg_rgba = parent.get_color() if parent else self.get_color()
-        fg = (fg_rgba.red, fg_rgba.green, fg_rgba.blue)
-        accent_rgba = self.get_color()  # .week-calendar { color: accent }
-        accent = (accent_rgba.red, accent_rgba.green, accent_rgba.blue)
+        fg = _rgb(parent.get_color() if parent is not None else self.get_color())
+        accent = _rgb(self.get_color())  # .week-calendar { color: accent }
         base = (0.13, 0.13, 0.15) if dark else (1.0, 1.0, 1.0)
         return dark, fg, accent, base
 
-    def _layout(self, text: str, size: float, bold: bool = False, width: float | None = None, lines: int = 1):
+    def _layout(
+        self, text: str, size: float, bold: bool = False, width: float | None = None, lines: int = 1
+    ) -> Pango.Layout:
         layout = self.create_pango_layout(text)
-        desc = self.get_pango_context().get_font_description().copy()
+        desc = _font(self)
         desc.set_size(int(size * Pango.SCALE))
         desc.set_weight(Pango.Weight.BOLD if bold else Pango.Weight.NORMAL)
         layout.set_font_description(desc)
@@ -219,11 +254,11 @@ class WeekCalendar(Gtk.DrawingArea):
 
     def _text(
         self,
-        cr,
+        cr: Cairo,
         text: str,
         x: float,
         y: float,
-        color,
+        color: RGB,
         alpha: float,
         size: float,
         bold: bool = False,
@@ -242,14 +277,15 @@ class WeekCalendar(Gtk.DrawingArea):
         PangoCairo.show_layout(cr, layout)
         return w, h
 
-    def _draw(self, _area, cr, width: int, height: int) -> None:
+    def _draw(self, _area: Gtk.DrawingArea, cr: Cairo, width: int, _height: int) -> None:
         dark, fg, accent, base = self._colors()
         gutter, header, col_w, hour_h = self._geometry()
+        if col_w <= 0 or hour_h <= 0:
+            return
         narrow = col_w < 70
         self._hits = []
         top, bottom = header, header + 24 * hour_h
 
-        # Today's column, then the grid.
         if self.today is not None:
             cx = gutter + self.today * col_w
             cr.set_source_rgba(*accent, 0.07 if dark else 0.06)
@@ -269,23 +305,20 @@ class WeekCalendar(Gtk.DrawingArea):
             cr.line_to(x, bottom)
             cr.stroke()
 
-        # Hour labels.
         step = 3 if hour_h >= 15 else 6
         for hour in range(step, 24, step):
             y = top + hour * hour_h
             if self.today is not None and abs(y - self._y(self.now_minute)) < 9:
                 continue
             label = f"{hour:02d}:00" if not narrow else f"{hour:02d}"
-            layout = self._layout(label, 7.5)
-            _w, h = layout.get_pixel_size()
+            _w, h = self._layout(label, 7.5).get_pixel_size()
             self._text(cr, label, gutter - 7, y - h / 2, fg, 0.55, 7.5, align="right")
 
-        # Day headings.
         for column in range(7):
             day = self.monday + dt.timedelta(days=column)
             cx = gutter + column * col_w + col_w / 2
             is_today = column == self.today
-            name = DAYS[column] if col_w >= 44 else DAYS[column][:2]
+            name = model.DAYS[column] if col_w >= 44 else model.DAYS[column][:2]
             self._text(
                 cr,
                 name.upper(),
@@ -306,27 +339,23 @@ class WeekCalendar(Gtk.DrawingArea):
             else:
                 self._text(cr, number, cx, 21, fg, 0.9, 9.5, bold=True, align="center")
             if day.day == 1:  # a new month starts inside this week
-                self._text(cr, MONTHS[day.month - 1], cx + 13, 23, fg, 0.5, 7, align="left")
+                self._text(cr, model.MONTHS[day.month - 1], cx + 13, 23, fg, 0.5, 7)
 
-        # Blocks.
         for column, spans in enumerate(self.spans):
             self._draw_day(cr, column, spans, gutter, col_w, base, fg, dark, narrow)
         for exception in self.exceptions:
-            self._draw_exception(cr, exception, gutter, col_w, base, fg, dark)
+            self._draw_exception(cr, exception, base, fg, dark)
 
-        # Hover outline.
-        if self._hover and self._hover.kind != "fallback":
+        if self._hover is not None and self._hover.kind != "fallback":
             hit = self._hover
             cr.set_source_rgba(*fg, 0.85)
             cr.set_line_width(2)
             _rounded(cr, hit.x0 - 1, hit.y0 - 1, hit.x1 + 1, hit.y1 + 1, 7)
             cr.stroke()
 
-        # Drag selection.
-        if self._selection:
-            self._draw_selection(cr, gutter, col_w, accent, fg, base)
+        if self._selection is not None:
+            self._draw_selection(cr, gutter, col_w, accent)
 
-        # Now.
         if self.today is not None:
             y = self._y(self.now_minute)
             cx = gutter + self.today * col_w
@@ -338,8 +367,7 @@ class WeekCalendar(Gtk.DrawingArea):
             cr.fill()
             cr.arc(cx + 2, y, 4.5, 0, math.tau)
             cr.fill()
-            label = model.hhmm(self.now_minute)
-            layout = self._layout(label, 7.5, bold=True)
+            layout = self._layout(model.hhmm(self.now_minute), 7.5, bold=True)
             w, h = layout.get_pixel_size()
             pill_x1 = gutter - 3
             _rounded(cr, pill_x1 - w - 8, y - h / 2 - 2, pill_x1, y + h / 2 + 2, (h + 4) / 2)
@@ -348,17 +376,32 @@ class WeekCalendar(Gtk.DrawingArea):
             cr.set_source_rgba(1, 1, 1, 1)
             PangoCairo.show_layout(cr, layout)
 
-    def _blocks(self, spans: list[model.Span]) -> list[Block]:
-        blocks: list[Block] = []
+    @staticmethod
+    def _blocks(spans: list[model.Span]) -> list[_Block]:
+        blocks: list[_Block] = []
         for span in spans:
             last = blocks[-1] if blocks else None
-            if last and last.rule is span.rule and last.end == span.start:
+            if last is not None and last.rule is span.rule and last.end == span.start:
                 last.end = span.end
             else:
-                blocks.append(Block(span.day, span.start, span.end, span.rule))
+                blocks.append(_Block(span.day, span.start, span.end, span.rule))
         return blocks
 
-    def _draw_day(self, cr, column: int, spans, gutter, col_w, base, fg, dark, narrow) -> None:
+    def _color(self, rule: RuleView) -> RGB:
+        return model.rgb(self.colors.get(rule.playlist, model.FALLBACK_COLOR))
+
+    def _draw_day(
+        self,
+        cr: Cairo,
+        column: int,
+        spans: list[model.Span],
+        gutter: float,
+        col_w: float,
+        base: RGB,
+        fg: RGB,
+        dark: bool,
+        narrow: bool,
+    ) -> None:
         x0 = gutter + column * col_w + 3
         x1 = gutter + (column + 1) * col_w - 2
         for block in self._blocks(spans):
@@ -374,10 +417,9 @@ class WeekCalendar(Gtk.DrawingArea):
                 cr.stroke()
                 cr.set_dash([])
                 if y1 - y0 >= 18:
-                    name = self.fallback_label
                     self._text(
                         cr,
-                        name,
+                        self.fallback_label,
                         x0 + 6,
                         y0 + 3,
                         fg,
@@ -386,11 +428,13 @@ class WeekCalendar(Gtk.DrawingArea):
                         width=x1 - x0 - 10,
                         lines=2 if y1 - y0 >= 30 else 1,
                     )
-                self._hits.append(Hit(x0, y0, x1, y1, "fallback", None, column, block.start, block.end, []))
+                self._hits.append(
+                    Hit(x0, y0, x1, y1, "fallback", None, column, block.start, block.end, [])
+                )
                 continue
-            color = model.rgb(self.colors.get(rule.playlist, model.FALLBACK_COLOR))
-            continues = model.wraps(rule) and block.end == model.DAY_MINUTES
-            tail = model.wraps(rule) and block.start == 0 and model.minutes(rule.end) > 0
+            color = self._color(rule)
+            continues = model.wraps(rule) and block.end == MINUTES_IN_A_DAY
+            tail = model.wraps(rule) and block.start == 0 and (rule.end or 0) > 0
             if continues:
                 y1 += 1
             if tail:
@@ -405,20 +449,19 @@ class WeekCalendar(Gtk.DrawingArea):
             cr.set_source_rgba(*color, 1)
             cr.rectangle(x0, y0, 3, y1 - y0)
             cr.fill()
-            # Overridden rules show as a hatched edge in their own color.
             inset = 0
-            beaten: list[Rule] = []
+            beaten: list[RuleView] = []
             for span in spans:
                 if span.rule is not rule or span.end <= block.start or span.start >= block.end:
                     continue
                 loser = span.top_loser
-                if not loser:
+                if loser is None:
                     continue
                 for other in span.losers:
-                    if other not in beaten:
+                    if not any(other is seen for seen in beaten):
                         beaten.append(other)
                 ly0, ly1 = self._y(span.start), self._y(span.end)
-                lc = model.rgb(self.colors.get(loser.playlist, model.FALLBACK_COLOR))
+                lc = self._color(loser)
                 cr.set_source_rgba(*base, 1)
                 cr.rectangle(x0, ly0, 9, ly1 - ly0)
                 cr.fill()
@@ -428,41 +471,71 @@ class WeekCalendar(Gtk.DrawingArea):
                 _hatch(cr, x0, ly0, x0 + 7.5, ly1, lc, 0.95)
                 inset = 7
                 self._hits.append(
-                    Hit(x0, max(ly0, y0), x0 + 8, min(ly1, y1), "loser", loser, column, span.start, span.end, [rule])
+                    Hit(
+                        x0,
+                        max(ly0, y0),
+                        x0 + 8,
+                        min(ly1, y1),
+                        "loser",
+                        loser,
+                        column,
+                        span.start,
+                        span.end,
+                        [rule],
+                    )
                 )
             cr.restore()
-            self._hits.append(Hit(x0, y0, x1, y1, "block", rule, column, block.start, block.end, beaten))
-            self._label_block(cr, rule, block, x0 + 3 + inset, x1, y0, y1, fg, narrow, column, tail, continues)
-        # Keep loser strips above their blocks for hit-testing.
+            cr.new_path()
+            self._hits.append(
+                Hit(x0, y0, x1, y1, "block", rule, column, block.start, block.end, beaten)
+            )
+            self._label_block(cr, rule, block, x0 + 3 + inset, x1, y0, y1, fg, narrow, column)
+        # Loser strips above their blocks for hit-testing.
         self._hits.sort(key=lambda hit: hit.kind == "loser")
 
     def _label_block(
-        self, cr, rule: Rule, block: Block, x0, x1, y0, y1, fg, narrow, column: int, tail: bool, continues: bool
+        self,
+        cr: Cairo,
+        rule: RuleView,
+        block: _Block,
+        x0: float,
+        x1: float,
+        y0: float,
+        y1: float,
+        fg: RGB,
+        narrow: bool,
+        column: int,
     ) -> None:
         height = y1 - y0
         if height < 13:
             return
         limit = x1
         for exception in self.exceptions:
-            if exception.day == column and exception.start < block.start + 90 and exception.end > block.start:
+            if (
+                exception.day == column
+                and exception.start < block.start + 90
+                and exception.end > block.start
+            ):
                 limit = min(limit, self._exception_x(column)[0] - 2)
         width = limit - x0 - 6
         size = 7.5 if narrow else 8.5
-        name = self._name_of(rule.playlist)
         lines = 2 if narrow and height >= 26 else 1
-        _w, h = self._text(cr, name, x0 + 4, y0 + 2, fg, 0.95, size, bold=True, width=width, lines=lines)
-        if rule.display and height >= 44:
-            color = model.rgb(self.colors.get(rule.playlist, model.FALLBACK_COLOR))
-            self._tag(cr, rule.display, x0 + 3, y1 - 16, width, color, True)
+        _w, h = self._text(
+            cr, self._name_of(rule), x0 + 4, y0 + 2, fg, 0.95, size, True, width, lines=lines
+        )
+        if rule.connector and height >= 44:
+            self._tag(cr, rule.connector, x0 + 3, y1 - 16, width, self._color(rule))
         if height >= 30 and not narrow:
-            if tail:
-                when = f"until {rule.end}"
-            elif continues:
-                when = f"{model.hhmm(block.start)}–{rule.end}"
-            elif block.start == 0 and block.end == model.DAY_MINUTES:
+            tail = model.wraps(rule) and block.start == 0
+            continues = model.wraps(rule) and block.end == MINUTES_IN_A_DAY
+            if tail and rule.end is not None:
+                when = f"until {model.hhmm(rule.end)}"
+            elif continues and rule.end is not None:
+                when = f"{model.hhmm(block.start)}\u2013{model.hhmm(rule.end)}"
+            elif block.start == 0 and block.end == MINUTES_IN_A_DAY:
                 when = "All day"
             else:
-                when = f"{model.hhmm(block.start)}–{model.hhmm(block.end)}"
+                when = f"{model.hhmm(block.start)}\u2013{model.hhmm(block.end % MINUTES_IN_A_DAY)}"
             self._text(cr, when, x0 + 4, y0 + 2 + h, fg, 0.7, size - 0.75, width=width)
 
     def _exception_x(self, column: int) -> tuple[float, float]:
@@ -470,14 +543,15 @@ class WeekCalendar(Gtk.DrawingArea):
         x1 = gutter + (column + 1) * col_w - 2
         return gutter + column * col_w + col_w * 0.40, x1
 
-    def _draw_exception(self, cr, exception: model.DisplayException, gutter, col_w, base, fg, dark) -> None:
+    def _draw_exception(
+        self, cr: Cairo, exception: model.DisplayException, base: RGB, fg: RGB, dark: bool
+    ) -> None:
         rule = exception.rule
         x0, x1 = self._exception_x(exception.day)
         y0, y1 = self._y(exception.start) + 1, self._y(exception.end) - 1
         if y1 - y0 < 2:
             return
-        color = model.rgb(self.colors.get(rule.playlist, model.FALLBACK_COLOR))
-        # A ring of background separates it from the shared block underneath.
+        color = self._color(rule)
         _rounded(cr, x0 - 2, y0 - 1, x1 + 1, y1 + 1, 7)
         cr.set_source_rgba(*base, 1)
         cr.fill()
@@ -503,7 +577,7 @@ class WeekCalendar(Gtk.DrawingArea):
         if y1 - y0 >= 14 and width > 18:
             _w, h = self._text(
                 cr,
-                self._name_of(rule.playlist),
+                self._name_of(rule),
                 x0 + 6,
                 y0 + 2,
                 fg,
@@ -514,7 +588,7 @@ class WeekCalendar(Gtk.DrawingArea):
                 lines=2 if y1 - y0 >= 48 else 1,
             )
             if y1 - y0 >= h + 22:
-                self._tag(cr, rule.display, x0 + 4, y1 - 15, x1 - x0 - 4, color, dark)
+                self._tag(cr, rule.connector, x0 + 4, y1 - 15, x1 - x0 - 4, color)
         self._hits.append(
             Hit(
                 x0,
@@ -526,11 +600,11 @@ class WeekCalendar(Gtk.DrawingArea):
                 exception.day,
                 exception.start,
                 exception.end,
-                [exception.over] if exception.over else [],
+                [exception.over] if exception.over is not None else [],
             )
         )
 
-    def _tag(self, cr, text: str, x: float, y: float, width: float, color, dark: bool) -> None:
+    def _tag(self, cr: Cairo, text: str, x: float, y: float, width: float, color: RGB) -> None:
         layout = self._layout(text, 6, bold=True, width=width - 4)
         w, h = layout.get_pixel_size()
         _rounded(cr, x, y, x + w + 5, y + h + 1, (h + 1) / 2)
@@ -540,7 +614,8 @@ class WeekCalendar(Gtk.DrawingArea):
         cr.set_source_rgba(1, 1, 1, 1)
         PangoCairo.show_layout(cr, layout)
 
-    def _draw_selection(self, cr, gutter, col_w, accent, fg, base) -> None:
+    def _draw_selection(self, cr: Cairo, gutter: float, col_w: float, accent: RGB) -> None:
+        assert self._selection is not None
         day0, day1, start, end = self._selection
         y0, y1 = self._y(start), self._y(end)
         for column in range(day0, day1 + 1):
@@ -554,8 +629,10 @@ class WeekCalendar(Gtk.DrawingArea):
             cr.set_dash([5, 3])
             cr.stroke()
             cr.set_dash([])
-        days = list(range(day0, day1 + 1))
-        label = f"{model.days_text(days)} · {model.hhmm(start)}–{model.hhmm(end)}"
+        label = (
+            f"{model.days_text(range(day0, day1 + 1))} · "
+            f"{model.hhmm(start)}\u2013{model.hhmm(end % MINUTES_IN_A_DAY)}"
+        )
         layout = self._layout(label, 8, bold=True)
         w, h = layout.get_pixel_size()
         x = gutter + day0 * col_w + 4
@@ -568,7 +645,7 @@ class WeekCalendar(Gtk.DrawingArea):
         PangoCairo.show_layout(cr, layout)
 
     # -- interaction ----------------------------------------------------------
-    def _hit(self, x: float, y: float) -> Hit | None:
+    def hit_at(self, x: float, y: float) -> Hit | None:
         for hit in reversed(self._hits):
             if hit.x0 <= x <= hit.x1 and hit.y0 <= y <= hit.y1:
                 return hit
@@ -577,89 +654,95 @@ class WeekCalendar(Gtk.DrawingArea):
     def _set_hover(self, hit: Hit | None) -> None:
         if hit is not self._hover:
             self._hover = hit
-            self.set_cursor_from_name("pointer" if hit and hit.rule else None)
+            self.set_cursor_from_name("pointer" if hit is not None and hit.rule else None)
             self.queue_draw()
 
-    def _motion(self, _ctrl, x: float, y: float) -> None:
+    def _motion(self, _ctrl: Gtk.EventControllerMotion, x: float, y: float) -> None:
         if self._selection is None:
-            self._set_hover(self._hit(x, y))
+            self._set_hover(self.hit_at(x, y))
 
-    def _drag_begin(self, _gesture, x: float, y: float) -> None:
+    def _drag_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
         self._press = (x, y)
         self._selection = None
 
-    def _selection_from(self, x: float, y: float) -> tuple[int, int, int, int] | None:
-        if not self._press:
+    def selection_from(self, x: float, y: float) -> tuple[int, int, int, int] | None:
+        """The drag selection from the press point to (x, y), snapped to `model.SNAP`."""
+        if self._press is None:
             return None
-        first = self._locate(*self._press)
-        if not first:
-            return None
-        _gutter, header, _col_w, _hour_h = self._geometry()
-        second = self._locate(max(x, _gutter + 1), max(y, header))
-        if not second:
+        first = self.locate(*self._press)
+        gutter, header, _col_w, _hour_h = self._geometry()
+        second = self.locate(max(x, gutter + 1), max(y, header))
+        if first is None or second is None:
             return None
         day0, day1 = sorted((first[0], second[0]))
         low, high = sorted((first[1], second[1]))
-        start = (low // SNAP) * SNAP
-        end = min(model.DAY_MINUTES, -(-high // SNAP) * SNAP)
-        if end - start < SNAP:
-            end = min(model.DAY_MINUTES, start + SNAP)
+        start = (low // model.SNAP) * model.SNAP
+        end = min(MINUTES_IN_A_DAY, -(-high // model.SNAP) * model.SNAP)
+        if end - start < model.SNAP:
+            end = min(MINUTES_IN_A_DAY, start + model.SNAP)
+        if end <= start:
+            return None
         return day0, day1, start, end
 
-    def _drag_update(self, gesture, dx: float, dy: float) -> None:
-        if not self._press:
+    def _drag_update(self, _gesture: Gtk.GestureDrag, dx: float, dy: float) -> None:
+        if self._press is None:
             return
         if self._selection is None and abs(dy) < 10 and abs(dx) < 16:
             return
-        x, y = self._press[0] + dx, self._press[1] + dy
-        self._selection = self._selection_from(x, y)
+        self._selection = self.selection_from(self._press[0] + dx, self._press[1] + dy)
         self._hover = None
         self.queue_draw()
 
-    def _drag_end(self, _gesture, dx: float, dy: float) -> None:
+    def _drag_end(self, _gesture: Gtk.GestureDrag, _dx: float, _dy: float) -> None:
         press, selection = self._press, self._selection
         self._press = None
-        if selection:
+        if selection is not None:
             self._selection = None
             self.queue_draw()
             day0, day1, start, end = selection
-            self._on_create(list(range(day0, day1 + 1)), start, end % model.DAY_MINUTES)
+            self._on_create(list(range(day0, day1 + 1)), start, end)
             return
-        if not press:
+        if press is None:
             return
-        hit = self._hit(*press)
-        if hit and hit.rule:
+        hit = self.hit_at(*press)
+        if hit is not None and hit.rule is not None:
             self._on_edit(hit.rule)
             return
-        spot = self._locate(*press)
-        if spot:
+        spot = self.locate(*press)
+        if spot is not None:
             day, minute = spot
             start = min(23 * 60, (minute // 60) * 60)
-            self._on_create([day], start, (start + 60) % model.DAY_MINUTES)
+            self._on_create([day], start, start + 60)
 
-    def _tooltip(self, _widget, x: int, y: int, _keyboard: bool, tooltip: Gtk.Tooltip) -> bool:
-        hit = self._hit(x, y)
-        if not hit:
+    def _tooltip(
+        self, _widget: Gtk.Widget, x: int, y: int, _keyboard: bool, tooltip: Gtk.Tooltip
+    ) -> bool:
+        hit = self.hit_at(x, y)
+        if hit is None:
             return False
-        day = DAYS_LONG[hit.day]
-        when = f"{day} {model.hhmm(hit.start)}–{model.hhmm(hit.end)}"
-        if hit.kind == "fallback":
+        when = (
+            f"{model.DAYS_LONG[hit.day]} {model.hhmm(hit.start)}\u2013"
+            f"{model.hhmm(hit.end % MINUTES_IN_A_DAY)}"
+        )
+        if hit.kind == "fallback" or hit.rule is None:
             tooltip.set_markup(
-                f"<b>Nothing scheduled</b>\n{when} · {escape(self.fallback_tip)}\nClick or drag to add a rule"
+                f"<b>Nothing scheduled</b>\n{when} · {escape(self.fallback_tip)}\n"
+                "Click or drag to add a rule"
             )
         elif hit.kind == "loser":
-            winner = escape(self._name_of(hit.over[0].playlist))
+            winner = escape(self._name_of(hit.over[0])) if hit.over else ""
             tooltip.set_markup(
-                f"<b>{escape(self._name_of(hit.rule.playlist))}</b> · overridden\n{when} · {winner} wins (higher rule)"
+                f"<b>{escape(self._name_of(hit.rule))}</b> · overridden\n"
+                f"{when} · {winner} wins (higher rule)"
             )
         else:
             rule = hit.rule
-            lines = [f"<b>{escape(self._name_of(rule.playlist))}</b>", escape(model.summary(rule))]
+            lines = [f"<b>{escape(self._name_of(rule))}</b>", escape(model.summary(rule))]
             if hit.over:
-                names = ", ".join(dict.fromkeys(self._name_of(r.playlist) for r in hit.over))
+                names = ", ".join(dict.fromkeys(self._name_of(other) for other in hit.over))
                 lines.append(f"Overrides {escape(names)}")
             if hit.kind == "exception":
-                lines.append(f"Only on {escape(rule.display)}")
+                lines.append(f"Only on {escape(rule.connector)}")
             lines.append("Click to edit")
             tooltip.set_markup("\n".join(lines))
         rect = Gdk.Rectangle()
@@ -670,7 +753,7 @@ class WeekCalendar(Gtk.DrawingArea):
 
 
 class WeekPreview(Gtk.DrawingArea):
-    """Seven thin tracks (Mon–Sun) showing where one rule lands. Used in the editor."""
+    """Seven thin tracks (Mon-Sun) showing where one rule lands. Used in the editor."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -679,27 +762,28 @@ class WeekPreview(Gtk.DrawingArea):
         self.set_hexpand(True)
         self._coverage: list[list[tuple[int, int]]] = [[] for _ in range(7)]
         self._color = model.FALLBACK_COLOR
-        self._valid = True
         self.set_draw_func(self._draw)
 
-    def set_rule(self, rule: Rule, color: str, valid: bool = True) -> None:
-        self._coverage = model.coverage(rule) if valid else [[] for _ in range(7)]
-        self._color, self._valid = color, valid
+    def set_coverage(self, coverage: list[list[tuple[int, int]]], color: str) -> None:
+        self._coverage, self._color = coverage, color
         self.queue_draw()
 
-    def _draw(self, _area, cr, width: int, _height: int) -> None:
+    def _small(self, text: str, size: float) -> Pango.Layout:
+        layout = self.create_pango_layout(text)
+        desc = _font(self)
+        desc.set_size(int(size * Pango.SCALE))
+        layout.set_font_description(desc)
+        return layout
+
+    def _draw(self, _area: Gtk.DrawingArea, cr: Cairo, width: int, _height: int) -> None:
         parent = self.get_parent()
-        fg_rgba = parent.get_color() if parent else self.get_color()
-        fg = (fg_rgba.red, fg_rgba.green, fg_rgba.blue)
+        fg = _rgb(parent.get_color() if parent is not None else self.get_color())
         color = model.rgb(self._color)
         label_w = 34
         track_w = width - label_w - 4
         for column in range(7):
             y = column * 11
-            layout = self.create_pango_layout(DAYS[column])
-            desc = self.get_pango_context().get_font_description().copy()
-            desc.set_size(int(7 * Pango.SCALE))
-            layout.set_font_description(desc)
+            layout = self._small(model.DAYS[column], 7)
             _w, h = layout.get_pixel_size()
             cr.move_to(0, y + 4 - h / 2)
             active = bool(self._coverage[column])
@@ -709,26 +793,14 @@ class WeekPreview(Gtk.DrawingArea):
             cr.set_source_rgba(*fg, 0.08)
             cr.fill()
             for start, end in self._coverage[column]:
-                x0 = label_w + track_w * start / model.DAY_MINUTES
-                x1 = label_w + track_w * end / model.DAY_MINUTES
-                _rounded(
-                    cr,
-                    x0,
-                    y,
-                    max(x0 + 3, x1),
-                    y + 8,
-                    4,
-                )
+                x0 = label_w + track_w * start / MINUTES_IN_A_DAY
+                x1 = label_w + track_w * end / MINUTES_IN_A_DAY
+                _rounded(cr, x0, y, max(x0 + 3, x1), y + 8, 4)
                 cr.set_source_rgba(*color, 1)
                 cr.fill()
-        # Hour ticks.
         for hour in (0, 6, 12, 18, 24):
             x = label_w + track_w * hour / 24
-            text = f"{hour:02d}:00" if hour < 24 else "24:00"
-            layout = self.create_pango_layout(text)
-            desc = self.get_pango_context().get_font_description().copy()
-            desc.set_size(int(6.5 * Pango.SCALE))
-            layout.set_font_description(desc)
+            layout = self._small(f"{hour:02d}:00", 6.5)
             w, _h = layout.get_pixel_size()
             tx = min(max(label_w, x - w / 2), label_w + track_w - w)
             cr.move_to(tx, 7 * 11 + 2)

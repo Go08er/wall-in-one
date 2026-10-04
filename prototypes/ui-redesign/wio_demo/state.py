@@ -45,6 +45,15 @@ from gi.repository import Gdk, GLib, GObject
 
 from wall_in_one.ui.next import thumbs as pictures
 from wall_in_one.ui.next.playlists_state import EntryView, PlaylistDetail, Rotation, Usage
+from wall_in_one.ui.next.schedule_state import (
+    ColorSource,
+    DisplayInfo,
+    ForgetPlan,
+    RouteView,
+    RuleTruth,
+    RuleView,
+    Settled,
+)
 from wall_in_one.ui.next.settings_state import (
     KEY_REFUSED,
     KEY_SAVED,
@@ -91,7 +100,7 @@ from .models import Display, Folder, Palette, Playlist, RememberedDisplay, Rule,
 Undo = Callable[[], None]
 #: The Library's orders: (key, label).
 LIBRARY_SORTS = [("added", "Recently added"), ("name", "Name"), ("kind", "Type"), ("color", "Color")]
-__all__ = ["UNCHANGED", "AppState", "Resolution", "Undo", "resolve", "rule_matches"]
+__all__ = ["UNCHANGED", "AppState", "Resolution", "Undo", "demo_rule", "resolve", "rule_matches", "rule_view"]
 
 
 @dataclass
@@ -172,6 +181,40 @@ def _rule_words(rule: Rule) -> str:
     return text
 
 
+def rule_view(rule: Rule) -> RuleView:
+    """A demo rule in the app's convention: Monday=0, months 1-12, minutes."""
+    return RuleView(
+        rule.id,
+        rule.playlist,
+        weekdays=frozenset(rule.days),
+        months=frozenset(month + 1 for month in rule.months),
+        start=_minutes(rule.start) if rule.start and rule.end else None,
+        end=_minutes(rule.end) if rule.start and rule.end else None,
+        connector=rule.display,
+        enabled=rule.enabled,
+    )
+
+
+def demo_rule(view: RuleView) -> Rule:
+    """The app's convention back in the demo's own: months 0-11, "HH:MM"."""
+    timed = view.start is not None and view.end is not None
+    return Rule(
+        view.id or "draft",
+        view.playlist,
+        sorted(view.weekdays),
+        f"{view.start // 60:02d}:{view.start % 60:02d}" if timed and view.start is not None else None,
+        f"{view.end // 60:02d}:{view.end % 60:02d}" if timed and view.end is not None else None,
+        sorted(month - 1 for month in view.months),
+        view.connector,
+        view.enabled,
+    )
+
+
+def _settle(settled: Settled | None, saved: bool) -> None:
+    if settled is not None:
+        settled(saved)
+
+
 # Demo scenes start the schedule from the original rules, copied at import
 # before anything can edit them (data.RULES is shared by every AppState).
 _SEED_RULES = [copy.deepcopy(rule) for rule in data.RULES]
@@ -215,6 +258,7 @@ class AppState(GObject.Object):
         self._held: set[str] = set()  # displays paused on their own while the rest play
         self._kept_assigned: dict[str, str] = {}  # display playlists kept aside while linked
         self._display_settings: dict[str, dict] = {}  # per-display renderer settings
+        self._beats: set[str] = set()  # displays whose own playlist beats the shared rules
         self.remembered_displays: list[RememberedDisplay] = [copy.copy(item) for item in data.REMEMBERED_DISPLAYS]
         self._demo_hidden_rules: list[Rule] | None = None
         self.playback = "playing"  # playing | paused | stopped
@@ -457,8 +501,9 @@ class AppState(GObject.Object):
         return self
 
     @property
-    def scheduling(self) -> None:
-        return None
+    def scheduling(self) -> AppState:
+        """The shared Schedule and Displays pages run over the demo's rules and displays."""
+        return self
 
     @property
     def settings_access(self) -> AppState:
@@ -1468,7 +1513,7 @@ class AppState(GObject.Object):
             entries = self.playlist(pid).entries if pid in self._playlist_index else []
             if entries and self.current.get(connector) not in entries:
                 self.current[connector] = entries[0]
-        self.emit_changed("schedule", "now")
+        self.emit_changed("schedule", "now", "routes")
 
     def _new_rule_id(self) -> str:
         existing = {rule.id for rule in self.rules}
@@ -1760,18 +1805,245 @@ class AppState(GObject.Object):
 
         return undo
 
-    def forget_display(self, connector: str) -> Undo:
-        """Stop remembering a disconnected display, with its playlist and settings."""
-        item = next(item for item in self.remembered_displays if item.connector == connector)
-        index = self.remembered_displays.index(item)
-        self.remembered_displays.remove(item)
+    def forget_display(self, connector: str, settled: Settled | None = None) -> None:
+        """Stop remembering a disconnected display, with its playlist and its rules."""
+        plan = self.forget_plan(connector)
+        if plan.refused:
+            self.toast(plan.refused)
+            _settle(settled, False)
+            return
+        self.remembered_displays = [d for d in self.remembered_displays if d.connector != connector]
+        self.rules[:] = [rule for rule in self.rules if rule.display != connector]
+        self._kept_assigned.pop(connector, None)
+        self._beats.discard(connector)
+        self._schedule_changed()
         self.emit_changed("displays")
+        _settle(settled, True)
 
-        def undo() -> None:
-            self.remembered_displays.insert(index, item)
+    # -- Scheduling: the shared Schedule and Displays pages' view of the demo ----
+    # The app's Protocol (wall_in_one.ui.next.schedule_state) over the demo's
+    # Rule (days 0-6, months 0-11, "HH:MM", display) and its displays. Every
+    # write is immediate and settles at once; there is no undo on these pages.
+    def clock(self) -> dt.datetime:
+        return self.now
+
+    @property
+    def schedule_rules(self) -> list[RuleView]:
+        return [rule_view(rule) for rule in self.rules]
+
+    def schedule_rule(self, rule_id: str) -> RuleView | None:
+        rule = self.rule(rule_id)
+        return rule_view(rule) if rule is not None else None
+
+    def rule_applies(self, rule: RuleView, at: dt.datetime, connector: str = "") -> bool:
+        return rule_matches(demo_rule(rule), at, connector or None)
+
+    def saved_display_mode(self) -> str:
+        return self.display_mode
+
+    @property
+    def default_playlist(self) -> str:
+        return self.fallback
+
+    def display_assignments(self) -> dict[str, str]:
+        kept = {item.connector: item.playlist for item in self.remembered_displays if item.playlist}
+        kept.update(self._kept_assigned)
+        kept.update({connector: pid for connector, pid in self.assigned.items() if pid})
+        return kept
+
+    def beats_global_rules(self, connector: str) -> bool:
+        return connector in self._beats
+
+    def known_displays(self) -> list[DisplayInfo]:
+        found = []
+        for display in self.displays:
+            refresh = display.mode.rpartition("@")[2].strip().split(" ")[0]
+            found.append(
+                DisplayInfo(
+                    display.connector,
+                    display.model,
+                    True,
+                    display.x,
+                    display.y,
+                    display.width,
+                    display.height,
+                    placed=True,
+                    scale=display.scale,
+                    refresh=int(refresh) * 1000 if refresh.isdigit() else 0,
+                )
+            )
+        found += [DisplayInfo(item.connector, item.model, connected=False) for item in self.remembered_displays]
+        return found
+
+    def routes(self) -> list[RouteView]:
+        if not self.service_running:
+            return []
+        connectors = self.connectors()
+        found = []
+        for connector in connectors:
+            key = self.lead_connector() if self.display_mode == "mirrored" else connector
+            reason = self.reason(key)
+            pid = self.effective_playlist(key)
+            resolution = self.resolution(key)
+            rule = resolution.rule if reason.route == "schedule" else None
+            found.append(
+                RouteView(
+                    connector,
+                    reason.route,
+                    pid,
+                    "Your pick" if pid == "quick" else self.playlist_name(pid),
+                    rule.id if rule is not None else None,
+                    reason.until if reason.route != "pick" else "",
+                    quick=pid == "quick",
+                    playback="paused" if self.display_paused(key) else self.playback,
+                    cycle=self.rotate,
+                    cycle_default=self.rotate,
+                    shuffle=self.shuffle_on(key),
+                    shuffle_default=self.shuffle_on(key),
+                )
+            )
+        return found
+
+    def rule_truth(self, rule_id: str) -> RuleTruth | None:
+        selected = in_force = False
+        for connector in self.connectors():
+            rule = self.resolution(connector).rule
+            if rule is not None and rule.id == rule_id:
+                selected = True
+                in_force = in_force or connector not in self.manual
+        return RuleTruth(selected, in_force)
+
+    def color_source(self) -> ColorSource:
+        connected = self.color_display in self.connectors()
+        effective = self.color_display if connected else self.lead_connector()
+        return ColorSource(self.color_display, effective, not connected)
+
+    def overrides_apply(self) -> bool:
+        return True
+
+    def schedule_blocked(self) -> str:
+        return ""
+
+    # settings_blocked() is the Settings page's own, below: the demo blocks nothing.
+
+    def runtime_blocked(self) -> str:
+        return "" if self.service_running else "The wallpaper service isn\u2019t running"
+
+    def playlist_blocked(self, pid: str) -> str:
+        if not self.has_playlist(pid):
+            return "That playlist no longer exists"
+        playlist = self.playlist(pid)
+        if not playlist.entries:
+            return f"\u201c{playlist.name}\u201d has nothing to play yet; add wallpapers to it first"
+        return ""
+
+    def save_rule(self, rule_id: str, draft: RuleView, settled: Settled | None = None) -> None:
+        problem = self.playlist_blocked(draft.playlist)
+        if draft.start is not None and draft.start == draft.end:
+            problem = "It starts and ends at the same time; choose All day instead"
+        if problem:
+            self.toast(f"The rule was not saved: {problem}")
+            _settle(settled, False)
+            return
+        if rule_id:
+            self.update_rule(rule_id, demo_rule(draft))
+        else:
+            self.add_rule(demo_rule(draft))
+        _settle(settled, True)
+
+    def remove_rule(self, rule_id: str, settled: Settled | None = None) -> None:
+        _settle(settled, self.delete_rule(rule_id) is not None)
+
+    def copy_rule(self, rule_id: str, settled: Settled | None = None) -> None:
+        if self.rule(rule_id) is None:
+            _settle(settled, False)
+            return
+        self.duplicate_rule(rule_id)
+        _settle(settled, True)
+
+    def enable_rule(self, rule_id: str, enabled: bool, settled: Settled | None = None) -> None:
+        if self.rule(rule_id) is None:
+            _settle(settled, False)
+            return
+        self.set_rule_enabled(rule_id, enabled)
+        _settle(settled, True)
+
+    def shift_rule(self, rule_id: str, step: int, settled: Settled | None = None) -> None:
+        ids = [rule.id for rule in self.rules]
+        if rule_id not in ids:
+            _settle(settled, False)
+            return
+        index = ids.index(rule_id)
+        target = max(0, min(len(ids) - 1, index + step))
+        ids.insert(target, ids.pop(index))
+        self.reorder_rules(ids)
+        _settle(settled, True)
+
+    def choose_default_playlist(self, pid: str, settled: Settled | None = None) -> None:
+        problem = self.playlist_blocked(pid)
+        if problem:
+            self.toast(f"The default playlist was not saved: {problem}")
+            _settle(settled, False)
+            return
+        self.set_fallback(pid)
+        _settle(settled, True)
+
+    def assign_display(self, connector: str, pid: str, settled: Settled | None = None) -> None:
+        problem = self.playlist_blocked(pid) if pid else ""
+        if problem:
+            self.toast(f"{connector}\u2019s playlist was not saved: {problem}")
+            _settle(settled, False)
+            return
+        remembered = next((d for d in self.remembered_displays if d.connector == connector), None)
+        if remembered is not None:
+            remembered.playlist = pid
             self.emit_changed("displays")
+        else:
+            self.set_display_playlist(connector, pid)
+        if not pid:
+            self._beats.discard(connector)
+        _settle(settled, True)
 
-        return undo
+    def set_beats_global_rules(self, connector: str, enabled: bool, settled: Settled | None = None) -> None:
+        if enabled and not self.display_assignments().get(connector):
+            self.toast(f"{connector} has no playlist of its own; assign one first")
+            _settle(settled, False)
+            return
+        (self._beats.add if enabled else self._beats.discard)(connector)
+        self.emit_changed("displays", "now")
+        _settle(settled, True)
+
+    def choose_display_mode(self, mode: str, settled: Settled | None = None) -> None:
+        if mode != self.display_mode:
+            self.set_display_mode(mode)
+        _settle(settled, True)
+
+    def choose_color_source(self, connector: str, settled: Settled | None = None) -> None:
+        self.set_color_display(connector)
+        _settle(settled, True)
+
+    def forget_plan(self, connector: str) -> ForgetPlan:
+        item = next((d for d in self.remembered_displays if d.connector == connector), None)
+        if item is None:
+            return ForgetPlan(connector, refused=f"{connector} is connected; only a display that isn\u2019t can be forgotten")
+        rules = sum(rule.display == connector for rule in self.rules)
+        return ForgetPlan(connector, item.playlist, rules, False)
+
+    def set_display_rotation(self, connector: str, *, cycle: bool | None = None, shuffle: bool | None = None) -> None:
+        if cycle is not None:
+            self.set_rotate(cycle)
+        if shuffle is not None:
+            self.set_shuffle(shuffle, connector if self.display_mode == "independent" else "all")
+
+    def use_saved_rotation(self, connector: str) -> None:
+        self.emit_changed("routes")
+
+    def play_now(self, connector: str, pid: str) -> None:
+        scope = connector or "all"
+        if pid:
+            self.play_playlist(pid, scope)
+        else:
+            self.resume_schedule(scope)
 
     # -- settings (the app's SettingsAccess) ------------------------------------
     @property

@@ -26,6 +26,7 @@ from wall_in_one import config, paths, runtime_config
 from wall_in_one.library import displays, schedules
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
+from wall_in_one.ui.next import real_schedule
 from wall_in_one.ui.next import schedule_model as model
 from wall_in_one.ui.next.real_schedule import (
     RealScheduling,
@@ -67,6 +68,16 @@ class Publishing(FakeApplication):
 
     def runtime_config_changed(self) -> None:
         self._publish()
+
+
+@pytest.fixture(autouse=True)
+def no_monitors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No GTK monitors: connected displays come from the runtime alone here.
+
+    Without a display there are none anyway; in a process where a GUI test
+    opened one (Xvfb's single "screen"), it must not count.
+    """
+    monkeypatch.setattr(real_schedule, "_monitor_displays", list)
 
 
 @pytest.fixture
@@ -200,15 +211,15 @@ def test_a_calendar_drag_never_makes_an_always_window() -> None:
 
 
 def test_words_for_days_months_and_times() -> None:
-    assert model.days_text({0, 1, 2, 3, 4}) == "Mon–Fri"
+    assert model.days_text({0, 1, 2, 3, 4}) == "Mon\u2013Fri"
     assert model.days_text(set()) == "Every day"
-    assert model.days_text({5, 6, 0}) == "Sat–Mon"
+    assert model.days_text({5, 6, 0}) == "Sat\u2013Mon"
     assert model.months_text({12}) == "December"
-    assert model.months_text({11, 12, 1, 2}) == "Nov–Feb"
+    assert model.months_text({11, 12, 1, 2}) == "Nov\u2013Feb"
     assert model.months_text({1, 2}) == "Jan, Feb"
     rule = RuleView("", "p", weekdays=frozenset({0, 1, 2, 3, 4}), start=540, end=1020)
     assert model.summary(replace(rule, connector="HDMI-A-1")) == (
-        "Mon–Fri · 09:00–17:00 · HDMI-A-1"
+        "Mon\u2013Fri · 09:00\u201317:00 · HDMI-A-1"
     )
     assert model.summary(RuleView("", "p", start=18 * 60, end=7 * 60)).endswith("(overnight)")
     assert model.summary(RuleView("", "p")) == "Always"
@@ -312,7 +323,9 @@ def test_a_rule_is_saved_in_the_stores_words(
     pid = _playlist(backend.session, "Weekend", items[0])
     adapter, owner = _scheduling(backend)
     seen: list[bool] = []
-    draft = RuleView("", pid, weekdays=frozenset({5, 6}), months=frozenset({12}), start=540, end=1140)
+    draft = RuleView(
+        "", pid, weekdays=frozenset({5, 6}), months=frozenset({12}), start=540, end=1140
+    )
     adapter.save_rule("", draft, seen.append)
     assert seen == [] and backend.session.schedules.rules == (), "nothing before the lane runs"
     backend.run_authoring()
@@ -632,7 +645,7 @@ def test_runtime_choices_are_runtime_commands_never_stored(backend: Publishing) 
 
 
 def test_runtime_choices_wait_for_the_service(backend: Publishing) -> None:
-    adapter, _owner = _scheduling(backend, runtime_off="The wallpaper service isn’t running")
+    adapter, _owner = _scheduling(backend, runtime_off="The wallpaper service isn\u2019t running")
     adapter.set_display_rotation("DP-1", cycle=True)
     adapter.play_now("", "")
     assert backend.sent == [] and backend.reports[-1].startswith("The wallpaper service")

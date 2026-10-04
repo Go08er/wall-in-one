@@ -38,6 +38,7 @@ from tests.test_ui_next_window import (  # noqa: E402
     run_application,
     sandboxed_runtime,
     settled,
+    store_not_ported,
 )
 from wall_in_one import legacy_migration  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
@@ -249,6 +250,8 @@ def test_a_window_rebuilt_by_ctl_open_shows_the_held_library_then_rescans_once(
 def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
     runtime: FakeRuntime, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Every page is ported; an injected unported Store keeps this path tested.
+    store_not_ported(monkeypatch)
     application = Application(ui="next")
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
     lanes: list[ThreadPoolExecutor] = []
@@ -267,10 +270,10 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         calls = count_first_activation_work(application, monkeypatch)
         libraries = record_library_shown(NextWindow, monkeypatch)
 
-        for page in ("schedules", "media", "browse", "settings", "playlists", "schedules"):
+        for page in ("browse", "media", "settings", "playlists", "schedules", "browse"):
             opened = control(requests, "open", page)
             yield f"ctl open {page}", opened.done
-            if page in ("media", "browse", "settings", "playlists"):  # these are ported
+            if page in ("media", "settings", "playlists", "schedules"):  # ported
                 assert opened.result() == Response.success(f"opened {page}")
             else:
                 not_in_new_ui(opened.result(), page)
@@ -282,13 +285,13 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         first.close()
         assert application._window is None
         add_wallpaper(tmp_path, "noon.png")
-        opened = control(requests, "open", "schedules")
-        yield "ctl open schedules with no window", opened.done
-        not_in_new_ui(opened.result(), "schedules")
+        opened = control(requests, "open", "browse")
+        yield "ctl open browse with no window", opened.done
+        not_in_new_ui(opened.result(), "browse")
         second = window_now(application)
         assert isinstance(second, NextWindow) and second is not first
         assert libraries[0] == (second, 2), "the held library is shown at once"
-        assert second.note_text.startswith("Schedule is not in the new interface yet")
+        assert second.note_text.startswith("Store is not in the new interface yet")
 
         yield (
             "the rebuilt window's scan to find the added file",
@@ -296,9 +299,9 @@ def test_ctl_open_under_the_new_ui_still_answers_not_in_new_ui(
         )
         assert calls == ONE_RESCAN, "a rebuilt window does one scan and nothing else"
 
-        again = control(requests, "open", "schedules")
-        yield "ctl open schedules on the rebuilt window", again.done
-        not_in_new_ui(again.result(), "schedules")
+        again = control(requests, "open", "browse")
+        yield "ctl open browse on the rebuilt window", again.done
+        not_in_new_ui(again.result(), "browse")
         yield "every tail to settle", lambda: settled(application)
         assert calls == ONE_RESCAN, "ctl open on the rebuilt window added work"
         lanes.extend(application_lanes(application))

@@ -608,7 +608,10 @@ class RealEditing:
             last = settle_intent(self._palette_intent, key)
             backend.pairing_changed(item)
             if last:
-                self._settle_view(wid)
+                # Redrawn even when the colors read the same: what the saved
+                # record offers changed too (Reset to defaults), and the rescan
+                # `pairing_changed` asks for comes later, at idle.
+                self._settle_view(wid, force=True)
 
         reported = False
 

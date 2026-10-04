@@ -47,6 +47,7 @@ from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.inspector import Inspector  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
 from wall_in_one.ui.next.real_editing import RealEditing  # noqa: E402
+from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
 from wall_in_one.ui.next.state import Removal  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 
@@ -155,6 +156,7 @@ def test_inspector_colors_queue_settle_and_fall_back_to_what_was_saved(
         item = item_at(application, dusk)
 
         # Two gestures while the lane is busy: each queues, the view shows the latest.
+        before = window.state.wallpaper(dusk)  # what a card built before them holds
         gate = hold_the_lane(application)
         inspector.theme_mode.set_active_name("dark")
         inspector.color_mode.set_active_name("keep")
@@ -162,6 +164,21 @@ def test_inspector_colors_queue_settle_and_fall_back_to_what_was_saved(
         view = window.state.wallpaper(dusk)
         assert (view.color_mode, view.theme_mode) == ("keep", "dark")
         assert durable(item) == pairings.PalettePolicy(), "nothing saved yet"
+
+        # Once the last save lands the pane shows what is saved at once, Reset
+        # included: no library rescan has to come first, so none is let run,
+        # and nothing redraws the pane while the saves wait.
+        rescans: list[int] = []
+        rescan = application.refresh_library
+        held_rescans = True
+
+        def refresh_library() -> None:
+            if held_rescans:
+                rescans.append(1)
+            else:
+                rescan()
+
+        monkeypatch.setattr(application, "refresh_library", refresh_library)
         gate.set()
         yield "both saves", lambda: settled(application)
         assert durable(item) == pairings.PalettePolicy("keep", "", pairings.Mode.DARK)
@@ -170,6 +187,17 @@ def test_inspector_colors_queue_settle_and_fall_back_to_what_was_saved(
         assert inspector.color_mode.get_active_name() == "keep"
         assert inspector.theme_mode.get_active_name() == "dark"
         assert inspector.reset_button is not None, "now there is something to reset"
+        held_rescans = False
+        for _held in rescans:
+            rescan()
+        yield "the held rescans", lambda: settled(application)
+
+        # A card's view from before the change opens what is saved now.
+        page.inspect(before)
+        inspector = inspector_of(window)
+        assert inspector.color_mode is not None and inspector.theme_mode is not None
+        assert inspector.color_mode.get_active_name() == "keep"
+        assert inspector.theme_mode.get_active_name() == "dark"
 
         # A save that fails puts the control back on what pairings.json holds.
         original = pairings.Store.choose_mode
@@ -182,7 +210,19 @@ def test_inspector_colors_queue_settle_and_fall_back_to_what_was_saved(
             return original(store, current, mode)
 
         monkeypatch.setattr(pairings.Store, "choose_mode", flaky)
+        gate = hold_the_lane(application)
         inspector.theme_mode.set_active_name("light")
+        # Anything that redraws the pane while it waits (Noctalia's colors
+        # changed, a playlist, what is on screen) shows the queued choice,
+        # never the view the pane was last built from.
+        state = window.state
+        assert isinstance(state, RealAppState)
+        state.emit_changed("theme")
+        inspector = inspector_of(window)
+        assert inspector.color_mode is not None and inspector.theme_mode is not None
+        assert inspector.theme_mode.get_active_name() == "light"
+        assert inspector.color_mode.get_active_name() == "keep"
+        gate.set()
         yield "the failed save", lambda: settled(application) and bool(said)
         assert said[-1] == "Colors for dusk were not saved; nothing changed: local-io: disk full"
         inspector = inspector_of(window)

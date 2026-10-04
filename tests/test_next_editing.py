@@ -359,7 +359,13 @@ def test_queued_color_gestures_show_the_latest_and_settle_to_it(
     view = adapter.wallpaper(target)
     assert (view.palette, view.theme_mode) == ("builtin:Ayu", "light"), "the controls show it"
     assert editing.choices(target).customized
+    seen = topics(adapter)
+    backend.authoring.popleft()()
+    assert seen == [], "the first save lands while the second is queued: nothing to redraw"
     backend.run_authoring()
+    # The last one redraws even though the colors read the same as queued: the
+    # saved record now offers Reset to defaults, and no rescan has to come first.
+    assert seen == ["library"]
     assert durable(item) == pairings.PalettePolicy("builtin", "Ayu", pairings.Mode.LIGHT)
     assert (adapter.wallpaper(target).palette, adapter.wallpaper(target).theme_mode) == (
         "builtin:Ayu",

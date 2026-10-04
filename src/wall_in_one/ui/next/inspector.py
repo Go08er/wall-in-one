@@ -242,11 +242,20 @@ class Inspector(Gtk.Box):
         # Rebuild for "now" only when this wallpaper's on-screen badge changes.
         on_screen = self._on_screen_now(wallpaper.id)
         if topic in ("playlists", "theme") or (topic == "now" and on_screen != self._on_screen):
-            self.show(wallpaper)
+            self.show(wallpaper)  # as it is now: `show` reads the state's current view
 
     # -- building --------------------------------------------------------------
     # Not GTK's ``show()`` (deprecated in GTK 4): the pages call this name.
     def show(self, wallpaper: WallpaperView) -> None:  # type: ignore[override]
+        """Build the pane for ``wallpaper`` as the state holds it now.
+
+        The view handed in may be one a card or an earlier build kept: a
+        color choice still being saved changes the state's view without a
+        redraw, so building from an old one would show colors from before
+        it. The state's current view of the same wallpaper is used instead.
+        """
+        if self.state.has_wallpaper(wallpaper.id):
+            wallpaper = self.state.wallpaper(wallpaper.id)
         same = self.wallpaper is not None and self.wallpaper.id == wallpaper.id
         scroll = self._scroller.get_vadjustment().get_value() if same else 0.0
         if not same:

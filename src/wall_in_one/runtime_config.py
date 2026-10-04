@@ -821,6 +821,112 @@ def pairing_refusal(
     return found
 
 
+# -- the application's boundary: one check for every write that could break it -------
+#
+# Every write that puts a playlist into use, or can take away what a playlist
+# plays, calls one of these from its ``prepare``: on GTK, when its task
+# reaches the head of the authoring lane, after every earlier write has been
+# adopted, so against what is saved. Whichever window, page or control verb
+# asked, it is the same check. Each refusal is a `PlaybackGuardError`,
+# raised before anything is written.
+
+
+def checked_entries_removal[Work](
+    reference: str,
+    entry_ids: Iterable[str],
+    work: Callable[[], Work],
+    session: Session,
+) -> Callable[[], Work]:
+    """``work`` (it takes ``entry_ids`` out of playlist ``reference``), once checked."""
+    playlist = session.playlists.find(reference)
+    chosen = frozenset(entry_ids)
+    refusal = entries_refusal(
+        playlist,
+        [entry for entry in playlist.entries if entry.id not in chosen],
+        session.settings,
+        session,
+    )
+    if refusal:
+        raise PlaybackGuardError(f"Nothing was removed from {_quoted_name(playlist)}: {refusal}")
+    return work
+
+
+def checked_entries_addition[Work](
+    reference: str,
+    sources: Iterable[Path],
+    work: Callable[[], Work],
+    session: Session,
+) -> Callable[[], Work]:
+    """``work`` (it adds ``sources`` to playlist ``reference``), once checked."""
+    playlist = session.playlists.find(reference)
+    adding = [Entry(f"adding-{index}", str(source)) for index, source in enumerate(sources)]
+    refusal = entries_refusal(playlist, [*playlist.entries, *adding], session.settings, session)
+    if refusal:
+        raise PlaybackGuardError(f"Nothing was added to {_quoted_name(playlist)}: {refusal}")
+    return work
+
+
+def checked_playlist_use[Work](
+    reference: str,
+    what: str,
+    work: Callable[[], Work],
+    session: Session,
+) -> Callable[[], Work]:
+    """``work`` (it makes playlist ``reference`` a rule's or a display's), once checked."""
+    refusal = use_refusal(reference, session)
+    if refusal:
+        raise PlaybackGuardError(f"{what}: {refusal}")
+    return work
+
+
+def refuse_unresolved_quick_choice(item: MediaItem, session: Session) -> None:
+    """Refuse Quick choice of a wallpaper the compiler can't keep, saying why.
+
+    Quick choice replaces "your pick" with that one wallpaper; one the
+    compiler drops would leave it holding nothing it can build. (One that
+    playback skips is refused by the callers before this, as it always was.)
+    """
+    can = entry_playability(item, session)
+    if not can.compiles:
+        raise PlaybackGuardError(f"Playback unavailable for {item.name}: {can.reason}")
+
+
+def refuse_library_removal(items: Sequence[MediaItem], session: Session) -> None:
+    """Refuse taking ``items`` out of the library when a playlist would break.
+
+    Every entry naming one goes with it (`emptied_by_removing`). Called before
+    the removal plan, so before anything is moved or deleted.
+    """
+    emptied = emptied_by_removing([item.path for item in items], session.settings, session)
+    if emptied:
+        names = listed([item.name for item in items])
+        raise PlaybackGuardError(
+            f"{names} was not removed: {listed(emptied)}. Add another wallpaper there first."
+        )
+
+
+def pairing_refusals_if_unresolved(item: MediaItem, session: Session) -> list[str]:
+    """What would break if a pairing change left ``item`` with no still.
+
+    Only a moving wallpaper can lose its still; going back to the worked-out
+    one is decided where that is worked out (the authoring worker, or the
+    headless service's scan), and this says what to refuse then.
+    """
+    if not item.is_moving:
+        return []
+    return pairing_refusal(item, False, session.settings, session)
+
+
+def settings_refusal(changes: Mapping[str, object], session: Session) -> str:
+    """Why a settings change may not be saved (a default with nothing to play); or empty."""
+    wanted = changes.get("active_playlist")
+    if isinstance(wanted, str) and wanted:
+        refusal = use_refusal(wanted, session)
+        if refusal:
+            return f"the chosen default playlist can\u2019t be used: {refusal}"
+    return ""
+
+
 def _validate_playlist_identity(
     compiled: list[tuple[str, str, tuple[tuple[str, ...], ...]]],
 ) -> None:

@@ -13,7 +13,7 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Adw, Gdk, Gtk
 
-from wall_in_one import config
+from wall_in_one import config, runtime_config
 from wall_in_one.library import schedules
 from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
@@ -1259,6 +1259,12 @@ class SchedulesPage(Gtk.ScrolledWindow):
                     wanted = choices[index - 1].id
                     if self._app.session.playlists.get(wanted) is None:
                         raise ValueError("that playlist was deleted before the assignment saved")
+                    return runtime_config.checked_playlist_use(
+                        wanted,
+                        f"{connector}\u2019s playlist was not changed",
+                        work,
+                        self._app.session,
+                    )
                 return work
 
             queue_intent(self._pending_assignments, connector, wanted)
@@ -1441,7 +1447,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         def prepare() -> Any:
             if self._app.session.playlists.get(playlist_id) is None:
                 raise ValueError("that playlist was deleted before the schedule rule saved")
-            return work
+            return runtime_config.checked_playlist_use(
+                playlist_id, "The schedule rule was not saved", work, self._app.session
+            )
 
         self._app.authoring_action_async(
             work,

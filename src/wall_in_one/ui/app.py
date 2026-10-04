@@ -2968,7 +2968,13 @@ class Application(Adw.Application):
         requested_still: Path | None,
         mutation: Callable[[pairings.Store, MediaItem, Path | None], pairings.Pairing],
     ) -> Callable[[], _StillPairingMutationResult]:
-        """Revalidate both sides of a queued representative-still choice."""
+        """Revalidate both sides of a queued representative-still choice.
+
+        Going back to the worked-out still (``requested_still`` None) can leave
+        a moving wallpaper with none, and then the compiler drops it: what that
+        would break is worked out here, and the worker refuses before the
+        write if it finds no still (`runtime_config.pairing_refusals_if_unresolved`).
+        """
         current = self.current_item_for_authoring(item)
         still = requested_still
         if still is not None:
@@ -2977,11 +2983,21 @@ class Application(Adw.Application):
                 raise ValueError(f"{still.name} was removed before the still choice could save")
         store = self._session.pairings
         roots = self._session.library.roots
+        unresolved = (
+            runtime_config.pairing_refusals_if_unresolved(current, self._session)
+            if still is None
+            else []
+        )
 
         def work() -> _StillPairingMutationResult:
             effective = still
             if effective is None:
                 effective = pairings.synthesize(current, roots).still
+            if effective is None and unresolved:
+                raise runtime_config.PlaybackGuardError(
+                    f"{current.name}\u2019s still was not changed: it would have none, and "
+                    f"{runtime_config.listed(unresolved)}"
+                )
             # Resolve the default before the durable mutation. A slow or
             # faulty source path can then fail cleanly without committing a
             # pairing whose GTK adoption/publication callback is skipped.
@@ -2994,13 +3010,23 @@ class Application(Adw.Application):
         self,
         item: MediaItem,
     ) -> Callable[[], _PairingResetMutationResult]:
-        """Reset and resolve its default away from GTK before acknowledging."""
+        """Reset and resolve its default away from GTK before acknowledging.
+
+        Refused before the write when the worked-out still is none and that
+        would break a playlist (`runtime_config.pairing_refusals_if_unresolved`).
+        """
         current = self.current_item_for_authoring(item)
         store = self._session.pairings
         roots = self._session.library.roots
+        unresolved = runtime_config.pairing_refusals_if_unresolved(current, self._session)
 
         def work() -> _PairingResetMutationResult:
             effective = pairings.synthesize(current, roots).still
+            if effective is None and unresolved:
+                raise runtime_config.PlaybackGuardError(
+                    f"{current.name} was not reset: it would have no still, and "
+                    f"{runtime_config.listed(unresolved)}"
+                )
             changed = store.reset(current)
             return _PairingResetMutationResult(current, changed, effective)
 
@@ -4231,6 +4257,10 @@ class Application(Adw.Application):
                 f"Playback unavailable for {item.name}; see Library for details and removal options"
             )
         try:
+            runtime_config.refuse_unresolved_quick_choice(item, self._session)
+        except runtime_config.PlaybackGuardError as error:
+            return server.failed(error)
+        try:
             chosen = (
                 self.legacy_authoring_sync(lambda: self._session.choose(item.path))
                 if self._service_start
@@ -4279,6 +4309,7 @@ class Application(Adw.Application):
             health = self._session.pairings.health(pairings.Identity.of(current))
             if health.is_borked:
                 raise ValueError(f"Playback unavailable for {current.name}")
+            runtime_config.refuse_unresolved_quick_choice(current, self._session)
             playlist_store = self._session.playlists
             return lambda: playlist_store.set_singleton(
                 QUICK_CHOICE_ID,
@@ -4356,6 +4387,7 @@ class Application(Adw.Application):
             health = self._session.pairings.health(pairings.Identity.of(current))
             if health.is_borked:
                 raise ValueError(f"Playback unavailable for {current.name}")
+            runtime_config.refuse_unresolved_quick_choice(current, self._session)
             playlist_store = self._session.playlists
             return lambda: playlist_store.set_display_singleton(
                 connector,
@@ -4478,19 +4510,7 @@ class Application(Adw.Application):
             # the lane, against what is saved by now: a rule, assignment or
             # default saved after the gesture is seen, and a playlist something
             # uses never loses the last wallpaper it can play.
-            emptied = runtime_config.emptied_by_removing(
-                [current.path], self._settings, self._session
-            )
-            if emptied:
-                listed = (
-                    emptied[0]
-                    if len(emptied) == 1
-                    else ", ".join(emptied[:-1]) + f" and {emptied[-1]}"
-                )
-                raise ValueError(
-                    f"{current.name} was not removed: {listed}. Add another wallpaper there "
-                    "first."
-                )
+            runtime_config.refuse_library_removal([current], self._session)
             plan = self._session.prepare_removal_plan(current, trash=trash)
             self._invalidate_runtime_for_pending_removal()
             self._removal_active = True
@@ -5214,13 +5234,11 @@ class Application(Adw.Application):
                 (key, field_generation, value)
                 for key, (field_generation, value) in self._settings_authoring_pending.items()
             )
-        wanted_default = {key: value for key, _gen, value in changes}.get("active_playlist")
-        if isinstance(wanted_default, str) and wanted_default:
-            refusal = runtime_config.use_refusal(wanted_default, self._session)
-            if refusal:
-                raise config.ConfigError(
-                    f"the chosen default playlist can\u2019t be used: {refusal}"
-                )
+        refusal = runtime_config.settings_refusal(
+            {key: value for key, _gen, value in changes}, self._session
+        )
+        if refusal:
+            raise config.ConfigError(refusal)
         return lambda: self._persist_settings_batch(generation, changes)
 
     def _persist_settings_batch(
@@ -5332,8 +5350,17 @@ class Application(Adw.Application):
             self.window_report(f"Settings were not saved; nothing changed: {message}")
 
     def update_settings(self, **changes: Any) -> config.Settings:
+        """Save a settings change now, for the headless service and non-GUI callers.
+
+        The same check as the window's batched writes (`runtime_config.settings_refusal`):
+        a default playlist with nothing to play is refused before anything
+        is written.
+        """
         if self._settings_unknown_keys:
             raise config.SettingsReadOnlyError(self._settings_unknown_keys)
+        refusal = runtime_config.settings_refusal(changes, self._session)
+        if refusal:
+            raise config.ConfigError(refusal)
         previous = self._settings
         # Explicit legacy-service and non-GUI callers retain a synchronous
         # boundary.  They still rebase semantic fields so a stale process
@@ -5649,6 +5676,7 @@ class _Commands:
                     f"Playback unavailable for {item.name}; "
                     "see Library for details and removal options"
                 )
+            runtime_config.refuse_unresolved_quick_choice(item, session)
             playlist_store = session.playlists
 
             def work() -> tuple[MediaItem, playlists.Playlist]:
@@ -5710,6 +5738,16 @@ class _Commands:
             if chosen != "default":
                 requested = server.parse_path(chosen, verb="still")
                 still = session.library.require_representative_still(requested).path
+            elif item.is_moving and item.paired_still is None:
+                # The headless service resolves the default from its scan.
+                unresolved = runtime_config.pairing_refusals_if_unresolved(item, session)
+                if unresolved:
+                    return server.failed(
+                        runtime_config.PlaybackGuardError(
+                            f"{item.name}\u2019s still was not changed: it would have none, "
+                            f"and {runtime_config.listed(unresolved)}"
+                        )
+                    )
             self._legacy_authoring(lambda: session.pairings.choose_still(item, still))
             self._app.pairing_changed(item)
             return Response.success(
@@ -5793,6 +5831,16 @@ class _Commands:
         if self._app.legacy_service:
             session = self._app.session
             item = server.resolve(session.library, value, verb="reset-pairing")
+            if item.is_moving and item.paired_still is None:
+                # The headless service resolves the default from its scan.
+                unresolved = runtime_config.pairing_refusals_if_unresolved(item, session)
+                if unresolved:
+                    return server.failed(
+                        runtime_config.PlaybackGuardError(
+                            f"{item.name} was not reset: it would have no still, and "
+                            f"{runtime_config.listed(unresolved)}"
+                        )
+                    )
             if not self._legacy_authoring(lambda: session.pairings.reset(item)):
                 return Response.success(f"{item.name} had nothing customized")
             self._app.pairing_changed(item)
@@ -5929,10 +5977,17 @@ class _Commands:
         connector, _, wanted = (value or "").strip().partition(" ")
         if not connector or not wanted.strip():
             return Response.failure("usage: display-assign <connector> <playlist>")
+        what = f"{connector}\u2019s playlist was not changed"
         if self._app.legacy_service:
             session = self._app.session
             playlist = session.playlists.find(wanted.strip())
-            self._legacy_authoring(lambda: session.displays.assign(connector, playlist.id))
+            assign = runtime_config.checked_playlist_use(
+                playlist.id,
+                what,
+                lambda: session.displays.assign(connector, playlist.id),
+                session,
+            )
+            self._legacy_authoring(assign)
             self._app.runtime_config_changed()
             return Response.success(f"{connector} shows {playlist.name}")
 
@@ -5945,7 +6000,7 @@ class _Commands:
                 display_store.assign(connector, playlist.id)
                 return playlist
 
-            return work
+            return runtime_config.checked_playlist_use(playlist.id, what, work, self._app.session)
 
         def finish(playlist: playlists.Playlist) -> Response:
             self._app.runtime_config_changed()
@@ -5992,7 +6047,13 @@ class _Commands:
             session = self._app.session
             playlist = session.playlists.find(name)
             item = server.resolve(session.library, source, verb="playlist-add")
-            self._legacy_authoring(lambda: session.playlists.add(playlist.id, item.path))
+            add = runtime_config.checked_entries_addition(
+                playlist.id,
+                [item.path],
+                lambda: session.playlists.add(playlist.id, item.path),
+                session,
+            )
+            self._legacy_authoring(add)
             self._app.playlists_changed()
             return Response.success(f"{item.name} added to {playlist.name}")
 
@@ -6006,7 +6067,7 @@ class _Commands:
                 playlist_store.add(playlist.id, item.path)
                 return playlist, item
 
-            return work
+            return runtime_config.checked_entries_addition(playlist.id, [item.path], work, session)
 
         def finish(result: tuple[playlists.Playlist, MediaItem]) -> Response:
             playlist, item = result
@@ -6024,7 +6085,13 @@ class _Commands:
         if self._app.legacy_service:
             session = self._app.session
             playlist = session.playlists.find(name)
-            self._legacy_authoring(lambda: session.playlists.remove_entry(playlist.id, entry))
+            remove = runtime_config.checked_entries_removal(
+                playlist.id,
+                [entry],
+                lambda: session.playlists.remove_entry(playlist.id, entry),
+                session,
+            )
+            self._legacy_authoring(remove)
             self._app.playlists_changed()
             return Response.success(f"removed {entry} from {playlist.name}")
 
@@ -6037,7 +6104,7 @@ class _Commands:
                 playlist_store.remove_entry(playlist.id, entry)
                 return playlist
 
-            return work
+            return runtime_config.checked_entries_removal(playlist.id, [entry], work, session)
 
         def finish(playlist: playlists.Playlist) -> Response:
             self._app.playlists_changed()
@@ -6128,9 +6195,13 @@ class _Commands:
             self._app.schedule_edited()
             return Response.success(f"{playlist.name} scheduled: {rule.describe()}")
 
+        what = "The schedule rule was not added"
         if self._app.legacy_service:
             playlist = self._app.session.playlists.find(name)
-            rule = self._legacy_authoring(lambda: work_for(playlist))
+            add = runtime_config.checked_playlist_use(
+                playlist.id, what, lambda: work_for(playlist), self._app.session
+            )
+            rule = self._legacy_authoring(add)
             return finish((playlist, rule))
 
         def prepare() -> Callable[[], tuple[playlists.Playlist, schedules.Rule]]:
@@ -6147,7 +6218,7 @@ class _Commands:
                 )
                 return playlist, rule
 
-            return work
+            return runtime_config.checked_playlist_use(playlist.id, what, work, self._app.session)
 
         def unprepared() -> tuple[playlists.Playlist, schedules.Rule]:  # pragma: no cover
             raise RuntimeError("schedule rule was not prepared")
@@ -6285,6 +6356,10 @@ class _Commands:
 
             def remove_legacy() -> Response:
                 item = server.resolve(session.library, value, verb="remove")
+                try:
+                    runtime_config.refuse_library_removal([item], self._app.session)
+                except runtime_config.PlaybackGuardError as error:
+                    return server.failed(error)
                 # Before the journal intent and the physical step, as a
                 # RemovalPlan does on its worker.
                 blocked = session.removal_cleanup_blocker(item)
@@ -6395,6 +6470,7 @@ class _Commands:
                     "busy", "another wallpaper removal or cleanup refresh is still in progress"
                 )
             item = server.resolve(self._app.session.library, value, verb="remove")
+            runtime_config.refuse_library_removal([item], self._app.session)
             plan = self._app.session.prepare_removal_plan(item, trash=not item.deletable)
             self._app._invalidate_runtime_for_pending_removal()
             self._app._removal_active = True

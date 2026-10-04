@@ -3229,6 +3229,8 @@ def test_an_unknown_keyword_is_refused_rather_than_ignored() -> None:
 def test_scheduling_a_playlist_stores_a_rule(sandbox: Path, applied: list[Path]) -> None:
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
+    # A rule needs a playlist with something to play.
+    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
 
     assert _immediate(commands.add_schedule_rule("Evening days=sat,sun")).ok
 
@@ -3249,6 +3251,8 @@ def test_scheduling_something_that_is_not_a_playlist_says_so(
 def test_the_schedule_lists_its_rules(sandbox: Path, applied: list[Path]) -> None:
     commands, _app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
+    # A rule needs a playlist with something to play.
+    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
     commands.add_schedule_rule("Evening days=sat,sun")
     message = commands.show_schedule().message
     assert "# fields: rule, playlist, when, enabled, in-force" in message
@@ -3258,6 +3262,8 @@ def test_the_schedule_lists_its_rules(sandbox: Path, applied: list[Path]) -> Non
 def test_a_rule_can_be_removed_by_its_id(sandbox: Path, applied: list[Path]) -> None:
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
+    # A rule needs a playlist with something to play.
+    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
     commands.add_schedule_rule("Evening")
     rule = app.session.schedules.rules[0]
 
@@ -3295,6 +3301,8 @@ def test_naming_needs_a_rule_id(value: str | None) -> None:
 def test_a_rule_can_be_named_and_unnamed_by_its_id(sandbox: Path, applied: list[Path]) -> None:
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
+    # A rule needs a playlist with something to play.
+    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
     commands.add_schedule_rule("Evening days=sat,sun")
     rule = app.session.schedules.rules[0]
     target = paths.app_state_dir() / "schedules.json"
@@ -3334,6 +3342,8 @@ def test_a_refused_schedule_backup_reaches_ctl_as_no_backup(
 ) -> None:
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
+    # A rule needs a playlist with something to play.
+    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
     commands.add_schedule_rule("Evening")
     rule = app.session.schedules.rules[0]
     target = paths.app_state_dir() / "schedules.json"
@@ -3355,6 +3365,8 @@ def test_deleting_a_playlist_takes_its_schedule_rules(sandbox: Path, applied: li
     silently not working."""
     commands, app = _commands(sandbox, [_wallpaper("aurora")])
     commands.make_playlist("Evening")
+    # A rule needs a playlist with something to play.
+    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
     commands.add_schedule_rule("Evening")
 
     commands.drop_playlist("Evening")

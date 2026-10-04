@@ -1561,12 +1561,19 @@ class QueuedScheduleApp(ScheduleApp):
 def _independent_schedules(
     tmp_path: Path,
 ) -> tuple[Session, QueuedScheduleApp, SchedulesPage, dict[str, str]]:
-    """Independent displays, playlists A, B and C, and DP-1 durably on A."""
+    """Independent displays, playlists A, B and C, and DP-1 durably on A.
+
+    Each playlist holds a picture, so each can be a display's playlist (one
+    with nothing to play is refused at the head of the lane).
+    """
     store = playlists.Store(path=tmp_path / "playlists.json")
+    picture = MediaItem(path=Path("/test-media/dawn.png"), kind=Kind.STILL, size=1, mtime=1)
     ids = {name: store.create(name, entry_id=f"entry-{name}").id for name in ("A", "B", "C")}
+    for pid in ids.values():
+        store.add(pid, picture.path)
     session = Session(
         config.Settings(display_mode=config.DISPLAY_MODE_INDEPENDENT),
-        scanner=lambda _roots: Library(roots=(Path("/test-media"),), items=()),
+        scanner=lambda _roots: Library(roots=(Path("/test-media"),), items=(picture,)),
         playlist_store=store,
         schedule_store=schedules.Store(path=tmp_path / "schedules.json"),
         display_store=displays.Store(path=tmp_path / "displays.json"),

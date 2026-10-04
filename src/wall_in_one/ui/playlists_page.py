@@ -17,6 +17,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk, Pango
 
+from wall_in_one import runtime_config
 from wall_in_one.library import pairings, playlists
 from wall_in_one.library.model import MediaItem
 from wall_in_one.ui import runtime_truth
@@ -1905,7 +1906,9 @@ class PlaylistsPage(Gtk.Box):
                 raise ValueError(
                     f"Playback unavailable for {current.name}; it cannot be added: {reason}"
                 )
-            return work
+            return runtime_config.checked_entries_addition(
+                selected, [current.path], work, self._app.session
+            )
 
         return self._app.authoring_action_async(
             work,
@@ -2052,7 +2055,12 @@ class PlaylistsPage(Gtk.Box):
                     raise ValueError(
                         f"Playback unavailable for {current.name}; it cannot be added: {reason}"
                     )
-                return lambda: store.add(selected, current.path)
+                return runtime_config.checked_entries_addition(
+                    selected,
+                    [current.path],
+                    lambda: store.add(selected, current.path),
+                    self._app.session,
+                )
 
             self._app.authoring_action_async(
                 lambda: store.add(selected, item.path),
@@ -2086,9 +2094,16 @@ class PlaylistsPage(Gtk.Box):
                 if row := self._entry_rows.get(focus_next):
                     row.grab_focus()
 
+            def remove_it() -> playlists.Playlist:
+                return store.remove_entry(selected, entry_id)
+
             self._app.authoring_action_async(
-                lambda: store.remove_entry(selected, entry_id),
+                remove_it,
                 saved,
+                # Refused at the head of the lane if the playlist would break.
+                prepare=lambda: runtime_config.checked_entries_removal(
+                    selected, [entry_id], remove_it, self._app.session
+                ),
                 failure=self._app.window_report,
             )
 

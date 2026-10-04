@@ -22,8 +22,10 @@ editor, the playlists page) already makes, through the same calls:
   colors and playlist entries too, so there is no Undo: nothing could put
   them back. One wallpaper at a time, because each removal holds the library
   until its rescan lands, and never the last thing a playlist in use can
-  play (the Playlists page's own rule, `RealPlaylists.emptied_by_removing`), and
-  the application checks it again when the removal reaches the head of the lane.
+  play, nor the last one the runtime configuration can use from any playlist
+  (the application's rule, `runtime_config.emptied_by_removing`, in the
+  Playlists page's words); the application checks it again when the removal
+  reaches the head of the lane.
 * **Playlists**: adding, and making a playlist with wallpapers in it, is the
   Playlists page's own save (`real_playlists.RealPlaylists`): one task,
   refused for a wallpaper playback skips, never "your pick" or All.
@@ -875,8 +877,8 @@ class RealEditing:
         emptied = self._playlists.emptied_by_removing([str(item.path)])
         if emptied:
             self._report(
-                f"{item.name} was not removed: {_listed(emptied)} would have nothing left "
-                "to play. Add another wallpaper there first."
+                f"{item.name} was not removed: {_listed(emptied)}. Add another wallpaper "
+                "there first."
             )
             return None
         self._backend.remove_item_async(item, trash=removal.how == "trash", finish=self._removed)

@@ -33,7 +33,9 @@ compiler's own answer (`runtime_config.entry_playability`): an entry it
 keeps, which playback does not skip, so a video still waiting for its
 still does not count. Removing the last entry a used playlist can play is
 refused at the head of the queue, against the saved rules, assignments and
-default (plus a default this adapter asked for that has not settled yet).
+default (plus a default this adapter asked for that has not settled yet);
+so is leaving any playlist, used or not, with entries but none the compiler
+keeps, which would stop every publication (`runtime_config.change_problem`).
 Making a playlist with nothing to play the default is refused when asked,
 and again by the application at its own settings write
 (`Application._prepare_settings_batch`), whichever page asked.
@@ -59,7 +61,7 @@ from wall_in_one import config, runtime_config
 from wall_in_one.library import playlists
 from wall_in_one.library.model import MediaItem
 from wall_in_one.library.schedules import Rule
-from wall_in_one.runtime_config import Playability, leaves_nothing_to_play
+from wall_in_one.runtime_config import Playability
 from wall_in_one.session import QUICK_CHOICE_ID, Session
 from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.playlists_state import (
@@ -508,6 +510,31 @@ class RealPlaylists:
 
         return settle
 
+    def _require_buildable(
+        self, current: playlists.Playlist, after: Sequence[playlists.Entry]
+    ) -> None:
+        """At the head of the queue: refuse entries the runtime configuration can't take.
+
+        The application's rule (`runtime_config.change_problem`), counting a
+        default asked for here and not saved yet as a use, in this page's words.
+        """
+        used = self._references(current.id)
+        problem = runtime_config.change_problem(
+            self._playability(current.entries), self._playability(after), bool(used)
+        )
+        if problem == runtime_config.LEAVES_NOTHING_TO_PLAY:
+            raise RefusedError(
+                f"{quoted(current.name)} is used by {usage_words(used)} and would have "
+                "nothing left to play. Add another wallpaper to it first, or use a "
+                "different playlist there"
+            )
+        if problem:
+            raise RefusedError(
+                f"{quoted(current.name)} would hold only wallpapers playback can\u2019t use, "
+                "and a playlist like that stops every change from reaching playback. Remove "
+                "those too, or add one that plays first"
+            )
+
     def _require_playing(self, items: Iterable[MediaItem]) -> None:
         """At the head of the queue: refuse a wallpaper playback would skip, saying why."""
         for item in items:
@@ -687,25 +714,27 @@ class RealPlaylists:
 
     # -- entries --------------------------------------------------------------------------
     def emptied_by_removing(self, sources: Iterable[str]) -> list[str]:
-        """Each playlist in use that would have nothing left to play without ``sources``.
+        """Each refusal, as a clause, that taking ``sources`` out of the library earns.
 
         For wallpapers leaving the library (every entry naming one goes with
-        it), by the same rule as removing entries here: as its name and what
-        uses it, for a refusal.
+        it), by the application's own rule (`runtime_config.emptied_by_removing`,
+        which it checks again at the head of the lane), in this page's words
+        and counting a default asked for here that has not saved yet.
         """
-        leaving = set(sources)
-        found: list[str] = []
-        for playlist in self._store.all():
-            kept = [entry for entry in playlist.entries if entry.source not in leaving]
-            if len(kept) == len(playlist.entries):
-                continue
-            used = self._references(playlist.id)
-            if used and leaves_nothing_to_play(
-                self._playability(playlist.entries), self._playability(kept)
-            ):
-                label = "\u201cYour pick\u201d" if hidden(playlist.id) else quoted(playlist.name)
-                found.append(f"{label} (used by {usage_words(used)})")
-        return found
+
+        def uses_of(playlist: playlists.Playlist) -> tuple[str, ...]:
+            words = usage_words(self._references(playlist.id))
+            return (words,) if words else ()
+
+        return runtime_config.emptied_by_removing(
+            [Path(source) for source in sources],
+            self._backend.settings,
+            self._session,
+            uses_of=uses_of,
+            label_of=lambda playlist: (
+                "\u201cYour pick\u201d" if hidden(playlist.id) else quoted(playlist.name)
+            ),
+        )
 
     def add_entries(self, pid: str, wids: Sequence[str], position: int | None = None) -> None:
         playlist = self._editable(pid)
@@ -770,15 +799,7 @@ class RealPlaylists:
                 (index, entry) for index, entry in enumerate(current.entries) if entry.id in chosen
             )
             kept = [entry for entry in current.entries if entry.id not in chosen]
-            used = self._references(pid)
-            if used and leaves_nothing_to_play(
-                self._playability(current.entries), self._playability(kept)
-            ):
-                raise RefusedError(
-                    f"{quoted(current.name)} is used by {usage_words(used)} and would have "
-                    "nothing left to play. Add another wallpaper to it first, or use a "
-                    "different playlist there"
-                )
+            self._require_buildable(current, kept)
             return lambda: (store.remove_entries(pid, chosen), removed)
 
         def saved(
@@ -817,6 +838,10 @@ class RealPlaylists:
                 raise RefusedError(
                     f"{quoted(current.name)} has changed since, so the removal can\u2019t be undone"
                 )
+            restored = list(current.entries)
+            for index, entry in removed:
+                restored.insert(max(0, min(len(restored), index)), entry)
+            self._require_buildable(current, restored)
             return lambda: store.insert_entries(pid, removed)
 
         self._queue(

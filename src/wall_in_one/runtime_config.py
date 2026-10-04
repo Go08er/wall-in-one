@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -664,18 +664,97 @@ def playlist_uses(pid: str, settings: config.Settings, session: Session) -> tupl
     return tuple(found)
 
 
-def _listed(words: Sequence[str]) -> str:
+def listed(words: Sequence[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + f" and {words[-1]}"
 
 
+class PlaybackGuardError(ValueError):
+    """A change refused because publication, or a playlist in use, would break.
+
+    Raised at the head of the authoring lane (or, in the headless service,
+    just before the write). ``kind`` lets a control-socket caller branch on
+    it (`control.server.failed`); the message is the whole sentence.
+    """
+
+    kind = "nothing-to-play"
+
+
+def _quoted_name(playlist: Playlist) -> str:
+    return f"\u201c{playlist.name}\u201d"
+
+
+#: `change_problem`: a playlist in use would have nothing left to play.
+LEAVES_NOTHING_TO_PLAY: Final = "leaves-nothing-to-play"
+#: `change_problem`: a playlist would hold entries, none of which the compiler keeps.
+LEAVES_ONLY_UNUSABLE: Final = "leaves-only-unusable"
+
+
+def change_problem(before: Sequence[Playability], after: Sequence[Playability], used: bool) -> str:
+    """What a playlist going from ``before`` to ``after`` would break, or empty.
+
+    The two rules are both the compiler's (`_compile`). A playlist in use
+    must keep something to play (`leaves_nothing_to_play`):
+    `LEAVES_NOTHING_TO_PLAY`. And any playlist that holds entries must keep
+    one the compiler keeps, used or not, because a playlist with entries but
+    none it can resolve stops every publication: `LEAVES_ONLY_UNUSABLE`. A
+    playlist that already broke that rule may still change, so it can be
+    cleaned up. The words are the caller's (`change_refusal` has some).
+    """
+    if used:
+        return LEAVES_NOTHING_TO_PLAY if leaves_nothing_to_play(before, after) else ""
+    breaks = after and not any(entry.compiles for entry in after)
+    was_fine = not before or any(entry.compiles for entry in before)
+    return LEAVES_ONLY_UNUSABLE if breaks and was_fine else ""
+
+
+def change_refusal(
+    label: str,
+    before: Sequence[Playability],
+    after: Sequence[Playability],
+    uses: Sequence[str],
+) -> str:
+    """`change_problem` for playlist ``label``, used by ``uses`` (in words), as a clause."""
+    problem = change_problem(before, after, bool(uses))
+    if problem == LEAVES_NOTHING_TO_PLAY:
+        return f"{label} (used by {listed(uses)}) would have nothing left to play"
+    if problem == LEAVES_ONLY_UNUSABLE:
+        return f"{label} would hold only wallpapers playback can\u2019t use"
+    return ""
+
+
+def entries_refusal(
+    playlist: Playlist,
+    after: Sequence[Entry],
+    settings: config.Settings,
+    session: Session,
+) -> str:
+    """`change_refusal` for giving ``playlist`` the entries ``after``, against what is saved."""
+    known = library_index(session)
+    return change_refusal(
+        _quoted_name(playlist),
+        playlist_playability(playlist.entries, session, known),
+        playlist_playability(after, session, known),
+        playlist_uses(playlist.id, settings, session),
+    )
+
+
 def emptied_by_removing(
-    sources: Iterable[Path], settings: config.Settings, session: Session
+    sources: Iterable[Path],
+    settings: config.Settings,
+    session: Session,
+    *,
+    uses_of: Callable[[Playlist], Sequence[str]] | None = None,
+    label_of: Callable[[Playlist], str] = _quoted_name,
 ) -> list[str]:
-    """Each used playlist that would have nothing left to play without ``sources``.
+    """Each refusal (`change_refusal`) that taking ``sources`` out of the library earns.
 
     For wallpapers leaving the library: every entry naming one goes with it.
     Checked against what is saved now, so at the head of the authoring lane
-    it is the guarantee; earlier it is only advice.
+    it is the guarantee; earlier it is only advice. ``uses_of`` and
+    ``label_of`` put a playlist's uses and name in a page's own words (a
+    page may count a default it asked for and that has not saved yet);
+    `playlist_uses` and its quoted name otherwise.
     """
     leaving = set(sources)
     known = library_index(session)
@@ -684,12 +763,61 @@ def emptied_by_removing(
         kept = [entry for entry in playlist.entries if entry.path not in leaving]
         if len(kept) == len(playlist.entries):
             continue
-        uses = playlist_uses(playlist.id, settings, session)
-        if uses and leaves_nothing_to_play(
+        refusal = change_refusal(
+            label_of(playlist),
             playlist_playability(playlist.entries, session, known),
             playlist_playability(kept, session, known),
-        ):
-            found.append(f"\u201c{playlist.name}\u201d (used by {_listed(uses)})")
+            (
+                uses_of(playlist)
+                if uses_of is not None
+                else playlist_uses(playlist.id, settings, session)
+            ),
+        )
+        if refusal:
+            found.append(refusal)
+    return found
+
+
+def pairing_refusal(
+    item: MediaItem,
+    compiles_after: bool,
+    settings: config.Settings,
+    session: Session,
+) -> list[str]:
+    """Each refusal (`change_refusal`) earned if ``item`` compiled as ``compiles_after`` says.
+
+    For a change to its pairing (its still chosen, cleared or reset): the
+    caller says whether the compiler would still keep it afterwards, and
+    every playlist holding it is checked with that answer. Nothing is
+    refused when the answer doesn't change.
+    """
+    current = entry_playability(item, session)
+    if current.compiles == compiles_after:
+        return []
+    health = session.pairings.health(pairings.Identity.of(item))
+    changed = Playability(
+        compiles_after,
+        compiles_after and not health.is_borked,
+        "" if compiles_after else "it would have no still for playback to show",
+    )
+    known = library_index(session)
+    found: list[str] = []
+    for playlist in session.playlists.all():
+        if not any(entry.path == item.path for entry in playlist.entries):
+            continue
+        before = playlist_playability(playlist.entries, session, known)
+        after = tuple(
+            changed if entry.path == item.path else can
+            for entry, can in zip(playlist.entries, before, strict=True)
+        )
+        refusal = change_refusal(
+            _quoted_name(playlist),
+            before,
+            after,
+            playlist_uses(playlist.id, settings, session),
+        )
+        if refusal:
+            found.append(refusal)
     return found
 
 

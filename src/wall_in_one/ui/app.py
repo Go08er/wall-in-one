@@ -4488,8 +4488,8 @@ class Application(Adw.Application):
                     else ", ".join(emptied[:-1]) + f" and {emptied[-1]}"
                 )
                 raise ValueError(
-                    f"{current.name} was not removed: {listed} would have nothing left to "
-                    "play. Add another wallpaper there first."
+                    f"{current.name} was not removed: {listed}. Add another wallpaper there "
+                    "first."
                 )
             plan = self._session.prepare_removal_plan(current, trash=trash)
             self._invalidate_runtime_for_pending_removal()

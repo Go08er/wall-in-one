@@ -35,6 +35,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -309,14 +310,56 @@ def _lifecycle_lock_path(path: Path, kind: Kind, scene: str = "") -> Path:
     return _lifecycle_lock_path_from_material(_lifecycle_material(path, kind, scene))
 
 
+#: The lifecycle locks a removal transaction holds on this thread (`held_for_removal`).
+_HELD_FOR_REMOVAL = threading.local()
+
+
+def _held_for_removal() -> set[str]:
+    held: set[str] = _HELD_FOR_REMOVAL.__dict__.setdefault("paths", set())
+    return held
+
+
 @contextlib.contextmanager
 def _lifecycle_lock(
     lock_path: Path,
     *,
     timeout: float | None = None,
 ) -> Iterator[None]:
-    """Hold one trusted lifecycle flock for a bounded commit section."""
+    """Hold one trusted lifecycle flock for a bounded commit section.
+
+    Inside a removal transaction on this thread (`held_for_removal`), a lock
+    it holds is held already, so the nested section just runs; any other
+    second acquisition waits on the first, as a new ``flock`` does.
+    """
+    if os.fspath(lock_path) in _held_for_removal():
+        yield
+        return
     with _flocked(lock_path, timeout=timeout):
+        yield
+
+
+@contextlib.contextmanager
+def held_for_removal(item: MediaItem) -> Iterator[None]:
+    """Hold ``item``'s media-path and source locks for a whole removal transaction.
+
+    A removal holds them from before its dry run to after its commit
+    (`session.RemovalPlan.run`), so nothing can publish for this source in
+    between; the commit's own sections in `manage` take the same locks on
+    the same thread and just run. Another thread, or process, waits as
+    before. The order is the one `manage` takes them in: media path, then
+    source.
+    """
+    paths = (
+        _media_path_lock_path(item.path),
+        _lifecycle_lock_path(item.path, item.kind, item.scene),
+    )
+    held = _held_for_removal()
+    with contextlib.ExitStack() as stack:
+        for path in paths:
+            stack.enter_context(_flocked(path))
+            key = os.fspath(path)
+            held.add(key)
+            stack.callback(held.discard, key)
         yield
 
 

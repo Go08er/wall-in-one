@@ -80,43 +80,95 @@ LEGACY_AUTOMATIC_KIND: Final = "automatic-still"
 _STILL_EXTENSION_ORDER: Final[tuple[str, ...]] = (".png", ".webp", ".avif", ".jpg", ".jpeg")
 
 
+#: A directory entry: ``(st_dev, st_ino)`` of the directory holding it, and its name.
+Entry = tuple[int, int, str]
+
+
 @dataclass(frozen=True, slots=True)
 class Exclusion:
-    """Files a dry run treats as already deleted, by identity (`excluding`).
+    """Files a dry run treats as already deleted (`excluding`).
 
-    A removal deletes directory entries for regular files. Every path that
-    reaches one of them is gone with it: its own spelling, one through a
-    linked folder, a symlink to it. A file is matched by its identity,
-    ``(st_dev, st_ino)``, so a spelling never decides; for a file with more
-    than one hard link, only the paths that resolve to a deleted entry go, as
-    its other names stay on disk.
+    A removal deletes directory entries. Every path that reaches a deleted
+    entry is gone with it: its own spelling, one through a linked folder or a
+    bind mount, a symbolic link to it. A path is matched by what it reaches,
+    never by its spelling:
+
+    - a deleted file's identity, ``(st_dev, st_ino)``: a file with one link
+      has one entry, the deleted one, so every path to it is gone;
+    - for a file with more than one link, the entry a path reaches, ``(st_dev,
+      st_ino)`` of the directory holding it plus the name: its other names
+      stay, as they do on disk;
+    - a deleted entry that isn't there yet (a capture the removal reserves)
+      counts as gone too, whatever comes to occupy it.
+
+    Whatever can't be told apart counts as gone, which can only refuse more.
     """
 
+    #: ``(st_dev, st_ino)`` of the deleted regular files that exist.
     identities: frozenset[tuple[int, int]] = frozenset()
-    #: The deleted entries, symlinks resolved: which names of a multiply-linked file go.
-    entries: frozenset[str] = frozenset()
+    #: Those whose deleted entry couldn't be identified: every name of them goes.
+    every_name: frozenset[tuple[int, int]] = frozenset()
+    #: The deleted entries, there or not yet.
+    entries: frozenset[Entry] = frozenset()
+    #: Their names: only a path with one of these can reach one by name.
+    names: frozenset[str] = frozenset()
 
     @classmethod
     def of(cls, paths: Iterable[Path]) -> Exclusion:
-        """The regular files at ``paths`` (anything else at one is left alone)."""
+        """The entries at ``paths`` (a regular file there, or nothing yet).
+
+        Read on the worker, from the files themselves: ``fstat`` of an
+        ``O_PATH`` descriptor that doesn't follow a final symlink, for the
+        file and for the directory holding it. Anything else at a path (a
+        symlink, a folder) is left alone, as a removal deletes only regular
+        files.
+        """
         identities: set[tuple[int, int]] = set()
-        entries: set[str] = set()
+        every_name: set[tuple[int, int]] = set()
+        entries: set[Entry] = set()
         for path in paths:
-            found = file_identity(path)
+            try:
+                there = os.lstat(path)
+            except FileNotFoundError:
+                there = None
+            except OSError, ValueError:
+                continue
+            if there is not None and not stat.S_ISREG(there.st_mode):
+                continue
+            entry = _directory_entry(path)
+            if entry is not None:
+                entries.add(entry)
+            found = file_identity(path) if there is not None else None
             if found is not None:
                 identities.add(found)
-                entries.add(os.path.realpath(path))
-        return cls(frozenset(identities), frozenset(entries))
+                if entry is None:
+                    every_name.add(found)
+        return cls(
+            frozenset(identities),
+            frozenset(every_name),
+            frozenset(entries),
+            frozenset(name for _device, _inode, name in entries),
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.identities or self.entries)
 
     def covers(self, path: Path, status: os.stat_result) -> bool:
-        """Whether ``path``, whose ``stat`` is ``status``, is one of the deleted files."""
-        if (status.st_dev, status.st_ino) not in self.identities:
+        """Whether ``path``, whose ``stat`` is ``status``, reaches a deleted entry."""
+        if path.name in self.names:
+            reached = _reached_entry(path)
+            if reached is None or reached in self.entries:
+                return True
+        identity = (status.st_dev, status.st_ino)
+        if identity not in self.identities:
             return False
-        # One link: every path to the file goes through the deleted entry.
-        return status.st_nlink <= 1 or os.path.realpath(path) in self.entries
+        if identity in self.every_name or status.st_nlink <= 1:
+            return True
+        reached = _reached_entry(path)
+        return reached is None or reached in self.entries
 
     def removes(self, path: Path) -> bool:
-        """Whether ``path`` exists now and would not once the files go."""
+        """Whether ``path`` exists now and would not once the entries go."""
         try:
             status = path.stat()
         except OSError, ValueError:
@@ -143,6 +195,46 @@ def file_identity(path: Path) -> tuple[int, int] | None:
     return (status.st_dev, status.st_ino) if stat.S_ISREG(status.st_mode) else None
 
 
+def _directory_entry(path: Path) -> Entry | None:
+    """The entry ``path`` names, as the removal will delete it.
+
+    The directory holding it from an ``O_PATH | O_NOFOLLOW`` descriptor: a
+    removal never goes through a linked directory, so this is the directory
+    itself. None when that isn't a directory.
+    """
+    try:
+        descriptor = os.open(path.parent, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError, ValueError:
+        return None
+    try:
+        status = os.fstat(descriptor)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    if not stat.S_ISDIR(status.st_mode):
+        return None
+    return (status.st_dev, status.st_ino, path.name)
+
+
+def _reached_entry(path: Path) -> Entry | None:
+    """The entry a scanned ``path`` reaches, or None when that can't be told.
+
+    A final symlink is followed to the entry it names. The directory is
+    identified by what the path reaches, links followed: a path through a
+    linked folder or a bind mount reaches the same directory, which has the
+    same ``(st_dev, st_ino)`` whatever the spelling.
+    """
+    try:
+        target = Path(os.path.realpath(path)) if path.is_symlink() else path
+        directory = os.stat(target.parent)
+    except OSError, ValueError:
+        return None
+    if not stat.S_ISDIR(directory.st_mode):
+        return None
+    return (directory.st_dev, directory.st_ino, target.name)
+
+
 #: What a dry run treats as already deleted (`excluding`); None outside one,
 #: so everything is as on disk.
 _EXCLUDED: ContextVar[Exclusion | None] = ContextVar("wall_in_one_excluded_files", default=None)
@@ -150,17 +242,22 @@ _EXCLUDED: ContextVar[Exclusion | None] = ContextVar("wall_in_one_excluded_files
 
 @contextmanager
 def excluding(exclusion: Exclusion | None) -> Iterator[None]:
-    """Within this, ``exclusion``'s files count as gone (`present`, `is_excluded`).
+    """Within this, ``exclusion``'s entries count as gone (`present`, `is_excluded`).
 
     For a dry run of a removal (`scan.scan(excluded=...)`): the scanner sees
     the library as the removal would leave it. Context-local, so only the
     scan that entered it is affected.
     """
-    token = _EXCLUDED.set(exclusion if exclusion is not None and exclusion.identities else None)
+    token = _EXCLUDED.set(exclusion if exclusion else None)
     try:
         yield
     finally:
         _EXCLUDED.reset(token)
+
+
+def active_exclusion() -> Exclusion | None:
+    """The exclusion in force (`excluding`), or None: an ordinary scan pays nothing."""
+    return _EXCLUDED.get()
 
 
 def is_excluded(path: Path, status: os.stat_result) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import threading
@@ -42,6 +43,7 @@ from wall_in_one.library import (
     scan,
     schedules,
     state_file,
+    stills,
 )
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import Library, MediaItem
@@ -56,6 +58,7 @@ from wall_in_one.session import (
     LibraryRefreshResult,
     RemovalResult,
     Session,
+    removal_lock_refusal,
 )
 from wall_in_one.theme import css, noctalia, source
 from wall_in_one.ui.activity_log import ActivityLog
@@ -4663,14 +4666,18 @@ class Application(Adw.Application):
         self.release()
         self._maybe_finish_requested_quit()
 
-    def _adopt_removal_library(self, library: Library, *, rescan: bool) -> None:
-        """Install a committed removal's dry-run library as a finished scan is installed.
+    def _adopt_post_removal_scan(self, library: Library, *, refresh_follows: bool) -> None:
+        """Install the scan a removal ran once it had committed (`RemovalResult.rescanned`).
 
-        The same steps as a completed scan (`refresh_library` without a
-        window): adopted, its sources accepted, shown and published, and the
-        runtime's library barrier and the removal's convergence released at
-        its generation. With ``rescan``, the barrier stays for the scan that
-        follows instead.
+        That is the real post-removal library, so it is installed as a finished
+        scan is (`refresh_library` without a window): adopted, its sources
+        accepted, shown and published, and the runtime's library barrier and
+        the removal's convergence released at its generation. Nothing scanned
+        before the commit is installed: the removal's dry run decides whether
+        it may go ahead, and only that. With ``refresh_follows`` (a removal
+        that committed with a failure, or a refresh asked for meanwhile), it
+        is adopted and shown, and the refresh that follows owns the barrier,
+        the convergence and the publication.
         """
         generation = self._library_scan_generation
         before = self._session.library
@@ -4681,12 +4688,9 @@ class Application(Adw.Application):
             item.path for item in (*before.items, *before.still_inventory) if item.path not in kept
         )
         self._session.adopt_library(library, reconcile_workshop=False)
-        if rescan:
-            # A partial removal: show and publish what is known now; the scan
-            # that follows owns the barrier and the convergence.
+        if refresh_follows:
             if self._window is not None:
                 self._window.show_library(self._session)
-            self._publish_runtime_for_context()
             return
         self._removal_convergence_scan_generation = generation
         self._adopt_runtime_library_scan(generation)
@@ -4696,18 +4700,19 @@ class Application(Adw.Application):
     def _adopt_item_removal(self, result: RemovalResult) -> None:
         """Install only semantic worker deltas after its lease is released.
 
-        A committed removal's library is the one its dry run scanned before
-        anything was touched (`RemovalResult.library_after`): the real post-
-        removal library, adopted as a completed scan is, and published at once,
-        so no generation names a deleted file. Only a removal that committed
-        with a failure (or a refresh asked for meanwhile) scans again.
+        A committed removal's library is the one a real scan found after the
+        commit, on the same worker (`RemovalResult.rescanned`); until it is
+        installed, nothing new is published and the previous generation
+        stays. A removal that committed with a failure, or a refresh asked for
+        meanwhile, is scanned again (with the pending-removal replay), and so
+        is one whose own scan failed.
         """
         self._removal_active = False
         self._session.adopt_library_cleanups(result.cleanups)
         self._session.adopt_library_fault_repairs(result.repaired_faults)
         partial = bool(result.error_message or result.cleanup_failures)
-        library = result.library_after
-        refresh = self._refresh_after_removal or (result.committed and (partial or library is None))
+        scanned = result.rescanned
+        refresh = self._refresh_after_removal or (result.committed and (partial or scanned is None))
         self._refresh_after_removal = False
         if result.committed:
             self._removed_item_paths.add(result.item.path)
@@ -4717,8 +4722,8 @@ class Application(Adw.Application):
             self._finish_runtime_removal_invalidation()
             self._stills.forget(result.item.path)
             self._begin_removal_convergence()
-            if library is not None:
-                self._adopt_removal_library(library, rescan=refresh)
+            if scanned is not None:
+                self._adopt_post_removal_scan(scanned, refresh_follows=refresh)
             # Otherwise the rescan below is the post-removal library. A new
             # detached refresh starts only after the removal worker has
             # released its operation lease and the actor has adopted every
@@ -6611,6 +6616,19 @@ class _Commands:
                 blocked = session.removal_cleanup_blocker(item)
                 if blocked is not None:
                     return Response.failure(blocked[1], kind=blocked[0])
+                # The source's lifecycle locks from before the dry run to after
+                # the commit, as `RemovalPlan.run` holds them (it explains why).
+                held = contextlib.ExitStack()
+                try:
+                    held.enter_context(stills.held_for_removal(item))
+                except OSError as error:
+                    held.close()
+                    kind, message = removal_lock_refusal(item, error)
+                    return Response.failure(message, kind=kind)
+                with held:
+                    return remove_held(item)
+
+            def remove_held(item: MediaItem) -> Response:
                 try:
                     # The same dry run, synchronous like everything here.
                     session.check_removal(item)

@@ -293,7 +293,7 @@ def test_r3_an_allowed_removal_publishes_no_generation_naming_either_spelling(
         assert str(aliased.alias) not in document
         assert str(aliased.forest) not in document
         assert str(aliased.dawn) in document
-    assert rescans == [], "its dry run's library is the new one"
+    assert rescans == [], "the removal's own scan after the commit is the new library"
     assert application.session.library.find(aliased.alias) is None
     assert _builds(application)
 

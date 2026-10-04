@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import zlib
 from dataclasses import replace
 from pathlib import Path
@@ -1732,6 +1733,41 @@ def test_a_still_is_taken_at_the_wallpapers_own_resolution(root: Path) -> None:
         text=True,
     )
     assert probe.stdout.strip().rstrip(",") == "320,180"
+
+
+def test_a_removal_transactions_locks_are_reused_within_it_and_held_against_everyone_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removal holds its source's locks across its dry run and commit; its own commit
+    sections take them again on the same thread, and anyone else still waits."""
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.1)
+    source = tmp_path / "clip.mp4"
+    item = MediaItem(source, Kind.VIDEO, 1, 1)
+    elsewhere: list[str] = []
+
+    def another_thread() -> None:
+        try:
+            with stills.source_lifecycle_lock(item), stills.media_path_lifecycle_lock(source):
+                elsewhere.append("took it")
+        except TimeoutError:
+            elsewhere.append("waited")
+
+    with stills.held_for_removal(item):
+        with stills.media_path_lifecycle_lock(source), stills.source_lifecycle_lock(item):
+            pass  # the transaction's own section, as `manage` takes it: no wait
+        waiting = threading.Thread(target=another_thread)
+        waiting.start()
+        waiting.join()
+    assert elsewhere == ["waited"]
+    another_thread()
+    assert elsewhere == ["waited", "took it"], "released once the transaction ends"
+    # Outside a transaction a second acquisition on one thread still waits, as before.
+    with (
+        stills.media_path_lifecycle_lock(source),
+        pytest.raises(TimeoutError),
+        stills.media_path_lifecycle_lock(source, timeout=0.05),
+    ):
+        pass
 
 
 def test_a_lifecycle_lock_that_times_out_names_no_lock_path(

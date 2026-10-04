@@ -7,9 +7,10 @@ after the change's GTK ``prepare`` and before anything is moved, deleted or
 saved, the real thing runs on copies:
 
 1. the real scanner scans the library as the change would leave it
-   (`library.scan.scan`; for a removal, with the files it deletes excluded by
-   file identity, so a path reaching one through a linked folder is gone
-   too);
+   (`library.scan.scan`; for a removal, with the entries it deletes excluded,
+   `library.pairing.Exclusion`: matched by what a path reaches, so a path
+   reaching one through a linked folder or a bind mount is gone too, and so
+   is a capture the removal reserves that isn't there yet);
 2. the real cleanup runs on copies of the stores (a removal clears the
    pairings, playlist entries and star of what it deletes);
 3. the compiler's own rule judges every playlist before and after
@@ -24,9 +25,10 @@ what it would find; the checks pages make as the gesture happens are early
 feedback only.
 
 A dry run writes nothing: the scan, the adoption manifest it reads and every
-still convention only read, and the copies are never saved. When a removal
-then commits, the library it scanned is the post-change library, adopted as
-it is, without another scan.
+still convention only read, and the copies are never saved. It decides
+whether a change may be made, and only that: pretending is not doing, so what
+it scanned is never published. What is published after a removal comes from
+a real scan once the removal has committed (`session.RemovalPlan.run`).
 """
 
 from __future__ import annotations

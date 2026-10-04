@@ -212,6 +212,9 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
         nonlocal scans
         scans += 1
         resolved = tuple(roots or ())
+        if scans > 1:
+            # The removal's own scan, after its commit, on its worker.
+            return Library(resolved, ())
         first_started.set()
         assert release_first.wait(10)
         first_returned.set()
@@ -238,8 +241,10 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
         # without racing the held scanner's own deadline.
         spin_until(lambda: removed == [True], timeout=10)
         assert item.path in application._removed_item_paths
-        # The committed delete installs and redraws the library its dry run
-        # found (round 3); this is not the held pre-delete scan landing.
+        # The committed delete installs and redraws the library its own scan
+        # found after the commit (round 4); this is not the held pre-delete
+        # scan landing.
+        assert scans == 2
         assert session.library.items == ()
         assert window.libraries == [(root,)]
         window.libraries.clear()
@@ -248,7 +253,7 @@ def test_pre_delete_scan_cannot_land_or_clear_the_removal_taboo(
         assert first_returned.wait(10)
         settle(0.3)
         assert window.libraries == [], "the pre-delete scan never lands"
-        assert scans == 1, "and nothing scans again: the dry run's library is the new one"
+        assert scans == 2, "and nothing else scans: the removal's scan is the new library"
         assert session.library.items == ()
         assert item.path in application._removed_item_paths
     finally:

@@ -13,10 +13,10 @@ import os
 import random
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from wall_in_one import config, file_io
 from wall_in_one.library import (
@@ -157,9 +157,10 @@ class RemovalResult:
     cancellation_failures: tuple[str, ...] = ()
     cleanups: tuple[RemovalCleanup, ...] = ()
     repaired_faults: tuple[tuple[str, str], ...] = ()
-    #: The library as the removal leaves it, as the dry run before it scanned
-    #: (`wall_in_one.dry_run.removal`); the post-removal library once it commits.
-    library_after: Library | None = None
+    #: What a real scan found once the removal committed, on the same worker
+    #: (`RemovalPlan.run`): the only library a removal hands back. None when
+    #: nothing committed, or that scan failed.
+    rescanned: Library | None = None
 
 
 def _physically_removed_adoption(
@@ -328,16 +329,85 @@ class RemovalPlan:
                 error_message=blocked[1],
                 repaired_faults=repaired_faults,
             )
-        # Still before anything is touched: the removal for pretend. A refusal
-        # (a playlist would break) or a dry run that can't run raises, and the
-        # task fails with nothing written.
-        library_after = _dry_run_removal(
-            self,
-            adopted_authority=adopted_authority,
-            favourite_store=favourite_store,
-            pairing_store=pairing_store,
-            playlist_store=playlist_store,
-        )
+        # The source's lifecycle locks, from before the dry run to after the
+        # commit: what the dry run excludes is what the commit deletes, and no
+        # capture of this source can publish into a path it reserved in
+        # between (a capture rendering waits, then finds its source gone and
+        # discards its output). The same locks, in the same order, as the
+        # physical step in `manage` takes; there this thread holds them
+        # already, so those sections just run (`stills.held_for_removal`).
+        # No deadlock with a StillMaker batch: a capture takes only its own
+        # source's lock, last, around a short commit, and takes nothing while
+        # holding it; a provider download takes its staged file's lock, then
+        # the media path's, never a source's. So nothing waits for this thread
+        # while holding what this thread waits for. A capture of this source
+        # waits at most `stills.LIFECYCLE_LOCK_TIMEOUT_SECONDS`; timed out, it
+        # fails without publishing, which is right for a source being removed.
+        locks = contextlib.ExitStack()
+        try:
+            locks.enter_context(stills.held_for_removal(self.item))
+        except OSError as error:
+            locks.close()
+            kind, message = removal_lock_refusal(self.item, error)
+            return RemovalResult(
+                item=self.item,
+                trash=self.trash,
+                committed=False,
+                error_kind=kind,
+                error_message=message,
+                repaired_faults=repaired_faults,
+            )
+        with locks:
+            # Still before anything is touched: the removal for pretend. A
+            # refusal (a playlist would break) or a dry run that can't run
+            # raises, and the task fails with nothing written. It decides
+            # whether, and only that: what is published after comes from the
+            # scan below, of what the commit really left.
+            _dry_run_removal(
+                self,
+                adopted_authority=adopted_authority,
+                favourite_store=favourite_store,
+                pairing_store=pairing_store,
+                playlist_store=playlist_store,
+            )
+            result = self._commit(
+                adopted_authority=adopted_authority,
+                favourite_store=favourite_store,
+                pairing_store=pairing_store,
+                playlist_store=playlist_store,
+                removal_store=removal_store,
+                repaired_faults=repaired_faults,
+            )
+        if not result.committed:
+            return result
+        return replace(result, rescanned=self._rescan(pairing_store))
+
+    def _rescan(self, pairing_store: pairings.Store) -> Library | None:
+        """The library as the committed removal left it, by a real scan; None if that fails."""
+        try:
+            if self.scanner is not None:
+                return self.scanner(self.settings.roots)
+            include_workshop = self.settings.scan_workshop and bool(self.settings.roots)
+            return scan.scan(
+                self.settings.roots,
+                dict(pairing_store.worker_copy(rebase=True).records),
+                include_workshop=include_workshop,
+                workshop_roots=workshop.steam_roots() if include_workshop else (),
+            )
+        except Exception:  # the app scans again instead (`refresh_library`)
+            return None
+
+    def _commit(
+        self,
+        *,
+        adopted_authority: adopted.Authority | None,
+        favourite_store: favourites.Store,
+        pairing_store: pairings.Store,
+        playlist_store: playlists.Store,
+        removal_store: removals.Store,
+        repaired_faults: tuple[tuple[str, str], ...],
+    ) -> RemovalResult:
+        """Journal, physical step and cleanup, as checked; under the source's locks."""
         snapshot = Session(
             self.settings,
             favourite_store=favourite_store,
@@ -487,7 +557,6 @@ class RemovalPlan:
                     cleanup_failures=cleanup_failures,
                     cleanups=tuple(cleanups),
                     repaired_faults=repaired_faults,
-                    library_after=library_after,
                 )
 
             cleanup_failures = snapshot.commit_removal(
@@ -517,7 +586,6 @@ class RemovalPlan:
                 cleanup_failures=cleanup_failures,
                 cleanups=tuple(cleanups),
                 repaired_faults=repaired_faults,
-                library_after=library_after,
             )
         finally:
             try:
@@ -527,6 +595,21 @@ class RemovalPlan:
                 snapshot.shutdown()
 
 
+#: Why a removal waited in vain for its file's lifecycle locks (`removal_lock_refusal`).
+REMOVAL_BUSY: Final = "it is being downloaded or captured right now; try again in a moment"
+
+
+def removal_lock_refusal(item: MediaItem, error: OSError) -> tuple[str, str]:
+    """``(kind, sentence)`` for a removal that couldn't take ``item``'s lifecycle locks.
+
+    A person reads the sentence: it says what is going on with the file, and
+    never names the lock (its path is in the log, `stills._flocked`).
+    """
+    if isinstance(error, stills.LifecycleBusy):
+        return "busy", f"{item.name} was not removed: {REMOVAL_BUSY}."
+    return "local-io", f"{item.name} was not removed: {error}"
+
+
 def _dry_run_removal(
     plan: RemovalPlan,
     *,
@@ -534,8 +617,12 @@ def _dry_run_removal(
     favourite_store: favourites.Store,
     pairing_store: pairings.Store,
     playlist_store: playlists.Store,
-) -> Library:
-    """`wall_in_one.dry_run.removal` for ``plan``; refuses by raising, as a prepare does."""
+) -> None:
+    """`wall_in_one.dry_run.removal` for ``plan``; refuses by raising, as a prepare does.
+
+    It decides whether the removal may go ahead, and nothing else: the
+    library it scanned for pretend is never handed on.
+    """
     from wall_in_one import dry_run, runtime_config  # dry_run builds Sessions
 
     if plan.uses is None:  # pragma: no cover - prepare_removal_plan always sets it
@@ -562,7 +649,6 @@ def _dry_run_removal(
         raise runtime_config.PlaybackGuardError(
             f"{plan.item.name} was not removed: {runtime_config.listed(verdict.refusals)}."
         )
-    return verdict.library
 
 
 @dataclass(frozen=True, slots=True)
@@ -1029,15 +1115,16 @@ class Session:
             scanner=self._scanner,
         )
 
-    def check_removal(self, item: MediaItem) -> Library:
+    def check_removal(self, item: MediaItem) -> None:
         """The dry run a `RemovalPlan` runs on its worker, synchronously, for the headless service.
 
         That service removes without an adopted capture's authority, so none
         is excluded. Raises `runtime_config.PlaybackGuardError` when a playlist
-        would break; returns the library the removal would leave.
+        would break. Its caller holds `stills.held_for_removal` across this
+        and the commit, as `RemovalPlan.run` does.
         """
         plan = self.prepare_removal_plan(item, trash=False)
-        return _dry_run_removal(
+        _dry_run_removal(
             plan,
             adopted_authority=None,
             favourite_store=plan.favourite_store.worker_copy(rebase=True),

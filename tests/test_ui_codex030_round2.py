@@ -160,7 +160,7 @@ def _allowed_removal_publishes_no_deleted_still(
     dawn: Path,
 ) -> None:
     """Add ``dawn`` to the playlist, remove ``forest``: allowed, and the interim
-    publication (the dry run's library, adopted without a rescan) names no deleted file."""
+    publication (of the removal's own scan after its commit) names no deleted file."""
     session = application.session
     still = forest.path
     session.playlists.add(pid, dawn)
@@ -185,8 +185,8 @@ def _allowed_removal_publishes_no_deleted_still(
     assert str(still) not in document, "no runtime.toml names the deleted still"
     assert str(dawn) in document
     kept = session.library.find(video)
-    assert kept is not None and kept.paired_still is None, "the dry run's library knows"
-    assert rescans == [], "a removal that commits in full is not scanned again (round 3)"
+    assert kept is not None and kept.paired_still is None, "the scan after the commit knows"
+    assert rescans == [], "that scan was the removal's own: no refresh follows a full commit"
     assert _builds(application)
 
 

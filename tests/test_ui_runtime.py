@@ -36,6 +36,7 @@ from wall_in_one.library import (  # noqa: E402
     pairing,
     pairings,
     playlists,
+    scan,
     schedules,
     state_file,
 )
@@ -771,8 +772,8 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
                 f"scan_pending={application._runtime_library_scan_pending}, "
                 f"actor_active={application._authoring_active}"
             ) from error
-        # The stale compile never reloads; what is published at once is the library the
-        # removal's dry run found (round 3), with no rescan, naming no deleted file.
+        # The stale compile never reloads; what is published is the library the removal's
+        # own scan found after the commit (round 4), naming no deleted file.
         assert reloads.count("reload") == 1
         assert all(str(source) not in document for document in reloaded)
         assert str(kept) in reloaded[0]
@@ -849,7 +850,7 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
         release_reload.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
         spin_until(lambda: removed == [True] and len(source_seen_during_reload) == 2)
-        # Then the dry run's library is published at once, with no rescan (round 3).
+        # Then the library the removal's own scan found after the commit (round 4).
         assert source_seen_during_reload == [True, False]
         assert refreshes == []
         assert not source.exists()
@@ -930,8 +931,8 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
 
         release_flush.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
-        # The post-delete tail is the dry run's library, installed as a finished
-        # scan is, and its publication (round 3): graceful quit waits for both.
+        # The post-delete tail is the removal's own scan after the commit, installed
+        # as a finished scan is, and its publication (round 4): quit waits for both.
         spin_until(lambda: removed == [True] and quit_calls == [True])
         assert not source.exists()
         assert refreshes == []
@@ -1062,11 +1063,11 @@ def test_explicit_quit_drains_committed_removal_scan_and_reconciliation(
         _close(application)
 
 
-def test_explicit_quit_drains_a_fully_committed_removal_without_a_scan(
+def test_explicit_quit_drains_a_fully_committed_removals_own_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Committed in full, a removal's dry-run library is final: quit waits for its publication."""
+    """Committed in full, a removal is scanned on its worker after the commit; quit drains it."""
     application = _application(tmp_path, monkeypatch)
     window = FakeWindow()
     _attach(application, window)
@@ -1097,15 +1098,31 @@ def test_explicit_quit_drains_a_fully_committed_removal_without_a_scan(
     monkeypatch.setattr(application, "refresh_runtime_status_async", lambda: True)
     monkeypatch.setattr(client, "send_runtime", runtime)
     monkeypatch.setattr(Application, "quit", lambda _self: quits.append(True))
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    real_scan = scan.scan
+
+    def held_scan(*arguments: Any, **keywords: Any) -> Library:
+        if not source.exists():  # the removal's own scan, after its commit
+            scan_started.set()
+            assert release_scan.wait(10)
+        return real_scan(*arguments, **keywords)
+
+    monkeypatch.setattr(scan, "scan", held_scan)
     try:
         assert application.remove_item_async(
             item,
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
+        assert scan_started.wait(10), "the removal scans after its commit"
         application.request_quit()
+        assert removed == [] and quits == [], "quit waits for that scan, and what follows it"
+        assert "reload" not in reloads, "nothing new is published until it lands"
+
+        release_scan.set()
         spin_until(lambda: removed == [True] and quits == [True], timeout=10)
-        assert plans == [], "no scan after a removal that committed in full"
+        assert plans == [], "that scan was the removal's own; no refresh followed"
         assert "reload" in reloads, "its library was published before quitting"
         assert not application._authoring_active
         assert application._authoring_lifetime_holds == 0
@@ -1725,7 +1742,7 @@ def test_committed_removal_installs_its_dry_runs_library_without_a_refresh(
             finish=lambda result: removed.append(result.committed),
         )
         spin_until(lambda: removed == [True])
-        assert refreshes == [], "the dry run's library is the post-removal one (round 3)"
+        assert refreshes == [], "its own scan after the commit is the library (round 4)"
         assert application.session.library.find(item.path) is None
         assert all(
             candidate.path != item.path for candidate in application.session.library.still_inventory

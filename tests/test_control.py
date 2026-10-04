@@ -7,13 +7,14 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import types
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -49,7 +50,7 @@ from wall_in_one.control.server import (
     render_search,
     resolve,
 )
-from wall_in_one.library import favourites, manage, pairing, pairings, removals
+from wall_in_one.library import favourites, manage, pairing, pairings, removals, stills
 from wall_in_one.library.filter import Kinds, Query
 from wall_in_one.library.manage import ManageError
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
@@ -1789,6 +1790,66 @@ def test_legacy_remove_uses_the_prepared_root_after_a_same_inode_root_swap(
     assert path.read_bytes().startswith(b"\xff\xd8\xff")
     assert path.with_name(path.name + pairing.SIDECAR_SUFFIX).read_bytes() == b"replacement pairing"
     assert app.session.removal_journal.records == ()
+
+
+def test_legacy_remove_is_checked_and_committed_under_the_sources_locks(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headless removal shares `RemovalPlan.run`'s lock discipline."""
+    from tests.test_dry_run import _held_elsewhere
+    from wall_in_one import dry_run
+
+    path = _downloaded(sandbox)
+    item = _on_disk(path, Ownership.MANAGED)
+    commands, _app = _commands(sandbox, [item])
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.05)
+    during: list[bool] = []
+    check = dry_run.removal
+
+    def checked(*arguments: Any, **keywords: Any) -> dry_run.Verdict:
+        during.append(_held_elsewhere(item))
+        return check(*arguments, **keywords)
+
+    monkeypatch.setattr(dry_run, "removal", checked)
+    response = _immediate(commands.remove_wallpaper(str(path)))
+
+    assert response.ok, response.message
+    assert during == [True], "held while it was checked"
+    assert not path.exists()
+    assert not _held_elsewhere(item), "and let go once committed"
+
+
+def test_legacy_remove_that_cant_take_its_locks_says_so_without_naming_them(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_dry_run import BUSY
+
+    path = _downloaded(sandbox)
+    item = _on_disk(path, Ownership.MANAGED)
+    commands, _app = _commands(sandbox, [item])
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.05)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with stills.source_lifecycle_lock(item):
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert holding.wait(5)
+        response = _immediate(commands.remove_wallpaper(str(path)))
+    finally:
+        release.set()
+        holder.join()
+
+    assert not response.ok and response.kind == "busy"
+    assert response.message == f"{item.name} was not removed: {BUSY}."
+    assert path.exists()
 
 
 def test_legacy_remove_retains_the_journal_when_a_replacement_cannot_be_restored(

@@ -297,8 +297,15 @@ def _walk(
     budget: list[int],
     skipped: list[str],
     cancelled: Callable[[], bool] | None = None,
+    gone: set[Path] | None = None,
 ) -> Iterable[Path]:
-    """Yield candidate files under ``root``, depth-first and bounded."""
+    """Yield candidate files under ``root``, depth-first and bounded.
+
+    In a dry run (`pairing.excluding`), a file it treats as deleted is
+    skipped before it counts against the budget, as the walk after the
+    deletion never meets it, and its path goes into ``gone``.
+    """
+    exclusion = pairing.active_exclusion()
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
         if cancelled is not None and cancelled():
@@ -312,6 +319,8 @@ def _walk(
         for entry in entries:
             if cancelled is not None and cancelled():
                 raise ScanCancelledError
+            if exclusion is not None and _deleted(entry, exclusion, gone):
+                continue
             budget[0] -= 1
             if budget[0] <= 0:
                 skipped.append(f"{root}: stopped after {MAX_ENTRIES_EXAMINED} entries")
@@ -328,6 +337,33 @@ def _walk(
                     yield Path(entry.path)
             except OSError as error:
                 skipped.append(f"{entry.path}: {error.strerror or error}")
+
+
+def _deleted(entry: os.DirEntry[str], exclusion: pairing.Exclusion, gone: set[Path] | None) -> bool:
+    """Whether the walk's ``entry`` is a file ``exclusion`` treats as deleted."""
+    try:
+        if not entry.is_file(follow_symlinks=False):
+            return False
+        status = entry.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    path = Path(entry.path)
+    if not exclusion.covers(path, status):
+        return False
+    if gone is not None:
+        gone.add(path)
+    return True
+
+
+def _excluded_now(path: Path) -> bool:
+    """Whether a dry run treats the file at ``path`` as deleted (`pairing.is_excluded`)."""
+    if pairing.active_exclusion() is None:
+        return False
+    try:
+        status = path.stat()
+    except OSError, ValueError:
+        return False
+    return pairing.is_excluded(path, status)
 
 
 def workshop_items(
@@ -413,12 +449,15 @@ def scan(
     a second time somewhere else would recompute the defaults from disk and
     overwrite whatever this pass decided.
 
-    ``excluded`` are files to scan as if they were already deleted: a dry
+    ``excluded`` are entries to scan as if they were already deleted: a dry
     run of a removal (`wall_in_one.dry_run`). Every existence test the scan
-    makes honors them (the walk, and `library.pairing.present` for every
-    still convention and chosen still), by file identity
-    (`pairing.Exclusion`), so a path reaching a deleted file through a linked
-    folder is gone too. Nothing here writes, so a dry run changes nothing.
+    makes honors them: the walk (before an entry counts against its budget,
+    as the walk after the deletion never meets it), Workshop discovery, and
+    `library.pairing.present` for every still convention and chosen still.
+    They are matched by what a path reaches (`pairing.Exclusion`), so a path
+    reaching a deleted entry through a linked folder or a bind mount is gone
+    too, and a deleted path is never found again under another branch of
+    the scan. Nothing here writes, so a dry run changes nothing.
     """
     with pairing.excluding(excluded):
         return _scan(
@@ -475,7 +514,7 @@ def _scan(
         if root.is_symlink() or not root.is_dir():
             skipped.append(f"{root}: not a directory")
             continue
-        for path in _walk(root, budget, skipped, cancelled):
+        for path in _walk(root, budget, skipped, cancelled, gone=seen):
             if len(items) >= MAX_ITEMS:
                 skipped.append(f"{root}: stopped at {MAX_ITEMS} wallpapers")
                 break
@@ -490,7 +529,8 @@ def _scan(
             except OSError, ValueError:
                 continue
             if pairing.is_excluded(path, info):
-                continue  # a dry run: as if already deleted, wherever it is reached from
+                seen.add(path)  # a dry run: as if already deleted, wherever it is reached from
+                continue
             seen.add(path)
             observed_generations[path] = (generation, info.st_uid, info.st_nlink)
 
@@ -532,21 +572,24 @@ def _scan(
         ):
             if cancelled is not None and cancelled():
                 raise ScanCancelledError
-            if item.path not in seen:
-                seen.add(item.path)
-                items.append(item)
-                if item.kind is Kind.VIDEO:
-                    try:
-                        info = item.path.stat()
-                        generation = file_io.file_fingerprint(info)
-                    except OSError, ValueError:
-                        pass
-                    else:
-                        observed_generations[item.path] = (
-                            generation,
-                            info.st_uid,
-                            info.st_nlink,
-                        )
+            if item.path in seen:
+                continue
+            seen.add(item.path)
+            if item.kind is Kind.VIDEO and _excluded_now(item.path):
+                continue  # a dry run: a deleted file under Steam's spelling is gone too
+            items.append(item)
+            if item.kind is Kind.VIDEO:
+                try:
+                    info = item.path.stat()
+                    generation = file_io.file_fingerprint(info)
+                except OSError, ValueError:
+                    pass
+                else:
+                    observed_generations[item.path] = (
+                        generation,
+                        info.st_uid,
+                        info.st_nlink,
+                    )
 
     items.sort(key=lambda item: (item.path.parent.as_posix(), item.name.lower()))
     still_inventory = tuple(item for item in items if item.kind is Kind.STILL)

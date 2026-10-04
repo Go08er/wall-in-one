@@ -18,10 +18,16 @@ must stay allowed, is in ``test_ui_codex030_round3``; those fail on 7d5665c.
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
+import logging
 import os
 import stat
+import subprocess
+import sys
+import threading
+import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,7 +37,7 @@ import pytest
 
 from tests.test_adopted_removal import _case as _adoption_case
 from wall_in_one import config, dry_run, runtime_config
-from wall_in_one.library import adopted, pairing, playlists, workshop
+from wall_in_one.library import adopted, pairing, playlists, scan, stills, workshop
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.pairings import Pairing
 from wall_in_one.session import Session
@@ -65,30 +71,52 @@ def _video(path: Path) -> MediaItem:
 # -- the application's own state, over the profile's files -----------------------------------
 
 
-@pytest.fixture
-def sessions(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., Session]]:
-    made: list[Session] = []
+class _Patcher:
+    """`monkeypatch.setattr` for a child process, which simply exits after."""
 
-    def make(roots: tuple[Path, ...], steam: Path | None = None) -> Session:
-        """A Session over the profile's stores (as the app's), really scanned."""
+    def setattr(self, target: object, name: str, value: object) -> None:
+        setattr(target, name, value)
+
+
+class Harness:
+    """The application's state over the profile's files: a Session, really scanned.
+
+    `test_ui_codex030_round4` runs the same scenarios through the real
+    application with its own harness.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch | _Patcher) -> None:
+        self.monkeypatch = monkeypatch
+        self.made: list[Session] = []
+
+    def __call__(self, roots: tuple[Path, ...], steam: Path | None = None) -> Session:
         if steam is not None:
-            monkeypatch.setattr(workshop, "steam_roots", lambda *_a, **_k: (steam,))
+            self.monkeypatch.setattr(workshop, "steam_roots", lambda *_a, **_k: (steam,))
         settings = config.Settings(roots=roots, scan_workshop=steam is not None).validated()
         session = Session(settings, owns_playback=False)
-        made.append(session)
+        self.made.append(session)
         session.refresh(mutate_removals=False)
         return session
 
-    yield make
-    for session in made:
-        session.shutdown()
+    def rescan(self, session: Session, roots: tuple[Path, ...]) -> None:
+        """The library folders changed to ``roots``, and scanned."""
+        session.update_settings(
+            replace(session.settings, roots=roots).validated(), rescan_library=False
+        )
+        session.refresh(mutate_removals=False)
+
+    def close(self) -> None:
+        for session in self.made:
+            session.shutdown()
 
 
-def _rescan(session: Session, roots: tuple[Path, ...]) -> None:
-    session.update_settings(
-        replace(session.settings, roots=roots).validated(), rescan_library=False
-    )
-    session.refresh(mutate_removals=False)
+@pytest.fixture
+def sessions(monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness]:
+    harness = Harness(monkeypatch)
+    try:
+        yield harness
+    finally:
+        harness.close()
 
 
 def _scheduled(session: Session, name: str, sources: list[Path]) -> playlists.Playlist:
@@ -145,7 +173,7 @@ def _real_outcome(settings: config.Settings) -> Outcome:
 
 
 def _remove_for_real(
-    session: Session, path: Path, monkeypatch: pytest.MonkeyPatch
+    session: Session, path: Path, monkeypatch: pytest.MonkeyPatch | _Patcher
 ) -> tuple[dry_run.Verdict, Outcome]:
     """Remove ``path`` through the real removal, refused or not; its dry run, and the outcome.
 
@@ -167,8 +195,10 @@ def _remove_for_real(
     assert result.committed, result.error_message
     assert not result.error_message and not result.cleanup_failures
     assert len(seen) == 1
-    assert result.library_after == seen[0].library, "what the application adopts"
-    return seen[0], _real_outcome(session.settings)
+    outcome = _real_outcome(session.settings)
+    # What the application installs: the removal's own scan, after the commit.
+    assert result.rescanned == outcome.library
+    return seen[0], outcome
 
 
 def _change_sources_for_real(
@@ -199,7 +229,7 @@ class Scenario:
     words: tuple[str, ...] = ()
 
 
-def _tree(sessions: Callable[..., Session], tmp_path: Path) -> tuple[Session, dict[str, Path]]:
+def _tree(sessions: Harness, tmp_path: Path) -> tuple[Session, dict[str, Path]]:
     """Round 2's: two folders, a Steam library, and every way a wallpaper gets its still."""
     a, b, steam = tmp_path / "lib" / "A", tmp_path / "lib" / "B", tmp_path / "steam"
     paths = {
@@ -238,7 +268,7 @@ def _tree(sessions: Callable[..., Session], tmp_path: Path) -> tuple[Session, di
 
 
 def _tree_change(change: str) -> Callable[..., Scenario]:
-    def build(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+    def build(sessions: Harness, tmp_path: Path) -> Scenario:
         session, paths = _tree(sessions, tmp_path)
         a, b = session.settings.roots
         if change == "drop-workshop":
@@ -270,7 +300,7 @@ def _tree_change(change: str) -> Callable[..., Scenario]:
 def _q1a(sibling: bool) -> Callable[..., Scenario]:
     """Round 2, Q-1 A: deleting the image a video plays through."""
 
-    def build(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+    def build(sessions: Harness, tmp_path: Path) -> Scenario:
         root = tmp_path / "lib" / "A"
         video = _file(root / "rain.mp4")
         still = _file(root / "forest.png")
@@ -295,7 +325,7 @@ def _q1a(sibling: bool) -> Callable[..., Scenario]:
     return build
 
 
-def _q1b(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+def _q1b(sessions: Harness, tmp_path: Path) -> Scenario:
     """Round 2, Q-1 B: scene C stays in the Workshop; its capture is under folder A."""
     a, b, steam = tmp_path / "lib" / "A", tmp_path / "lib" / "B", tmp_path / "steam"
     _file(b / "dawn.png")
@@ -314,7 +344,7 @@ def _q1b(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
     )
 
 
-def _chosen_outside(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+def _chosen_outside(sessions: Harness, tmp_path: Path) -> Scenario:
     """Allowed: the scan attaches a chosen still wherever it is."""
     a, b = tmp_path / "lib" / "A", tmp_path / "lib" / "B"
     still = _file(a / "forest.png")
@@ -326,7 +356,7 @@ def _chosen_outside(sessions: Callable[..., Session], tmp_path: Path) -> Scenari
     return Scenario(session, replace(session.settings, roots=(b,)), refused=False)
 
 
-def _alternate(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+def _alternate(sessions: Harness, tmp_path: Path) -> Scenario:
     """Allowed: the playlist has another wallpaper to play."""
     root = tmp_path / "lib" / "A"
     video = _file(root / "rain.mp4")
@@ -339,7 +369,7 @@ def _alternate(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
     return Scenario(session, still, refused=False)
 
 
-def _r1(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+def _r1(sessions: Harness, tmp_path: Path) -> Scenario:
     """Codex R-1: the adoption's own folder replaced by the folder above it."""
     case = _adoption_case(tmp_path / "lib", managed=False)
     case.session.shutdown()
@@ -358,7 +388,7 @@ def _r1(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
     )
 
 
-def _r2(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+def _r2(sessions: Harness, tmp_path: Path) -> Scenario:
     """Codex R-2: removing the source whose adopted capture another video plays through."""
     case = _adoption_case(tmp_path / "lib", managed=False)
     case.session.shutdown()
@@ -367,7 +397,7 @@ def _r2(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
     session = sessions((case.root.parent,))
     assert session.library.find(case.capture) is not None
     session.pairings.choose_still(_video(other), case.capture)
-    _rescan(session, (case.root,))
+    sessions.rescan(session, (case.root,))
     assert session.library.adopted_stills == ((case.source, case.capture),)
     kept = session.library.find(other)
     assert kept is not None and kept.paired_still == case.capture
@@ -386,7 +416,7 @@ def _r2(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
 def _r3(alternate: bool) -> Callable[..., Scenario]:
     """Codex R-3: the real file removed, its alias through a linked folder chosen."""
 
-    def build(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+    def build(sessions: Harness, tmp_path: Path) -> Scenario:
         walls = tmp_path / "lib" / "real" / "walls"
         rain = _file(walls / "rain.mp4")
         forest = _file(walls / "forest.png")
@@ -414,7 +444,7 @@ def _r3(alternate: bool) -> Callable[..., Scenario]:
     return build
 
 
-def _hard_link(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
+def _hard_link(sessions: Harness, tmp_path: Path) -> Scenario:
     """A file's other hard link stays when one name goes; a symlink to that name goes."""
     root = tmp_path / "lib" / "A"
     a = _file(root / "a.png")
@@ -427,6 +457,39 @@ def _hard_link(sessions: Callable[..., Session], tmp_path: Path) -> Scenario:
     session.pairings.choose_still(_video(video), b)
     session.refresh(mutate_removals=False)
     _scheduled(session, "Linked", [video])
+    return Scenario(session, a, refused=False)
+
+
+def _s2(sessions: Harness, tmp_path: Path) -> Scenario:
+    """Codex S-2: a library folder that is a Workshop item's own folder, Workshop scanning on.
+
+    The root walk finds the video first, as the user's own; Workshop
+    discovery finds the same path again, and must not bring it back.
+    """
+    steam = tmp_path / "steam"
+    installed = steam / "steamapps" / "workshop" / "content" / workshop.APP_ID / "123"
+    installed.mkdir(parents=True)
+    (installed / "project.json").write_text(
+        json.dumps({"type": "video", "file": "clip.mp4", "title": "Clip"}), encoding="utf-8"
+    )
+    clip = _file(installed / "clip.mp4")
+    _file(installed / "clip-still.png")
+    dawn = _file(tmp_path / "lib" / "A" / "dawn.png")
+    session = sessions((installed, dawn.parent), steam)
+    found = session.library.find(clip)
+    assert found is not None and found.provider == "local", "the root walk wins"
+    _scheduled(session, "Evening", [clip, dawn])
+    return Scenario(session, clip, refused=False)
+
+
+def _s4(sessions: Harness, tmp_path: Path) -> Scenario:
+    """Codex S-4: what the removal deletes doesn't count against the walk's budget."""
+    root = tmp_path / "lib" / "A"
+    a, b, _c = (_file(root / name) for name in ("a.png", "b.png", "c.png"))
+    sessions.monkeypatch.setattr(scan, "MAX_ENTRIES_EXAMINED", 3)
+    session = sessions((root,))
+    assert {item.path for item in session.library.items} == {a, b}, "c is past the budget"
+    _scheduled(session, "Evening", [b])
     return Scenario(session, a, refused=False)
 
 
@@ -456,13 +519,15 @@ SCENARIOS: dict[str, Callable[..., Scenario]] = {
     "r3-linked-ancestor-alias": _r3(alternate=False),
     "r3-alias-with-an-alternate": _r3(alternate=True),
     "hard-link": _hard_link,
+    "s2-workshop-overlap": _s2,
+    "s4-walk-budget": _s4,
 }
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
 def test_the_dry_run_is_what_the_change_really_leaves(
     name: str,
-    sessions: Callable[..., Session],
+    sessions: Harness,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -489,7 +554,7 @@ def test_the_dry_run_is_what_the_change_really_leaves(
 
 
 def test_a_removal_names_no_deleted_file_in_what_it_leaves(
-    sessions: Callable[..., Session], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    sessions: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R-3's publication: allowed, and no spelling of the deleted still is left anywhere."""
     scenario = _r3(alternate=True)(sessions, tmp_path)
@@ -502,6 +567,90 @@ def test_a_removal_names_no_deleted_file_in_what_it_leaves(
         assert item.paired_still not in {forest, alias}
     assert str(forest) not in verdict.compiled
     assert str(alias) not in verdict.compiled
+
+
+# -- the source's locks, from the dry run through the commit ---------------------------------
+
+#: What a person reads when a removal can't take its file's lifecycle locks in time.
+BUSY = "it is being downloaded or captured right now; try again in a moment"
+
+
+def _held_elsewhere(item: MediaItem) -> bool:
+    """Whether another thread finds ``item``'s source lifecycle lock taken right now."""
+    found: list[bool] = []
+
+    def probe() -> None:
+        try:
+            with stills.source_lifecycle_lock(item):
+                found.append(False)
+        except stills.LifecycleBusy:
+            found.append(True)
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join()
+    return found == [True]
+
+
+def test_a_removal_is_checked_and_committed_under_its_sources_locks(
+    sessions: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex S-1's boundary: nothing can publish for the source between its dry run and commit."""
+    scenario = _alternate(sessions, tmp_path)
+    assert isinstance(scenario.change, Path)
+    item = scenario.session.library.find(scenario.change)
+    assert item is not None
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.05)
+    during: list[bool] = []
+    check = dry_run.removal
+
+    def checked(*arguments: Any, **keywords: Any) -> dry_run.Verdict:
+        during.append(_held_elsewhere(item))
+        return check(*arguments, **keywords)
+
+    monkeypatch.setattr(dry_run, "removal", checked)
+    result = scenario.session.prepare_removal_plan(item, trash=True).run()
+
+    assert result.committed, result.error_message
+    assert during == [True], "held while it was checked"
+    assert not _held_elsewhere(item), "and let go once committed"
+
+
+def test_a_removal_that_cant_take_its_locks_says_so_without_naming_them(
+    sessions: Harness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A capture or download holding the file: refused in words; the lock's path is logged."""
+    scenario = _alternate(sessions, tmp_path)
+    assert isinstance(scenario.change, Path)
+    item = scenario.session.library.find(scenario.change)
+    assert item is not None
+    monkeypatch.setattr(stills, "LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.05)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with stills.source_lifecycle_lock(item):
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert holding.wait(5)
+        with caplog.at_level(logging.WARNING, logger=stills.__name__):
+            result = scenario.session.prepare_removal_plan(item, trash=True).run()
+    finally:
+        release.set()
+        holder.join()
+
+    assert not result.committed and scenario.change.exists()
+    assert result.error_kind == "busy"
+    assert result.error_message == f"forest was not removed: {BUSY}."
+    assert ".lock" not in result.error_message
+    assert ".lock" in caplog.text, "the lock's path is in the log"
 
 
 # -- the exclusion ---------------------------------------------------------------------------
@@ -528,6 +677,172 @@ def test_the_exclusion_is_by_identity_whatever_the_spelling(tmp_path: Path) -> N
     assert pairing.present(alias), "only inside the dry run"
 
 
+def test_a_reserved_entry_is_gone_whatever_comes_to_occupy_it(tmp_path: Path) -> None:
+    """Codex S-1: a capture the removal reserves counts as deleted before it exists."""
+    video = _file(tmp_path / "lib" / "A" / "rain.mp4")
+    capture = pairing.still_directory(tmp_path / "lib" / "A") / "rain-capture.png"
+    capture.parent.mkdir(parents=True)
+    gone = pairing.Exclusion.of([video, capture])
+    assert gone, "the capture's directory is there, so its entry is known"
+    _file(capture)  # published after the snapshot
+    assert gone.removes(capture)
+    with pairing.excluding(gone):
+        assert not pairing.present(capture)
+    assert not gone.removes(_file(capture.with_name("another.png")))
+
+
+#: Run in a child: a fresh user and mount namespace, so a bind mount is private to it and
+#: goes with it. Prints ``SKIP: ...`` where namespaces aren't allowed (a build sandbox).
+_IN_A_NAMESPACE = """
+import os, sys
+uid, gid = os.getuid(), os.getgid()
+try:
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+    with open("/proc/self/setgroups", "w") as handle:
+        handle.write("deny")
+    with open("/proc/self/uid_map", "w") as handle:
+        handle.write(f"0 {uid} 1")
+    with open("/proc/self/gid_map", "w") as handle:
+        handle.write(f"0 {gid} 1")
+except OSError as error:
+    print(f"SKIP: no user and mount namespace here: {error}")
+    sys.exit(0)
+from tests.test_dry_run import _bind_alias_child
+_bind_alias_child()
+"""
+
+
+def _bind_mount(source: Path, target: Path) -> None:
+    """``mount --bind source target``, with ``/`` made private first (nothing propagates out)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    ms_bind, ms_rec, ms_private = 4096, 16384, 1 << 18
+    if libc.mount(None, b"/", None, ms_rec | ms_private, None) != 0:
+        raise OSError(ctypes.get_errno(), "could not make / private")
+    if libc.mount(os.fsencode(source), os.fsencode(target), None, ms_bind, None) != 0:
+        raise OSError(ctypes.get_errno(), f"could not bind {source} at {target}")
+
+
+def _bind_alias_child() -> None:
+    """Codex S-3, inside the namespace: R bind-mounted at B, both roots; rain plays B/forest.png.
+
+    Prints one JSON object: what was found at each stage, or why it stopped.
+    """
+    base = Path(os.environ["WIO_BIND_BASE"])
+    real, mounted = base / "lib" / "R", base / "lib" / "B"
+    rain = _file(real / "rain.mp4")
+    forest = _file(real / "forest.png")
+    mounted.mkdir(parents=True)
+    if os.environ["WIO_BIND_HARD_LINK"] == "1":
+        os.link(forest, base / "elsewhere.png")  # a surviving name, outside the roots
+    found: dict[str, object] = {}
+    try:
+        _bind_mount(real, mounted)
+    except OSError as error:
+        print(f"SKIP: no bind mount here: {error}")
+        return
+    alias = mounted / "forest.png"
+    harness = Harness(_Patcher())
+    try:
+        here, there = real.stat(), mounted.stat()
+        found["same_directory"] = (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
+        found["links"] = forest.stat().st_nlink
+        found["excluded"] = pairing.Exclusion.of([forest]).removes(alias)
+        session = harness((real, mounted))
+        found["indexed"] = session.library.find(alias) is not None
+        session.pairings.choose_still(_video(rain), alias)
+        session.refresh(mutate_removals=False)
+        _scheduled(session, "Bind alias", [rain])
+        item = session.library.find(forest)
+        assert item is not None
+        verdict = dry_run.removal(
+            item,
+            settings=session.settings,
+            library=session.library,
+            roots=session.library.roots,
+            adopted_authority=None,
+            favourite_store=session.favourites,
+            pairing_store=session.pairings,
+            playlist_store=session.playlists,
+            uses=dry_run.Uses.of(session),
+        )
+        found["refusals"] = list(verdict.refusals)
+        seen, real_outcome = _remove_for_real(session, forest, _Patcher())
+        found["conforms"] = Outcome.of(seen) == real_outcome
+        found["alias_gone"] = not alias.exists()
+        found["published_missing"] = _missing(real_outcome.compiled)
+    except Exception as error:
+        found["error"] = f"{type(error).__name__}: {error}"
+    finally:
+        harness.close()
+    print(json.dumps(found))
+
+
+def _missing(document: str) -> list[str]:
+    """Every ``still`` and ``motion`` path ``document`` (runtime.toml) names that isn't there."""
+    named: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key in {"still", "motion"} and isinstance(inner, str):
+                    named.append(inner)
+                else:
+                    walk(inner)
+        elif isinstance(value, list):
+            for inner in value:
+                walk(inner)
+
+    walk(tomllib.loads(document) if document else {})
+    return [path for path in named if not Path(path).exists()]
+
+
+@pytest.mark.parametrize("hard_link", [False, True], ids=["one-link", "another-hard-link"])
+def test_a_bind_mounted_alias_of_a_deleted_entry_is_gone_too(
+    hard_link: bool, tmp_path: Path
+) -> None:
+    """Codex S-3: the entry B/forest.png reaches is R's, whatever else links to the file.
+
+    With one link, identity alone already covers it (the control); with
+    another hard link elsewhere, only the entry tells the alias from the
+    surviving name. Refused either way, and what the removal really leaves
+    is what the dry run said.
+    """
+    repository = Path(__file__).resolve().parents[1]
+    environment = dict(
+        os.environ,
+        WIO_BIND_BASE=str(tmp_path),
+        WIO_BIND_HARD_LINK="1" if hard_link else "0",
+        PYTHONPATH=os.pathsep.join([str(repository), *sys.path]),
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", _IN_A_NAMESPACE],
+        env=environment,
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    output = completed.stdout.strip().splitlines()
+    assert completed.returncode == 0 and output, completed.stderr
+    if output[-1].startswith("SKIP: "):
+        pytest.skip(output[-1].removeprefix("SKIP: "))
+    found = json.loads(output[-1])
+    assert "error" not in found or "refusals" in found, found
+    assert found["same_directory"], "a bind-mounted directory is the same directory"
+    assert found["links"] == (2 if hard_link else 1)
+    assert found["indexed"], "both spellings are in the library"
+    assert found["excluded"], "the alias reaches the deleted entry"
+    assert found["refusals"] == [
+        "\u201cBind alias\u201d (used by 1 schedule rule) would have nothing left to play: "
+        "rain.mp4 plays through forest.png, which this removes"
+    ]
+    assert "error" not in found, found["error"]
+    assert found["conforms"], "the dry run is what the removal really leaves"
+    assert found["alias_gone"]
+    assert found["published_missing"] == []
+
+
 # -- no side effects -------------------------------------------------------------------------
 
 
@@ -550,9 +865,7 @@ def _snapshot(*tops: Path) -> dict[str, tuple[int, int, str]]:
 
 
 @pytest.mark.parametrize("name", ["r2-adopted-capture", "r3-linked-ancestor-alias", "tree-forest"])
-def test_a_dry_run_changes_nothing(
-    name: str, sessions: Callable[..., Session], tmp_path: Path
-) -> None:
+def test_a_dry_run_changes_nothing(name: str, sessions: Harness, tmp_path: Path) -> None:
     """Byte for byte: the profile, the library folders and the Steam library."""
     scenario = SCENARIOS[name](sessions, tmp_path)
     session = scenario.session

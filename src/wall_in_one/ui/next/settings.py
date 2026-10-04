@@ -979,18 +979,6 @@ class SettingsPage(Page):
             "frost blur frosted glass strength soft clear",
             available=lambda: self.state.window_style == "frosted",
         )
-        self._add(
-            group,
-            self._spin(
-                "Classic window opacity",
-                "The classic window's own opacity. This window's look is its style above",
-                "opacity",
-                OPACITY_RANGE,
-                0.01,
-                digits=2,
-            ),
-            "opacity classic window transparency",
-        )
         if self.launch is not None:
             for row, keywords in zip(
                 self.launch.rows,
@@ -1003,6 +991,27 @@ class SettingsPage(Page):
                     keywords,
                     target="appearance.interface" if row is self.interface_row else None,
                 )
+        # settings.toml's `opacity` is the classic window's own: in a group of its
+        # own, so nobody expects it to change this window (its look is the style).
+        classic = self._group(
+            section,
+            "Classic interface",
+            "Used only when Wall-in-One starts the classic interface. This window's look is "
+            "its window style above.",
+            keywords="classic interface window",
+        )
+        self._add(
+            classic,
+            self._spin(
+                "Window opacity",
+                "The classic window's background, from 0.30 to 1 (opaque)",
+                "opacity",
+                OPACITY_RANGE,
+                0.01,
+                digits=2,
+            ),
+            "opacity classic window transparency translucent",
+        )
         self._sync_window_style()
 
     def _dial(

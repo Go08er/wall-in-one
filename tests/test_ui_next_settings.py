@@ -462,6 +462,23 @@ def test_the_interface_and_gpu_rows_stay_with_the_keeper(opened: Opened) -> None
     assert ui_prefs.load().prefs.gpu_acceleration is False and keeper.saves == 1
 
 
+def test_the_classic_window_opacity_sits_in_its_own_labelled_group(opened: Opened) -> None:
+    """settings.toml's `opacity` changes only the classic window, so it says so."""
+    row = opened.row("opacity")
+    appearance = opened.page._sections["appearance"]
+    [classic] = [group for group in appearance.groups if group.title == "Classic interface"]
+    assert any(entry.row is row for entry in classic.entries)
+    assert "only when Wall-in-One starts the classic interface" in (
+        classic.widget.get_description() or ""
+    )
+    assert row.get_title() == "Window opacity"
+    others = [group for group in appearance.groups if group is not classic]
+    assert not any(entry.row is row for group in others for entry in group.entries)
+    opened.page._set_query("opacity classic")
+    assert row.get_visible() and classic.widget.get_visible(), "search still finds it"
+    opened.page._set_query("")
+
+
 def test_the_settings_keys_are_still_0_1_4s() -> None:
     assert {field.name for field in fields(config.Settings)} == V0_1_4_SETTINGS_KEYS
 

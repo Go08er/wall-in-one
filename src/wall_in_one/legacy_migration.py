@@ -40,12 +40,13 @@ from wall_in_one.library import (
     pairings,
     playlists,
     removals,
+    scan,
     schedules,
     state_file,
     workshop,
 )
 from wall_in_one.library import pairing as pairing_conventions
-from wall_in_one.library.model import Kind, classify
+from wall_in_one.library.model import Kind, MediaItem, classify
 from wall_in_one.providers import credentials
 from wall_in_one.providers.base import ProviderError
 from wall_in_one.providers.wallhaven import normalise_api_key
@@ -156,6 +157,8 @@ class _Converted:
     legacy_schema: int
     legacy_playlist_count: int
     legacy_output_count: int
+    #: The imported playlists that hold entries but nothing the library will have.
+    nothing_to_play: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,11 +781,28 @@ def _migrate_locked(
         # Leaving an exact journal is recoverable and not a failed migration.
         return Outcome(
             True,
-            f"imported legacy authoring; could not remove completed journal: {error}",
+            f"imported legacy authoring; could not remove completed journal: {error}"
+            + _nothing_to_play_detail(converted.nothing_to_play),
             report_path(),
         )
     return Outcome(
-        True, "imported legacy authoring; legacy bytes were left untouched", report_path()
+        True,
+        "imported legacy authoring; legacy bytes were left untouched"
+        + _nothing_to_play_detail(converted.nothing_to_play),
+        report_path(),
+    )
+
+
+def _nothing_to_play_detail(names: tuple[str, ...]) -> str:
+    """The import's one sentence about playlists with nothing to play, or empty."""
+    if not names:
+        return ""
+    quoted = [f"\u201c{name}\u201d" for name in names]
+    listed = quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
+    verb = "has" if len(names) == 1 else "have"
+    return (
+        f"; {listed} {verb} nothing to play yet, so changes won\u2019t reach playback "
+        "until that is fixed (see the report)"
     )
 
 
@@ -1028,6 +1048,14 @@ def _convert(source: _LegacySource) -> _Converted:
         legacy_outputs, playlist_map, notes, independent=independent
     )
     converted_displays = _convert_displays(legacy_outputs, playlist_map) if independent else {}
+    nothing_to_play = _nothing_to_play(
+        converted_playlists,
+        converted_settings,
+        converted_schedules,
+        converted_displays,
+        workshop_paths,
+        notes,
+    )
     api_key = _api_key(source.plugin_settings, notes)
 
     if source.schema < 5:
@@ -1057,7 +1085,67 @@ def _convert(source: _LegacySource) -> _Converted:
         legacy_schema=source.schema,
         legacy_playlist_count=len(legacy_playlists),
         legacy_output_count=len(legacy_outputs),
+        nothing_to_play=nothing_to_play,
     )
+
+
+def _nothing_to_play(
+    converted: dict[str, playlists.Playlist],
+    settings: config.Settings,
+    rules: tuple[schedules.Rule, ...],
+    assignments: dict[str, str],
+    workshop_paths: dict[str, _WorkshopResolution],
+    notes: list[str],
+) -> tuple[str, ...]:
+    """Each imported playlist holding entries but none the library will have, by name.
+
+    Its entries are kept as they were (an unmounted drive is not a deletion),
+    but the compiler refuses a document with such a playlist, used or not,
+    so until one of its wallpapers is back, or it is emptied, no change
+    reaches playback. Said here, naming it, so the import report is honest;
+    the app says it too once it publishes. Worked out as the scan will find
+    the files (`scan.would_find`): there, and in an imported library folder,
+    or installed in Steam while Workshop scanning is on.
+    """
+    include_workshop = settings.scan_workshop and bool(settings.roots)
+    installed = {resolution.path for resolution in workshop_paths.values()}
+
+    def found(source: Path) -> bool:
+        try:
+            if not source.exists():
+                return False
+            directory = source.is_dir()
+        except OSError:
+            return False
+        if source in installed:
+            return include_workshop
+        if directory:
+            return False
+        item = MediaItem(source, classify(source) or Kind.STILL, 0, 0)
+        return scan.would_find(item, settings.roots, include_workshop)
+
+    names: list[str] = []
+    for playlist in converted.values():
+        if not playlist.entries or any(found(entry.path) for entry in playlist.entries):
+            continue
+        uses = []
+        if settings.active_playlist == playlist.id:
+            uses.append("the default uses it")
+        if any(rule.playlist == playlist.id for rule in rules):
+            uses.append("a schedule rule uses it")
+        if any(assigned == playlist.id for assigned in assignments.values()):
+            uses.append("a display uses it")
+        used = f" ({', '.join(uses)})" if uses else ""
+        count = len(playlist.entries)
+        notes.append(
+            f"\u201c{playlist.name}\u201d has nothing to play yet{used}: none of its {count} "
+            f"wallpaper{'' if count == 1 else 's'} is in the imported library folders now. "
+            "Its entries were kept. Until one of them is back, or the playlist is emptied, "
+            "Wall-in-One can\u2019t build the wallpaper service\u2019s configuration, so "
+            "changes won\u2019t reach playback; the app says so until then."
+        )
+        names.append(playlist.name)
+    return tuple(names)
 
 
 def _report_unmapped_plugin_settings(plugin: dict[str, Any], notes: list[str]) -> None:

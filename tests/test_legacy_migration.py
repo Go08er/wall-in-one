@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import pytest
 
-from wall_in_one import cli, config, legacy_migration, paths
+from wall_in_one import cli, config, legacy_migration, paths, runtime_config
 from wall_in_one.library import (
     displays,
     favourites,
@@ -30,6 +30,7 @@ from wall_in_one.library import (
     state_file,
 )
 from wall_in_one.providers import credentials
+from wall_in_one.session import Session
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy"
 
@@ -724,6 +725,45 @@ def test_missing_file_backed_media_and_stills_are_preserved_and_reported(
     report = legacy_migration.report_path().read_text(encoding="utf-8")
     assert "currently missing" in report
     assert all(path.read_bytes() == before for path, before in watched.items())
+
+
+def test_an_import_says_which_playlists_have_nothing_to_play(isolated_xdg: Path) -> None:
+    """After Codex 0.3.0 round 1: the import writes playlists as they were, unchecked.
+
+    One holding only missing files stops every publication: the compiler
+    refuses the document. The import isn't refused for it (it is the user's
+    data, and the files may come back); it says so, naming the playlist and
+    what uses it, in its outcome and its report.
+    """
+    legacy, _watched, _video, _manual, _automatic = _legacy_fixture(isolated_xdg)
+    config_path = legacy / "config.json"
+    document = cast(dict[str, Any], json.loads(config_path.read_bytes()))
+    missing = isolated_xdg / "unmounted" / "missing.mp4"
+    moving = cast(dict[str, Any], cast(dict[str, Any], document["playlists"])["moving"])
+    entry = cast(dict[str, Any], cast(list[object], moving["entries"])[0])
+    cast(dict[str, Any], entry["media"])["source"] = str(missing)
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+
+    outcome = legacy_migration.migrate(source_dir=legacy)
+
+    assert outcome.changed
+    assert outcome.detail.endswith(
+        "; \u201cMoving\u201d has nothing to play yet, so changes won\u2019t reach playback "
+        "until that is fixed (see the report)"
+    )
+    report = legacy_migration.report_path().read_text(encoding="utf-8")
+    assert (
+        "\u201cMoving\u201d has nothing to play yet (a display uses it): none of its 1 " in report
+    )
+    assert "\u201cQuiet\u201d has nothing" not in report, "its picture is there"
+    # What it says is so: the compiler refuses the imported document.
+    session = Session(config.load())
+    try:
+        session.refresh()
+        with pytest.raises(runtime_config.RuntimeConfigError, match="'Moving'"):
+            runtime_config.render(session.settings, session)
+    finally:
+        session.shutdown()
 
 
 def test_installed_workshop_video_imports_with_file_identity_and_legacy_dynamic_id(

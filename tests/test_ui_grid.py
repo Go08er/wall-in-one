@@ -34,7 +34,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import settle  # noqa: E402
 from wall_in_one.library.filter import Query, Sort  # noqa: E402
-from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem, Ownership  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE, WallpaperGrid, WallpaperTile  # noqa: E402
 from wall_in_one.ui.thumbnails import Callback, ThumbnailLoader  # noqa: E402
 from wall_in_one.ui.window import ACCELERATORS, MainWindow  # noqa: E402
@@ -914,6 +914,8 @@ def test_changing_roots_requests_a_scan_and_redraw_instead_of_only_a_highlight(
         def __init__(self) -> None:
             self.settings = config.Settings()
             self.synced = 0
+            # A folder change asks what would leave the library: nothing here.
+            self.library = Library(roots=(), items=())
 
         def update_settings(
             self, settings: config.Settings, *, rescan_library: bool = True

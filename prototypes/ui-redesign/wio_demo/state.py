@@ -1929,6 +1929,9 @@ class AppState(GObject.Object):
     def runtime_blocked(self) -> str:
         return "" if self.service_running else "The wallpaper service isn\u2019t running"
 
+    def playlist_label(self, pid: str) -> str | None:
+        return self.playlist_name(pid) if self.has_playlist(pid) else None
+
     def playlist_blocked(self, pid: str) -> str:
         if not self.has_playlist(pid):
             return "That playlist no longer exists"

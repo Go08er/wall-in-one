@@ -32,7 +32,7 @@ from tests.test_next_status_line import two_display_status  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import schedules  # noqa: E402
 from wall_in_one.library.model import MediaItem  # noqa: E402
-from wall_in_one.session import Session  # noqa: E402
+from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session  # noqa: E402
 from wall_in_one.ui.next import schedule  # noqa: E402
 from wall_in_one.ui.next.prefs import UiPrefsKeeper  # noqa: E402
 from wall_in_one.ui.next.real_state import RealAppState  # noqa: E402
@@ -400,5 +400,30 @@ def test_the_editor_keeps_a_named_rule_s_name(
         view.settle()
         (saved,) = store.rules
         assert (saved.name, saved.start, saved.end) == ("School days", 480, 900)
+    finally:
+        view.close()
+
+
+def test_a_rule_on_your_pick_is_named_not_missing(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    """A profile's disabled rule on the hidden "Your pick" playlist reads as such."""
+    session = backend.session
+    session.playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, items[0].path)
+    rule = session.schedules.add(QUICK_CHOICE_ID)
+    session.schedules.set_enabled(rule.id, False)
+    view = Shown(backend)
+    try:
+        page = view.page
+        row = page.row(rule.id)
+        assert row is not None
+        assert not row.note.get_visible(), row.note.get_label()
+        assert not row.switch.get_active()
+        page.edit_rule(row.rule)
+        editor = page.editor
+        assert editor is not None
+        assert editor._name.get_label() == "Your pick"
+        assert QUICK_CHOICE_ID in editor._playlist_ids
+        editor.force_close()
     finally:
         view.close()

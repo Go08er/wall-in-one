@@ -34,8 +34,17 @@ MISSING: Final = "Missing playlist"
 SaveRule = Callable[[RuleView, RuleView | None, Settled], None]
 
 
+def hidden_label(state: AppState, pid: str) -> str | None:
+    """What to call a playlist the sidebar hides ("Your pick"), or None when it is gone."""
+    scheduling = state.scheduling
+    return scheduling.playlist_label(pid) if scheduling is not None else None
+
+
 def playlist_name(state: AppState, pid: str) -> str:
-    return state.playlist(pid).name if state.has_playlist(pid) else MISSING
+    """A playlist's name; "Your pick" for a hidden pick; `MISSING` when it is gone."""
+    if state.has_playlist(pid):
+        return state.playlist(pid).name
+    return hidden_label(state, pid) or MISSING
 
 
 def rule_title(state: AppState, rule: RuleView) -> str:
@@ -67,8 +76,9 @@ def playlist_factory(state: AppState, size: int = 26) -> Gtk.SignalListItemFacto
             return
         pid = string.get_string()
         if not state.has_playlist(pid):
-            label.set_label(MISSING)
-            image.set_from_icon_name("dialog-warning-symbolic")
+            hidden = hidden_label(state, pid)
+            label.set_label(hidden or MISSING)
+            image.set_from_icon_name("view-pin-symbolic" if hidden else "dialog-warning-symbolic")
             return
         playlist = state.playlist(pid)
         label.set_label(playlist.name)

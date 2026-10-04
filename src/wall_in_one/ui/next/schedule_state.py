@@ -235,6 +235,11 @@ class Scheduling(Protocol):
         """Why runtime commands (rotation, play now) are off now, or empty."""
         ...
 
+    def playlist_label(self, pid: str) -> str | None:
+        """What to call a playlist `AppState.playlists` hides (a "Your pick" one a rule
+        or a display can still name), or None when no such playlist exists."""
+        ...
+
     def playlist_blocked(self, pid: str) -> str:
         """Why ``pid`` can't be scheduled, assigned or made the default (missing, nothing
         playable), or empty when it can."""

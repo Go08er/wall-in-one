@@ -55,6 +55,7 @@ from wall_in_one.theme import palettes, source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Colour, Mode, Palette, PaletteError
 from wall_in_one.ui import runtime_truth
+from wall_in_one.ui.next.displays_settings import settings_edit
 from wall_in_one.ui.next.settings_state import (
     KEY_FAILED,
     KEY_REFUSED,
@@ -637,24 +638,15 @@ class RealSettings:
         )
 
     def change_settings(self, **changes: Any) -> None:
-        requested = self._backend.requested_settings
-        wanted = {key: value for key, value in changes.items() if getattr(requested, key) != value}
+        # The display mode and the colors' display follow the rule the Displays
+        # page uses too: independent displays need an attached one to follow.
+        wanted = settings_edit(self._backend.requested_settings, changes, self._live_connectors())
+        if isinstance(wanted, str):
+            self._report(wanted)
+            self._host.emit_changed("settings")
+            return
         if not wanted:
             return  # what is saved or being saved already: no second write
-        independent = config.DISPLAY_MODE_INDEPENDENT
-        if wanted.get("display_mode") == independent and not (
-            wanted.get("theme_source_connector") or requested.theme_source_connector
-        ):
-            # Independent displays need one whose colours Noctalia follows.
-            offered = [connector for connector, _attached in self.theme_sources().connectors]
-            if not offered:
-                self._report(
-                    "Independent display control needs an attached display for Colours "
-                    "follow. Connect a display and try again."
-                )
-                self._host.emit_changed("settings")
-                return
-            wanted["theme_source_connector"] = offered[0]
 
         def failed(error: str) -> None:
             self._report(f"Settings were not saved; nothing changed: {error}")

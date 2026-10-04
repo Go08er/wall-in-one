@@ -23,11 +23,12 @@ import pytest
 from tests.test_next_state import FakeApplication, _library, _session
 from tests.test_next_status_line import two_display_status
 from wall_in_one import config, paths, runtime_config
-from wall_in_one.library import displays, schedules
+from wall_in_one.library import displays, playlists, schedules
 from wall_in_one.library.model import MediaItem
-from wall_in_one.session import Session
+from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
 from wall_in_one.ui.next import real_schedule
 from wall_in_one.ui.next import schedule_model as model
+from wall_in_one.ui.next.displays_settings import NEEDS_AN_ATTACHED_DISPLAY, settings_edit
 from wall_in_one.ui.next.real_schedule import (
     RealScheduling,
     rule_view,
@@ -531,7 +532,7 @@ def test_independent_displays_need_a_connected_display(backend: Publishing) -> N
     results: list[bool] = []
     adapter.choose_display_mode(config.DISPLAY_MODE_INDEPENDENT, results.append)
     assert results == [False] and backend.settings_changes == []
-    assert "needs a connected display" in backend.reports[-1]
+    assert "needs an attached display" in backend.reports[-1]
     assert adapter.saved_display_mode() == config.DISPLAY_MODE_MIRRORED
     assert "displays" in owner.topics, "the toggle goes back"
 
@@ -662,3 +663,45 @@ def test_the_app_state_offers_scheduling(backend: Publishing) -> None:
     finally:
         state.close()
         keeper.close()
+
+
+def test_a_hidden_pick_is_named_not_missing(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    """ "Your pick" playlists are hidden from the lists but a rule can still point at one."""
+    session = backend.session
+    session.playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, items[0].path)
+    session.playlists.set_display_singleton("DP-2", items[1].path)
+    adapter, _owner = _scheduling(backend)
+    assert adapter.playlist_label(QUICK_CHOICE_ID) == "Your pick"
+    display_pick = playlists.display_quick_choice_id("DP-2")
+    assert adapter.playlist_label(display_pick) == "Your pick · DP-2"
+    assert adapter.playlist_label("gone") is None
+    made = _playlist(session, "Evening", items[0])
+    assert adapter.playlist_label(made) == "Evening"
+
+
+def test_settings_and_displays_share_one_rule_for_the_display_mode() -> None:
+    """`displays_settings.settings_edit` is what both pages save the mode through."""
+    requested = config.Settings()
+    independent = {"display_mode": config.DISPLAY_MODE_INDEPENDENT}
+    assert settings_edit(requested, independent, []) == NEEDS_AN_ATTACHED_DISPLAY
+    assert settings_edit(requested, independent, ["HDMI-A-1", "DP-1"]) == {
+        **independent,
+        "theme_source_connector": "HDMI-A-1",
+    }
+    assert settings_edit(requested, {"display_mode": "mirrored"}, []) == {}, "already saved"
+    saved = replace(requested, theme_source_connector="DP-2")
+    assert settings_edit(saved, independent, []) == independent, "a saved choice is kept"
+
+
+def test_a_detached_display_is_not_one_to_follow(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    """Only an attached display can be chosen for the colors (classic, DECISIONS)."""
+    backend.session.displays.assign("DP-2", _playlist(backend.session, "Dock", items[0]))
+    adapter, _owner = _scheduling(backend)
+    assert [d.connector for d in adapter.known_displays()] == ["DP-2"]
+    results: list[bool] = []
+    adapter.choose_display_mode(config.DISPLAY_MODE_INDEPENDENT, results.append)
+    assert results == [False] and backend.settings_changes == []

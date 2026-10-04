@@ -16,7 +16,8 @@ an assignment, a rule, the colors' choice.
 whose completion republishes the runtime configuration (``schedule_edited``
 or ``runtime_config_changed``, as the classic Schedules page does); the
 default, the mode and the colors' display are settings edits
-(`update_settings_async`). Each write settles exactly once: saved, failed
+(`update_settings_async`); the mode and the colors' display follow the same
+rule as Settings → Displays (`displays_settings`). Each write settles exactly once: saved, failed
 (reported, "nothing changed"), or refused before it was queued. A playlist
 that would compile to nothing is refused for a rule, an assignment or the
 default, both at the gesture and again when the write reaches the head of
@@ -52,10 +53,14 @@ from gi.repository import Gdk
 from wall_in_one import config, display_policy, runtime_config
 from wall_in_one.library import schedules
 from wall_in_one.library.model import Kind, MediaItem
-from wall_in_one.library.playlists import DISPLAY_QUICK_CHOICE_ID_PREFIX
+from wall_in_one.library.playlists import (
+    DISPLAY_QUICK_CHOICE_ID_PREFIX,
+    DISPLAY_QUICK_CHOICE_NAME_PREFIX,
+)
 from wall_in_one.session import QUICK_CHOICE_ID, Session
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next import schedule_model
+from wall_in_one.ui.next.displays_settings import settings_edit
 from wall_in_one.ui.next.schedule_state import (
     ColorSource,
     DisplayInfo,
@@ -91,6 +96,11 @@ class ScheduleBackend(Protocol):
 
     @property
     def settings(self) -> config.Settings: ...
+
+    @property
+    def requested_settings(self) -> config.Settings:
+        """What is saved with every queued settings edit applied."""
+        ...
 
     @property
     def settings_unknown_keys(self) -> tuple[str, ...]: ...
@@ -434,6 +444,18 @@ class RealScheduling:
     def runtime_blocked(self) -> str:
         return self._runtime_off()
 
+    def playlist_label(self, pid: str) -> str | None:
+        """Any authored playlist's name; the hidden "Your pick" ones as the window says it."""
+        playlist = self._session.playlists.get(pid)
+        if playlist is None:
+            return None
+        if pid == QUICK_CHOICE_ID:
+            return "Your pick"
+        if pid.startswith(DISPLAY_QUICK_CHOICE_ID_PREFIX):
+            connector = playlist.name.removeprefix(DISPLAY_QUICK_CHOICE_NAME_PREFIX)
+            return f"Your pick \u00b7 {connector}" if connector != playlist.name else "Your pick"
+        return playlist.name
+
     def playlist_blocked(self, pid: str) -> str:
         if pid == runtime_config.FALLBACK_PLAYLIST_ID:
             return ""
@@ -677,39 +699,31 @@ class RealScheduling:
             settled=settled,
         )
 
+    def _display_settings(
+        self, what: str, changes: dict[str, Any], settled: Settled | None
+    ) -> None:
+        """Settings → Displays' own rule and save path (`displays_settings`)."""
+        attached = [display.connector for display in self.known_displays() if display.connected]
+        edit = settings_edit(self._backend.requested_settings, changes, attached)
+        if isinstance(edit, str):
+            self._refuse(settled, edit, "displays", "settings")
+            return
+        if not edit:
+            self._settle(settled, True)  # saved, or being saved, already
+            return
+        self._settings_write(
+            what=what, topics=("displays", "schedule", "settings"), settled=settled, **edit
+        )
+
     def choose_display_mode(self, mode: str, settled: Settled | None = None) -> None:
-        settings = self._backend.settings
         if mode not in config.DISPLAY_MODES:
             self._refuse(settled, f"{mode!r} is not a display mode", "displays")
             return
-        if mode == settings.display_mode:
-            self._settle(settled, True)
-            return
-        changes: dict[str, Any] = {"display_mode": mode}
-        if mode == config.DISPLAY_MODE_INDEPENDENT and not settings.theme_source_connector:
-            connected = [d.connector for d in self.known_displays() if d.connected]
-            if not connected:
-                self._refuse(
-                    settled,
-                    "Each display separately needs a connected display for the desktop "
-                    "colors. Connect a display and try again.",
-                    "displays",
-                )
-                return
-            changes["theme_source_connector"] = connected[0]
-        self._settings_write(
-            what="The display mode", topics=("displays", "schedule"), settled=settled, **changes
-        )
+        self._display_settings("The display mode", {"display_mode": mode}, settled)
 
     def choose_color_source(self, connector: str, settled: Settled | None = None) -> None:
-        if connector == self._backend.settings.theme_source_connector:
-            self._settle(settled, True)
-            return
-        self._settings_write(
-            what="The desktop colors\u2019 display",
-            topics=("displays",),
-            settled=settled,
-            theme_source_connector=connector,
+        self._display_settings(
+            "The desktop colors\u2019 display", {"theme_source_connector": connector}, settled
         )
 
     def forget_plan(self, connector: str) -> ForgetPlan:

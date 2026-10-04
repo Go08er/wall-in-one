@@ -38,6 +38,7 @@ from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.page import Page, not_ported
 from wall_in_one.ui.next.schedule_calendar import WeekCalendar
 from wall_in_one.ui.next.schedule_editor import (
+    MISSING,
     RuleEditor,
     playlist_factory,
     playlist_name,
@@ -860,7 +861,6 @@ class SchedulePage(Page):
             visible += [rule for rule in shown if rule.id == pin]
         monday = self._monday()
         seasonal = {rule.id for rule in model.seasonal_off(rules, monday)}
-        known_playlists = {playlist.id for playlist in self.state.playlists}
         for rule in visible:
             index = shown.index(rule)
             row = self._rule_row(
@@ -870,7 +870,7 @@ class SchedulePage(Page):
                 seasonal=rule.id in seasonal,
                 never=rule.id in never,
                 dormant=bool(rule.connector) and not independent,
-                missing=rule.playlist not in known_playlists,
+                missing=self._name(rule.playlist) == MISSING,
                 blocked=blocked,
             )
             self.rule_list.append(row)

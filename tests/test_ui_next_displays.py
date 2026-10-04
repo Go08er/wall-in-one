@@ -269,7 +269,7 @@ def test_independent_displays_with_none_connected_are_refused(
         page.flush()
         assert page.mode_group.get_active_name() == "mirrored"
         assert backend.settings_changes == [], "no settings write was even queued"
-        assert "needs a connected display" in backend.reports[-1]
+        assert "needs an attached display" in backend.reports[-1]
         assert backend.session.settings.display_mode == config.DISPLAY_MODE_MIRRORED
     finally:
         view.close()

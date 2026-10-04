@@ -93,6 +93,10 @@ class FakeApplication:
         return self._session.settings
 
     @property
+    def requested_settings(self) -> config.Settings:
+        return self._session.settings
+
+    @property
     def settings_unknown_keys(self) -> tuple[str, ...]:
         return self.unknown_keys
 

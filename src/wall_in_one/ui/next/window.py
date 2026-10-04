@@ -34,8 +34,11 @@ user presses Apply.
 
 **First run.** The window asks the application's first-run questions on its
 own welcome screen (`welcome.Welcome`) instead of in dialogs: it is a
-`FirstRunHost`. The questions, their words and what each answer does are the
-application's, shared with the classic window. A fresh profile opens on the
+`FirstRunHost`. While it covers the window, every window action but the
+shortcuts help is off (`ShellWindow.block_actions`), so its keys and menu
+items change nothing underneath, as under a classic modal dialog. The
+questions, their words and what each answer does are the application's,
+shared with the classic window. A fresh profile opens on the
 welcome screen; otherwise it appears only for a question, or for the
 older-data check if that runs long. A question put off ("Not now"), and changes
 paused by the authoring gate, leave a notice under the header whose button asks
@@ -180,9 +183,15 @@ class NextWindow(ShellWindow):
         self._show_status()
         self.connect("realize", lambda _window: self._resume())
         self.connect("unrealize", lambda _window: self._teardown())
-        if not application.first_activation_done and not settings.roots:
-            # A fresh profile: its first question follows at once, so open on
-            # the welcome screen rather than flash the empty window first.
+        if (
+            application.get_is_registered()
+            and not application.first_activation_done
+            and not settings.roots
+        ):
+            # The running app's first window, on a fresh profile: its first
+            # question follows at once, so open on the welcome screen rather
+            # than flash the empty window first. (A window built outside a
+            # running app, as tests do, waits for a question like any other.)
             self._reveal_welcome()
         # After the activation that builds this window has asked what it asks.
         self.first_run_changed()
@@ -444,12 +453,15 @@ class NextWindow(ShellWindow):
             self._check_grace = 0
 
     def _reveal_welcome(self) -> None:
+        """Cover the window with the welcome screen; its shortcuts wait, as under a dialog."""
         if self._root is not None and not self.welcome_shown:
             self._root.set_visible_child_name("welcome")
+        self.block_actions(True)
 
     def _hide_welcome(self) -> None:
         if self._root is not None and self.welcome_shown:
             self._root.set_visible_child_name("main")
+        self.block_actions(False)
         self.welcome.show_waiting()
 
     # -- the window's own notices ------------------------------------------------------

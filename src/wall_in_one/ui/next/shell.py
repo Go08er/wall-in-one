@@ -52,6 +52,10 @@ WINDOW_STYLES: Final = (
 )
 #: Builds one page over the window's state.
 PageFactory = Callable[[AppState], Page]
+#: The window actions a screen covering the pages leaves on (`block_actions`):
+#: the shortcuts help. GTK's own ``window.close`` (Ctrl+W) is not among this
+#: window's actions, so it stays too.
+UNBLOCKED_ACTIONS: Final = frozenset({"shortcuts"})
 
 
 class ShellWindow(Adw.ApplicationWindow):
@@ -80,6 +84,8 @@ class ShellWindow(Adw.ApplicationWindow):
         self._sidebar_released = False
         self._header_widgets: list[Gtk.Widget] = []
         self._banner_action = ""
+        #: The actions `block_actions` turned off, while it holds them off.
+        self._blocked_actions: set[str] | None = None
 
         # -- content side --------------------------------------------------
         self.header = Adw.HeaderBar()
@@ -407,7 +413,43 @@ class ShellWindow(Adw.ApplicationWindow):
         style_action = self.lookup_action("style")
         if isinstance(style_action, Gio.SimpleAction):
             style_action.set_state(GLib.Variant("s", self.state.window_style))
-            style_action.set_enabled(not self.state.appearance_blocked())
+            style_action.set_enabled(
+                not self.state.appearance_blocked() and self._blocked_actions is None
+            )
+
+    # -- a screen over the pages -------------------------------------------------
+    @property
+    def actions_blocked(self) -> bool:
+        return self._blocked_actions is not None
+
+    def block_actions(self, blocked: bool) -> None:
+        """Turn every window action off but `UNBLOCKED_ACTIONS`, or back on.
+
+        For a screen that covers the sidebar, pages and player bar and wants an
+        answer first, as a modal dialog would: the keys and menu items bound to
+        window actions then change nothing underneath it. Each action turned
+        off here is turned on again after; the window style follows its own
+        rule (`_refresh_glass`).
+        """
+        if blocked == self.actions_blocked:
+            return
+        if blocked:
+            held: set[str] = set()
+            for name in self.list_actions():
+                action = self.lookup_action(name)
+                if name in UNBLOCKED_ACTIONS or not isinstance(action, Gio.SimpleAction):
+                    continue
+                if action.get_enabled():
+                    action.set_enabled(False)
+                    held.add(name)
+            self._blocked_actions = held
+            return
+        held, self._blocked_actions = self._blocked_actions or set(), None
+        for name in held:
+            action = self.lookup_action(name)
+            if isinstance(action, Gio.SimpleAction):
+                action.set_enabled(True)
+        self._refresh_glass()
 
     # -- dialogs ---------------------------------------------------------------
     def _new_playlist(self) -> None:

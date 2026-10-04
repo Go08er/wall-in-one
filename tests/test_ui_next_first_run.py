@@ -42,6 +42,7 @@ from wall_in_one.theme import noctalia  # noqa: E402
 from wall_in_one.ui.app import Application, _PlaylistReferenceRepairResult  # noqa: E402
 from wall_in_one.ui.next import window as next_window  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
+from wall_in_one.ui.next.shell import UNBLOCKED_ACTIONS  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 
 
@@ -164,6 +165,70 @@ def test_a_fresh_profile_opens_on_the_welcome_screen_and_not_now_saves_nothing(
         )
         assert config.load().roots == (fresh,)
         assert _no_notice_of_its_own(window)
+
+    _run(application, scenario())
+
+
+#: Window actions the coordinator named, which must wait under the welcome screen.
+HELD: frozenset[str] = frozenset(
+    {f"win.go-{page}" for page in ("library", "store", "playlist", "schedule", "displays")}
+    | {"win.go-settings", "win.new-playlist", "win.browse", "win.palettes", "win.refresh"}
+    | {"win.random", "win.next", "win.previous", "win.play", "win.search", "win.settings"}
+)
+
+
+def _bound(application: Application) -> set[str]:
+    """Every window action a key is bound to (the app's table and the shell's)."""
+    return {
+        detailed
+        for detailed in application.list_action_descriptions()
+        if detailed.startswith("win.") and application.get_accels_for_action(detailed)
+    }
+
+
+def test_the_welcome_screen_holds_the_windows_shortcuts_until_it_is_answered(
+    fresh: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As a classic modal dialog does: no key or menu item reaches the pages beneath."""
+    application = Application(ui="next")
+    rescans: list[bool] = []
+    real_refresh = application.refresh_library
+
+    def counted(**keywords: object) -> None:
+        rescans.append(True)
+        real_refresh(**keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(application, "refresh_library", counted)
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield "the folder question", lambda: _asking(window, "Choose a library folder")
+        bound = _bound(application)
+        assert bound >= HELD | {"win.shortcuts"}, "the keys this test is about are bound"
+        page = window.current_page
+        for name in window.list_actions():
+            action = window.lookup_action(name)
+            assert action is not None
+            assert action.get_enabled() == (name in UNBLOCKED_ACTIONS), name
+        for detailed in sorted(bound - {"win.shortcuts"}):
+            # What the key's shortcut does: activate the action through the window.
+            window.activate_action(detailed, None)
+        assert window.current_page is page and window.welcome_shown
+        assert window.get_visible_dialog() is None, "no New playlist, no Palettes"
+        assert rescans == [], "F5 waits too"
+        help_action = window.lookup_action("shortcuts")
+        assert help_action is not None and help_action.get_enabled(), "the help stays"
+
+        window.welcome.buttons["later"].emit("clicked")
+        yield "the window back", lambda: not window.welcome_shown
+        for detailed in HELD:
+            action = window.lookup_action(detailed.removeprefix("win."))
+            assert action is not None and action.get_enabled(), detailed
+        window.activate_action("win.go-store", None)
+        assert window.current_page is window.pages["store"]
+        window.activate_action("win.refresh", None)
+        assert rescans == [True]
 
     _run(application, scenario())
 

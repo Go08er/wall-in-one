@@ -45,6 +45,20 @@ def _settings(body: str) -> Path:
     return path
 
 
+def _noctalia_files() -> dict[str, bytes | None]:
+    """Every entry in Noctalia's settings directory, with its bytes.
+
+    Only Noctalia's own files: `install` may already have published the
+    content-addressed template copy in Wall-in-One's state directory before
+    a refusal, as its documented order has it.
+    """
+    directory = paths.noctalia_settings_path().parent
+    return {
+        entry.name: entry.read_bytes() if entry.is_file() else None
+        for entry in sorted(directory.iterdir())
+    }
+
+
 def _snapshot() -> dict[str, bytes | None]:
     """Every entry beside Noctalia's settings and in the app's state, with its bytes."""
     found: dict[str, bytes | None] = {}
@@ -176,13 +190,11 @@ def test_a_size_refusal_leaves_noctalias_files_byte_identical(asked: list[str]) 
     line = "# " + "x" * 1022 + "\n"
     room = template.MAX_NOCTALIA_SETTINGS_BYTES - len(SAMPLE) - 64
     _settings(SAMPLE + line * (room // len(line)) + "#" * (room % len(line)) + "\n")
-    before = _snapshot()
-    noctalia_before = {k: v for k, v in before.items() if "noctalia" in k}
+    noctalia_before = _noctalia_files()
     with pytest.raises(template.TemplateInstallError) as refused:
         real_settings.install_template()
     assert "Noctalia's settings weren't changed" in str(refused.value)
-    after = {k: v for k, v in _snapshot().items() if "noctalia" in k}
-    assert after == noctalia_before, "no backup, no transaction file, same bytes"
+    assert _noctalia_files() == noctalia_before, "no backup, no transaction file, same bytes"
     assert asked == [], "Noctalia isn't asked to reload what didn't change"
 
 
@@ -192,7 +204,7 @@ def test_a_backup_that_cannot_be_written_is_a_refusal_with_nothing_changed(
 ) -> None:
     settings = _settings(SAMPLE)
     noctalia_dir = settings.parent
-    before = {k: v for k, v in _snapshot().items() if "noctalia" in k}
+    before = _noctalia_files()
     noctalia_dir.chmod(0o555)
     try:
         with pytest.raises(template.TemplateInstallError) as refused:
@@ -201,5 +213,5 @@ def test_a_backup_that_cannot_be_written_is_a_refusal_with_nothing_changed(
         noctalia_dir.chmod(0o755)
     assert "cannot create a backup" in str(refused.value)
     assert "Noctalia's settings weren't changed" in str(refused.value)
-    assert {k: v for k, v in _snapshot().items() if "noctalia" in k} == before
+    assert _noctalia_files() == before
     assert asked == []

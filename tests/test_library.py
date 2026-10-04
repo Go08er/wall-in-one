@@ -136,6 +136,29 @@ def test_sidecar_beats_the_naming_convention(tmp_path: Path) -> None:
     assert pairing.find_still(video) == chosen
 
 
+def test_a_scan_reads_each_pairing_sidecar_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex 0.3.0 round 3, B-1: one observation of a sidecar decides the video's still."""
+    video = _touch(tmp_path / "clip.mp4")
+    chosen = _touch(tmp_path / "chosen.png")
+    (tmp_path / ("clip.mp4" + pairing.SIDECAR_SUFFIX)).write_text(
+        json.dumps({"still_path": str(chosen)}), encoding="utf-8"
+    )
+    reads: list[Path] = []
+    read = pairing.read_sidecar
+
+    def counted(path: Path) -> Path | None:
+        reads.append(path)
+        return read(path)
+
+    monkeypatch.setattr(pairing, "read_sidecar", counted)
+    found = scan.scan((tmp_path,), {}, adoption_candidates=()).find(video)
+
+    assert found is not None and found.paired_still == chosen
+    assert reads == [video]
+
+
 def test_sidecar_naming_a_missing_file_is_ignored(tmp_path: Path) -> None:
     video = _touch(tmp_path / "clip.mp4")
     convention = _touch(tmp_path / "clip-still.png")

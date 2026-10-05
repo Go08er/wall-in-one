@@ -73,6 +73,11 @@ SEEDS = int(os.environ.get("WIO_INTERLEAVING_SEEDS", "200"))
 STEPS = int(os.environ.get("WIO_INTERLEAVING_STEPS", "10"))
 #: More acquisitions of the runtime lock per second than this is a worker spinning.
 SPIN_RATE = 20_000
+#: How long each step's work gets to land before the next; also the window the
+#: lock rate is measured over.
+DRAIN = 0.01
+#: An idle stretch at the end, and the CPU the process may spend in it.
+IDLE, IDLE_CPU = 0.05, 0.025
 TINY_CAP = 64
 
 
@@ -208,6 +213,9 @@ class World:
 @pytest.fixture
 def worlds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., World]]:
     made: list[World] = []
+    # This checks ordering, not durability (test_ui_runtime has the fsync
+    # contract), and an fsync per state write is most of a seed on a real disk.
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
 
     def make(evening: tuple[str, ...] = ("forest", "keep")) -> World:
         root = tmp_path / "lib" / "R"
@@ -440,7 +448,7 @@ def _drain(world: World) -> None:
     """Let what the step started land, and check that nothing spun meanwhile."""
     lock = world.lock
     taken, started = lock.taken, time.monotonic()
-    settle(0.02)
+    settle(DRAIN)
     application = world.application
     if (
         world.favourites_free is not None
@@ -499,10 +507,9 @@ def _finish_checked(world: World) -> None:
         BOUND,
         what="every hold to settle once nothing is pending",
     )
-    spent = os.times()
-    time.sleep(0.1)
-    after = os.times()
-    assert (after.user + after.system) - (spent.user + spent.system) < 0.05, "a worker spins"
+    spent = time.process_time()
+    time.sleep(IDLE)
+    assert time.process_time() - spent < IDLE_CPU, "a worker spins"
     if not world.quit_requested:
         application.refresh_library()
         spin_until(lambda: _quiet(application), BOUND, what="the recovering scan")

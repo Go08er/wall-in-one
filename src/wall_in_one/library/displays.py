@@ -68,7 +68,7 @@ class DisplayError(Exception):
     """An assignment could not be stored.
 
     Kinds in use: ``local-io``, ``validation``, ``newer-version``,
-    ``no-backup``, ``full``.
+    ``no-backup``, ``full``, ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -77,6 +77,14 @@ class DisplayError(Exception):
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
+
+
+def _unreadable_error(fault: str, target: Path) -> DisplayError:
+    return DisplayError(
+        state_file.UNREADABLE,
+        f"{target.name} can't be read ({fault}), so which assignments it holds isn't known. "
+        "Nothing was changed.",
+    )
 
 
 def state_path() -> Path:
@@ -417,6 +425,43 @@ class Store:
             return changed, changed
 
         return self._mutate(unassign)
+
+    def forget_display(self, connector: str) -> str:
+        """Unassign ``connector`` for Forget Display; return the playlist it had, or "".
+
+        Like `unassign`, its opt-in goes too. A file that can't be read is
+        refused before anything is written (``unreadable``): whether it holds
+        an assignment can't be known, so it can't be said to be gone.
+        """
+        name = _clean_connector(connector)
+
+        def forget(working: _Working) -> tuple[str, bool]:
+            if self._fault is not None:
+                raise _unreadable_error(self._fault, self._target())
+            playlist = working.assignments.get(name, "")
+            working.drop(name)
+            return playlist, bool(playlist)
+
+        return self._mutate(forget)
+
+    def durable_problem(self) -> str:
+        """Why a change can't be made to the file as it is now, or empty. Never writes.
+
+        For a caller that must not write anything elsewhere first when this
+        file would refuse: one from a newer version, or one that can't be read.
+        """
+        target = self._target()
+        reading = _read(target)
+        if reading.newer_version:
+            return str(
+                DisplayError(state_file.NEWER_VERSION, state_file.newer_version_refusal(target))
+            )
+        if reading.fault is not None:
+            return str(_unreadable_error(reading.fault, target))
+        return ""
+
+    def _target(self) -> Path:
+        return self._path if self._path is not None else state_path()
 
     def forget_playlist(self, playlist: str) -> int:
         """Drop every assignment naming ``playlist``, and say how many.

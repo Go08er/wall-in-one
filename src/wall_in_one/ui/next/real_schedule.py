@@ -18,7 +18,10 @@ or ``runtime_config_changed``, as the classic Schedules page does); the
 default, the mode and the colors' display are settings edits
 (`update_settings_async`); the mode and the colors' display follow the same
 rule as Settings → Displays (`displays_settings`). Each write settles exactly once: saved, failed
-(reported, "nothing changed"), or refused before it was queued. A playlist
+(reported, "nothing changed"), or refused before it was queued. Forget
+Display is the one write that touches several stores: when a later one
+fails it says exactly what it removed and what is still saved, never
+"nothing changed", and publishes what committed (`forget_display`). A playlist
 that would compile to nothing is refused for a rule, an assignment or the
 default, both at the gesture and again when the write reaches the head of
 the lane. "Beats the shared rules" is the display store's version-2 field;
@@ -41,6 +44,7 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final, Protocol, TypeVar
 
 import gi
@@ -50,6 +54,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk
 
 from wall_in_one import config, display_policy, runtime_config
+from wall_in_one.library import displays as display_store
 from wall_in_one.library import schedules
 from wall_in_one.library.playlists import (
     DISPLAY_QUICK_CHOICE_ID_PREFIX,
@@ -72,6 +77,30 @@ from wall_in_one.ui.next.state import Route
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView
 
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True, slots=True)
+class _Forgotten:
+    """What Forget Display committed: the rules, the playlist, and why it stopped."""
+
+    #: The rules removed, in one transaction.
+    rules: tuple[schedules.Rule, ...]
+    #: The playlist unassigned ("" when there was none); None: that step failed.
+    playlist: str | None
+    error: str = ""
+
+
+def _removed_words(outcome: _Forgotten, label: Callable[[str], str | None]) -> list[str]:
+    """Its playlist and its rules, as removed, for a sentence."""
+    words = []
+    if outcome.playlist:
+        name = label(outcome.playlist) or outcome.playlist
+        words.append(f"its own playlist (\u201c{name}\u201d)")
+    if outcome.rules:
+        count = len(outcome.rules)
+        words.append(f"its {count} schedule rule{'s' if count != 1 else ''}")
+    return words or ["nothing of its own"]
+
 
 _ROUTES: Final[dict[str, Route]] = {
     "manual": "pick",
@@ -507,12 +536,17 @@ class RealScheduling:
         topics: tuple[str, ...],
         settled: Settled | None,
         after: Callable[[], None] | None = None,
+        failed_said: Callable[[str], str] | None = None,
         **changes: Any,
     ) -> None:
-        """One settings edit, settled exactly once."""
+        """One settings edit, settled exactly once.
+
+        ``failed_said`` words a failure when something else already committed,
+        so it is never called "nothing changed".
+        """
         blocked = self.settings_blocked()
         if blocked:
-            self._refuse(settled, blocked, *topics)
+            self._refuse(settled, failed_said(blocked) if failed_said else blocked, *topics)
             return
         reported = False
 
@@ -525,12 +559,19 @@ class RealScheduling:
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
-            self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
+            self._backend.window_report(
+                failed_said(error)
+                if failed_said is not None
+                else f"{what} was not saved; nothing changed: {error}"
+            )
             self._owner.emit_changed(*topics)
             self._settle(settled, False)
 
         accepted = self._backend.update_settings_async(on_success=saved, on_error=failed, **changes)
         if not accepted and not reported:
+            if failed_said is not None:
+                # Refused without a word, after something else committed: say so.
+                self._backend.window_report(failed_said("it could not be queued"))
             self._owner.emit_changed(*topics)
             self._settle(settled, False)
 
@@ -706,37 +747,106 @@ class RealScheduling:
         return ForgetPlan(connector, playlist, rules, colors, refused)
 
     def forget_display(self, connector: str, settled: Settled | None = None) -> None:
+        """Forget a detached display: its rules, its own playlist, then the colors' choice.
+
+        One task on the authoring lane, in this order, so that whatever fails
+        leaves the least surprising state and is said exactly:
+
+        1. Before anything is written, both stores are read: one that can't
+           be read, or is from a newer version, refuses the whole thing.
+        2. The schedule: every rule aimed at the display, in one transaction
+           (`schedules.Store.remove_for_display`). It is the store with the
+           most ways to refuse, so a refusal is most likely here, where
+           "nothing changed" is still true.
+        3. The display store: its playlist (`displays.Store.forget_display`).
+           If this fails after the rules went, the one thing left is that
+           playlist, shown on the Displays page, and forgetting again removes
+           it. That is reported as such, never as "nothing changed".
+        4. The desktop colors' choice, last: a settings edit, made only while
+           displays are mirrored, where that choice has no effect.
+
+        Whatever committed is published (`schedule_edited`), through the
+        application's own publication and its checks, and the pages show
+        what is saved.
+        """
         plan = self.forget_plan(connector)
         if plan.refused:
             self._refuse(settled, plan.refused, "displays", "schedule")
             return
-        displays = self._session.displays
+        assignments = self._session.displays
         rules = self._session.schedules
+        topics = ("displays", "schedule")
+        reported = False
 
-        def work() -> object:
+        def work() -> _Forgotten:
             # Never a "Your pick" playlist: those stay (hidden) whatever happens.
-            displays.unassign(connector)
-            for rule in [rule for rule in rules.rules if rule.connector == connector]:
-                rules.remove(rule.id)
-            return None
+            for problem in (rules.durable_problem(), assignments.durable_problem()):
+                if problem:
+                    raise ValueError(problem)
+            removed = rules.remove_for_display(connector)
+            try:
+                playlist = assignments.forget_display(connector)
+            except display_store.DisplayError as error:
+                if not removed:
+                    raise  # nothing committed: the plain refusal is true
+                return _Forgotten(removed, None, str(error))
+            return _Forgotten(removed, playlist)
 
-        def forgotten(saved: bool) -> None:
-            if not saved or not plan.colors:
-                self._settle(settled, saved)
+        def finish(outcome: _Forgotten) -> None:
+            if outcome.rules or outcome.playlist:
+                self._backend.schedule_edited()  # publish what committed
+            if outcome.playlist is None:
+                self._backend.window_report(self._partly_forgotten(connector, plan, outcome))
+                self._owner.emit_changed(*topics)
+                self._settle(settled, False)
                 return
+            if not plan.colors:
+                self._owner.emit_changed(*topics)
+                self._settle(settled, True)
+                return
+            removed = runtime_config.listed(_removed_words(outcome, self.playlist_label))
             self._settings_write(
                 what=f"Forgetting {connector} as the desktop colors\u2019 display",
-                topics=("displays",),
+                topics=topics,
                 settled=settled,
+                failed_said=lambda error: (
+                    f"Forgetting {connector} was only partly saved: {removed} "
+                    f"{'were' if outcome.playlist and outcome.rules else 'was'} removed, but "
+                    f"the desktop colors still follow it: {error}"
+                ),
                 theme_source_connector="",
             )
 
-        self._store_write(
-            work,
-            what=f"Forgetting {connector}",
-            topics=("displays", "schedule"),
-            publish=self._backend.schedule_edited,
-            settled=forgotten,
+        def failed(error: str) -> None:
+            nonlocal reported
+            reported = True
+            self._backend.window_report(
+                f"Forgetting {connector} was not saved; nothing changed: {error}"
+            )
+            self._owner.emit_changed(*topics)
+            self._settle(settled, False)
+
+        blocked = self.schedule_blocked()
+        if blocked:
+            self._refuse(settled, blocked, *topics)
+            return
+        accepted = self._backend.authoring_action_async(work, finish, failure=failed)
+        if not accepted and not reported:
+            # Refused without a report (shutting down, or authoring not open yet).
+            self._owner.emit_changed(*topics)
+            self._settle(settled, False)
+
+    def _partly_forgotten(self, connector: str, plan: ForgetPlan, outcome: _Forgotten) -> str:
+        """Exactly what Forget Display removed and what is still saved."""
+        count = len(outcome.rules)
+        removed = f"its {count} schedule rule{'s were' if count != 1 else ' was'} removed"
+        label = self.playlist_label(plan.playlist) or plan.playlist
+        left = [f"its own playlist (\u201c{label}\u201d) is still saved"]
+        if plan.colors:
+            left.append("the desktop colors still follow it")
+        return (
+            f"Forgetting {connector} was only partly saved: {removed}, but "
+            f"{runtime_config.listed(left)}: {outcome.error}"
         )
 
     # -- Scheduling: runtime commands ----------------------------------------------------------

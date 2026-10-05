@@ -572,6 +572,75 @@ def test_forgetting_a_detached_display(backend: Publishing, items: tuple[MediaIt
     assert "DP-2" not in {display.connector for display in adapter.known_displays()}
 
 
+def test_forgetting_a_display_says_exactly_what_went_when_the_colors_choice_fails(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    """The colors' choice is the last step: its failure names what was already removed."""
+    session = backend.session
+    pid = _playlist(session, "Dock", items[0])
+    session.displays.assign("DP-2", pid)
+    session.schedules.add(pid, connector="DP-2")
+    session.update_settings(replace(session.settings, theme_source_connector="DP-2"))
+    adapter, owner = _scheduling(backend)
+    plan = adapter.forget_plan("DP-2")
+    assert (plan.playlist, plan.rules, plan.colors, plan.refused) == (pid, 1, True, "")
+    backend.settings_failure = "disk full"
+    results: list[bool] = []
+    adapter.forget_display("DP-2", results.append)
+    backend.run_authoring()
+    backend.run_authoring()  # the settings edit, queued once the stores were saved
+    assert results == [False]
+    assert session.displays.all() == () and session.schedules.rules == ()
+    assert backend.published == 1, "what was removed is published"
+    message = backend.reports[-1]
+    assert "nothing changed" not in message, message
+    assert message == (
+        "Forgetting DP-2 was only partly saved: its own playlist (\u201cDock\u201d) and "
+        "its 1 schedule rule were removed, but the desktop colors still follow it: disk full"
+    )
+    assert "displays" in owner.topics
+
+
+def test_settings_turning_read_only_mid_forget_still_names_what_was_removed(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    session = backend.session
+    pid = _playlist(session, "Dock", items[0])
+    session.displays.assign("DP-2", pid)
+    session.update_settings(replace(session.settings, theme_source_connector="DP-2"))
+    adapter, _owner = _scheduling(backend)
+    results: list[bool] = []
+    adapter.forget_display("DP-2", results.append)
+    backend.unknown_keys = ("wallpaper_rules",)  # settings.toml from a newer version, meanwhile
+    backend.run_authoring()
+    assert results == [False] and session.displays.all() == ()
+    message = backend.reports[-1]
+    assert message.startswith(
+        "Forgetting DP-2 was only partly saved: its own playlist (\u201cDock\u201d) was "
+        "removed, but the desktop colors still follow it: Settings are read-only"
+    ), message
+
+
+def test_forgetting_refuses_an_unreadable_display_store_before_the_rules_go(
+    backend: Publishing, items: tuple[MediaItem, ...]
+) -> None:
+    """Read first: a display store that can't be read stops it before the schedule changes."""
+    session = backend.session
+    pid = _playlist(session, "Dock", items[0])
+    session.displays.assign("DP-2", pid)
+    rule = session.schedules.add(pid, connector="DP-2")
+    displays.state_path().write_text("{ not json", encoding="utf-8")
+    adapter, _owner = _scheduling(backend)
+    results: list[bool] = []
+    adapter.forget_display("DP-2", results.append)
+    backend.run_authoring()
+    assert results == [False]
+    assert [kept.id for kept in schedules.Store.open().rules] == [rule.id]
+    assert backend.published == 0
+    message = backend.reports[-1]
+    assert message.startswith("Forgetting DP-2 was not saved; nothing changed: unreadable:")
+
+
 def test_the_colors_display_is_not_forgotten_while_displays_run_separately(
     backend: Publishing,
 ) -> None:

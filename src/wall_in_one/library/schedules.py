@@ -77,7 +77,7 @@ class ScheduleError(Exception):
     Kinds in use: ``local-io``, ``no-such-rule``, ``identity-conflict``,
     ``invalid-time``, ``invalid-day``, ``invalid-month``,
     ``invalid-connector``, ``invalid-name``, ``full``, ``newer-version``,
-    ``no-backup``.
+    ``no-backup``, ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -86,6 +86,20 @@ class ScheduleError(Exception):
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
+
+
+def _unreadable_error(fault: str, target: Path) -> ScheduleError:
+    return ScheduleError(
+        state_file.UNREADABLE,
+        f"{target.name} can't be read ({fault}), so which rules it holds isn't known. "
+        "Nothing was changed.",
+    )
+
+
+def refuse_unreadable(fault: str | None, path: Path | None) -> None:
+    """Refuse a change that must see every rule, while the file can't be read."""
+    if fault is not None:
+        raise _unreadable_error(fault, path if path is not None else state_path())
 
 
 def new_id() -> str:
@@ -678,6 +692,41 @@ class Store:
             return changed, changed
 
         return self._mutate(remove)
+
+    def remove_for_display(self, connector: str) -> tuple[Rule, ...]:
+        """Remove every rule aimed at ``connector`` in one save; return the rules removed.
+
+        All of them or none: one transaction, so no failure can leave some of
+        a display's rules behind. A file that can't be read is refused before
+        anything is written (``unreadable``): which rules it holds can't be
+        known, so none can be said to be gone.
+        """
+        name = clean_connector(connector)
+
+        def remove(rules: list[Rule]) -> tuple[tuple[Rule, ...], bool]:
+            refuse_unreadable(self._fault, self._path)
+            removed = tuple(rule for rule in rules if rule.connector == name)
+            if removed:
+                rules[:] = [rule for rule in rules if rule.connector != name]
+            return removed, bool(removed)
+
+        return self._mutate(remove)
+
+    def durable_problem(self) -> str:
+        """Why a change can't be made to the file as it is now, or empty. Never writes.
+
+        For a caller that must not write anything elsewhere first when this
+        file would refuse: one from a newer version, or one that can't be read.
+        """
+        target = self._path if self._path is not None else state_path()
+        reading = _read(target)
+        if reading.newer_version:
+            return str(
+                ScheduleError(state_file.NEWER_VERSION, state_file.newer_version_refusal(target))
+            )
+        if reading.fault is not None:
+            return str(_unreadable_error(reading.fault, target))
+        return ""
 
     def set_enabled(self, rule_id: str, enabled: bool) -> Rule:
         def set_enabled(rules: list[Rule]) -> tuple[Rule, bool]:

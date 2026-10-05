@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -427,21 +427,49 @@ def test_the_query_survives_a_rescan(grid: WallpaperGrid) -> None:
 
 
 @pytest.mark.parametrize("count", (600, 4096))
-def test_large_library_initial_work_is_bounded_and_fast(loader: CountingLoader, count: int) -> None:
+def test_large_library_initial_work_is_bounded_and_fast(
+    loader: CountingLoader, count: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Library size affects pure matching, never GTK-card construction.
 
-    The time ceiling is deliberately generous for emulated and debug GTK
-    builds.  The card/request counts are the hard invariant; the ceiling also
-    catches an accidental expensive full-inventory pass beyond the intended
-    string matching and sort.
+    Asserted by counting, not by the clock: a wall-clock ceiling flaked under
+    host load and proved nothing a count does not. The whole inventory is
+    matched once and given one sort key each (one pure pass, no second
+    expensive one), while GTK sees exactly one page: that many tiles built,
+    appended and asked for thumbnails, none built and dropped on the way.
     """
+    from wall_in_one.library import filter as library_filter
+    from wall_in_one.ui import grid as grid_module
+
+    matched: list[str] = []
+    keyed: list[Path] = []
+    built: list[Path] = []
+    real_matches, real_order_key = library_filter.matches, library_filter.order_key
+
+    def matches(name: str, wanted: Sequence[str]) -> bool:
+        matched.append(name)
+        return real_matches(name, wanted)
+
+    def order_key(each: MediaItem, sort: Sort) -> tuple[int, str, str]:
+        keyed.append(each.path)
+        return real_order_key(each, sort)
+
+    class CountedTile(WallpaperTile):
+        def __init__(self, shown: MediaItem) -> None:
+            built.append(shown.path)
+            super().__init__(shown)
+
+    monkeypatch.setattr(library_filter, "matches", matches)
+    monkeypatch.setattr(library_filter, "order_key", order_key)
+    monkeypatch.setattr(grid_module, "WallpaperTile", CountedTile)
     grid = WallpaperGrid(loader, lambda _item: None)
     items = tuple(item(f"media-{index:04d}") for index in range(count))
 
-    started = time.perf_counter()
     grid.populate(items)
-    elapsed = time.perf_counter() - started
 
+    assert len(matched) == count, "every item is matched exactly once"
+    assert sorted(keyed) == sorted(each.path for each in items), "one sort key per item"
+    assert built == [each.path for each in items[:MEDIA_PAGE_SIZE]], "one page of tiles, no more"
     assert grid.visible_count == count
     assert len(grid._tiles) == MEDIA_PAGE_SIZE
     assert len(tiles_in(grid)) == MEDIA_PAGE_SIZE
@@ -450,7 +478,6 @@ def test_large_library_initial_work_is_bounded_and_fast(loader: CountingLoader, 
     assert grid._more.get_label() == (
         f"Load {MEDIA_PAGE_SIZE} more \u00b7 {MEDIA_PAGE_SIZE} of {count} shown"
     )
-    assert elapsed < 1.0, f"bounded initial grid took {elapsed:.3f}s for {count} items"
 
 
 def test_load_more_adds_one_page_without_replacing_existing_tiles(

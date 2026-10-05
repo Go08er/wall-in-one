@@ -484,6 +484,8 @@ def _run(cell: Cell) -> None:
         BOUND,
         what="every hold to settle",
     )
+    # Nothing is reported pending once there is no work for it to be waiting on.
+    assert not application._runtime_library_scan_pending, "a scan pending with no work behind it"
     spent = _cpu()
     time.sleep(IDLE)
     assert _cpu() - spent < IDLE / 2, "a worker is spinning"
@@ -509,7 +511,9 @@ def _run(cell: Cell) -> None:
         application.request_quit()
 
     # Quit completes within the bound, whatever happened.
-    spin_until(lambda: cell.quits == [True], BOUND, what="Quit to complete")
+    spin_until(lambda: bool(cell.quits), BOUND, what="Quit to complete")
+    spin_until(lambda: _settled(application), BOUND, what="the last work to land")
+    assert not application._runtime_library_scan_pending, "a scan pending with no work behind it"
     assert application._authoring_lifetime_holds == 0
     assert not application._removal_convergence_held
 
@@ -900,4 +904,4 @@ def test_a_publication_captured_during_a_refused_removal_ends_while_still_invali
     assert cell.installed.documents[count:] == []
     assert application.publication_problem != ""
     application.request_quit()
-    spin_until(lambda: cell.quits == [True], BOUND, what="Quit to complete")
+    spin_until(lambda: bool(cell.quits), BOUND, what="Quit to complete")

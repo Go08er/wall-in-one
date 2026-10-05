@@ -534,10 +534,12 @@ class Application(Adw.Application):
         self._inventory_stamp = 0
         self._inventory_valid = True
         self._inventory_problem = ""
-        #: What a removal's prepare found in force (inventory validity and
-        #: problem, scan barrier pending and error), put back exactly when it
-        #: doesn't commit (`_restore_runtime_after_uncommitted_removal`).
-        self._inventory_before_removal: tuple[bool, str, bool, str] | None = None
+        #: The inventory validity and problem a removal's prepare found in
+        #: force, put back exactly when it doesn't commit
+        #: (`_restore_runtime_after_uncommitted_removal`). Only the inventory:
+        #: the scan lifecycle (pending, error, ready, generation) belongs to
+        #: the scan worker, and a removal never saves or restores it.
+        self._inventory_before_removal: tuple[bool, str] | None = None
         self._runtime_compile_pending = False
         self._runtime_authoring_request: _RuntimeAuthoringRequest | None = None
         #: Why the last publication didn't reach the wallpaper service, or empty.
@@ -2243,12 +2245,13 @@ class Application(Adw.Application):
     def refresh_library(self, *, finished: Callable[[bool], None] | None = None) -> None:
         """Rescan and reconcile without filesystem work on GTK's thread.
 
-        Headless callers keep the synchronous :class:`Session` contract. With
-        a window present, one generation-tagged worker replays the removal
-        journal, walks the library, and performs confirmed Workshop cleanup
-        through detached Stores.  The existing grid, search, scroll and focus
-        remain in place. A newer request cooperatively cancels the older one
-        and makes any already-running result ineligible to land.
+        The explicit headless service (``--service``) keeps the synchronous
+        :class:`Session` contract. Every GUI process, with a window or after
+        its last window closed, uses one generation-tagged worker that replays
+        the removal journal, walks the library, and performs confirmed Workshop
+        cleanup through detached Stores. The existing grid, search, scroll and
+        focus remain in place. A newer request cooperatively cancels the older
+        one and makes any already-running result ineligible to land.
 
         ``finished``, when given, runs once on GTK: with True after the next
         library install has been shown (`_finish_library_refresh`), or with
@@ -2532,8 +2535,10 @@ class Application(Adw.Application):
                 self._runtime_library_scan_hold_generation = generation
                 acquire_lifetime = not self._runtime_library_scan_held
                 self._runtime_library_scan_held = True
-            if self._accepted_library_sources != sources:
-                self._runtime_library_ready.clear()
+            # Pending and ready never both hold: a gesture waiting for this scan
+            # sleeps on the event until it ends, rather than finding it set and
+            # looping for as long as the scan runs.
+            self._runtime_library_ready.clear()
         if acquire_lifetime:
             self.hold()
 
@@ -3396,12 +3401,18 @@ class Application(Adw.Application):
             if self._runtime_shutdown or self._runtime_compile_pending:
                 return
             request = self._runtime_authoring_request
+            withdrawn = request is None
             if request is None or (
                 request.generation <= self._runtime_compiled_generation
                 and not self._runtime_publication_held
             ):
-                return
-            self._runtime_compile_pending = True
+                request = None
+            else:
+                self._runtime_compile_pending = True
+        if request is None:
+            if withdrawn:
+                self._settle_publication_without_request()
+            return
         try:
             future = self._runtime_pool().submit(self._compile_runtime_until_current)
         except RuntimeError:
@@ -3537,8 +3548,17 @@ class Application(Adw.Application):
                         latest = self._runtime_authoring_request
                         scan_pending = self._runtime_library_scan_pending
                         scan_error = self._runtime_library_error
+                        removal_pending = self._removal_runtime_invalidated
                     if latest is not None and latest.generation > request.generation:
                         continue
+                    if removal_pending:
+                        # The removal's outcome publishes again (its scan after a
+                        # commit, or its restore): defer to it, never wait here.
+                        return _RuntimePublication(
+                            request.generation,
+                            changed=changed_any,
+                            deferred=True,
+                        )
                     if not scan_pending:
                         return _RuntimePublication(
                             request.generation,
@@ -3725,6 +3745,7 @@ class Application(Adw.Application):
             retry_terminal_scan = (
                 publication.deferred
                 and not self._runtime_library_scan_pending
+                and not self._removal_runtime_invalidated
                 and latest is not None
             )
             publication_hold_terminal = (
@@ -3771,6 +3792,7 @@ class Application(Adw.Application):
                 self._ensure_runtime_compile_queued()
             if publication_hold_terminal:
                 self._release_runtime_publication_hold()
+            self._settle_publication_without_request()
             self._maybe_finish_removal_convergence()
         return GLib.SOURCE_REMOVE
 
@@ -3794,6 +3816,26 @@ class Application(Adw.Application):
         changed = getattr(self._window, "publication_changed", None)
         if callable(changed):
             changed()
+
+    def _settle_publication_without_request(self) -> None:
+        """End a publication hold whose request was withdrawn and that nothing will publish.
+
+        A removal's prepare withdraws the pending request (its Library may
+        name what the removal deletes). When the removal then publishes
+        nothing (an inventory restored invalid, scans that failed), no compile
+        is coming for that hold: nothing eligible to publish is its outcome.
+        A later publication takes a hold of its own.
+        """
+        with self._runtime_config_lock:
+            orphaned = (
+                self._runtime_publication_held
+                and self._runtime_authoring_request is None
+                and not self._runtime_compile_pending
+                and not self._removal_runtime_invalidated
+                and not self._runtime_library_scan_pending
+            )
+        if orphaned:
+            self._release_runtime_publication_hold()
 
     def _release_runtime_publication_hold(self) -> None:
         """Balance the coalesced hold after its newest terminal publication."""
@@ -4921,22 +4963,20 @@ class Application(Adw.Application):
             return self._inventory_valid and (stamp is None or stamp == self._inventory_stamp)
 
     def _invalidate_runtime_for_pending_removal(self) -> None:
-        """Cancel stale health/compile requests before physical deletion."""
+        """Cancel stale health/compile requests before physical deletion.
+
+        The removal's own barrier is ``_removal_runtime_invalidated`` (with
+        the inventory invalid): publications defer and gestures fail promptly
+        until it resolves. The scan lifecycle is left to the scan worker, so
+        a refresh that completes meanwhile, however it ends, still counts.
+        """
         with self._runtime_config_lock:
-            self._inventory_before_removal = (
-                self._inventory_valid,
-                self._inventory_problem,
-                self._runtime_library_scan_pending,
-                self._runtime_library_error,
-            )
+            self._inventory_before_removal = (self._inventory_valid, self._inventory_problem)
         self._invalidate_inventory("a wallpaper is being removed")
         with self._runtime_config_lock:
             self._runtime_authoring_generation += 1
             self._runtime_authoring_request = None
             self._runtime_health_request = None
-            self._runtime_library_scan_pending = True
-            self._runtime_library_error = ""
-            self._runtime_library_ready.clear()
             self._removal_runtime_invalidated = True
 
     def _invalidate_library_scan_after_removal(self) -> None:
@@ -4979,20 +5019,16 @@ class Application(Adw.Application):
             self._removal_runtime_invalidated = False
             before = self._inventory_before_removal
             self._inventory_before_removal = None
-            valid, problem, pending, error = (
-                before
-                if before is not None
-                else (self._inventory_valid, self._inventory_problem, False, "")
+            valid, problem = (
+                before if before is not None else (self._inventory_valid, self._inventory_problem)
             )
-            # Nothing was deleted, so exactly what was in force comes back: an
-            # inventory left invalid by an earlier removal whose scans failed
-            # stays invalid, with its notice. "This changed nothing" validates
-            # nothing. The stamp still moves, so whatever was captured before
-            # or meanwhile stays rejected.
-            self._runtime_library_scan_pending = pending
-            self._runtime_library_error = error
-            if not pending:
-                self._runtime_library_ready.set()
+            # Nothing was deleted, so the inventory validity in force before
+            # comes back: an inventory left invalid by an earlier removal whose
+            # scans failed stays invalid, with its notice. "This changed
+            # nothing" validates nothing. The scan lifecycle is not rewound: a
+            # refresh that finished meanwhile stands as it ended, and one still
+            # running ends on its own. The stamp still moves, so whatever was
+            # captured before or meanwhile stays rejected.
             self._inventory_stamp += 1
             self._inventory_valid = valid
             self._inventory_problem = problem

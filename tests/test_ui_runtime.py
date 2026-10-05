@@ -753,7 +753,8 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
         )
         spin_until(lambda: application._removal_runtime_invalidated)
         assert application._runtime_authoring_request is None
-        assert not application._runtime_library_ready.is_set()
+        # The removal's own barrier: nothing is installed from the library meanwhile.
+        assert not application._inventory_valid
 
         release_compile.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
@@ -926,7 +927,7 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
         assert quit_calls == []
         assert application._removal_runtime_invalidated
         assert application._authoring_lifetime_holds > 0
-        assert not application._runtime_library_ready.is_set()
+        assert not application._inventory_valid, "the removal's own barrier"
         assert "reload" not in reloads
 
         release_flush.set()

@@ -18,10 +18,18 @@ the same fault controls the matrix uses, and only when it can happen:
 - a favourite from the window, a favourite over ctl, a settings change, Next,
   the last window closing, Quit.
 
+Window gestures (a removal or the star from the window, a settings change,
+Next) are offered only while the window is open; ctl's stay offered after it
+closes, and a gesture made before it closed still lands. The star toggles,
+as the window's does. Each user action is counted as admitted, refused or a
+no-op (the gesture found nothing to act on), and the module prints the tally.
+
 After every step: every runtime document installed so far names only files
-that existed when it was installed; no scan is reported pending without
-real work behind it (a scan future or request, the authoring lane, a
-removal); nothing spins (lock acquisitions per second stay bounded). At the
+that existed when it was installed; no scan is reported pending without the
+work that will end it behind it -- the current scan generation's future or
+request, that generation's reconciliation on the authoring lane, or a
+committed removal's scan tail -- never just any unrelated work on the lane;
+nothing spins (lock acquisitions per second stay bounded). At the
 end, with every gate open and the faults lifted: every hold settles, nothing
 spins (process CPU over an idle stretch), a refresh recovers to a valid
 document, and Quit completes. A failing seed prints its steps, to replay
@@ -39,7 +47,7 @@ import random
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -160,6 +168,48 @@ class Gates:
 
 
 @dataclass
+class ScanWork:
+    """What a pending scan can be waiting for, tracked at the application's own seams (W-2)."""
+
+    #: Generations whose reconciliation is queued or running on the authoring lane.
+    reconciling: set[int] = field(default_factory=set)
+    #: A committed removal's scan tail: the generation its adoption left pending,
+    #: with the refresh after it scheduled but not started.
+    tail: int | None = None
+
+    def backs(self, application: Application) -> bool:
+        """The work that will end the current pending scan, if any is live."""
+        generation = application._runtime_library_scan_generation
+        current_scan = application._library_scan_generation == generation and (
+            application._library_scan_future is not None
+            or application._library_scan_request is not None
+        )
+        return current_scan or generation in self.reconciling or self.tail == generation
+
+
+#: How one user action ended up (W-1).
+ADMITTED, REFUSED, NO_OP = "admitted", "refused", "no-op"
+
+
+@dataclass
+class Action:
+    """One user action, resolved once its work has settled."""
+
+    event: str
+    outcome: Callable[[], str]
+
+
+#: Every seed's resolved actions, for the module's tally: (action kind, outcome) -> count.
+TALLY: dict[tuple[str, str], int] = {}
+
+
+def _kind(event: str) -> str:
+    """``remove:window:keep:full`` -> ``remove:window``; ``star`` -> ``star``."""
+    parts = event.split(":")
+    return ":".join(parts[:2]) if parts[0] == "remove" else parts[0]
+
+
+@dataclass
 class World:
     application: Application
     window: FakeWindow
@@ -177,6 +227,15 @@ class World:
     favourites_free: threading.Event | None = None
     quit_requested: bool = False
     window_open: bool = True
+    scans: ScanWork = field(default_factory=ScanWork)
+    actions: list[Action] = field(default_factory=list)
+
+    def tally(self) -> dict[tuple[str, str], int]:
+        counts: dict[tuple[str, str], int] = {}
+        for action in self.actions:
+            key = (_kind(action.event), action.outcome())
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def set_write(self, mode: str) -> None:
         os.chmod(self.state, 0o500 if mode == "eacces" else 0o700)
@@ -270,6 +329,7 @@ def worlds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable
             return changed
 
         monkeypatch.setattr(runtime_config, "update", recorded)
+        scans = _watch_scan_work(application, monkeypatch)
         assert application._publish_runtime_async()
         spin_until(lambda: _quiet(application), BOUND, what="the first publication")
         gates = Gates()
@@ -286,6 +346,7 @@ def worlds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable
             lock,
             paths.runtime_config_path().parent,
             runtime_config.MAX_RUNTIME_CONFIG_BYTES,
+            scans=scans,
         )
         world_box.append(world)
         made.append(world)
@@ -308,22 +369,57 @@ def _quiet(application: Application) -> bool:
     )
 
 
+def _watch_scan_work(application: Application, monkeypatch: pytest.MonkeyPatch) -> ScanWork:
+    """Record, at the application's own seams, the work each pending scan waits for."""
+    scans = ScanWork()
+    queue = application._queue_library_reconciliation
+    finish = application._finish_runtime_library_scan
+    failed = application._library_reconciliation_failed
+    adopt = application._adopt_item_removal
+
+    def queued(generation: int, request: Any, library: Any) -> None:
+        scans.reconciling.add(generation)
+        queue(generation, request, library)
+
+    def finished(generation: int, *, error: str = "") -> None:
+        scans.reconciling.discard(generation)
+        if scans.tail == generation:
+            scans.tail = None
+        finish(generation, error=error)
+
+    def reconciliation_failed(generation: int, message: str) -> None:
+        scans.reconciling.discard(generation)
+        failed(generation, message)
+
+    def adopted(result: RemovalResult) -> None:
+        adopt(result)
+        if (
+            result.committed
+            and application._runtime_library_scan_pending
+            and application._library_scan_future is None
+            and application._library_scan_request is None
+        ):
+            # The refresh after the commit is scheduled; until it starts, this is its tail.
+            scans.tail = application._runtime_library_scan_generation
+
+    monkeypatch.setattr(application, "_queue_library_reconciliation", queued)
+    monkeypatch.setattr(application, "_finish_runtime_library_scan", finished)
+    monkeypatch.setattr(application, "_library_reconciliation_failed", reconciliation_failed)
+    monkeypatch.setattr(application, "_adopt_item_removal", adopted)
+    return scans
+
+
 def _scan_work_live(world: World) -> bool:
-    """Real current work a pending scan can be waiting for."""
-    application = world.application
-    return bool(
-        application._library_scan_future is not None
-        or application._library_scan_request is not None
-        or application._authoring_active
-        or application._authoring_queue
-        or application._removal_active
-    )
+    """The work that will end the pending scan: its future or request, its
+    reconciliation, or a committed removal's tail (W-2: not any authoring work)."""
+    return world.scans.backs(world.application)
 
 
 # -- events -------------------------------------------------------------------------------
 
 
-def _ctl(world: World, verb: str, argument: str) -> None:
+def _ctl(world: World, verb: str, argument: str) -> Callable[[], str]:
+    """Send one ctl request; its outcome is its reply's."""
     replies: list[Response] = []
     server.dispatch(
         server.build_verb_table(_Commands(world.application)),
@@ -331,76 +427,107 @@ def _ctl(world: World, verb: str, argument: str) -> None:
         replies.append,
     )
     world.replies.append(lambda: bool(replies))
+    return lambda: ADMITTED if replies and replies[0].ok else REFUSED
+
+
+def _admitted(accepted: bool | None) -> Callable[[], str]:
+    return lambda: ADMITTED if accepted is not False else REFUSED
+
+
+def _no_op() -> str:
+    return NO_OP
 
 
 def _remove(
     world: World, via: str, target: str, commit: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> Callable[[], str]:
     application = world.application
     path = world.files[target]
+    item = application.session.library.find(path)
     if commit == "partial":
         world.hold_favourites(monkeypatch)
     if via == "ctl":
-        _ctl(world, "remove", str(path))
-        return
-    item = application.session.library.find(path)
-    if item is not None:
-        finished: list[RemovalResult] = []
-        application.remove_item_async(item, trash=True, finish=finished.append)
+        replied = _ctl(world, "remove", str(path))
+        return _no_op if item is None else replied
+    if item is None:
+        return _no_op  # the window shows no card for what the library lacks
+    finished: list[RemovalResult] = []
+    accepted = application.remove_item_async(item, trash=True, finish=finished.append)
+
+    def outcome() -> str:
+        # A queued removal can still be refused by its own dry run (or be busy).
+        committed = accepted and finished and finished[0].committed
+        return ADMITTED if committed else REFUSED
+
+    return outcome
 
 
-def _star(world: World) -> None:
-    """As the window's star does (`RealState.toggle_favorite`)."""
+def _star(world: World) -> Callable[[], str]:
+    """As the window's star does (`RealState.toggle_favorite`): add or discard, by what is saved."""
     application = world.application
     item = application.session.library.find(world.files["keep"])
     if item is None:
-        return
+        return _no_op
+    wanted = item.path not in application.session.favourites.paths
+    changed: list[bool] = []
 
     def prepare() -> Callable[[], bool]:
         current = application.current_item_for_authoring(item)
         store = application.session.favourites
-        return lambda: store.discard(current.path)
+        return lambda: store.add(current.path) if wanted else store.discard(current.path)
 
-    application.authoring_action_async(
-        lambda: False,
-        lambda _changed: application.favourites_changed(),
-        prepare=prepare,
-        failure=lambda _error: None,
+    def saved(did: bool) -> None:
+        changed.append(did)
+        application.favourites_changed()
+
+    accepted = application.authoring_action_async(
+        lambda: False, saved, prepare=prepare, failure=lambda _error: None
     )
+    return lambda: ADMITTED if accepted and changed else REFUSED
 
 
 def _apply(world: World, event: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Do ``event``; every one of them can happen in the state it is chosen in."""
     application = world.application
     kind, _, rest = event.partition(":")
+    outcome: Callable[[], str] | None = None
     if kind == "refresh":
         application.refresh_library()
+        outcome = _admitted(None)
     elif kind == "let-go":
-        which, outcome = rest.split(":")
+        which, result = rest.split(":")
         waiting = world.gates.waiting(which)
         assert waiting, f"no {which} scan is held to let go"
-        world.gates.let_go(waiting[0], fail=outcome == "fail")
+        world.gates.let_go(waiting[0], fail=result == "fail")
     elif kind == "remove":
         via, target, commit = rest.split(":")
-        _remove(world, via, target, commit, monkeypatch)
+        outcome = _remove(world, via, target, commit, monkeypatch)
     elif kind == "write":
         world.set_write(rest)
     elif kind == "star":
-        _star(world)
+        outcome = _star(world)
     elif kind == "ctl-favourite":
-        _ctl(world, "favourite", str(world.files["other"]))
+        outcome = _ctl(world, "favourite", str(world.files["other"]))
     elif kind == "settings":
-        application.update_settings_async(shuffle=not application.settings.shuffle)
+        outcome = _admitted(
+            application.update_settings_async(shuffle=not application.settings.shuffle)
+        )
     elif kind == "next":
-        application._start_gui_runtime_call(lambda: application._send_gui_runtime("next"))
+        outcome = _admitted(
+            application._start_gui_runtime_call(lambda: application._send_gui_runtime("next"))
+        )
     elif kind == "close":
         application._on_close_request(world.window)  # type: ignore[arg-type]
         world.window_open = False
+        outcome = _admitted(None)
     elif kind == "quit":
         application.request_quit()
         world.quit_requested = True
+        outcome = _admitted(None)
     else:  # pragma: no cover - a typo in a script
         raise AssertionError(event)
+    if outcome is not None:
+        world.actions.append(Action(event, outcome))
 
 
 def _choices(world: World) -> list[tuple[str, int]]:
@@ -411,8 +538,11 @@ def _choices(world: World) -> list[tuple[str, int]]:
             options += [(f"let-go:{which}:ok", 4), (f"let-go:{which}:fail", 2)]
     if world.quit_requested:
         return options
-    options += [("refresh", 2), ("star", 1), ("ctl-favourite", 1), ("settings", 1), ("next", 1)]
-    for via in ("window", "ctl"):
+    options += [("refresh", 2), ("ctl-favourite", 1)]
+    # A closed window makes no new gestures (one made before it closed still lands).
+    if world.window_open:
+        options += [("star", 1), ("settings", 1), ("next", 1)]
+    for via in ("window", "ctl") if world.window_open else ("ctl",):
         for target in ("forest", "keep", "other"):
             for commit in ("full", "partial"):
                 options.append((f"remove:{via}:{target}:{commit}", 1))
@@ -526,6 +656,8 @@ def _finish_checked(world: World) -> None:
     assert application._authoring_lifetime_holds == 0
     named_missing = [missing for _document, missing in world.installed if missing]
     assert named_missing == [], "a generation named a file that wasn't there when installed"
+    for key, count in world.tally().items():
+        TALLY[key] = TALLY.get(key, 0) + count
 
 
 def _play(world: World, events: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -557,6 +689,32 @@ def _seeds() -> list[int]:
     return [int(one)] if one else list(range(SEEDS))
 
 
+@pytest.fixture(scope="module", autouse=True)
+def tally(pytestconfig: pytest.Config) -> Iterator[None]:
+    """Print how the module's user actions ended: what was exercised, not just how much."""
+    TALLY.clear()
+    yield
+    lines = ["interleaving actions (admitted / refused / no-op):"]
+    for kind in sorted({kind for kind, _outcome in TALLY}):
+        counts = [TALLY.get((kind, outcome), 0) for outcome in (ADMITTED, REFUSED, NO_OP)]
+        lines.append(f"  {kind}: {counts[0]} / {counts[1]} / {counts[2]}")
+    totals = [
+        sum(count for (_kind, outcome), count in TALLY.items() if outcome == wanted)
+        for wanted in (ADMITTED, REFUSED, NO_OP)
+    ]
+    lines.append(f"  all: {totals[0]} / {totals[1]} / {totals[2]}")
+    # Module teardown runs inside the last test's output capture, which a
+    # passing test discards: print past it, as `capsys.disabled()` does.
+    reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
+    capture = pytestconfig.pluginmanager.get_plugin("capturemanager")
+    with capture.global_and_fixture_disabled() if capture is not None else nullcontext():
+        for line in lines:
+            if reporter is not None:
+                reporter.write_line(line)
+            else:  # pragma: no cover - pytest always has one
+                print(line)
+
+
 @pytest.mark.parametrize("seed", _seeds(), ids=lambda seed: f"seed-{seed}")
 def test_any_reachable_interleaving_keeps_every_invariant(
     seed: int, worlds: Callable[..., World], monkeypatch: pytest.MonkeyPatch
@@ -566,8 +724,8 @@ def test_any_reachable_interleaving_keeps_every_invariant(
         _seeded(seed, world, monkeypatch)
     except AssertionError as failure:
         raise AssertionError(
-            f"seed {seed} failed after {world.trace}; replay with WIO_INTERLEAVING_SEED={seed}: "
-            f"{failure}"
+            f"seed {seed} failed after {world.trace} ({world.tally()}); replay with "
+            f"WIO_INTERLEAVING_SEED={seed}: {failure}"
         ) from failure
 
 

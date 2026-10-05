@@ -1106,8 +1106,42 @@ class Application(Adw.Application):
         dialog.add_response("working", "Working…")
         dialog.set_response_enabled("working", False)
         dialog.set_can_close(False)
+        # Closing the window must still close it. libadwaita answers a
+        # window's close by closing its dialog instead, and this one can't
+        # close: it only emits "close-attempt", and the window used to stay
+        # (with the process) until the work ended, the close lost. Escape is
+        # kept from the dialog, so an attempt is the window being closed.
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", lambda _keys, key, _code, _mods: key == Gdk.KEY_Escape)
+        dialog.add_controller(keys)
+        dialog.connect("close-attempt", self._close_window_past_progress)
         self._legacy_migration_prompt = dialog
         self._ask(dialog)
+
+    def _close_window_past_progress(self, dialog: Adw.AlertDialog) -> None:
+        """The window was asked to close over a progress dialog: put it away, then close.
+
+        The work under the dialog does not need a window: a check, import or
+        postponement that lands without one is consumed as a windowless one
+        (`_deliver_legacy_migration_job`), and the next window asks again.
+        The close is asked for again once this one has been answered, when
+        no dialog is left to stop it.
+        """
+        window = self._dialog_parent()
+        if self._legacy_migration_prompt is dialog:
+            self._legacy_migration_prompt = None
+        dialog.force_close()
+        if window is None:
+            return
+        closing = window
+
+        def close() -> bool:
+            if closing.get_realized():
+                closing.close()
+            return GLib.SOURCE_REMOVE
+
+        # After the close request that was turned away has returned.
+        GLib.idle_add(close, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def _close_legacy_migration_dialog(self) -> None:
         dialog = self._legacy_migration_prompt

@@ -52,7 +52,7 @@ runtime document when successful; it is not a read-only settings checker.
 `settings.toml` has no version number, so Wall-in-One can't tell a key from a
 newer release apart from a typo. 0.1.4 refuses the whole file, which is why
 0.2.0 writes only the keys 0.1.4 knows (see
-[Rolling back from 0.2.0 to 0.1.4](updating.md#rolling-back-from-020-to-014)).
+[Going back to 0.1.4](updating.md#going-back-to-014)).
 Since 0.2.0, a key this version doesn't know never stops anything. Instead:
 
 - Every reader uses the keys it knows. The unknown ones are ignored, never

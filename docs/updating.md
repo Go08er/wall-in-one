@@ -142,8 +142,9 @@ already running keeps its window and prints a note, so close it first.
 
 Package rollback does not roll back application data, and there is no
 automatic data downgrade. An older release can refuse or narrow files that a
-newer one wrote (for 0.1.4, see below): keep or restore the newer package to
-repair the configuration. Preserve current files before restoring
+newer one wrote: keep or restore the newer package to repair the
+configuration. There are two kinds of target below. Going back to a 0.2.x
+release involves only `ui.toml`; going back to 0.1.4 needs a tool. Preserve current files before restoring
 any backup, since a whole-folder restore would discard changes made after that
 backup.
 
@@ -204,11 +205,14 @@ Don't copy a version 2 file, such as `ui.toml.v2-saved`, back for 0.2.0 or
 `~/.local/state/wall-in-one` folder for this; only `ui.toml` is involved.
 0.1.4 ignores `ui.toml`.
 
-### Rolling back from 0.2.0 to 0.1.4
+### Going back to 0.1.4
 
-0.2.0 isn't designed to be rolled back, and there is no 0.1.5: 0.1.4 is the
-only release to go back to. 0.2.0 reads every 0.1.4 file as it is, but moves
-three of them to a newer version the first time you use what it adds:
+0.1.4 is the release before 0.2.0 (there is no 0.1.5), and the one rollback
+target that needs more than `ui.toml`. 0.2.0 moved three store formats on, and
+every release since, 0.3.0 included, writes those same formats, so the way back
+to 0.1.4 is the same from any of them. 0.2.0 and later read every 0.1.4 file
+as it is, but move three of them to a newer version the first time you use
+what 0.2.0 added:
 
 - naming a schedule rule moves `schedules.json` from version 2 to 3;
 - giving a playlist its own interval or shuffle moves `playlists.json` from
@@ -218,7 +222,7 @@ three of them to a newer version the first time you use what it adds:
 
 A profile that never used these is entirely in 0.1.4's formats. Otherwise,
 to go back to 0.1.4, close the app and stop the service, then run the
-rollback tool that comes with 0.2.0:
+rollback tool that comes with 0.2.0 and every later release:
 
 ```sh
 systemctl --user stop wall-in-one.service
@@ -234,18 +238,18 @@ rewrites the three files in the versions 0.1.4 reads, and removes
 `runtime-overrides.toml`, which 0.1.4 never reads. It then prints the two
 commands that put the copies back; if a write fails part way, it says which
 files it already rewrote and prints the same commands. It refuses, writing
-nothing, while the app or the service is running, and when a file was saved
-by a version newer than 0.2.0. A file that changes after the tool read it is
-never rewritten: the tool stops there and says so. Running it again finds
-nothing to do.
+nothing, while the app or the service is running, and when a file is in a
+format newer than the ones 0.2.0 writes. A file that changes after the tool
+read it is never rewritten: the tool stops there and says so. Running it again
+finds nothing to do.
 
 Then install 0.1.4 and start its service. Its first start compiles
 `runtime.toml` again from the rewritten files. Everything else is left as it
 is: `pairings.json`, `favourites.json`, `pending-removals.json` and
-`settings.toml` are already in 0.1.4's formats (0.2.0 writes only settings
-keys 0.1.4 knows), and 0.1.4 ignores `ui.toml`, the `.v<n>-backup` files and
-`tidy-archive/`.
+`settings.toml` are already in 0.1.4's formats (no release since writes a
+settings key 0.1.4 doesn't know), and 0.1.4 ignores `ui.toml`, the
+`.v<n>-backup` files and `tidy-archive/`.
 
 Without the tool, 0.1.4's app shows an empty library and saves nothing until
-you update to 0.2.0 again, but nothing is lost, and the wallpaper keeps
-running on the last `runtime.toml`.
+you update again, but nothing is lost, and the wallpaper keeps running on the
+last `runtime.toml`.

@@ -246,7 +246,7 @@ its id, and the runtime never sees the name. Naming the first rule moves
 `schedules.json.v2-backup` (see
 [State-file recovery](library.md#state-file-recovery)). 0.1.4 can't safely
 edit version 3: after a rollback, its next schedule edit drops the names (see
-[Rolling back from 0.2.0 to 0.1.4](updating.md#rolling-back-from-020-to-014)).
+[Going back to 0.1.4](updating.md#going-back-to-014)).
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

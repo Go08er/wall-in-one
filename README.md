@@ -379,24 +379,22 @@ $ wall-in-one --install-theme-template
 $ noctalia msg templates-apply
 ```
 
-Settings → Colours → **Noctalia template** shows whether that is done and does
-the same install or repair with one button. Installing doesn't render; the
-**Render the colours now** row asks Noctalia to re-render all of its templates
-until it has rendered Wall-in-One's. Either way, that registers a
-`[theme.templates.user.wall-in-one]` entry in Noctalia's settings. It is a real schema field, so Noctalia round-trips it through its own
+That registers a `[theme.templates.user.wall-in-one]` entry in Noctalia's
+settings. It is a real schema field, so Noctalia round-trips it through its own
 settings writes rather than dropping it. The bundled template is copied once to
 a content-addressed file under Wall-in-One's state directory, without replacing
 an existing name. The settings block is fenced with markers, the previous file
 is backed up first, and a hand-written entry under the same id is never
 overwritten. `--uninstall-theme-template` removes the settings block again.
+
 In the new interface, Settings → Colours → **Noctalia template** shows whether
 the registration is installed, missing or needs repair (with the reason), and
 its Install or Repair button does the same as `--install-theme-template`. It
 writes only when you press it, and not while Wall-in-One's own upgrade is
-unfinished. Noctalia renders the template the next time its colours change;
-until it has, a separate **Render now** does what `noctalia msg
-templates-apply` does, re-rendering all of Noctalia's templates, not only
-Wall-in-One's.
+unfinished. Installing doesn't render: Noctalia renders the template the next
+time its colours change, and until it has, the **Render the colours now** row's
+**Render now** does what `noctalia msg templates-apply` does, re-rendering all
+of Noctalia's templates, not only Wall-in-One's.
 
 Check what you have with `--theme-status`, `--print-palette`, or `--print-css`.
 Palette updates are event-driven. A valid template file does not prove that
@@ -419,14 +417,12 @@ the next ones; a wallpaper's palette choices in the Library list the community
 palettes 24 at a time the same way. A rescan says "Refreshing installed
 palettes…" while it runs, and a palette saved by this app invalidates the old
 snapshot until the post-write generation lands, so an edited entry cannot be
-resurrected by a late scan. The manager also duplicates a palette into yours,
-named "<name> copy" (numbered if that is taken), and edits its colours, and
-previews every scheme on one of your stills. No two palettes you can pick
-share a name: the editor says so as you type, and Save waits until the name
-is free.
+resurrected by a late scan. The manager also duplicates a palette into yours
+and edits its colours, and previews every scheme on one of your stills.
 
 No two palettes you can pick share a name. A copy starts as "Nord copy"
-("Nord copy 2" when that is taken), and saving a new palette under a name a
+("Nord copy 2" when that is taken); the editor says as you type when a name is
+taken, and Save waits until it is free. Saving a new palette under a name a
 built-in, community or custom palette already has (ignoring case) is refused,
 with nothing written over: every window saves through the same check. A
 legacy palette's name is free to reuse, since copying it forward is how it

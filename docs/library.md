@@ -315,10 +315,19 @@ library the app holds may still name the removed file, so nothing new is
 installed from it, whatever asks: an edit is saved, and reaches the wallpaper
 service with the next publication after that scan. Meanwhile the service keeps
 the last setup that was installed, which can name the removed file until it
-is replaced. So every newly installed runtime configuration names only files
-that are there when it is installed. A removal that went through with a
+is replaced. So no runtime configuration installed after one of the app's own
+removals names the file it removed. A removal that went through with a
 problem (a cleanup that failed) is scanned once more after that, with the
 cleanup tried again.
+
+That guarantee covers what the app itself removes. A file deleted outside the
+app (in a file manager, say) after the last accepted scan is different, as it
+was in 0.2.2: the library the app holds still names it, so a later ordinary
+publication, after an unrelated edit, can still name the missing file until
+the next scan. If that publication is refused, the notice under the header
+says why (the classic window says it in a toast) and the service keeps its
+last setup. The next scan (`F5`, or **Rescan the Library** in the main menu)
+drops the file, and the publication after it names only what is there.
 
 If the scan after a removal fails, or the runtime configuration can't be
 written or is refused, the notice under the header says so and the service
@@ -576,7 +585,7 @@ it does not know. Its app checks the playlists, schedules and display
 assignments before it saves anything, so while one of them is from 0.2.0 it
 pauses every edit instead, and nothing is moved aside or lost. To go back to
 0.1.4, `wall-in-one-rollback` rewrites those files in 0.1.4's versions first;
-see [Rolling back from 0.2.0 to 0.1.4](updating.md#rolling-back-from-020-to-014).
+see [Going back to 0.1.4](updating.md#going-back-to-014).
 
 ### Format versions and their backups
 

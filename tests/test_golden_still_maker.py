@@ -8,13 +8,13 @@ interfaces run it after every scan (`Application._make_missing_stills`).
 The golden run is the nix check's machine: no linux-wallpaperengine and no
 niri on PATH. No still can be captured, so the whitelist must hold as it is.
 A second machine has the engine and a measured display but refuses the
-engine's process: there the only extra write allowed is the one claim pair a
-withdrawn named temporary leaves (the engine needs a ``.png`` name).
+engine's process: there the only extra write allowed is the one empty
+tombstone a withdrawn named temporary leaves (the engine needs a ``.png`` name).
 A third is the documented exception to the idle rule (docs/updating.md, "What
 opening the app writes"): the engine captures, and the 2x2 golden scene still
 is smaller than the measured display both ways, so idling replaces exactly
-that managed still with the captured frame (plus the claim pair the replaced
-inode leaves) and asks the engine once, rescan included.
+that managed still with the captured frame (plus the empty tombstone the
+replaced inode leaves) and asks the engine once, rescan included.
 The still maker is spied on (its work runs) and waited for, since the
 application's shutdown cancels it without waiting. Before the fix the golden
 scene's 2x2 still was judged against a 2560x1440 guess, a capture was tried
@@ -53,7 +53,7 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.golden import harness, sandbox  # noqa: E402
 from tests.golden.harness import Allowance, Change  # noqa: E402
 from tests.golden.test_idle import first_start_writes  # noqa: E402
-from tests.golden.test_stills_idle import RETAINED, assert_one_claim_pair  # noqa: E402
+from tests.golden.test_stills_idle import RETAINED, assert_one_tombstone  # noqa: E402
 from tests.test_stills import _real_png  # noqa: E402
 from tests.test_ui_next_slice import IDLE_SECONDS, _cache_touch  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402
@@ -139,8 +139,7 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
     else:
         # The engine is installed and niri measured the panel, so the 2x2
         # golden still is due; but the engine's process is refused. Its named
-        # temporary then leaves one claim pair (accepted for now), and nothing
-        # else may change.
+        # temporary then leaves one empty tombstone, and nothing else may change.
         monkeypatch.setattr(scenes, "is_available", lambda: True)
         monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: (2560, 1600))
         sealed: Callable[..., object] = subprocess.Popen
@@ -197,8 +196,8 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
     if machine != "nix-check":
         # The named temporary (refused engine) or the replaced still (capture)
         # is withdrawn through file_io's claim-and-retain, which leaves one
-        # empty claim pair; the rmdir follow-up will remove it.
-        assert_one_claim_pair([c for c in changes if c.path.startswith(RETAINED)])
+        # empty tombstone; the emptied claim directory is removed.
+        assert_one_tombstone([c for c in changes if c.path.startswith(RETAINED)])
         changes = [c for c in changes if not c.path.startswith(RETAINED)]
     allowed = [
         *first_start_writes(profile, None),

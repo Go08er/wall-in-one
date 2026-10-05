@@ -669,10 +669,10 @@ def test_a_failed_write_leaves_only_inert_private_residue(
     assert caught.value.kind == "local-io"
     retained = tmp_path / file_io.RETAINED_ENTRY_DIRECTORY
     assert set(tmp_path.iterdir()) == {retained}
-    residues = tuple(retained.iterdir())
-    assert len(residues) == 2
-    assert any(path.is_file() and path.stat().st_size == 0 for path in residues)
-    assert any(path.is_dir() and tuple(path.iterdir()) == () for path in residues)
+    # The discarded temporary's emptied inode stays; its emptied claim
+    # directory is removed (rmdir, which can't remove anything else).
+    (residue,) = tuple(retained.iterdir())
+    assert residue.is_file() and residue.stat().st_size == 0
 
 
 def test_a_store_write_failure_does_not_change_the_in_memory_schedule(

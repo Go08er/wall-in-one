@@ -1308,14 +1308,14 @@ def _retained_claims(directory: Path) -> tuple[int, int]:
     return len(claims), len(tombstones)
 
 
-def test_an_engine_that_cannot_be_started_keeps_the_still_and_only_its_claim(
+def test_an_engine_that_cannot_be_started_keeps_the_still_and_one_empty_tombstone(
     monkeypatch: pytest.MonkeyPatch, root: Path
 ) -> None:
     """Accepted for now: the named temporary is withdrawn through file_io.
 
     The engine needs a named ``.png`` path, so the temporary exists before the
-    process is started; `file_io`'s claim-and-retain then leaves one empty
-    claim directory and one 0-byte tombstone. Only after the engine and a
+    process is started; `file_io`'s claim-and-retain then leaves one 0-byte
+    tombstone (the claim directory is removed once empty). Only after the engine and a
     measured display were both found -- without either nothing is written
     (`test_a_scene_capture_that_cannot_be_made_writes_nothing`).
     """
@@ -1341,7 +1341,7 @@ def test_an_engine_that_cannot_be_started_keeps_the_still_and_only_its_claim(
     assert stills._png_size(target) == (1270, 1537)
     names = {path.name for path in target.parent.iterdir()}
     assert names == {target.name, file_io.RETAINED_ENTRY_DIRECTORY}
-    assert _retained_claims(target.parent) == (1, 1)
+    assert _retained_claims(target.parent) == (0, 1), "the emptied claim directory is gone"
 
 
 def test_an_engine_that_dies_mid_frame_publishes_nothing_torn(
@@ -1373,7 +1373,7 @@ def test_an_engine_that_dies_mid_frame_publishes_nothing_torn(
     assert not target.exists()
     names = {path.name for path in target.parent.iterdir()}
     assert names == {file_io.RETAINED_ENTRY_DIRECTORY}, "no torn still, no temporary"
-    assert _retained_claims(target.parent) == (1, 1)
+    assert _retained_claims(target.parent) == (0, 1), "the emptied claim directory is gone"
 
 
 def test_scene_capture_replaces_the_managed_still_atomically(

@@ -1154,10 +1154,55 @@ def test_discard_routes_file_and_claim_directory_residue_to_requested_parent(
     )
 
     assert tuple(nested.iterdir()) == ()
-    retained = _retained_entries(tmp_path)
-    assert len(retained) == 2
-    assert any(path.is_file() and path.stat().st_size == 0 for path in retained)
-    assert any(path.is_dir() for path in retained)
+    # The emptied inode is routed to the requested parent; the claim
+    # directory it was discarded from is removed once empty.
+    (retained,) = _retained_entries(tmp_path)
+    assert retained.is_file() and retained.stat().st_size == 0
+
+
+def test_a_replayable_claim_keeps_its_removal_folder_after_a_discard(tmp_path: Path) -> None:
+    """Only a transient claim's directory is removed: a token's ``.wall-in-one-removal-*``
+    folder is the removal's own record, and the owner's pre-upgrade copies live in them."""
+    source = tmp_path / "wallpaper.png"
+    source.write_bytes(b"pixels")
+    fingerprint = file_io.regular_file_fingerprint(source)
+    token = "0123456789abcdef0123456789abcdef"
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=fingerprint[:2],
+        expected_fingerprint=fingerprint,
+        operation_token=token,
+    )
+    try:
+        claim.discard()
+    finally:
+        claim.close()
+    assert file_io.deletion_claim_directory(source, token).is_dir()
+
+
+def test_a_transient_claim_directory_that_still_holds_its_entry_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``rmdir`` can't remove data: when the emptied inode could not be moved
+    out to the retained namespace, it stays in its claim directory, and so does
+    the directory."""
+    source = tmp_path / "record.json"
+    source.write_bytes(b"transaction record")
+    fingerprint = file_io.regular_file_fingerprint(source)
+
+    def stuck(_claim: object) -> None:
+        raise OSError("the retained namespace is full")
+
+    monkeypatch.setattr(file_io.ClaimedPath, "_retain_discarded_inode", stuck)
+    assert file_io.discard_regular_if_same(
+        source,
+        expected_identity=fingerprint[:2],
+        expected_fingerprint=fingerprint,
+    )
+    (claim_directory,) = _retained_entries(tmp_path)
+    assert claim_directory.is_dir()
+    (entry,) = tuple(claim_directory.iterdir())
+    assert entry.name == "entry" and entry.stat().st_size == 0
 
 
 def test_pinned_directory_context_rejects_a_public_rebind(tmp_path: Path) -> None:

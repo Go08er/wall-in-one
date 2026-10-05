@@ -950,6 +950,10 @@ class ClaimedPath:
     _pin: PinnedPath = field(repr=False)
     _retained_access_parent: Path | None = field(default=None, repr=False, kw_only=True)
     _retained_logical_parent: Path | None = field(default=None, repr=False, kw_only=True)
+    #: A claim made without an operation token: its directory lives in the
+    #: shared retained namespace and nothing replays it, so an emptied one
+    #: is removed after a discard (`_remove_emptied_transient_directory`).
+    _transient: bool = field(default=False, repr=False, kw_only=True)
     _consumed: bool = field(default=False, init=False, repr=False)
 
     def _verify(self, *, require_expected_generation: bool = True) -> None:
@@ -1137,9 +1141,50 @@ class ClaimedPath:
         # The public removal is already committed. Failure to centralise inert
         # residue must not make replay restore an empty file or keep retrying an
         # irreversible discard; `_finish` simply leaves it in this claim.
+        retained = False
         with contextlib.suppress(OSError, ValueError):
             self._retain_discarded_inode()
+            retained = True
+        if retained and self._transient:
+            self._remove_emptied_transient_directory()
         self._finish()
+
+    def _remove_emptied_transient_directory(self) -> None:
+        """Remove a transient claim's directory once its entry has moved out.
+
+        The directory pin is no cleanup authority (it cannot prove who made
+        the directory), and none is needed: ``rmdir`` removes only an empty
+        directory. A name that now holds anything fails with ``ENOTEMPTY``,
+        a symbolic link or a file with ``ENOTDIR``, and nothing is lost
+        either way; such a failure leaves the entry exactly as it is. Only
+        the directory this claim made is named, and only while it is still
+        the generation the pin holds. A replayable claim's directory (an
+        operation token's ``.wall-in-one-removal-*``) is never touched here.
+
+        The retained namespace is reached as `_retain_discarded_inode` just
+        reached it, and the child is named relative to that open directory:
+        the access path the claim was made through went with its pin.
+        """
+        parent = self._retained_access_parent or self._original_access.parent
+        name = self._directory.name
+        with contextlib.suppress(OSError):
+            descriptor = os.open(
+                parent / RETAINED_ENTRY_DIRECTORY,
+                os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            try:
+                named = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if (
+                    stat.S_ISDIR(named.st_mode)
+                    and (
+                        named.st_dev,
+                        named.st_ino,
+                    )
+                    == self._directory_pin.identity
+                ):
+                    os.rmdir(name, dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
 
     def is_present(self) -> bool:
         """Whether the exact retained claim entry remains in its pinned directory."""
@@ -1248,6 +1293,7 @@ def claim_for_deletion(
     a directory, so no later cleanup infers ownership from the post-creation
     pin. Callers either :meth:`ClaimedPath.discard` the independently pinned
     file or restore it with no-replace semantics after a pre-commit failure.
+    A transient claim's emptied directory is removed after its discard.
     """
     public_path = path if logical_path is None else logical_path
     retained_access_parent = path.parent if retained_parent is None else retained_parent
@@ -1387,6 +1433,7 @@ def claim_for_deletion(
         pinned_source,
         _retained_access_parent=retained_access_parent,
         _retained_logical_parent=retained_public_parent,
+        _transient=operation_token is None,
     )
 
 

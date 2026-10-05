@@ -124,26 +124,26 @@ def test_a_due_scene_without_a_renderer_writes_nothing(
 RETAINED = "Pictures/Wallpapers/Wall-in-One/Automatic Stills/.wall-in-one-retained/"
 
 
-def assert_one_claim_pair(changes: list[harness.Change]) -> None:
+def assert_one_tombstone(changes: list[harness.Change]) -> None:
     """Exactly what withdrawing one named temporary leaves, by `file_io`'s design:
-    an empty ``entry-XXXXXXXX`` claim directory and a 0-byte ``entry-<32 hex>``."""
+    a 0-byte ``entry-<32 hex>``. The claim directory it was withdrawn through
+    is removed once empty, so no ``entry-XXXXXXXX`` directory is left."""
     assert all(change.kind == "created" and change.after for change in changes), changes
     claims = [c for c in changes if c.after is not None and c.after.kind == "dir"]
     tombstones = [c for c in changes if c.after is not None and c.after.kind == "file"]
-    assert len(claims) == 1 and len(tombstones) == 1, [c.describe() for c in changes]
-    assert re.fullmatch(re.escape(RETAINED) + r"entry-[a-z0-9_]{8}", claims[0].path)
+    assert claims == [] and len(tombstones) == 1, [c.describe() for c in changes]
     assert re.fullmatch(re.escape(RETAINED) + r"entry-[0-9a-f]{32}", tombstones[0].path)
     assert tombstones[0].after is not None and tombstones[0].after.size == 0
 
 
-def test_a_due_scene_whose_engine_cannot_be_started_leaves_only_its_claim(
+def test_a_due_scene_whose_engine_cannot_be_started_leaves_only_an_empty_tombstone(
     golden: Golden, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Accepted for now: engine installed and display measured, process refused.
 
     The engine needs a named ``.png`` path, so the temporary exists before the
-    process is started, and withdrawing it leaves one claim pair. Nothing else
-    may change: the still is kept.
+    process is started, and withdrawing it leaves one empty tombstone (its
+    claim directory is removed). Nothing else may change: the still is kept.
     """
     monkeypatch.setattr(scenes, "is_available", lambda: True)
     monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: DISPLAY)
@@ -160,4 +160,4 @@ def test_a_due_scene_whose_engine_cannot_be_started_leaves_only_its_claim(
     assert stills.ensure(scene, root, size=DISPLAY) is None
     changes = harness.diff(before, harness.snapshot(golden.profile.home))
     assert len(started) == 1, "the engine really was asked"
-    assert_one_claim_pair(changes)
+    assert_one_tombstone(changes)

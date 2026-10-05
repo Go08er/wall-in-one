@@ -534,6 +534,10 @@ class Application(Adw.Application):
         self._inventory_stamp = 0
         self._inventory_valid = True
         self._inventory_problem = ""
+        #: What a removal's prepare found in force (inventory validity and
+        #: problem, scan barrier pending and error), put back exactly when it
+        #: doesn't commit (`_restore_runtime_after_uncommitted_removal`).
+        self._inventory_before_removal: tuple[bool, str, bool, str] | None = None
         self._runtime_compile_pending = False
         self._runtime_authoring_request: _RuntimeAuthoringRequest | None = None
         #: Why the last publication didn't reach the wallpaper service, or empty.
@@ -2190,7 +2194,7 @@ class Application(Adw.Application):
             self._settings.follow_noctalia_palette,
         )
         self._settings = settings
-        async_scan = library_sources_changed and self._window is not None
+        async_scan = library_sources_changed and not self._service_start
         self._session.update_settings(settings, rescan_library=not async_scan)
         if self._window is not None:
             # The settings document can also move without a Preferences-page
@@ -2262,7 +2266,9 @@ class Application(Adw.Application):
         if self._removal_active:
             self._refresh_after_removal = True
             return
-        if self._window is None:
+        if self._service_start:
+            # The explicit compatibility service scans synchronously. A GUI
+            # whose last window closed keeps the asynchronous path below.
             with self._runtime_config_lock:
                 runtime_generation = self._runtime_library_scan_generation
                 runtime_pending = self._runtime_library_scan_pending
@@ -2283,9 +2289,11 @@ class Application(Adw.Application):
             self._validate_inventory()
             if runtime_pending:
                 self._adopt_runtime_library_scan(runtime_generation)
-            self._finish_library_refresh()
-            if runtime_pending:
-                self._finish_runtime_library_scan(runtime_generation)
+            try:
+                self._finish_library_refresh()
+            finally:
+                if runtime_pending:
+                    self._finish_runtime_library_scan(runtime_generation)
             return
 
         try:
@@ -2307,7 +2315,8 @@ class Application(Adw.Application):
         previous = self._library_scan_future
         if previous is not None:
             previous.cancel()
-        self._window.show_library_scanning(True)
+        if self._window is not None:
+            self._window.show_library_scanning(True)
         self._begin_runtime_library_scan(generation)
 
         try:
@@ -2315,7 +2324,8 @@ class Application(Adw.Application):
         except Exception as error:
             detail = str(error) or error.__class__.__name__
             request.cancel()
-            self._window.show_library_scanning(False)
+            if self._window is not None:
+                self._window.show_library_scanning(False)
             self.window_report(f"Library scan could not start: {detail}")
             self._finish_runtime_library_scan(generation, error=detail)
             self._settle_library_refresh_waiters(False)
@@ -2476,7 +2486,7 @@ class Application(Adw.Application):
                 "Workshop uninstall"
                 + manage.metadata_cleanup_note(self._session.workshop_cleanup_failures)
             )
-        if self._window is None:
+        if self._service_start:
             # The explicit compatibility service is headless and has no GTK
             # responsiveness contract. Keep its simple synchronous startup.
             self._session.sync_with_noctalia()
@@ -2607,8 +2617,11 @@ class Application(Adw.Application):
             return False, False
         try:
             changed = runtime_config.update(self._settings, self._session)
-        except runtime_config.RuntimeConfigError as error:
+        except (runtime_config.RuntimeConfigError, OSError) as error:
             self.window_report(str(error))
+            return False, False
+        except Exception as error:  # every outcome is an outcome: never a stranded caller
+            self.window_report(f"runtime configuration could not be written: {error}")
             return False, False
         if changed:
             with self._runtime_config_lock:
@@ -2680,10 +2693,16 @@ class Application(Adw.Application):
         return True
 
     def _publish_runtime_for_context(self) -> bool:
-        """Use the non-blocking path whenever a real window owns this call."""
+        """The GUI's bounded asynchronous path, window or not; synchronous only for ``--service``.
+
+        A GUI process whose last window has closed keeps its accepted tails
+        (a removal's convergence, a publication) and finishes them on the
+        same path, with the same terminal handling (`_finish_runtime_compile`).
+        Only the explicit compatibility service publishes synchronously.
+        """
         if self._runtime_shutdown:
             return False
-        if self._window is not None:
+        if not self._service_start:
             published = self._publish_runtime_async()
             if published and self._removal_convergence_held:
                 with self._runtime_config_lock:
@@ -2699,10 +2718,14 @@ class Application(Adw.Application):
                         )
                 self._maybe_finish_removal_convergence()
             return published
-        published = self._publish_runtime()
-        if self._removal_convergence_held:
-            self._removal_convergence_runtime_terminal = published
-            self._maybe_finish_removal_convergence()
+        published = False
+        try:
+            published = self._publish_runtime()
+        finally:
+            if self._removal_convergence_held:
+                # Installed, refused or failed: each is this tail's outcome.
+                self._removal_convergence_runtime_terminal = True
+                self._maybe_finish_removal_convergence()
         return published
 
     def _runtime_pool(self) -> ThreadPoolExecutor:
@@ -2901,15 +2924,19 @@ class Application(Adw.Application):
         self._authoring_active = True
         work = task.work
         if task.requires_migration and not self._authoring_migration_ready:
-            task.reply(self._migration_blocked_response())
-            self._authoring_task_completed(task)
+            try:
+                task.reply(self._migration_blocked_response())
+            finally:
+                self._authoring_task_completed(task)
             return
         if task.prepare is not None:
             try:
                 work = task.prepare()
             except Exception as error:
-                task.reply(server.failed(error))
-                self._authoring_task_completed(task)
+                try:
+                    task.reply(server.failed(error))
+                finally:
+                    self._authoring_task_completed(task)
                 return
 
         def guarded_work() -> Any:
@@ -2924,9 +2951,11 @@ class Application(Adw.Application):
         try:
             future = self._authoring_pool().submit(guarded_work)
         except RuntimeError:
-            if not self._authoring_shutdown and not self._runtime_shutdown:
-                task.reply(Response.failure("application is shutting down"))
-            self._authoring_task_completed(task)
+            try:
+                if not self._authoring_shutdown and not self._runtime_shutdown:
+                    task.reply(Response.failure("application is shutting down"))
+            finally:
+                self._authoring_task_completed(task)
             return
         # The adoption, the reply and the next queued task all wait on this
         # delivery: above redraw.
@@ -2944,31 +2973,47 @@ class Application(Adw.Application):
         future: Future[Any],
         task: _AuthoringTask,
     ) -> bool:
-        """Adopt one worker result on GTK, optionally chaining a Deferred."""
-        if self._authoring_shutdown or self._runtime_shutdown:
-            self._authoring_task_completed(task)
-            return GLib.SOURCE_REMOVE
-        try:
-            outcome = task.finish(future.result())
-        except Exception as error:
-            task.reply(server.failed(error))
-            self._authoring_task_completed(task)
-            return GLib.SOURCE_REMOVE
-        if isinstance(outcome, Response):
-            task.reply(outcome)
-            self._authoring_task_completed(task)
-            return GLib.SOURCE_REMOVE
+        """Adopt one worker result on GTK, optionally chaining a Deferred.
 
-        def chained_reply(response: Response) -> None:
-            if not self._authoring_shutdown and not self._runtime_shutdown:
-                task.reply(response)
-            self._authoring_task_completed(task)
+        The task completes exactly once on every path, a reply that raises
+        included, so its lifetime hold and the actor are always released.
+        """
+        completed = False
 
+        def complete() -> None:
+            nonlocal completed
+            if not completed:
+                completed = True
+                self._authoring_task_completed(task)
+
+        chained = False
         try:
-            outcome.start(chained_reply)
-        except Exception as error:
-            task.reply(server.failed(error))
-            self._authoring_task_completed(task)
+            if self._authoring_shutdown or self._runtime_shutdown:
+                return GLib.SOURCE_REMOVE
+            try:
+                outcome = task.finish(future.result())
+            except Exception as error:
+                task.reply(server.failed(error))
+                return GLib.SOURCE_REMOVE
+            if isinstance(outcome, Response):
+                task.reply(outcome)
+                return GLib.SOURCE_REMOVE
+
+            def chained_reply(response: Response) -> None:
+                try:
+                    if not self._authoring_shutdown and not self._runtime_shutdown:
+                        task.reply(response)
+                finally:
+                    complete()
+
+            try:
+                outcome.start(chained_reply)
+                chained = True
+            except Exception as error:
+                task.reply(server.failed(error))
+        finally:
+            if not chained:
+                complete()
         return GLib.SOURCE_REMOVE
 
     def _authoring_task_completed(self, task: _AuthoringTask) -> None:
@@ -3702,25 +3747,31 @@ class Application(Adw.Application):
                 )
             ):
                 self._removal_convergence_runtime_terminal = True
-        if not self._runtime_shutdown and current:
-            problem = ""
-            if publication.error:
-                self.window_report(publication.error)
-                problem = publication.error
-            elif publication.unavailable:
-                self._status_model.mark_unavailable(forget=False)
-            elif publication.response is not None and not publication.response.ok:
-                problem = f"Runtime rejected the new configuration: {publication.response.message}"
-                self.window_report(problem)
-            elif publication.changed and self._window is not None:
-                self.refresh_runtime_status_async()
-            if not publication.deferred:
-                self._set_publication_problem(problem)
-        if (again or retry_terminal_scan) and not self._runtime_shutdown:
-            self._ensure_runtime_compile_queued()
-        if publication_hold_terminal:
-            self._release_runtime_publication_hold()
-        self._maybe_finish_removal_convergence()
+        try:
+            if not self._runtime_shutdown and current:
+                problem = ""
+                if publication.error:
+                    self.window_report(publication.error)
+                    problem = publication.error
+                elif publication.unavailable:
+                    self._status_model.mark_unavailable(forget=False)
+                elif publication.response is not None and not publication.response.ok:
+                    problem = (
+                        f"Runtime rejected the new configuration: {publication.response.message}"
+                    )
+                    self.window_report(problem)
+                elif publication.changed and self._window is not None:
+                    self.refresh_runtime_status_async()
+                if not publication.deferred:
+                    self._set_publication_problem(problem)
+        finally:
+            # Whatever reporting did: the next request, the publication hold
+            # and the removal's tail are always serviced.
+            if (again or retry_terminal_scan) and not self._runtime_shutdown:
+                self._ensure_runtime_compile_queued()
+            if publication_hold_terminal:
+                self._release_runtime_publication_hold()
+            self._maybe_finish_removal_convergence()
         return GLib.SOURCE_REMOVE
 
     @property
@@ -4346,9 +4397,12 @@ class Application(Adw.Application):
             # authoring GUI does not take rendering ownership, so the honest
             # next state is unavailable rather than stale playback truth.
             self._status_model.mark_unavailable(forget=True)
-        if response.ok and on_success is not None:
-            on_success(runtime_answered)
-        self._runtime_action_pending = False
+        try:
+            if response.ok and on_success is not None:
+                on_success(runtime_answered)
+        finally:
+            # The single-flight flag is released whatever the callback did.
+            self._runtime_action_pending = False
         if on_complete is not None:
             on_complete(response, runtime_answered)
         current = (
@@ -4789,8 +4843,12 @@ class Application(Adw.Application):
         self._validate_inventory()
         self._removal_convergence_scan_generation = generation
         self._adopt_runtime_library_scan(generation)
-        self._finish_library_refresh(scan_generation=generation)
-        self._finish_runtime_library_scan(generation)
+        try:
+            self._finish_library_refresh(scan_generation=generation)
+        finally:
+            # The scan barrier and the removal's scan half end, whatever showing
+            # or publishing the library did.
+            self._finish_runtime_library_scan(generation)
 
     def _adopt_item_removal(self, result: RemovalResult) -> None:
         """Install only semantic worker deltas after its lease is released.
@@ -4810,8 +4868,9 @@ class Application(Adw.Application):
         refresh = self._refresh_after_removal or (result.committed and (partial or scanned is None))
         self._refresh_after_removal = False
         if result.committed:
-            # Still invalid since its prepare: until a scan after the commit is accepted.
-            self._inventory_failed(
+            # Invalid from the commit until a scan after it is accepted, whatever
+            # happened since its prepare.
+            self._invalidate_inventory(
                 f"{result.item.name} was removed; the library is being scanned again"
             )
             self._removed_item_paths.add(result.item.path)
@@ -4863,6 +4922,13 @@ class Application(Adw.Application):
 
     def _invalidate_runtime_for_pending_removal(self) -> None:
         """Cancel stale health/compile requests before physical deletion."""
+        with self._runtime_config_lock:
+            self._inventory_before_removal = (
+                self._inventory_valid,
+                self._inventory_problem,
+                self._runtime_library_scan_pending,
+                self._runtime_library_error,
+            )
         self._invalidate_inventory("a wallpaper is being removed")
         with self._runtime_config_lock:
             self._runtime_authoring_generation += 1
@@ -4876,8 +4942,6 @@ class Application(Adw.Application):
     def _invalidate_library_scan_after_removal(self) -> None:
         """Forbid a pre-delete scan from masquerading as a reinstall."""
         self._library_scan_generation += 1
-        if self._window is None:
-            return
         request = self._library_scan_request
         self._library_scan_request = None
         if request is not None:
@@ -4890,6 +4954,11 @@ class Application(Adw.Application):
     def _finish_runtime_removal_invalidation(self) -> None:
         """Keep the compiler barred until the post-delete scan is accepted."""
         with self._runtime_config_lock:
+            if self._runtime_library_scan_held:
+                # The commit cancelled the source-changing scan holding this
+                # barrier (`_invalidate_library_scan_after_removal`); the scan
+                # after the commit replaces it, and ends the hold with it.
+                self._runtime_library_scan_hold_generation = self._library_scan_generation
             self._runtime_library_scan_generation = self._library_scan_generation
             self._runtime_library_scan_sources = (
                 self._settings.roots,
@@ -4899,6 +4968,8 @@ class Application(Adw.Application):
             self._runtime_library_error = ""
             self._runtime_library_ready.clear()
             self._removal_runtime_invalidated = False
+            # It committed: what was in force before it no longer matters.
+            self._inventory_before_removal = None
 
     def _restore_runtime_after_uncommitted_removal(self) -> None:
         """Release a speculative barrier when no physical lifecycle committed."""
@@ -4906,12 +4977,31 @@ class Application(Adw.Application):
             if not self._removal_runtime_invalidated:
                 return
             self._removal_runtime_invalidated = False
-            self._runtime_library_scan_pending = False
-            self._runtime_library_error = ""
-            self._runtime_library_ready.set()
-        # Nothing was deleted, so the library is still the inventory.
-        self._validate_inventory()
-        self._publish_runtime_for_context()
+            before = self._inventory_before_removal
+            self._inventory_before_removal = None
+            valid, problem, pending, error = (
+                before
+                if before is not None
+                else (self._inventory_valid, self._inventory_problem, False, "")
+            )
+            # Nothing was deleted, so exactly what was in force comes back: an
+            # inventory left invalid by an earlier removal whose scans failed
+            # stays invalid, with its notice. "This changed nothing" validates
+            # nothing. The stamp still moves, so whatever was captured before
+            # or meanwhile stays rejected.
+            self._runtime_library_scan_pending = pending
+            self._runtime_library_error = error
+            if not pending:
+                self._runtime_library_ready.set()
+            self._inventory_stamp += 1
+            self._inventory_valid = valid
+            self._inventory_problem = problem
+        if valid:
+            self._publish_runtime_for_context()
+        else:
+            # Still invalid: publish nothing new, but let a request captured during
+            # the removal reach its terminal outcome (and release its hold).
+            self._ensure_runtime_compile_queued()
 
     def prepare_item_removal(self, item: MediaItem) -> removals.Intent:
         """Legacy synchronous removal boundary for explicit compatibility mode."""
@@ -5770,7 +5860,7 @@ class Application(Adw.Application):
             previous.roots,
             previous.scan_workshop,
         )
-        async_scan = library_sources_changed and self._window is not None
+        async_scan = library_sources_changed and not self._service_start
         # Persist before adoption. A failed write must leave the application,
         # Session, runtime document and visible controls on the same last-known
         # durable snapshot.

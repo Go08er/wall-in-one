@@ -1,26 +1,41 @@
-"""Codex 0.3.0 round 5, in the real application: every way a removal's aftermath can fail.
+"""Codex 0.3.0 rounds 5 and 6, in the real application: every way a removal's aftermath fails.
 
 One parametrized matrix over the real application crosses what can go wrong
 after a removal commits with what a person can do meanwhile:
 
-- the commit: full, or partial (a cleanup failed, so a refresh follows);
+- the commit: full, or partial: a real failed cleanup (the favourites store's
+  lock held by someone else while the removal cleans up, so its mutation
+  times out and the removal journal keeps the intent for the refresh to
+  replay);
 - the removal's own scan after the commit: fine, failing, held (then fine),
   or held and then failing;
 - the fallback refresh, where one runs: fine, failing, or held (then fine);
-- writing the runtime configuration: fine, or failing for real (the state
-  directory made read-only, EACCES), from the first scan that succeeds;
+- writing the runtime configuration, from the first scan that succeeds:
+  fine, failing for real (the state directory made read-only: EACCES), or
+  refused (the size cap lowered below the document);
+- the window at completion: open, or the last one closed through the real
+  `_on_close_request` at the failure point, before a held scan is released;
 - the action interleaved at the failure point (while a scan is held, or once
   everything has landed): none, Quit, Next, a favourite from the window, a
-  favourite, a playlist addition and a removal over ctl, a settings change,
-  and a second removal from the window.
+  favourite and a playlist addition over ctl, a settings change, a second
+  removal (of a removable wallpaper, of the one already removed, of one a
+  used playlist can't lose, and of one whose dry run can't scan), from the
+  window and over ctl.
 
-Only the faults are injected (the scan wrapper, a cleanup failure, chmod).
-For every cell: every runtime document installed at any time names only
-files that exist when it is installed; Quit completes within a bound; no
-worker spins; every hold settles; the action completes or refuses with a
-reason within a bound; and once the faults are lifted, a refresh recovers
-and what is installed names nothing missing. Codex's T-1, T-2 and T-3 are
-named cells; each fails on 9fddd73.
+Every action is crossed with the full commits' scan outcomes and the first
+two write modes; partial commits, whose difference is the replay rather than
+how actions interleave, with one action of each kind; and the closed window
+with every write fault and the actions that bear on completion (none, Quit,
+an edit), as is the refused write with the window open.
+
+Only the faults are injected (a scan wrapper, a held lock with a short wait,
+chmod, the size cap). For every cell: every runtime document installed at
+any time names only files that exist when it is installed; the action
+completes or refuses with a reason within a bound; every hold settles; no
+worker spins; once the faults are lifted, a refresh recovers and what is
+installed names nothing missing; and Quit completes. Codex's T-1, T-2, T-3
+(round 5) and U-1, U-2 (round 6) are named cells; each fails on the tip it
+was found on.
 """
 
 from __future__ import annotations
@@ -29,6 +44,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -50,14 +66,16 @@ from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # n
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
-from wall_in_one.library import pairings, scan  # noqa: E402
-from wall_in_one.session import RemovalPlan, RemovalResult  # noqa: E402
+from wall_in_one.library import favourites, pairings, scan, state_file  # noqa: E402
+from wall_in_one.session import RemovalResult  # noqa: E402
 from wall_in_one.ui.app import Application, _Commands  # noqa: E402
 
 #: How long anything here may take before it counts as stuck.
 BOUND = 15.0
 #: An idle stretch: a spinning worker burns about all of it in CPU time.
-IDLE = 0.2
+IDLE = 0.15
+#: A size cap no runtime configuration fits under.
+TINY_CAP = 64
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -74,13 +92,14 @@ class Faults:
     commit: str  # full | partial
     postscan: str  # ok | fails | held | held-fails
     fallback: str  # ok | fails | held (only where a fallback refresh runs)
-    write: str  # ok | fails
+    write: str  # ok | eacces | size-cap
     action: str
+    window: str = "open"  # open | closed
 
 
 @dataclass
 class Injected:
-    """The fault injection, and nothing else: scans, a cleanup failure, a read-only directory."""
+    """The fault injection, and nothing else."""
 
     faults: Faults
     forest: Path
@@ -88,17 +107,27 @@ class Injected:
     lifted: bool = False
     postscan_used: bool = False
     fallback_used: bool = False
-    read_only: bool = False
+    #: The second removal's own dry-run scan fails while this is set.
+    dry_runs_fail: bool = False
+    write_failing: bool = False
+    original_cap: int = runtime_config.MAX_RUNTIME_CONFIG_BYTES
     reached: dict[str, threading.Event] = field(
         default_factory=lambda: {"postscan": threading.Event(), "fallback": threading.Event()}
     )
     release: threading.Event = field(default_factory=threading.Event)
+    #: Held by someone else while the removal cleans up (a partial commit).
+    favourites_held: threading.Event = field(default_factory=threading.Event)
+    favourites_free: threading.Event = field(default_factory=threading.Event)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         real_scan = scan.scan
+        # Restored at teardown whatever happens.
+        monkeypatch.setattr(runtime_config, "MAX_RUNTIME_CONFIG_BYTES", self.original_cap)
 
         def faulty(*arguments: Any, **keywords: Any) -> Any:
             stage = self._stage()
+            if not stage and self.dry_runs_fail and not self.lifted:
+                raise OSError("injected dry-run scan fault")
             behaviour = getattr(self.faults, stage) if stage else "ok"
             if behaviour.startswith("held"):
                 self.reached[stage].set()
@@ -106,23 +135,44 @@ class Injected:
             if behaviour.endswith("fails"):
                 raise OSError("injected scan fault")
             library = real_scan(*arguments, **keywords)
-            if stage and self.faults.write == "fails" and not self.read_only:
-                # From the first post-commit scan that succeeds: EACCES on every write.
-                os.chmod(self.state, 0o500)
-                self.read_only = True
+            if stage and not self.write_failing:
+                self._fail_writes()
             return library
 
         monkeypatch.setattr(scan, "scan", faulty)
         if self.faults.commit == "partial":
-            commit = RemovalPlan.run
+            # A real failed cleanup: the favourites lock is held elsewhere while the
+            # removal cleans up; its mutation waits briefly, then fails for real.
+            real_lock = state_file.mutation_lock
 
-            def partial(plan: RemovalPlan) -> RemovalResult:
-                result = commit(plan)
-                if plan.item.path == self.forest and result.committed:
-                    return replace(result, cleanup_failures=("favourites: injected",))
-                return result
+            def briefly(
+                target: Path, *, description: str, **keywords: Any
+            ) -> AbstractContextManager[None]:
+                if description == "favourites" and self.favourites_held.is_set():
+                    keywords["timeout"] = 0.1
+                return real_lock(target, description=description, **keywords)
 
-            monkeypatch.setattr(RemovalPlan, "run", partial)
+            monkeypatch.setattr(state_file, "mutation_lock", briefly)
+
+            def hold() -> None:
+                with real_lock(
+                    favourites.state_path(), description="favourites", process_gate=False
+                ):
+                    self.favourites_held.set()
+                    self.favourites_free.wait(BOUND * 2)
+                self.favourites_held.clear()
+
+            threading.Thread(target=hold, daemon=True).start()
+            assert self.favourites_held.wait(5)
+
+    def _fail_writes(self) -> None:
+        """From the first post-commit scan that succeeds, the runtime write fails or is refused."""
+        if self.faults.write == "eacces":
+            os.chmod(self.state, 0o500)
+            self.write_failing = True
+        elif self.faults.write == "size-cap":
+            setattr(runtime_config, "MAX_RUNTIME_CONFIG_BYTES", TINY_CAP)  # noqa: B010
+            self.write_failing = True
 
     def _stage(self) -> str:
         """Which scan this is: the removal's own after its commit, the fallback, or neither."""
@@ -138,12 +188,18 @@ class Injected:
         self.postscan_used = True
         return "postscan"
 
+    def free_favourites(self) -> None:
+        self.favourites_free.set()
+
     def lift(self) -> None:
         self.lifted = True
+        self.dry_runs_fail = False
         self.release.set()
-        if self.read_only:
+        self.free_favourites()
+        if self.write_failing:
             os.chmod(self.state, 0o700)
-            self.read_only = False
+            setattr(runtime_config, "MAX_RUNTIME_CONFIG_BYTES", self.original_cap)  # noqa: B010
+            self.write_failing = False
 
 
 class Installed:
@@ -205,6 +261,7 @@ def cells(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[
         session.playlists.add(evening.id, forest)
         session.playlists.add(evening.id, keep)
         session.schedules.add(evening.id)
+        session.favourites.add(forest)  # so its removal has a favourite to clear
         installed = Installed(monkeypatch)
         _publish(application)
         injected = Injected(faults, forest, paths.runtime_config_path().parent)
@@ -245,10 +302,56 @@ def _ctl(application: Application, verb: str, argument: str) -> Callable[[], lis
     return lambda: replies
 
 
+def _said(replies: list[Response]) -> str | None:
+    if not replies:
+        return None
+    reply = replies[0]
+    return "done" if reply.ok else f"refused: {reply.message}"
+
+
+#: A second removal through the window, and over ctl: which wallpaper, and whether its own
+#: dry run can scan.
+SECOND_REMOVALS = {
+    "second-removal": ("other", False),
+    "retry-removed": ("forest", False),
+    "remove-emptying": ("keep", False),
+    "second-removal-scan-fails": ("other", True),
+}
+
+
+def _second_removal(cell: Cell, action: str) -> Callable[[], str | None]:
+    application = cell.application
+    over_ctl = action.startswith("ctl-")
+    target, dry_run_fails = SECOND_REMOVALS[action.removeprefix("ctl-")]
+    path = {"other": cell.other, "forest": cell.forest, "keep": cell.keep}[target]
+    cell.injected.dry_runs_fail = dry_run_fails
+    if over_ctl:
+        replies_of = _ctl(application, "remove", str(path))
+        return lambda: _said(replies_of())
+    item = application.session.library.find(path)
+    if item is None:
+        return lambda: "refused: it is not in the library"
+    said_before = len(application.activity_log.entries)
+    finished: list[RemovalResult] = []
+    accepted = application.remove_item_async(item, trash=True, finish=finished.append)
+    if not accepted:
+        return lambda: "refused: not accepted"
+
+    def outcome() -> str | None:
+        if finished:
+            result = finished[0]
+            return "removed" if result.committed else f"refused: {result.error_message}"
+        said = application.activity_log.entries[said_before:]
+        if said and _lane_idle(application):
+            return f"refused: {said[-1].text}"
+        return None
+
+    return outcome
+
+
 def _act(cell: Cell, action: str) -> Callable[[], str | None]:
     """Start ``action``; returns how it ended so far (None while it hasn't)."""
     application = cell.application
-    reports_before = len(cell.window.reports)
     if action == "none":
         return lambda: "nothing"
     if action == "quit":
@@ -256,12 +359,14 @@ def _act(cell: Cell, action: str) -> Callable[[], str | None]:
         return lambda: "quit" if cell.quits else None
     if action == "next":
         replies: list[Response] = []
+        said_before = len(application.activity_log.entries)
         started = application._start_gui_runtime_call(
             lambda: application._send_gui_runtime("next"),
             on_complete=lambda response, _answered: replies.append(response),
         )
         if not started:
-            return lambda: "refused: " + (cell.window.reports[-1] if cell.window.reports else "")
+            said = application.activity_log.entries[said_before:]
+            return lambda: "refused: " + (said[-1].text if said else "busy")
         return lambda: _said(replies)
     if action == "favourite":
         # As the window's star does (`RealState.toggle_favorite`).
@@ -293,9 +398,6 @@ def _act(cell: Cell, action: str) -> Callable[[], str | None]:
     if action == "ctl-playlist-add":
         replies_of = _ctl(application, "playlist-add", f"{cell.playlist} {cell.other}")
         return lambda: _said(replies_of())
-    if action == "ctl-remove":
-        replies_of = _ctl(application, "remove", str(cell.other))
-        return lambda: _said(replies_of())
     if action == "settings":
         errors: list[str] = []
         wanted = not application.settings.shuffle
@@ -305,32 +407,9 @@ def _act(cell: Cell, action: str) -> Callable[[], str | None]:
             if errors
             else ("saved" if application.settings.shuffle == wanted else None)
         )
-    if action == "second-removal":
-        item = application.session.library.find(cell.other)
-        assert item is not None
-        finished: list[RemovalResult] = []
-        accepted = application.remove_item_async(item, trash=True, finish=finished.append)
-        if not accepted:
-            return lambda: "refused: not accepted"
-
-        def outcome() -> str | None:
-            if finished:
-                return (
-                    "removed" if finished[0].committed else f"refused: {finished[0].error_message}"
-                )
-            if len(cell.window.reports) > reports_before:
-                return f"refused: {cell.window.reports[-1]}"
-            return None
-
-        return outcome
+    if action.removeprefix("ctl-") in SECOND_REMOVALS:
+        return _second_removal(cell, action)
     raise AssertionError(action)
-
-
-def _said(replies: list[Response]) -> str | None:
-    if not replies:
-        return None
-    reply = replies[0]
-    return "done" if reply.ok else f"refused: {reply.message}"
 
 
 def _cpu() -> float:
@@ -368,10 +447,18 @@ def _run(cell: Cell) -> None:
     item = application.session.library.find(cell.forest)
     assert item is not None
     removed: list[RemovalResult] = []
-    assert application.remove_item_async(item, trash=True, finish=removed.append)
+
+    def finished(result: RemovalResult) -> None:
+        removed.append(result)
+        cell.injected.free_favourites()  # whoever held them is done: the replay can run
+
+    assert application.remove_item_async(item, trash=True, finish=finished)
 
     _point(cell)
     ended = _act(cell, faults.action)
+    if faults.window == "closed":
+        application._on_close_request(cell.window)  # type: ignore[arg-type]
+        assert application._window is None
     cell.injected.release.set()  # held scans go on now (and succeed or fail as set)
 
     # The action completes, or refuses with a reason, within the bound.
@@ -382,6 +469,9 @@ def _run(cell: Cell) -> None:
         assert len(outcome) > len("refused: "), "a refusal says why"
     spin_until(lambda: bool(removed), BOUND, what="the removal")
     assert removed[0].committed and not cell.forest.exists()
+    if faults.commit == "partial":
+        assert removed[0].cleanup_failures, "the partial commit really failed a cleanup"
+    cell.injected.dry_runs_fail = False
 
     # Every hold settles; no worker spins.
     spin_until(
@@ -412,6 +502,10 @@ def _run(cell: Cell) -> None:
         assert _missing(document) == []
         assert str(cell.forest) not in document
         assert application.publication_problem == ""
+        if faults.commit == "partial":
+            item_now = pairings.Identity.of(item)
+            assert pairings.Store.open().get(item_now) is None
+            assert cell.forest not in favourites.Store.open().paths, "the replay cleaned up"
         application.request_quit()
 
     # Quit completes within the bound, whatever happened.
@@ -443,7 +537,6 @@ SCANS: tuple[tuple[str, str, str], ...] = (
     ("partial", "fails", "fails"),
     ("partial", "fails", "held"),
 )
-WRITES = ("ok", "fails")
 ACTIONS = (
     "none",
     "quit",
@@ -453,36 +546,97 @@ ACTIONS = (
     "ctl-playlist-add",
     "settings",
     "second-removal",
-    "ctl-remove",
+    "ctl-second-removal",
+    "retry-removed",
+    "ctl-retry-removed",
+    "remove-emptying",
+    "ctl-remove-emptying",
+    "second-removal-scan-fails",
+)
+#: The window closing, crossed with the write faults: the actions that bear on completion.
+CLOSING_ACTIONS = ("none", "quit", "ctl-favourite")
+#: A partial commit differs from a full one in the replay its refresh does, not in how
+#: actions interleave: one of each kind of action.
+PARTIAL_ACTIONS = (
+    "none",
+    "quit",
+    "next",
+    "ctl-favourite",
+    "settings",
+    "second-removal",
+    "ctl-retry-removed",
+    "remove-emptying",
 )
 
 #: Codex's reproductions, as cells.
 NAMED = {
+    # Round 5, found on 9fddd73.
     "T-1-terminal-scan-failure-then-quit": Faults("full", "held-fails", "fails", "ok", "quit"),
-    "T-1-runtime-write-failure-then-quit": Faults("full", "ok", "-", "fails", "quit"),
+    "T-1-runtime-write-failure-then-quit": Faults("full", "ok", "-", "eacces", "quit"),
     "T-2-next-after-the-scans-failed": Faults("full", "fails", "fails", "ok", "next"),
     "T-3-edit-after-the-fallback-failed": Faults("full", "fails", "fails", "ok", "ctl-favourite"),
     "T-3-edit-while-the-fallback-is-held": Faults("full", "fails", "held", "ok", "ctl-favourite"),
+    # Round 6, found on 83f38dc.
+    "U-1-window-retry-of-the-removed-source": Faults(
+        "full", "fails", "fails", "ok", "retry-removed"
+    ),
+    "U-1-ctl-retry-of-the-removed-source": Faults(
+        "full", "fails", "fails", "ok", "ctl-retry-removed"
+    ),
+    "U-1-window-removal-emptying-a-used-playlist": Faults(
+        "full", "fails", "fails", "ok", "remove-emptying"
+    ),
+    "U-1-ctl-removal-emptying-a-used-playlist": Faults(
+        "full", "fails", "fails", "ok", "ctl-remove-emptying"
+    ),
+    "U-1-second-removal-whose-dry-run-scan-fails": Faults(
+        "full", "fails", "fails", "ok", "second-removal-scan-fails"
+    ),
+    "U-2-last-window-closed-then-eacces": Faults("full", "held", "-", "eacces", "quit", "closed"),
+    "U-2-last-window-closed-then-size-cap": Faults(
+        "full", "held", "-", "size-cap", "quit", "closed"
+    ),
 }
+
+
+def _writes_happen(postscan: str, fallback: str) -> bool:
+    """Whether any scan after the commit succeeds, so that anything is ever written."""
+    return not (postscan.endswith("fails") and fallback == "fails")
 
 
 def _grid() -> list[Any]:
     named = set(NAMED.values())
     cells: list[Any] = [pytest.param(faults, id=name) for name, faults in NAMED.items()]
+
+    def add(faults: Faults) -> None:
+        if faults in named:
+            return
+        named.add(faults)
+        cells.append(
+            pytest.param(
+                faults,
+                id=(
+                    f"{faults.commit}-own:{faults.postscan}-fallback:{faults.fallback}"
+                    f"-write:{faults.write}-window:{faults.window}-{faults.action}"
+                ),
+            )
+        )
+
     for commit, postscan, fallback in SCANS:
-        for write in WRITES:
-            if write == "fails" and postscan.endswith("fails") and fallback == "fails":
-                continue  # no scan succeeds, so nothing is ever written
-            for action in ACTIONS:
-                faults = Faults(commit, postscan, fallback, write, action)
-                if faults in named:
-                    continue
-                cells.append(
-                    pytest.param(
-                        faults,
-                        id=f"{commit}-own:{postscan}-fallback:{fallback}-write:{write}-{action}",
-                    )
-                )
+        writes = ("ok", "eacces", "size-cap") if _writes_happen(postscan, fallback) else ("ok",)
+        actions = ACTIONS if commit == "full" else PARTIAL_ACTIONS
+        # Window open: the actions, with the two write modes the fault rounds began with.
+        for write in ("ok", "eacces"):
+            if write in writes:
+                for action in actions:
+                    add(Faults(commit, postscan, fallback, write, action))
+        # The window closing, crossed with every write fault; and the refused write open.
+        for write in writes:
+            for action in CLOSING_ACTIONS:
+                add(Faults(commit, postscan, fallback, write, action, "closed"))
+            if write == "size-cap":
+                for action in ("none", "quit"):
+                    add(Faults(commit, postscan, fallback, write, action))
     return cells
 
 
@@ -631,3 +785,119 @@ def test_no_installer_installs_from_an_invalid_inventory(
         assert application.publication_problem == ""
     finally:
         _close(application)
+
+
+# -- what the hold audit found ---------------------------------------------------------------
+
+
+def test_a_removal_committing_during_a_source_change_scan_still_lets_quit_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit cancels the source-changing scan holding the scan barrier; the scan after
+    the commit replaces it and ends the hold, so Quit completes."""
+    root = tmp_path / "lib" / "R"
+    added = tmp_path / "lib" / "S"
+    forest, _keep = _file(root / "forest.png"), _file(root / "keep.png")
+    _file(added / "dawn.png")
+    application = _application(tmp_path, monkeypatch)
+    _attach(application, FakeWindow())
+    monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
+    monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+    quits: list[bool] = []
+    monkeypatch.setattr(Application, "quit", lambda _self: quits.append(True))
+    release = threading.Event()
+    real_scan = scan.scan
+
+    def held(*arguments: Any, **keywords: Any) -> Any:
+        if threading.current_thread().name.startswith("library-scan"):
+            release.wait(BOUND * 2)
+        return real_scan(*arguments, **keywords)
+
+    try:
+        _configured(application, root)
+        _publish(application)
+        monkeypatch.setattr(scan, "scan", held)
+        errors: list[str] = []
+        application.update_settings_async(roots=(root, added), on_error=errors.append)
+        spin_until(lambda: application._runtime_library_scan_held, BOUND, what="the source scan")
+        item = application.session.library.find(forest)
+        assert item is not None
+        removed: list[RemovalResult] = []
+        assert application.remove_item_async(item, trash=True, finish=removed.append)
+        spin_until(lambda: bool(removed) and _settled_lane(application), BOUND, what="removal")
+        assert removed[0].committed and errors == []
+        release.set()
+        application.request_quit()
+        spin_until(lambda: quits == [True], BOUND, what="Quit to complete")
+        assert not application._runtime_library_scan_held
+        assert application.session.library.find(added / "dawn.png") is not None
+    finally:
+        release.set()
+        _close(application)
+
+
+def _settled_lane(application: Application) -> bool:
+    return _lane_idle(application) and not application._removal_active
+
+
+def test_a_publication_captured_during_a_refused_removal_ends_while_still_invalid(
+    cells: Callable[[Faults], Cell],
+) -> None:
+    """After a removal whose scans failed, a second removal is refused while a publication is
+    waiting on it: that publication ends (nothing installed), and its hold with it."""
+    cell = cells(Faults("full", "fails", "fails", "ok", "none"))
+    application = cell.application
+    item = application.session.library.find(cell.forest)
+    assert item is not None
+    removed: list[RemovalResult] = []
+    assert application.remove_item_async(item, trash=True, finish=removed.append)
+    spin_until(
+        lambda: (
+            bool(removed)
+            and _settled(application)
+            and not application._runtime_library_scan_pending
+            and not application._removal_convergence_held
+        ),
+        BOUND,
+        what="the first removal and its failed scans",
+    )
+    assert not application._inventory_valid
+    count = len(cell.installed.documents)
+
+    # A second removal (Keep: Evening would have nothing left), its dry run held a moment.
+    holding = threading.Event()
+    go = threading.Event()
+    real_scan = scan.scan
+
+    def held_dry_run(*arguments: Any, **keywords: Any) -> Any:
+        holding.set()
+        go.wait(BOUND)
+        return real_scan(*arguments, **keywords)
+
+    keep = application.session.library.find(cell.keep)
+    assert keep is not None
+    cell.injected.lift()  # nothing else fails now; the scan below is held instead
+    setattr(scan, "scan", held_dry_run)  # noqa: B010 - restored by the fixture's monkeypatch
+    said_before = len(application.activity_log.entries)
+    assert application.remove_item_async(keep, trash=True, finish=removed.append)
+    assert holding.wait(BOUND)
+    # A publication captured while that removal is in progress.
+    assert application._publish_runtime_async()
+    assert application._runtime_publication_held
+    go.set()
+
+    spin_until(
+        lambda: (
+            _settled(application)
+            and not application._runtime_publication_held
+            and len(application.activity_log.entries) > said_before
+        ),
+        BOUND,
+        what="the refusal and the waiting publication to end",
+    )
+    assert cell.keep.exists() and len(removed) == 1, "the second removal was refused"
+    assert not application._inventory_valid, "a refusal changed nothing, and validated nothing"
+    assert cell.installed.documents[count:] == []
+    assert application.publication_problem != ""
+    application.request_quit()
+    spin_until(lambda: cell.quits == [True], BOUND, what="Quit to complete")

@@ -1541,8 +1541,13 @@ def _write_atomic(document: str, target: Path) -> None:
     A failure up to the rename is :class:`RuntimeConfigError`, with the old
     file in place; one after it is :class:`RuntimeConfigNotDurableError`.
     """
-    paths.ensure_directory(target.parent)
-    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        paths.ensure_directory(target.parent)
+        descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    except OSError as error:
+        # The temporary couldn't even be made (EACCES on a read-only
+        # directory, say): a write failure like any other, old file in place.
+        raise RuntimeConfigError(f"cannot write {target}: {error}") from error
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:

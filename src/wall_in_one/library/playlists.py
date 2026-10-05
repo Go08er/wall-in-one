@@ -106,7 +106,7 @@ class PlaylistError(Exception):
 
     Kinds in use: ``local-io``, ``no-such-playlist``, ``no-such-entry``,
     ``invalid-name``, ``identity-conflict``, ``full``, ``newer-version``,
-    ``no-backup``, ``validation``.
+    ``no-backup``, ``validation``, ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -609,6 +609,14 @@ DOCUMENT_SHAPE: Final = state_file.Shape(
 )
 
 
+def _unreadable_error(fault: str, target: Path) -> PlaylistError:
+    return PlaylistError(
+        state_file.UNREADABLE,
+        f"{target.name} can't be read ({fault}), so which playlists it holds isn't known. "
+        "Nothing was changed.",
+    )
+
+
 def state_path() -> Path:
     return paths.app_state_dir() / STATE_FILENAME
 
@@ -992,32 +1000,70 @@ class Store:
         return self._mutate(create)
 
     def rename(self, identifier: str, name: str) -> Playlist:
+        """Rename one playlist; an unreadable file refuses (``unreadable``)."""
         tidy = tidy_name(name)
 
         def rename(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
-            playlist = self._find_in(authored, identifier)
-            if tidy == playlist.name:
-                return playlist, False
-            if _fold_identity(playlist.id) in {
-                _fold_identity(generated_id) for generated_id, _name in RESERVED_IDENTITIES
-            } or _fold_identity(playlist.id).startswith(
-                _fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)
-            ):
-                raise PlaylistError(
-                    "identity-conflict",
-                    f"{playlist.name} is generated automatically and cannot be renamed",
-                )
-            self._validate_identity(
-                playlist.id,
-                tidy,
-                authored=authored,
-                replacing=playlist.id,
-            )
-            renamed = replace(playlist, name=tidy)
-            authored[playlist.id] = renamed
-            return renamed, True
+            return self._renamed(authored, identifier, tidy)
 
-        return self._mutate(rename)
+        return self._mutate(rename, refuse_unreadable=True)
+
+    def rename_problem(self, identifier: str, name: str) -> str:
+        """Why `rename` would refuse now, read from the file as it is; empty when it wouldn't.
+
+        Never writes: for a caller that must not change anything elsewhere
+        first when the rename itself would be refused.
+        """
+        target = self._path if self._path is not None else state_path()
+        reading = _read(target)
+        if reading.newer_version:
+            return str(
+                PlaylistError(state_file.NEWER_VERSION, state_file.newer_version_refusal(target))
+            )
+        if reading.fault is not None:
+            return str(_unreadable_error(reading.fault, target))
+        authored = dict(reading.value) if target.exists() or self._loaded else dict(self._playlists)
+        try:
+            self._renamed(authored, identifier, tidy_name(name))
+        except PlaylistError as error:
+            return str(error)
+        return ""
+
+    def durable_problem(self) -> str:
+        """Why a change can't be made to the file as it is now, or empty. Never writes."""
+        target = self._path if self._path is not None else state_path()
+        reading = _read(target)
+        if reading.newer_version:
+            return str(
+                PlaylistError(state_file.NEWER_VERSION, state_file.newer_version_refusal(target))
+            )
+        if reading.fault is not None:
+            return str(_unreadable_error(reading.fault, target))
+        return ""
+
+    def _renamed(
+        self, authored: dict[str, Playlist], identifier: str, tidy: str
+    ) -> tuple[Playlist, bool]:
+        """`rename`'s change, on ``authored``: the renamed playlist, or a refusal."""
+        playlist = self._find_in(authored, identifier)
+        if tidy == playlist.name:
+            return playlist, False
+        if _fold_identity(playlist.id) in {
+            _fold_identity(generated_id) for generated_id, _name in RESERVED_IDENTITIES
+        } or _fold_identity(playlist.id).startswith(_fold_identity(DISPLAY_QUICK_CHOICE_ID_PREFIX)):
+            raise PlaylistError(
+                "identity-conflict",
+                f"{playlist.name} is generated automatically and cannot be renamed",
+            )
+        self._validate_identity(
+            playlist.id,
+            tidy,
+            authored=authored,
+            replacing=playlist.id,
+        )
+        renamed = replace(playlist, name=tidy)
+        authored[playlist.id] = renamed
+        return renamed, True
 
     def delete(self, identifier: str) -> bool:
         def delete(authored: dict[str, Playlist]) -> tuple[bool, bool]:
@@ -1030,7 +1076,7 @@ class Store:
             del authored[playlist.id]
             return True, True
 
-        return self._mutate(delete)
+        return self._mutate(delete, refuse_unreadable=True)
 
     def add(self, identifier: str, source: Path, entry_id: str | None = None) -> Playlist:
         def add(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
@@ -1192,7 +1238,7 @@ class Store:
             authored[updated.id] = updated
             return updated, True
 
-        return self._mutate(remove)
+        return self._mutate(remove, refuse_unreadable=True)
 
     def insert_entries(self, identifier: str, placed: Sequence[tuple[int, Entry]]) -> Playlist:
         """Put several entries in, in one transaction: all of them or none.
@@ -1261,7 +1307,7 @@ class Store:
             authored[updated.id] = updated
             return updated, bool(wanted)
 
-        return self._mutate(remove)
+        return self._mutate(remove, refuse_unreadable=True)
 
     def move_entry(self, identifier: str, entry: str, position: int) -> Playlist:
         def move(authored: dict[str, Playlist]) -> tuple[Playlist, bool]:
@@ -1307,7 +1353,7 @@ class Store:
                     changed = True
             return changed, changed
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def adopt_worker_forget_path(self, path: Path) -> bool:
         """Mirror a durable cleanup while preserving unrelated live edits."""
@@ -1336,6 +1382,8 @@ class Store:
     def _mutate(
         self,
         change: Callable[[dict[str, Playlist]], tuple[_MutationResult, bool]],
+        *,
+        refuse_unreadable: bool = False,
     ) -> _MutationResult:
         """Apply one lock-read-change-write transaction over the latest file.
 
@@ -1374,6 +1422,10 @@ class Store:
                         state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
                     )
                 current, fault = reading.value, reading.fault
+                if refuse_unreadable and fault is not None:
+                    # Decided from this locked read: a removal or rename must
+                    # see the playlists, and can't. Nothing is written.
+                    raise _unreadable_error(fault, target)
                 authored = dict(current) if present or self._loaded else dict(self._playlists)
                 result, changed = change(authored)
                 if changed:

@@ -109,17 +109,26 @@ _DEFAULT: Final = "default"
 
 
 class RenameResult(Protocol):
-    """A saved rename (`Application.prepare_playlist_rename`)."""
+    """A rename (`Application.prepare_playlist_rename`), whole or partly saved."""
 
     @property
     def before(self) -> playlists.Playlist: ...
 
+    #: None when it stopped after saving a reference first (`saved`, `error`).
     @property
-    def renamed(self) -> playlists.Playlist: ...
+    def renamed(self) -> playlists.Playlist | None: ...
 
     #: The settings saved first, when the default named it by name; else None.
     @property
     def settings(self) -> config.Settings | None: ...
+
+    #: What was saved before the rename, for a sentence.
+    @property
+    def saved(self) -> tuple[str, ...]: ...
+
+    #: Why it stopped, when ``renamed`` is None.
+    @property
+    def error(self) -> str: ...
 
 
 class PlaylistBackend(Protocol):
@@ -701,6 +710,7 @@ class RealPlaylists:
             return self._backend.prepare_playlist_rename(pid, name)
 
         def saved(result: RenameResult) -> bool:
+            # Says what a partial rename saved; publishing follows either way.
             self._backend.adopt_playlist_rename(result)
             return result.renamed != result.before
 

@@ -101,7 +101,8 @@ _MutationResult = TypeVar("_MutationResult")
 class PairingError(Exception):
     """A pairing could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``, ``invalid-state``, ``newer-version``, ``full``.
+    Kinds in use: ``local-io``, ``invalid-state``, ``newer-version``, ``full``,
+    ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -386,6 +387,14 @@ DOCUMENT_SHAPE: Final = state_file.Shape(
         )
     },
 )
+
+
+def _unreadable_error(fault: str, target: Path) -> PairingError:
+    return PairingError(
+        state_file.UNREADABLE,
+        f"{target.name} can't be read ({fault}), so which wallpaper choices it holds "
+        "isn't known. Nothing was changed.",
+    )
 
 
 def state_path() -> Path:
@@ -1084,7 +1093,7 @@ class Store:
                 del records[identity.key]
             return True, True
 
-        return self._mutate(clear)
+        return self._mutate(clear, refuse_unreadable=True)
 
     def reset(self, item: MediaItem) -> bool:
         """Forget everything chosen for ``item``. True if there was anything."""
@@ -1100,7 +1109,7 @@ class Store:
                 del records[identity.key]
             return True, True
 
-        return self._mutate(reset_choices)
+        return self._mutate(reset_choices, refuse_unreadable=True)
 
     def forget_identity(self, identity: Identity) -> bool:
         """Drop a record by identity, for a wallpaper the app has just deleted.
@@ -1115,7 +1124,7 @@ class Store:
             del records[identity.key]
             return True, True
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def forget_item(
         self,
@@ -1155,7 +1164,7 @@ class Store:
                 changed = True
             return changed, changed
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def adopt_worker_forget_item(
         self,
@@ -1216,15 +1225,20 @@ class Store:
                 changed = True
             return changed, changed
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def _mutate(
         self,
         operation: Callable[[dict[str, Pairing]], tuple[_MutationResult, bool]],
         *,
         refuse_fault: bool = False,
+        refuse_unreadable: bool = False,
     ) -> _MutationResult:
-        """Reload, rebase and optionally replace one authoring transaction."""
+        """Reload, rebase and optionally replace one authoring transaction.
+
+        ``refuse_unreadable``: a removal must see the records, so a file that
+        can't be read refuses (``unreadable``) rather than removing nothing.
+        """
         target = self._path if self._path is not None else state_path()
         try:
             with _mutation_lock(target), state_file.observe(target) as observed:
@@ -1247,6 +1261,8 @@ class Store:
                         f"cannot persist runtime health because {fault}; "
                         "the unreadable pairings file was left untouched",
                     )
+                if fault is not None and refuse_unreadable:
+                    raise _unreadable_error(fault, target)
                 updated = dict(records)
                 result, changed = operation(updated)
                 if changed:

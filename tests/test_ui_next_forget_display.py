@@ -150,8 +150,8 @@ def after_the_first_schedule_commit(lock: Path) -> Iterator[None]:
     commits = [0]
     holder: list[contextlib.ExitStack] = []
 
-    def mutate(store: schedules.Store, change: Any) -> Any:
-        result = real(store, change)
+    def mutate(store: schedules.Store, change: Any, **keywords: Any) -> Any:
+        result = real(store, change, **keywords)
         commits[0] += 1
         if commits[0] == 1:
             stack = contextlib.ExitStack()

@@ -96,12 +96,6 @@ def _unreadable_error(fault: str, target: Path) -> ScheduleError:
     )
 
 
-def refuse_unreadable(fault: str | None, path: Path | None) -> None:
-    """Refuse a change that must see every rule, while the file can't be read."""
-    if fault is not None:
-        raise _unreadable_error(fault, path if path is not None else state_path())
-
-
 def new_id() -> str:
     return secrets.token_hex(8)
 
@@ -684,6 +678,8 @@ class Store:
         return self._mutate(append)
 
     def remove(self, rule_id: str) -> bool:
+        """Remove one rule. ``False`` if it isn't there; an unreadable file refuses."""
+
         def remove(rules: list[Rule]) -> tuple[bool, bool]:
             kept = [rule for rule in rules if rule.id != rule_id]
             changed = len(kept) != len(rules)
@@ -691,7 +687,7 @@ class Store:
                 rules[:] = kept
             return changed, changed
 
-        return self._mutate(remove)
+        return self._mutate(remove, refuse_unreadable=True)
 
     def remove_for_display(self, connector: str) -> tuple[Rule, ...]:
         """Remove every rule aimed at ``connector`` in one save; return the rules removed.
@@ -704,13 +700,12 @@ class Store:
         name = clean_connector(connector)
 
         def remove(rules: list[Rule]) -> tuple[tuple[Rule, ...], bool]:
-            refuse_unreadable(self._fault, self._path)
             removed = tuple(rule for rule in rules if rule.connector == name)
             if removed:
                 rules[:] = [rule for rule in rules if rule.connector != name]
             return removed, bool(removed)
 
-        return self._mutate(remove)
+        return self._mutate(remove, refuse_unreadable=True)
 
     def durable_problem(self) -> str:
         """Why a change can't be made to the file as it is now, or empty. Never writes.
@@ -883,27 +878,37 @@ class Store:
                 rules[:] = kept
             return changed, changed
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def retarget(self, reference: str, playlist_id: str) -> int:
         """Point every rule naming ``reference`` at ``playlist_id``; say how many.
 
         For a playlist about to be renamed while an older profile's rule
         names it by name: its id names the same playlist before and after.
-        One save, and none when nothing names it.
+        One save, and none when nothing names it. See `retarget_many`.
+        """
+        return self.retarget_many((reference,), playlist_id)
+
+    def retarget_many(self, references: Iterable[str], playlist_id: str) -> int:
+        """Point every rule naming any of ``references`` at ``playlist_id``, in one save.
+
+        All of them or none, and an unreadable file refuses (``unreadable``)
+        rather than retargeting nothing: a rule it holds could still name a
+        reference. Returns how many rules changed.
         """
         if not playlist_id.strip():
             raise ScheduleError("no-such-rule", "a rule needs a playlist")
+        wanted = frozenset(references)
 
         def retarget(rules: list[Rule]) -> tuple[int, bool]:
             changed = 0
             for index, rule in enumerate(rules):
-                if rule.playlist == reference:
+                if rule.playlist in wanted:
                     rules[index] = replace(rule, playlist=playlist_id)
                     changed += 1
             return changed, bool(changed)
 
-        return self._mutate(retarget)
+        return self._mutate(retarget, refuse_unreadable=True)
 
     def adopt_worker_retarget(self, retargeted: Mapping[str, str]) -> int:
         """Mirror a detached `retarget` (reference to playlist id) without another write."""
@@ -929,6 +934,8 @@ class Store:
     def _mutate(
         self,
         change: Callable[[list[Rule]], tuple[_MutationResult, bool]],
+        *,
+        refuse_unreadable: bool = False,
     ) -> _MutationResult:
         """Apply one semantic mutation to the latest durable rule order.
 
@@ -976,6 +983,10 @@ class Store:
                     self._fault = fault
                     self._fault_kind = reading.fault_kind
                     self._loaded = True
+                if refuse_unreadable and fault is not None:
+                    # Decided from this locked read: a removal or retarget
+                    # must see every rule, and these can't be read.
+                    raise _unreadable_error(fault, target)
                 result, changed = change(rules)
                 if changed:
                     # Format-change guards: keep the file's version unless

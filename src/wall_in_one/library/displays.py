@@ -389,7 +389,8 @@ class Store:
                 working.beats_global_rules.discard(name)
             return changed, changed
 
-        return self._mutate(opt)
+        # Opting out of an unreadable file would be a no-op said as a success.
+        return self._mutate(opt, refuse_unreadable=True)
 
     def assign(self, connector: str, playlist: str) -> None:
         """Point one screen at one playlist. Its opt-in, if any, is kept."""
@@ -424,7 +425,7 @@ class Store:
             working.drop(name)
             return changed, changed
 
-        return self._mutate(unassign)
+        return self._mutate(unassign, refuse_unreadable=True)
 
     def forget_display(self, connector: str) -> str:
         """Unassign ``connector`` for Forget Display; return the playlist it had, or "".
@@ -436,13 +437,11 @@ class Store:
         name = _clean_connector(connector)
 
         def forget(working: _Working) -> tuple[str, bool]:
-            if self._fault is not None:
-                raise _unreadable_error(self._fault, self._target())
             playlist = working.assignments.get(name, "")
             working.drop(name)
             return playlist, bool(playlist)
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def durable_problem(self) -> str:
         """Why a change can't be made to the file as it is now, or empty. Never writes.
@@ -479,26 +478,35 @@ class Store:
                 working.drop(key)
             return len(stale), bool(stale)
 
-        return self._mutate(forget)
+        return self._mutate(forget, refuse_unreadable=True)
 
     def retarget(self, reference: str, playlist_id: str) -> int:
         """Point every assignment naming ``reference`` at ``playlist_id``; say how many.
 
         For a playlist about to be renamed while an older profile's
         assignment names it by name: its id names the same playlist before
-        and after. One save, and none when nothing names it.
+        and after. One save, and none when nothing names it. See `retarget_many`.
         """
-        wanted, replacement = _clean(reference), _clean(playlist_id)
+        return self.retarget_many((reference,), playlist_id)
+
+    def retarget_many(self, references: Iterable[str], playlist_id: str) -> int:
+        """Point every assignment naming any of ``references`` at ``playlist_id``, in one save.
+
+        All of them or none, and an unreadable file refuses (``unreadable``)
+        rather than retargeting nothing. Returns how many assignments changed.
+        """
+        wanted = frozenset(_clean(reference) for reference in references)
+        replacement = _clean(playlist_id)
         if not replacement:
             raise DisplayError("validation", "that is not a playlist name")
 
         def retarget(working: _Working) -> tuple[int, bool]:
-            stale = [key for key, value in working.assignments.items() if value == wanted]
+            stale = [key for key, value in working.assignments.items() if value in wanted]
             for key in stale:
                 working.assignments[key] = replacement
             return len(stale), bool(stale)
 
-        return self._mutate(retarget)
+        return self._mutate(retarget, refuse_unreadable=True)
 
     def adopt_worker_retarget(self, retargeted: Mapping[str, str]) -> int:
         """Mirror a detached `retarget` (reference to playlist id) without another write."""
@@ -537,6 +545,8 @@ class Store:
     def _mutate(
         self,
         change: Callable[[_Working], tuple[_MutationResult, bool]],
+        *,
+        refuse_unreadable: bool = False,
     ) -> _MutationResult:
         """Apply one connector mutation to the latest durable assignments."""
         target = self._path if self._path is not None else state_path()
@@ -581,6 +591,10 @@ class Store:
                     self._fault = fault
                     self._fault_kind = reading.fault_kind
                     self._loaded = True
+                if refuse_unreadable and fault is not None:
+                    # Decided from this locked read: a removal, an opt-out or
+                    # a retarget must see the assignments, and can't.
+                    raise _unreadable_error(fault, target)
                 result, changed = change(working)
                 if changed:
                     version = FORMATS.to_write(

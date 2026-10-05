@@ -320,11 +320,31 @@ class _PlaylistDeleteResult:
 
 @dataclass(frozen=True, slots=True)
 class PlaylistRenameResult:
-    """A saved rename, and the settings saved first if the default named it by name."""
+    """A rename, and what it saved first so what names the playlist by name keeps working.
+
+    ``renamed`` is None when a step failed after an earlier one was saved:
+    ``saved`` says what was (each now names the playlist by its id, the same
+    playlist) and ``error`` why it stopped. That is never "nothing changed";
+    `Application.adopt_playlist_rename` says exactly this.
+    """
 
     before: playlists.Playlist
-    renamed: playlists.Playlist
+    renamed: playlists.Playlist | None
+    #: The settings saved first, when the default named it by name; else None.
     settings: config.Settings | None = None
+    #: What was saved before the rename, for a sentence ("2 schedule rules").
+    saved: tuple[str, ...] = ()
+    error: str = ""
+
+
+def rename_partly_saved(result: RenameResult) -> str:
+    """What a rename that stopped partway saved, and why it stopped."""
+    many = len(result.saved) > 1 or not result.saved[0].startswith(("the ", "1 "))
+    return (
+        f"\u201c{result.before.name}\u201d was not renamed: {result.error}. Saved before "
+        f"that: {runtime_config.listed(result.saved)} now name{'' if many else 's'} it by its "
+        "id instead of its name, which is the same playlist. Rename it again to finish."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -5168,11 +5188,24 @@ class Application(Adw.Application):
         An older profile's default, rule or display assignment may name the
         playlist by its name, which the compiler resolves (by id, then by
         name); renaming it would leave that naming nothing and stop every
-        publication. In this task each such reference is first given the
-        playlist's id, in the record or key it is already in, then the
-        playlist is renamed: the id names the same playlist before and after,
-        so nothing breaks if the rename itself then fails. No new field is
-        stored. Read-only settings refuse the whole rename, saying why.
+        publication. So, in this one task:
+
+        1. Read every store first, writing nothing: the playlists file (with
+           the new name checked as the rename would check it), the schedule
+           and display stores, and settings when the default must change. One
+           that can't be read, is from a newer version, or would refuse the
+           name refuses the whole rename before anything is written.
+        2. Give each reference the playlist's id, one transaction per store:
+           the default, every rule, every display assignment. The id names the
+           same playlist before and after, so each is invisible on its own.
+        3. Rename the playlist last: the one change anybody sees.
+
+        After step 1 the only failures left are the stores' own (a lock, the
+        disk). One after something was saved returns what was saved and why
+        it stopped (`PlaylistRenameResult`), never "nothing changed"; the
+        callers adopt and publish it (`adopt_playlist_rename`). No new field
+        is stored. A reference added by ``ctl`` between this preparation on
+        GTK and the worker is the head-of-lane boundary every check here has.
         """
         playlist = self._session.playlists.find(reference)
         pid = playlist.id
@@ -5185,18 +5218,52 @@ class Application(Adw.Application):
         display_store = self._session.displays
 
         def work() -> PlaylistRenameResult:
-            saved: config.Settings | None = None
+            for problem in (
+                store.rename_problem(pid, name),
+                schedule_store.durable_problem(),
+                display_store.durable_problem(),
+            ):
+                if problem:
+                    raise ValueError(problem)
             if default:
-                saved = config.repoint_playlist_default(default, pid)
-            for old in named_by:
-                schedule_store.retarget(old, pid)
-                display_store.retarget(old, pid)
-            return PlaylistRenameResult(playlist, store.rename(pid, name), saved)
+                loaded = config.load_strict_document()
+                if loaded.read_only:
+                    raise config.SettingsReadOnlyError(loaded.unknown_keys)
+            saved: list[str] = []
+            settings: config.Settings | None = None
+            try:
+                if default:
+                    settings = config.repoint_playlist_default(default, pid)
+                    if settings is not None:
+                        saved.append("the default playlist")
+                if named_by:
+                    rules = schedule_store.retarget_many(named_by, pid)
+                    if rules:
+                        saved.append(f"{rules} schedule rule{'' if rules == 1 else 's'}")
+                    assigned = display_store.retarget_many(named_by, pid)
+                    if assigned:
+                        saved.append(
+                            f"{assigned} display\u2019s own playlist"
+                            if assigned == 1
+                            else f"{assigned} displays\u2019 own playlists"
+                        )
+                renamed = store.rename(pid, name)
+            except Exception as error:
+                if not saved:
+                    raise  # nothing was saved: the plain refusal is true
+                return PlaylistRenameResult(playlist, None, settings, tuple(saved), str(error))
+            return PlaylistRenameResult(playlist, renamed, settings, tuple(saved))
 
         return work
 
     def adopt_playlist_rename(self, result: RenameResult) -> None:
-        """Take a rename's saved default on GTK, if it gave the default the playlist's id."""
+        """Take a rename's saved default on GTK, and say what a partial rename saved.
+
+        Both windows call this, then publish: what was saved reaches the
+        runtime whether or not the rename itself did.
+        """
+        if result.renamed is None:
+            self.window_report(rename_partly_saved(result))
         if result.settings is None:
             return
         previous = self._settings

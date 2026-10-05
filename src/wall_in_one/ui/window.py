@@ -992,8 +992,11 @@ class MainWindow(Adw.ApplicationWindow):
             lambda: False,
             saved,
             prepare=prepare,
-            failure=lambda _error: self.report(
-                f"{item.name} could not be saved as a favourite; nothing changed"
+            # Says which way and why: an unstar refused because the list can't
+            # be read must not read as a failed star.
+            failure=lambda error: self.report(
+                f"{item.name} was not {'starred' if wanted else 'unstarred'}; "
+                f"nothing changed: {error}"
             ),
         )
 

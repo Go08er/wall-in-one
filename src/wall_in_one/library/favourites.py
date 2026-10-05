@@ -77,7 +77,7 @@ BROKEN_SUFFIX: Final = ".broken"
 class FavouritesError(Exception):
     """The favourites could not be written, with a machine-readable reason.
 
-    Kinds in use: ``local-io``, ``newer-version``, ``full``.
+    Kinds in use: ``local-io``, ``newer-version``, ``full``, ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -86,6 +86,14 @@ class FavouritesError(Exception):
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
+
+
+def _unreadable_error(fault: str, target: Path) -> FavouritesError:
+    return FavouritesError(
+        state_file.UNREADABLE,
+        f"{target.name} can't be read ({fault}), so which favorites it holds isn't known. "
+        "Nothing was changed.",
+    )
 
 
 def state_path() -> Path:
@@ -376,7 +384,12 @@ class Store:
 
     # -- mutation --------------------------------------------------------
 
-    def _mutate(self, change: Callable[[Favourites], tuple[bool, Favourites]]) -> bool:
+    def _mutate(
+        self,
+        change: Callable[[Favourites], tuple[bool, Favourites]],
+        *,
+        refuse_unreadable: bool = False,
+    ) -> bool:
         """Apply one rebased mutation while excluding other app processes.
 
         Atomic replacement prevents torn JSON, but without this lock two
@@ -413,6 +426,10 @@ class Store:
                         state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
                     )
                 current, fault = reading.value, reading.fault
+                if refuse_unreadable and fault is not None:
+                    # Decided from this locked read: an unstar must see the
+                    # list, and can't. Nothing is written or moved aside.
+                    raise _unreadable_error(fault, target)
                 # Preserve the historical direct-construction contract: an
                 # explicit in-memory seed is the base only until a real file
                 # has ever existed. Store.open(...), including an absent file,
@@ -509,7 +526,7 @@ class Store:
             updated = current.without(path)
             return updated is not current, updated
 
-        return self._mutate(discard)
+        return self._mutate(discard, refuse_unreadable=True)
 
     def adopt_worker_discard(self, path: Path) -> bool:
         """Mirror a worker-completed durable discard without another write.
@@ -545,5 +562,7 @@ class Store:
             updated = current.with_added(path) if now_favourite else current.without(path)
             return True, updated
 
-        self._mutate(toggle)
+        # Which way to flip depends on the list, so an unreadable one refuses
+        # (it used to star, and move the user's whole list aside, on an unstar).
+        self._mutate(toggle, refuse_unreadable=True)
         return now_favourite

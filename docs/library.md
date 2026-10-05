@@ -558,6 +558,14 @@ if an editor installs a valid document before or during that boundary, the
 manual repair remains canonical and the app reports its own mutation as
 failed. The same rule applies to an in-place repair of the original inode.
 
+Taking something out is not a repair. Deleting, unassigning, unstarring,
+forgetting or renaming a record in one of these files while it can't be read
+is refused with the reason `unreadable` ("… can't be read (…), so which rules
+it holds isn't known. Nothing was changed."), and the file stays where and as it
+is: nothing can be said to be gone from a file whose contents aren't known.
+Renaming a playlist reads every file that names it before it writes any of
+them, so it is refused the same way if one of them can't be read.
+
 Each of these files has a size the app reads back: 8 MiB for playlists and
 Pairings, 4 MiB for schedules and favourites, 64 KiB for display assignments,
 and 1 MiB for `settings.toml`. An edit that would make one larger is refused

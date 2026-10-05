@@ -58,8 +58,10 @@ class Renamed:
     """`Application.prepare_playlist_rename`'s result, as the adapter reads it."""
 
     before: playlists.Playlist
-    renamed: playlists.Playlist
+    renamed: playlists.Playlist | None
     settings: config.Settings | None = None
+    saved: tuple[str, ...] = ()
+    error: str = ""
 
 
 class FakeApplication:

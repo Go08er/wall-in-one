@@ -321,9 +321,12 @@ problem (a cleanup that failed) is scanned once more after that, with the
 cleanup tried again.
 
 If the scan after a removal fails, or the runtime configuration can't be
-written, the notice under the header says so and the service keeps its last
-setup; nothing waits on it, so the app can still quit. Refreshing the library,
-or the next change that gets through, recovers.
+written or is refused, the notice under the header says so and the service
+keeps its last setup; nothing waits on it, so the app can still quit, also
+when its window was closed meanwhile. Refreshing the library, or the next
+change that gets through, recovers. Another removal that doesn't go through
+changes nothing: in particular, it doesn't make a library that still needs
+that scan count as scanned.
 
 The check costs about one scan and one build of the runtime configuration, and
 a removal one more scan after it, all on the worker rather than in the window.

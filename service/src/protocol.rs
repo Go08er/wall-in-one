@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
@@ -94,15 +95,81 @@ fn read_request_budgeted(
     serde_json::from_slice(&bytes).map_err(|error| format!("invalid request: {error}"))
 }
 
-pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<(), String> {
+fn encode_response(response: &Response) -> Result<Vec<u8>, String> {
     let mut encoded = serde_json::to_vec(response).map_err(|error| error.to_string())?;
     encoded.push(b'\n');
     if encoded.len() > MAX_RESPONSE_BYTES {
         return Err(format!("response exceeds {MAX_RESPONSE_BYTES} bytes"));
     }
+    Ok(encoded)
+}
+
+pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<(), String> {
+    let encoded = encode_response(response)?;
     writer
         .write_all(&encoded)
         .map_err(|error| format!("cannot write response: {error}"))
+}
+
+/// Write `response` to a client within `deadline` as a whole.
+///
+/// A socket write timeout bounds each wait for buffer space, not the write:
+/// a peer that reads just often enough keeps one blocking `write` going for
+/// as long as the reply takes to trickle out, and with it the single service
+/// thread. So the reply goes out in nonblocking pieces, waiting for room with
+/// `poll` only until `deadline`; at it the reply is abandoned and the runtime
+/// loop goes back to its work.
+pub fn write_response_until(
+    stream: &UnixStream,
+    response: &Response,
+    deadline: Instant,
+) -> Result<(), String> {
+    let encoded = encode_response(response)?;
+    let fd = stream.as_raw_fd();
+    let mut unwritten = &encoded[..];
+    while !unwritten.is_empty() {
+        // SAFETY: the pointer and length describe the live `unwritten` slice.
+        let sent = unsafe {
+            libc::send(
+                fd,
+                unwritten.as_ptr().cast(),
+                unwritten.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent > 0 {
+            unwritten = &unwritten[sent.unsigned_abs()..];
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if sent == 0 || !matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR)) {
+            return Err(format!("cannot write response: {error}"));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "response deadline expired with {} of {} bytes unwritten",
+                unwritten.len(),
+                encoded.len()
+            ));
+        }
+        let mut ready = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let wait = i32::try_from(remaining.as_millis())
+            .unwrap_or(i32::MAX)
+            .max(1);
+        // SAFETY: one valid pollfd for the duration of the call.
+        if unsafe { libc::poll(&mut ready, 1, wait) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("cannot wait to write response: {error}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

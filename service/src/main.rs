@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use wall_in_one_service::config::{Config, ConfigError, overrides_path};
 use wall_in_one_service::power::PowerObserver;
-use wall_in_one_service::protocol::{Request, Response, read_request_until, write_response};
+use wall_in_one_service::protocol::{Request, Response, read_request_until, write_response_until};
 use wall_in_one_service::renderer::SystemDriver;
 use wall_in_one_service::runtime::Runtime;
 
@@ -157,12 +157,18 @@ fn parse() -> Result<Options, String> {
     Ok(options)
 }
 
+/// How long one reply may take to reach its client, as a whole. A local client
+/// reads even a full-size status in milliseconds; one that stops reading, or
+/// reads just enough to keep each write alive, gives up its turn here so the
+/// single runtime thread can return to supervision, other clients and
+/// shutdown.
+const RESPONSE_WRITE_BUDGET: Duration = Duration::from_secs(1);
+
 fn serve(
     stream: UnixStream,
     runtime: &mut Runtime<SystemDriver>,
     power: &mut PowerObserver,
 ) -> bool {
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
     let mut reader = BufReader::new(&stream);
     let deadline = Instant::now() + Duration::from_millis(250);
     let (response, was_reload) = match read_request_until(&mut reader, &stream, deadline) {
@@ -177,8 +183,10 @@ fn serve(
         }
         Err(error) => (Response::failure(error), false),
     };
-    let mut writer = stream;
-    if let Err(error) = write_response(&mut writer, &response) {
+    // The budget starts with the write: handling the request may take a while,
+    // and that is not the client's doing.
+    let deadline = Instant::now() + RESPONSE_WRITE_BUDGET;
+    if let Err(error) = write_response_until(&stream, &response, deadline) {
         eprintln!("wall-in-one-service: response write failed: {error}");
     }
     was_reload
@@ -594,13 +602,21 @@ fn main() {
 mod tests {
     use super::{
         MAX_ACCEPTS_PER_ITERATION, accept_ready_batch, claim_lock_with_hook,
-        clear_stale_socket_with_hook,
+        clear_stale_socket_with_hook, serve,
     };
+    use chrono::Local;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use wall_in_one_service::config::Config;
+    use wall_in_one_service::power::PowerObserver;
+    use wall_in_one_service::renderer::SystemDriver;
+    use wall_in_one_service::runtime::Runtime;
 
     fn directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -688,5 +704,106 @@ mod tests {
         drop(accepted);
         drop(listener);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A mirrored runtime whose status is about 100 KB: many playlists with
+    /// long names, built through the production loader.
+    fn runtime_with_a_large_status() -> Runtime<SystemDriver> {
+        let mut document = String::from(
+            r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+default_playlist = "p0000"
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = false
+display_mode = "mirrored"
+theme_source_connector = ""
+[renderer]
+noctalia_program = "/bin/true"
+niri_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = false
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 0
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+"#,
+        );
+        for index in 0..578 {
+            document.push_str(&format!(
+                "[[playlists]]\nid = \"p{index:04}\"\nname = \"{}{index:04}\"\n\
+                 [[playlists.entries]]\nid = \"e\"\nkind = \"still\"\nstill = \"/tmp/s.png\"\n\
+                 palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+                "n".repeat(110),
+            ));
+        }
+        let config = Config::from_bytes(document.into_bytes()).unwrap();
+        let driver =
+            SystemDriver::new_for_service_socket(config.renderer.clone(), Path::new("/tmp/w.sock"));
+        Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            config,
+            driver,
+            Local::now().naive_local(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_trickling_client_cannot_hold_the_runtime_loop_past_the_reply_deadline() {
+        // H-5: a per-write timeout is renewed by every partial write. Shrink
+        // the server's send buffer so the kernel moves the reply in ~4 KB
+        // pieces, then read one piece a little more often than the old 250 ms
+        // per-write timeout: each write makes progress, and only an overall
+        // deadline ends the exchange.
+        let mut runtime = runtime_with_a_large_status();
+        let mut power = PowerObserver::default();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let small: libc::c_int = 4096;
+        let set = unsafe {
+            libc::setsockopt(
+                server.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const small).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0);
+        client.write_all(b"{\"verb\":\"status\"}\n").unwrap();
+        let reader = thread::spawn(move || {
+            let mut received = 0_usize;
+            let mut chunk = [0_u8; 4096];
+            let stop = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < stop {
+                thread::sleep(Duration::from_millis(200));
+                match client.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => received += read,
+                }
+            }
+            received
+        });
+
+        let started = Instant::now();
+        serve(server, &mut runtime, &mut power);
+        let held = started.elapsed();
+        let received = reader.join().unwrap();
+        assert!(
+            held < Duration::from_millis(2500),
+            "a trickling client held the runtime loop for {held:?} ({received} bytes read)"
+        );
+        assert!(received > 0, "the client was answered until the deadline");
     }
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import sys
 import threading
@@ -104,7 +105,9 @@ def _runtime_installed(settings: config.Settings, session: Session) -> bool:
         return True
 
 
-def _settings_published(write: Callable[[], config.Settings]) -> config.Settings:
+def _settings_published[Saved: (config.Settings, config.Settings | None)](
+    write: Callable[[], Saved],
+) -> Saved:
     """Run one settings write; one that published but couldn't sync its folder saved.
 
     The file already holds the new settings (`config.SettingsNotDurableError`),
@@ -820,10 +823,12 @@ class Application(Adw.Application):
             active = durable_settings.active_playlist
             if active and active not in valid:
                 target = named(active)
-                saved_settings = (
-                    config.forget_playlist_default(active)
-                    if target is None
-                    else config.repoint_playlist_default(active, target)
+                saved_settings = _settings_published(
+                    lambda: (
+                        config.forget_playlist_default(active)
+                        if target is None
+                        else config.repoint_playlist_default(active, target)
+                    )
                 )
                 if saved_settings is None:
                     durable_settings = config.load_strict()
@@ -5254,7 +5259,8 @@ class Application(Adw.Application):
             saved_settings: config.Settings | None = None
             try:
                 for reference in references:
-                    saved_settings = config.forget_playlist_default(reference) or saved_settings
+                    forget = functools.partial(config.forget_playlist_default, reference)
+                    saved_settings = _settings_published(forget) or saved_settings
             except config.ConfigError as error:
                 failures.append(f"saved default: {error}")
             return _PlaylistDeleteResult(

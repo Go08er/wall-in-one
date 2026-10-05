@@ -10,6 +10,7 @@ caller heard "failed" while the files said otherwise.
 from __future__ import annotations
 
 import errno
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ from tests.test_ui_runtime import (  # noqa: E402,F401
 from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.control import server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
-from wall_in_one.library import state_file  # noqa: E402
+from wall_in_one.library import playlists, state_file  # noqa: E402
 from wall_in_one.ui.app import Application, _Commands  # noqa: E402
 
 SAVED_BUT = "was saved, but syncing its folder failed"
@@ -119,5 +120,54 @@ def test_the_synchronous_settings_path_keeps_what_it_published(
         assert saved.opacity == 0.8
         assert application.settings.opacity == 0.8
         assert config.load_strict().opacity == 0.8
+    finally:
+        _close(application)
+
+
+def test_a_deleted_default_cleared_before_the_sync_failed_is_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting the default playlist clears the saved default, in the same task."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    evening = playlists.Store.open().create("Evening")
+    config.save(replace(config.Settings(), active_playlist=evening.id))
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: True)
+    assert application.settings.active_playlist == evening.id
+    failed = _sync_fails_for(monkeypatch, "settings.toml")
+    try:
+        reply = _ctl(application, "playlist-delete", "Evening")
+
+        assert failed == [paths.settings_path()]
+        assert reply.ok, reply.message
+        # Before: "cleanup needs attention: saved default: ..." with the old default kept.
+        assert "needs attention" not in reply.message
+        assert SAVED_BUT in reply.message
+        assert config.load_strict().active_playlist == ""
+        assert application.settings.active_playlist == "", "the app holds what the file holds"
+    finally:
+        _close(application)
+
+
+def test_startup_repair_that_cleared_the_default_before_the_sync_failed_opens_authoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config.save(replace(config.Settings(), active_playlist="deleted"))
+    application = Application()
+    failed = _sync_fails_for(monkeypatch, "settings.toml")
+    try:
+        repaired = application._repair_dangling_playlist_references()
+        response = application._finish_playlist_reference_repair(repaired)
+
+        assert failed == [paths.settings_path()]
+        assert response.ok, response.message  # before: authoring-repair-required
+        assert bool(application.authoring_ready)
+        assert config.load_strict().active_playlist == ""
+        assert application.settings.active_playlist == ""
     finally:
         _close(application)

@@ -5,7 +5,31 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 ISO="$(mktemp -d)"
-trap 'rm -rf "$ISO"' EXIT
+# Removing the throwaway profile raced a late writer: a fontconfig cache
+# written while the last GTK process exited made `rm -rf` fail ("Directory not
+# empty") and, under `set -e`, turned a clean run into exit 1. So first wait
+# (at most 10 s) until no process is left whose environment names the profile
+# -- everything the run started does, and only our own processes' environments
+# are readable -- then remove it, retrying briefly. Either way the script exits
+# with the run's own status: cleanup never makes a pass fail or a failure pass.
+cleanup() {
+  local status=$? tenth
+  for ((tenth = 0; tenth < 100; tenth++)); do
+    grep -qzF -- "$ISO" /proc/[0-9]*/environ 2>/dev/null || break
+    sleep 0.1
+  done
+  for ((tenth = 0; tenth < 25; tenth++)); do
+    if rm -rf "$ISO" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
+  if [[ -e $ISO ]]; then
+    echo "warning: $ISO was still being written to; left in place" >&2
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 mkdir -p "$ISO"/{home,config,state,cache,data,run}
 chmod 700 "$ISO/run"
 cd "$REPO"

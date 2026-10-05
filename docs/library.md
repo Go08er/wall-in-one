@@ -310,10 +310,20 @@ removal refused as you choose it. The check above is the guarantee.
 
 The check only decides whether the change is made. After a removal, the
 library is scanned again, on the same worker, and only what that scan finds is
-shown and published; until then the wallpaper service keeps the setup it has.
-So no runtime configuration names a deleted file. A removal that went through
-with a problem (a cleanup that failed) is scanned once more after that, with
-the cleanup tried again.
+shown and published. Until a scan after the removal has been accepted, the
+library the app holds may still name the removed file, so nothing new is
+installed from it, whatever asks: an edit is saved, and reaches the wallpaper
+service with the next publication after that scan. Meanwhile the service keeps
+the last setup that was installed, which can name the removed file until it
+is replaced. So every newly installed runtime configuration names only files
+that are there when it is installed. A removal that went through with a
+problem (a cleanup that failed) is scanned once more after that, with the
+cleanup tried again.
+
+If the scan after a removal fails, or the runtime configuration can't be
+written, the notice under the header says so and the service keeps its last
+setup; nothing waits on it, so the app can still quit. Refreshing the library,
+or the next change that gets through, recovers.
 
 The check costs about one scan and one build of the runtime configuration, and
 a removal one more scan after it, all on the worker rather than in the window.

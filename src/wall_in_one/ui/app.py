@@ -86,6 +86,24 @@ def download_root(settings: config.Settings) -> Path | None:
     return configured[0] if configured else None
 
 
+def _runtime_installed(settings: config.Settings, session: Session) -> bool:
+    """`runtime_config.update`, where a pair published but not confirmed durable is installed.
+
+    `runtime_config.RuntimeConfigNotDurableError` comes only after the whole
+    new pair was renamed into place, so the service's watcher already reads
+    it. Treated as a failure, the lane neither reloaded the service nor
+    counted the document, and the next update found nothing to change, so
+    only the watcher ever applied it. It is a change: reload it, and report
+    the uncertainty (`state_file.report_not_durable`). Callers check the
+    inventory (`Application._inventory_installable`) before this, as before.
+    """
+    try:
+        return runtime_config.update(settings, session)
+    except runtime_config.RuntimeConfigNotDurableError as uncertain:
+        state_file.report_not_durable(str(uncertain))
+        return True
+
+
 def _settings_published(write: Callable[[], config.Settings]) -> config.Settings:
     """Run one settings write; one that published but couldn't sync its folder saved.
 
@@ -2713,7 +2731,7 @@ class Application(Adw.Application):
             self.window_report(problem or "the library is being scanned again")
             return False, False
         try:
-            changed = runtime_config.update(self._settings, self._session)
+            changed = _runtime_installed(self._settings, self._session)
         except (runtime_config.RuntimeConfigError, OSError) as error:
             self.window_report(str(error))
             return False, False
@@ -3565,7 +3583,7 @@ class Application(Adw.Application):
                     raise _RuntimeInventoryInvalidError(
                         problem or "the library is being scanned again"
                     )
-                return runtime_config.update(settings, snapshot)
+                return _runtime_installed(settings, snapshot)
             finally:
                 snapshot.shutdown()
 
@@ -4340,7 +4358,7 @@ class Application(Adw.Application):
                 if not self._inventory_installable(request.inventory):
                     # The markers are saved; the next valid publication carries them.
                     return _RuntimeHealthResult(request)
-                document_changed = runtime_config.update(settings, snapshot)
+                document_changed = _runtime_installed(settings, snapshot)
                 # An unchanged compiled document already contains these
                 # markers. Re-sending the same stale/non-durable test reply on
                 # every poll would create a reload loop.

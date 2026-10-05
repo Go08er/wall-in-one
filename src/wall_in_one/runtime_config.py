@@ -912,6 +912,38 @@ def checked_entries_addition[Work](
     return work
 
 
+def new_playlist_refusal(name: str, sources: Iterable[Path | str], session: Session) -> str:
+    """`change_refusal` for a new playlist ``name`` made holding ``sources``; empty if fine.
+
+    Nothing uses a playlist that does not exist yet, so the one rule that
+    applies is the compiler's: a playlist with entries must hold one it keeps
+    (`LEAVES_ONLY_UNUSABLE`), used or not, or every publication stops. An
+    empty one is fine. It stops at the first entry that compiles, so a copy
+    of a large library is answered at once.
+    """
+    known = library_index(session)
+    after: list[Playability] = []
+    for source in sources:
+        can = entry_playability(known.get(Path(source)), session)
+        if can.compiles:
+            return ""
+        after.append(can)
+    return change_refusal(f"\u201c{name}\u201d", (), after, ())
+
+
+def checked_new_playlist[Work](
+    name: str,
+    sources: Iterable[Path | str],
+    work: Callable[[], Work],
+    session: Session,
+) -> Callable[[], Work]:
+    """``work`` (it makes playlist ``name`` holding ``sources``, a copy included), once checked."""
+    refusal = new_playlist_refusal(name, sources, session)
+    if refusal:
+        raise PlaybackGuardError(refusal)
+    return work
+
+
 def checked_playlist_use[Work](
     reference: str,
     what: str,

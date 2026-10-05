@@ -127,6 +127,7 @@ def test_the_readme_says_what_the_playlists_page_does() -> None:
         "a video waiting for its still doesn't play yet, so it can't be added",
         "The picker doesn't offer it and says why",
         "No playlist, used or not, can be left holding only wallpapers playback can't",
+        "or of All wallpapers while nothing in the library can play yet",
         "A wallpaper dropped below the last row shown goes to the end of the playlist",
     ):
         assert words in guide, words

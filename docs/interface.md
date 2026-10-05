@@ -175,7 +175,10 @@ Also:
   its last wallpaper that plays.
 - No playlist, used or not, can be left holding only wallpapers playback can't
   use: the service couldn't build its configuration around it. It can be
-  emptied.
+  emptied. Nor can one be made like that: a copy of such a playlist, or of All
+  wallpapers while nothing in the library can play yet (videos still waiting
+  for their stills), is refused, saying why. An empty playlist can always be
+  made.
 - One with nothing that plays can't become the default.
 - "Your pick" stays hidden.
 - Long playlists show 72 rows at a time. A wallpaper dropped below the last row

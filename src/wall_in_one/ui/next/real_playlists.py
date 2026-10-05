@@ -35,7 +35,9 @@ still does not count. Removing the last entry a used playlist can play is
 refused at the head of the queue, against the saved rules, assignments and
 default (plus a default this adapter asked for that has not settled yet);
 so is leaving any playlist, used or not, with entries but none the compiler
-keeps, which would stop every publication (`runtime_config.change_problem`).
+keeps, which would stop every publication (`runtime_config.change_problem`),
+and so is making one like that: a new playlist with wallpapers, or a copy,
+"All wallpapers" included (`runtime_config.checked_new_playlist`).
 Making a playlist with nothing to play the default is refused when asked,
 and again by the application at its own settings write
 (`Application._prepare_settings_batch`), whichever page asked.
@@ -599,14 +601,21 @@ class RealPlaylists:
         pid = playlists.new_id()
         store = self._store
         backend = self._backend
+        session = self._session
         self._creating.add(pid)
 
         def prepare() -> Callable[[], playlists.Playlist]:
             items = [backend.current_item_for_authoring(view.item) for view in views]
             self._require_playing(items)
             entries = [playlists.Entry(playlists.new_id(), str(item.path)) for item in items]
-            # One save: the playlist and its wallpapers, or nothing at all.
-            return lambda: store.create(name, entry_id=pid, entries=entries)
+            # One save: the playlist and its wallpapers, or nothing at all; and,
+            # like every playlist made with entries, one the compiler can build.
+            return runtime_config.checked_new_playlist(
+                name,
+                (entry.source for entry in entries),
+                lambda: store.create(name, entry_id=pid, entries=entries),
+                session,
+            )
 
         def saved(made: playlists.Playlist) -> bool:
             if views:
@@ -644,12 +653,22 @@ class RealPlaylists:
             name = copy_name(source_name, (playlist.name for playlist in store.all()))
             entries = [playlists.Entry(playlists.new_id(), source) for source in sources]
             # One save: the copy, its entries and its rotation, or nothing at all.
-            return lambda: store.create(
+            # Checked here, at the head of the lane, by the compiler's own rule
+            # (`runtime_config.checked_new_playlist`): a copy holding entries
+            # none of which compiles (a library of videos still waiting for
+            # their stills, or a playlist whose files went) would stop every
+            # publication, used or not. An empty copy is fine.
+            return runtime_config.checked_new_playlist(
                 name,
-                entry_id=copy,
-                entries=entries,
-                cycle_interval=interval,
-                shuffle=shuffle,
+                sources,
+                lambda: store.create(
+                    name,
+                    entry_id=copy,
+                    entries=entries,
+                    cycle_interval=interval,
+                    shuffle=shuffle,
+                ),
+                session,
             )
 
         self._queue(

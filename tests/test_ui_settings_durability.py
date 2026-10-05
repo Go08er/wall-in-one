@@ -71,11 +71,24 @@ def test_a_save_published_before_its_sync_failed_is_kept_and_reported_honestly(
     assert application.update_settings_async(
         opacity=0.8, on_success=lambda settings: saved.append(settings.opacity)
     )
-    spin_until(lambda: not application._settings_authoring_running and bool(reports), timeout=5)
+
+    def said_about_settings() -> list[str]:
+        return [report for report in reports if report.startswith("Settings were")]
+
+    spin_until(
+        lambda: not application._settings_authoring_running and bool(said_about_settings()),
+        timeout=5,
+    )
 
     assert config.load_strict().opacity == 0.8, "the new bytes are on disk"
     assert application.settings.opacity == 0.8, "the window keeps what the file holds"
     assert saved == [0.8]
     assert not any("nothing changed" in report for report in reports)
-    assert reports[-1].startswith("Settings were saved, but Wall-in-One couldn't confirm")
-    assert "may not survive a power loss" in reports[-1]
+    # Found by what it says, not by position: the save then publishes the
+    # runtime document, and this application was never activated, so its
+    # library was never scanned for the saved folder. That publication's own
+    # report ("The library does not match the saved source settings ...")
+    # follows a few milliseconds later and was sometimes already last.
+    (said,) = said_about_settings()
+    assert said.startswith("Settings were saved, but Wall-in-One couldn't confirm")
+    assert "may not survive a power loss" in said

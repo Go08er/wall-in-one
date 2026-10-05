@@ -222,6 +222,8 @@ class _RuntimeAuthoringRequest:
     generation: int
     library: Library
     library_sources: _LibrarySources
+    #: The inventory stamp when ``library`` was captured (`Application._inventory_installable`).
+    inventory: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +240,10 @@ class _RuntimePublication:
 
 class _RuntimeLibraryNotReadyError(Exception):
     """The accepted Library belongs to older source settings than disk."""
+
+
+class _RuntimeInventoryInvalidError(_RuntimeLibraryNotReadyError):
+    """The captured Library is not a valid inventory now: nothing may be installed from it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +263,8 @@ class _RuntimeHealthRequest:
     authoring_generation: int
     library: Library
     status_document: str
+    #: The inventory stamp when ``library`` was captured; None: whatever is valid now.
+    inventory: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,6 +525,15 @@ class Application(Adw.Application):
         # under ``compiler_lock`` and folds bursts into the newest generation.
         self._runtime_authoring_generation = 0
         self._runtime_compiled_generation = 0
+        # Whether `session.library` is a valid inventory: it isn't from a
+        # removal's prepare until it is known not to have committed, or until
+        # a scan after its commit is accepted. Every installer checks it right
+        # before `runtime_config.update` (`_inventory_installable`); the stamp
+        # moves on every change, so a Library captured before one is never
+        # installed after it.
+        self._inventory_stamp = 0
+        self._inventory_valid = True
+        self._inventory_problem = ""
         self._runtime_compile_pending = False
         self._runtime_authoring_request: _RuntimeAuthoringRequest | None = None
         #: Why the last publication didn't reach the wallpaper service, or empty.
@@ -2258,10 +2275,12 @@ class Application(Adw.Application):
                 if runtime_pending:
                     self._finish_runtime_library_scan(runtime_generation, error=detail)
                 else:
-                    self._mark_removal_scan_terminal(runtime_generation)
+                    self._library_scan_failed(detail)
+                    self._mark_removal_scan_terminal(runtime_generation, failed=True)
                 self.window_report(f"Library scan failed: {detail}")
                 self._settle_library_refresh_waiters(False)
                 return
+            self._validate_inventory()
             if runtime_pending:
                 self._adopt_runtime_library_scan(runtime_generation)
             self._finish_library_refresh()
@@ -2405,6 +2424,9 @@ class Application(Adw.Application):
                 return
             try:
                 self._session.adopt_library_refresh(result)
+                # A scan landing as current started after any removal's commit
+                # (`_invalidate_library_scan_after_removal`): an inventory.
+                self._validate_inventory()
                 # A later scan which actually sees the item again is the clean
                 # reinstall boundary and may release its process-local taboo.
                 self._removed_item_paths.difference_update(
@@ -2528,7 +2550,9 @@ class Application(Adw.Application):
             if release_lifetime:
                 self._runtime_library_scan_held = False
                 self._runtime_library_scan_hold_generation = 0
-        self._mark_removal_scan_terminal(generation)
+        if error:
+            self._library_scan_failed(error)
+        self._mark_removal_scan_terminal(generation, failed=bool(error))
         # A compiler may have durably written the requested document and then
         # deferred its reload at this scan barrier.  Run the terminal pass now
         # even when no newer generation needs compilation.
@@ -2540,18 +2564,47 @@ class Application(Adw.Application):
             self.release()
             self._maybe_finish_requested_quit()
 
-    def _mark_removal_scan_terminal(self, generation: int) -> None:
-        """Record the bounded post-delete scan tail, including an honest error."""
+    def _library_scan_failed(self, error: str) -> None:
+        """A scan meant to replace an invalid inventory failed: say so, and keep it invalid.
+
+        The wallpaper service keeps the last document that was installed;
+        nothing new is installed until a scan gets through (a refresh, or the
+        next removal's own scan), which publishes as usual.
+        """
+        with self._runtime_config_lock:
+            invalid = not self._inventory_valid
+        if not invalid:
+            return
+        problem = (
+            f"The library could not be scanned after a removal ({error}), so nothing new "
+            "reaches the wallpaper service until it can be; refresh the library to try again"
+        )
+        self._inventory_failed(problem)
+        self._set_publication_problem(problem)
+
+    def _mark_removal_scan_terminal(self, generation: int, *, failed: bool = False) -> None:
+        """Record the bounded post-delete scan tail, including an honest error.
+
+        A failed scan leaves nothing eligible to publish (the inventory stays
+        invalid), so the runtime half of the tail ends with it.
+        """
         if not self._removal_convergence_held:
             return
         expected = self._removal_convergence_scan_generation
         if expected is None or generation != expected:
             return
         self._removal_convergence_scan_terminal = True
+        if failed:
+            self._removal_convergence_runtime_terminal = True
         self._maybe_finish_removal_convergence()
 
     def _update_runtime_document(self) -> tuple[bool, bool]:
         """Synchronously write a live Session for explicit headless callers."""
+        if not self._inventory_installable(None):
+            with self._runtime_config_lock:
+                problem = self._inventory_problem
+            self.window_report(problem or "the library is being scanned again")
+            return False, False
         try:
             changed = runtime_config.update(self._settings, self._session)
         except runtime_config.RuntimeConfigError as error:
@@ -2616,6 +2669,7 @@ class Application(Adw.Application):
                 self._runtime_authoring_generation,
                 self._session.library,
                 library_sources,
+                self._inventory_stamp,
             )
             self._runtime_publication_hold_target = self._runtime_authoring_generation
             acquire_lifetime = not self._runtime_publication_held
@@ -3315,13 +3369,14 @@ class Application(Adw.Application):
             lambda done: self._post_runtime_completion(done, self._finish_runtime_compile)
         )
 
-    @staticmethod
-    def _compile_runtime_request(request: _RuntimeAuthoringRequest) -> bool:
+    def _compile_runtime_request(self, request: _RuntimeAuthoringRequest) -> bool:
         """Compile one immutable Library plus the latest durable authoring.
 
         No live application ``Session`` enters this worker.  The short-lived
         session and every one of its stores are constructed and destroyed on
-        this thread while the cross-process compiler lock is held.
+        this thread while the cross-process compiler lock is held. Nothing is
+        installed from a Library that isn't a valid inventory now
+        (`_inventory_installable`), checked right before the install.
         """
         with (
             legacy_migration.unattended_transaction(),
@@ -3336,6 +3391,12 @@ class Application(Adw.Application):
             snapshot = Session(settings)
             try:
                 snapshot.adopt_library(request.library, reconcile_workshop=False)
+                if not self._inventory_installable(request.inventory):
+                    with self._runtime_config_lock:
+                        problem = self._inventory_problem
+                    raise _RuntimeInventoryInvalidError(
+                        problem or "the library is being scanned again"
+                    )
                 return runtime_config.update(settings, snapshot)
             finally:
                 snapshot.shutdown()
@@ -3374,8 +3435,19 @@ class Application(Adw.Application):
                 scan_error = self._runtime_library_error
                 removal_pending = self._removal_runtime_invalidated
                 authoring_generation = self._runtime_authoring_generation
+                inventory_valid = self._inventory_valid
+                inventory_problem = self._inventory_problem
             if shutting_down:
                 return _RuntimePublication(max(completed, compiled), changed=changed_any)
+            if not inventory_valid and not scan_pending and not removal_pending:
+                # Nothing can be installed until a scan replaces the inventory,
+                # and none is coming: a terminal result now, on entry or later,
+                # whether or not a caller waited through the scan.
+                return _RuntimePublication(
+                    max(completed, compiled, authoring_generation),
+                    changed=changed_any,
+                    error=scan_error or inventory_problem or "the library needs a fresh scan",
+                )
             if scan_pending and (request is None or wait_for_library):
                 # Delete/Trash deliberately removes the old immutable Library
                 # before its physical worker starts.  With no replacement
@@ -3415,7 +3487,7 @@ class Application(Adw.Application):
             if request is not None and request.generation > compiled:
                 try:
                     changed = self._compile_runtime_request(request)
-                except _RuntimeLibraryNotReadyError:
+                except _RuntimeLibraryNotReadyError as not_ready:
                     with self._runtime_config_lock:
                         latest = self._runtime_authoring_request
                         scan_pending = self._runtime_library_scan_pending
@@ -3428,8 +3500,12 @@ class Application(Adw.Application):
                             changed=changed_any,
                             error=(
                                 scan_error
-                                or "The library does not match the saved source settings; "
-                                "refresh it before controlling playback"
+                                or (
+                                    str(not_ready)
+                                    if isinstance(not_ready, _RuntimeInventoryInvalidError)
+                                    else "The library does not match the saved source settings; "
+                                    "refresh it before controlling playback"
+                                )
                             ),
                         )
                     if not wait_for_library:
@@ -3538,7 +3614,9 @@ class Application(Adw.Application):
                 # Re-sample instead of reloading an older document.  The next
                 # loop either compiles the replacement request, waits for its
                 # accepted scan, or returns an explicit in-progress result.
-                if not wait_for_library or removal_pending:
+                if not wait_for_library or removal_pending or not scan_pending:
+                    # Without a scan to wait for, a generation no request carries
+                    # will not be compiled by looping: return, never spin.
                     return _RuntimePublication(
                         max(completed, authoring_generation),
                         changed=changed_any,
@@ -3579,7 +3657,7 @@ class Application(Adw.Application):
             if latest is not None and latest.generation > completed:
                 continue
             if scan_pending or authoring_generation > completed:
-                if not wait_for_library or removal_pending:
+                if not wait_for_library or removal_pending or not scan_pending:
                     return _RuntimePublication(
                         max(completed, authoring_generation),
                         changed=changed_any,
@@ -3612,7 +3690,16 @@ class Application(Adw.Application):
             if (
                 self._removal_convergence_held
                 and self._removal_convergence_runtime_target > 0
-                and self._runtime_compiled_generation >= self._removal_convergence_runtime_target
+                and (
+                    self._runtime_compiled_generation >= self._removal_convergence_runtime_target
+                    # A terminal failure (a refused or unwritable document) for
+                    # the target is an outcome too: nothing new was installed.
+                    or (
+                        bool(publication.error)
+                        and not publication.deferred
+                        and publication.generation >= self._removal_convergence_runtime_target
+                    )
+                )
             ):
                 self._removal_convergence_runtime_terminal = True
         if not self._runtime_shutdown and current:
@@ -3938,10 +4025,13 @@ class Application(Adw.Application):
                 return
         with self._runtime_config_lock:
             authoring_generation = self._runtime_authoring_generation
+        with self._runtime_config_lock:
+            inventory = self._inventory_stamp
         request = _RuntimeHealthRequest(
             authoring_generation,
             self._session.library,
             health_document,
+            inventory,
         )
         if window is None:
             self._apply_runtime_health_result(self._ingest_runtime_health(request))
@@ -4042,6 +4132,9 @@ class Application(Adw.Application):
                 if not accepted:
                     return _RuntimeHealthResult(request)
 
+                if not self._inventory_installable(request.inventory):
+                    # The markers are saved; the next valid publication carries them.
+                    return _RuntimeHealthResult(request)
                 document_changed = runtime_config.update(settings, snapshot)
                 # An unchanged compiled document already contains these
                 # markers. Re-sending the same stale/non-durable test reply on
@@ -4689,9 +4782,11 @@ class Application(Adw.Application):
         )
         self._session.adopt_library(library, reconcile_workshop=False)
         if refresh_follows:
+            # The refresh that follows is the inventory, once it lands.
             if self._window is not None:
                 self._window.show_library(self._session)
             return
+        self._validate_inventory()
         self._removal_convergence_scan_generation = generation
         self._adopt_runtime_library_scan(generation)
         self._finish_library_refresh(scan_generation=generation)
@@ -4715,6 +4810,10 @@ class Application(Adw.Application):
         refresh = self._refresh_after_removal or (result.committed and (partial or scanned is None))
         self._refresh_after_removal = False
         if result.committed:
+            # Still invalid since its prepare: until a scan after the commit is accepted.
+            self._inventory_failed(
+                f"{result.item.name} was removed; the library is being scanned again"
+            )
             self._removed_item_paths.add(result.item.path)
             for cleanup in result.cleanups:
                 self._removed_item_paths.update(cleanup.removed_stills)
@@ -4734,8 +4833,37 @@ class Application(Adw.Application):
             # finish: above redraw, or its own animation could starve it.
             GLib.idle_add(self.refresh_library, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
+    def _invalidate_inventory(self, problem: str) -> None:
+        """From now on `session.library` may name files that are gone: install nothing from it."""
+        with self._runtime_config_lock:
+            self._inventory_stamp += 1
+            self._inventory_valid = False
+            self._inventory_problem = problem
+
+    def _inventory_failed(self, problem: str) -> None:
+        """Say why the inventory stays invalid (a scan that should have replaced it failed)."""
+        with self._runtime_config_lock:
+            if self._inventory_valid:
+                return
+            self._inventory_problem = problem
+
+    def _validate_inventory(self) -> None:
+        """`session.library` is a fresh inventory again; its publication follows at once."""
+        with self._runtime_config_lock:
+            if self._inventory_valid:
+                return
+            self._inventory_stamp += 1
+            self._inventory_valid = True
+            self._inventory_problem = ""
+
+    def _inventory_installable(self, stamp: int | None) -> bool:
+        """Whether a document built from a Library captured at ``stamp`` may be installed."""
+        with self._runtime_config_lock:
+            return self._inventory_valid and (stamp is None or stamp == self._inventory_stamp)
+
     def _invalidate_runtime_for_pending_removal(self) -> None:
         """Cancel stale health/compile requests before physical deletion."""
+        self._invalidate_inventory("a wallpaper is being removed")
         with self._runtime_config_lock:
             self._runtime_authoring_generation += 1
             self._runtime_authoring_request = None
@@ -4781,6 +4909,8 @@ class Application(Adw.Application):
             self._runtime_library_scan_pending = False
             self._runtime_library_error = ""
             self._runtime_library_ready.set()
+        # Nothing was deleted, so the library is still the inventory.
+        self._validate_inventory()
         self._publish_runtime_for_context()
 
     def prepare_item_removal(self, item: MediaItem) -> removals.Intent:
@@ -4809,6 +4939,7 @@ class Application(Adw.Application):
         """Finish one committed deletion, retaining its journal until clean."""
         if (item.path, item.kind, item.scene) != (intent.path, intent.kind, intent.scene):
             raise ValueError("removal intent does not identify the removed library item")
+        self._invalidate_inventory(f"{item.name} was removed; the library is being scanned again")
         failures = self._session.commit_removal(
             intent,
             artifacts_already_clean=artifacts_already_clean,

@@ -248,3 +248,120 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
         wrapper.wait(timeout=30)
         if wrapper.stderr is not None:
             wrapper.stderr.close()
+
+
+# -- the workload's process group: known by more than its number (sweep 5 U-2) ----------
+
+
+#: Leaves a member in the command's process group, reports its pid and start
+#: time, and exits with status 3 at once. The member ignores TERM when asked.
+LEAVER: Final = """
+import json, os, signal, subprocess, sys
+command = [sys.executable, "-c", "import signal, sys, time\\n"
+           "if sys.argv[1] == 'stubborn':\\n"
+           "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+           "time.sleep(float(sys.argv[2]))\\n", sys.argv[2], sys.argv[3]]
+# No shared pipes: the wrapper's caller must not wait on the member's output.
+quiet = subprocess.DEVNULL
+member = subprocess.Popen(command, stdin=quiet, stdout=quiet, stderr=quiet)
+with open(f"/proc/{member.pid}/stat", encoding="utf-8") as handle:
+    fields = handle.read().rsplit(")", 1)[1].split()
+report = {"pid": member.pid, "started": fields[19], "pgrp": fields[2], "home": os.environ["HOME"]}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+os._exit(3)
+"""
+
+
+def _stubbed_wrapper_environment(tmp_path: Path, grace_tenths: int) -> dict[str, str]:
+    """The wrapper inside a Nix shell, with an xvfb-run that only runs its command."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    xvfb_run = stubs / "xvfb-run"
+    xvfb_run.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "arguments = sys.argv[1:]\n"
+        "while arguments and arguments[0].startswith('-'):\n"
+        "    arguments.pop(0)\n"
+        "os.execvp(arguments[0], arguments)\n",
+        encoding="utf-8",
+    )
+    xvfb_run.chmod(0o755)
+    temporary = tmp_path / "tmp"
+    temporary.mkdir()
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in (conftest.SESSION_ROOT_ENV, "WIO_TEST_SESSION_PID")
+    }
+    environment.update(
+        IN_NIX_SHELL="impure",
+        TMPDIR=str(temporary),
+        PATH=f"{stubs}{os.pathsep}{os.environ.get('PATH', '')}",
+        WIO_ISOLATED_GRACE_TENTHS=str(grace_tenths),
+    )
+    return environment
+
+
+@pytest.mark.parametrize(
+    ("kind", "seconds", "grace_tenths"),
+    [("polite", "1.0", 50), ("stubborn", "300", 5), ("polite", "300", 5)],
+)
+def test_the_profile_goes_only_after_the_whole_group_has(
+    tmp_path: Path, kind: str, seconds: str, grace_tenths: int
+) -> None:
+    """A member the command leaves behind is waited for, then stopped, before the profile goes.
+
+    Before, the wrapper knew its group only by number and returned when the
+    command did: the member went on running (in a group whose number could
+    later be reused) with its profile deleted under it.
+    """
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - every supported build has bash
+        pytest.skip("no bash")
+    report = tmp_path / "report.json"
+    started = time.monotonic()
+    completed = subprocess.run(
+        (bash, str(WRAPPER), sys.executable, "-c", LEAVER, str(report), kind, seconds),
+        env=_stubbed_wrapper_environment(tmp_path, grace_tenths),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        start_new_session=True,
+    )
+    elapsed = time.monotonic() - started
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    try:
+        assert completed.returncode == 3, completed.stderr
+        assert not _still_running(seen["pid"], seen["started"]), "the member outlived the wrapper"
+        assert not Path(seen["home"]).parent.exists(), "the profile is removed, after the group"
+        if seconds == "1.0":
+            assert elapsed >= 0.9, "a member that leaves by itself is waited for"
+        else:
+            # Grace, TERM, grace, then KILL for the one that ignores TERM.
+            assert elapsed < 30, elapsed
+    finally:
+        if _still_running(seen["pid"], seen["started"]):
+            os.kill(seen["pid"], signal.SIGKILL)
+
+
+def test_the_wrapper_never_signals_a_group_by_its_number_alone() -> None:
+    """Every group signal is guarded by the leader's identity: its parent and start time."""
+    script = "\n".join(
+        line
+        for line in WRAPPER.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "kill -0" not in script, "existence of a number is not ownership"
+    assert "${!" not in script, "no fallback to the last background job's number"
+    body = script.split("stop_workload() {", 1)[1].split("\n}\n", 1)[0]
+    guarded = [line for line in body.splitlines() if "kill -s" in line]
+    assert len(guarded) == 2
+    lines = body.splitlines()
+    for line in guarded:
+        before = lines[: lines.index(line)]
+        assert any("leader_alive" in earlier for earlier in before[-3:]), line
+    alive = script.split("leader_alive() {", 1)[1].split("\n}\n", 1)[0]
+    assert '"$$"' in alive and "leader_started" in alive and "!= Z" in alive

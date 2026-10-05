@@ -1444,15 +1444,17 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(
-                            authored,
-                            target,
-                            replace_existing=False,
-                            unknown=reading.unknown,
-                            version=version,
-                        )
+                        with state_file.published_counts():
+                            save(
+                                authored,
+                                target,
+                                replace_existing=False,
+                                unknown=reading.unknown,
+                                version=version,
+                            )
                     else:
-                        save(authored, target, unknown=reading.unknown, version=version)
+                        with state_file.published_counts():
+                            save(authored, target, unknown=reading.unknown, version=version)
                     fault = None
 
                 # Adopt memory only after the durable write, so an exception

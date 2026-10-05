@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import paths
+from wall_in_one.library import state_file
 from wall_in_one.providers.base import ProviderError
 from wall_in_one.providers.registry import (
     API_KEY_FILENAME,
@@ -139,15 +140,20 @@ def save_key(value: str) -> Path:
             sink.flush()
             os.fsync(sink.fileno())
         os.replace(temporary, destination)
-        # The key's bytes were synced before publication; sync the directory
-        # entry too so a successful save remains a save after an abrupt power
-        # loss rather than reverting to the previous key (or no key).
-        paths.fsync_directory(directory)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise ProviderError(
             "local-io", f"could not write {destination}: {error.strerror or error}"
         ) from error
+    # The key's bytes were synced before publication; sync the directory
+    # entry too so a successful save remains a save after an abrupt power
+    # loss rather than reverting to the previous key (or no key). It is
+    # already the key every reader uses, so a failure here is a save whose
+    # durability is unconfirmed, reported as that, never "could not write".
+    try:
+        paths.fsync_directory(directory)
+    except OSError as error:
+        state_file.report_not_durable(str(state_file.PublishedNotDurableError(destination, error)))
     return destination
 
 
@@ -156,11 +162,18 @@ def clear_key() -> bool:
     path = key_path()
     try:
         path.unlink()
-        paths.fsync_directory(path.parent)
     except FileNotFoundError:
         return False
     except OSError as error:
         raise ProviderError(
             "local-io", f"could not remove {path}: {error.strerror or error}"
         ) from error
+    try:
+        paths.fsync_directory(path.parent)
+    except OSError as error:
+        # Gone for every reader already: removed, durability unconfirmed.
+        state_file.report_not_durable(
+            f"{path} was removed, but syncing its folder failed, so the change may not "
+            f"survive a power loss ({error.strerror or error})"
+        )
     return True

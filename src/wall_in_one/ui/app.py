@@ -9,7 +9,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, Literal, TypeVar
@@ -84,6 +84,24 @@ def download_root(settings: config.Settings) -> Path | None:
     """
     configured = settings.roots
     return configured[0] if configured else None
+
+
+def _settings_published(write: Callable[[], config.Settings]) -> config.Settings:
+    """Run one settings write; one that published but couldn't sync its folder saved.
+
+    The file already holds the new settings (`config.SettingsNotDurableError`),
+    so they are what is returned, read back, and the uncertainty is reported
+    (`state_file.report_not_durable`), never "nothing changed". The window's
+    own batch does the same in `Application._persist_settings_batch`.
+    """
+    try:
+        return write()
+    except config.SettingsNotDurableError as error:
+        state_file.report_not_durable(str(error))
+        try:
+            return config.load_strict()
+        except config.ConfigError:
+            return error.settings
 
 
 #: How often the calendar is re-read. A minute, because that is the
@@ -197,6 +215,9 @@ class _AuthoringTask:
     requires_migration: bool = True
     guard_migration_transaction: bool = True
     application_held: bool = False
+    #: What the work saved but could not confirm durable (`state_file.report_not_durable`),
+    #: said after the task: to the window, and in a ``ctl`` reply.
+    durability: list[str] = field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +573,8 @@ class Application(Adw.Application):
         # moves on every change, so a Library captured before one is never
         # installed after it.
         self._inventory_stamp = 0
+        #: The durability sink this application replaced at startup (`_not_durable`).
+        self._previous_durability_sink: Callable[[str], None] | None = None
         self._inventory_valid = True
         self._inventory_problem = ""
         #: The inventory validity and problem a removal's prepare found in
@@ -648,6 +671,9 @@ class Application(Adw.Application):
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
+        # A store saved outside the authoring lane (health, scans, settings
+        # rows) whose folder sync failed is said in the window too.
+        self._previous_durability_sink = state_file.set_durability_sink(self._not_durable)
         # The process, rather than the last window, owns rotation and the
         # calendar. Exactly one hold is released by `ctl quit`; closing every
         # window therefore leaves the service and its timers alive.
@@ -1649,7 +1675,19 @@ class Application(Adw.Application):
         self._prompt_for_library_root()
         return self._library_root_prompt is not None
 
+    def _not_durable(self, message: str) -> None:
+        """`state_file.report_not_durable`'s sink: any thread; said on GTK."""
+
+        def say() -> bool:
+            self.window_report(message)
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(say, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
+
     def do_shutdown(self) -> None:
+        current = state_file.set_durability_sink(self._previous_durability_sink)
+        if current != self._not_durable:
+            state_file.set_durability_sink(current)  # another application's since: keep it
         # A deliberate quit (`ctl quit` in --service mode) ends the loop with
         # the window still open, and GTK then neither unrealizes nor destroys
         # it, so the teardown it runs on unrealize would not happen. Destroy it
@@ -2999,13 +3037,22 @@ class Application(Adw.Application):
                 return
 
         def guarded_work() -> Any:
-            # A later explicit CLI import uses this same marker lock. Holding
-            # it across the complete worker transaction closes the check/use
-            # race between its empty-profile preflight and target install.
-            if task.guard_migration_transaction:
-                with legacy_migration.unattended_transaction():
+            # A store write that was published but whose folder sync failed is
+            # a write (`state_file.published_counts`): collect what it says,
+            # for after the task, whatever else happens.
+            with state_file.collecting_durability_warnings() as warnings:
+                try:
+                    # A later explicit CLI import uses this same marker lock.
+                    # Holding it across the complete worker transaction closes
+                    # the check/use race between its empty-profile preflight
+                    # and target install.
+                    if task.guard_migration_transaction:
+                        with legacy_migration.unattended_transaction():
+                            return work()
                     return work()
-            return work()
+                finally:
+                    # One folder that can't sync fails every write in it: say it once.
+                    task.durability.extend(dict.fromkeys(warnings))
 
         try:
             future = self._authoring_pool().submit(guarded_work)
@@ -3045,6 +3092,13 @@ class Application(Adw.Application):
                 completed = True
                 self._authoring_task_completed(task)
 
+        def reply(response: Response) -> None:
+            # A ``ctl`` caller is told too; the window is told below.
+            if task.durability:
+                said = "; ".join((response.message, *task.durability)).lstrip("; ")
+                response = Response(ok=response.ok, message=said, kind=response.kind)
+            task.reply(response)
+
         chained = False
         try:
             if self._authoring_shutdown or self._runtime_shutdown:
@@ -3052,16 +3106,16 @@ class Application(Adw.Application):
             try:
                 outcome = task.finish(future.result())
             except Exception as error:
-                task.reply(server.failed(error))
+                reply(server.failed(error))
                 return GLib.SOURCE_REMOVE
             if isinstance(outcome, Response):
-                task.reply(outcome)
+                reply(outcome)
                 return GLib.SOURCE_REMOVE
 
             def chained_reply(response: Response) -> None:
                 try:
                     if not self._authoring_shutdown and not self._runtime_shutdown:
-                        task.reply(response)
+                        reply(response)
                 finally:
                     complete()
 
@@ -3069,8 +3123,12 @@ class Application(Adw.Application):
                 outcome.start(chained_reply)
                 chained = True
             except Exception as error:
-                task.reply(server.failed(error))
+                reply(server.failed(error))
         finally:
+            if not self._authoring_shutdown and not self._runtime_shutdown:
+                # Saved, whatever the task made of it: never "nothing changed".
+                for warning in task.durability:
+                    self.window_report(warning)
             if not chained:
                 complete()
         return GLib.SOURCE_REMOVE
@@ -5979,9 +6037,9 @@ class Application(Adw.Application):
         # boundary.  They still rebase semantic fields so a stale process
         # cannot erase unrelated settings authored elsewhere.
         candidate = (
-            self.legacy_authoring_sync(lambda: config.update(changes))
+            self.legacy_authoring_sync(lambda: _settings_published(lambda: config.update(changes)))
             if self.legacy_service
-            else config.update(changes)
+            else _settings_published(lambda: config.update(changes))
         )
         self._settings_requested = candidate
         self._adopt_settings(previous, candidate)
@@ -6135,7 +6193,7 @@ class _Commands:
             )
 
         return self._app.authoring_off_thread(
-            work,
+            lambda: _settings_published(work),
             lambda updated: self._adopt_control_settings(
                 updated,
                 lambda saved: f"shuffle {'on' if saved.shuffle else 'off'}",
@@ -6152,7 +6210,7 @@ class _Commands:
             )
 
         return self._app.authoring_off_thread(
-            work,
+            lambda: _settings_published(work),
             lambda updated: self._adopt_control_settings(
                 updated,
                 lambda saved: f"cycle {'on' if saved.cycle_enabled else 'off'}",
@@ -6167,7 +6225,7 @@ class _Commands:
         except ValueError:
             return Response.failure(f"expected a whole number of seconds, got {value!r}")
         return self._app.authoring_off_thread(
-            lambda: config.update({"cycle_interval": seconds}),
+            lambda: _settings_published(lambda: config.update({"cycle_interval": seconds})),
             lambda updated: self._adopt_control_settings(
                 updated,
                 lambda saved: f"cycle-interval {saved.cycle_interval}",
@@ -6184,7 +6242,7 @@ class _Commands:
             )
 
         return self._app.authoring_off_thread(
-            work,
+            lambda: _settings_published(work),
             lambda updated: self._adopt_control_settings(
                 updated,
                 lambda saved: f"dynamics {'on' if saved.dynamics_enabled else 'off'}",

@@ -599,7 +599,10 @@ class Store:
                         f"cannot safely update pending removals: {fault}",
                     )
                 result = change(records)
-                _save(records, self._path, unknown=reading.unknown)
+                # Published but not confirmed durable is written: the journal
+                # on disk is this one, so memory must be too.
+                with state_file.published_counts():
+                    _save(records, self._path, unknown=reading.unknown)
                 self._records = records
                 self._fault = None
                 self._fault_kind = None

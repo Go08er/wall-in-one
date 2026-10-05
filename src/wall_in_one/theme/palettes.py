@@ -807,7 +807,8 @@ def _publish_new(target: Path, serialised: str, name: str) -> None:
     then, which is left exactly as it is. The inode never had a name, so a
     refusal leaves nothing behind and nothing is ever unlinked by name.
     Raises `PaletteNameTakenError` for an existing target; the folder is
-    synced after a successful link.
+    synced after a successful link, and a failure of that sync is reported,
+    not raised (`state_file.report_not_durable`): the palette is saved.
 
     A filesystem without ``O_TMPFILE`` uses the stores' own no-replace
     publication instead (`state_file.write_atomic_text` with
@@ -841,12 +842,15 @@ def _publish_new(target: Path, serialised: str, name: str) -> None:
     try:
         state_file.fsync_parent(target)
     except OSError as error:
-        raise PaletteWriteError(str(state_file.PublishedNotDurableError(target, error))) from error
+        # Linked in, so every reader already has it: saved, not confirmed
+        # durable. Never a refusal, never "not saved".
+        state_file.report_not_durable(str(state_file.PublishedNotDurableError(target, error)))
 
 
 def _publish_new_by_rename(target: Path, serialised: str, name: str) -> None:
     try:
-        state_file.write_atomic_text(target, serialised, replace_existing=False)
+        with state_file.published_counts():
+            state_file.write_atomic_text(target, serialised, replace_existing=False)
     except FileExistsError as error:
         raise PaletteNameTakenError(name_taken_message(name, None)) from error
     except OSError as error:
@@ -857,7 +861,8 @@ def _replace_in_place(target: Path, serialised: str) -> None:
     """Rewrite one of the user's own palettes, deliberately replacing it (`save_edits`)."""
     _ensure_parent(target)
     try:
-        state_file.write_atomic_text(target, serialised)
+        with state_file.published_counts():
+            state_file.write_atomic_text(target, serialised)
     except OSError as error:
         raise PaletteWriteError(f"cannot write {target}: {error}") from error
 

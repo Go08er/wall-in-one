@@ -433,7 +433,10 @@ def _write_manifest(directory: Path, document: Mapping[str, Any]) -> None:
             f"{error}, so it wasn't updated. {directory} keeps its last saved state, "
             "and Undo works from that."
         ) from error
-    state_file.write_atomic_text(directory / MANIFEST, data, mode=0o600)
+    # Published but not confirmed durable is journalled: every reader, Undo
+    # included, sees it, so the action goes on and says so.
+    with state_file.published_counts():
+        state_file.write_atomic_text(directory / MANIFEST, data, mode=0o600)
 
 
 def _require_manifest_room(

@@ -485,7 +485,10 @@ def mutate(
                 if on_disk is not None and FORMATS.is_bump(on_disk, version):
                     _back_up_before_bump(target, observed, on_disk, version)
                 paths.ensure_directory(target.parent)
-                state_file.write_atomic_text(target, text, mode=FILE_MODE)
+                # Published but not confirmed durable is saved: say so, never
+                # "not saved" (`state_file.published_counts`).
+                with state_file.published_counts():
+                    state_file.write_atomic_text(target, text, mode=FILE_MODE)
             return UiPrefsDocument(prefs, tomllib.loads(text))
     except UiPrefsError:
         raise

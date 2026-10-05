@@ -452,14 +452,16 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(
-                            updated,
-                            target,
-                            replace_existing=False,
-                            unknown=reading.unknown,
-                        )
+                        with state_file.published_counts():
+                            save(
+                                updated,
+                                target,
+                                replace_existing=False,
+                                unknown=reading.unknown,
+                            )
                     else:
-                        save(updated, target, unknown=reading.unknown)
+                        with state_file.published_counts():
+                            save(updated, target, unknown=reading.unknown)
                     fault = None
 
                 # File first, then memory. A failed write leaves this Store on

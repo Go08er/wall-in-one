@@ -295,7 +295,12 @@ The graphical authoring actor refuses a second control mutation with
 which could begin only after that caller timed out.
 
 A successful ordinary authoring reply confirms the store/config transaction
-is durable and the running app adopted it. Runtime-document compilation and
+is durable and the running app adopted it. One success is weaker, and says
+so: when a file was replaced but syncing its folder then failed, the change is
+what every reader sees, so the app adopts it and replies with success, with
+"... was saved, but syncing its folder failed, so the change may not survive a
+power loss" appended to the message. It is never reported as a refusal or as
+"nothing changed". Runtime-document compilation and
 reload are queued afterward and may settle later; consult runtime `status` for
 effective playback truth. `select` and the authoring-socket `playlist-use`
 compatibility path are the deliberate exceptions: their reply waits through

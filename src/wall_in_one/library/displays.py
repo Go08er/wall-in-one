@@ -620,22 +620,24 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(
-                            working.assignments,
-                            target,
-                            replace_existing=False,
-                            unknown=reading.unknown,
-                            beats_global_rules=working.beats_global_rules,
-                            version=version,
-                        )
+                        with state_file.published_counts():
+                            save(
+                                working.assignments,
+                                target,
+                                replace_existing=False,
+                                unknown=reading.unknown,
+                                beats_global_rules=working.beats_global_rules,
+                                version=version,
+                            )
                     else:
-                        save(
-                            working.assignments,
-                            target,
-                            unknown=reading.unknown,
-                            beats_global_rules=working.beats_global_rules,
-                            version=version,
-                        )
+                        with state_file.published_counts():
+                            save(
+                                working.assignments,
+                                target,
+                                unknown=reading.unknown,
+                                beats_global_rules=working.beats_global_rules,
+                                version=version,
+                            )
                     fault = None
 
                 # Adopt only after persistence, so a failed save leaves the

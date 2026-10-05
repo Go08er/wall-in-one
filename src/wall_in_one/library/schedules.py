@@ -1007,15 +1007,17 @@ class Store:
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        save(
-                            rules,
-                            target,
-                            replace_existing=False,
-                            unknown=reading.unknown,
-                            version=version,
-                        )
+                        with state_file.published_counts():
+                            save(
+                                rules,
+                                target,
+                                replace_existing=False,
+                                unknown=reading.unknown,
+                                version=version,
+                            )
                     else:
-                        save(rules, target, unknown=reading.unknown, version=version)
+                        with state_file.published_counts():
+                            save(rules, target, unknown=reading.unknown, version=version)
                     fault = None
 
                 # File first, then memory: failed persistence cannot make the

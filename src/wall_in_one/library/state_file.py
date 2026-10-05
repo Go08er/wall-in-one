@@ -19,7 +19,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -759,6 +759,84 @@ class PublishedNotDurableError(OSError):
             f"survive a power loss ({error.strerror or error})",
         )
         self.path = path
+
+
+def published_not_durable(error: BaseException) -> PublishedNotDurableError | None:
+    """The publication-without-folder-sync behind ``error``, if that is what failed.
+
+    A store's writer wraps it in its own local-io error, so the chain of
+    causes is searched.
+    """
+    found: BaseException | None = error
+    while found is not None:
+        if isinstance(found, PublishedNotDurableError):
+            return found
+        found = found.__cause__
+    return None
+
+
+#: Where `report_not_durable` sends a warning while something collects them
+#: (`collecting_durability_warnings`), on this thread and context only.
+_DURABILITY_WARNINGS: ContextVar[list[str] | None] = ContextVar("durability_warnings", default=None)
+#: Where a warning goes when nothing collects it (`set_durability_sink`).
+_durability_sink: Callable[[str], None] | None = None
+
+
+def report_not_durable(message: str) -> None:
+    """Say that something was saved but may not survive a power loss.
+
+    To whoever is collecting on this thread (the application's authoring
+    lane, which says so after its task), else to the process's sink, else
+    to the log. Never raises: the save it describes already happened.
+    """
+    collected = _DURABILITY_WARNINGS.get()
+    if collected is not None:
+        collected.append(message)
+        return
+    sink = _durability_sink
+    if sink is None:
+        LOGGER.warning("%s", message)
+        return
+    try:
+        sink(message)
+    except Exception:  # a warning must never undo the save it reports
+        LOGGER.warning("%s", message)
+
+
+def set_durability_sink(sink: Callable[[str], None] | None) -> Callable[[str], None] | None:
+    """Send uncollected warnings to ``sink`` (any thread may call it); returns the previous."""
+    global _durability_sink
+    previous, _durability_sink = _durability_sink, sink
+    return previous
+
+
+@contextlib.contextmanager
+def collecting_durability_warnings() -> Iterator[list[str]]:
+    """Collect this thread's `report_not_durable` warnings in the yielded list."""
+    collected: list[str] = []
+    token = _DURABILITY_WARNINGS.set(collected)
+    try:
+        yield collected
+    finally:
+        _DURABILITY_WARNINGS.reset(token)
+
+
+@contextlib.contextmanager
+def published_counts() -> Iterator[None]:
+    """Inside a store's transaction: a write that failed only after publication is a write.
+
+    The new bytes are what every reader sees, so the store must adopt them
+    and its caller must show them, never "nothing changed". The failure is
+    swallowed here and reported as what it is (`report_not_durable`); every
+    other failure propagates unchanged.
+    """
+    try:
+        yield
+    except Exception as error:
+        published = published_not_durable(error)
+        if published is None:
+            raise
+        report_not_durable(str(published))
 
 
 class DocumentTooLargeError(ValueError):

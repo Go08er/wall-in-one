@@ -3,7 +3,7 @@ use crate::config::{
     SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
 };
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, Response, success_fits};
 use crate::renderer::{MAX_OUTPUT_NAME_BYTES, RendererFailure, WallpaperDriver};
 use crate::schedule;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
@@ -1005,7 +1005,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 if let Err(error) = no_argument("status") {
                     return Response::failure(error);
                 }
-                return match self.status_json(at) {
+                return match self.status_reply(at) {
                     Ok(status) => Response::success(status),
                     Err(error) => Response::failure(error),
                 };
@@ -4650,9 +4650,42 @@ impl<D: WallpaperDriver> Runtime<D> {
         DisplayTiming::new(route_change, cycle, moment.utc, &Local)
     }
 
-    fn status_json(&self, at: NaiveDateTime) -> Result<String, String> {
+    /// The status, within the reply's size limit.
+    ///
+    /// The configuration's status budget bounds everything a status repeats
+    /// from it except the taboo records' own text, which a document at the
+    /// schema's ceilings can push over the limit. Then the oldest records are
+    /// left out -- as many as needed, and counted in `taboo_entries_omitted`,
+    /// as the 64-record cap already does -- instead of the reply failing. The
+    /// shape of the status never changes, and `entry_taboo` stays exact.
+    fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
+        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES)?;
+        if success_fits(&full) {
+            return Ok(full);
+        }
+        let mut best = self.status_json(at, 0)?;
+        if !success_fits(&best) {
+            // Not reachable from a validated document; the writer refuses it.
+            return Ok(best);
+        }
+        // The most records that fit: `fits` fits, `over` does not.
+        let (mut fits, mut over) = (0, MAX_TABOO_STATUS_ENTRIES);
+        while over - fits > 1 {
+            let middle = fits + (over - fits) / 2;
+            let candidate = self.status_json(at, middle)?;
+            if success_fits(&candidate) {
+                fits = middle;
+                best = candidate;
+            } else {
+                over = middle;
+            }
+        }
+        Ok(best)
+    }
+
+    fn status_json(&self, at: NaiveDateTime, taboo_limit: usize) -> Result<String, String> {
         if self.is_independent() {
-            return self.status_json_independent(at);
+            return self.status_json_independent(at, taboo_limit);
         }
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -4695,7 +4728,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     observed_config_epoch: record.observed_config_epoch,
                 })
             })
-            .take(MAX_TABOO_STATUS_ENTRIES)
+            .take(taboo_limit.min(MAX_TABOO_STATUS_ENTRIES))
             .collect();
         let playlists = self
             .config
@@ -4987,7 +5020,11 @@ impl<D: WallpaperDriver> Runtime<D> {
         .map_err(|error| error.to_string())
     }
 
-    fn status_json_independent(&self, at: NaiveDateTime) -> Result<String, String> {
+    fn status_json_independent(
+        &self,
+        at: NaiveDateTime,
+        taboo_limit: usize,
+    ) -> Result<String, String> {
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let live_targets = self.current_targets(&self.target_outputs);
@@ -5049,7 +5086,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     observed_config_epoch: record.observed_config_epoch,
                 })
             })
-            .take(MAX_TABOO_STATUS_ENTRIES)
+            .take(taboo_limit.min(MAX_TABOO_STATUS_ENTRIES))
             .collect();
         let taboo_entries_omitted = taboo_total.saturating_sub(taboo_entries.len());
         let playlists = self

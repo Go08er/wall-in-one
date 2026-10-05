@@ -95,6 +95,27 @@ fn read_request_budgeted(
     serde_json::from_slice(&bytes).map_err(|error| format!("invalid request: {error}"))
 }
 
+/// The bytes `s` takes as a JSON string's contents, escaped as serde_json
+/// escapes it: `"` and `\` take two, the control characters with a short
+/// escape two and the others six (`\u00XX`); everything else is itself.
+fn escaped_len(s: &str) -> usize {
+    s.bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Whether `Response::success(message)` fits `MAX_RESPONSE_BYTES` on the
+/// wire, measured without encoding it.
+pub fn success_fits(message: &str) -> bool {
+    // `{"ok":true,"message":""}` and the newline.
+    const ENVELOPE: usize = 25;
+    ENVELOPE.saturating_add(escaped_len(message)) <= MAX_RESPONSE_BYTES
+}
+
 fn encode_response(response: &Response) -> Result<Vec<u8>, String> {
     let mut encoded = serde_json::to_vec(response).map_err(|error| error.to_string())?;
     encoded.push(b'\n');
@@ -178,6 +199,26 @@ mod tests {
     use std::io::BufReader;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn the_fit_measure_is_the_encoded_size() {
+        for message in [
+            String::new(),
+            "plain text".into(),
+            "\"quoted\" and \\back\\slashed".into(),
+            "line\nbreak\r\ttab\u{8}\u{c}".into(),
+            "\u{0}\u{1}\u{1f}\u{7f}".into(),
+            "gr\u{fc}\u{df}e \u{1f600} \u{2028}".into(),
+            "\"".repeat(1000),
+        ] {
+            let encoded = serde_json::to_vec(&Response::success(message.clone())).unwrap();
+            assert_eq!(25 + escaped_len(&message), encoded.len() + 1, "{message:?}");
+        }
+        let limit = MAX_RESPONSE_BYTES - 25;
+        assert!(success_fits(&"x".repeat(limit)));
+        assert!(!success_fits(&"x".repeat(limit + 1)));
+        assert!(!success_fits(&"\"".repeat(limit / 2 + 1)));
+    }
 
     #[test]
     fn trickled_request_cannot_renew_the_absolute_deadline() {

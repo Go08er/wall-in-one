@@ -2943,6 +2943,145 @@ fn sixty_four_display_failures_and_detached_inventory_fit_the_status_wire() {
     assert!(encoded.len() <= MAX_RESPONSE_BYTES);
 }
 
+/// Codex 0.2.1b H-6: a hand-made but valid runtime document at the schema's
+/// ceilings -- 64 live and 64 detached displays, 64 taboo records, and
+/// identifiers and text full of quotes, each of which the reply escapes
+/// twice. The status budget does not count the taboo records' text.
+fn status_ceiling_document() -> String {
+    let quotes = |count: usize| "\\\"".repeat(count);
+    let big = format!("{}BIG", quotes(210));
+    let mut document = String::from(
+        r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+default_playlist = "BIG"
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = false
+display_mode = "independent"
+theme_source_connector = "THEME"
+[renderer]
+noctalia_program = "/bin/true"
+niri_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = false
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 0
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+"#,
+    )
+    .replace("THEME", &format!("{}D00", quotes(253)))
+    .replace("BIG", &big);
+    document.push_str(&format!(
+        "[[playlists]]\nid = \"{big}\"\nname = \"{}Big\"\n\
+         [[playlists.entries]]\nid = \"{}\"\nkind = \"still\"\nstill = \"/tmp/s.png\"\n\
+         palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+        quotes(117),
+        quotes(256),
+    ));
+    for index in 0..64 {
+        document.push_str(&format!(
+            "[[playlists]]\nid = \"t{index:02}{}\"\nname = \"{}{index:04}\"\n\
+             [[playlists.entries]]\nid = \"{}\"\nkind = \"still\"\nstill = \"/tmp/t.png\"\n\
+             taboo = {{ reason = \"{}\", source = \"{}\" }}\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            quotes(100),
+            quotes(116),
+            quotes(256),
+            quotes(512),
+            quotes(64),
+        ));
+    }
+    for index in 0..64 {
+        document.push_str(&format!(
+            "[[displays]]\nconnector = \"{}D{index:02}\"\nplaylist = \"{big}\"\n",
+            quotes(253),
+        ));
+    }
+    document
+}
+
+#[test]
+fn a_status_over_the_wire_budget_leaves_out_taboo_records_instead_of_failing() {
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let parsed = Config::from_bytes(status_ceiling_document().into_bytes()).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(
+            (0..64)
+                .map(|index| format!("{}L{index:02}", "\"".repeat(253)))
+                .collect(),
+        ),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.tick(at, Instant::now());
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    assert!(response.ok, "{}", response.message);
+    let mut encoded = Vec::new();
+    write_response(&mut encoded, &response).unwrap();
+    assert!(
+        encoded.len() <= MAX_RESPONSE_BYTES,
+        "{} bytes",
+        encoded.len()
+    );
+    let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    // Degraded within the status's own vocabulary: the newest taboo records,
+    // and the count of those left out; every other part whole.
+    let kept = snapshot["taboo_entries"].as_array().unwrap().len();
+    let omitted = snapshot["taboo_entries_omitted"].as_u64().unwrap() as usize;
+    assert!(omitted > 0, "{} bytes", encoded.len());
+    assert_eq!(kept + omitted, 64);
+    assert!(kept > 0, "only as many left out as the budget needs");
+    assert_eq!(snapshot["displays"].as_array().unwrap().len(), 128);
+    assert_eq!(snapshot["playlists"].as_array().unwrap().len(), 65);
+    for key in [
+        "status_version",
+        "playlist_id",
+        "playback_state",
+        "entry_taboo",
+        "theme_source",
+        "schedule",
+        "schedules",
+        "last_error",
+    ] {
+        assert!(snapshot.get(key).is_some(), "{key}");
+    }
+    // Room for one more record would have pushed it over.
+    assert!(
+        encoded.len() + 2_000 > MAX_RESPONSE_BYTES - 40_000,
+        "left out more than needed: {} bytes",
+        encoded.len()
+    );
+}
+
 #[test]
 fn oversized_discovered_connector_is_never_a_renderer_target_or_status_field() {
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)

@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import pwd
 import shutil
 import stat
 import tempfile
@@ -74,6 +75,17 @@ class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
 
 
+@dataclass(frozen=True, slots=True)
+class Published:
+    """What one `publish_changes` did to disk: the files it wrote and removed."""
+
+    written: tuple[Path, ...] = ()
+    removed: tuple[Path, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.written or self.removed)
+
+
 class RuntimeConfigNotDurableError(RuntimeConfigError):
     """A file was replaced (or removed), but syncing its folder then failed.
 
@@ -94,6 +106,9 @@ class RuntimeConfigNotDurableError(RuntimeConfigError):
         )
         self.published = published
         self.error = error
+        #: Everything the save put on disk, when it knows (`publish_changes`):
+        #: a file can be published and synced while another's sync failed.
+        self.changes: Published | None = None
 
 
 @dataclass(slots=True)
@@ -476,8 +491,70 @@ def read_config_generation(path: Path | None = None) -> str:
         raise RuntimeConfigError(f"runtime configuration {target}: {error}") from error
 
 
+#: The Nix store. A directory inside it names one immutable build.
+NIX_STORE: Final = Path("/nix/store")
+
+
+def _user_name() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def program_directories() -> tuple[Path, ...]:
+    """Where ``runtime.toml``'s renderer programs are looked for, in this order.
+
+    Not simply the caller's ``PATH``: a terminal, the graphical session and
+    the service's user manager each have their own, and resolving from
+    whichever one compiled made the same authoring state compile to different
+    bytes (0.1.4's ``shutil.which``). So the places every caller shares come
+    first:
+
+    1. The Nix store directories on ``PATH``, in ``PATH`` order. The package's
+       wrapper puts its bundled renderers (niri, mpvpaper,
+       linux-wallpaperengine) there, at the front, for every caller, and a
+       store directory names one immutable build wherever it is seen.
+    2. The per-user and system Nix profiles, in NixOS's own login order:
+       ``~/.nix-profile``, ``~/.local/state/nix/profile``,
+       ``/etc/profiles/per-user/<user>``, ``/nix/var/nix/profiles/default``,
+       ``/run/current-system/sw``.
+    3. The FHS places: ``~/.local/bin``, ``/usr/local/bin``, ``/usr/bin``, ``/bin``.
+    4. Every other absolute directory on ``PATH``, in ``PATH`` order, so a
+       renderer installed somewhere unusual (``/opt/...``, ``~/bin``, a
+       custom prefix) is still found. Only such an install can still compile
+       differently from a terminal and from the service, when their ``PATH``
+       differ there. Relative entries are skipped: they would depend on the
+       caller's working directory.
+
+    A program found nowhere keeps 0.1.4's ``/usr/bin/<name>`` (`_program`).
+    """
+    home = Path.home()
+    search = [
+        Path(entry)
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and Path(entry).is_absolute()
+    ]
+    store = [entry for entry in search if entry.is_relative_to(NIX_STORE)]
+    user = _user_name()
+    profiles = [
+        home / ".nix-profile" / "bin",
+        home / ".local" / "state" / "nix" / "profile" / "bin",
+        *([Path("/etc/profiles/per-user") / user / "bin"] if user else []),
+        Path("/nix/var/nix/profiles/default/bin"),
+        Path("/run/current-system/sw/bin"),
+    ]
+    system = [home / ".local" / "bin", Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")]
+    ordered: list[Path] = []
+    for directory in (*store, *profiles, *system, *search):
+        if directory not in ordered:
+            ordered.append(directory)
+    return tuple(ordered)
+
+
 def _program(name: str) -> Path:
-    found = shutil.which(name)
+    """The renderer program ``name``, from `program_directories`, symlinks resolved."""
+    found = shutil.which(name, path=os.pathsep.join(str(d) for d in program_directories()))
     if found is not None:
         program = Path(found).resolve()
         _absolute_path(program, label=f"{name} program")
@@ -1431,6 +1508,17 @@ def update(settings: config.Settings, session: Session, path: Path | None = None
     overrides file from a newer build is left exactly as it is. A refused or
     failed ``runtime.toml`` leaves the previous pair (see :func:`_publish`).
     """
+    return bool(publish_changes(settings, session, path))
+
+
+def publish_changes(
+    settings: config.Settings, session: Session, path: Path | None = None
+) -> Published:
+    """`update`, saying which files it wrote or removed (``--write-config`` reports them).
+
+    A `RuntimeConfigNotDurableError` carries the same answer in ``changes``:
+    every file listed was published, only a folder sync failed.
+    """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
         document, overrides = _compile(settings, session)
@@ -1444,17 +1532,30 @@ def update(settings: config.Settings, session: Session, path: Path | None = None
             current_overrides
         )
         if not (document_changed or overrides_changed):
-            return False
+            return Published()
         if document_changed:
             _require_publishable(document, target)
-        _publish(
-            target,
-            document if document_changed else None,
-            overrides,
-            publish_overrides=overrides_changed,
-            previous_overrides=current_overrides,
+        sidecar = overrides_path(target)
+        # Publication order: the overrides first, then runtime.toml.
+        written = (
+            *((sidecar,) if overrides_changed and overrides is not None else ()),
+            *((target,) if document_changed else ()),
         )
-        return True
+        removed = (sidecar,) if overrides_changed and overrides is None else ()
+        changes = Published(written=written, removed=removed)
+        try:
+            _publish(
+                target,
+                document if document_changed else None,
+                overrides,
+                publish_overrides=overrides_changed,
+                previous_overrides=current_overrides,
+            )
+        except RuntimeConfigNotDurableError as uncertain:
+            # Raised only once every planned file was published.
+            uncertain.changes = changes
+            raise
+        return changes
 
 
 def _publish(

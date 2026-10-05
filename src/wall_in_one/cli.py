@@ -34,7 +34,7 @@ from wall_in_one import __version__, paths, ui_prefs
 from wall_in_one.ui.window_services import UI_KINDS
 
 if TYPE_CHECKING:
-    from wall_in_one import config
+    from wall_in_one import config, runtime_config
     from wall_in_one.session import Session
 
 #: GTK's renderer choice. Set by the user, it always wins.
@@ -420,8 +420,8 @@ def _run_graphical_startup_upgrade(
     return None
 
 
-def _update_runtime(settings: config.Settings, session: Session) -> bool:
-    """``runtime_config.update``, adopting a pair published without its folder sync.
+def _update_runtime(settings: config.Settings, session: Session) -> runtime_config.Published:
+    """``runtime_config.publish_changes``, adopting a pair published without its folder sync.
 
     Every reader already sees the new files, so they count as written; that
     they may not survive a power loss is said as a warning, never as a
@@ -430,10 +430,34 @@ def _update_runtime(settings: config.Settings, session: Session) -> bool:
     from wall_in_one import runtime_config
 
     try:
+        return runtime_config.publish_changes(settings, session)
+    except runtime_config.RuntimeConfigNotDurableError as error:
+        print(f"warning: {error}", file=sys.stderr)
+        return error.changes or runtime_config.Published(written=error.published)
+
+
+def _runtime_changed(settings: config.Settings, session: Session) -> bool:
+    """``runtime_config.update`` for the health sync: whether anything changed.
+
+    A pair published without its folder sync counts as changed, as above.
+    """
+    from wall_in_one import runtime_config
+
+    try:
         return runtime_config.update(settings, session)
     except runtime_config.RuntimeConfigNotDurableError as error:
         print(f"warning: {error}", file=sys.stderr)
         return True
+
+
+def _say_published(changes: runtime_config.Published) -> None:
+    """Name exactly the files ``--write-config`` wrote or removed, or that nothing changed."""
+    for path in changes.written:
+        print(f"wrote: {path}")
+    for path in changes.removed:
+        print(f"removed: {path}")
+    if not changes:
+        print(f"nothing changed: {paths.runtime_config_path()} is already current")
 
 
 def _warn_unknown_settings(unknown_keys: Sequence[str]) -> None:
@@ -494,8 +518,7 @@ def _write_runtime_config() -> int:
     except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    state = "wrote" if changed else "already current"
-    print(f"{state}: {paths.runtime_config_path()}")
+    _say_published(changed)
     return 0
 
 
@@ -622,7 +645,7 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                 # Publish that newer authoring truth, but never consume an old
                 # runtime observation: it may be precisely what Clear+retry
                 # was intended to retract.
-                document_changed = _update_runtime(settings, session)
+                document_changed = _runtime_changed(settings, session)
                 reload_needed = True
                 refresh_only = True
             else:
@@ -642,7 +665,7 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                     # Always render, even when every marker was already in the
                     # store. This repairs the split state left by a previous
                     # compiler failure instead of pinning it forever.
-                    document_changed = _update_runtime(settings, session)
+                    document_changed = _runtime_changed(settings, session)
                     reload_needed = document_changed or any(
                         not report.durable for report in inventory.reports
                     )

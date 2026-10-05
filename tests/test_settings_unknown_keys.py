@@ -206,7 +206,7 @@ def test_runtime_document_is_exactly_the_one_compiled_without_the_unknown_key(
     """Regenerating runtime.toml can neither lose nor mis-apply anything.
 
     Unknown keys never reach `Settings`, so the compiled document is the one
-    the known keys alone produce. "already current" proves byte equality.
+    the known keys alone produce. "nothing changed" proves byte equality.
     """
     from wall_in_one import cli
 
@@ -221,7 +221,7 @@ def test_runtime_document_is_exactly_the_one_compiled_without_the_unknown_key(
     target.write_bytes(with_unknown)
     assert cli.main(["--write-config"]) == 0
     output = capsys.readouterr()
-    assert "already current:" in output.out
+    assert output.out.startswith("nothing changed:")
     assert "future_setting, future_table" in output.err
     assert paths.runtime_config_path().read_bytes() == runtime
     assert target.read_bytes() == with_unknown

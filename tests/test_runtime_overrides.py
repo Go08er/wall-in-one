@@ -752,7 +752,8 @@ def test_write_config_adopts_a_pair_published_without_its_folder_sync(
     out, err = capsys.readouterr()
     assert status == 0, err
     assert "(sync refused)" in renamed
-    assert out == f"wrote: {target}\n"
+    # Both files changed and both were published; only runtime.toml's folder sync failed.
+    assert out == f"wrote: {runtime_config.overrides_path(target)}\nwrote: {target}\n"
     assert err.startswith("warning: runtime.toml was saved, but syncing its folder failed"), err
     assert "could not be compiled" not in err
     assert _intervals(target) == (600, 120)

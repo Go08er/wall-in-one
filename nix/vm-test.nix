@@ -715,6 +715,14 @@ pkgs.testers.runNixOSTest {
         # that guarded startup boundary instead of treating socket existence as
         # authoring readiness. The exact absent probe above ensures retries can
         # never paper over a real migration decision.
+        #
+        # The relaunched GUI also scans its library only after that boundary,
+        # and schedule-add refuses a playlist with nothing playable in the
+        # library the app holds, which before its first scan is none. So wait
+        # for the app's own listing (`ctl list`, what its window shows) to hold
+        # the night playlist's wallpaper first.
+        night_listed = as_user("${app} ctl list") + " | grep -qF night-grid.png"
+        machine.wait_until_succeeds(night_listed, timeout=90)
         schedule_command = as_user(
             "${app} ctl schedule-add night from=12:00 to=13:00 2>&1"
         )
@@ -722,6 +730,7 @@ pkgs.testers.runNixOSTest {
             "current-profile authoring is still opening; retry shortly",
             "another authoring change is still being saved; retry after it finishes",
         }
+        nothing_to_play = "\u201cNight samples\u201d has nothing to play yet"
         for _attempt in range(200):
             exit_code, output = machine.execute(schedule_command)
             scheduled = output.strip()
@@ -732,7 +741,14 @@ pkgs.testers.runNixOSTest {
             # mutation, so only these outcomes are safe to retry. A timeout,
             # busy store, I/O failure, or any other rejection may have crossed
             # a durable boundary and must fail the test immediately.
-            assert scheduled in safe_pre_admission, (
+            # The playability refusal is a not-ready state only while the
+            # app's library does not hold the wallpaper yet; once it does,
+            # the refusal is a real failure and is never retried.
+            library_loading = (
+                nothing_to_play in scheduled
+                and machine.execute(night_listed)[0] != 0
+            )
+            assert scheduled in safe_pre_admission or library_loading, (
                 exit_code,
                 scheduled,
             )

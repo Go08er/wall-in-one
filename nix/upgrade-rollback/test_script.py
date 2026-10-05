@@ -280,7 +280,12 @@ def launch_tracked(command: str) -> str:
 
 
 def unit_processes(unit: str) -> list[str]:
-    """The live processes in ``unit``'s cgroup, as ``pid sid args`` lines."""
+    """The live processes in ``unit``'s cgroup, as ``pid sid args`` lines.
+
+    A snapshot, for naming what is there: a listed process can fork and exit
+    between the list and its ``ps``, leaving a child the list never named.
+    Whether the cgroup is empty is :func:`unit_populated`'s to say.
+    """
     group = prop("ControlGroup", unit)
     assert group, f"{unit} has no cgroup"
     found = []
@@ -291,23 +296,41 @@ def unit_processes(unit: str) -> list[str]:
     return found
 
 
+def unit_populated(unit: str) -> bool:
+    """Whether ``unit``'s cgroup holds any process, by the kernel's own count.
+
+    ``cgroup.events`` reads ``populated 0`` only once the cgroup, and every
+    cgroup below it, has no process left, whatever forked and exited when.
+    """
+    group = prop("ControlGroup", unit)
+    assert group, f"{unit} has no cgroup"
+    events = machine.succeed(f"cat /sys/fs/cgroup{group}/cgroup.events")
+    for line in events.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "populated":
+            return value.strip() != "0"
+    raise AssertionError(f"{unit}'s cgroup.events has no populated line: {events!r}")
+
+
 def wait_unit_drained(unit: str, leader: int | None = None, timeout: float = 60) -> None:
     """Every process launched in ``unit`` has exited, then the unit is stopped.
 
     The window's own process going away is not enough: anything the app
     started -- a still renderer, a worker, in its own session or not -- can
-    still be writing to the profile after it. Nothing is killed: on timeout
-    this fails, naming the survivors, and the empty unit's stop signals no one.
+    still be writing to the profile after it. "Exited" is the kernel's word
+    (:func:`unit_populated`), never an empty process snapshot. Nothing is
+    killed: on timeout this fails, naming the survivors, and the unit is
+    stopped only once its cgroup is empty, so its stop signals no one.
     """
     deadline = time.monotonic() + timeout
     lingered: list[str] = []
-    while alive := unit_processes(unit):
-        if leader is not None and not any(line.split()[0] == str(leader) for line in alive):
+    while unit_populated(unit):
+        alive = unit_processes(unit)
+        if leader is not None and alive and not any(line.split()[0] == str(leader) for line in alive):
             lingered = alive
         if time.monotonic() > deadline:
-            raise AssertionError(
-                f"what {unit} launched has not exited after {timeout:g} s:\n" + "\n".join(alive)
-            )
+            named = "\n".join(alive) or "(its cgroup is still populated)"
+            raise AssertionError(f"what {unit} launched has not exited after {timeout:g} s:\n{named}")
         time.sleep(0.2)
     if lingered:
         observe(f"{unit}: processes that outlived the GUI", lingered)

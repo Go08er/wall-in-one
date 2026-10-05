@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use wall_in_one_service::config::{Config, ConfigError, overrides_path};
 use wall_in_one_service::power::PowerObserver;
 use wall_in_one_service::protocol::{Request, Response, read_request_until, write_response_until};
-use wall_in_one_service::renderer::SystemDriver;
+use wall_in_one_service::renderer::{SystemDriver, connect_until};
 use wall_in_one_service::runtime::Runtime;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
@@ -326,13 +326,32 @@ fn claim_lock_with_hook(lock_path: &Path, after_open: impl FnOnce()) -> Result<F
     Ok(lock)
 }
 
+/// How long startup's ownership probe waits for a listener to make room.
+const OWNER_PROBE: Duration = Duration::from_millis(250);
+
+/// Whether something is listening on the socket at `path`: owned, or stale.
+///
+/// A blocking connect to a listener whose backlog is full waits until it
+/// accepts, which a wedged owner never does, and startup would hang before
+/// the runtime loop. The probe connects without blocking, as the renderer IPC
+/// does: a connection, or a backlog still full when the probe gives up,
+/// means a live owner; a refusal or anything else means a stale socket, as
+/// before.
+fn socket_has_owner(path: &Path) -> bool {
+    let never_abandoned = AtomicBool::new(false);
+    match connect_until(path, Instant::now() + OWNER_PROBE, &never_abandoned) {
+        Ok(_) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::TimedOut,
+    }
+}
+
 fn clear_stale_socket_with_hook(path: &Path, before_recheck: impl FnOnce()) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(format!("cannot inspect socket {}: {error}", path.display())),
     };
-    if UnixStream::connect(path).is_ok() {
+    if socket_has_owner(path) {
         return Err(format!(
             "another service is listening on {}",
             path.display()

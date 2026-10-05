@@ -180,3 +180,57 @@ fn shutdown_does_not_delete_a_replacement_path() {
     assert_eq!(fs::read(&socket).unwrap(), b"replacement");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_wedged_listener_is_an_owner_and_never_hangs_startup() {
+    // A listener that never accepts, with its backlog full: a blocking
+    // connect to it waits forever. Startup must say the socket is owned and
+    // stop, not hang before its runtime loop.
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let root = directory("wedged-owner");
+    let config = fixture(&root);
+    let socket = root.join("runtime.sock");
+    let listener =
+        unsafe { OwnedFd::from_raw_fd(libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)) };
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address
+        .sun_path
+        .iter_mut()
+        .zip(socket.as_os_str().as_bytes())
+    {
+        *slot = *byte as libc::c_char;
+    }
+    let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    assert_eq!(
+        unsafe { libc::bind(listener.as_raw_fd(), (&raw const address).cast(), length) },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+    // The backlog's one place, taken and never accepted.
+    let _parked = UnixStream::connect(&socket).unwrap();
+
+    let mut child = spawn(&config, &socket);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("startup hung on a listener that never accepts");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("another service is listening"), "{stderr}");
+    assert!(socket.exists(), "an owned socket is never removed");
+    drop(listener);
+    fs::remove_dir_all(root).unwrap();
+}

@@ -597,8 +597,9 @@ fn wait_slice(deadline: Instant, abandoned: &AtomicBool) -> std::io::Result<Dura
 
 /// Connect without blocking. A Unix listener whose backlog is full refuses a
 /// nonblocking connect with `EAGAIN` instead of queueing it, so retry until
-/// it has room, the deadline passes or the exchange is abandoned.
-fn connect_until(
+/// it has room, the deadline passes (`TimedOut`) or the exchange is
+/// abandoned. The service's startup ownership probe uses it too.
+pub fn connect_until(
     path: &Path,
     deadline: Instant,
     abandoned: &AtomicBool,

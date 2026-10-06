@@ -510,8 +510,13 @@ pkgs.testers.runNixOSTest {
         )
 
     with subtest("runtime cycle and stop controls remain independent"):
-        before = status_text(".entry_id")
+        # The service cycles every five seconds here. Read the entry only once
+        # `cycle off` is acknowledged: a reading taken before it can be
+        # overtaken by one last automatic advance, which is the cycle working,
+        # not failing. From the acknowledgement on, no tick may advance it.
         assert ctl("cycle off") == "cycle off (manual)"
+        machine.succeed(status_matches(".cycle_enabled == false"))
+        before = status_text(".entry_id")
         machine.sleep(7)
         held = status_text(".entry_id")
         assert held == before, (before, held)

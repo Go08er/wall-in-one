@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -1092,6 +1093,104 @@ def test_legacy_reconciling_after_its_entries_are_retired_names_none(
     # Failed on e98f1c6: "transaction entries preserved at <the empty directory>".
     assert "transaction entries preserved" not in said, said
     assert said.endswith(f"; canonical entry preserved at {settings_path}"), said
+
+
+def test_staging_cleanup_names_a_candidate_retired_unverified_where_it_is(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging fails once its locator is published (a directory fsync EIO); the
+    cleanup retires the candidate, and that move lands but can be neither verified
+    nor undone. The entries said to remain include it, where it is."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    locator = template._transaction_locator(settings_path)
+    real_sync = template._fsync_parent
+    sync_failed: list[Path] = []
+
+    def sync(path: Path) -> None:
+        if path == locator and not sync_failed:
+            sync_failed.append(path)
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(path)
+
+    monkeypatch.setattr(template, "_fsync_parent", sync)
+    candidate = template._transaction_leaf_prefix(settings_path, "candidate")
+    landed = _double_fault_on_move(
+        monkeypatch,
+        folder,
+        lambda source, destination: (
+            source.name.startswith(candidate)
+            and destination.name.startswith(file_io.RETAINED_ENTRY_PREFIX)
+        ),
+    )
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.install()
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY / landed[0].name
+    assert sync_failed and retained.is_file()
+    assert "cannot stage template transaction" in said, said
+    listed = said.partition("; cleanup entries remain at ")[2].split("; ")[0].split(", ")
+    # Failed on d0a3b01: the retired candidate was not among them.
+    assert str(retained) in listed, said
+    assert all(os.path.lexists(entry) for entry in listed), said
+
+
+def test_the_next_reconcile_discards_a_lock_left_without_its_record(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconciling retires the record, then discarding the lock fails (an EIO): the
+    lock is left with no record. The next operation discards it, so such locks
+    neither pile up nor stay."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator, _candidate, lock = _interrupted_transaction(settings_path)
+    real_discard = file_io.discard_regular_if_same
+    failed = False
+
+    def fail_once(path: Path, **kwargs: object) -> bool:
+        nonlocal failed
+        if path == lock and not locator.exists() and not failed:
+            failed = True
+            raise OSError(errno.EIO, "injected lock discard failure")
+        return real_discard(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_io, "discard_regular_if_same", fail_once)
+    with pytest.raises(template.TemplateInstallError):
+        template.uninstall(reload_config=False)
+    assert failed and not locator.exists() and lock.exists(), "the lock is orphaned"
+
+    result = template.uninstall(reload_config=False)
+
+    assert not result.changed and result.detail == "not registered"
+    # Failed on d0a3b01: the orphaned lock stayed.
+    assert not lock.exists()
+    prefix = template._transaction_leaf_prefix(settings_path, "lock")
+    left = [entry for entry in settings_path.parent.iterdir() if entry.name.startswith(prefix)]
+    assert left == []
+
+
+def test_reconciling_leaves_a_held_lock_and_anything_not_a_lock(fake_home: Path) -> None:
+    """The control: a lock an installer holds while it stages (no record yet), and
+    a non-empty file under the lock name, are not orphaned locks: both stay."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    prefix = template._transaction_leaf_prefix(settings_path, "lock")
+    descriptor, held = tempfile.mkstemp(prefix=prefix, dir=settings_path.parent)
+    other = settings_path.parent / f"{prefix}not-a-lock"
+    other.write_text("not empty\n", encoding="utf-8")
+    other.chmod(0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        template.uninstall(reload_config=False)
+
+        assert Path(held).exists()
+        assert other.read_text(encoding="utf-8") == "not empty\n"
+    finally:
+        os.close(descriptor)
 
 
 @pytest.mark.parametrize("kind", ("regular", "directory"))

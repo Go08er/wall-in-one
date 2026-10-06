@@ -1652,11 +1652,68 @@ def _reconcile_locator_transaction(path: Path) -> bool:
 
 
 def _reconcile_interrupted_transaction(path: Path) -> bool:
-    """Reconcile current locator transactions and legacy directory records."""
+    """Reconcile current locator transactions and legacy directory records.
+
+    Then discard any transaction lock left without its record
+    (`_discard_orphaned_locks`).
+    """
 
     current = _reconcile_locator_transaction(path)
     legacy = _reconcile_legacy_interrupted_transaction(path)
+    _discard_orphaned_locks(path)
     return current or legacy
+
+
+def _discard_orphaned_locks(path: Path) -> None:
+    """Discard transaction locks no record names and no installer holds.
+
+    A transaction's record is retired before its lock, so a crash between the
+    two never leaves a record whose lock is gone (which would stop every later
+    reconcile). A fault between them leaves the lock with no record, and every
+    transaction makes a new lock: without this, such locks would pile up in
+    Noctalia's folder. Only while no locator exists, and only an entry with
+    this transaction's lock name that is exactly what a lock is (an empty,
+    private, singly linked regular file of this user) and that nobody holds
+    (a non-blocking ``flock``; a live installer holds its lock from just after
+    creating it). Anything else is left as it is; failures are not raised.
+    """
+
+    if os.path.lexists(_transaction_locator(path)):
+        return
+    prefix = _transaction_leaf_prefix(path, "lock")
+    try:
+        names = sorted(name for name in os.listdir(path.parent) if name.startswith(prefix))
+    except OSError:
+        return
+    for name in names:
+        lock_path = path.parent / name
+        with contextlib.suppress(OSError, ValueError, TemplateInstallError):
+            lock = _open_recovery_entry(lock_path, 0)
+            if lock is None:
+                continue
+            try:
+                status = os.fstat(lock.descriptor)
+                if (
+                    lock.file_type != stat.S_IFREG
+                    or lock.document != b""
+                    or status.st_uid != os.getuid()
+                    or stat.S_IMODE(status.st_mode) != 0o600
+                    or status.st_nlink != 1
+                ):
+                    continue
+                try:
+                    fcntl.flock(lock.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                _discard_recovery_regular(
+                    lock_path,
+                    lock,
+                    retained_parent=path.parent,
+                    logical_retained_parent=path.parent,
+                )
+                _fsync_parent(lock_path)
+            finally:
+                lock.close()
 
 
 def _begin_publication_transaction(
@@ -1813,6 +1870,7 @@ def _begin_publication_transaction(
                         cleanup_remainders.append(regular_path)
                         return False
                     return True
+                moved_to: Path | None = None
                 try:
                     if retain_intact:
                         if fingerprint is None:
@@ -1834,8 +1892,13 @@ def _begin_publication_transaction(
                             retained_parent=path.parent,
                             logical_retained_parent=path.parent,
                         )
-                except OSError, ValueError:
+                except (OSError, ValueError) as error:
                     removed = False
+                    # A retirement that moved it but could neither verify nor
+                    # undo the move left it there: listed where it is.
+                    moved_to = _moved_to(error)
+                if moved_to is not None:
+                    cleanup_remainders.append(moved_to)
                 if not removed and os.path.lexists(regular_path):
                     cleanup_remainders.append(regular_path)
                 return removed

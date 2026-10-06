@@ -819,6 +819,16 @@ class _CandidateLeftBehind:
         )
 
 
+def _remaining_at(temporary: Path, otherwise: Path | None) -> Path | None:
+    """``PathChangedError.preserved_path`` for a publication that ended in error.
+
+    The temporary when an entry remains there (it is named in the message),
+    else ``otherwise``: where file_io left the entry it could not move back,
+    or None when nothing is preserved anywhere.
+    """
+    return temporary if os.path.lexists(temporary) else otherwise
+
+
 def _restore_relocated_publication_entry(
     temporary: Path,
     path: Path,
@@ -1216,7 +1226,10 @@ def write_atomic_bytes(
                     raise
                 raise file_io.PathChangedError(
                     f"{error}; {restoration}",
-                    preserved_path=error.preserved_path,
+                    # What the message says remains: a concurrent entry left at
+                    # the temporary (never ours: the cleanup leaves it), or the
+                    # entry file_io left at the name.
+                    preserved_path=_remaining_at(temporary, error.preserved_path),
                 ) from error
     except (OSError, UnicodeError) as failure:
         if temporary_pin is None:
@@ -1249,7 +1262,8 @@ def write_atomic_bytes(
             raise file_io.PathChangedError(
                 f"{failure}; "
                 f"{left_behind.said(temporary, discarded=discarded, still_ours=still_ours)}",
-                preserved_path=failure.preserved_path,
+                # Settled by the cleanup: nothing once discarded, else what stays.
+                preserved_path=None if discarded else _remaining_at(temporary, None),
             ) from failure
         raise
     finally:

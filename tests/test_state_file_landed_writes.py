@@ -127,12 +127,13 @@ def test_a_concurrent_entry_put_back_is_not_recorded(
     with (
         after_the_publication(monkeypatch, target, repair),
         state_file.collecting_writes() as wrote,
-        pytest.raises(file_io.PathChangedError, match="concurrent entry was restored"),
+        pytest.raises(file_io.PathChangedError, match="concurrent entry was restored") as raised,
     ):
         state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
 
     assert target.read_text(encoding="utf-8") == "manual in-place repair\n"
     assert wrote == []
+    assert raised.value.preserved_path is None, "put back at its name: nothing is preserved"
 
 
 def test_an_unproven_entry_left_at_the_name_is_not_recorded(
@@ -346,6 +347,7 @@ def test_a_candidate_that_cannot_be_put_back_is_said_as_discarded(
     assert f"a newer concurrent entry remains at {target}" in said, said
     # Failed on d2260e9: "...; the publication candidate remains preserved at <gone>".
     assert said.endswith("; the publication candidate was discarded"), said
+    assert raised.value.preserved_path is None, "nothing is preserved: it was discarded"
     assert wrote == []
 
 
@@ -370,6 +372,8 @@ def test_a_candidate_the_cleanup_cannot_discard_is_said_where_it_is(
     assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "kept, where it is said to be"
     assert "the publication candidate could not be put back" in said, said
     assert said.endswith(f"; the publication candidate remains preserved at {moved[0]}"), said
+    # Failed on cc99c61: None, though the candidate remains there.
+    assert raised.value.preserved_path == moved[0]
     assert wrote == []
 
 
@@ -411,6 +415,7 @@ def test_an_entry_replacing_the_candidate_before_the_cleanup_is_left_and_not_cla
         f"; the entry now at {moved[0]} is not provably the publication candidate, "
         "so it was left as it is"
     ), said
+    assert raised.value.preserved_path == moved[0]
 
 
 @contextlib.contextmanager
@@ -477,6 +482,7 @@ def test_a_candidate_that_could_not_be_inspected_is_proven_then_discarded(
     assert all(entry.stat().st_size == 0 for entry in retained.iterdir()), "emptied"
     assert f"could not inspect the entry moved back to {moved[0]}" in said, said
     assert said.endswith("; the publication candidate was discarded"), said
+    assert raised.value.preserved_path is None
     assert wrote == []
 
 
@@ -504,5 +510,7 @@ def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
             f"; the entry now at {moved[0]} is not provably the publication candidate, "
             "so it was left as it is"
         ), said
+        assert raised.value.preserved_path == moved[0]
     else:
         assert said.endswith("; the publication candidate was discarded"), said
+        assert raised.value.preserved_path is None

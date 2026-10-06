@@ -140,6 +140,10 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<()
 /// thread. So the reply goes out in nonblocking pieces, waiting for room with
 /// `poll` only until `deadline`; at it the reply is abandoned and the runtime
 /// loop goes back to its work.
+///
+/// The deadline is looked at before every send, the first included: a
+/// budget already spent (by encoding, or by the thread not being scheduled)
+/// sends nothing, rather than as much as a writable socket would take.
 pub fn write_response_until(
     stream: &UnixStream,
     response: &Response,
@@ -149,6 +153,13 @@ pub fn write_response_until(
     let fd = stream.as_raw_fd();
     let mut unwritten = &encoded[..];
     while !unwritten.is_empty() {
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return Err(format!(
+                "response deadline expired with {} of {} bytes unwritten",
+                unwritten.len(),
+                encoded.len()
+            ));
+        }
         // SAFETY: the pointer and length describe the live `unwritten` slice.
         let sent = unsafe {
             libc::send(
@@ -163,16 +174,16 @@ pub fn write_response_until(
             continue;
         }
         let error = std::io::Error::last_os_error();
-        if sent == 0 || !matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR)) {
-            return Err(format!("cannot write response: {error}"));
+        match error.raw_os_error() {
+            // Interrupted before anything was sent: try again (deadline first).
+            Some(libc::EINTR) if sent < 0 => continue,
+            Some(libc::EAGAIN) if sent < 0 => {}
+            _ => return Err(format!("cannot write response: {error}")),
         }
+        // No room: wait for some, but not past the deadline.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(format!(
-                "response deadline expired with {} of {} bytes unwritten",
-                unwritten.len(),
-                encoded.len()
-            ));
+            continue; // reported at the top
         }
         let mut ready = libc::pollfd {
             fd,
@@ -196,9 +207,99 @@ pub fn write_response_until(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
+    use std::io::{BufReader, ErrorKind, Read};
     use std::thread;
     use std::time::Duration;
+
+    /// Everything the server has sent to `client` so far, without waiting.
+    fn sent_so_far(client: &UnixStream) -> Vec<u8> {
+        client.set_nonblocking(true).unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 65536];
+        loop {
+            match (&*client).read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn an_expired_deadline_sends_nothing() {
+        // Codex 0.3.0 Y-5: the deadline was looked at only after a send found
+        // no room, so a writable socket still got the whole reply.
+        let (server, client) = UnixStream::pair().unwrap();
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let error = write_response_until(&server, &Response::success("small"), past).unwrap_err();
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(
+            sent_so_far(&client).is_empty(),
+            "nothing goes out once the budget is spent"
+        );
+    }
+
+    #[test]
+    fn a_budget_spent_before_the_first_send_sends_nothing() {
+        let (server, client) = UnixStream::pair().unwrap();
+        // Scheduling: the thread gets to the write only after its deadline.
+        let deadline = Instant::now() + Duration::from_millis(20);
+        thread::sleep(Duration::from_millis(40));
+        let error =
+            write_response_until(&server, &Response::success("small"), deadline).unwrap_err();
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(sent_so_far(&client).is_empty());
+        // Encoding: a near-full reply takes far longer than a microsecond to
+        // encode, so its budget is gone before the first send.
+        let large = Response::success("x".repeat(MAX_RESPONSE_BYTES - 64));
+        let deadline = Instant::now() + Duration::from_micros(1);
+        let error = write_response_until(&server, &large, deadline).unwrap_err();
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(sent_so_far(&client).is_empty());
+    }
+
+    #[test]
+    fn a_reading_peer_gets_the_whole_reply() {
+        let (server, client) = UnixStream::pair().unwrap();
+        let response = Response::success("y".repeat(512 * 1024));
+        let expected = encode_response(&response).unwrap();
+        let reader = thread::spawn(move || {
+            let mut all = Vec::new();
+            (&client).read_to_end(&mut all).unwrap();
+            all
+        });
+        write_response_until(&server, &response, Instant::now() + Duration::from_secs(5)).unwrap();
+        drop(server);
+        assert_eq!(reader.join().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_stalled_peer_is_given_up_at_the_deadline() {
+        let (server, _client) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(150);
+        let response = Response::success("z".repeat(900 * 1024));
+        let error = write_response_until(&server, &response, deadline).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(
+            elapsed >= Duration::from_millis(150) && elapsed < Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_closed_peer_fails_at_once() {
+        let (server, client) = UnixStream::pair().unwrap();
+        drop(client);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(5);
+        let error = write_response_until(&server, &Response::success("w"), deadline).unwrap_err();
+        assert!(error.contains("cannot write response"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 
     #[test]
     fn the_fit_measure_is_the_encoded_size() {

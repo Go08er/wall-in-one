@@ -849,6 +849,35 @@ def collecting_durability_warnings() -> Iterator[list[str]]:
         _DURABILITY_WARNINGS.reset(token)
 
 
+#: What the current authoring task changed on disk (`collecting_writes`), on
+#: this thread and context only.
+_WRITES: ContextVar[list[Path] | None] = ContextVar("writes", default=None)
+
+
+def record_write(path: Path) -> None:
+    """Note that ``path`` changed on disk now: published, replaced, moved or removed.
+
+    For whoever collects on this thread (`collecting_writes`): the authoring
+    lane, which only calls a task that failed afterwards "saved" when its
+    work really changed something. Every durable writer calls it at the
+    moment its change becomes visible to readers.
+    """
+    collected = _WRITES.get()
+    if collected is not None:
+        collected.append(path)
+
+
+@contextlib.contextmanager
+def collecting_writes() -> Iterator[list[Path]]:
+    """Collect this thread's `record_write` calls in the yielded list."""
+    collected: list[Path] = []
+    token = _WRITES.set(collected)
+    try:
+        yield collected
+    finally:
+        _WRITES.reset(token)
+
+
 @contextlib.contextmanager
 def published_counts() -> Iterator[None]:
     """Inside a store's transaction: a write that failed only after publication is a write.
@@ -1027,6 +1056,7 @@ def write_atomic_bytes(
             temporary_pin.close()
     # Publication is done: the name holds the new bytes. A failure from here
     # on is uncertainty about durability, never a refusal.
+    record_write(path)
     try:
         fsync_parent(path)
     except OSError as error:
@@ -1178,6 +1208,7 @@ def preserve_faulted(
             )
         except FileExistsError:
             continue
+        record_write(path)
         try:
             fsync_parent(path)
         except OSError as error:

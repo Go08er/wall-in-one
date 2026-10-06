@@ -43,9 +43,11 @@ from tests.test_ui_next_window import (  # noqa: E402,F401
     toolkit,
 )
 from wall_in_one import config, paths  # noqa: E402
+from wall_in_one.control import server  # noqa: E402
+from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import pairings, playlists  # noqa: E402
 from wall_in_one.session import QUICK_CHOICE_ID  # noqa: E402
-from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.app import SAVED_NOT_APPLIED, Application, _Commands  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 
 
@@ -192,46 +194,128 @@ def test_a_settings_callback_that_fails_after_the_save_is_not_nothing_changed(
         application.session.shutdown()
 
 
-def test_a_window_task_whose_adoption_raises_is_said_saved_not_nothing_changed(
+def _lane_application(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The lane's contract for every window caller, whatever its finish does."""
+) -> tuple[Application, list[str], list[bool]]:
+    """A real application, its window reports, and each publication it starts."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     application = Application(ui="classic")
     application._authoring_migration_ready = True
     reports: list[str] = []
-    monkeypatch.setattr(Application, "window_report", lambda _self, m: reports.append(m))
     published: list[bool] = []
+
+    def report(self: Application, message: str) -> None:
+        # What `Application.window_report` shows, with no window to show it in.
+        reports.append(self.with_task_durability(message))
 
     def publish() -> bool:
         published.append(True)
         return True
 
+    monkeypatch.setattr(Application, "window_report", report)
     monkeypatch.setattr(application, "_publish_runtime_for_context", publish)
+    return application, reports, published
+
+
+def _close_lane_application(application: Application) -> None:
+    application._runtime_shutdown = True
+    jobs = application._authoring_jobs
+    application._shutdown_authoring_jobs()
+    if jobs is not None:
+        jobs.shutdown(wait=True, cancel_futures=True)
+    application._stills.shutdown()
+    application.session.shutdown()
+
+
+def test_a_window_task_whose_adoption_raises_is_said_saved_not_nothing_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lane's contract for every window caller, whatever its finish does."""
+    application, reports, published = _lane_application(tmp_path, monkeypatch)
     store = application.session.playlists
-    failures: list[str] = []
+    put_back: list[str] = []
 
     def adopt(_made: object) -> None:
         raise RuntimeError("the page could not take it")
 
+    def failed(message: str) -> None:
+        put_back.append(message)  # a caller puts its controls back, then says why
+        application.window_report(
+            f"\u201cEvening\u201d was not created; nothing changed: {message}"
+        )
+
     try:
         assert application.authoring_action_async(
-            lambda: store.create("Evening"),
-            adopt,
-            failure=lambda message: failures.append(f"not saved; nothing changed: {message}"),
+            lambda: store.create("Evening"), adopt, failure=failed
         )
         spin_until(lambda: not application._authoring_active and bool(reports))
 
         assert playlists.Store.open().by_name("Evening") is not None, "the write landed"
-        assert failures == [], "the caller's 'nothing changed' is never said for a saved write"
+        assert len(put_back) == 1, "the caller still restores its controls"
         assert reports == ["Saved, but it couldn't be applied: the page could not take it"]
         assert published, "what was saved is published"
     finally:
-        application._runtime_shutdown = True
-        jobs = application._authoring_jobs
-        application._shutdown_authoring_jobs()
-        if jobs is not None:
-            jobs.shutdown(wait=True, cancel_futures=True)
-        application._stills.shutdown()
-        application.session.shutdown()
+        _close_lane_application(application)
+
+
+def test_a_task_that_wrote_nothing_fails_as_it_always_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control (Y-3): a worker that completed is no proof that anything landed."""
+    application, reports, published = _lane_application(tmp_path, monkeypatch)
+    state = paths.app_state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+
+    def files() -> list[str]:
+        # The lane's own lock files aside: nothing else appears or changes.
+        return sorted(p.name for p in state.iterdir() if not p.name.endswith(".lock"))
+
+    listing = files()
+
+    def adopt(_nothing: object) -> None:
+        raise ValueError("no such thing here")
+
+    def failed(message: str) -> None:
+        application.window_report(f"That was not saved; nothing changed: {message}")
+
+    try:
+        assert application.authoring_action_async(lambda: None, adopt, failure=failed)
+        spin_until(lambda: not application._authoring_active and bool(reports))
+
+        # Before: "Saved, but it couldn't be applied: no such thing here", published.
+        assert reports == ["That was not saved; nothing changed: no such thing here"]
+        assert published == [], "nothing saved, nothing published"
+        assert files() == listing
+    finally:
+        _close_lane_application(application)
+
+
+def test_ctl_removing_a_rule_that_is_not_there_is_not_found_not_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Y-3 as found: ``ctl schedule-remove wrong-id`` writes nothing."""
+    application, reports, published = _lane_application(tmp_path, monkeypatch)
+    rule = application.session.schedules.add("Evening", rule_id="kept", weekdays=("mon",))
+    target = paths.app_state_dir() / "schedules.json"
+    held = target.read_bytes()
+    replies: list[Response] = []
+    try:
+        server.dispatch(
+            server.build_verb_table(_Commands(application)),
+            Request("schedule-remove", "wrong-id").encode(),
+            replies.append,
+        )
+        spin_until(lambda: bool(replies) and not application._authoring_active)
+
+        (reply,) = replies
+        assert not reply.ok
+        # Before: "Saved, but it couldn't be applied: ..." with kind saved-not-applied.
+        assert reply.message == "no schedule rule wrong-id", reply.message
+        assert reply.kind != SAVED_NOT_APPLIED
+        assert target.read_bytes() == held, "nothing was written"
+        assert published == [], "and nothing published"
+        assert [found.id for found in application.session.schedules.rules] == [rule.id]
+        assert not any("Saved" in r for r in reports), reports
+    finally:
+        _close_lane_application(application)

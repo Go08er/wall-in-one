@@ -256,16 +256,25 @@ class _ThemeActionResult:
 
 
 @dataclass(slots=True)
-class _Durability:
-    """What one authoring task saved without confirming it durable, and if the window knows.
+class _Said:
+    """What one authoring task changed, and what the window has been told about it.
 
-    Said in a ``ctl`` reply, and in the window as part of what the task's
-    caller says for it (`Application.window_report`), or on its own after
-    the task when the caller says nothing: one task, one message.
+    One task, one message (`Application.with_task_durability`): what its
+    caller says for it carries these, or the lane says them after the task
+    when the caller says nothing.
     """
 
+    #: What the work saved without confirming it durable (`state_file.report_not_durable`).
     warnings: list[str] = field(default_factory=list)
+    #: Whether the window was told ``warnings``.
     said: bool = False
+    #: Whether the work changed anything on disk (`state_file.record_write`): the
+    #: only proof that a task which failed afterwards saved something.
+    wrote: bool = False
+    #: Said in place of the caller's first report: a write landed, then its
+    #: adoption failed (`Application._after_failed_finish`).
+    instead: str = ""
+    instead_said: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +296,7 @@ class _AuthoringTask:
     guard_migration_transaction: bool = True
     application_held: bool = False
     #: What the work saved but could not confirm durable (`state_file.report_not_durable`).
-    durability: _Durability = field(default_factory=_Durability, compare=False)
+    spoken: _Said = field(default_factory=_Said, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2396,19 +2405,30 @@ class Application(Adw.Application):
             self._window.report(message)
 
     def with_task_durability(self, message: str) -> str:
-        """``message``, carrying what the authoring task it reports saved without confirming.
+        """``message``, made true of the authoring task it reports, and carrying what it saved.
 
         Said while an authoring task's result is adopted on GTK (by its
-        caller's report or toast, `_finish_authoring_outcome`), the first
-        message also says what that task saved but couldn't confirm durable,
-        so one task is one message: what it did, and what it couldn't. The
-        lane says the warning on its own only when the caller says nothing.
+        caller's report or toast, `_finish_authoring_outcome`):
+
+        * a task whose write landed but whose adoption failed is said as the
+          lane says it ("Saved, but it couldn't be applied: ..."), in place
+          of the caller's first message, whose failure wording isn't true;
+        * the first message also says what the task saved but couldn't
+          confirm durable, so one task is one message.
+
+        The lane says these on their own only when the caller says nothing.
         """
         task = self._speaking_for
-        if task is None or not task.durability.warnings or task.durability.said:
+        if task is None:
             return message
-        task.durability.said = True
-        return _with_durability(message, task.durability.warnings)
+        spoken = task.spoken
+        if spoken.instead and not spoken.instead_said:
+            spoken.instead_said = True
+            message = spoken.instead
+        if spoken.warnings and not spoken.said:
+            spoken.said = True
+            message = _with_durability(message, spoken.warnings)
+        return message
 
     def _dialog_parent(self) -> Gtk.Window | None:
         """The window as a dialog parent, when it is a real GTK window.
@@ -3131,7 +3151,10 @@ class Application(Adw.Application):
             # A store write that was published but whose folder sync failed is
             # a write (`state_file.published_counts`): collect what it says,
             # for after the task, whatever else happens.
-            with state_file.collecting_durability_warnings() as warnings:
+            with (
+                state_file.collecting_durability_warnings() as warnings,
+                state_file.collecting_writes() as wrote,
+            ):
                 try:
                     # A later explicit CLI import uses this same marker lock.
                     # Holding it across the complete worker transaction closes
@@ -3143,7 +3166,8 @@ class Application(Adw.Application):
                     return work()
                 finally:
                     # One folder that can't sync fails every write in it: say it once.
-                    task.durability.warnings.extend(dict.fromkeys(warnings))
+                    task.spoken.warnings.extend(dict.fromkeys(warnings))
+                    task.spoken.wrote = bool(wrote)
 
         try:
             future = self._authoring_pool().submit(guarded_work)
@@ -3185,8 +3209,8 @@ class Application(Adw.Application):
 
         def reply(response: Response) -> None:
             # A ``ctl`` caller is told too; the window is told below.
-            if task.durability.warnings:
-                said = "; ".join((response.message, *task.durability.warnings)).lstrip("; ")
+            if task.spoken.warnings:
+                said = "; ".join((response.message, *task.spoken.warnings)).lstrip("; ")
                 response = Response(ok=response.ok, message=said, kind=response.kind)
             task.reply(response)
 
@@ -3198,13 +3222,12 @@ class Application(Adw.Application):
             try:
                 result = future.result()
             except Exception as error:
-                reply(server.failed(error))  # the work refused: nothing it wrote landed
+                reply(server.failed(error))  # the work refused
                 return GLib.SOURCE_REMOVE
             try:
                 outcome = task.finish(result)
             except Exception as error:
-                # The write landed; only adopting it, or what follows it, failed.
-                reply(self._saved_but_not_applied(error))
+                reply(self._after_failed_finish(task, error))
                 return GLib.SOURCE_REMOVE
             if isinstance(outcome, Response):
                 reply(outcome)
@@ -3221,33 +3244,45 @@ class Application(Adw.Application):
                 outcome.start(chained_reply)
                 chained = True
             except Exception as error:
-                reply(self._saved_but_not_applied(error))
+                reply(self._after_failed_finish(task, error))
         finally:
             self._speaking_for = speaking_for
-            unsaid = task.durability.warnings and not task.durability.said
-            if unsaid and not self._authoring_shutdown and not self._runtime_shutdown:
-                # Saved, whatever the task made of it: never "nothing changed".
-                # Said with the caller's own result above, or here on its own.
-                task.durability.said = True
-                self.window_report(_with_durability("", task.durability.warnings))
+            if not self._authoring_shutdown and not self._runtime_shutdown:
+                # Whatever the caller said, or didn't: said here on its own.
+                self._say_the_rest(task.spoken)
             if not chained:
                 complete()
         return GLib.SOURCE_REMOVE
 
-    def _saved_but_not_applied(self, error: Exception) -> Response:
-        """A task's write landed, then adopting it on GTK (or what follows it) failed.
+    def _say_the_rest(self, spoken: _Said) -> None:
+        """What a task's caller didn't say for it: the lane's message, its warnings."""
+        message = ""
+        if spoken.instead and not spoken.instead_said:
+            spoken.instead_said = True
+            message = spoken.instead
+        if spoken.warnings and not spoken.said:
+            spoken.said = True
+            message = _with_durability(message, spoken.warnings)
+        if message:
+            self.window_report(message)
 
-        Never "nothing changed", which a caller's failure wording says: the
-        stores already hold what was saved, so it is published and shown as
-        they hold it (`_show_what_was_saved`), and the reply says both halves.
-        A window caller's own failure callback isn't told
-        (`authoring_action_async`); the window is, with this message.
+    def _after_failed_finish(self, task: _AuthoringTask, error: Exception) -> Response:
+        """Reply for a task whose adoption on GTK (or what follows it) failed.
+
+        Only a task whose work really changed something on disk
+        (`state_file.record_write`) is saved: then it is "Saved, but it
+        couldn't be applied: ...", in place of its caller's failure wording
+        ("nothing changed"), and what the stores hold is published and shown
+        (`_show_what_was_saved`). A task that wrote nothing (a removal of a
+        rule that isn't there, say) fails as it always did.
         """
+        if not task.spoken.wrote:
+            return server.failed(error)
         self._show_what_was_saved()
         detail = str(error) or error.__class__.__name__
-        return Response.failure(
-            f"Saved, but it couldn't be applied: {detail}", kind=SAVED_NOT_APPLIED
-        )
+        message = f"Saved, but it couldn't be applied: {detail}"
+        task.spoken.instead = message
+        return Response.failure(message, kind=SAVED_NOT_APPLIED)
 
     def _show_what_was_saved(self) -> None:
         """Publish and show what the stores hold, after a task's adoption failed partway."""
@@ -3318,10 +3353,8 @@ class Application(Adw.Application):
                 accepted = False
             if response.ok:
                 return
-            if response.kind == SAVED_NOT_APPLIED:
-                # Saved: never the caller's "was not saved; nothing changed".
-                self.window_report(response.message)
-                return
+            # Saved but not applied: the caller still puts its controls back,
+            # and what it says is made true of the task (`with_task_durability`).
             if failure is not None:
                 failure(response.message)
             else:
@@ -7239,6 +7272,8 @@ class _Commands:
 
         def finish(changed: bool) -> Response:
             if not changed:
+                # Nothing was written, so the lane answers this as the plain
+                # refusal it is (`_after_failed_finish`), never "saved".
                 raise ValueError(f"no schedule rule {rule_id}")
             self._app.schedule_edited()
             return Response.success(f"removed rule {rule_id}")

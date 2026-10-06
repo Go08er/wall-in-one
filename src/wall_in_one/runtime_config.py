@@ -1672,6 +1672,7 @@ def _publish_overrides(overrides: str | None, target: Path) -> None:
         return
     except OSError as error:
         raise RuntimeConfigError(f"cannot remove {sidecar}: {error}") from error
+    state_file.record_write(sidecar)
     # Gone for every reader: a failure from here on is durability uncertainty.
     try:
         state_file.fsync_parent(sidecar)
@@ -1709,6 +1710,7 @@ def _write_atomic(document: str, target: Path) -> None:
         raise RuntimeConfigError(f"cannot write {target}: {error}") from error
     # Published: every reader sees the new bytes. A failure from here on is
     # uncertainty about durability, never a refusal.
+    state_file.record_write(target)
     try:
         state_file.fsync_parent(target)
     except OSError as error:

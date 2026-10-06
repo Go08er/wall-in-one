@@ -520,6 +520,7 @@ def _rename_exchange(source: Path, destination: Path) -> None:
     if result != 0:
         error_number = ctypes.get_errno()
         raise OSError(error_number, os.strerror(error_number), str(destination))
+    state_file.record_write(destination)
 
 
 def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
@@ -2361,6 +2362,7 @@ def _write_bytes_atomically(path: Path, document: bytes) -> None:
             dst_dir_fd=parent_descriptor,
             follow_symlinks=True,
         )
+        state_file.record_write(path)
         after = os.fstat(descriptor)
         named = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
         current_parent = path.parent.lstat()

@@ -145,6 +145,7 @@ def save_key(value: str) -> Path:
         raise ProviderError(
             "local-io", f"could not write {destination}: {error.strerror or error}"
         ) from error
+    state_file.record_write(destination)
     # The key's bytes were synced before publication; sync the directory
     # entry too so a successful save remains a save after an abrupt power
     # loss rather than reverting to the previous key (or no key). It is
@@ -168,6 +169,7 @@ def clear_key() -> bool:
         raise ProviderError(
             "local-io", f"could not remove {path}: {error.strerror or error}"
         ) from error
+    state_file.record_write(path)
     try:
         paths.fsync_directory(path.parent)
     except OSError as error:

@@ -308,7 +308,11 @@ so: when a file was replaced but syncing its folder then failed, the change is
 what every reader sees, so the app adopts it and replies with success, with
 "... was saved, but syncing its folder failed, so the change may not survive a
 power loss" appended to the message. It is never reported as a refusal or as
-"nothing changed". Runtime-document compilation and
+"nothing changed". A failure that comes after a write landed (the app
+couldn't adopt or apply it) replies `saved-not-applied`, "Saved, but it
+couldn't be applied: ...", and the saved change is published; a request that
+wrote nothing (removing a rule that isn't there, say) fails with its ordinary
+reason. Runtime-document compilation and
 reload are queued afterward and may settle later; consult runtime `status` for
 effective playback truth. `select` and the authoring-socket `playlist-use`
 compatibility path are the deliberate exceptions: their reply waits through

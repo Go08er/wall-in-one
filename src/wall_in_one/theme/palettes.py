@@ -839,6 +839,7 @@ def _publish_new(target: Path, serialised: str, name: str) -> None:
             raise PaletteWriteError(f"cannot write {target}: {error}") from error
     finally:
         os.close(descriptor)
+    state_file.record_write(target)
     try:
         state_file.fsync_parent(target)
     except OSError as error:

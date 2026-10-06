@@ -172,6 +172,10 @@ class ScheduleBackend(Protocol):
 
     def runtime_config_changed(self) -> None: ...
 
+    def require_current_library(self) -> None:
+        """Refused while the library may name files that are gone (`LibraryNotCurrentError`)."""
+        ...
+
     def prepare_colors_forget(self, connector: str) -> Callable[[], ColorsForgotten]:
         """At the head of the authoring lane: Forget Display's colors step, for its worker."""
         ...
@@ -530,7 +534,11 @@ class RealScheduling:
         reported = False
 
         def prepare() -> Callable[[], object]:
-            # At the head of the lane: the playlist may have emptied since.
+            # At the head of the lane: the playlist may have emptied since,
+            # and whether it can be put into use is judged by the library,
+            # never by one the app knows is stale.
+            if recheck is not None:
+                self._backend.require_current_library()
             problem = recheck() if recheck is not None else ""
             if problem:
                 raise ValueError(problem)

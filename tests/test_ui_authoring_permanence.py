@@ -424,6 +424,9 @@ class ScheduleApp:
 
     def window_report(self, _message: str) -> None: ...
 
+    def require_current_library(self) -> None:
+        """The library this fake holds is always current."""
+
     def authoring_action_async(
         self,
         work: Any,

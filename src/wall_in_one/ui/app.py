@@ -6186,9 +6186,11 @@ class Application(Adw.Application):
                 (key, field_generation, value)
                 for key, (field_generation, value) in self._settings_authoring_pending.items()
             )
-        refusal = runtime_config.settings_refusal(
-            {key: value for key, _gen, value in changes}, self._session
-        )
+        change_map = {key: value for key, _gen, value in changes}
+        if change_map.get("active_playlist"):
+            # A default is judged by the library: never by one the app knows is stale.
+            self.require_current_library()
+        refusal = runtime_config.settings_refusal(change_map, self._session)
         if refusal:
             # Its kind keeps the reply a sentence (`control.server.failed`).
             raise runtime_config.PlaybackGuardError(refusal)
@@ -6381,6 +6383,8 @@ class Application(Adw.Application):
         """
         if self._settings_unknown_keys:
             raise config.SettingsReadOnlyError(self._settings_unknown_keys)
+        if changes.get("active_playlist"):
+            self.require_current_library()  # judged by the library, as in the window
         refusal = runtime_config.settings_refusal(changes, self._session)
         if refusal:
             raise config.ConfigError(refusal)
@@ -7028,6 +7032,7 @@ class _Commands:
         if self._app.legacy_service:
             session = self._app.session
             playlist = session.playlists.find(wanted.strip())
+            self._app.require_current_library()
             assign = runtime_config.checked_playlist_use(
                 playlist.id,
                 what,
@@ -7039,6 +7044,9 @@ class _Commands:
             return Response.success(f"{connector} shows {playlist.name}")
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            # Whether it can be put into use is judged by the library: never
+            # by one the app knows is stale.
+            self._app.require_current_library()
             session = self._app.session
             playlist = session.playlists.find(wanted.strip())
             display_store = session.displays
@@ -7255,6 +7263,7 @@ class _Commands:
         what = "The schedule rule was not added"
         if self._app.legacy_service:
             playlist = self._app.session.playlists.find(name)
+            self._app.require_current_library()
             add = runtime_config.checked_playlist_use(
                 playlist.id, what, lambda: work_for(playlist), self._app.session
             )
@@ -7262,6 +7271,8 @@ class _Commands:
             return finish((playlist, rule))
 
         def prepare() -> Callable[[], tuple[playlists.Playlist, schedules.Rule]]:
+            # Judged by the library: never by one the app knows is stale.
+            self._app.require_current_library()
             playlist = self._app.session.playlists.find(name)
             schedule_store = self._app.session.schedules
 

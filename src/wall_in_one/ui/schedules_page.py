@@ -1256,6 +1256,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
             def prepare() -> Any:
                 if 0 < index <= len(choices):
+                    # Judged by the library: never by one the app knows is stale.
+                    self._app.require_current_library()
                     wanted = choices[index - 1].id
                     if self._app.session.playlists.get(wanted) is None:
                         raise ValueError("that playlist was deleted before the assignment saved")
@@ -1445,6 +1447,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._refresh_rules()
 
         def prepare() -> Any:
+            # Judged by the library: never by one the app knows is stale.
+            self._app.require_current_library()
             if self._app.session.playlists.get(playlist_id) is None:
                 raise ValueError("that playlist was deleted before the schedule rule saved")
             return runtime_config.checked_playlist_use(

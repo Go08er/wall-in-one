@@ -786,13 +786,41 @@ def _holds_publication_candidate(
     return current, proven
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidateLeftBehind:
+    """This writer's proven candidate could not be put back: it is at the temporary.
+
+    Then the writer's cleanup proves it ours again and discards it, as after
+    any failed write: it is only this writer's own unpublished bytes (the call
+    raises, and nothing adopts them), and a temporary left behind would be a
+    stray file in the store's folder. What is said of it waits for that
+    cleanup (`said`): discarded, or still there when it could not be.
+    """
+
+    reason: str
+
+    def said(self, temporary: Path, *, discarded: bool, still_ours: bool) -> str:
+        """After the cleanup: ``discarded`` by it, or not; ``still_ours`` if the
+        entry at ``temporary`` was proven to be the candidate just before."""
+        if discarded:
+            return f"{self.reason}; the publication candidate was discarded"
+        if not os.path.lexists(temporary):
+            return f"{self.reason}; the publication candidate is no longer at {temporary}"
+        if still_ours:
+            return f"{self.reason}; the publication candidate remains preserved at {temporary}"
+        return (
+            f"{self.reason}; the entry now at {temporary} is not provably the publication "
+            "candidate, so it was left as it is"
+        )
+
+
 def _restore_relocated_publication_entry(
     temporary: Path,
     path: Path,
     candidate: file_io.PinnedPath,
     candidate_fingerprint: file_io.FileFingerprint,
     candidate_document: bytes,
-) -> str | None:
+) -> str | _CandidateLeftBehind | None:
     """Restore a post-publication replacement relocated to our temporary.
 
     ``atomic_move_no_replace`` restores an unverified destination to its
@@ -804,7 +832,9 @@ def _restore_relocated_publication_entry(
     When the entry is provably our candidate (`_holds_publication_candidate`)
     and it is restored to ``path``, that is this writer's write landing: it
     is recorded (`record_write`) the moment it is back at ``path``. A
-    concurrent entry put back is somebody else's, and is not.
+    concurrent entry put back is somebody else's, and is not. When our
+    candidate can't be put back and stays at the temporary, the caller's
+    cleanup decides what is said of it (`_CandidateLeftBehind`).
     """
     try:
         current, same_candidate = _holds_publication_candidate(
@@ -831,6 +861,8 @@ def _restore_relocated_publication_entry(
             expected_fingerprint=current_fingerprint,
         )
     except FileExistsError:
+        if same_candidate:
+            return _CandidateLeftBehind(f"a newer concurrent entry remains at {path}")
         return (
             f"a newer concurrent entry remains at {path}; "
             f"the {relocated_description} remains preserved at {temporary}"
@@ -845,6 +877,8 @@ def _restore_relocated_publication_entry(
             if retained is not None:
                 return retained
             return f"the {relocated_description} remains at {path}: {error}"
+        if same_candidate:
+            return _CandidateLeftBehind(f"the publication candidate could not be put back: {error}")
         return f"the {relocated_description} remains preserved at {temporary}: {error}"
     if same_candidate:
         # The verified move put exactly the candidate back under its public
@@ -1120,6 +1154,7 @@ def write_atomic_bytes(
     temporary_identity = temporary_status.st_dev, temporary_status.st_ino
     temporary_fingerprint: file_io.FileFingerprint | None = None
     temporary_pin: file_io.PinnedPath | None = None
+    left_behind: _CandidateLeftBehind | None = None
     try:
         temporary_pin = file_io.PinnedPath(
             temporary,
@@ -1158,6 +1193,10 @@ def write_atomic_bytes(
                     temporary_fingerprint,
                     candidate_document,
                 )
+                if isinstance(restoration, _CandidateLeftBehind):
+                    # Said once the cleanup below has settled the temporary.
+                    left_behind = restoration
+                    raise
                 if restoration is None and error.preserved_path == path:
                     restoration = _retained_publication_candidate(
                         path,
@@ -1171,7 +1210,7 @@ def write_atomic_bytes(
                     f"{error}; {restoration}",
                     preserved_path=error.preserved_path,
                 ) from error
-    except OSError, UnicodeError:
+    except (OSError, UnicodeError) as failure:
         if temporary_pin is None:
             # Even descriptor exhaustion must not make cleanup identify the
             # private temporary only by a recyclable inode number.
@@ -1180,12 +1219,30 @@ def write_atomic_bytes(
         if temporary_fingerprint is None:
             with contextlib.suppress(OSError):
                 temporary_fingerprint = temporary_pin.fingerprint
-        file_io.discard_regular_if_same(
+        expected_fingerprint = temporary_fingerprint
+        still_ours = False
+        if left_behind is not None and temporary_fingerprint is not None:
+            # Our candidate, back at the temporary after renames that changed
+            # its ctime: proven ours again, now, it is discarded like any
+            # failed write's temporary instead of staying in the folder.
+            with contextlib.suppress(OSError):
+                current, still_ours = _holds_publication_candidate(
+                    temporary, temporary_pin, temporary_fingerprint, contents
+                )
+                if still_ours:
+                    expected_fingerprint = file_io.file_fingerprint(current)
+        discarded = file_io.discard_regular_if_same(
             temporary,
             expected_identity=temporary_identity,
-            expected_fingerprint=temporary_fingerprint,
+            expected_fingerprint=expected_fingerprint,
             pinned_source=temporary_pin,
         )
+        if left_behind is not None and isinstance(failure, file_io.PathChangedError):
+            raise file_io.PathChangedError(
+                f"{failure}; "
+                f"{left_behind.said(temporary, discarded=discarded, still_ours=still_ours)}",
+                preserved_path=failure.preserved_path,
+            ) from failure
         raise
     finally:
         if descriptor >= 0:

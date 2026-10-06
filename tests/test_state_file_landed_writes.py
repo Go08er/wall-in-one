@@ -281,3 +281,133 @@ def test_a_backup_written_but_not_finished_cleanly_is_said_as_kept(
     assert happened, "the fault was injected"
     # And `backup_before_bump` says it raises this, not only "no backup kept".
     assert "BackupNotConfirmedError" in (state_file.backup_before_bump.__doc__ or "")
+
+
+@contextlib.contextmanager
+def put_back_refused(
+    monkeypatch: pytest.MonkeyPatch, target: Path, refuse: Callable[[Path], object]
+) -> Iterator[list[Path]]:
+    """The publication's verification read fails once; the candidate is moved back
+    to its temporary, then ``refuse(target)`` runs, so that putting it back fails.
+
+    Yields the temporaries it was moved back to.
+    """
+    rename = file_io._rename_noreplace
+    lstat = Path.lstat
+    moved_back: list[Path] = []
+    failing = False
+
+    def publish(source: Path, destination: Path) -> None:
+        nonlocal failing
+        rename(source, destination)
+        if source.name.endswith(".tmp") and destination == target and not moved_back:
+            failing = True
+        elif source == target and destination.name.endswith(".tmp"):
+            moved_back.append(destination)
+            refuse(target)
+
+    def verify(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing and path == target:
+            failing = False
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", publish)
+    monkeypatch.setattr(Path, "lstat", verify)
+    yield moved_back
+
+
+def test_a_candidate_that_cannot_be_put_back_is_said_as_discarded(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual repair takes the name before the candidate can be put back: the
+    repair wins, and the writer's cleanup discards the candidate at its temporary.
+    Said as discarded; it used to say "remains preserved at <temporary>", which
+    the cleanup had just removed."""
+    target = folder / "state.json"
+    repair = "manual repair\n"
+
+    with (
+        put_back_refused(monkeypatch, target, lambda name: name.write_text(repair)) as moved,
+        state_file.collecting_writes() as wrote,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert len(moved) == 1 and target.read_text(encoding="utf-8") == repair
+    assert not moved[0].exists(), "the cleanup discarded the candidate"
+    # No stray file: besides the repair, only what every discard leaves, its
+    # emptied inode in the retained container (`file_io.RETAINED_ENTRY_DIRECTORY`).
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    assert sorted(entry.name for entry in folder.iterdir()) == sorted([target.name, retained.name])
+    assert all(entry.stat().st_size == 0 for entry in retained.iterdir()), "emptied"
+    assert f"a newer concurrent entry remains at {target}" in said, said
+    # Failed on d2260e9: "...; the publication candidate remains preserved at <gone>".
+    assert said.endswith("; the publication candidate was discarded"), said
+    assert wrote == []
+
+
+def test_a_candidate_the_cleanup_cannot_discard_is_said_where_it_is(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the folder turns read-only (a native EACCES) right after the
+    candidate is moved back, so it can neither be put back nor discarded. It stays
+    at its temporary, and that is what is said."""
+    target = folder / "state.json"
+
+    with (
+        put_back_refused(monkeypatch, target, lambda name: name.parent.chmod(0o500)) as moved,
+        state_file.collecting_writes() as wrote,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+    folder.chmod(0o700)
+
+    said = str(raised.value)
+    assert len(moved) == 1 and not target.exists()
+    assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "kept, where it is said to be"
+    assert "the publication candidate could not be put back" in said, said
+    assert said.endswith(f"; the publication candidate remains preserved at {moved[0]}"), said
+    assert wrote == []
+
+
+def test_an_entry_replacing_the_candidate_before_the_cleanup_is_left_and_not_claimed(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repair takes the name, then something else replaces the temporary before
+    the cleanup proves it ours again: not ours, so not discarded, and not said to be
+    the publication candidate either."""
+    target = folder / "state.json"
+    holds = state_file._holds_publication_candidate
+    proofs: list[Path] = []
+    stranger = "somebody else's\n"
+
+    def proof(
+        entry: Path,
+        candidate: file_io.PinnedPath,
+        fingerprint: file_io.FileFingerprint,
+        document: bytes,
+    ) -> tuple[os.stat_result, bool]:
+        proofs.append(entry)
+        if len(proofs) == 2:  # the cleanup's proof, after putting it back failed
+            replacement = folder / "replacement"
+            replacement.write_text(stranger, encoding="utf-8")
+            os.replace(replacement, entry)
+        return holds(entry, candidate, fingerprint, document)
+
+    monkeypatch.setattr(state_file, "_holds_publication_candidate", proof)
+    with (
+        put_back_refused(monkeypatch, target, lambda name: name.write_text("repair\n")) as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert proofs == [moved[0], moved[0]]
+    assert moved[0].read_text(encoding="utf-8") == stranger, "left as it is"
+    assert said.endswith(
+        f"; the entry now at {moved[0]} is not provably the publication candidate, "
+        "so it was left as it is"
+    ), said

@@ -13,6 +13,7 @@ from gi.repository import Adw, Gdk, Gtk
 
 from wall_in_one import paths
 from wall_in_one.theme import css, source
+from wall_in_one.ui.plain_text import markup_text
 from wall_in_one.ui.readonly_palette import ReadOnlyPalette
 
 TITLE = "Wall-in-One update needs an app restart"
@@ -74,7 +75,7 @@ class UpdateNotice(Adw.Application):
         view.add_top_bar(Adw.HeaderBar())
         page = Adw.StatusPage(
             title="Restart the open app",
-            description=DESCRIPTION,
+            description=markup_text(DESCRIPTION),
             icon_name="software-update-available-symbolic",
         )
         buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)

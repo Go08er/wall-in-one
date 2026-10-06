@@ -32,6 +32,7 @@ from wall_in_one.ui.next.prefs import (
     INTERFACE_NOTE,
     UiPrefsKeeper,
 )
+from wall_in_one.ui.plain_text import plain
 
 
 class LaunchRows:
@@ -42,13 +43,14 @@ class LaunchRows:
         self._report = report
         #: Set while the rows are being shown what is durable, not edited.
         self._showing = False
-        self.interface = Adw.ComboRow(
+        self.interface = plain(
+            Adw.ComboRow,
             title="Interface",
             subtitle=INTERFACE_NOTE,
             model=Gtk.StringList.new([label for _key, label in INTERFACE_CHOICES]),
         )
         self.interface.connect("notify::selected", self._on_interface)
-        self.gpu = Adw.SwitchRow(title="GPU acceleration", subtitle=GPU_NOTE)
+        self.gpu = plain(Adw.SwitchRow, title="GPU acceleration", subtitle=GPU_NOTE)
         self.gpu.connect("notify::active", self._on_gpu)
         self._notes: tuple[tuple[Adw.ActionRow, str], ...] = (
             (self.interface, INTERFACE_NOTE),

@@ -334,6 +334,37 @@ def real_profile_tripwire() -> Iterator[None]:
         )
 
 
+#: What GTK says when a widget that reads Pango markup (a row's title, a toast,
+#: a group's description) is given text that isn't markup, "Frog & toad" say:
+#: it then shows nothing at all. Text people, files or providers wrote is
+#: never markup (`wall_in_one.ui.plain_text`).
+MARKUP_FAILURE: Final = "from markup due to error parsing markup"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
+    """Fail a test during which GTK could not show some text as markup.
+
+    GTK only warns, on standard error, which pytest captures per phase; this
+    reads the phase's own capture. A run with ``-s`` captures nothing and so
+    checks nothing.
+    """
+    outcome = yield
+    report = outcome.get_result()  # type: ignore[attr-defined]
+    if not report.passed:
+        return
+    said = "".join(
+        content for name, content in report.sections if name == f"Captured stderr {report.when}"
+    )
+    failures = [line for line in said.splitlines() if MARKUP_FAILURE in line]
+    if failures:
+        report.outcome = "failed"
+        report.longrepr = (
+            f"GTK could not show text as markup during {report.when} "
+            f"(it shows nothing instead):\n  " + "\n  ".join(failures[:5])
+        )
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """The same check once more, after session and module fixtures are gone."""
     escapes = _escapes()

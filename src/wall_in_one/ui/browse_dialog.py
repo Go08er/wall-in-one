@@ -38,6 +38,7 @@ from wall_in_one.providers.base import (
     SearchResult,
     WallpaperCandidate,
 )
+from wall_in_one.ui.plain_text import markup_text, plain_toast
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -1030,7 +1031,7 @@ class BrowseDialog(Adw.Dialog):
         self._summary.set_label("")
         self._clear()
         self._status.set_title(title)
-        self._status.set_description(description)
+        self._status.set_description(markup_text(description))
         self._stack.set_visible_child_name("empty")
 
     def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
@@ -1233,7 +1234,7 @@ class BrowseDialog(Adw.Dialog):
             return
         self._stack.set_visible_child_name("empty")
         self._status.set_title("That search did not work")
-        self._status.set_description(message)
+        self._status.set_description(markup_text(message))
         self.report(message)
 
     def _show_result(self, result: SearchResult, page: int, append: bool = False) -> None:
@@ -1620,7 +1621,7 @@ class BrowseDialog(Adw.Dialog):
         return GLib.SOURCE_REMOVE
 
     def report(self, message: str) -> None:
-        self._toast.add_toast(Adw.Toast.new(message))
+        self._toast.add_toast(plain_toast(message))
 
     def _on_closed(self, _dialog: Adw.Dialog) -> None:
         self._closed = True

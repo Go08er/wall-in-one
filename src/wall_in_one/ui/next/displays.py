@@ -39,6 +39,7 @@ from wall_in_one.ui.next.schedule_editor import playlist_name
 from wall_in_one.ui.next.schedule_state import DisplayInfo, RouteView, Scheduling
 from wall_in_one.ui.next.state import AppState, Reason, WallpaperView, reason_text
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
+from wall_in_one.ui.plain_text import plain
 
 MODES: Final = {
     "mirrored": "One rotation, shown on every display",
@@ -296,12 +297,12 @@ class DisplaysPage(Page):
         group.append(Gtk.ListBoxRow(activatable=False, child=row))
 
         # Play a playlist now: a runtime choice, held until the schedule is resumed.
-        self.play_row = Adw.ComboRow(title="Playing now")
+        self.play_row = plain(Adw.ComboRow, title="Playing now")
         self.play_row.connect("notify::selected", self._on_play)
         group.append(self.play_row)
 
         # Cycle and Shuffle on this display: runtime choices over its saved defaults.
-        self.rotation_row = Adw.ActionRow(title="Rotation")
+        self.rotation_row = plain(Adw.ActionRow, title="Rotation")
         buttons = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
         self.cycle_toggle = Gtk.ToggleButton(label="Cycle")
         self.cycle_toggle.connect("toggled", self._on_rotation, "cycle")
@@ -326,19 +327,22 @@ class DisplaysPage(Page):
     def _build_settings(self) -> Gtk.Widget:
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
-        self.plays_row = Adw.ComboRow(title="When nothing is scheduled")
+        self.plays_row = plain(Adw.ComboRow, title="When nothing is scheduled")
         self.plays_row.set_subtitle_lines(3)
         self.plays_row.connect("notify::selected", self._on_plays)
         group.append(self.plays_row)
 
-        self.beats_row = Adw.SwitchRow(
+        self.beats_row = plain(
+            Adw.SwitchRow,
             title="Its playlist beats shared rules",
             subtitle="Rules aimed at this display still win",
         )
         self.beats_row.connect("notify::active", self._on_beats)
         group.append(self.beats_row)
 
-        self._schedule_link = Adw.ActionRow(title="Schedule for this display…", activatable=True)
+        self._schedule_link = plain(
+            Adw.ActionRow, title="Schedule for this display…", activatable=True
+        )
         self._schedule_link.add_prefix(Gtk.Image.new_from_icon_name("x-office-calendar-symbolic"))
         self._schedule_link.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
         self._schedule_link.connect(
@@ -346,13 +350,15 @@ class DisplaysPage(Page):
         )
         group.append(self._schedule_link)
 
-        self.linked_note = Adw.ActionRow(title="Same rotation on every display", subtitle_lines=3)
+        self.linked_note = plain(
+            Adw.ActionRow, title="Same rotation on every display", subtitle_lines=3
+        )
         glyph = LinkGlyph(16)
         glyph.add_css_class("dimmed")
         self.linked_note.add_prefix(glyph)
         group.append(self.linked_note)
 
-        self.colors_row = Adw.ActionRow(title="Desktop colors", subtitle_lines=2)
+        self.colors_row = plain(Adw.ActionRow, title="Desktop colors", subtitle_lines=2)
         self.colors_row.add_prefix(Gtk.Image.new_from_icon_name("preferences-color-symbolic"))
         self.colors_button = Gtk.Button(label="Use this display", valign=Gtk.Align.CENTER)
         self.colors_button.set_tooltip_text(
@@ -646,7 +652,8 @@ class DisplaysPage(Page):
                 bits.append(f"{plan.rules} rule{'s' if plan.rules != 1 else ''} aimed at it")
             if plan.colors:
                 bits.append("desktop colors are saved to follow it")
-            row = Adw.ActionRow(
+            row = plain(
+                Adw.ActionRow,
                 title=display.connector,
                 subtitle="Not connected" + (" · " + " · ".join(bits) if bits else ""),
                 subtitle_lines=3,

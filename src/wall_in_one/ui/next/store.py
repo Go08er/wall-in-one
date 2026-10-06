@@ -74,6 +74,7 @@ from wall_in_one.ui.next.store_widgets import (
     filter_label,
     install_css,
 )
+from wall_in_one.ui.plain_text import markup_text
 
 #: Card width in the grid (the Library's large size).
 CARD_WIDTH: Final = 220
@@ -672,9 +673,8 @@ class StorePage(Page):
         text = self.query.text.strip()
         if text:
             self._empty.set_title(f"No results for {quoted(text)}")
-            self._empty.set_description(
-                "Try other words" + (" or fewer filters" if self.filters_active() else "")
-            )
+            fewer = " or fewer filters" if self.filters_active() else ""
+            self._empty.set_description(markup_text(f"Try other words{fewer}"))
             clear = Gtk.Button(label="Clear search")
             clear.add_css_class("pill")
             clear.connect("clicked", lambda *_: self.set_text(""))
@@ -703,19 +703,19 @@ class StorePage(Page):
         if problem.kind == "rate-limit":
             self._error.set_icon_name("preferences-system-time-symbolic")
             self._error.set_title(f"{provider.title} needs a short break")
-            self._error.set_description(f"Too many searches in a row. {message}")
+            self._error.set_description(markup_text(f"Too many searches in a row. {message}"))
             self._error_buttons.append(retry)
         elif problem.kind == "challenge":
             self._error.set_icon_name("channel-secure-symbolic")
             self._error.set_title(f"{provider.title} wants a browser check")
             self._error.set_description(
-                f"Open {provider.site} in your browser once, then try again"
+                markup_text(f"Open {provider.site} in your browser once, then try again")
             )
             self._error_buttons.append(retry)
         elif problem.kind in ("validation", "credential", "invalid-request"):
             self._error.set_icon_name("dialog-information-symbolic")
             self._error.set_title("That search can't be made")
-            self._error.set_description(message)
+            self._error.set_description(markup_text(message))
             if self.filters_active():
                 reset = Gtk.Button(label="Reset filters")
                 reset.add_css_class("pill")
@@ -724,7 +724,7 @@ class StorePage(Page):
         else:
             self._error.set_icon_name("network-offline-symbolic")
             self._error.set_title(f"Can't reach {provider.title}")
-            self._error.set_description(message)
+            self._error.set_description(markup_text(message))
             self._error_buttons.append(retry)
             library = Gtk.Button(label="Go to Library")
             library.add_css_class("pill")

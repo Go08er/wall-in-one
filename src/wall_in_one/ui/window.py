@@ -25,6 +25,7 @@ from wall_in_one.ui.grid import WallpaperGrid
 from wall_in_one.ui.pairings_page import PairingsPage
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.palette_catalog import PaletteCatalog
+from wall_in_one.ui.plain_text import plain_toast
 from wall_in_one.ui.playlists_page import PlaylistsPage
 from wall_in_one.ui.preferences import PreferencesPage
 from wall_in_one.ui.schedules_page import SchedulesPage
@@ -554,7 +555,7 @@ class MainWindow(Adw.ApplicationWindow):
         One authoring task, one message: a result said here directly still
         carries what its task saved without confirming (`with_task_durability`).
         """
-        self._toast.add_toast(Adw.Toast.new(self._app.with_task_durability(message)))
+        self._toast.add_toast(plain_toast(self._app.with_task_durability(message)))
 
     def _teardown(self, _window: Gtk.Window) -> None:
         """Stop this window's workers and cancel their queued work, once.

@@ -73,6 +73,7 @@ from wall_in_one.ui.next.settings_state import (
     SettingsAccess,
 )
 from wall_in_one.ui.next.state import AppState
+from wall_in_one.ui.plain_text import markup_text, plain
 
 if TYPE_CHECKING:
     from wall_in_one.ui.launch_rows import LaunchRows
@@ -273,7 +274,7 @@ class SettingsPage(Page):
         status = Adw.StatusPage(
             icon_name="emblem-system-symbolic",
             title="Settings",
-            description=f"Settings is not in the new interface yet. {CLASSIC_HINT}",
+            description=markup_text(f"Settings is not in the new interface yet. {CLASSIC_HINT}"),
         )
         if self.launch is not None:
             group = Adw.PreferencesGroup()
@@ -354,8 +355,8 @@ class SettingsPage(Page):
         self, section: _Section, title: str = "", description: str = "", keywords: str = ""
     ) -> _Group:
         widget = Adw.PreferencesGroup(
-            title=GLib.markup_escape_text(title),
-            description=GLib.markup_escape_text(description) if description else None,
+            title=markup_text(title),
+            description=markup_text(description) if description else None,
         )
         group = _Group(widget, title, keywords)
         section.groups.append(group)
@@ -387,7 +388,7 @@ class SettingsPage(Page):
         return row
 
     def _switch(self, title: str, subtitle: str, key: str) -> Adw.SwitchRow:
-        row = Adw.SwitchRow(title=title, subtitle=subtitle)
+        row = plain(Adw.SwitchRow, title=title, subtitle=subtitle)
         row.connect("notify::active", lambda r, _p: self._save(key, r.get_active()))
         self._bind(key, row)
         return row
@@ -406,7 +407,9 @@ class SettingsPage(Page):
         adjustment = Gtk.Adjustment(
             lower=low, upper=high, step_increment=step, page_increment=step * 10, value=low
         )
-        row = Adw.SpinRow(title=title, subtitle=subtitle, adjustment=adjustment, digits=digits)
+        row = plain(
+            Adw.SpinRow, title=title, subtitle=subtitle, adjustment=adjustment, digits=digits
+        )
 
         def changed(spin: Adw.SpinRow, _param: object) -> None:
             value = spin.get_value()
@@ -417,7 +420,8 @@ class SettingsPage(Page):
         return row
 
     def _combo(self, title: str, subtitle: str, key: str, choices: Choices) -> Adw.ComboRow:
-        row = Adw.ComboRow(
+        row = plain(
+            Adw.ComboRow,
             title=title,
             subtitle=subtitle,
             model=Gtk.StringList.new([label for _value, label in choices]),
@@ -454,7 +458,7 @@ class SettingsPage(Page):
     def _build_notice(self) -> None:
         section = self._section("notice")
         group = self._group(section)
-        self._notice = Adw.ActionRow(title="Settings can't be changed here", use_markup=False)
+        self._notice = plain(Adw.ActionRow, title="Settings can't be changed here")
         self._notice.set_subtitle_lines(0)
         icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
         icon.add_css_class("st-warning-icon")
@@ -476,8 +480,8 @@ class SettingsPage(Page):
             "stills. Nothing is moved.",
             keywords="folders library locations directories scan files downloads stills",
         )
-        self._add_folder_row = Adw.ButtonRow(
-            title="Add folder…", start_icon_name="folder-new-symbolic"
+        self._add_folder_row = plain(
+            Adw.ButtonRow, title="Add folder…", start_icon_name="folder-new-symbolic"
         )
         self._add_folder_row.connect("activated", lambda *_: self._choose_folder())
         self._writers.append(self._add_folder_row)
@@ -512,14 +516,12 @@ class SettingsPage(Page):
             self._add(group, row, keywords)
             self._folder_rows.append(row)
         if not folders:
-            row = Adw.ActionRow(
+            row = plain(
+                Adw.ActionRow,
                 title="Not configured",
-                subtitle=(
-                    f"Suggested folder: {suggestion}"
-                    if suggestion
-                    else "Choose a folder before downloading or generating stills"
-                ),
-                use_markup=False,
+                subtitle=f"Suggested folder: {suggestion}"
+                if suggestion
+                else "Choose a folder before downloading or generating stills",
             )
             self._add(group, row, "folder empty suggested")
             self._folder_rows.append(row)
@@ -527,7 +529,7 @@ class SettingsPage(Page):
         self._apply_filter()
 
     def _folder_row(self, index: int, folder: Folder, blocked: bool) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=folder.name, subtitle=folder.path, use_markup=False)
+        row = plain(Adw.ActionRow, title=folder.name, subtitle=folder.path)
         writers: list[Gtk.Widget] = []
         if folder.missing:
             # Said plainly rather than dropped: a folder on a drive that is not
@@ -687,7 +689,7 @@ class SettingsPage(Page):
             "battery power laptop energy save stills animation unplugged",
             target="playback.battery",
         )
-        self._battery_note = Adw.ActionRow(title="Battery animation control", use_markup=False)
+        self._battery_note = plain(Adw.ActionRow, title="Battery animation control")
         self._add(
             group,
             self._battery_note,
@@ -720,7 +722,8 @@ class SettingsPage(Page):
             ),
             "mirror mirrored independent same every output connector",
         )
-        self._theme_row = Adw.ComboRow(
+        self._theme_row = plain(
+            Adw.ComboRow,
             title="Colours follow",
             subtitle="Choose which display drives Noctalia's one shell-wide palette",
         )
@@ -773,7 +776,7 @@ class SettingsPage(Page):
             ),
             "accent tint app colors window chrome",
         )
-        self._source = Adw.ActionRow(title="Palette source", use_markup=False)
+        self._source = plain(Adw.ActionRow, title="Palette source")
         self._source_swatches = widgets.Swatches([], size=12, overlap=True)
         self._source.add_prefix(self._source_swatches)
         reload = widgets.icon_button(
@@ -797,7 +800,8 @@ class SettingsPage(Page):
             "scheme adaptive tonal spot vibrant soft monochrome rainbow preview default",
             target="colors.scheme",
         )
-        palettes = Adw.ActionRow(
+        palettes = plain(
+            Adw.ActionRow,
             title="Palettes",
             subtitle="Browse, apply, duplicate and edit Noctalia's palettes; preview every scheme",
         )
@@ -818,7 +822,7 @@ class SettingsPage(Page):
         It writes Noctalia's settings, not settings.toml, so read-only settings
         don't turn it off; an upgrade still running does, and says so.
         """
-        row = Adw.ActionRow(title="Noctalia template", use_markup=False)
+        row = plain(Adw.ActionRow, title="Noctalia template")
         row.set_subtitle_lines(0)
         self._template_pill = Gtk.Box(valign=Gtk.Align.CENTER)
         row.add_suffix(self._template_pill)
@@ -845,13 +849,11 @@ class SettingsPage(Page):
         )
         # Its own row and press: installing never renders, and this does more
         # than Wall-in-One's template, so it says so before it is pressed.
-        render = Adw.ActionRow(
+        render = plain(
+            Adw.ActionRow,
             title="Render the colours now",
-            subtitle=(
-                "Asks Noctalia to re-render all of its templates, not only Wall-in-One's: "
-                "everything Noctalia themes is redrawn with its current colours."
-            ),
-            use_markup=False,
+            subtitle="Asks Noctalia to re-render all of its templates, not only Wall-in-One's: "
+            "everything Noctalia themes is redrawn with its current colours.",
         )
         render.set_subtitle_lines(0)
         self._render_button = Gtk.Button(label="Render now", valign=Gtk.Align.CENTER)
@@ -934,7 +936,7 @@ class SettingsPage(Page):
             "This window's look is saved for this window only.",
             keywords="appearance window app look",
         )
-        style_row = Adw.ActionRow(title="Window style")
+        style_row = plain(Adw.ActionRow, title="Window style")
         self._style_toggle = Adw.ToggleGroup(valign=Gtk.Align.CENTER)
         for name, label, tip in STYLES:
             toggle = Adw.Toggle(name=name, label=label)
@@ -1018,7 +1020,7 @@ class SettingsPage(Page):
         self, title: str, subtitle: str, setter: Callable[[float], None]
     ) -> tuple[Adw.ActionRow, Gtk.Scale]:
         """A 0-100% slider row that applies live while dragging; saved once it rests."""
-        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        row = plain(Adw.ActionRow, title=title, subtitle=subtitle)
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
         scale.set_draw_value(False)
         scale.set_size_request(150, -1)
@@ -1075,14 +1077,14 @@ class SettingsPage(Page):
             "reachable with one. A key saved here is written to a file only you can read.",
             keywords="online store providers internet download",
         )
-        self._key_row = Adw.ActionRow(title="Wallhaven API key", use_markup=False)
+        self._key_row = plain(Adw.ActionRow, title="Wallhaven API key")
         self._key_row.set_subtitle_lines(0)
         self._key_remove = self._button("Remove", self.clear_key, "Delete the saved key file")
         self._key_row.add_suffix(self._key_remove)
         self._add(group, self._key_row, "wallhaven api key account token", target="online.key")
         # A password row, never filled from the stored key: the page only
         # needs to know that one exists.
-        self._key_entry = Adw.PasswordEntryRow(title="New key", show_apply_button=True)
+        self._key_entry = plain(Adw.PasswordEntryRow, title="New key", show_apply_button=True)
         self._key_entry.connect("apply", lambda *_: self.save_key())
         self._key_entry.connect("entry-activated", lambda *_: self.save_key())
         # Otherwise the row stays red from a refused key while the corrected one is typed.
@@ -1119,7 +1121,7 @@ class SettingsPage(Page):
             "Renderer settings. The defaults suit most systems",
             keywords="advanced renderer expert",
         )
-        video = Adw.ExpanderRow(title="Video", subtitle="Sound, decoding and smoothing")
+        video = plain(Adw.ExpanderRow, title="Video", subtitle="Sound, decoding and smoothing")
         video.add_prefix(Gtk.Image.new_from_icon_name("video-x-generic-symbolic"))
         self._expanders.append(video)
         self._add(group, video, "video mpv mpvpaper")
@@ -1167,7 +1169,7 @@ class SettingsPage(Page):
             ),
             "smooth motion interpolation oversample linear frame rate judder",
         )
-        scenes = Adw.ExpanderRow(title="Scenes", subtitle="Wallpaper Engine")
+        scenes = plain(Adw.ExpanderRow, title="Scenes", subtitle="Wallpaper Engine")
         scenes.add_prefix(Gtk.Image.new_from_icon_name("applications-games-symbolic"))
         self._expanders.append(scenes)
         self._add(group, scenes, "scenes wallpaper engine linux-wallpaperengine steam")
@@ -1181,7 +1183,7 @@ class SettingsPage(Page):
             ),
             "run own renderer linux-wallpaperengine start",
         )
-        self._renderer = Adw.ActionRow(title="Wallpaper Engine renderer", use_markup=False)
+        self._renderer = plain(Adw.ActionRow, title="Wallpaper Engine renderer")
         self._renderer_icon = Gtk.Image()
         self._renderer.add_prefix(self._renderer_icon)
         self._add_child(group, scenes, self._renderer, "renderer installed found available")
@@ -1260,7 +1262,7 @@ class SettingsPage(Page):
                 "keyboard shortcuts keys hotkeys accelerators",
             ),
         ):
-            row = Adw.ActionRow(title=title, activatable=True)
+            row = plain(Adw.ActionRow, title=title, activatable=True)
             row.add_prefix(Gtk.Image.new_from_icon_name(icon))
             row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
             row.connect(

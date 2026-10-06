@@ -38,6 +38,7 @@ from wall_in_one.ui.next.state import (
     WallpaperView,
     solo_displays,
 )
+from wall_in_one.ui.plain_text import plain
 
 #: Community palettes listed at first; "Show more" adds this many again.
 COMMUNITY_PAGE: Final = 24
@@ -625,11 +626,13 @@ class Inspector(Gtk.Box):
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
         group.append(
-            Adw.SwitchRow(title="Animate", subtitle="Off shows the still instead", active=True)
+            plain(
+                Adw.SwitchRow, title="Animate", subtitle="Off shows the still instead", active=True
+            )
         )
-        group.append(Adw.SwitchRow(title="Sound", subtitle="Muted by default", active=False))
+        group.append(plain(Adw.SwitchRow, title="Sound", subtitle="Muted by default", active=False))
         if wallpaper.kind == "scene":
-            fps = Adw.ComboRow(title="Frame rate", subtitle="Lower saves power")
+            fps = plain(Adw.ComboRow, title="Frame rate", subtitle="Lower saves power")
             fps.set_model(
                 Gtk.StringList.new(
                     ["Use app setting (30 fps)", "15 fps", "24 fps", "30 fps", "60 fps"]
@@ -645,13 +648,16 @@ class Inspector(Gtk.Box):
             group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
             group.add_css_class("boxed-list")
             group.append(
-                Adw.ActionRow(
-                    title="Desktop colors", subtitle=widgets.color_summary(self.state, wallpaper)
+                plain(
+                    Adw.ActionRow,
+                    title="Desktop colors",
+                    subtitle=widgets.color_summary(self.state, wallpaper),
                 )
             )
             mode = {"auto": "Auto", "dark": "Dark", "light": "Light", "keep": "Don\u2019t change"}
             group.append(
-                Adw.ActionRow(
+                plain(
+                    Adw.ActionRow,
                     title="Light or dark",
                     subtitle=mode.get(wallpaper.theme_mode, wallpaper.theme_mode.capitalize()),
                 )
@@ -813,7 +819,7 @@ class Inspector(Gtk.Box):
         palette: PaletteView,
         refresh: Callable[[], None],
     ) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=palette.name, activatable=True)
+        row = plain(Adw.ActionRow, title=palette.name, activatable=True)
         strip = palette.strip(_dark())
         if strip:
             row.add_prefix(widgets.Swatches(strip, size=14, overlap=True))
@@ -842,8 +848,8 @@ class Inspector(Gtk.Box):
             listed.add(palette.key)
         custom = list(editing.palettes("custom"))
         if custom:
-            mine = Adw.ExpanderRow(
-                title="Your palettes", subtitle="Saved in Noctalia\u2019s folder"
+            mine = plain(
+                Adw.ExpanderRow, title="Your palettes", subtitle="Saved in Noctalia\u2019s folder"
             )
             for palette in custom:
                 mine.add_row(self._palette_row(editing, wallpaper, palette, refresh))
@@ -852,8 +858,10 @@ class Inspector(Gtk.Box):
             group.append(mine)
         community = list(editing.palettes("community"))
         if community:
-            expander = Adw.ExpanderRow(
-                title="Community palettes", subtitle="From Noctalia\u2019s online catalog"
+            expander = plain(
+                Adw.ExpanderRow,
+                title="Community palettes",
+                subtitle="From Noctalia\u2019s online catalog",
             )
             shown = community[: self._community_limit]
             chosen = next(
@@ -865,7 +873,7 @@ class Inspector(Gtk.Box):
                 listed.add(palette.key)
             remaining = len(community) - len(shown)
             if remaining > 0:
-                more = Adw.ButtonRow(title=f"Show {min(COMMUNITY_PAGE, remaining)} more")
+                more = plain(Adw.ButtonRow, title=f"Show {min(COMMUNITY_PAGE, remaining)} more")
 
                 def show_more(_row: Adw.ButtonRow) -> None:
                     self._community_limit += COMMUNITY_PAGE
@@ -877,7 +885,8 @@ class Inspector(Gtk.Box):
             group.append(expander)
         if wallpaper.color_mode == "palette" and wallpaper.palette not in listed:
             # A choice whose palette is not installed right now stays visible as chosen.
-            missing = Adw.ActionRow(
+            missing = plain(
+                Adw.ActionRow,
                 title=_palette_label(wallpaper.palette),
                 subtitle="Chosen, but not among the installed palettes right now",
             )
@@ -886,7 +895,7 @@ class Inspector(Gtk.Box):
             missing.add_suffix(check)
             group.append(missing)
         if not listed and wallpaper.color_mode != "palette":
-            group.append(Adw.ActionRow(title="Looking for installed palettes…"))
+            group.append(plain(Adw.ActionRow, title="Looking for installed palettes…"))
         return group
 
     def _playlists(self, wallpaper: WallpaperView) -> Gtk.Box:
@@ -918,8 +927,8 @@ class Inspector(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
-        location = Adw.ActionRow(
-            title="Location", subtitle=wallpaper.folder, subtitle_selectable=True
+        location = plain(
+            Adw.ActionRow, title="Location", subtitle=wallpaper.folder, subtitle_selectable=True
         )
         editing = self._editing
         if editing is not None:
@@ -935,9 +944,9 @@ class Inspector(Gtk.Box):
         source = {"Local": "Your folder", "Workshop": "Wallpaper Engine (Steam Workshop)"}.get(
             wallpaper.source, f"Downloaded from {wallpaper.source}"
         )
-        group.append(Adw.ActionRow(title="Source", subtitle=source))
+        group.append(plain(Adw.ActionRow, title="Source", subtitle=source))
         if wallpaper.added:
-            group.append(Adw.ActionRow(title="Added", subtitle=wallpaper.added))
+            group.append(plain(Adw.ActionRow, title="Added", subtitle=wallpaper.added))
         box.append(group)
         if editing is not None:
             removal = editing.removal(wallpaper.id)

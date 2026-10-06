@@ -26,6 +26,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk, Pango
 
 from wall_in_one import paths, tidy, ui_prefs
+from wall_in_one.ui.plain_text import plain
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -120,7 +121,7 @@ def _home(path: Path) -> str:
 
 def _row(title: str, subtitle: str = "") -> Adw.ActionRow:
     """A plain-text row: paths and Noctalia values are never markup."""
-    row = Adw.ActionRow(use_markup=False, title=title, subtitle=subtitle)
+    row = plain(Adw.ActionRow, title=title, subtitle=subtitle)
     row.set_title_lines(0)
     row.set_subtitle_lines(0)
     row.set_activatable(False)
@@ -149,7 +150,7 @@ class _ActionRow:
     def __init__(self, section: TidySection, plan: tidy.ActionPlan) -> None:
         self.section = section
         self.plan = plan
-        self.expander = Adw.ExpanderRow(use_markup=False, title=plan.title)
+        self.expander = plain(Adw.ExpanderRow, title=plan.title)
         self.expander.set_subtitle_lines(0)
         self.spinner = Gtk.Spinner(valign=Gtk.Align.CENTER, visible=False)
         self.apply = Gtk.Button(

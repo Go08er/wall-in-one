@@ -39,6 +39,7 @@ from wall_in_one.ui.next.state import (
     WallpaperView,
     solo_displays,
 )
+from wall_in_one.ui.plain_text import markup_text, plain
 
 #: Cards are built a page at a time, like the classic grid, so a library of
 #: thousands builds 72 cards, not thousands.
@@ -143,7 +144,7 @@ class LibraryPage(Page):
         filters.append(self._sort_button)
 
         # -- problems notice ---------------------------------------------------------
-        self._notice = Adw.Banner()
+        self._notice = plain(Adw.Banner)
         self._notice.set_button_label("Review")
         self._notice.connect("button-clicked", self._review_problem)
 
@@ -601,9 +602,11 @@ class LibraryPage(Page):
         self._empty.set_icon_name("folder-pictures-symbolic" if none else "edit-find-symbolic")
         self._empty.set_title("No wallpapers yet" if none else "No wallpapers match")
         self._empty.set_description(
-            "Your library is empty for now. Find wallpapers in the Store."
-            if none
-            else "Try another word, or clear the filters."
+            markup_text(
+                "Your library is empty for now. Find wallpapers in the Store."
+                if none
+                else "Try another word, or clear the filters."
+            )
         )
         self._clear.set_visible(not none)
         remaining = shown - len(self._cards)

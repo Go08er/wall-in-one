@@ -53,6 +53,7 @@ from wall_in_one.ui.next.playlists_state import (
 )
 from wall_in_one.ui.next.reorder import ReorderList
 from wall_in_one.ui.next.state import AppState, WallpaperView
+from wall_in_one.ui.plain_text import plain
 
 #: Rows built at a time, like the classic editor: rows are real widget trees.
 ENTRY_PAGE_SIZE: Final = 72
@@ -494,7 +495,7 @@ class PlaylistPage(Page):
         )
 
         # -- body -------------------------------------------------------------------
-        self._notice = Adw.Banner()
+        self._notice = plain(Adw.Banner)
         body = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=24,
@@ -689,11 +690,11 @@ class PlaylistPage(Page):
         self._playback.append(label)
         group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         group.add_css_class("boxed-list")
-        self.interval_row = Adw.ComboRow(title="Change")
+        self.interval_row = plain(Adw.ComboRow, title="Change")
         self.interval_row.set_tooltip_text("How often the next wallpaper comes on")
         self.interval_row.connect("notify::selected", self._on_interval)
         group.append(self.interval_row)
-        self.shuffle_row = Adw.ComboRow(title="Order")
+        self.shuffle_row = plain(Adw.ComboRow, title="Order")
         self.shuffle_row.connect("notify::selected", self._on_shuffle)
         group.append(self.shuffle_row)
         self._playback.append(group)

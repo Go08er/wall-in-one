@@ -32,6 +32,7 @@ from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.page import Page, Placeholder
 from wall_in_one.ui.next.playerbar import PlayerBar
 from wall_in_one.ui.next.state import AppState, ToastButton
+from wall_in_one.ui.plain_text import plain
 
 #: libadwaita 1.8's sidebar widgets, newer than the pinned pygobject-stubs.
 _Adw: Any = Adw
@@ -89,11 +90,11 @@ class ShellWindow(Adw.ApplicationWindow):
 
         # -- content side --------------------------------------------------
         self.header = Adw.HeaderBar()
-        self.banner = Adw.Banner()
+        self.banner = plain(Adw.Banner)
         self.banner.connect("button-clicked", self._on_banner)
         # Read-only states (newer files, unknown settings) have their own,
         # always visible, banner: they outlast every transient condition.
-        self.notice = Adw.Banner()
+        self.notice = plain(Adw.Banner)
         self.stack = Gtk.Stack(
             transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=120
         )
@@ -381,7 +382,7 @@ class ShellWindow(Adw.ApplicationWindow):
             self.state.banner_activated(self._banner_action)
 
     def _on_toast(self, _state: AppState, text: str, button: ToastButton | None) -> None:
-        toast = Adw.Toast(title=text, timeout=4)
+        toast = Adw.Toast(title=text, timeout=4, use_markup=False)
         if button:
             label, callback = button
             toast.set_button_label(label)
@@ -644,7 +645,7 @@ class GlassDialog(Adw.Dialog):
         self._sync()
 
     def _dial(self, group: Adw.PreferencesGroup, title: str, subtitle: str) -> Gtk.Scale:
-        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        row = plain(Adw.ActionRow, title=title, subtitle=subtitle)
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         scale.set_hexpand(True)
         scale.set_size_request(150, -1)

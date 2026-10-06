@@ -17,6 +17,7 @@ from wall_in_one import config, runtime_config
 from wall_in_one.library import schedules
 from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
+from wall_in_one.ui.plain_text import plain
 
 if TYPE_CHECKING:
     from wall_in_one.session import Session
@@ -235,12 +236,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._populate_independent_playback(session, truth)
             return group
         choices = session.playlists.all()
-        row = Adw.ComboRow(
+        row = plain(
+            Adw.ComboRow,
             title="Active playlist",
             subtitle=self._playback_description(session, truth),
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
-            # Playlist and rule names are the person's text, never markup.
-            use_markup=False,
         )
         row.set_selected(self._playback_selected(session, choices, truth))
         self._playback_row = row
@@ -267,7 +267,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         if truth is None or truth.status_version != 2 or truth.display_mode != "independent":
             self._remove_independent_live_rows(group)
             if self._playback_placeholder is None:
-                self._playback_placeholder = Adw.ActionRow()
+                self._playback_placeholder = plain(Adw.ActionRow)
                 self._playback_placeholder.add_prefix(
                     Gtk.Image(icon_name="dialog-warning-symbolic")
                 )
@@ -295,7 +295,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             else:
                 palette_subtitle = f"Noctalia colours currently follow {palette.effective}"
             if self._palette_playback_row is None:
-                self._palette_playback_row = Adw.ActionRow(title="Shell-wide colours")
+                self._palette_playback_row = plain(Adw.ActionRow, title="Shell-wide colours")
                 self._palette_playback_row.add_prefix(
                     Gtk.Image(icon_name="applications-graphics-symbolic")
                 )
@@ -309,7 +309,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 group.remove(controls.row)
             self._display_playback_rows = {}
             if self._playback_placeholder is None:
-                self._playback_placeholder = Adw.ActionRow()
+                self._playback_placeholder = plain(Adw.ActionRow)
                 group.add(self._playback_placeholder)
             self._playback_placeholder.set_title("No connected displays")
             self._playback_placeholder.set_subtitle(
@@ -357,8 +357,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         connector: str,
         choices: tuple[Any, ...],
     ) -> _DisplayControls:
-        row = Adw.ExpanderRow(title=connector, use_markup=False)
-        playlist = Adw.ComboRow(
+        row = plain(Adw.ExpanderRow, title=connector)
+        playlist = plain(
+            Adw.ComboRow,
             title="Active playlist",
             model=Gtk.StringList.new(
                 ["Follow this display's schedule", *(one.name for one in choices)]
@@ -370,7 +371,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         row.add_row(playlist)
 
-        transport = Adw.ActionRow(
+        transport = plain(
+            Adw.ActionRow,
             title="Playback",
             subtitle="Pause freezes motion; Stop releases renderer resources and keeps the still",
         )
@@ -404,7 +406,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         transport.add_suffix(transport_buttons)
         row.add_row(transport)
 
-        modes = Adw.ActionRow(
+        modes = plain(
+            Adw.ActionRow,
             title="Rotation modes",
             subtitle="Cycle advances automatically; Shuffle changes that order",
         )
@@ -614,12 +617,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         group = Adw.PreferencesGroup(title="Independent display setup")
         noun = "saved item" if records == 1 else "saved items"
         group.add(
-            Adw.ActionRow(
+            plain(
+                Adw.ActionRow,
                 title="Saved and inactive",
-                subtitle=(
-                    f"{records} {noun} are preserved. Enable independent displays in "
-                    "Settings to use them."
-                ),
+                subtitle=f"{records} {noun} are preserved. Enable independent displays in "
+                "Settings to use them.",
             )
         )
         return group
@@ -674,7 +676,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         model = Gtk.StringList.new(
             ["All media (built-in playlist)", *(one.name for one in choices)]
         )
-        row = Adw.ComboRow(title="Playlist", model=model)
+        row = plain(Adw.ComboRow, title="Playlist", model=model)
         selected = 0
         for index, playlist in enumerate(choices, start=1):
             if playlist.id == session.settings.active_playlist:
@@ -698,7 +700,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         connectors = self._schedule_connectors(session)
         if not connectors:
             group.add(
-                Adw.ActionRow(
+                plain(
+                    Adw.ActionRow,
                     title="All outputs",
                     subtitle="No named connector is available; wallpapers apply everywhere.",
                 )
@@ -708,7 +711,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         names = ["Follow default", *(one.name for one in choices)]
         self._assignment_rows.clear()
         for connector in connectors:
-            row = Adw.ComboRow(
+            row = plain(
+                Adw.ComboRow,
                 title=connector,
                 subtitle="Not attached" if connector not in connected else "Connected",
                 model=Gtk.StringList.new(names),
@@ -737,7 +741,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         if not session.schedules.rules:
             self._rule_limit = RULE_PAGE_SIZE
             self._rule_pin = ""
-            empty = Adw.ActionRow(title="No scheduled overrides")
+            empty = plain(Adw.ActionRow, title="No scheduled overrides")
             self._rules_group.add(empty)
             self._rule_rows.append(empty)
             return
@@ -753,11 +757,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
             # A named rule leads with its name and still says what it plays.
             details = f"{target} · priority {index + 1} · {rule.describe()}"
             pending = self._pending_enabled.get(rule.id)
-            row = Adw.SwitchRow(
+            row = plain(
+                Adw.SwitchRow,
                 title=playlist if rule.name is None else rule.name,
                 subtitle=details if rule.name is None else f"{playlist} · {details}",
                 active=pending[0] if pending is not None else rule.enabled,
-                use_markup=False,
             )
             row.connect("notify::active", self._make_enabled(rule.id))
             self._enabled_rows[rule.id] = row
@@ -792,7 +796,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             amount = sum(
                 rule.id not in materialised_ids for rule in session.schedules.rules[:next_limit]
             )
-            more_row = Adw.ActionRow(
+            more_row = plain(
+                Adw.ActionRow,
                 title="More scheduled overrides",
                 subtitle=f"{len(materialised_ids)} of {total} shown",
             )
@@ -831,11 +836,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
         choices = session.playlists.all()
         self._rule_choices = choices
         self._rule_connectors = self._schedule_connectors(session)
-        self._rule_target = Adw.ComboRow(
+        self._rule_target = plain(
+            Adw.ComboRow,
             title="Displays",
-            subtitle=(
-                "All displays shares this rule; a connector makes it an independent exception"
-            ),
+            subtitle="All displays shares this rule; a connector makes it an independent exception",
             model=Gtk.StringList.new(
                 [
                     "All displays",
@@ -847,7 +851,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             session.settings.display_mode == config.DISPLAY_MODE_INDEPENDENT
         )
         group.add(self._rule_target)
-        self._rule_playlist = Adw.ComboRow(
+        self._rule_playlist = plain(
+            Adw.ComboRow,
             title="Playlist",
             model=Gtk.StringList.new([one.name for one in choices] or ["Create a playlist first"]),
         )
@@ -875,7 +880,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             self._weekdays.append(button)
         group.add(weekday_box)
 
-        self._time_enabled = Adw.SwitchRow(
+        self._time_enabled = plain(
+            Adw.SwitchRow,
             title="Use a time window",
             subtitle="The end is exclusive; an earlier end time wraps past midnight",
         )

@@ -53,6 +53,7 @@ from wall_in_one.ui.next.schedule_editor import (
 from wall_in_one.ui.next.schedule_state import RouteView, RuleView, Scheduling, Settled
 from wall_in_one.ui.next.state import AppState
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
+from wall_in_one.ui.plain_text import plain
 
 #: Rows built at a time, like the classic Schedules page.
 RULE_PAGE_SIZE: Final = 48
@@ -297,7 +298,7 @@ class SchedulePage(Page):
 
         fallback_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, margin_top=4)
         fallback_list.add_css_class("boxed-list")
-        self.fallback_row = Adw.ComboRow(title="When nothing is scheduled")
+        self.fallback_row = plain(Adw.ComboRow, title="When nothing is scheduled")
         self.fallback_row.set_title_lines(2)
         self.fallback_row.set_factory(playlist_factory(state, 22))
         self.fallback_row.connect("notify::selected", self._on_fallback)

@@ -21,6 +21,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.shown_text import shown_texts  # noqa: E402
 from tests.test_tidy import _claim_folder, _noctalia_settings  # noqa: E402
 from wall_in_one import paths, tidy  # noqa: E402
 from wall_in_one.theme import noctalia  # noqa: E402
@@ -118,6 +119,8 @@ def test_the_section_previews_applies_and_undoes_each_action(
     assert any(text.startswith("Every path (3)") for text in _texts(group, tidy.LEFTOVERS))
     plugin_texts = _texts(group, tidy.PLUGIN_SETTINGS)
     assert any("remove hub_placement" in text for text in plugin_texts)
+    # "<date>-<time>" in the backup note: shown as written, not as failed markup.
+    assert any("bak-wall-in-one-<date>-<time>" in text for text in shown_texts(plugin.expander))
     assert any(text.startswith("Kept: refresh_interval_seconds") for text in plugin_texts)
     assert plugin.apply.get_visible() and plugin.apply.get_sensitive()
     assert not plugin.undo.get_visible()

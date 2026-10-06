@@ -19,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.shown_text import shown_texts  # noqa: E402
 from tests.started import started_application  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
@@ -121,6 +122,8 @@ def test_folder_labels_preserve_paths_order_and_missing_destination(
             assert row.get_title() == root.name
         missing = index == 0 and primary_missing
         assert row.get_subtitle() == (f"{root} -- not there right now" if missing else str(root))
+        # "&" in the name and the label: shown as written, not as failed markup.
+        assert row.get_title() in shown_texts(row) and row.get_subtitle() in shown_texts(row)
         assert row.has_css_class("warning") == missing
         remove = [
             button for button in _buttons(row) if button.get_icon_name() == "list-remove-symbolic"

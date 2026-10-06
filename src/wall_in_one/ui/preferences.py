@@ -27,6 +27,7 @@ from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.launch_rows import LaunchRows
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
+from wall_in_one.ui.plain_text import plain
 from wall_in_one.ui.tidy_section import TidySection
 from wall_in_one.wallpaper import renderer, scenes
 
@@ -90,7 +91,7 @@ class PreferencesPage(Adw.PreferencesPage):
 
         # Shown while settings.toml has keys this build does not know. Those
         # keys come from a file anyone can edit, so no markup.
-        self._read_only_banner = Adw.Banner(use_markup=False)
+        self._read_only_banner = plain(Adw.Banner)
         self.set_banner(self._read_only_banner)
 
         self.add(self._build_library_group())
@@ -159,9 +160,10 @@ class PreferencesPage(Adw.PreferencesPage):
         self._roots_group = group
         self._root_rows: list[Gtk.Widget] = []
 
-        self._workshop = Adw.SwitchRow(
+        self._workshop = plain(
+            Adw.SwitchRow,
             title="Scan Wallpaper Engine library",
-            subtitle=("Show installed Steam Workshop wallpapers; Wall-in-One never modifies them"),
+            subtitle="Show installed Steam Workshop wallpapers; Wall-in-One never modifies them",
         )
         self._workshop.connect("notify::active", self._on_changed)
         group.add(self._workshop)
@@ -174,9 +176,8 @@ class PreferencesPage(Adw.PreferencesPage):
 
         roots = self._app.settings.roots
         if not roots:
-            row = Adw.ActionRow(
-                title="Not configured",
-                subtitle=self._noctalia_root_subtitle(),
+            row = plain(
+                Adw.ActionRow, title="Not configured", subtitle=self._noctalia_root_subtitle()
             )
             self._roots_group.add(row)
             self._root_rows.append(row)
@@ -184,7 +185,7 @@ class PreferencesPage(Adw.PreferencesPage):
 
         read_only = bool(self._read_only_keys())
         for index, root in enumerate(roots):
-            row = Adw.ActionRow(title=root.name or str(root), subtitle=str(root), use_markup=False)
+            row = plain(Adw.ActionRow, title=root.name or str(root), subtitle=str(root))
             # Every suffix button rewrites `roots`. The row itself stays
             # sensitive so its path remains readable.
             writers: list[Gtk.Button] = []
@@ -288,21 +289,24 @@ class PreferencesPage(Adw.PreferencesPage):
             ),
         )
 
-        self._shuffle = Adw.SwitchRow(
+        self._shuffle = plain(
+            Adw.SwitchRow,
             title="Shuffle by default",
             subtitle="Initial order when the service starts",
         )
         self._shuffle.connect("notify::active", self._on_changed)
         group.add(self._shuffle)
 
-        self._cycle = Adw.SwitchRow(
+        self._cycle = plain(
+            Adw.SwitchRow,
             title="Cycle by default",
             subtitle="Initial timer state when the service starts",
         )
         self._cycle.connect("notify::active", self._on_changed)
         group.add(self._cycle)
 
-        self._interval = Adw.SpinRow(
+        self._interval = plain(
+            Adw.SpinRow,
             title="Cycle interval",
             subtitle="Seconds between changes",
             adjustment=Gtk.Adjustment(lower=5, upper=24 * 60 * 60, step_increment=30, value=300),
@@ -310,26 +314,27 @@ class PreferencesPage(Adw.PreferencesPage):
         self._interval.connect("notify::value", self._on_changed)
         group.add(self._interval)
 
-        self._dynamics = Adw.SwitchRow(
+        self._dynamics = plain(
+            Adw.SwitchRow,
             title="Animate wallpapers",
             subtitle="Play videos and Wallpaper Engine scenes. Off shows paired stills",
         )
         self._dynamics.connect("notify::active", self._on_changed)
         group.add(self._dynamics)
 
-        self._battery_animations = Adw.SwitchRow(
+        self._battery_animations = plain(
+            Adw.SwitchRow,
             title="Stop animations on battery",
-            subtitle=(
-                "Show still wallpapers on battery. Resume when plugged in, "
-                "according to your playback settings"
-            ),
+            subtitle="Show still wallpapers on battery. Resume when plugged in, "
+            "according to your playback settings",
         )
         self._battery_animations.connect("notify::active", self._on_changed)
         group.add(self._battery_animations)
-        self._power_status = Adw.ActionRow(title="Battery animation control")
+        self._power_status = plain(Adw.ActionRow, title="Battery animation control")
         group.add(self._power_status)
 
-        self._own_scenes = Adw.SwitchRow(
+        self._own_scenes = plain(
+            Adw.SwitchRow,
             title="Play Wallpaper Engine scenes",
             subtitle=(
                 "Starts linux-wallpaperengine only when no other process owns the target output"
@@ -339,15 +344,14 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._own_scenes)
 
         scene_available = scenes.is_available()
-        scene_status = Adw.ActionRow(
+        scene_status = plain(
+            Adw.ActionRow,
             title="Wallpaper Engine renderer",
-            subtitle=(
-                "linux-wallpaperengine is available"
-                if scene_available
-                else (
-                    "linux-wallpaperengine was not found. Install the Nix package or launch "
-                    "Wall-in-One from its packaged wrapper."
-                )
+            subtitle="linux-wallpaperengine is available"
+            if scene_available
+            else (
+                "linux-wallpaperengine was not found. Install the Nix package or launch "
+                "Wall-in-One from its packaged wrapper."
             ),
         )
         scene_status.add_prefix(
@@ -357,12 +361,11 @@ class PreferencesPage(Adw.PreferencesPage):
         )
         group.add(scene_status)
 
-        self._display_mode = Adw.ComboRow(
+        self._display_mode = plain(
+            Adw.ComboRow,
             title="Displays",
-            subtitle=(
-                "Same wallpaper everywhere is lighter; independent mode unlocks connector "
-                "assignments, schedules and separate Quick choices"
-            ),
+            subtitle="Same wallpaper everywhere is lighter; independent mode unlocks connector "
+            "assignments, schedules and separate Quick choices",
             model=Gtk.StringList.new(
                 ["Same wallpaper on every display", "Control displays independently"]
             ),
@@ -372,28 +375,32 @@ class PreferencesPage(Adw.PreferencesPage):
 
         self._theme_connectors: tuple[str, ...] = ()
         self._theme_attached: frozenset[str] = frozenset()
-        self._theme_source = Adw.ComboRow(
+        self._theme_source = plain(
+            Adw.ComboRow,
             title="Colours follow",
             subtitle="Choose which display drives Noctalia's one shell-wide palette",
         )
         self._theme_source.connect("notify::selected", self._on_changed)
         group.add(self._theme_source)
 
-        self._favourites_only = Adw.SwitchRow(
+        self._favourites_only = plain(
+            Adw.SwitchRow,
             title="Cycle favourites only",
             subtitle="Ignored while nothing is starred, so the rotation never empties",
         )
         self._favourites_only.connect("notify::active", self._on_changed)
         group.add(self._favourites_only)
 
-        self._muted = Adw.SwitchRow(
+        self._muted = plain(
+            Adw.SwitchRow,
             title="Mute video wallpapers",
             subtitle="The audio track stays loaded, so this takes effect immediately",
         )
         self._muted.connect("notify::active", self._on_changed)
         group.add(self._muted)
 
-        self._volume = Adw.SpinRow(
+        self._volume = plain(
+            Adw.SpinRow,
             title="Video volume",
             subtitle="Applied to the video already playing",
             adjustment=Gtk.Adjustment(
@@ -403,19 +410,19 @@ class PreferencesPage(Adw.PreferencesPage):
         self._volume.connect("notify::value", self._on_changed)
         group.add(self._volume)
 
-        self._hardware_decode = Adw.SwitchRow(
+        self._hardware_decode = plain(
+            Adw.SwitchRow,
             title="Hardware video decoding",
             subtitle="Usually lowers CPU use; turn off to diagnose decoder or driver artifacts",
         )
         self._hardware_decode.connect("notify::active", self._on_changed)
         group.add(self._hardware_decode)
 
-        self._interpolation = Adw.ComboRow(
+        self._interpolation = plain(
+            Adw.ComboRow,
             title="Smooth low-frame-rate videos",
-            subtitle=(
-                "Uses an unambiguous active-monitor refresh; mixed-rate All outputs keeps "
-                "source cadence. Linear blending may ghost"
-            ),
+            subtitle="Uses an unambiguous active-monitor refresh; mixed-rate All outputs keeps "
+            "source cadence. Linear blending may ghost",
             model=Gtk.StringList.new(
                 [_INTERPOLATION_LABELS[choice] for choice in renderer.INTERPOLATION_CHOICES]
             ),
@@ -423,7 +430,8 @@ class PreferencesPage(Adw.PreferencesPage):
         self._interpolation.connect("notify::selected", self._on_changed)
         group.add(self._interpolation)
 
-        self._scene_fps = Adw.SpinRow(
+        self._scene_fps = plain(
+            Adw.SpinRow,
             title="Wallpaper Engine frame rate",
             subtitle="Native scene-rendering limit; videos keep their source frame rate",
             adjustment=Gtk.Adjustment(
@@ -437,7 +445,8 @@ class PreferencesPage(Adw.PreferencesPage):
         self._scene_fps.connect("notify::value", self._on_changed)
         group.add(self._scene_fps)
 
-        self._scene_scaling = Adw.ComboRow(
+        self._scene_scaling = plain(
+            Adw.ComboRow,
             title="Wallpaper Engine scaling",
             subtitle="Global scene fit; videos keep their own Fill behavior",
             model=Gtk.StringList.new(
@@ -447,7 +456,8 @@ class PreferencesPage(Adw.PreferencesPage):
         self._scene_scaling.connect("notify::selected", self._on_changed)
         group.add(self._scene_scaling)
 
-        self._scene_clamp = Adw.ComboRow(
+        self._scene_clamp = plain(
+            Adw.ComboRow,
             title="Wallpaper Engine texture edges",
             subtitle="Controls sampling outside a scene's texture bounds",
             model=Gtk.StringList.new([_CLAMP_LABELS[choice] for choice in scenes.CLAMP_CHOICES]),
@@ -455,7 +465,8 @@ class PreferencesPage(Adw.PreferencesPage):
         self._scene_clamp.connect("notify::selected", self._on_changed)
         group.add(self._scene_clamp)
 
-        self._when_hidden = Adw.ComboRow(
+        self._when_hidden = plain(
+            Adw.ComboRow,
             title="When covered by a window",
             subtitle="Takes effect on the next video. Try 'Keep playing' if the others misbehave",
             model=Gtk.StringList.new(
@@ -625,7 +636,7 @@ class PreferencesPage(Adw.PreferencesPage):
             ),
         )
 
-        self._api_key_status = Adw.ActionRow(title="Wallhaven API key")
+        self._api_key_status = plain(Adw.ActionRow, title="Wallhaven API key")
         self._clear_api_key = Gtk.Button(label="Clear")
         self._clear_api_key.set_valign(Gtk.Align.CENTER)
         self._clear_api_key.add_css_class("flat")
@@ -637,7 +648,7 @@ class PreferencesPage(Adw.PreferencesPage):
         # A password row so the key is not left legible on a screen someone
         # else can see. It starts empty and is never filled from the stored
         # key: this dialogue only ever needs to know that a key exists.
-        self._api_key_entry = Adw.PasswordEntryRow(title="New key")
+        self._api_key_entry = plain(Adw.PasswordEntryRow, title="New key")
         self._api_key_entry.connect("entry-activated", self._on_save_api_key)
         # Otherwise the row stays red from a rejected key while the user is
         # already typing the corrected one.
@@ -658,22 +669,22 @@ class PreferencesPage(Adw.PreferencesPage):
             description="App appearance is separate from each pairing's desktop colours.",
         )
 
-        self._follow_palette = Adw.SwitchRow(
+        self._follow_palette = plain(
+            Adw.SwitchRow,
             title="Follow Noctalia for app colours",
             subtitle="Update this app's appearance only; pairing colour choices stay unchanged",
         )
         self._follow_palette.connect("notify::active", self._on_changed)
         group.add(self._follow_palette)
 
-        self._palette_source = Adw.ActionRow(title="Palette source")
+        self._palette_source = plain(Adw.ActionRow, title="Palette source")
         group.add(self._palette_source)
 
-        self._scheme = Adw.ComboRow(
+        self._scheme = plain(
+            Adw.ComboRow,
             title="Default adaptive colour scheme",
-            subtitle=(
-                "For previews and adaptive pairings without a chosen scheme. "
-                "Explicit pairing colours stay unchanged"
-            ),
+            subtitle="For previews and adaptive pairings without a chosen scheme. "
+            "Explicit pairing colours stay unchanged",
             model=Gtk.StringList.new(list(ALL_SCHEMES)),
         )
         self._scheme.connect("notify::selected", self._on_changed)
@@ -692,7 +703,8 @@ class PreferencesPage(Adw.PreferencesPage):
         swatch_row.set_child(box)
         group.add(swatch_row)
 
-        browse_row = Adw.ActionRow(
+        browse_row = plain(
+            Adw.ActionRow,
             title="Palettes",
             subtitle="Browse installed palettes and preview every scheme",
         )
@@ -703,7 +715,8 @@ class PreferencesPage(Adw.PreferencesPage):
         browse_row.add_suffix(browse_button)
         group.add(browse_row)
 
-        reload_row = Adw.ActionRow(
+        reload_row = plain(
+            Adw.ActionRow,
             title="Reload palette",
             subtitle="Re-read the colours Noctalia last rendered",
         )
@@ -723,7 +736,8 @@ class PreferencesPage(Adw.PreferencesPage):
                 "compositor's job -- see docs/niri.md for the window rule."
             ),
         )
-        self._opacity = Adw.SpinRow(
+        self._opacity = plain(
+            Adw.SpinRow,
             title="Window opacity",
             subtitle="Lower values let the compositor show and blur through",
             adjustment=Gtk.Adjustment(

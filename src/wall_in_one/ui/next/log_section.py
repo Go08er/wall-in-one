@@ -27,6 +27,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, GObject, Gtk, Pango
 
 from wall_in_one.ui.activity_log import ActivityLog, Entry
+from wall_in_one.ui.plain_text import markup_text, plain
 
 #: The list's height: enough to read, never the whole page.
 LIST_HEIGHT: Final = 260
@@ -91,10 +92,8 @@ class LogSection(Adw.PreferencesGroup):
         holder.set_child(self._scroller)
         self.add(holder)
 
-        self.hiding = Adw.SwitchRow(
-            title="Hide file paths",
-            subtitle=HIDE_SUBTITLE,
-            active=True,
+        self.hiding = plain(
+            Adw.SwitchRow, title="Hide file paths", subtitle=HIDE_SUBTITLE, active=True
         )
         self.hiding.connect("notify::active", lambda _row, _param: self._render())
         self.add(self.hiding)
@@ -183,12 +182,14 @@ class LogSection(Adw.PreferencesGroup):
     def _describe(self) -> None:
         shown, problems = len(self._rows), self._log.problems
         if not shown:
-            self.set_description(DESCRIPTION)
+            self.set_description(markup_text(DESCRIPTION))
             return
         count = f"{shown} entr{'y' if shown == 1 else 'ies'}"
         self.set_description(
-            f"{DESCRIPTION} This session: {count}"
-            + (f", {problems} problem{'' if problems == 1 else 's'}." if problems else ".")
+            markup_text(
+                f"{DESCRIPTION} This session: {count}"
+                + (f", {problems} problem{'' if problems == 1 else 's'}." if problems else ".")
+            )
         )
 
     def _copy(self) -> None:

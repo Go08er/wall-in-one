@@ -49,6 +49,7 @@ from wall_in_one.ui.next.settings_state import (
     SettingsAccess,
 )
 from wall_in_one.ui.next.state import AppState
+from wall_in_one.ui.plain_text import markup_text, plain
 
 #: Most unreadable files listed before the rest are summarized.
 MAX_SKIPPED_ROWS: Final = 24
@@ -294,7 +295,7 @@ class PalettesDialog(Adw.Dialog):
         search_group.add(self.search)
         self._list.add(search_group)
         self._status = Adw.PreferencesGroup()
-        self._status_row = Adw.ActionRow(use_markup=False)
+        self._status_row = plain(Adw.ActionRow)
         self._status_spinner = Adw.Spinner()
         self._status_retry = Gtk.Button(label="Retry", valign=Gtk.Align.CENTER)
         self._status_retry.connect("clicked", lambda *_: self.manager.rescan_palettes())
@@ -303,7 +304,7 @@ class PalettesDialog(Adw.Dialog):
         self._status.add(self._status_row)
         self._list.add(self._status)
         self._more = Adw.PreferencesGroup()
-        self._more_row = Adw.ActionRow()
+        self._more_row = plain(Adw.ActionRow)
         self._more_button = Gtk.Button(valign=Gtk.Align.CENTER)
         self._more_button.connect("clicked", lambda *_: self.show_more())
         self._more_row.add_suffix(self._more_button)
@@ -383,9 +384,12 @@ class PalettesDialog(Adw.Dialog):
             note = description
             if total > len(items):
                 note += f" Showing {len(items)} of {total}."
-            group = Adw.PreferencesGroup(title=label, description=GLib.markup_escape_text(note))
+            group = Adw.PreferencesGroup(
+                title=markup_text(label), description=GLib.markup_escape_text(note)
+            )
             if not items:
-                empty = Adw.ActionRow(
+                empty = plain(
+                    Adw.ActionRow,
                     title="No matches" if searching else "Nothing here yet",
                     subtitle="Try another name" if searching else _ORIGIN_EMPTY[origin],
                 )
@@ -401,14 +405,15 @@ class PalettesDialog(Adw.Dialog):
                 title="Skipped", description="Files in a palette folder that could not be read."
             )
             for note in listed.skipped[:MAX_SKIPPED_ROWS]:
-                row = Adw.ActionRow(title=note, use_markup=False)
+                row = plain(Adw.ActionRow, title=note)
                 row.set_activatable(False)
                 row.add_css_class("dimmed")
                 skipped.add(row)
             remaining = len(listed.skipped) - MAX_SKIPPED_ROWS
             if remaining > 0:
                 skipped.add(
-                    Adw.ActionRow(
+                    plain(
+                        Adw.ActionRow,
                         title=f"{remaining} more skipped files",
                         subtitle="Fix the listed files, then rescan to see the next ones.",
                     )
@@ -424,7 +429,7 @@ class PalettesDialog(Adw.Dialog):
             self._list.add(group)
 
     def _row(self, item: PaletteItem) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=item.name, subtitle=item.detail, use_markup=False)
+        row = plain(Adw.ActionRow, title=item.name, subtitle=item.detail)
         colors = item.dark if self._dark else item.light
         swatches = widgets.Swatches(list(colors), size=14)
         swatches.set_tooltip_text(
@@ -485,10 +490,11 @@ class PalettesDialog(Adw.Dialog):
             description="What each generator makes of one of your stills: the same code "
             "Noctalia runs, so this is the result rather than an approximation.",
         )
-        self._source_row = Adw.ComboRow(title="Wallpaper", model=Gtk.StringList.new([]))
+        self._source_row = plain(Adw.ComboRow, title="Wallpaper", model=Gtk.StringList.new([]))
         self._source_row.connect("notify::selected", self._on_source)
         group.add(self._source_row)
-        self.sync = Adw.SwitchRow(
+        self.sync = plain(
+            Adw.SwitchRow,
             title="Also set the scheme in Noctalia",
             subtitle="Otherwise “Use” only changes the default for adaptive wallpapers",
         )
@@ -623,7 +629,7 @@ class PaletteEditor(Adw.NavigationPage):
         )
         names = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         names.add_css_class("boxed-list")
-        self.name = Adw.EntryRow(title="Name", text=draft.name)
+        self.name = plain(Adw.EntryRow, title="Name", text=draft.name)
         self.name.set_editable(draft.renamable)
         if not draft.renamable:
             self.name.set_tooltip_text("Editing in place; duplicate it to rename")

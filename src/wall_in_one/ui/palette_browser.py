@@ -35,6 +35,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Colour, Mode, Palette, PaletteError, PalettePair
 from wall_in_one.ui.palette_catalog import CatalogState, PaletteCatalog
+from wall_in_one.ui.plain_text import markup_text, plain, plain_toast
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -389,7 +390,7 @@ class PaletteBrowserDialog(Adw.Dialog):
         page.add(search_group)
 
         self._catalog_status = Adw.PreferencesGroup()
-        self._catalog_status_row = Adw.ActionRow()
+        self._catalog_status_row = plain(Adw.ActionRow)
         self._catalog_spinner = Adw.Spinner()
         self._catalog_spinner.set_size_request(22, 22)
         self._catalog_retry = Gtk.Button(label="Retry")
@@ -401,7 +402,7 @@ class PaletteBrowserDialog(Adw.Dialog):
         page.add(self._catalog_status)
 
         self._more_group = Adw.PreferencesGroup()
-        self._more_row = Adw.ActionRow()
+        self._more_row = plain(Adw.ActionRow)
         self._more_button = Gtk.Button()
         self._more_button.set_valign(Gtk.Align.CENTER)
         self._more_button.connect("clicked", self._show_more_palettes)
@@ -420,11 +421,12 @@ class PaletteBrowserDialog(Adw.Dialog):
                 "result rather than an approximation."
             ),
         )
-        self._wallpaper = Adw.ComboRow(title="Wallpaper", model=Gtk.StringList.new([]))
+        self._wallpaper = plain(Adw.ComboRow, title="Wallpaper", model=Gtk.StringList.new([]))
         self._wallpaper.connect("notify::selected", self._on_wallpaper_changed)
         source.add(self._wallpaper)
 
-        self._variant = Adw.ComboRow(
+        self._variant = plain(
+            Adw.ComboRow,
             title="Variant",
             subtitle="Every scheme produces both; this only chooses what is shown",
             model=Gtk.StringList.new(["Dark", "Light"]),
@@ -432,7 +434,8 @@ class PaletteBrowserDialog(Adw.Dialog):
         self._variant.connect("notify::selected", self._on_variant_changed)
         source.add(self._variant)
 
-        self._sync = Adw.SwitchRow(
+        self._sync = plain(
+            Adw.SwitchRow,
             title="Also set the scheme in Noctalia",
             subtitle="Otherwise 'Use' only saves the wallpaper preview preference",
         )
@@ -590,18 +593,17 @@ class PaletteBrowserDialog(Adw.Dialog):
         if total > len(entries):
             description += f" Showing {len(entries)} of {total} matches."
         group = Adw.PreferencesGroup(
-            title=origin.label,
-            description=description,
+            title=markup_text(origin.label),
+            description=markup_text(description),
         )
         if not entries:
             searching = bool(self._palette_search.get_text().strip())
-            empty = Adw.ActionRow(
+            empty = plain(
+                Adw.ActionRow,
                 title="No matches" if searching else "Nothing here yet",
-                subtitle=(
-                    "Try a different palette name or source."
-                    if searching
-                    else _ORIGIN_EMPTY[origin]
-                ),
+                subtitle="Try a different palette name or source."
+                if searching
+                else _ORIGIN_EMPTY[origin],
             )
             empty.set_activatable(False)
             group.add(empty)
@@ -619,7 +621,7 @@ class PaletteBrowserDialog(Adw.Dialog):
         return group
 
     def _build_entry_row(self, entry: palettes.PaletteEntry) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=entry.name, subtitle=entry.describe())
+        row = plain(Adw.ActionRow, title=entry.name, subtitle=entry.describe())
         palette = entry.for_mode(self._mode)
         if palette is not None:
             row.add_prefix(swatch_strip(palette))
@@ -663,13 +665,14 @@ class PaletteBrowserDialog(Adw.Dialog):
             description="Files in a palette directory that could not be read.",
         )
         for note in self._discovery.skipped[:MAX_SKIPPED_ROWS]:
-            row = Adw.ActionRow(title=note)
+            row = plain(Adw.ActionRow, title=note)
             row.set_activatable(False)
             row.add_css_class("dim-label")
             group.add(row)
         remaining = len(self._discovery.skipped) - MAX_SKIPPED_ROWS
         if remaining > 0:
-            row = Adw.ActionRow(
+            row = plain(
+                Adw.ActionRow,
                 title=f"{remaining} more skipped files",
                 subtitle="Fix the listed source errors, then rescan to see the next group.",
             )
@@ -855,7 +858,7 @@ class PaletteBrowserDialog(Adw.Dialog):
     # -- lifecycle -------------------------------------------------------
 
     def report(self, message: str) -> None:
-        self._toast.add_toast(Adw.Toast.new(message))
+        self._toast.add_toast(plain_toast(message))
 
     def show_palette(self) -> None:
         """Called when the app's palette changed under us."""
@@ -935,7 +938,7 @@ class _PaletteEditor(Adw.Dialog):
         self.set_content_width(640)
         self.set_content_height(760)
 
-        self._name = Adw.EntryRow(title="Name")
+        self._name = plain(Adw.EntryRow, title="Name")
         self._name.set_text(name)
         self._name.connect("changed", lambda row: row.remove_css_class("error"))
         if in_place is not None:
@@ -980,7 +983,7 @@ class _PaletteEditor(Adw.Dialog):
         return toolbar
 
     def _build_row(self, key: str, label: str) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=label, subtitle=key)
+        row = plain(Adw.ActionRow, title=label, subtitle=key)
         modes: tuple[Mode, ...] = ("light", "dark")
         for mode in modes:
             button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())

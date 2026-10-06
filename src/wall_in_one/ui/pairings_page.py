@@ -33,6 +33,7 @@ from wall_in_one.theme.palette import Palette, PalettePair
 from wall_in_one.ui.palette_browser import SchemePreview, SchemePreviewLoader, swatch_strip
 from wall_in_one.ui.palette_catalog import CatalogState, PaletteCatalog
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
+from wall_in_one.ui.plain_text import markup_text, plain
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 if TYPE_CHECKING:
@@ -261,15 +262,17 @@ class PairingsPage(Gtk.Box):
             self._health_group = Adw.PreferencesGroup(
                 title="Playback unavailable · renderer failed",
                 description=(
-                    f"{bundle.health.reason}\n\n"
-                    "Playback, Quick choice, and transport retry are disabled. If this "
-                    "wallpaper was active when it failed, its paired still may remain visible; "
-                    "the service will not select it again."
+                    markup_text(
+                        f"{bundle.health.reason}\n\n"
+                        "Playback, Quick choice, and transport retry are disabled. If this "
+                        "wallpaper was active when it failed, its paired still may remain visible; "
+                        "the service will not select it again."
+                    )
                 ),
             )
             self._health_group.add_css_class("error")
-            health_row = Adw.ActionRow(
-                title="Playback disabled · remove or uninstall to reset",
+            health_row = plain(
+                Adw.ActionRow, title="Playback disabled · remove or uninstall to reset"
             )
             self._health_row = health_row
             removable = manage.is_removable(item, session.library.roots)
@@ -300,7 +303,8 @@ class PairingsPage(Gtk.Box):
 
         still_group = self._build_still_picker(item, bundle)
         if item.kind is Kind.SCENE:
-            regenerate = Adw.ActionRow(
+            regenerate = plain(
+                Adw.ActionRow,
                 title="Regenerate automatic scene still",
                 subtitle="Recapture at the target display's physical aspect and resolution",
             )
@@ -315,7 +319,8 @@ class PairingsPage(Gtk.Box):
             title="Colour policy",
             description="The swatches preview the colours this pairing will ask Noctalia to use.",
         )
-        self._mode_row = Adw.ComboRow(
+        self._mode_row = plain(
+            Adw.ComboRow,
             title="Theme mode",
             model=Gtk.StringList.new([label for label, _mode in _MODES]),
         )
@@ -561,7 +566,8 @@ class PairingsPage(Gtk.Box):
         self._still_more.connect("clicked", self._show_more_stills)
         group.add(self._still_more)
 
-        self._manual_still = Adw.ActionRow(
+        self._manual_still = plain(
+            Adw.ActionRow,
             title="Browse indexed library images…",
             subtitle="Choose a still already found by the latest library refresh",
         )

@@ -28,6 +28,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.shown_text import shown_texts  # noqa: E402
 from tests.test_browse import _record_download  # noqa: E402
 from tests.test_next_state import NAMES, FakeApplication, _library, _session  # noqa: E402
 from tests.test_providers_fakes import FakeClient, png_bytes  # noqa: E402
@@ -738,6 +739,8 @@ def test_a_key_saved_after_the_store_opened_is_used(
         page.activate(None)
         _searched(page)
         spin_until(lambda: real.nsfw_blocked == registry.NSFW_NEEDS_KEY, 5)
+        # The refusal names the URL, "&" and all: shown as written.
+        spin_until(lambda: any("&purity=" in text for text in shown_texts(page.widget)), 5)
         assert not page.purity.chips["NSFW"].get_sensitive()
         assert page.key_hint.get_visible()
         assert page.key_hint_label.get_label() == registry.NSFW_NEEDS_KEY

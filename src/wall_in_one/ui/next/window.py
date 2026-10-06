@@ -78,6 +78,7 @@ from wall_in_one.ui.next.settings import SettingsPage
 from wall_in_one.ui.next.shell import ShellWindow
 from wall_in_one.ui.next.state import AppState, Banner
 from wall_in_one.ui.next.welcome import Welcome, is_progress
+from wall_in_one.ui.plain_text import plain_toast
 from wall_in_one.ui.tidy_section import TidyCard, TidySection
 
 if TYPE_CHECKING:
@@ -281,7 +282,7 @@ class NextWindow(ShellWindow):
     # -- WindowServices: lifecycle ------------------------------------------------
     def report(self, message: str) -> None:
         """Show one transient message as a toast."""
-        self.toasts.add_toast(Adw.Toast.new(message))
+        self.toasts.add_toast(plain_toast(message))
 
     def show_page(self, page: str) -> bool:
         """Show ``page``; False (with its placeholder shown) when it is not ported yet."""

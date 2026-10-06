@@ -24,6 +24,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
+from tests.shown_text import shown_texts  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
@@ -1504,6 +1505,11 @@ def test_a_named_rule_is_shown_by_name_and_editing_it_keeps_the_name(tmp_path: P
 
     named, plain = (cast(Adw.SwitchRow, row) for row in page._rule_rows[:2])
     assert named.get_title() == "Frog & toad"
+    # Shown as written, not as markup that fails to parse and shows nothing.
+    assert "Frog & toad" in shown_texts(named)
+    playback = page._playback_row
+    assert playback is not None
+    assert any("rule Frog & toad selects" in text for text in shown_texts(playback))
     assert named.get_use_markup() is False
     assert named.get_subtitle() == "Evening · All displays · priority 1 · sat"
     assert plain.get_title() == "Evening"
@@ -1745,3 +1751,4 @@ def test_a_rule_switch_shows_the_last_queued_state_once_saved(
     page.refresh(session)
     assert not _rule_switch(page, "Evenings").get_active()
     session.shutdown()
+

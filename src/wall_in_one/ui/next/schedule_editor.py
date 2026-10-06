@@ -24,6 +24,7 @@ from wall_in_one.ui.next import schedule_model as model
 from wall_in_one.ui.next.schedule_calendar import WeekPreview
 from wall_in_one.ui.next.schedule_state import MINUTES_IN_A_DAY, RuleView, Scheduling, Settled
 from wall_in_one.ui.next.state import AppState
+from wall_in_one.ui.plain_text import plain
 
 #: Times offered: every quarter hour, as calendar apps do.
 TIMES: Final = tuple(range(0, MINUTES_IN_A_DAY, 15))
@@ -99,7 +100,8 @@ class TimeRow(Adw.ActionRow):
     """``From 18:00 ▾``: a quarter-hour list, plus the rule's own time if it is between."""
 
     def __init__(self, title: str, value: int, on_change: Callable[[], None]) -> None:
-        super().__init__(title=title)
+        super().__init__(use_markup=False)
+        self.set_title(title)  # plain: once use-markup is off (`plain_text.plain`)
         self._times = sorted({*TIMES, value})
         self.dropdown = Gtk.DropDown.new_from_strings([model.hhmm(t) for t in self._times])
         self.dropdown.set_valign(Gtk.Align.CENTER)
@@ -214,7 +216,7 @@ class RuleEditor(Adw.Dialog):
         self._playlist_ids = [playlist.id for playlist in self.state.playlists]
         if self.draft.playlist not in self._playlist_ids:
             self._playlist_ids.append(self.draft.playlist)  # shown as "Missing playlist"
-        self.playlist_row = Adw.ComboRow(title="Playlist")
+        self.playlist_row = plain(Adw.ComboRow, title="Playlist")
         self.playlist_row.set_model(Gtk.StringList.new(self._playlist_ids))
         self.playlist_row.set_factory(playlist_factory(self.state))
         self.playlist_row.set_selected(self._playlist_ids.index(self.draft.playlist))
@@ -255,7 +257,7 @@ class RuleEditor(Adw.Dialog):
         group = Adw.PreferencesGroup(title="Time")
         draft = self.draft
         timed = model.has_window(draft)
-        self.all_day = Adw.SwitchRow(title="All day", active=not timed)
+        self.all_day = plain(Adw.SwitchRow, title="All day", active=not timed)
         self.all_day.connect("notify::active", lambda *_args: self._changed())
         group.add(self.all_day)
         start = draft.start if timed and draft.start is not None else 9 * 60
@@ -268,7 +270,7 @@ class RuleEditor(Adw.Dialog):
 
     def _months_group(self) -> Gtk.Widget:
         group = Adw.PreferencesGroup(title="Months")
-        self.all_year = Adw.SwitchRow(title="All year", active=not self.draft.months)
+        self.all_year = plain(Adw.SwitchRow, title="All year", active=not self.draft.months)
         self.all_year.connect("notify::active", lambda *_args: self._changed())
         group.add(self.all_year)
         grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True, margin_top=10)
@@ -295,7 +297,7 @@ class RuleEditor(Adw.Dialog):
         if self.draft.connector and self.draft.connector not in self._connectors:
             self._connectors.append(self.draft.connector)
         labels = ["All displays", *self._connectors[1:]]
-        self.display_row = Adw.ComboRow(title="Display", model=Gtk.StringList.new(labels))
+        self.display_row = plain(Adw.ComboRow, title="Display", model=Gtk.StringList.new(labels))
         self.display_row.set_selected(self._connectors.index(self.draft.connector))
         if self.scheduling.saved_display_mode() == "mirrored":
             self.display_row.set_subtitle(
@@ -303,11 +305,11 @@ class RuleEditor(Adw.Dialog):
             )
         self.display_row.connect("notify::selected", lambda *_args: self._changed())
         group.add(self.display_row)
-        self.enabled_row = Adw.SwitchRow(title="Use this rule", active=self.draft.enabled)
+        self.enabled_row = plain(Adw.SwitchRow, title="Use this rule", active=self.draft.enabled)
         self.enabled_row.connect("notify::active", lambda *_args: self._changed())
         group.add(self.enabled_row)
         if self.draft.name:
-            named = Adw.ActionRow(title="Name", subtitle=self.draft.name)
+            named = plain(Adw.ActionRow, title="Name", subtitle=self.draft.name)
             named.set_tooltip_text("Rules are named with “wall-in-one ctl schedule name”")
             group.add(named)
         return group

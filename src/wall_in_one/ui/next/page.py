@@ -19,6 +19,7 @@ from gi.repository import Adw, Gtk
 
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.state import AppState
+from wall_in_one.ui.plain_text import markup_text
 
 
 class Page:
@@ -70,7 +71,9 @@ class Placeholder(Page):
     ) -> None:
         self.name, self.title = name, title
         super().__init__(state)
-        self.status = Adw.StatusPage(icon_name=icon, title=title, description=description)
+        self.status = Adw.StatusPage(
+            icon_name=icon, title=title, description=markup_text(description)
+        )
         self.widget = self.status
 
 

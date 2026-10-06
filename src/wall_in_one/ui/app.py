@@ -4446,7 +4446,21 @@ class Application(Adw.Application):
                 if not self._inventory_installable(request.inventory):
                     # The markers are saved; the next valid publication carries them.
                     return _RuntimeHealthResult(request)
-                document_changed = _runtime_installed(settings, snapshot)
+                try:
+                    document_changed = _runtime_installed(settings, snapshot)
+                except runtime_config.RuntimeConfigError as error:
+                    # The markers are saved whatever the compiler makes of
+                    # them: adopt them, and say why this publication stopped
+                    # as every other one does (`_apply_runtime_health_result`).
+                    return _RuntimeHealthResult(
+                        request,
+                        changed=changed,
+                        accepted=True,
+                        store=snapshot.pairings,
+                        publication=_RuntimePublication(
+                            request.authoring_generation, error=str(error)
+                        ),
+                    )
                 # An unchanged compiled document already contains these
                 # markers. Re-sending the same stale/non-durable test reply on
                 # every poll would create a reload loop.
@@ -4542,14 +4556,18 @@ class Application(Adw.Application):
         publication = result.publication
         if publication is None:
             return
+        # The same publication-problem path as the compile lane's
+        # (`_finish_runtime_compile`): said, and kept until one gets through.
+        problem = ""
         if publication.error:
-            self.window_report(publication.error)
+            problem = publication.error
         elif publication.unavailable:
             self._status_model.mark_unavailable(forget=False)
         elif publication.response is not None and not publication.response.ok:
-            self.window_report(
-                f"Runtime rejected the new configuration: {publication.response.message}"
-            )
+            problem = f"Runtime rejected the new configuration: {publication.response.message}"
+        if problem:
+            self.window_report(problem)
+        self._set_publication_problem(problem)
 
     def refresh_runtime_status(self) -> bool:
         """Synchronously refresh state for non-GUI compatibility callers."""

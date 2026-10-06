@@ -87,6 +87,32 @@ def download_root(settings: config.Settings) -> Path | None:
     return configured[0] if configured else None
 
 
+def _unfinished_replay(failures: Sequence[str]) -> str:
+    """What a pending removal's replayed cleanup couldn't finish, said to the window."""
+    return (
+        "Pending removal cleanup could not finish: "
+        + "; ".join(failures[:3])
+        + ". Fix the state-directory problem and refresh to retry."
+    )
+
+
+def _unfinished_library_cleanup(result: LibraryRefreshResult) -> str:
+    """Everything one reconciliation couldn't clean up, as one message, or empty.
+
+    For a reconciliation a newer scan superseded: its cleanups are adopted
+    without its Library, and nobody else says what it couldn't finish. The
+    current one says the same through `_finish_library_refresh`.
+    """
+    said = []
+    if result.replay_failures:
+        said.append(_unfinished_replay(result.replay_failures))
+    if result.workshop_cleanup_failures:
+        said.append(
+            "Workshop uninstall" + manage.metadata_cleanup_note(result.workshop_cleanup_failures)
+        )
+    return " ".join(said)
+
+
 def _with_durability(message: str, warnings: Sequence[str]) -> str:
     """``message``, then each warning it doesn't already say, as sentences of one message."""
     said = [message.rstrip(" .")] if message.strip() else []
@@ -2587,9 +2613,13 @@ class Application(Adw.Application):
             self._removed_item_paths.update(removed_paths)
             if generation != self._library_scan_generation:
                 # The cleanup is durable even when a newer scan won. Mirror
-                # only semantic deletion facts, never the stale Library.
+                # only semantic deletion facts, never the stale Library, and
+                # say once what this cleanup couldn't finish: nobody else will.
                 self._session.adopt_library_cleanups(result.cleanups)
                 self._session.adopt_library_fault_repairs(result.repaired_faults)
+                unfinished = _unfinished_library_cleanup(result)
+                if unfinished:
+                    self.window_report(unfinished)
                 return
             try:
                 self._session.adopt_library_refresh(result)
@@ -2603,11 +2633,7 @@ class Application(Adw.Application):
                 )
                 self._adopt_runtime_library_scan(generation)
                 if result.replay_failures:
-                    self.window_report(
-                        "Pending removal cleanup could not finish: "
-                        + "; ".join(result.replay_failures[:3])
-                        + ". Fix the state-directory problem and refresh to retry."
-                    )
+                    self.window_report(_unfinished_replay(result.replay_failures))
                 self._finish_library_refresh(scan_generation=generation)
             except Exception as error:  # defensive GTK delivery boundary
                 self._library_reconciliation_failed(generation, str(error))

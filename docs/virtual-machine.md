@@ -73,8 +73,13 @@ runtime:
 
 ```console
 $ nix build -L .#checks.x86_64-linux.service-rss
-$ cat result/summary.txt
+$ nix log .#checks.x86_64-linux.service-rss
 ```
+
+The measurements go to the build log; the result holds only `verdict.txt`, the
+pass and the limits it was held to. Measurements vary from run to run, so
+keeping them out of the result makes it the same on every build, and
+`nix build --rebuild` can confirm it.
 
 That check starts three fresh services for each one-/three-display shape and
 power-policy case, from handwritten resolved configs representing a
@@ -102,11 +107,12 @@ resident thread counts (one disabled, two enabled) and bounded open descriptors.
 A separate launch discovers the supported ceiling of 64 synthetic connectors,
 routes commands to all of them, and validates the resulting atomic status
 snapshot. That is a correctness stress, not a memory promise for a normal
-desktop. `samples-kib.tsv`, `idle-cpu.tsv`, `summary.json`, the status snapshots,
-per-process `status`/`smaps_rollup` snapshots, and service logs are retained in
-the result for review. Peak observations also retain maps and available full
-`smaps` alongside `process-counts.tsv`. `library-slope.tsv` records one-display
-observations at
+desktop. The log shows the summary and every table: `samples-kib.tsv`,
+`idle-cpu.tsv`, `process-counts.tsv`, `warmup-rss.tsv`, `library-slope.tsv` and
+the power summaries. The status snapshots, per-process `status`/`smaps_rollup`
+snapshots, peak maps and `smaps`, and service logs are written next to them in
+the build tree, which `nix build --keep-failed` keeps when a run fails.
+`library-slope.tsv` records one-display observations at
 64, 300, and 600 library items to make allocator growth diagnosable; those
 smaller shapes do not replace the 600-item gate. The Python app and GUI are
 never started; a small isolated Python client only speaks the public socket and

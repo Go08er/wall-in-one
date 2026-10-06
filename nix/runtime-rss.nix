@@ -194,7 +194,13 @@ pkgs.runCommand "wall-in-one-service-rss"
     nativeBuildInputs = [ pkgs.gawk pkgs.python314 pkgs.coreutils ];
   }
   ''
-    mkdir -p "$out" "$TMPDIR/state" "$TMPDIR/runtime"
+    # Every measurement and snapshot goes to $artifacts, in the build tree, and
+    # the numbers are printed to the build log. The output holds only the
+    # verdict and the limits, so it is the same on every build and
+    # `nix build --rebuild` can check it. (`--keep-failed` keeps the
+    # artifacts of a failed run.)
+    artifacts="$TMPDIR/artifacts"
+    mkdir -p "$artifacts" "$TMPDIR/state" "$TMPDIR/runtime"
     # Even feature-enabled measurements must never inspect the builder's real
     # system bus. Exercise quiet bounded retries against a missing private path.
     export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$TMPDIR/no-power-bus"
@@ -243,12 +249,12 @@ pkgs.runCommand "wall-in-one-service-rss"
       # No host configuration or service-activation directories are loaded.
       ${pkgs.dbus}/bin/dbus-daemon --config-file ${privateBusConfig} \
         --nofork --nopidfile --print-address=1 \
-        > "$bus_address_file" 2> "$out/power-$power_source-bus.stderr" &
+        > "$bus_address_file" 2> "$artifacts/power-$power_source-bus.stderr" &
       power_bus_pid=$!
       for attempt in $(${pkgs.coreutils}/bin/seq 1 200); do
         [ -s "$bus_address_file" ] && break
         if ! kill -0 "$power_bus_pid" 2>/dev/null; then
-          cat "$out/power-$power_source-bus.stderr" >&2
+          cat "$artifacts/power-$power_source-bus.stderr" >&2
           echo "disposable power bus exited before readiness" >&2
           exit 1
         fi
@@ -263,12 +269,12 @@ pkgs.runCommand "wall-in-one-service-rss"
       ${pkgs.python314}/bin/python ${./fake-upower.py} \
         ${lib.getLib pkgs.dbus}/lib/libdbus-1.so.3 \
         "$DBUS_SYSTEM_BUS_ADDRESS" "$power_source" \
-        > "$provider_ready_file" 2> "$out/power-$power_source-provider.stderr" &
+        > "$provider_ready_file" 2> "$artifacts/power-$power_source-provider.stderr" &
       power_provider_pid=$!
       for attempt in $(${pkgs.coreutils}/bin/seq 1 200); do
         [ -s "$provider_ready_file" ] && break
         if ! kill -0 "$power_provider_pid" 2>/dev/null; then
-          cat "$out/power-$power_source-provider.stderr" >&2
+          cat "$artifacts/power-$power_source-provider.stderr" >&2
           echo "disposable UPower provider exited before readiness" >&2
           exit 1
         fi
@@ -281,14 +287,14 @@ pkgs.runCommand "wall-in-one-service-rss"
       export WALL_IN_ONE_RSS_POWER_SOURCE="$power_source"
     }
 
-    printf 'shape\trun\tsample\trss_kib\n' > "$out/samples-kib.tsv"
+    printf 'shape\trun\tsample\trss_kib\n' > "$artifacts/samples-kib.tsv"
     printf 'shape\trun\toutputs\telapsed_ms\tclock_ticks_per_second\tcpu_ticks\tcpu_millipercent\n' \
-      > "$out/idle-cpu.tsv"
+      > "$artifacts/idle-cpu.tsv"
     printf 'library_items\tresolved_entry_occurrences\trss_kib\tstatus_bytes\n' \
-      > "$out/library-slope.tsv"
+      > "$artifacts/library-slope.tsv"
     printf 'shape\trun\trss_before_request_kib\trss_after_status_kib\trss_after_controls_kib\n' \
-      > "$out/warmup-rss.tsv"
-    printf 'shape\trun\tthreads\tfile_descriptors\n' > "$out/process-counts.tsv"
+      > "$artifacts/warmup-rss.tsv"
+    printf 'shape\trun\tthreads\tfile_descriptors\n' > "$artifacts/process-counts.tsv"
     clock_ticks=$(${pkgs.glibc.bin}/bin/getconf CLK_TCK)
     if [ -z "$clock_ticks" ] || [ "$clock_ticks" -le 0 ]; then
       echo "could not read a positive CLK_TCK" >&2
@@ -305,13 +311,13 @@ pkgs.runCommand "wall-in-one-service-rss"
       fi
       if [ "$observed_rss" -gt "$run_peak" ]; then
         run_peak="$observed_rss"
-        printf '%s\n' "$observed_rss" > "$out/peak-rss-$label-run-$run-kib.txt"
+        printf '%s\n' "$observed_rss" > "$artifacts/peak-rss-$label-run-$run-kib.txt"
         # procfs sources are read-only, so their copied artifacts are too.
         # Replace only these gate-owned snapshots when a later peak wins.
-        cp --remove-destination "/proc/$service_pid/status" "$out/peak-proc-status-$label-run-$run.txt"
-        cp --remove-destination "/proc/$service_pid/maps" "$out/peak-maps-$label-run-$run.txt"
+        cp --remove-destination "/proc/$service_pid/status" "$artifacts/peak-proc-status-$label-run-$run.txt"
+        cp --remove-destination "/proc/$service_pid/maps" "$artifacts/peak-maps-$label-run-$run.txt"
         if [ -r "/proc/$service_pid/smaps" ]; then
-          cp --remove-destination "/proc/$service_pid/smaps" "$out/peak-smaps-$label-run-$run.txt"
+          cp --remove-destination "/proc/$service_pid/smaps" "$artifacts/peak-smaps-$label-run-$run.txt"
         fi
       fi
     }
@@ -366,7 +372,7 @@ pkgs.runCommand "wall-in-one-service-rss"
         capture_run_peak "$rss_before_request"
         export WALL_IN_ONE_RSS_STATUS_ONLY=1
         if ! ${pkgs.python314}/bin/python ${warmClient} \
-          > "$out/status-$label-run-$run-before-controls.json"; then
+          > "$artifacts/status-$label-run-$run-before-controls.json"; then
           cat "$stdout" >&2
           cat "$stderr" >&2
           echo "runtime status warm-up failed in $label run $run" >&2
@@ -376,7 +382,7 @@ pkgs.runCommand "wall-in-one-service-rss"
         capture_run_peak "$rss_after_status"
         unset WALL_IN_ONE_RSS_STATUS_ONLY
         if ! ${pkgs.python314}/bin/python ${warmClient} \
-          > "$out/status-$label-run-$run.json"; then
+          > "$artifacts/status-$label-run-$run.json"; then
           if kill -0 "$service_pid" 2>/dev/null; then
             echo "runtime remained alive after closing the client connection" >&2
           else
@@ -394,7 +400,7 @@ pkgs.runCommand "wall-in-one-service-rss"
         printf '%s\t%s\t%s\t%s\t%s\n' \
           "$label" "$run" "$rss_before_request" "$rss_after_status" \
           "$rss_after_controls" \
-          >> "$out/warmup-rss.tsv"
+          >> "$artifacts/warmup-rss.tsv"
         for rss in "$rss_before_request" "$rss_after_status" "$rss_after_controls"; do
           if [ -z "$rss" ]; then
             echo "could not read warm-up VmRSS in $label run $run" >&2
@@ -404,9 +410,9 @@ pkgs.runCommand "wall-in-one-service-rss"
           [ "$rss" -lt "$shape_minimum" ] && shape_minimum="$rss"
           [ "$rss" -gt "$run_peak" ] && run_peak="$rss"
         done
-        cp "/proc/$service_pid/status" "$out/proc-status-$label-run-$run.txt"
+        cp "/proc/$service_pid/status" "$artifacts/proc-status-$label-run-$run.txt"
         if [ -r "/proc/$service_pid/smaps_rollup" ]; then
-          cp "/proc/$service_pid/smaps_rollup" "$out/smaps-$label-run-$run.txt"
+          cp "/proc/$service_pid/smaps_rollup" "$artifacts/smaps-$label-run-$run.txt"
         fi
 
         cpu_before=$(awk '{ print $14 + $15 }' "/proc/$service_pid/stat")
@@ -431,7 +437,7 @@ pkgs.runCommand "wall-in-one-service-rss"
           ${pkgs.coreutils}/bin/sleep 0.05
         done
         printf '%s\t%s\t%s\t%s\n' "$label" "$run" "$threads" "$descriptors" \
-          >> "$out/process-counts.tsv"
+          >> "$artifacts/process-counts.tsv"
         if [ "$threads" -ne "$expected_threads" ]; then
           echo "$label run $run retained $threads threads; expected $expected_threads" >&2
           failed=1
@@ -450,7 +456,7 @@ pkgs.runCommand "wall-in-one-service-rss"
           fi
           export WALL_IN_ONE_RSS_STATUS_ONLY=1
           ${pkgs.python314}/bin/python ${warmClient} \
-            > "$out/status-$label-run-$run-after-idle.json"
+            > "$artifacts/status-$label-run-$run-after-idle.json"
           unset WALL_IN_ONE_RSS_STATUS_ONLY
         fi
         elapsed_ms=$(( (time_after - time_before) / 1000000 ))
@@ -474,7 +480,7 @@ pkgs.runCommand "wall-in-one-service-rss"
           && shape_cpu_maximum="$cpu_millipercent"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
           "$label" "$run" "$output_count" "$elapsed_ms" "$clock_ticks" \
-          "$cpu_ticks" "$cpu_millipercent" >> "$out/idle-cpu.tsv"
+          "$cpu_ticks" "$cpu_millipercent" >> "$artifacts/idle-cpu.tsv"
 
         for sample in $(${pkgs.coreutils}/bin/seq 1 20); do
           if ! kill -0 "$service_pid" 2>/dev/null; then
@@ -491,13 +497,13 @@ pkgs.runCommand "wall-in-one-service-rss"
           [ "$rss" -lt "$shape_minimum" ] && shape_minimum="$rss"
           capture_run_peak "$rss"
           printf '%s\t%s\t%s\t%s\n' "$label" "$run" "$sample" "$rss" \
-            >> "$out/samples-kib.tsv"
+            >> "$artifacts/samples-kib.tsv"
           ${pkgs.coreutils}/bin/sleep 0.05
         done
         shape_peaks="$shape_peaks $run_peak"
         cleanup
-        cp "$stdout" "$out/service-$label-run-$run.stdout"
-        cp "$stderr" "$out/service-$label-run-$run.stderr"
+        cp "$stdout" "$artifacts/service-$label-run-$run.stdout"
+        cp "$stderr" "$artifacts/service-$label-run-$run.stderr"
       done
 
       set -- $shape_peaks
@@ -536,7 +542,7 @@ pkgs.runCommand "wall-in-one-service-rss"
     unset WALL_IN_ONE_RSS_BATTERY
     printf '{"power_source":"unknown","bus":"missing-private","one_display":{"maximum_kib":%s,"hard_limit_kib":5120,"idle_cpu_max_millipercent":%s},"three_display":{"maximum_kib":%s,"hard_limit_kib":10240,"idle_cpu_max_millipercent":%s}}\n' \
       "$battery_one_maximum" "$battery_one_cpu_maximum" \
-      "$battery_three_maximum" "$battery_three_cpu_maximum" > "$out/battery-summary.json"
+      "$battery_three_maximum" "$battery_three_cpu_maximum" > "$artifacts/battery-summary.json"
 
     # Measure the actual authenticated/subscribed worker, including its bus
     # buffers, on both authoritative power states. The fixture's own process
@@ -546,10 +552,10 @@ pkgs.runCommand "wall-in-one-service-rss"
       start_power_fixture "$power_source"
       measure_shape "one-power-$power_source" ${mkRuntimeConfigWithBattery true 1 600 100} 1 5120
       printf '{"power_source":"%s","outputs":1,"maximum_kib":%s,"hard_limit_kib":5120,"idle_cpu_max_millipercent":%s}\n' \
-        "$power_source" "$shape_maximum" "$shape_cpu_maximum" > "$out/power-$power_source-one-summary.json"
+        "$power_source" "$shape_maximum" "$shape_cpu_maximum" > "$artifacts/power-$power_source-one-summary.json"
       measure_shape "three-power-$power_source" ${mkRuntimeConfigWithBattery true 3 600 100} 3 10240
       printf '{"power_source":"%s","outputs":3,"maximum_kib":%s,"hard_limit_kib":10240,"idle_cpu_max_millipercent":%s}\n' \
-        "$power_source" "$shape_maximum" "$shape_cpu_maximum" > "$out/power-$power_source-three-summary.json"
+        "$power_source" "$shape_maximum" "$shape_cpu_maximum" > "$artifacts/power-$power_source-three-summary.json"
       cleanup_power_fixture
     done
     unset WALL_IN_ONE_RSS_BATTERY
@@ -567,7 +573,7 @@ pkgs.runCommand "wall-in-one-service-rss"
       socket="$TMPDIR/runtime/wall-in-one-runtime-$label.sock"
       stdout="$TMPDIR/service-$label.stdout"
       stderr="$TMPDIR/service-$label.stderr"
-      status="$out/status-$label.json"
+      status="$artifacts/status-$label.json"
       cp "$config_source" "$config"
 
       ${wallInOneService}/bin/wall-in-one-service \
@@ -596,17 +602,17 @@ pkgs.runCommand "wall-in-one-service-rss"
       ${pkgs.coreutils}/bin/sleep 0.1
       rss_before_request=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$service_pid/status")
       export WALL_IN_ONE_RSS_STATUS_ONLY=1
-      ${pkgs.python314}/bin/python ${warmClient} > "$out/status-$label-before-controls.json"
+      ${pkgs.python314}/bin/python ${warmClient} > "$artifacts/status-$label-before-controls.json"
       rss_after_status=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$service_pid/status")
       unset WALL_IN_ONE_RSS_STATUS_ONLY
       ${pkgs.python314}/bin/python ${warmClient} > "$status"
       rss_after_controls=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$service_pid/status")
       printf '%s\t1\t%s\t%s\t%s\n' \
         "$label" "$rss_before_request" "$rss_after_status" "$rss_after_controls" \
-        >> "$out/warmup-rss.tsv"
-      cp "/proc/$service_pid/status" "$out/proc-status-$label.txt"
+        >> "$artifacts/warmup-rss.tsv"
+      cp "/proc/$service_pid/status" "$artifacts/proc-status-$label.txt"
       if [ -r "/proc/$service_pid/smaps_rollup" ]; then
-        cp "/proc/$service_pid/smaps_rollup" "$out/smaps-$label.txt"
+        cp "/proc/$service_pid/smaps_rollup" "$artifacts/smaps-$label.txt"
       fi
       scale_peak=0
       for rss in "$rss_before_request" "$rss_after_status" "$rss_after_controls"; do
@@ -628,17 +634,17 @@ pkgs.runCommand "wall-in-one-service-rss"
       status_bytes=$(wc -c < "$status")
       printf '%s\t%s\t%s\t%s\n' \
         "$library_count" "$resolved_count" "$scale_peak" "$status_bytes" \
-        >> "$out/library-slope.tsv"
+        >> "$artifacts/library-slope.tsv"
       cleanup
-      cp "$stdout" "$out/service-$label.stdout"
-      cp "$stderr" "$out/service-$label.stderr"
+      cp "$stdout" "$artifacts/service-$label.stdout"
+      cp "$stderr" "$artifacts/service-$label.stderr"
     }
 
     measure_library_scale 64 10 ${mkRuntimeConfig 1 64 10}
     measure_library_scale 300 50 ${mkRuntimeConfig 1 300 50}
-    one_status_bytes=$(wc -c < "$out/status-one-run-1.json")
+    one_status_bytes=$(wc -c < "$artifacts/status-one-run-1.json")
     printf '600\t900\t%s\t%s\n' "$one_maximum" "$one_status_bytes" \
-      >> "$out/library-slope.tsv"
+      >> "$artifacts/library-slope.tsv"
 
     # The supported connector ceiling is a routing/status correctness stress,
     # not a RAM promise for a real one- or three-monitor desktop.
@@ -667,26 +673,41 @@ pkgs.runCommand "wall-in-one-service-rss"
     export WALL_IN_ONE_RSS_OUTPUTS=64
     export WALL_IN_ONE_RSS_LIBRARY=600
     export WALL_IN_ONE_RSS_AUTHORED=100
-    ${pkgs.python314}/bin/python ${warmClient} > "$out/status-stress-64.json"
+    ${pkgs.python314}/bin/python ${warmClient} > "$artifacts/status-stress-64.json"
     cleanup
-    cp "$TMPDIR/service-stress.stdout" "$out/service-stress.stdout"
-    cp "$TMPDIR/service-stress.stderr" "$out/service-stress.stderr"
+    cp "$TMPDIR/service-stress.stdout" "$artifacts/service-stress.stdout"
+    cp "$TMPDIR/service-stress.stderr" "$artifacts/service-stress.stderr"
 
     printf 'service_binary_bytes=%s\nlibrary_items=600\nresolved_entry_occurrences=900\none_display_minimum_kib=%s\none_display_maximum_kib=%s\none_display_run_peaks_kib=%s,%s,%s\none_display_hard_limit_kib=5120\none_display_idle_cpu_max_millipercent=%s\nthree_display_minimum_kib=%s\nthree_display_maximum_kib=%s\nthree_display_run_peaks_kib=%s,%s,%s\nthree_display_hard_limit_kib=10240\nthree_display_idle_cpu_max_millipercent=%s\nclock_ticks_per_second=%s\nidle_cpu_hard_limit_millipercent=2000\nidle_cpu_formula=cpu_ticks*100000000/(clock_ticks_per_second*elapsed_ms)\nstress_connectors=64\n' \
       "$service_binary_bytes" \
       "$one_minimum" "$one_maximum" "$one_peak_1" "$one_peak_2" "$one_peak_3" \
       "$one_cpu_maximum" "$three_minimum" "$three_maximum" "$three_peak_1" \
       "$three_peak_2" "$three_peak_3" "$three_cpu_maximum" "$clock_ticks" \
-      > "$out/summary.txt"
+      > "$artifacts/summary.txt"
     printf '{"service_binary_bytes":%s,"library_items":600,"resolved_entry_occurrences":900,"one_display":{"minimum_kib":%s,"maximum_kib":%s,"run_peak_kib":[%s,%s,%s],"hard_limit_kib":5120,"idle_cpu_max_millipercent":%s},"three_display":{"minimum_kib":%s,"maximum_kib":%s,"run_peak_kib":[%s,%s,%s],"hard_limit_kib":10240,"idle_cpu_max_millipercent":%s},"clock_ticks_per_second":%s,"idle_cpu_hard_limit_millipercent":2000,"stress_connectors":64}\n' \
       "$service_binary_bytes" \
       "$one_minimum" "$one_maximum" "$one_peak_1" "$one_peak_2" "$one_peak_3" \
       "$one_cpu_maximum" "$three_minimum" "$three_maximum" "$three_peak_1" \
       "$three_peak_2" "$three_peak_3" "$three_cpu_maximum" "$clock_ticks" \
-      > "$out/summary.json"
-    cat "$out/summary.txt"
+      > "$artifacts/summary.json"
+    # The numbers, for the log (`nix log`): the summary, then every table.
+    for report in summary.txt samples-kib.tsv idle-cpu.tsv process-counts.tsv \
+      warmup-rss.tsv library-slope.tsv battery-summary.json power-*-summary.json; do
+      echo "== $report"
+      cat "$artifacts/$report"
+    done
 
     [ "$failed" -eq 0 ] || exit 1
 
+    mkdir -p "$out"
+    printf '%s\n' \
+      "service-rss: pass" \
+      "one_display_hard_limit_kib=5120" \
+      "three_display_hard_limit_kib=10240" \
+      "idle_cpu_hard_limit_millipercent=2000" \
+      "library_items=600" \
+      "resolved_entry_occurrences=900" \
+      "stress_connectors=64" \
+      > "$out/verdict.txt"
     trap - EXIT
   ''

@@ -113,6 +113,12 @@ class FakeWindow:
     def apply_settings(self, _settings: config.Settings) -> None: ...
 
 
+#: A wait that covers real storage (a removal's trash, fsync and own scan, or
+#: a publication's document write) waits on its condition, not on GTK's
+#: two-second delivery bound: on a loaded disk that I/O alone took over 2 s.
+REAL_IO_S = 30.0
+
+
 def _application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Application:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -764,7 +770,9 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
                     removed == [True]
                     and bool(reloaded)
                     and not application._runtime_compile_pending
-                )
+                ),
+                REAL_IO_S,
+                what="the removal's publication (a real runtime document write)",
             )
         except AssertionError as error:
             raise AssertionError(
@@ -850,7 +858,11 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
 
         release_reload.set()
         assert storage_finished.wait(30), "real removal storage worker did not finish"
-        spin_until(lambda: removed == [True] and len(source_seen_during_reload) == 2)
+        spin_until(
+            lambda: removed == [True] and len(source_seen_during_reload) == 2,
+            REAL_IO_S,
+            what="the removal's publication (a real runtime document write)",
+        )
         # Then the library the removal's own scan found after the commit (round 4).
         assert source_seen_during_reload == [True, False]
         assert refreshes == []
@@ -934,7 +946,11 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
         assert storage_finished.wait(30), "real removal storage worker did not finish"
         # The post-delete tail is the removal's own scan after the commit, installed
         # as a finished scan is, and its publication (round 4): quit waits for both.
-        spin_until(lambda: removed == [True] and quit_calls == [True])
+        spin_until(
+            lambda: removed == [True] and quit_calls == [True],
+            REAL_IO_S,
+            what="the removal's publication (a real runtime document write), then quit",
+        )
         assert not source.exists()
         assert refreshes == []
         assert not application._removal_convergence_held
@@ -1685,7 +1701,11 @@ def test_queued_item_authoring_cannot_resurrect_metadata_after_removal(
         )
 
         release.set()
-        spin_until(lambda: removed == [True] and len(refused) == 3)
+        spin_until(
+            lambda: removed == [True] and len(refused) == 3,
+            REAL_IO_S,
+            what="the removal (real trash, fsync and scan), then the refused requests",
+        )
 
         assert not source.exists()
         assert not favourites.Store.open().is_favourite(item.path)
@@ -1727,6 +1747,7 @@ def test_committed_removal_installs_its_dry_runs_library_without_a_refresh(
     removed: list[bool] = []
     monkeypatch.setattr(application, "refresh_library", lambda: refreshes.append(True))
     monkeypatch.setattr(client, "send_runtime", lambda *_args, **_kwargs: Response.success())
+    storage_finished = _observe_removal_worker(monkeypatch)
 
     def resolve(outcome: server.Outcome) -> Response:
         if isinstance(outcome, Response):
@@ -1742,7 +1763,14 @@ def test_committed_removal_installs_its_dry_runs_library_without_a_refresh(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        spin_until(lambda: removed == [True])
+        # The worker's real trash, fsync and scan took over 2s on a loaded
+        # disk: wait for it to finish, then hold delivery on GTK to the bound.
+        spin_until(
+            storage_finished.is_set,
+            REAL_IO_S,
+            what="the removal's storage worker (real trash, fsync and its own scan)",
+        )
+        spin_until(lambda: removed == [True], what="the committed removal, delivered on GTK")
         assert refreshes == [], "its own scan after the commit is the library (round 4)"
         assert application.session.library.find(item.path) is None
         assert all(
@@ -1889,7 +1917,11 @@ def test_queued_still_choice_cannot_relink_a_removed_library_still(
         )
 
         release.set()
-        spin_until(lambda: removed == [True] and len(refused) == 1)
+        spin_until(
+            lambda: removed == [True] and len(refused) == 1,
+            REAL_IO_S,
+            what="the removal (real trash, fsync and scan), then the refused request",
+        )
 
         assert not still_path.exists()
         durable = pairings.Store.open().get(pairings.Identity.of(video))
@@ -1953,7 +1985,11 @@ def test_unexpected_removal_worker_failure_releases_guard_and_deferred_refresh(
             trash=True,
             finish=lambda result: removed.append(result.committed),
         )
-        spin_until(lambda: removed == [True])
+        spin_until(
+            lambda: removed == [True],
+            REAL_IO_S,
+            what="the removal (real trash, fsync and scan)",
+        )
         assert not application._removal_active
         assert not source.exists()
     finally:
@@ -2010,7 +2046,11 @@ def test_removal_invalidates_a_stale_health_write_queued_behind_it(
         )
         application._queue_runtime_health(request)
         release.set()
-        spin_until(lambda: removed == [True] and not application._runtime_health_pending)
+        spin_until(
+            lambda: removed == [True] and not application._runtime_health_pending,
+            REAL_IO_S,
+            what="the removal (real trash, fsync and scan), then the health request",
+        )
 
         assert stale_health_calls == []
         assert pairings.Store.open().get(pairings.Identity.of(item)) is None

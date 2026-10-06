@@ -10,6 +10,7 @@ removal is refused before the journal intent and before the file is touched.
 
 from __future__ import annotations
 
+import errno
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -279,3 +280,22 @@ def test_no_store_refusal_after_the_commit_says_nothing_was_changed(
         "so it may still list this wallpaper"
     )
     assert "Nothing was changed" not in manage.metadata_cleanup_note((failure,))
+
+
+def test_a_kept_copy_refusal_after_a_removal_still_says_the_file_may_list_it() -> None:
+    """The cold review of Z-3: a bump refused on a copy that was written but did not
+    finish cleanly ends "...; the copy stays.", not "Nothing was changed.". The hint
+    comes from the refusal's kind, so it is kept whatever its last words are."""
+    target = Path("/profile/state/playlists.json")
+    backup = state_file.version_backup_path(target, 1)
+    landed = state_file.BackupNotConfirmedError(backup, OSError(errno.EIO, "I/O error"))
+    error = playlists.PlaylistError("no-backup", state_file.backup_refusal(target, 1, 2, landed))
+
+    failure = session_module._cleanup_failure("playlists", playlists.STATE_FILENAME, error)
+
+    assert "Nothing was changed" not in failure
+    assert "the copy stays" in failure
+    # Failed on d2260e9: the hint the plain refusal gets was missing here.
+    assert failure.endswith(
+        "playlists.json was left as it was, so it may still list this wallpaper"
+    ), failure

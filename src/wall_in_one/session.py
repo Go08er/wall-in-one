@@ -252,22 +252,35 @@ def _removal_cleanup_blocker(
 #: How a Store's refusal ends; only ever true of the store's own file.
 _STORE_UNCHANGED = "Nothing was changed."
 
+#: A Store's refusals that leave its own file as it was, by kind, whatever the
+#: wording: an unreadable file, a backup that wasn't (cleanly) made before a
+#: format bump, an edit that would make the file too large to read back.
+_REFUSED_UNCHANGED = frozenset({state_file.UNREADABLE, "no-backup", "full"})
+
 
 def _cleanup_failure(label: str, filename: str, error: Exception) -> str:
     """One record a committed removal could not clear, worded for after the fact.
 
-    A Store's refusal ends "Nothing was changed." (a newer file, a backup it
-    could not make), which is true of its own file but, beside a wallpaper
-    already moved or deleted, reads as a denial that anything happened.
+    A Store's refusal often ends "Nothing was changed." (a newer file, a backup
+    it could not make), which is true of its own file but, beside a wallpaper
+    already moved or deleted, reads as a denial that anything happened: those
+    words go. Whether the store's file still lists the wallpaper is said by
+    the refusal's kind (`_REFUSED_UNCHANGED`), so it holds whatever the
+    refusal's last words are ("...; the copy stays." for a backup written but
+    not finished cleanly), and also for any refusal that says it changed
+    nothing.
     """
-    if getattr(error, "kind", None) == state_file.NEWER_VERSION:
+    kind = getattr(error, "kind", None)
+    if kind == state_file.NEWER_VERSION:
         return (
             f"{label}: {filename} was saved by a newer version of Wall-in-One; this version "
             "cannot change it, so it may still list this wallpaper"
         )
     text = str(error).rstrip()
-    if text.endswith(_STORE_UNCHANGED):
+    said_unchanged = text.endswith(_STORE_UNCHANGED)
+    if said_unchanged:
         text = text.removesuffix(_STORE_UNCHANGED).rstrip()
+    if said_unchanged or kind in _REFUSED_UNCHANGED:
         return f"{label}: {text} {filename} was left as it was, so it may still list this wallpaper"
     return f"{label}: {text}"
 

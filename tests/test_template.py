@@ -1483,6 +1483,104 @@ def test_a_locator_already_gone_names_the_lock_that_remains(
     assert said.endswith(f"recovery cleanup remains at {locks[0]}"), said
 
 
+def _transaction_locks(settings_path: Path) -> list[str]:
+    prefix = template._transaction_leaf_prefix(settings_path, "lock")
+    return sorted(name for name in os.listdir(settings_path.parent) if name.startswith(prefix))
+
+
+def test_a_lock_lost_before_it_is_held_refuses_the_install_before_settings_change(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cold review's race: another process's reconcile discards an installer's
+    lock between its creation and its flock (modelled in-process: flock locks belong
+    to open file descriptions). The install is refused, settings untouched, no
+    locator published; a retry installs."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    before = settings_path.read_bytes()
+    real_mkstemp = tempfile.mkstemp
+    stolen: list[str] = []
+
+    def mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        descriptor, name = real_mkstemp(*args, **kwargs)  # type: ignore[call-overload]
+        prefix = template._transaction_leaf_prefix(settings_path, "lock")
+        if not stolen and Path(name).name.startswith(prefix):
+            template._discard_orphaned_locks(settings_path)  # the other process
+            stolen.append(name)
+        return descriptor, name
+
+    monkeypatch.setattr(tempfile, "mkstemp", mkstemp)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install(reload_config=False)
+
+    said = str(raised.value)
+    assert stolen and not os.path.lexists(stolen[0]), "the race happened: the lock was taken"
+    assert "settings were not replaced" in said, said
+    assert settings_path.read_bytes() == before, "Noctalia's settings untouched"
+    _assert_no_current_transaction(settings_path)
+    monkeypatch.setattr(tempfile, "mkstemp", real_mkstemp)
+    assert template.install(reload_config=False).changed, "a retry is all it takes"
+    assert _transaction_locks(settings_path) == []
+
+
+def test_a_lock_lost_then_a_crash_never_wedges_reconcile(fake_home: Path) -> None:
+    """The cold review's wedge: the same race, then the installer dies right after
+    staging (SIGKILL). Its locator must never name a lock that is gone, which
+    would refuse every later install, uninstall and repair."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    before = settings_path.read_bytes()
+    script = f"""
+import os, signal, tempfile
+from pathlib import Path
+from wall_in_one.theme import template
+
+settings_path = Path({str(settings_path)!r})
+real_mkstemp = tempfile.mkstemp
+stolen = []
+
+def mkstemp(*args, **kwargs):
+    descriptor, name = real_mkstemp(*args, **kwargs)
+    prefix = template._transaction_leaf_prefix(settings_path, "lock")
+    if not stolen and Path(name).name.startswith(prefix):
+        template._discard_orphaned_locks(settings_path)
+        stolen.append(name)
+    return descriptor, name
+
+template.tempfile.mkstemp = mkstemp
+real_begin = template._begin_publication_transaction
+
+def kill_after_begin(*args, **kwargs):
+    transaction = real_begin(*args, **kwargs)
+    os.kill(os.getpid(), signal.SIGKILL)
+    return transaction
+
+template._begin_publication_transaction = kill_after_begin
+template.install(reload_config=False)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+    )
+    # Now refused before staging (it used to stage, then die with the locator up).
+    assert completed.returncode in (1, -signal.SIGKILL), completed.stderr
+    assert settings_path.read_bytes() == before
+
+    outcomes: list[str] = []
+    for _attempt in range(2):
+        try:
+            template.install(reload_config=False)
+            outcomes.append("installed")
+        except template.TemplateInstallError as error:
+            outcomes.append(str(error))
+
+    # Failed on 6c7833c: "transaction lock is not an empty regular file", twice.
+    assert outcomes[0] == "installed", outcomes
+    _assert_no_current_transaction(settings_path)
+    assert _transaction_locks(settings_path) == []
+
+
 @pytest.mark.parametrize("kind", ("regular", "directory"))
 def test_install_never_keeps_a_substituted_candidate_name_public(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, kind: str

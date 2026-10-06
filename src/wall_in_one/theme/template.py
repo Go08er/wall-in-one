@@ -1723,6 +1723,11 @@ def _discard_orphaned_locks(path: Path) -> None:
     private, singly linked regular file of this user) and that nobody holds
     (a non-blocking ``flock``; a live installer holds its lock from just after
     creating it). Anything else is left as it is; failures are not raised.
+
+    A lock taken in the moment between an installer creating and holding it
+    costs that installer its attempt, never the transaction: it checks, once
+    held, that its lock is still at its name, and refuses before staging
+    anything or publishing a locator (`_begin_publication_transaction`).
     """
 
     if _present(_transaction_locator(path)) is not False:
@@ -1794,6 +1799,20 @@ def _begin_publication_transaction(
         lock_identity = lock_status.st_dev, lock_status.st_ino
         lock_fingerprint = file_io.file_fingerprint(lock_status)
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Held, the lock can no longer be taken: `_discard_orphaned_locks` only
+        # discards a lock nobody holds. Between its creation and the flock it
+        # could have been. So it must still be at its name now, before anything
+        # is staged and long before a locator names it: a locator naming a lock
+        # that is gone would stop every later reconcile.
+        try:
+            named_lock = lock.lstat()
+        except FileNotFoundError:
+            named_lock = None
+        if named_lock is None or (named_lock.st_dev, named_lock.st_ino) != lock_identity:
+            raise file_io.PathChangedError(
+                f"the transaction lock {lock} was taken before it could be held; "
+                "settings were not replaced"
+            )
         os.fsync(lock_descriptor)
         lock_fingerprint = file_io.file_fingerprint(os.fstat(lock_descriptor))
         assert lock_fingerprint is not None

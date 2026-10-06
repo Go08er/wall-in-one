@@ -1752,3 +1752,28 @@ def test_a_rule_switch_shows_the_last_queued_state_once_saved(
     assert not _rule_switch(page, "Evenings").get_active()
     session.shutdown()
 
+
+def test_rows_not_laid_out_yet_are_measured_at_their_natural_width(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A reorder before the first layout measured each row for a 1-pixel width.
+
+    GTK refuses that ("Trying to measure ... for width of 1, but it needs at
+    least ...") and answers with a height no row will have; an unallocated
+    list now asks for each row's natural height.
+    """
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _session(tmp_path)
+    session.playlists.add(playlist.id, items[1].path, entry_id="second")
+    page = playlists_page.PlaylistsPage(SimpleNamespace(session=session))  # type: ignore[arg-type]
+    page.refresh(session)
+    order = page._order_list
+    assert order.get_width() == 0, "not laid out yet"
+    capfd.readouterr()
+
+    heights = order.row_heights()
+
+    natural = tuple(float(row.measure(Gtk.Orientation.VERTICAL, -1)[1]) for row in order.rows())
+    assert heights == natural
+    assert "Trying to measure" not in capfd.readouterr().err
+    session.shutdown()

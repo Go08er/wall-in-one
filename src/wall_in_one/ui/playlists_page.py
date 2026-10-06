@@ -246,8 +246,15 @@ class _ReorderList(Gtk.Widget):
     def row_heights(self) -> tuple[float, ...]:
         if len(self._row_heights) == len(self._rows):
             return self._row_heights
-        width = max(self.get_width(), 1)
-        return tuple(float(row.measure(Gtk.Orientation.VERTICAL, width)[1]) for row in self._rows)
+        # Not allocated yet (a reorder by keyboard before the first layout):
+        # each row's height for its natural width, never for an impossible
+        # 1-pixel one, which GTK refuses ("needs at least ...") and answers
+        # with a height no row will have.
+        width = self.get_width()
+        for_size = width if width > 0 else -1
+        return tuple(
+            float(row.measure(Gtk.Orientation.VERTICAL, for_size)[1]) for row in self._rows
+        )
 
     def row_bounds(self, top: float) -> tuple[tuple[float, float], ...]:
         heights = self.row_heights()

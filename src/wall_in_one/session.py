@@ -165,6 +165,8 @@ class RemovalResult:
     #: (`RemovalPlan.run`): the only library a removal hands back. None when
     #: nothing committed, or that scan failed.
     rescanned: Library | None = None
+    #: The sources that scan read (the plan's own settings), with ``rescanned``.
+    rescanned_sources: LibrarySources | None = None
 
 
 def _physically_removed_adoption(
@@ -384,7 +386,14 @@ class RemovalPlan:
             )
         if not result.committed:
             return result
-        return replace(result, rescanned=self._rescan(pairing_store))
+        rescanned = self._rescan(pairing_store)
+        if rescanned is None:
+            return result
+        return replace(
+            result,
+            rescanned=rescanned,
+            rescanned_sources=(self.settings.roots, self.settings.scan_workshop),
+        )
 
     def _rescan(self, pairing_store: pairings.Store) -> Library | None:
         """The library as the committed removal left it, by a real scan; None if that fails."""

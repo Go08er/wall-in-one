@@ -1595,6 +1595,8 @@ class Application(Adw.Application):
         self._settings = settings
         self._settings_requested = settings
         self._session = self._new_session(settings)
+        # Nothing the replaced one scans from now on is this application's.
+        previous.on_scanned(None)
         with self._runtime_config_lock:
             # Its library is empty until it is scanned: nothing was accepted from it.
             self._accepted_library_sources = None
@@ -2785,12 +2787,20 @@ class Application(Adw.Application):
         if acquire_lifetime:
             self.hold()
 
-    def _adopt_runtime_library_scan(self, generation: int) -> None:
-        """Tag an accepted Library before its publication request is captured."""
+    def _adopt_runtime_library_scan(
+        self, generation: int, sources: _LibrarySources | None = None
+    ) -> None:
+        """Tag an accepted Library before its publication request is captured.
+
+        ``sources``: what that scan read, when its caller knows (a removal's
+        own scan, from its plan's settings); else what it was begun for.
+        """
         with self._runtime_config_lock:
             if generation != self._runtime_library_scan_generation:
                 return
-            self._accepted_library_sources = self._runtime_library_scan_sources
+            self._accepted_library_sources = (
+                sources if sources is not None else self._runtime_library_scan_sources
+            )
 
     def _finish_runtime_library_scan(self, generation: int, *, error: str = "") -> None:
         """Release actions waiting for the current source-changing scan."""
@@ -5296,7 +5306,9 @@ class Application(Adw.Application):
         self.release()
         self._maybe_finish_requested_quit()
 
-    def _adopt_post_removal_scan(self, library: Library, *, refresh_follows: bool) -> None:
+    def _adopt_post_removal_scan(
+        self, library: Library, sources: _LibrarySources, *, refresh_follows: bool
+    ) -> None:
         """Install the scan a removal ran once it had committed (`RemovalResult.rescanned`).
 
         That is the real post-removal library, so it is installed as a finished
@@ -5325,7 +5337,9 @@ class Application(Adw.Application):
             return
         self._validate_inventory()
         self._removal_convergence_scan_generation = generation
-        self._adopt_runtime_library_scan(generation)
+        # What the worker scanned (its plan's settings), not what the settings
+        # say now: they agree only while the lane runs one thing at a time.
+        self._adopt_runtime_library_scan(generation, sources)
         try:
             self._finish_library_refresh(scan_generation=generation)
         finally:
@@ -5363,8 +5377,10 @@ class Application(Adw.Application):
             self._finish_runtime_removal_invalidation()
             self._stills.forget(result.item.path)
             self._begin_removal_convergence()
-            if scanned is not None:
-                self._adopt_post_removal_scan(scanned, refresh_follows=refresh)
+            if scanned is not None and result.rescanned_sources is not None:
+                self._adopt_post_removal_scan(
+                    scanned, result.rescanned_sources, refresh_follows=refresh
+                )
             # Otherwise the rescan below is the post-removal library. A new
             # detached refresh starts only after the removal worker has
             # released its operation lease and the actor has adopted every

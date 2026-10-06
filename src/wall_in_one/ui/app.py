@@ -64,6 +64,7 @@ from wall_in_one.session import (
 from wall_in_one.theme import css, noctalia, source
 from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.real_playlists import RenameResult
+from wall_in_one.ui.next.real_schedule import ColorsForgotten
 from wall_in_one.ui.next.window import NextWindow
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
@@ -5520,6 +5521,71 @@ class Application(Adw.Application):
             }
             self._settings_requested = replace(result.settings, **pending).validated()
         self._adopt_settings(previous, result.settings)
+
+    def prepare_colors_forget(self, connector: str) -> Callable[[], ColorsForgotten]:
+        """Forget Display's colors step: decided at the head of the lane, written on the worker.
+
+        It stops the desktop colors following ``connector`` only while they
+        still do and displays are mirrored, where that choice has no effect:
+        never from when Forget was asked for. Here, on GTK after everything
+        queued before it has saved, a newer choice still queued wins: another
+        display for the colors, or independent displays (which need one;
+        clearing it under them would make them mirrored again,
+        `config.Settings.validated`). Otherwise what is requested no longer
+        follows ``connector`` until the worker has run, so a choice made
+        meanwhile is made against that. The worker decides again under the
+        settings lock, against what ``settings.toml`` holds then
+        (`config.forget_color_source`). `adopt_colors_forget` takes the result.
+        """
+        kept = "displays are now controlled separately, which needs a display for the colors"
+        with self._settings_authoring_lock:
+            pending = {
+                key: value for key, (_gen, value) in self._settings_authoring_pending.items()
+            }
+            requested = self._settings_requested
+            if "theme_source_connector" in pending:
+                return lambda: ColorsForgotten()  # a newer colors choice: nothing to say
+            if requested.display_mode != config.DISPLAY_MODE_MIRRORED:
+                still = requested.theme_source_connector == connector
+                return lambda: ColorsForgotten(kept=kept if still else "")
+            if requested.theme_source_connector == connector:
+                self._settings_requested = replace(requested, theme_source_connector="").validated()
+
+        def clear() -> ColorsForgotten:
+            try:
+                held, wrote = config.forget_color_source(connector)
+            except config.SettingsNotDurableError as error:
+                # Published, then the folder sync failed: saved, and said so.
+                state_file.report_not_durable(str(error))
+                try:
+                    return ColorsForgotten(config.load_strict())
+                except config.ConfigError:
+                    return ColorsForgotten(error.settings)
+            if wrote:
+                return ColorsForgotten(held)
+            still = held.theme_source_connector == connector
+            return ColorsForgotten(kept=kept if still else "")
+
+        return clear
+
+    def adopt_colors_forget(self, result: ColorsForgotten | None) -> None:
+        """Take what Forget Display's colors step saved, on GTK; else what is requested again.
+
+        Either way the requested settings are what is saved with every edit
+        still queued applied, which undoes what `prepare_colors_forget`
+        projected when the step wrote nothing.
+        """
+        saved = result.settings if result is not None else None
+        previous = self._settings
+        with self._settings_authoring_lock:
+            pending = {
+                key: value for key, (_gen, value) in self._settings_authoring_pending.items()
+            }
+            self._settings_requested = replace(
+                saved if saved is not None else previous, **pending
+            ).validated()
+        if saved is not None:
+            self._adopt_settings(previous, saved)
 
     def _adopt_playlist_delete(self, result: _PlaylistDeleteResult) -> tuple[str, ...]:
         """Reconcile every portion which committed, even after partial cleanup."""

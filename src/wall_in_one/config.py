@@ -868,6 +868,45 @@ def _rewrite_playlist_default(
         raise ConfigError(f"cannot safely update {target}: {error}") from error
 
 
+def forget_color_source(connector: str, path: Path | None = None) -> tuple[Settings, bool]:
+    """Stop following ``connector`` for the desktop colors iff they still do, while mirrored.
+
+    Forget Display's last step. Decided under the settings mutation lock,
+    against what ``settings.toml`` holds then, never from when Forget was
+    asked for: a newer choice of another display for the colors, or of
+    independent displays, wins and nothing is written. Independent displays
+    need their colors' display, and `Settings.validated` turns independent
+    with none back into mirrored, so a Forget is never what changes the mode.
+    Returns what the file holds now and whether this call wrote it. When a
+    write is needed and the file has keys this build does not know,
+    `SettingsReadOnlyError` is raised and nothing is written.
+    """
+    target = path if path is not None else paths.settings_path()
+    forgotten = _tidy_connector(connector)
+    try:
+        with state_file.mutation_lock(target, description="settings"):
+            loaded = load_strict_document(target)
+            current = loaded.settings
+            if (
+                not forgotten
+                or current.theme_source_connector != forgotten
+                or current.display_mode != DISPLAY_MODE_MIRRORED
+            ):
+                return current, False
+            if loaded.read_only:
+                raise SettingsReadOnlyError(loaded.unknown_keys)
+            candidate = replace(current, theme_source_connector="").validated()
+            _validate_strict_mapping(tomllib.loads(candidate.to_toml()), target)
+            _check_runtime_compatibility(candidate, target)
+            paths.ensure_directory(target.parent)
+            _publish(target, candidate)
+            return candidate, True
+    except ConfigError:
+        raise
+    except (OSError, TimeoutError) as error:
+        raise ConfigError(f"cannot safely update {target}: {error}") from error
+
+
 def require_playlist_deletable(
     playlist: str, path: Path | None = None, *, also: tuple[str, ...] = ()
 ) -> None:

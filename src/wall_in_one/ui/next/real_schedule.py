@@ -80,14 +80,33 @@ _T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
+class ColorsForgotten:
+    """What Forget Display's last step did to the desktop colors' display.
+
+    `ScheduleBackend.prepare_colors_forget` decides it at the head of the
+    authoring lane and writes it on the worker; `adopt_colors_forget` takes it
+    on GTK. Nothing written and nothing ``kept`` means a newer choice won.
+    """
+
+    #: ``settings.toml`` as this step wrote it; None when it wrote nothing.
+    settings: config.Settings | None = None
+    #: Why the colors still follow the forgotten display, when they do.
+    kept: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class _Forgotten:
-    """What Forget Display committed: the rules, the playlist, and why it stopped."""
+    """What Forget Display committed: the rules, the playlist, the colors, and why it stopped."""
 
     #: The rules removed, in one transaction.
     rules: tuple[schedules.Rule, ...]
     #: The playlist unassigned ("" when there was none); None: that step failed.
     playlist: str | None
     error: str = ""
+    #: The colors' step, when it ran; None when it wasn't needed or didn't get to run.
+    colors: ColorsForgotten | None = None
+    #: Why the colors' step failed after the stores were saved.
+    colors_error: str = ""
 
 
 def _removed_words(outcome: _Forgotten, label: Callable[[str], str | None]) -> list[str]:
@@ -152,6 +171,14 @@ class ScheduleBackend(Protocol):
     def schedule_edited(self) -> None: ...
 
     def runtime_config_changed(self) -> None: ...
+
+    def prepare_colors_forget(self, connector: str) -> Callable[[], ColorsForgotten]:
+        """At the head of the authoring lane: Forget Display's colors step, for its worker."""
+        ...
+
+    def adopt_colors_forget(self, result: ColorsForgotten | None) -> None:
+        """On GTK: take what that step saved, or put back what it projected."""
+        ...
 
     def runtime_action_async(self, verb: str, argument: str | None = None) -> bool: ...
 
@@ -536,17 +563,12 @@ class RealScheduling:
         topics: tuple[str, ...],
         settled: Settled | None,
         after: Callable[[], None] | None = None,
-        failed_said: Callable[[str], str] | None = None,
         **changes: Any,
     ) -> None:
-        """One settings edit, settled exactly once.
-
-        ``failed_said`` words a failure when something else already committed,
-        so it is never called "nothing changed".
-        """
+        """One settings edit, settled exactly once."""
         blocked = self.settings_blocked()
         if blocked:
-            self._refuse(settled, failed_said(blocked) if failed_said else blocked, *topics)
+            self._refuse(settled, blocked, *topics)
             return
         reported = False
 
@@ -559,19 +581,12 @@ class RealScheduling:
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
-            self._backend.window_report(
-                failed_said(error)
-                if failed_said is not None
-                else f"{what} was not saved; nothing changed: {error}"
-            )
+            self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
             self._owner.emit_changed(*topics)
             self._settle(settled, False)
 
         accepted = self._backend.update_settings_async(on_success=saved, on_error=failed, **changes)
         if not accepted and not reported:
-            if failed_said is not None:
-                # Refused without a word, after something else committed: say so.
-                self._backend.window_report(failed_said("it could not be queued"))
             self._owner.emit_changed(*topics)
             self._settle(settled, False)
 
@@ -762,8 +777,14 @@ class RealScheduling:
            If this fails after the rules went, the one thing left is that
            playlist, shown on the Displays page, and forgetting again removes
            it. That is reported as such, never as "nothing changed".
-        4. The desktop colors' choice, last: a settings edit, made only while
-           displays are mirrored, where that choice has no effect.
+        4. The desktop colors' choice, last, and only if it still stands: the
+           colors still follow this display and displays are still mirrored,
+           where that choice has no effect. Not from when Forget was asked
+           for: at the head of the lane against the choices still queued, and
+           on the worker against what ``settings.toml`` holds then
+           (`ScheduleBackend.prepare_colors_forget`). A newer choice of
+           another display for the colors, or of independent displays, wins,
+           and Forget never changes the mode.
 
         Whatever committed is published (`schedule_edited`), through the
         application's own publication and its checks, and the pages show
@@ -775,51 +796,66 @@ class RealScheduling:
             return
         assignments = self._session.displays
         rules = self._session.schedules
-        topics = ("displays", "schedule")
+        topics = ("displays", "schedule", "settings") if plan.colors else ("displays", "schedule")
         reported = False
 
-        def work() -> _Forgotten:
-            # Never a "Your pick" playlist: those stay (hidden) whatever happens.
-            for problem in (rules.durable_problem(), assignments.durable_problem()):
-                if problem:
-                    raise ValueError(problem)
-            removed = rules.remove_for_display(connector)
-            try:
-                playlist = assignments.forget_display(connector)
-            except display_store.DisplayError as error:
-                if not removed:
-                    raise  # nothing committed: the plain refusal is true
-                return _Forgotten(removed, None, str(error))
-            return _Forgotten(removed, playlist)
+        def prepare() -> Callable[[], _Forgotten]:
+            # On GTK at the head of the lane: everything queued before this
+            # has saved, and what is still queued is newer than this.
+            blocked = self.settings_blocked() if plan.colors else ""
+            colors = (
+                self._backend.prepare_colors_forget(connector)
+                if plan.colors and not blocked
+                else None
+            )
+
+            def work() -> _Forgotten:
+                # Never a "Your pick" playlist: those stay (hidden) whatever happens.
+                for problem in (rules.durable_problem(), assignments.durable_problem()):
+                    if problem:
+                        raise ValueError(problem)
+                removed = rules.remove_for_display(connector)
+                try:
+                    playlist = assignments.forget_display(connector)
+                except display_store.DisplayError as error:
+                    if not removed:
+                        raise  # nothing committed: the plain refusal is true
+                    return _Forgotten(removed, None, str(error))
+                if blocked:
+                    return _Forgotten(removed, playlist, colors_error=blocked)
+                if colors is None:
+                    return _Forgotten(removed, playlist)
+                try:
+                    return _Forgotten(removed, playlist, colors=colors())
+                except Exception as error:
+                    return _Forgotten(
+                        removed, playlist, colors_error=str(error) or type(error).__name__
+                    )
+
+            return work
 
         def finish(outcome: _Forgotten) -> None:
-            if outcome.rules or outcome.playlist:
+            # The settings first, so what is published is what is saved.
+            self._backend.adopt_colors_forget(outcome.colors)
+            committed = bool(outcome.rules or outcome.playlist)
+            if committed:
                 self._backend.schedule_edited()  # publish what committed
+            said, ok = "", True
             if outcome.playlist is None:
-                self._backend.window_report(self._partly_forgotten(connector, plan, outcome))
-                self._owner.emit_changed(*topics)
-                self._settle(settled, False)
-                return
-            if not plan.colors:
-                self._owner.emit_changed(*topics)
-                self._settle(settled, True)
-                return
-            removed = runtime_config.listed(_removed_words(outcome, self.playlist_label))
-            self._settings_write(
-                what=f"Forgetting {connector} as the desktop colors\u2019 display",
-                topics=topics,
-                settled=settled,
-                failed_said=lambda error: (
-                    f"Forgetting {connector} was only partly saved: {removed} "
-                    f"{'were' if outcome.playlist and outcome.rules else 'was'} removed, but "
-                    f"the desktop colors still follow it: {error}"
-                ),
-                theme_source_connector="",
-            )
+                said, ok = self._partly_forgotten(connector, plan, outcome), False
+            elif outcome.colors_error:
+                said, ok = self._colors_still_follow(connector, outcome), False
+            elif outcome.colors is not None and outcome.colors.kept:
+                said, ok = self._colors_kept(connector, outcome), committed
+            if said:
+                self._backend.window_report(said)
+            self._owner.emit_changed(*topics)
+            self._settle(settled, ok)
 
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
+            self._backend.adopt_colors_forget(None)  # nothing saved: what is requested again
             self._backend.window_report(
                 f"Forgetting {connector} was not saved; nothing changed: {error}"
             )
@@ -830,11 +866,39 @@ class RealScheduling:
         if blocked:
             self._refuse(settled, blocked, *topics)
             return
-        accepted = self._backend.authoring_action_async(work, finish, failure=failed)
+        accepted = self._backend.authoring_action_async(
+            lambda: _Forgotten((), ""), finish, prepare=prepare, failure=failed
+        )
         if not accepted and not reported:
             # Refused without a report (shutting down, or authoring not open yet).
             self._owner.emit_changed(*topics)
             self._settle(settled, False)
+
+    def _colors_still_follow(self, connector: str, outcome: _Forgotten) -> str:
+        """The colors' step failed: exactly what went before it."""
+        words = _removed_words(outcome, self.playlist_label)
+        if not (outcome.rules or outcome.playlist):
+            return f"Forgetting {connector} was not saved; nothing changed: {outcome.colors_error}"
+        return (
+            f"Forgetting {connector} was only partly saved: {runtime_config.listed(words)} "
+            f"{'were' if outcome.playlist and outcome.rules else 'was'} removed, but the "
+            f"desktop colors still follow it: {outcome.colors_error}"
+        )
+
+    def _colors_kept(self, connector: str, outcome: _Forgotten) -> str:
+        """A newer choice of independent displays kept the colors on ``connector``."""
+        assert outcome.colors is not None
+        then = f"Choose another display for them, then forget {connector} again."
+        if not (outcome.rules or outcome.playlist):
+            return (
+                f"{connector} was not forgotten: the desktop colors still follow it, and "
+                f"{outcome.colors.kept}. {then}"
+            )
+        words = runtime_config.listed(_removed_words(outcome, self.playlist_label))
+        return (
+            f"Forgetting {connector} removed {words}, but the desktop colors still follow "
+            f"it: {outcome.colors.kept}. {then}"
+        )
 
     def _partly_forgotten(self, connector: str, plan: ForgetPlan, outcome: _Forgotten) -> str:
         """Exactly what Forget Display removed and what is still saved."""

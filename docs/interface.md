@@ -219,7 +219,10 @@ order reversed, where the last matching rule wins.
 - **Which display the desktop colors follow.** It and the mode are the same
   settings, saved the same way, as Settings → Displays.
 - **A display that is not connected** keeps what is saved for it until you
-  forget it.
+  forget it. Forgetting it removes its rules and its own playlist, and stops
+  the desktop colors following it if they still do when it runs and displays
+  are mirrored. A choice made meanwhile, of another display for the colors or
+  of separate displays, is kept.
 
 ## Settings
 

@@ -28,6 +28,7 @@ from wall_in_one.ui.next import prefs
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.next.real_controls import NO_SERVICE_START
 from wall_in_one.ui.next.real_playlists import RenameResult
+from wall_in_one.ui.next.real_schedule import ColorsForgotten
 from wall_in_one.ui.next.real_state import RealAppState, human_size, scheme_name, wallpaper_view
 from wall_in_one.ui.next.state import AppState, Reason, reason_text, solo_displays
 from wall_in_one.ui.status_model import RuntimeStatusModel
@@ -264,6 +265,33 @@ class FakeApplication:
     def activate_playlist_async(self, reference: str) -> bool:
         self.activated.append(reference)
         return True
+
+    def prepare_colors_forget(self, connector: str) -> Callable[[], ColorsForgotten]:
+        """Forget Display's colors step, decided as `Application.prepare_colors_forget` does.
+
+        Fails with `settings_failure` when set; otherwise stops the colors
+        following ``connector`` iff they still do while mirrored, recording the
+        edit in `settings_changes`.
+        """
+
+        def clear() -> ColorsForgotten:
+            if self.settings_failure:
+                failure, self.settings_failure = self.settings_failure, ""
+                raise ValueError(failure)
+            settings = self._session.settings
+            if (
+                settings.theme_source_connector != connector
+                or settings.display_mode != config.DISPLAY_MODE_MIRRORED
+            ):
+                return ColorsForgotten()
+            self.settings_changes.append({"theme_source_connector": ""})
+            return ColorsForgotten(replace(settings, theme_source_connector="").validated())
+
+        return clear
+
+    def adopt_colors_forget(self, result: ColorsForgotten | None) -> None:
+        if result is not None and result.settings is not None:
+            self._session.update_settings(result.settings)
 
 
 NAMES = ("alpine.png", "city-dusk.png", "lily-pond.png", "rain.mp4")

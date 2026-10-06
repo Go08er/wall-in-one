@@ -976,8 +976,9 @@ class RealSettings:
             self._refresh_key()
             self._report("Wallhaven API key removed" if removed else "There was no saved key")
 
-        def failed(_message: str) -> None:
-            self._report("The saved key could not be removed")
+        def failed(message: str) -> None:
+            # Safe to quote, unlike a save's: removal names the file, never a key.
+            self._report(f"The saved key could not be removed: {message}")
             self._host.emit_changed("settings")
 
         self._backend.authoring_action_async(credentials.clear_key, cleared, failure=failed)

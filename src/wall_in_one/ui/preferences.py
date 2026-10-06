@@ -1010,9 +1010,10 @@ class PreferencesPage(Adw.PreferencesPage):
             self._refresh_api_key_status()
             self._report("Wallhaven API key removed" if removed else "There was no saved key")
 
-        def failed(_message: str) -> None:
+        def failed(message: str) -> None:
             self._clear_api_key.set_sensitive(True)
-            self._report("The saved key could not be removed")
+            # Safe to quote, unlike a save's: removal names the file, never a key.
+            self._report(f"The saved key could not be removed: {message}")
 
         self._app.authoring_action_async(
             credentials.clear_key,

@@ -1189,8 +1189,10 @@ class MainWindow(Adw.ApplicationWindow):
                     current, current_still
                 ),
             ),
-            failure=lambda _error: self.report(
-                f"The still for {item.name} could not be saved; nothing changed"
+            # The store's own words follow: where a damaged original was kept,
+            # and why. "nothing changed" goes when it isn't true (the lane knows).
+            failure=lambda error: self.report(
+                f"The still for {item.name} could not be saved; nothing changed: {error}"
             ),
         )
 
@@ -1212,7 +1214,9 @@ class MainWindow(Adw.ApplicationWindow):
             lambda: store.reset(item),
             reset,
             prepare=lambda: self._app.prepare_pairing_reset(item),
-            failure=lambda _error: self.report(f"{item.name} could not be reset; nothing changed"),
+            failure=lambda error: self.report(
+                f"{item.name} could not be reset; nothing changed: {error}"
+            ),
         )
 
     def _on_palette_path(self, _action: Gio.SimpleAction, raw: GLib.Variant | None) -> None:
@@ -1238,8 +1242,8 @@ class MainWindow(Adw.ApplicationWindow):
                     current, policy, keep_mode=True
                 ),
             ),
-            failure=lambda _error: self.report(
-                f"The colours for {item.name} could not be saved; nothing changed"
+            failure=lambda error: self.report(
+                f"The colours for {item.name} could not be saved; nothing changed: {error}"
             ),
         )
 

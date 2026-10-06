@@ -19,6 +19,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -42,10 +43,14 @@ from tests.test_ui_next_window import (  # noqa: E402,F401
     settled,
     toolkit,
 )
+from tests.test_ui_runtime import FakeWindow, _attach  # noqa: E402
+from tests.test_ui_runtime import _application as _runtime_application  # noqa: E402
+from tests.test_ui_runtime import _close as _close_runtime_application  # noqa: E402
 from wall_in_one import config, paths  # noqa: E402
-from wall_in_one.control import server  # noqa: E402
+from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import pairings, playlists  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.session import QUICK_CHOICE_ID  # noqa: E402
 from wall_in_one.ui.app import SAVED_NOT_APPLIED, Application, _Commands  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
@@ -322,3 +327,93 @@ def test_ctl_removing_a_rule_that_is_not_there_is_not_found_not_saved(
         assert not any("Saved" in r for r in reports), reports
     finally:
         _close_lane_application(application)
+
+
+class _NoticedWindow(FakeWindow):
+    """Records each publication problem the application tells it about."""
+
+    def __init__(self, application: Application) -> None:
+        super().__init__()
+        self._application = application
+        self.notices: list[str] = []
+
+    def publication_changed(self) -> None:
+        self.notices.append(self._application.publication_problem)
+
+
+def test_publishing_what_was_saved_that_raises_is_the_publication_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Showing what was saved never raises; a publication that did is said under the header.
+
+    Before, it was an activity-log line only: the window said nothing about
+    playback still running the last setup. The next publication clears it.
+    """
+    application = _runtime_application(tmp_path, monkeypatch)
+    window = _NoticedWindow(application)
+    _attach(application, window)
+    monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
+    root = tmp_path / "wallpapers"
+    root.mkdir()
+    dawn = MediaItem(root / "dawn.png", Kind.STILL, 5, 1)
+    dawn.path.write_bytes(b"placeholder image bytes")
+    settings = replace(application.settings, roots=(root,)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.adopt_library(Library((root,), (dawn,)))
+    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    evening = application.session.playlists.create("Evening")
+    application.session.playlists.add(evening.id, dawn.path)
+    application.update_settings(active_playlist=evening.id)
+    document = paths.runtime_config_path()
+
+    def published() -> bool:
+        return not application._runtime_compile_pending and not application._authoring_active
+
+    try:
+        assert application._publish_runtime_async()
+        spin_until(lambda: published() and document.exists(), 10, what="the first publication")
+        good = document.read_bytes()
+        assert application.publication_problem == ""
+
+        real_publish = application._publish_runtime_async
+        raised: list[int] = []
+
+        def publish_raises_once() -> bool:
+            if not raised:
+                raised.append(1)
+                raise RuntimeError("the runtime lock is gone")
+            return real_publish()
+
+        monkeypatch.setattr(application, "_publish_runtime_async", publish_raises_once)
+
+        def adopt(_made: object) -> None:
+            raise RuntimeError("the page could not take it")
+
+        store = application.session.playlists
+        assert application.authoring_action_async(lambda: store.create("Night"), adopt)
+        spin_until(
+            lambda: published() and any("couldn't be applied" in r for r in window.reports),
+            10,
+            what="the saved task to settle",
+        )
+
+        assert raised, "showing what was saved published, and that raised"
+        problem = application.publication_problem
+        assert problem == "publishing what was saved failed (the runtime lock is gone)", problem
+        assert window.notices == [problem], "the window was told: the header says it"
+        assert document.read_bytes() == good, "the service keeps the last setup that worked"
+        compiled = application._runtime_compiled_generation
+
+        assert application._publish_runtime_async()
+        spin_until(
+            lambda: published() and application.publication_problem == "",
+            10,
+            what="the next publication to get through",
+        )
+        assert window.notices == [problem, ""]
+        assert application._runtime_compiled_generation > compiled, "cleared by a publication"
+    finally:
+        _close_runtime_application(application)

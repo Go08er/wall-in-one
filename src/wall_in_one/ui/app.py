@@ -3387,12 +3387,22 @@ class Application(Adw.Application):
         """Publish and show what the stores hold, after a task's adoption failed partway.
 
         Never raises: it runs on a path that has already failed once, and the
-        reply to the task's caller follows it.
+        reply to the task's caller follows it. A publication that raised is
+        the publication problem (`publication_problem`), as a refused one is:
+        the service keeps the last setup that worked, the new window says so
+        under its header, and the next publication that gets through clears it.
         """
         try:
             self._publish_runtime_for_context()
         except Exception as error:
-            self.activity_log.record("app", f"What was saved could not be published: {error}")
+            detail = str(error) or error.__class__.__name__
+            self.activity_log.record("app", f"What was saved could not be published: {detail}")
+            try:
+                self._set_publication_problem(f"publishing what was saved failed ({detail})")
+            except Exception as notice:  # the window may be what failed
+                self.activity_log.record(
+                    "app", f"The window could not show the publication problem: {notice}"
+                )
         window = self._window
         if window is None:
             return

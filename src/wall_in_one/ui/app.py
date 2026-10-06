@@ -162,6 +162,9 @@ THEME_DELIVERY_PRIORITY: Final = GLib.PRIORITY_HIGH_IDLE
 # timer sources it answers, above redraw for the same reason. Each lane posts
 # at this one priority, so each lane stays first in, first out.
 COMPLETION_PRIORITY: Final = GLib.PRIORITY_DEFAULT
+#: The reply kind for an authoring task whose write landed but whose adoption
+#: on GTK, or what follows it, failed (`Application._saved_but_not_applied`).
+SAVED_NOT_APPLIED: Final = "saved-not-applied"
 _RuntimeResult = TypeVar("_RuntimeResult")
 _AuthoringResult = TypeVar("_AuthoringResult")
 _LibrarySources = tuple[tuple[Path, ...], bool]
@@ -3166,9 +3169,15 @@ class Application(Adw.Application):
             if self._authoring_shutdown or self._runtime_shutdown:
                 return GLib.SOURCE_REMOVE
             try:
-                outcome = task.finish(future.result())
+                result = future.result()
             except Exception as error:
-                reply(server.failed(error))
+                reply(server.failed(error))  # the work refused: nothing it wrote landed
+                return GLib.SOURCE_REMOVE
+            try:
+                outcome = task.finish(result)
+            except Exception as error:
+                # The write landed; only adopting it, or what follows it, failed.
+                reply(self._saved_but_not_applied(error))
                 return GLib.SOURCE_REMOVE
             if isinstance(outcome, Response):
                 reply(outcome)
@@ -3185,7 +3194,7 @@ class Application(Adw.Application):
                 outcome.start(chained_reply)
                 chained = True
             except Exception as error:
-                reply(server.failed(error))
+                reply(self._saved_but_not_applied(error))
         finally:
             self._speaking_for = speaking_for
             unsaid = task.durability.warnings and not task.durability.said
@@ -3197,6 +3206,34 @@ class Application(Adw.Application):
             if not chained:
                 complete()
         return GLib.SOURCE_REMOVE
+
+    def _saved_but_not_applied(self, error: Exception) -> Response:
+        """A task's write landed, then adopting it on GTK (or what follows it) failed.
+
+        Never "nothing changed", which a caller's failure wording says: the
+        stores already hold what was saved, so it is published and shown as
+        they hold it (`_show_what_was_saved`), and the reply says both halves.
+        A window caller's own failure callback isn't told
+        (`authoring_action_async`); the window is, with this message.
+        """
+        self._show_what_was_saved()
+        detail = str(error) or error.__class__.__name__
+        return Response.failure(
+            f"Saved, but it couldn't be applied: {detail}", kind=SAVED_NOT_APPLIED
+        )
+
+    def _show_what_was_saved(self) -> None:
+        """Publish and show what the stores hold, after a task's adoption failed partway."""
+        self._publish_runtime_for_context()
+        window = self._window
+        if window is None:
+            return
+        try:
+            window.playlists_changed(self._session)
+            window.show_library(self._session)
+            window.apply_settings(self._settings)
+        except Exception as error:  # the window may be what failed: say it, don't loop
+            self.activity_log.record("app", f"The window could not show the saved change: {error}")
 
     def _authoring_task_completed(self, task: _AuthoringTask) -> None:
         """Release the actor only after mutation, GTK adoption and reply."""
@@ -3253,6 +3290,10 @@ class Application(Adw.Application):
             if synchronous and not response.ok:
                 accepted = False
             if response.ok:
+                return
+            if response.kind == SAVED_NOT_APPLIED:
+                # Saved: never the caller's "was not saved; nothing changed".
+                self.window_report(response.message)
                 return
             if failure is not None:
                 failure(response.message)
@@ -4776,8 +4817,11 @@ class Application(Adw.Application):
             try:
                 self._session.use_playlist(chosen.id)
             except ApplyError as error:
+                # Saved (a health marker landed meanwhile, say): published and
+                # said as saved, never as a choice that didn't happen.
                 release_choice()
-                self.window_report(str(error))
+                self.playlists_changed()
+                self.window_report(f"Saved, but it couldn't be applied: {error}")
                 return
             self.playlists_changed()
             started = self._start_gui_runtime_call(
@@ -6053,17 +6097,27 @@ class Application(Adw.Application):
                 },
             ).validated()
         previous = self._settings
-        self._adopt_settings(previous, result.settings)
-        for _generation, success, _failure in callbacks:
-            if success is not None:
-                success(result.settings)
-        if result.not_durable:
-            self.window_report(
-                "Settings were saved, but Wall-in-One couldn't confirm they're safely on "
-                f"disk: {result.not_durable}"
-            )
-        if pending:
-            self._start_settings_authoring()
+        try:
+            # Saved: from here a failure is never "nothing changed". One in
+            # adopting it reaches the lane as saved but not applied; one in a
+            # caller's own follow-up is that caller's, and the batch goes on.
+            self._adopt_settings(previous, result.settings)
+            for _generation, success, _failure in callbacks:
+                if success is not None:
+                    try:
+                        success(result.settings)
+                    except Exception as error:
+                        self.window_report(
+                            f"Settings were saved, but what follows them failed: {error}"
+                        )
+            if result.not_durable:
+                self.window_report(
+                    "Settings were saved, but Wall-in-One couldn't confirm they're safely on "
+                    f"disk: {result.not_durable}"
+                )
+        finally:
+            if pending:
+                self._start_settings_authoring()
 
     def _fail_settings_batch(self, message: str) -> None:
         """Roll every coalesced control back to the last durable snapshot."""

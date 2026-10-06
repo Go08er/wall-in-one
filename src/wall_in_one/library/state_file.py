@@ -190,7 +190,9 @@ def read_object(
 
     ``(None, None)`` is reserved for an absent file.  Every object that exists
     but is not a readable regular JSON file produces a fault, including a
-    replacement race between ``lstat`` and ``open``.
+    replacement race between ``lstat`` and ``open``. A fault from inspecting,
+    opening or reading it, or from that race, is a :class:`ReadFailure`: the
+    bytes weren't read, so nothing is known to be wrong with them.
     """
     snapshots = _READ_SNAPSHOTS.get()
     if snapshots is not None:
@@ -210,7 +212,7 @@ def read_object(
     except FileNotFoundError:
         return None, None
     except OSError as error:
-        return None, f"could not inspect {path.name}: {error.strerror or error}"
+        return None, ReadFailure(f"could not inspect {path.name}: {error.strerror or error}")
 
     if stat.S_ISLNK(before.st_mode):
         return None, f"{path.name} is a symbolic link, not a regular {description} file"
@@ -223,18 +225,18 @@ def read_object(
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
-        return None, f"could not read {path.name}: {error.strerror or error}"
+        return None, ReadFailure(f"could not read {path.name}: {error.strerror or error}")
 
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             return None, f"{path.name} is not a regular {description} file"
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            return None, f"{path.name} changed while it was being read"
+            return None, ReadFailure(f"{path.name} changed while it was being read")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             encoded = handle.read(maximum_bytes + 1)
     except OSError as error:
-        return None, f"could not read {path.name}: {error.strerror or error}"
+        return None, ReadFailure(f"could not read {path.name}: {error.strerror or error}")
     finally:
         os.close(descriptor)
 
@@ -266,10 +268,32 @@ def version_fault(path: Path, document: dict[str, Any], expected: int) -> str | 
 #: here: it is shown as far as this build understands it, and every mutation
 #: is refused with this kind so the file stays byte-identical and no
 #: ``.broken`` copy is made. Anything else this build cannot use is
-#: ``unreadable`` and keeps the historical recovery, in which the next write
-#: moves the original aside before saving what could be parsed.
+#: ``unreadable``. Content it cannot use keeps the historical recovery, in
+#: which the next addition moves the original aside before saving what could
+#: be parsed; a file it could not read at all (a :class:`ReadFailure`) is never
+#: moved or replaced, and every change to it is refused.
 NEWER_VERSION: Final = "newer-version"
 UNREADABLE: Final = "unreadable"
+
+
+class ReadFailure(str):
+    """A fault from reading the file at all, not from what it holds.
+
+    The file could not be inspected, opened or read (a permission it lacks,
+    an I/O error), or was replaced while it was being read. Nothing says its
+    bytes are damaged, only that they can't be read now, so no Store moves it
+    aside or writes over it: every change is refused (``unreadable``) until
+    it can be read again. A plain ``str`` fault is about the content (not
+    JSON, not this build's shape, too large, a link or something other than a
+    file) and keeps the recovery.
+    """
+
+    __slots__ = ()
+
+
+def read_failed(fault: str | None) -> bool:
+    """Whether ``fault`` says the file couldn't be read at all (:class:`ReadFailure`)."""
+    return isinstance(fault, ReadFailure)
 
 
 def newer_version_fault(path: Path, document: Mapping[str, Any], understood: int) -> str | None:

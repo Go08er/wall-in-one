@@ -426,9 +426,11 @@ class Store:
                         state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
                     )
                 current, fault = reading.value, reading.fault
-                if refuse_unreadable and fault is not None:
+                if fault is not None and (refuse_unreadable or state_file.read_failed(fault)):
                     # Decided from this locked read: an unstar must see the
-                    # list, and can't. Nothing is written or moved aside.
+                    # list, and can't; and a list that couldn't be read at all
+                    # is not damaged, so a star must not move it aside either.
+                    # Nothing is written or moved aside.
                     raise _unreadable_error(fault, target)
                 # Preserve the historical direct-construction contract: an
                 # explicit in-memory seed is the base only until a real file

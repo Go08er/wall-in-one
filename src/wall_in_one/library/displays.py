@@ -591,9 +591,11 @@ class Store:
                     self._fault = fault
                     self._fault_kind = reading.fault_kind
                     self._loaded = True
-                if refuse_unreadable and fault is not None:
+                if fault is not None and (refuse_unreadable or state_file.read_failed(fault)):
                     # Decided from this locked read: a removal, an opt-out or
-                    # a retarget must see the assignments, and can't.
+                    # a retarget must see the assignments, and can't; and a
+                    # file that couldn't be read at all is not damaged, so
+                    # nothing may move it aside or write over it.
                     raise _unreadable_error(fault, target)
                 result, changed = change(working)
                 if changed:

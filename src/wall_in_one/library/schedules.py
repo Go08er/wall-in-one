@@ -983,11 +983,20 @@ class Store:
                     self._fault = fault
                     self._fault_kind = reading.fault_kind
                     self._loaded = True
-                if refuse_unreadable and fault is not None:
+                if fault is not None and (refuse_unreadable or state_file.read_failed(fault)):
                     # Decided from this locked read: a removal or retarget
-                    # must see every rule, and these can't be read.
+                    # must see every rule, and these can't be read; and a
+                    # file that couldn't be read at all is not damaged, so
+                    # nothing may move it aside or write over it.
                     raise _unreadable_error(fault, target)
-                result, changed = change(rules)
+                try:
+                    result, changed = change(rules)
+                except ScheduleError as error:
+                    if fault is not None and error.kind == "no-such-rule":
+                        # Not among the rules that could be read: whether the
+                        # file holds it isn't known, so say why, not "no rule".
+                        raise _unreadable_error(fault, target) from error
+                    raise
                 if changed:
                     # Format-change guards: keep the file's version unless
                     # these rules need a newer one, and keep the old bytes

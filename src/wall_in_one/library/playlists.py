@@ -1422,12 +1422,21 @@ class Store:
                         state_file.NEWER_VERSION, state_file.newer_version_refusal(target)
                     )
                 current, fault = reading.value, reading.fault
-                if refuse_unreadable and fault is not None:
+                if fault is not None and (refuse_unreadable or state_file.read_failed(fault)):
                     # Decided from this locked read: a removal or rename must
-                    # see the playlists, and can't. Nothing is written.
+                    # see the playlists, and can't; and a file that couldn't
+                    # be read at all is not damaged, so nothing may move it
+                    # aside or write over it. Nothing is written.
                     raise _unreadable_error(fault, target)
                 authored = dict(current) if present or self._loaded else dict(self._playlists)
-                result, changed = change(authored)
+                try:
+                    result, changed = change(authored)
+                except PlaylistError as error:
+                    if fault is not None and error.kind in ("no-such-playlist", "no-such-entry"):
+                        # Not among what could be read: whether the file holds
+                        # it isn't known, so say why, not "no playlist".
+                        raise _unreadable_error(fault, target) from error
+                    raise
                 if changed:
                     version = FORMATS.to_write(reading.version, required_version(authored.values()))
                     # Refused if too large to read back, before anything is backed up

@@ -552,11 +552,13 @@ Deleting the whole directory is safe -- it is rebuilt on demand.
 ## State-file recovery
 
 If favourites, Pairings, playlists, schedules or display assignments contain
-unreadable JSON, a later repair mutation first moves the exact generation that
-failed to a numbered `.broken` file. Recovery publishes without replacement:
-if an editor installs a valid document before or during that boundary, the
-manual repair remains canonical and the app reports its own mutation as
-failed. The same rule applies to an in-place repair of the original inode.
+JSON this version can't use, the next addition (or edit of a record it could
+still read) first moves the exact generation that failed to a numbered
+`.broken` file, then saves what could be read. Recovery publishes without
+replacement: if an editor installs a valid document before or during that
+boundary, the manual repair remains canonical and the app reports its own
+mutation as failed. The same rule applies to an in-place repair of the
+original inode.
 
 Taking something out is not a repair. Deleting, unassigning, unstarring,
 forgetting or renaming a record in one of these files while it can't be read
@@ -564,7 +566,15 @@ is refused with the reason `unreadable` ("… can't be read (…), so which rule
 it holds isn't known. Nothing was changed."), and the file stays where and as it
 is: nothing can be said to be gone from a file whose contents aren't known.
 Renaming a playlist reads every file that names it before it writes any of
-them, so it is refused the same way if one of them can't be read.
+them, so it is refused the same way if one of them can't be read. Changing a
+rule, a playlist or an entry that isn't among what could be read is refused
+the same way too, rather than said not to exist.
+
+A file that can't be read at all is not damaged: its permissions don't let the
+app read it, or the disk reported an error. It is never moved aside or written
+over. Every change to it, an addition too, is refused with the reason
+`unreadable` until it can be read again; only content this version can't use
+is moved aside.
 
 Each of these files has a size the app reads back: 8 MiB for playlists and
 Pairings, 4 MiB for schedules and favourites, 64 KiB for display assignments,

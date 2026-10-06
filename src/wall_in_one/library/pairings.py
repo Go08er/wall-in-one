@@ -1238,6 +1238,9 @@ class Store:
 
         ``refuse_unreadable``: a removal must see the records, so a file that
         can't be read refuses (``unreadable``) rather than removing nothing.
+        Any change refuses a file that couldn't be read at all
+        (`state_file.ReadFailure`); only one whose content is damaged is
+        moved aside for a choice.
         """
         target = self._path if self._path is not None else state_path()
         try:
@@ -1261,7 +1264,11 @@ class Store:
                         f"cannot persist runtime health because {fault}; "
                         "the unreadable pairings file was left untouched",
                     )
-                if fault is not None and refuse_unreadable:
+                if fault is not None and (refuse_unreadable or state_file.read_failed(fault)):
+                    # A removal must see the records; and a file that couldn't
+                    # be read at all is not damaged, so a choice must not move
+                    # it aside or write over it either. (Health, above, keeps
+                    # its own refusal of any fault.)
                     raise _unreadable_error(fault, target)
                 updated = dict(records)
                 result, changed = operation(updated)

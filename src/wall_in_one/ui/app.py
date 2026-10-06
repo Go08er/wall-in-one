@@ -564,7 +564,7 @@ class Application(Adw.Application):
         self._window_glass: css.Glass | None = None
         self._control: server.SocketServer | None = None
         self._resolved: source.ResolvedPalette | None = None
-        self._session = Session(self._settings, owns_playback=self._service_start)
+        self._session = self._new_session(self._settings)
         self._cycle_source: int = 0
         self._schedule_source: int = 0
         self._runtime_status_source: int = 0
@@ -1564,12 +1564,36 @@ class Application(Adw.Application):
         if jobs is not None:
             jobs.shutdown(wait=wait, cancel_futures=True)
 
+    def _new_session(self, settings: config.Settings) -> Session:
+        """The application's Session, which reports every library it scans (`_library_scanned`)."""
+        session = Session(settings, owns_playback=self._service_start)
+        session.on_scanned(self._library_scanned)
+        return session
+
+    def _library_scanned(self, sources: _LibrarySources) -> None:
+        """A synchronous scan installed a library from ``sources``: they are accepted.
+
+        `Session.refresh` says so only once the scan has succeeded and its
+        library is installed, with the sources that scan read, whoever asked
+        for it: the compatibility service's start and refreshes, the rescan
+        when its settings change the library's sources, or a paused video's
+        still. A failed scan says nothing, so the earlier evidence stands, and
+        `_accepted_library_sources` stays None only for a library never
+        scanned. (A GUI scans on a worker; `_adopt_runtime_library_scan` and a
+        removal's own scan record those.)
+        """
+        with self._runtime_config_lock:
+            self._accepted_library_sources = sources
+
     def _replace_session_after_migration(self, settings: config.Settings) -> None:
         """Reopen every split store which the just-completed import installed."""
         previous = self._session
         self._settings = settings
         self._settings_requested = settings
-        self._session = Session(settings, owns_playback=self._service_start)
+        self._session = self._new_session(settings)
+        with self._runtime_config_lock:
+            # Its library is empty until it is scanned: nothing was accepted from it.
+            self._accepted_library_sources = None
         previous.shutdown()
         if self._window is not None:
             self._window.apply_settings(settings)
@@ -2504,9 +2528,9 @@ class Application(Adw.Application):
                 self.window_report(f"Library scan failed: {detail}")
                 self._settle_library_refresh_waiters(False)
                 return
+            # Its own sources are accepted already (`_library_scanned`), as
+            # this scan read them: never what the settings say afterwards.
             self._validate_inventory()
-            if runtime_pending:
-                self._adopt_runtime_library_scan(runtime_generation)
             try:
                 self._finish_library_refresh()
             finally:
@@ -3550,8 +3574,9 @@ class Application(Adw.Application):
                 "be taken from it yet; wait for that scan to finish (refresh the library if it "
                 "failed), then try again"
             )
-        # Before any scan is accepted (None), the library holds nothing a scan
-        # found under other folders: nothing to take from older sources.
+        # None only before any scan was accepted, by a worker or synchronously
+        # (`_library_scanned`): the library is empty, so nothing in it can come
+        # from older sources.
         if sources is not None and sources != (self._settings.roots, self._settings.scan_workshop):
             return (
                 "the library is being scanned for its changed folders, so wallpapers can\u2019t "

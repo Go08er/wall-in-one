@@ -47,6 +47,10 @@ if TYPE_CHECKING:
 Scanner = Callable[[Sequence[Path] | None], Library]
 
 
+#: A library's sources: its roots, and whether Workshop items were scanned.
+LibrarySources = tuple[tuple[Path, ...], bool]
+
+
 @dataclass(frozen=True, slots=True)
 class LibraryScan:
     """One immutable library-scan request, safe to execute off the UI thread.
@@ -840,6 +844,8 @@ class Session:
         # test that hands over a ready-made library means it, and re-resolving
         # would recompute every pairing from a disk the test never wrote to.
         self._scanner = scanner
+        #: Told the sources of every library a synchronous scan installs (`on_scanned`).
+        self._scan_observer: Callable[[LibrarySources], None] | None = None
         self._library = Library(roots=(), items=())
         # Keep successfully observed Workshop installations across malformed
         # or missing-entry scans. The ordinary Library snapshot intentionally
@@ -930,10 +936,32 @@ class Session:
         """
         if mutate_removals:
             self.retry_removals()
-        return self.adopt_library(
+        # What this scan reads, as `prepare_scan` reads it, before it runs:
+        # the library it installs comes from these sources and no others.
+        sources: LibrarySources = (
+            tuple(roots) if roots is not None else self._settings.roots,
+            self._settings.scan_workshop,
+        )
+        adopted = self.adopt_library(
             self.prepare_scan(roots).run(),
             reconcile_workshop=mutate_removals,
         )
+        if self._scan_observer is not None:
+            # Only once installed: a scan that failed told nobody anything.
+            self._scan_observer(sources)
+        return adopted
+
+    def on_scanned(self, observer: Callable[[LibrarySources], None] | None) -> None:
+        """Tell ``observer`` the sources of every library `refresh` installs.
+
+        ``(roots, scan_workshop)``, as the settings the scan read had them, once
+        the scan has succeeded and its library is installed; never for one that
+        failed. The application keeps it as the evidence its library is current
+        (`Application.library_currency_refusal`). A library a background worker
+        scanned is installed with `adopt_library_refresh`, and the application
+        records its sources itself.
+        """
+        self._scan_observer = observer
 
     def prepare_scan(
         self,

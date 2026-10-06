@@ -279,3 +279,5 @@ def test_a_backup_written_but_not_finished_cleanly_is_said_as_kept(
     assert backup.read_bytes() == before, "the copy is the version-1 file"
     assert wrote == [backup], "the copy landed, and the lane hears it"
     assert happened, "the fault was injected"
+    # And `backup_before_bump` says it raises this, not only "no backup kept".
+    assert "BackupNotConfirmedError" in (state_file.backup_before_bump.__doc__ or "")

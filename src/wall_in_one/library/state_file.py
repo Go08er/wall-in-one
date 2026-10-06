@@ -653,8 +653,12 @@ def backup_before_bump(path: Path, *, observed: StateFileObservation, replaced: 
 
     Raises :class:`OSError` when no backup can be kept: something other than
     a regular file holds the name, the file changed since it was observed, or
-    the copy could not be written. The caller must then refuse the save
-    rather than bump without a backup.
+    the copy could not be written. Raises :class:`BackupNotConfirmedError`
+    (an :class:`OSError` too) when the copy was written, and is recorded
+    (`record_write`), but writing it did not finish cleanly: it could not be
+    verified in place, or its folder did not sync. Either way the caller
+    must refuse the save rather than bump on an unconfirmed backup, and say
+    which (`backup_refusal`).
     """
     backup = version_backup_path(path, replaced)
     if _kept_backup(backup):

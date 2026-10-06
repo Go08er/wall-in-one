@@ -549,8 +549,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._browse_page.focus_search()
 
     def report(self, message: str) -> None:
-        """Surface a failure where the user will actually see it."""
-        self._toast.add_toast(Adw.Toast.new(message))
+        """Surface a failure where the user will actually see it.
+
+        One authoring task, one message: a result said here directly still
+        carries what its task saved without confirming (`with_task_durability`).
+        """
+        self._toast.add_toast(Adw.Toast.new(self._app.with_task_durability(message)))
 
     def _teardown(self, _window: Gtk.Window) -> None:
         """Stop this window's workers and cancel their queued work, once.

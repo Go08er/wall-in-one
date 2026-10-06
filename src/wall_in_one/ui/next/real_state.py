@@ -133,6 +133,8 @@ class Backend(RuntimeBackend, PlaylistBackend, ScheduleBackend, Protocol):
 
     def play_item_async(self, item: MediaItem) -> bool: ...
 
+    def with_task_durability(self, message: str) -> str: ...
+
     def play_item_on_async(self, item: MediaItem, connector: str) -> bool: ...
 
     def authoring_action_async(
@@ -417,7 +419,12 @@ class RealAppState(GObject.Object):
 
     # -- signals ----------------------------------------------------------------
     def toast(self, text: str, undo: Undo | None = None, action: ToastButton | None = None) -> None:
-        """Show ``text``, with an Undo button when ``undo`` is given (else ``action``'s)."""
+        """Show ``text``, with an Undo button when ``undo`` is given (else ``action``'s).
+
+        A task's result carries what it saved without confirming durable, so it
+        is one toast, not two (`Application.with_task_durability`).
+        """
+        text = self._backend.with_task_durability(text)
         self.emit("toast", text, ("Undo", undo) if undo is not None else action)
 
     def navigate(self, page: str) -> None:

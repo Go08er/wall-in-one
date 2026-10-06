@@ -784,6 +784,10 @@ class PublishedNotDurableError(OSError):
         )
         self.path = path
 
+    def __str__(self) -> str:
+        # Said to people as is, so without OSError's "[Errno 5] " prefix.
+        return self.strerror or super().__str__()
+
 
 def published_not_durable(error: BaseException) -> PublishedNotDurableError | None:
     """The publication-without-folder-sync behind ``error``, if that is what failed.

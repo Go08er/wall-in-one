@@ -189,6 +189,9 @@ class FakeApplication:
     def window_report(self, message: str) -> None:
         self.reports.append(message)
 
+    def with_task_durability(self, message: str) -> str:
+        return message
+
     def set_window_glass(self, glass: css.Glass | None) -> None:
         self.glass.append(glass)
 

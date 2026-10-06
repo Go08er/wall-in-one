@@ -1620,6 +1620,9 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
             calls.append((verb, argument))
             return True
 
+        def with_task_durability(self, message: str) -> str:
+            return message
+
     application = FakeApp()
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_runtime_protocol_error("Runtime returned status in an unexpected format")

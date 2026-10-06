@@ -34,6 +34,7 @@ from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.control import server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import playlists, state_file  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.app import Application, _Commands  # noqa: E402
 
 SAVED_BUT = "was saved, but syncing its folder failed"
@@ -202,5 +203,39 @@ def test_a_rename_that_repointed_the_default_before_the_sync_failed_goes_on(
         application.adopt_playlist_rename(result)
         assert application.settings.active_playlist == dock.id
         assert config.load_strict().active_playlist == dock.id
+    finally:
+        _close(application)
+
+
+def test_a_damaged_list_moved_aside_and_rewritten_without_syncs_is_one_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """X-2c's move aside and the save after it: two warnings, one task, one message."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    target = paths.app_state_dir() / "favourites.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"{ not json")
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: True)
+    path = tmp_path / "library" / "paper.png"
+    item = MediaItem(path=path, kind=Kind.STILL, size=1, mtime=1)
+    application.session.adopt_library(Library(roots=(path.parent,), items=(item,)))
+    assert application.session.favourites.fault is not None
+    failed = _sync_fails_for(monkeypatch, "favourites.json")
+    try:
+        heard = len(window.reports)
+        reply = _ctl(application, "favourite", str(path))
+        spin_until(lambda: len(window.reports) > heard)
+
+        assert len(failed) == 2, "the move aside, then the new file"
+        assert reply.ok, reply.message
+        assert "was moved aside to favourites.json.broken" in reply.message
+        assert f"favourites.json {SAVED_BUT}" in reply.message
+        new = window.reports[heard:]
+        assert len(new) == 1, new
+        assert "moved aside" in new[0] and SAVED_BUT in new[0]
+        assert application.session.favourites.is_favourite(path)
     finally:
         _close(application)

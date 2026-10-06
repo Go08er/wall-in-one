@@ -1322,8 +1322,8 @@ class Store:
                 ) from error
             self._fault = None
             self._fault_kind = None
-            # Published but not confirmed durable is written; a backup that
-            # couldn't be confirmed above still refuses, before any write.
+            # Published but not confirmed durable is written, as the move
+            # aside above is (`state_file.preserve_faulted` says it, then goes on).
             with state_file.published_counts():
                 save(records, target, replace_existing=False, unknown=unknown)
         else:

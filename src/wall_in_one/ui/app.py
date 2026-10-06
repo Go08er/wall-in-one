@@ -8,7 +8,7 @@ import json
 import sys
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -85,6 +85,13 @@ def download_root(settings: config.Settings) -> Path | None:
     """
     configured = settings.roots
     return configured[0] if configured else None
+
+
+def _with_durability(message: str, warnings: Sequence[str]) -> str:
+    """``message``, then each warning it doesn't already say, as sentences of one message."""
+    said = [message.rstrip(" .")] if message.strip() else []
+    said.extend(warning.rstrip(" .") for warning in warnings if warning not in message)
+    return ". ".join(said) + "." if said else ""
 
 
 def _runtime_installed(settings: config.Settings, session: Session) -> bool:
@@ -218,6 +225,19 @@ class _ThemeActionResult:
     error: str = ""
 
 
+@dataclass(slots=True)
+class _Durability:
+    """What one authoring task saved without confirming it durable, and if the window knows.
+
+    Said in a ``ctl`` reply, and in the window as part of what the task's
+    caller says for it (`Application.window_report`), or on its own after
+    the task when the caller says nothing: one task, one message.
+    """
+
+    warnings: list[str] = field(default_factory=list)
+    said: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class _AuthoringTask:
     """One transaction held until its GTK/runtime tail has replied.
@@ -236,9 +256,8 @@ class _AuthoringTask:
     requires_migration: bool = True
     guard_migration_transaction: bool = True
     application_held: bool = False
-    #: What the work saved but could not confirm durable (`state_file.report_not_durable`),
-    #: said after the task: to the window, and in a ``ctl`` reply.
-    durability: list[str] = field(default_factory=list, compare=False)
+    #: What the work saved but could not confirm durable (`state_file.report_not_durable`).
+    durability: _Durability = field(default_factory=_Durability, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,6 +615,9 @@ class Application(Adw.Application):
         self._inventory_stamp = 0
         #: The durability sink this application replaced at startup (`_not_durable`).
         self._previous_durability_sink: Callable[[str], None] | None = None
+        #: The authoring task whose result GTK is adopting now, so what its caller
+        #: says carries what the task saved (`window_report`).
+        self._speaking_for: _AuthoringTask | None = None
         self._inventory_valid = True
         self._inventory_problem = ""
         #: The inventory validity and problem a removal's prepare found in
@@ -2338,9 +2360,25 @@ class Application(Adw.Application):
 
     def window_report(self, message: str) -> None:
         """Put a management-page result in the window's toast overlay (and the log)."""
+        message = self.with_task_durability(message)
         self.activity_log.record("app", message)
         if self._window is not None:
             self._window.report(message)
+
+    def with_task_durability(self, message: str) -> str:
+        """``message``, carrying what the authoring task it reports saved without confirming.
+
+        Said while an authoring task's result is adopted on GTK (by its
+        caller's report or toast, `_finish_authoring_outcome`), the first
+        message also says what that task saved but couldn't confirm durable,
+        so one task is one message: what it did, and what it couldn't. The
+        lane says the warning on its own only when the caller says nothing.
+        """
+        task = self._speaking_for
+        if task is None or not task.durability.warnings or task.durability.said:
+            return message
+        task.durability.said = True
+        return _with_durability(message, task.durability.warnings)
 
     def _dialog_parent(self) -> Gtk.Window | None:
         """The window as a dialog parent, when it is a real GTK window.
@@ -3075,7 +3113,7 @@ class Application(Adw.Application):
                     return work()
                 finally:
                     # One folder that can't sync fails every write in it: say it once.
-                    task.durability.extend(dict.fromkeys(warnings))
+                    task.durability.warnings.extend(dict.fromkeys(warnings))
 
         try:
             future = self._authoring_pool().submit(guarded_work)
@@ -3117,12 +3155,13 @@ class Application(Adw.Application):
 
         def reply(response: Response) -> None:
             # A ``ctl`` caller is told too; the window is told below.
-            if task.durability:
-                said = "; ".join((response.message, *task.durability)).lstrip("; ")
+            if task.durability.warnings:
+                said = "; ".join((response.message, *task.durability.warnings)).lstrip("; ")
                 response = Response(ok=response.ok, message=said, kind=response.kind)
             task.reply(response)
 
         chained = False
+        speaking_for, self._speaking_for = self._speaking_for, task
         try:
             if self._authoring_shutdown or self._runtime_shutdown:
                 return GLib.SOURCE_REMOVE
@@ -3148,10 +3187,13 @@ class Application(Adw.Application):
             except Exception as error:
                 reply(server.failed(error))
         finally:
-            if not self._authoring_shutdown and not self._runtime_shutdown:
+            self._speaking_for = speaking_for
+            unsaid = task.durability.warnings and not task.durability.said
+            if unsaid and not self._authoring_shutdown and not self._runtime_shutdown:
                 # Saved, whatever the task made of it: never "nothing changed".
-                for warning in task.durability:
-                    self.window_report(warning)
+                # Said with the caller's own result above, or here on its own.
+                task.durability.said = True
+                self.window_report(_with_durability("", task.durability.warnings))
             if not chained:
                 complete()
         return GLib.SOURCE_REMOVE

@@ -620,6 +620,10 @@ class Application(Adw.Application):
                 Callable[[str], None] | None,
             ]
         ] = []
+        #: The generation the batch at the head of the lane took
+        #: (`_prepare_settings_batch`): what that batch owns and settles, and
+        #: nothing accepted after it. None between batches.
+        self._settings_batch_generation: int | None = None
         self._settings_requested = self._settings
         self._runtime_status_pending = False
         self._runtime_status_generation = -1
@@ -3360,6 +3364,7 @@ class Application(Adw.Application):
         prepare: Callable[[], Callable[[], _AuthoringResult]] | None = None,
         finalize: Callable[[], None] | None = None,
         failure: Callable[[str], None] | None = None,
+        saved_not_applied: Callable[[str], None] | None = None,
         requires_migration: bool = True,
         guard_migration_transaction: bool = True,
         allow_during_quit: bool = False,
@@ -3370,6 +3375,21 @@ class Application(Adw.Application):
         durable.  Errors are delivered as plain text so callers can restore
         their exact controls without allowing worker exceptions to escape the
         main loop.
+
+        Two outcomes are kept apart, explicitly:
+
+        * ``failure`` hears a task that did not save: refused before its
+          write, or its work raised (if it changed something first, a damaged
+          file moved aside say, what the caller says drops "nothing changed",
+          `with_task_durability`). Callers undo there: settle intents, put
+          controls back, cancel a batch.
+        * A task whose write landed but whose ``finish`` raised
+          (`SAVED_NOT_APPLIED`) is never given to ``failure``: undoing a saved
+          write's bookkeeping there settles it twice, or cancels a newer
+          request (Z-1). The lane publishes and shows what was saved and says
+          "Saved, but it couldn't be applied" (`_after_failed_finish`); a
+          caller with its own settlement for that case gives
+          ``saved_not_applied``.
         """
         if self._authoring_shutdown or self._runtime_shutdown:
             return False
@@ -3392,9 +3412,14 @@ class Application(Adw.Application):
                 accepted = False
             if response.ok:
                 return
-            # Saved but not applied, or changed then refused: the caller still
-            # puts its controls back, and what it says is made true of the
-            # task (`with_task_durability`).
+            if response.kind == SAVED_NOT_APPLIED:
+                # Committed: never the caller's failure path. Its own
+                # settlement if it has one; the lane says the rest.
+                if saved_not_applied is not None:
+                    saved_not_applied(response.message)
+                return
+            # Did not save: the caller undoes and says why (made true of the
+            # task if it changed something first, `with_task_durability`).
             if failure is not None:
                 failure(response.message)
             else:
@@ -6174,7 +6199,11 @@ class Application(Adw.Application):
             self._unprepared_settings_batch,
             self._finish_settings_batch,
             prepare=self._prepare_settings_batch,
+            # A batch that did not save: its own generation goes back.
             failure=self._fail_settings_batch,
+            # One that saved settles itself (`_finish_settings_batch`); this
+            # only hears the lane if that ever raised regardless.
+            saved_not_applied=self._settings_batch_saved_not_applied,
             # A newer field was already accepted while the current batch was
             # in flight.  Explicit quit refuses new gestures but must drain
             # this coalesced tail before releasing the application.
@@ -6207,6 +6236,9 @@ class Application(Adw.Application):
         """
         with self._settings_authoring_lock:
             generation = self._settings_authoring_generation
+            # What this batch owns, from here to its settlement, whether it
+            # saves or not; anything accepted later is a later batch's.
+            self._settings_batch_generation = generation
             changes = tuple(
                 (key, field_generation, value)
                 for key, (field_generation, value) in self._settings_authoring_pending.items()
@@ -6326,15 +6358,45 @@ class Application(Adw.Application):
             return persist()
 
     def _finish_settings_batch(self, result: _SettingsResult) -> None:
-        """Adopt exactly the durable generation and queue at most one tail."""
-        callbacks: list[
+        """Settle the batch that saved: its own generation, exactly once, then its tail.
+
+        Committed-but-not-adopted is this batch's to settle, never a failure:
+        `_fail_settings_batch` is for a batch that did not save. The
+        generation's callbacks are taken first and settled here whatever
+        adopting the saved settings does (`_settle_saved_settings`); a newer
+        generation accepted during the save keeps its fields and callbacks and
+        saves as its own batch, started last.
+        """
+        callbacks, pending = self._take_saved_generation(result)
+        previous = self._settings
+        scans = self._library_scan_generation
+        try:
+            unapplied: Exception | None = None
+            try:
+                self._adopt_settings(previous, result.settings)
+            except Exception as error:
+                unapplied = error
+            scanned = self._library_scan_generation != scans
+            self._settle_saved_settings(previous, result, callbacks, unapplied, scanned=scanned)
+        finally:
+            if pending:
+                self._start_settings_authoring()
+
+    def _take_saved_generation(
+        self, result: _SettingsResult
+    ) -> tuple[
+        list[
             tuple[
                 int,
                 Callable[[config.Settings], None] | None,
                 Callable[[str], None] | None,
             ]
-        ] = []
+        ],
+        bool,
+    ]:
+        """This batch's callbacks and fields, out of the shared lists; whether a tail remains."""
         with self._settings_authoring_lock:
+            self._settings_batch_generation = None
             for key, field_generation, _value in result.changes:
                 pending_field = self._settings_authoring_pending.get(key)
                 if pending_field is not None and pending_field[0] <= field_generation:
@@ -6351,53 +6413,145 @@ class Application(Adw.Application):
             ]
             pending = bool(self._settings_authoring_pending)
             self._settings_authoring_running = pending
-            self._settings_requested = replace(
-                result.settings,
-                **{
-                    key: value
-                    for key, (_field_generation, value) in self._settings_authoring_pending.items()
-                },
-            ).validated()
-        previous = self._settings
+            newer = {key: value for key, (_gen, value) in self._settings_authoring_pending.items()}
+            try:
+                self._settings_requested = replace(result.settings, **newer).validated()
+            except TypeError, ValueError:
+                # The newer fields don't combine with what was saved: they are
+                # checked again when their own batch saves.
+                self._settings_requested = result.settings
+        return callbacks, pending
+
+    def _settle_saved_settings(
+        self,
+        previous: config.Settings,
+        result: _SettingsResult,
+        callbacks: list[
+            tuple[
+                int,
+                Callable[[config.Settings], None] | None,
+                Callable[[str], None] | None,
+            ]
+        ],
+        unapplied: Exception | None,
+        *,
+        scanned: bool = True,
+    ) -> None:
+        """Tell this generation's callers it saved, once each, and say what couldn't follow.
+
+        They saved whatever adopting it did: each hears success (its value is
+        what ``settings.toml`` holds), never its failure path, which says
+        "nothing changed" and undoes intents. If adopting failed partway, the
+        app still holds the saved settings (`_adopt_settings` takes them
+        first); what they change is published and shown here, and that they
+        couldn't be applied is said once. New library folders the window
+        never got to scan (``scanned`` False) are scanned now; a scan that ran
+        and failed is not repeated here: the library stays what it was, and
+        is said not to be current, until a scan succeeds (Z-2).
+        """
+        if unapplied is not None:
+            self._show_what_was_saved()
+            sources_changed = (result.settings.roots, result.settings.scan_workshop) != (
+                previous.roots,
+                previous.scan_workshop,
+            )
+            if sources_changed and not scanned and not self._service_start:
+                # Adoption stopped before the window's scan of the new folders
+                # began. (The service scans inside adoption, `Session.update_settings`.)
+                try:
+                    self.refresh_library()
+                except Exception as error:  # said with the rest, below
+                    unapplied = RuntimeError(f"{unapplied}; and the library scan: {error}")
+        for _generation, success, _failure in callbacks:
+            if success is not None:
+                try:
+                    success(result.settings)
+                except Exception as error:
+                    self.window_report(
+                        f"Settings were saved, but what follows them failed: {error}"
+                    )
+        if unapplied is not None:
+            self.window_report(f"Settings were saved, but they couldn't be applied: {unapplied}")
+        if result.not_durable:
+            self.window_report(
+                "Settings were saved, but Wall-in-One couldn't confirm they're safely on "
+                f"disk: {result.not_durable}"
+            )
+
+    def _settings_batch_saved_not_applied(self, message: str) -> None:
+        """The lane's saved-but-not-applied route for a settings batch: touch no generation.
+
+        `_finish_settings_batch` takes and settles its own generation and
+        starts any tail itself, so this normally follows a failure after all
+        that; the lane says the message (`with_task_durability`). Above all it
+        is not `_fail_settings_batch`, which would drop a newer accepted edit.
+        Should the generation not have been taken, it is settled from what
+        ``settings.toml`` holds, so the batch never wedges.
+        """
+        with self._settings_authoring_lock:
+            took = self._settings_batch_generation
+            changes = tuple(
+                (key, field_generation, value)
+                for key, (field_generation, value) in self._settings_authoring_pending.items()
+                if took is not None and field_generation <= took
+            )
+        if took is None:
+            return
         try:
-            # Saved: from here a failure is never "nothing changed". One in
-            # adopting it reaches the lane as saved but not applied; one in a
-            # caller's own follow-up is that caller's, and the batch goes on.
-            self._adopt_settings(previous, result.settings)
-            for _generation, success, _failure in callbacks:
-                if success is not None:
-                    try:
-                        success(result.settings)
-                    except Exception as error:
-                        self.window_report(
-                            f"Settings were saved, but what follows them failed: {error}"
-                        )
-            if result.not_durable:
-                self.window_report(
-                    "Settings were saved, but Wall-in-One couldn't confirm they're safely on "
-                    f"disk: {result.not_durable}"
-                )
-        finally:
-            if pending:
-                self._start_settings_authoring()
+            saved = config.load_strict()
+        except config.ConfigError:
+            saved = self._settings
+        self._finish_settings_batch(_SettingsResult(took, saved, changes))
 
     def _fail_settings_batch(self, message: str) -> None:
-        """Roll every coalesced control back to the last durable snapshot."""
+        """Put the batch that did not save back to what is saved; nothing newer.
+
+        Pre-commit only: a refusal before the write, or a write that failed
+        (`saved_not_applied` takes the committed case). The batch at the lane
+        head owns the generation it took (`_settings_batch_generation`); its
+        fields and callbacks go back and fail. A generation accepted after it
+        stays pending and starts its own batch. Refused before the lane head
+        (shutting down, say), the batch took nothing: everything accepted so
+        far fails, and nothing is retried.
+        """
         with self._settings_authoring_lock:
-            callbacks = self._settings_authoring_callbacks
-            self._settings_authoring_callbacks = []
-            self._settings_authoring_pending.clear()
-            self._settings_authoring_running = False
-            self._settings_requested = self._settings
-        if self._window is not None:
-            self._window.apply_settings(self._settings)
-        delivered = False
-        for _generation, _success, failure in callbacks:
-            if failure is not None:
-                failure(message)
-                delivered = True
-        if not delivered:
-            self.window_report(f"Settings were not saved; nothing changed: {message}")
+            took = self._settings_batch_generation
+            self._settings_batch_generation = None
+            failed = took if took is not None else self._settings_authoring_generation
+            callbacks = [
+                callback for callback in self._settings_authoring_callbacks if callback[0] <= failed
+            ]
+            self._settings_authoring_callbacks = [
+                callback for callback in self._settings_authoring_callbacks if callback[0] > failed
+            ]
+            for key in [
+                key
+                for key, (field_generation, _value) in self._settings_authoring_pending.items()
+                if field_generation <= failed
+            ]:
+                self._settings_authoring_pending.pop(key)
+            # Before the lane head ``failed`` is the newest generation, so
+            # nothing is left; after it, anything left is newer and retried.
+            retry = bool(self._settings_authoring_pending or self._settings_authoring_callbacks)
+            self._settings_authoring_running = retry
+            self._settings_requested = replace(
+                self._settings,
+                **{key: value for key, (_gen, value) in self._settings_authoring_pending.items()},
+            ).validated()
+            requested = self._settings_requested
+        try:
+            if self._window is not None:
+                self._window.apply_settings(requested)
+            delivered = False
+            for _generation, _success, failure in callbacks:
+                if failure is not None:
+                    failure(message)
+                    delivered = True
+            if not delivered:
+                self.window_report(f"Settings were not saved; nothing changed: {message}")
+        finally:
+            if retry:
+                self._start_settings_authoring()
 
     def update_settings(self, **changes: Any) -> config.Settings:
         """Save a settings change now, for the headless service and non-GUI callers.

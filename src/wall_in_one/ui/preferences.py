@@ -244,7 +244,9 @@ class PreferencesPage(Adw.PreferencesPage):
 
     def _set_roots(self, roots: tuple[Path, ...]) -> bool:
         def failed(error: str) -> None:
-            self.apply_settings(self._app.settings)
+            # What is saved plus any newer edit still queued, which a failed
+            # batch leaves pending (`Application._fail_settings_batch`).
+            self.apply_settings(self._app.requested_settings)
             self._report(f"Library folders were not saved; nothing changed: {error}")
 
         return self._app.update_settings_async(
@@ -927,7 +929,9 @@ class PreferencesPage(Adw.PreferencesPage):
             return
 
         def failed(error: str) -> None:
-            self.apply_settings(self._app.settings)
+            # What is saved plus any newer edit still queued, which a failed
+            # batch leaves pending (`Application._fail_settings_batch`).
+            self.apply_settings(self._app.requested_settings)
             self._report(f"Settings were not saved; nothing changed: {error}")
 
         self._app.update_settings_async(on_error=failed, **changes)

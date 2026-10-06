@@ -474,3 +474,35 @@ def test_a_failed_gpu_save_goes_back_and_the_same_choice_then_saves(tmp_path: Pa
     assert ui_prefs.load().prefs.gpu_acceleration is False and not row.get_active()
     assert len(application.reports) == 1
     page._ui_prefs.close(wait=True)
+
+
+def test_a_failed_save_puts_back_what_is_requested_keeping_a_newer_queued_edit(
+    tmp_path: Path,
+) -> None:
+    """A failed batch leaves a newer accepted edit pending (`_fail_settings_batch`, Z-1).
+
+    The page put every widget back to what is saved, so a newer queued edit
+    (shuffle on, here) showed as off, and the next change would have written
+    it off again. It puts back what is requested: saved plus what is queued.
+    """
+    root = tmp_path / "library"
+    root.mkdir()
+
+    class Queued(SettingsApp):
+        """Shuffle on is accepted and still queued when the next write fails."""
+
+        @property
+        def requested_settings(self) -> config.Settings:
+            return replace(self.settings, shuffle=True)
+
+    application = Queued(root)
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    page.apply_settings(application.requested_settings)
+    assert page._shuffle.get_active()
+    application.fail = True
+
+    page._cycle.set_active(not application.settings.cycle_enabled)
+
+    assert application.reports and "nothing changed" in application.reports[-1]
+    assert page._shuffle.get_active(), "the newer queued edit still shows"
+    assert page._cycle.get_active() == application.settings.cycle_enabled, "this one went back"

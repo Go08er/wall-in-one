@@ -240,7 +240,7 @@ def test_a_window_task_whose_adoption_raises_is_said_saved_not_nothing_changed(
         raise RuntimeError("the page could not take it")
 
     def failed(message: str) -> None:
-        put_back.append(message)  # a caller puts its controls back, then says why
+        put_back.append(message)  # a caller undoes its bookkeeping, then says why
         application.window_report(
             f"\u201cEvening\u201d was not created; nothing changed: {message}"
         )
@@ -252,7 +252,10 @@ def test_a_window_task_whose_adoption_raises_is_said_saved_not_nothing_changed(
         spin_until(lambda: not application._authoring_active and bool(reports))
 
         assert playlists.Store.open().by_name("Evening") is not None, "the write landed"
-        assert len(put_back) == 1, "the caller still restores its controls"
+        # Its failure path is for a task that did not save: undoing a saved
+        # write's bookkeeping there settled it twice and cancelled newer
+        # requests (Z-1). The lane shows what was saved instead.
+        assert put_back == [], "the failure path never hears a saved write"
         assert reports == ["Saved, but it couldn't be applied: the page could not take it"]
         assert published, "what was saved is published"
     finally:

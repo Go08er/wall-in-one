@@ -928,7 +928,24 @@ class Application(Adw.Application):
         self,
         result: _PlaylistReferenceRepairResult,
     ) -> Response:
-        """Adopt committed repair deltas, opening the gate only when clean."""
+        """Adopt committed repair deltas, opening the gate only when clean.
+
+        The repair's writes are saved before this runs. If adopting them here
+        fails, the gate rests at ``repair`` (Try again runs it once more and
+        finds nothing left to repair), never at ``checking`` until a restart;
+        the lane says what was saved (`SAVED_NOT_APPLIED`).
+        """
+        try:
+            self._adopt_playlist_reference_repair(result)
+        except Exception:
+            self._authoring_repair_started = False
+            self._authoring_gate_state = "repair"
+            self._first_run_changed()
+            raise
+        return self._open_after_playlist_reference_repair(result)
+
+    def _adopt_playlist_reference_repair(self, result: _PlaylistReferenceRepairResult) -> None:
+        """The repair's deltas, in this process's stores and settings."""
         self._session.schedules.adopt_worker_forget_playlists(result.schedule_playlists)
         self._session.displays.adopt_worker_forget_playlists(result.display_playlists)
         self._session.schedules.adopt_worker_retarget(dict(result.schedule_retargets))
@@ -946,6 +963,10 @@ class Application(Adw.Application):
         elif result.schedule_playlists or result.schedule_retargets:
             self._session.playlists_changed()
 
+    def _open_after_playlist_reference_repair(
+        self, result: _PlaylistReferenceRepairResult
+    ) -> Response:
+        """Open the gate after a clean repair, or rest it at ``repair``."""
         if result.failures:
             self._authoring_repair_started = False
             self._authoring_gate_state = "repair"
@@ -2715,11 +2736,15 @@ class Application(Adw.Application):
         if generation != self._library_scan_generation:
             return
         detail = message or "unknown lifecycle reconciliation failure"
-        if self._window is not None:
-            self._window.show_library_scanning(False)
-            self._window.report(f"Library result could not be installed: {detail}")
-        self._finish_runtime_library_scan(generation, error=detail)
-        self._settle_library_refresh_waiters(False)
+        try:
+            if self._window is not None:
+                self._window.show_library_scanning(False)
+                self._window.report(f"Library result could not be installed: {detail}")
+        finally:
+            # Whatever the window does (it may be what failed): the barrier
+            # ends, or every gesture waiting on this scan would wait forever.
+            self._finish_runtime_library_scan(generation, error=detail)
+            self._settle_library_refresh_waiters(False)
 
     def _finish_library_refresh(self, *, scan_generation: int | None = None) -> None:
         """Reconcile and render one installed scan, always on the main thread."""
@@ -5362,6 +5387,32 @@ class Application(Adw.Application):
         inventory stays invalid, so the guard and the compiler refuse.
         """
         self._removal_active = False
+        if result.committed:
+            # The file is gone: from here on, nothing may restore what was in
+            # force before the removal (`_restore_runtime_after_uncommitted_removal`),
+            # so this comes first, before anything that could fail.
+            # Invalid from the commit until a scan after it is accepted, whatever
+            # happened since its prepare.
+            self._invalidate_inventory(
+                f"{result.item.name} was removed; the library is being scanned again"
+            )
+            self._removed_item_paths.add(result.item.path)
+            for cleanup in result.cleanups:
+                self._removed_item_paths.update(cleanup.removed_stills)
+            self._invalidate_library_scan_after_removal()
+            self._finish_runtime_removal_invalidation()
+        try:
+            self._adopt_removal_deltas(result)
+        except Exception:
+            if result.committed:
+                # Adopting the rest failed: the inventory stays invalid, so the
+                # guards refuse, until the scan the lane starts once it is free
+                # lands (`_release_removal_lane`). The lane says it saved.
+                self._refresh_after_removal = True
+            raise
+
+    def _adopt_removal_deltas(self, result: RemovalResult) -> None:
+        """What `_adopt_item_removal` takes in after the commit's own bookkeeping."""
         self._session.adopt_library_cleanups(result.cleanups)
         self._session.adopt_library_fault_repairs(result.repaired_faults)
         partial = bool(result.error_message or result.cleanup_failures)
@@ -5380,16 +5431,6 @@ class Application(Adw.Application):
         )
         self._refresh_after_removal = False
         if result.committed:
-            # Invalid from the commit until a scan after it is accepted, whatever
-            # happened since its prepare.
-            self._invalidate_inventory(
-                f"{result.item.name} was removed; the library is being scanned again"
-            )
-            self._removed_item_paths.add(result.item.path)
-            for cleanup in result.cleanups:
-                self._removed_item_paths.update(cleanup.removed_stills)
-            self._invalidate_library_scan_after_removal()
-            self._finish_runtime_removal_invalidation()
             self._stills.forget(result.item.path)
             self._begin_removal_convergence()
             if own_scan is not None:

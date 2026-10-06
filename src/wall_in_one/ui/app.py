@@ -5309,17 +5309,18 @@ class Application(Adw.Application):
     def _adopt_post_removal_scan(
         self, library: Library, sources: _LibrarySources, *, refresh_follows: bool
     ) -> None:
-        """Install the scan a removal ran once it had committed (`RemovalResult.rescanned`).
+        """Install the scan a removal ran once it had committed (`RemovalResult.own_scan`).
 
         That is the real post-removal library, so it is installed as a finished
         scan is (`refresh_library` without a window): adopted, its sources
         accepted, shown and published, and the runtime's library barrier and
         the removal's convergence released at its generation. Nothing scanned
         before the commit is installed: the removal's dry run decides whether
-        it may go ahead, and only that. With ``refresh_follows`` (a removal
-        that committed with a failure, or a refresh asked for meanwhile), it
-        is adopted and shown, and the refresh that follows owns the barrier,
-        the convergence and the publication.
+        it may go ahead, and only that. Only a scan of the sources the
+        settings name now gets here (`_adopt_item_removal`). With
+        ``refresh_follows`` (a removal that committed with a failure, or a
+        refresh asked for meanwhile), it is adopted and shown, and the refresh
+        that follows owns the barrier, the convergence and the publication.
         """
         generation = self._library_scan_generation
         before = self._session.library
@@ -5337,8 +5338,9 @@ class Application(Adw.Application):
             return
         self._validate_inventory()
         self._removal_convergence_scan_generation = generation
-        # What the worker scanned (its plan's settings), not what the settings
-        # say now: they agree only while the lane runs one thing at a time.
+        # What the worker scanned (its plan's settings), taken from the scan
+        # itself; `_adopt_item_removal` let it through only while the
+        # settings still name the same sources.
         self._adopt_runtime_library_scan(generation, sources)
         try:
             self._finish_library_refresh(scan_generation=generation)
@@ -5351,18 +5353,31 @@ class Application(Adw.Application):
         """Install only semantic worker deltas after its lease is released.
 
         A committed removal's library is the one a real scan found after the
-        commit, on the same worker (`RemovalResult.rescanned`); until it is
+        commit, on the same worker (`RemovalResult.own_scan`); until it is
         installed, nothing new is published and the previous generation
         stays. A removal that committed with a failure, or a refresh asked for
         meanwhile, is scanned again (with the pending-removal replay), and so
-        is one whose own scan failed.
+        is one whose own scan failed, came back without its sources, or read
+        sources the settings no longer name. Until that scan lands the
+        inventory stays invalid, so the guard and the compiler refuse.
         """
         self._removal_active = False
         self._session.adopt_library_cleanups(result.cleanups)
         self._session.adopt_library_fault_repairs(result.repaired_faults)
         partial = bool(result.error_message or result.cleanup_failures)
-        scanned = result.rescanned
-        refresh = self._refresh_after_removal or (result.committed and (partial or scanned is None))
+        # Its own scan, only with the sources it read and only while they are
+        # still the settings' (as the guard compares them): a scan of folders
+        # the settings no longer name is no inventory, so it is not installed
+        # and the rescan below replaces it, as one that failed would be.
+        own_scan = result.own_scan
+        if own_scan is not None and own_scan[1] != (
+            self._settings.roots,
+            self._settings.scan_workshop,
+        ):
+            own_scan = None
+        refresh = self._refresh_after_removal or (
+            result.committed and (partial or own_scan is None)
+        )
         self._refresh_after_removal = False
         if result.committed:
             # Invalid from the commit until a scan after it is accepted, whatever
@@ -5377,10 +5392,9 @@ class Application(Adw.Application):
             self._finish_runtime_removal_invalidation()
             self._stills.forget(result.item.path)
             self._begin_removal_convergence()
-            if scanned is not None and result.rescanned_sources is not None:
-                self._adopt_post_removal_scan(
-                    scanned, result.rescanned_sources, refresh_follows=refresh
-                )
+            if own_scan is not None:
+                scanned, sources = own_scan
+                self._adopt_post_removal_scan(scanned, sources, refresh_follows=refresh)
             # Otherwise the rescan below is the post-removal library. A new
             # detached refresh starts only after the removal worker has
             # released its operation lease and the actor has adopted every

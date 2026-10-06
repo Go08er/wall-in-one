@@ -168,6 +168,18 @@ class RemovalResult:
     #: The sources that scan read (the plan's own settings), with ``rescanned``.
     rescanned_sources: LibrarySources | None = None
 
+    @property
+    def own_scan(self) -> tuple[Library, LibrarySources] | None:
+        """That scan with the sources it read, or None: half of one is no scan.
+
+        Read both fields only through this: a library without its sources is
+        not evidence of anything, so it is treated as a scan that failed (the
+        application scans again), never as one to install.
+        """
+        if self.rescanned is None or self.rescanned_sources is None:
+            return None
+        return self.rescanned, self.rescanned_sources
+
 
 def _physically_removed_adoption(
     authority: adopted.Authority | None,

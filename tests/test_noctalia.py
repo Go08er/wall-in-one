@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.process_helpers import handed_off, is_alive, kill_and_reap, reaped, subreaper
+from tests.process_helpers import (
+    SLEEPER_STARTER,
+    handed_off,
+    is_alive,
+    kill_and_reap,
+    reaped,
+    subreaper,
+)
 from wall_in_one.theme import noctalia, source
 
 
@@ -22,9 +29,9 @@ def _fake_noctalia(tmp_path: Path) -> Path:
         '  : > "$3"\n'
         "  sleep 30\n"
         'elif [ "$2" = orphan ] || [ "$2" = linger ]; then\n'
-        # A same-group sleeper that inherits, and so holds, the output pipes.
-        "  sleep 120 &\n"
-        '  echo "$$ $!" > "$3.tmp"\n'
+        # A same-group sleeper that inherits, and so holds, the output pipes;
+        # the test's child from the start, never the shell's to reap.
+        f"  {SLEEPER_STARTER}\n"
         '  mv "$3.tmp" "$3"\n'
         '  [ "$2" = linger ] && exec sleep 30\n'
         "  printf 'ready\\n'\n"

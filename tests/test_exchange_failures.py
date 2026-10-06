@@ -39,7 +39,14 @@ from typing import Any
 
 import pytest
 
-from tests.process_helpers import handed_off, is_alive, kill_and_reap, reaped, subreaper
+from tests.process_helpers import (
+    SLEEPER_STARTER,
+    handed_off,
+    is_alive,
+    kill_and_reap,
+    reaped,
+    subreaper,
+)
 from wall_in_one import worker_processes
 from wall_in_one.theme import noctalia
 from wall_in_one.worker_processes import OwnedProcess
@@ -48,13 +55,19 @@ FAULTS = ("fd-pressure", "no-selector", "unwatchable", "read-eio", "interrupt")
 
 
 def _stand_in(tmp_path: Path) -> Path:
-    """``<script> msg <linger|exit> <handoff>``, the Noctalia CLI's argv shape."""
+    """``<script> msg <linger|exit> <handoff>``, the Noctalia CLI's argv shape.
+
+    The sleeper is in the same group and inherits, so holds, the output pipes.
+    It is started from a subshell that exits at once, so from then on its
+    parent is this test (a subreaper), never the shell: a shell blocked in
+    ``waitpid`` for ``mv`` when the group is killed would otherwise reap a
+    sleeper that died first, and the test could neither reap nor safely
+    signal its pid (see `SLEEPER_STARTER`).
+    """
     script = tmp_path / "stand-in"
     script.write_text(
         "#!/bin/sh\n"
-        # Same group, and it inherits, so holds, the output pipes.
-        "sleep 120 &\n"
-        'echo "$$ $!" > "$3.tmp"\n'
+        f"{SLEEPER_STARTER}\n"
         'mv "$3.tmp" "$3"\n'
         "printf 'ready\\n'\n"
         '[ "$2" = linger ] && exec sleep 30\n'
@@ -266,8 +279,8 @@ class _Harness:
                 if stream is not None:
                     stream.close()
         if self.spawned and not self._collected:
-            # Not reaped yet, so its pid is still reserved; once its leader is
-            # gone this test, the subreaper, is its parent.
+            # Not reaped yet, so its pid is still reserved: this test, the
+            # subreaper, has been its parent since its starter subshell exited.
             with contextlib.suppress(FileNotFoundError, ValueError):
                 if self._sleeper is None:
                     _leader, self._sleeper = handed_off(self.handoff, 0.5)

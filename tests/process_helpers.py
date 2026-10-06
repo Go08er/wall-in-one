@@ -20,6 +20,19 @@ from typing import Final
 import pytest
 
 _PR_SET_CHILD_SUBREAPER: Final = 36
+#: A stand-in's sleeper, for a ``sh`` stand-in called with the handoff path as
+#: ``$3``: starts ``sleep 120`` in the stand-in's process group (so it holds
+#: the stand-in's pipes) and writes ``"<leader> <sleeper>"`` to ``$3.tmp``,
+#: for the stand-in to ``mv`` into place.
+#:
+#: The sleeper is started from a subshell that exits at once, so it is
+#: orphaned, and adopted by the test (its subreaper), before the handoff
+#: exists. Started by the stand-in shell itself, it would be the shell's
+#: child: a shell blocked in ``waitpid`` (for ``mv``, say) when the test
+#: kills the group can reap a sleeper that died first, before its own
+#: SIGKILL lands, and the test would then find no child to reap and a pid it
+#: may no longer signal. (``$$`` is the stand-in's own pid in the subshell.)
+SLEEPER_STARTER: Final = '( sleep 120 & echo "$$ $!" > "$3.tmp" )'
 #: ``/proc/<pid>/stat`` states of a process that has exited: zombie or dead.
 _EXITED: Final = frozenset({"Z", "X", "x"})
 
@@ -71,9 +84,24 @@ def reaped(pid: int, seconds: float) -> int | None:
         time.sleep(0.02)
 
 
+def is_own_child(pid: int) -> bool:
+    """Whether ``pid`` is this process's unreaped child, asked without reaping it."""
+    try:
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return False
+    return True
+
+
 def kill_and_reap(pid: int) -> None:
-    """Clean up a sleeper the test started and has not reaped yet. Its pid is
-    still reserved, so the signal reaches only that process."""
+    """Clean up a sleeper the test started and has not reaped yet.
+
+    Only while it is still this process's unreaped child: then its pid is
+    reserved and the signal reaches only that process. One that is no longer
+    ours was reaped elsewhere, and its pid may already name someone else.
+    """
+    if not is_own_child(pid):
+        return
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
     with contextlib.suppress(ChildProcessError):

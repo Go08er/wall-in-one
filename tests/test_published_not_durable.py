@@ -337,3 +337,51 @@ def test_a_provider_key_removed_before_the_sync_failed_is_removed(
 
     assert failed and not credentials.key_path().exists()
     assert any("was removed, but syncing its folder failed" in m for m in caplog.messages)
+
+
+# -- a damaged file moved aside before the sync failed (X-2c) --------------------------------
+
+MOVED_BUT = "was moved aside to favourites.json.broken, but syncing its folder failed"
+
+
+def test_a_damaged_list_moved_aside_before_the_sync_failed_still_gets_its_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before: "could not preserve unreadable", with no favourites.json left at all."""
+    target = tmp_path / "favourites.json"
+    target.write_bytes(b"{ not json")
+    store = favourites.Store.open(target)
+    failed = _sync_fails_for(monkeypatch, "favourites.json")
+    caplog.set_level(logging.WARNING)
+
+    assert store.add(A)
+
+    assert failed, "the folder sync was failed"
+    assert (tmp_path / "favourites.json.broken").read_bytes() == b"{ not json"
+    assert favourites.Store.open(target).paths == frozenset({A})
+    assert A in store.paths and store.fault is None
+    assert any(MOVED_BUT in message for message in caplog.messages), caplog.messages
+    assert len(_warnings(caplog)) == 1, "and the save after it, said the same way"
+
+
+def test_a_list_that_cannot_be_read_is_neither_moved_nor_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A guard for the split: a file that couldn't be read is refused before any write."""
+    target = tmp_path / "favourites.json"
+    target.write_text(json.dumps({"version": 1, "paths": [str(B)]}), encoding="utf-8")
+    store = favourites.Store.open(target)
+    held = target.read_bytes()
+    failed = _sync_fails_for(monkeypatch, "favourites.json")
+    caplog.set_level(logging.WARNING)
+    target.chmod(0)
+    try:
+        with pytest.raises(favourites.FavouritesError) as refused:
+            store.add(A)
+    finally:
+        target.chmod(0o600)
+
+    assert refused.value.kind == "unreadable"
+    assert not failed and not caplog.messages
+    assert target.read_bytes() == held
+    assert not (tmp_path / "favourites.json.broken").exists()

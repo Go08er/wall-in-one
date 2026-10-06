@@ -1145,7 +1145,9 @@ def preserve_faulted(
     just to make room for a JSON document. A Store passes the observation held
     across its read so a valid manual repair cannot be mistaken for the bytes
     which produced the fault. Direct callers get the same protection from a
-    fresh observation.
+    fresh observation. Once the move has happened, a failure to sync the
+    folder is reported (`report_not_durable`), not raised: the file is no
+    longer at ``path`` for any reader, so the caller must go on to save.
     """
     if observed is None:
         with observe(path) as current:
@@ -1172,6 +1174,16 @@ def preserve_faulted(
             )
         except FileExistsError:
             continue
-        fsync_parent(path)
+        try:
+            fsync_parent(path)
+        except OSError as error:
+            # The move is live: every reader already sees no file at ``path``.
+            # Refusing now would stop the store before it writes what it
+            # read, leaving no file there at all; as for a write that
+            # published (`published_counts`), it is said, not refused.
+            report_not_durable(
+                f"{path} was moved aside to {backup.name}, but syncing its folder failed, "
+                f"so the move may not survive a power loss ({error.strerror or error})"
+            )
         return backup
     raise OSError(f"could not preserve {path}: too many recovery backups")

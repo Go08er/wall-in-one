@@ -1193,6 +1193,296 @@ def test_reconciling_leaves_a_held_lock_and_anything_not_a_lock(fake_home: Path)
         os.close(descriptor)
 
 
+def _cannot_look_at(
+    monkeypatch: pytest.MonkeyPatch,
+    entry: Callable[[], Path | None],
+    *,
+    skip: int = 0,
+    times: int = 1_000_000,
+) -> list[int]:
+    """Looking at ``entry()`` (``lstat`` and ``stat``) fails with a real EIO, after
+    ``skip`` successful looks and for ``times`` looks. Returns the failure count."""
+    real_lstat = os.lstat
+    real_stat = os.stat
+    seen = [0]
+    failed: list[int] = []
+
+    def looking(real: Callable[..., os.stat_result]) -> Callable[..., os.stat_result]:
+        def look(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            target = entry()
+            if (
+                target is not None
+                and not args
+                and "dir_fd" not in kwargs
+                and isinstance(path, (str, os.PathLike))
+                and os.fspath(path) == str(target)
+            ):
+                seen[0] += 1
+                if seen[0] > skip and len(failed) < times:
+                    failed.append(seen[0])
+                    raise OSError(errno.EIO, "injected read failure", os.fspath(path))
+            return real(path, *args, **kwargs)
+
+        return look
+
+    monkeypatch.setattr(os, "lstat", looking(real_lstat))
+    monkeypatch.setattr(os, "stat", looking(real_stat))
+    return failed
+
+
+def test_settings_that_cannot_be_looked_at_are_not_said_to_be_absent(
+    fake_home: Path,
+) -> None:
+    """The cold review's repro: Noctalia's folder is readable but not searchable (a
+    native EACCES). The settings are there; they are said to be unchecked."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator, _candidate, _lock = _interrupted_transaction(settings_path)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    folder.chmod(0o600)
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template._reconcile_interrupted_transaction(settings_path)
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    assert settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS and locator.exists()
+    assert "cannot inspect transaction" in said, said
+    # Failed on 778fbbc: "no canonical entry is at <settings>".
+    assert f"no canonical entry is at {settings_path}" not in said, said
+    assert f"whether a canonical entry is at {settings_path} could not be checked" in said, said
+    assert f"whether transaction entries are at {locator} could not be checked" in said, said
+
+
+def test_legacy_lock_claimed_but_unverified_is_not_said_to_be_in_the_directory(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cold review's repro: a legacy reconcile retires the record, then its lock
+    discard claims the lock and can neither verify nor undo that (a one-shot EIO,
+    then a native EACCES): the lock is in the claim, the directory is empty."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    _interrupted_transaction(settings_path)
+    legacy = _convert_current_transaction_to_legacy(settings_path)
+    mode = stat.S_IMODE(legacy.stat().st_mode)
+    landed = _double_fault_on_move(
+        monkeypatch,
+        legacy,
+        lambda source, destination: source.name == "lock" and destination.name == "entry",
+    )
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.uninstall(reload_config=False)
+    finally:
+        legacy.chmod(mode)
+
+    said = str(raised.value)
+    assert len(landed) == 1, said
+    assert tuple(legacy.iterdir()) == (), "record retired, lock claimed: nothing remains"
+    assert "cannot safely discard transaction entry" in said, said
+    claimed = said.split("it remains preserved at ")[1].split(";")[0]
+    assert Path(claimed).name == "entry" and os.path.lexists(claimed), said
+    # Failed on 778fbbc: the empty legacy directory was named as holding entries.
+    assert f"transaction entries preserved at {legacy}" not in said, said
+    assert said.endswith(f"; transaction entries preserved at {claimed}"), said
+
+
+def test_a_lock_is_not_taken_for_orphaned_when_the_locator_cannot_be_looked_for(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock with no locator, but the locator can't be looked for the second time
+    (a real EIO): whether it is orphaned isn't known, so it stays."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator, _candidate, lock = _interrupted_transaction(settings_path)
+    locator.unlink()
+    failed = _cannot_look_at(monkeypatch, lambda: locator, skip=1)
+
+    template.uninstall(reload_config=False)
+
+    assert failed, "the locator could not be looked for"
+    # Failed on 778fbbc: a lexists False was taken for "no locator".
+    assert lock.exists()
+
+
+def test_staging_cleanup_says_entries_it_cannot_look_at_are_unchecked(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging fails once its locator is published (a directory fsync EIO) and the
+    settings folder then turns unsearchable (a native EACCES): nothing can be
+    retired or looked at. The entries are said to be unchecked, not left out."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    locator = template._transaction_locator(settings_path)
+    real_sync = template._fsync_parent
+    sync_failed: list[Path] = []
+
+    def sync(path: Path) -> None:
+        if path == locator and not sync_failed:
+            sync_failed.append(path)
+            folder.chmod(0o600)
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(path)
+
+    monkeypatch.setattr(template, "_fsync_parent", sync)
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.install()
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    assert sync_failed and locator.exists()
+    # Failed on 778fbbc: no entry was listed at all, as if nothing remained.
+    assert "; whether cleanup entries remain at " in said, said
+    assert f"{locator} (" in said.partition("; whether cleanup entries remain at ")[2], said
+
+
+def test_publication_cleanup_keeps_the_locator_when_the_swap_cannot_be_looked_at(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exchange is done and the displaced settings moved to their backup; then
+    the swap can't be looked at (a real EIO). Whether it is empty isn't known, so the
+    locator is kept and named, and the next install finishes the transaction."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator = template._transaction_locator(settings_path)
+    swaps: list[Path] = []
+    preserved: list[Path] = []
+    real_begin = template._begin_publication_transaction
+    real_preserve = template._preserve_regular_at_backup
+
+    def begin(*args: object, **kwargs: object) -> object:
+        transaction = real_begin(*args, **kwargs)  # type: ignore[arg-type]
+        swaps.append(transaction.swap)
+        return transaction
+
+    def preserve(*args: object, **kwargs: object) -> Path:
+        destination = real_preserve(*args, **kwargs)  # type: ignore[arg-type]
+        preserved.append(destination)
+        return destination
+
+    monkeypatch.setattr(template, "_begin_publication_transaction", begin)
+    monkeypatch.setattr(template, "_preserve_regular_at_backup", preserve)
+    failed = _cannot_look_at(
+        monkeypatch, lambda: swaps[0] if swaps and preserved else None, times=1
+    )
+
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    assert failed and preserved and locator.exists()
+    # Failed on 778fbbc: the swap was taken for gone, the locator retired, no error.
+    assert said.endswith(f"recovery cleanup remains at {locator}"), said
+    assert not template.install().changed
+    _assert_no_current_transaction(settings_path)
+
+
+def test_inspect_says_an_unlookable_transaction_is_unchecked(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether an earlier change was interrupted can't be known when its locator
+    can't be looked at (a real EIO): said so, not taken for "no transaction"."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator = template._transaction_locator(settings_path)
+    failed = _cannot_look_at(monkeypatch, lambda: locator)
+
+    check = template.inspect()
+
+    assert failed
+    # Failed on 778fbbc: classified as if no transaction existed.
+    assert check.state == "unavailable", check
+    assert "can't be checked" in check.detail, check
+
+
+def test_status_says_settings_it_cannot_look_at_are_unknown(fake_home: Path) -> None:
+    """Noctalia's folder is unsearchable (a native EACCES): the settings are there,
+    and the status says it can't check them, not that there are none."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    folder.chmod(0o600)
+    try:
+        said = template.status()
+    finally:
+        folder.chmod(mode)
+
+    # Failed on 778fbbc: "not installed (no Noctalia settings at ...)".
+    assert said.startswith(f"unknown (Noctalia's settings at {settings_path} can't be checked")
+
+
+def test_status_says_a_palette_it_cannot_look_at_is_unchecked(fake_home: Path) -> None:
+    """The palette is rendered, but its folder is unsearchable (a native EACCES):
+    the status says it can't check it, not "not yet rendered"."""
+    _write_noctalia_settings(SAMPLE_SETTINGS)
+    template.install()
+    output = paths.palette_path()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("{}", encoding="utf-8")
+    mode = stat.S_IMODE(output.parent.stat().st_mode)
+    output.parent.chmod(0o600)
+    try:
+        said = template.status()
+    finally:
+        output.parent.chmod(mode)
+
+    # Failed on 778fbbc: "palette not yet rendered".
+    assert "not yet rendered" not in said, said
+    assert "palette in a state that can't be checked (" in said, said
+
+
+def test_a_lock_already_gone_is_no_remainder(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install is done; something outside deletes the transaction lock just
+    before the cleanup discards it. Nothing remains, so nothing is said to."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    prefix = template._transaction_leaf_prefix(settings_path, "lock")
+    real_discard = file_io.discard_regular_if_same
+    gone: list[Path] = []
+
+    def deleted_first(path: Path, **kwargs: object) -> bool:
+        if path.name.startswith(prefix) and not gone:
+            gone.append(path)
+            path.unlink()
+        return real_discard(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_io, "discard_regular_if_same", deleted_first)
+
+    # Failed on 778fbbc: "... recovery cleanup remains at <the deleted lock>".
+    assert template.install().changed
+    assert gone and not gone[0].exists()
+    _assert_no_current_transaction(settings_path)
+
+
+def test_a_locator_already_gone_names_the_lock_that_remains(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install is done; something outside deletes the locator just before the
+    cleanup retires it. The lock, which then stays, is the remainder named."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator = template._transaction_locator(settings_path)
+    prefix = template._transaction_leaf_prefix(settings_path, "lock")
+    real_retire = template._retain_regular_intact
+    gone: list[Path] = []
+
+    def deleted_first(path: Path, **kwargs: object) -> Path:
+        if path == locator and not gone:
+            gone.append(path)
+            path.unlink()
+        return real_retire(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(template, "_retain_regular_intact", deleted_first)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    locks = [entry for entry in settings_path.parent.iterdir() if entry.name.startswith(prefix)]
+    assert gone and not locator.exists() and len(locks) == 1
+    # Failed on 778fbbc: "... recovery cleanup remains at <the deleted locator>".
+    assert said.endswith(f"recovery cleanup remains at {locks[0]}"), said
+
+
 @pytest.mark.parametrize("kind", ("regular", "directory"))
 def test_install_never_keeps_a_substituted_candidate_name_public(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, kind: str

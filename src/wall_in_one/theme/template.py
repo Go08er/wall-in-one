@@ -31,7 +31,7 @@ import stat
 import sys
 import tempfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1141,23 +1141,61 @@ def _retain_recovery_candidate_intact(
         raise _cannot_retire("retire transaction candidate", displayed_path, error) from error
 
 
-def _recovery_failure(path: Path, transaction: Path | None, detail: str) -> TemplateInstallError:
+def _present(path: Path) -> bool | OSError:
+    """Whether an entry is at ``path``, without following it.
+
+    False only when it is known to be absent (``FileNotFoundError``); any other
+    failure to look is returned, so a caller never says "not there" for "can't
+    look" (an unsearchable folder, an I/O error).
+    """
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        return error
+    return True
+
+
+def _holds_entries(path: Path) -> bool | OSError:
+    """`_present`, except that a directory counts only while it holds an entry
+    (other than the retained namespace)."""
+    try:
+        status = path.lstat()
+        if stat.S_ISDIR(status.st_mode):
+            return any(name != file_io.RETAINED_ENTRY_DIRECTORY for name in os.listdir(path))
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        return error
+    return True
+
+
+def _recovery_failure(path: Path, transaction: Sequence[Path], detail: str) -> TemplateInstallError:
     """Reconciliation stopped: why, and where the settings and the transaction are.
 
-    Each place is named only while something is there: ``transaction`` is
-    where the transaction's remaining entries can be found (None once none
-    remain), and the settings can be absent when something outside deleted them.
+    Both are looked at now, not inferred from what reconciling did: the
+    settings can be absent when something outside deleted them, and the
+    transaction's entries are named at the first of ``transaction`` (in
+    order) that holds any. Whatever can't be looked at is said to be unchecked,
+    never absent.
     """
-    canonical = (
-        f"canonical entry preserved at {path}"
-        if os.path.lexists(path)
-        else f"no canonical entry is at {path}"
-    )
-    entries = (
-        f"; transaction entries preserved at {transaction}"
-        if transaction is not None and os.path.lexists(transaction)
-        else ""
-    )
+    found = _present(path)
+    if found is True:
+        canonical = f"canonical entry preserved at {path}"
+    elif found is False:
+        canonical = f"no canonical entry is at {path}"
+    else:
+        canonical = f"whether a canonical entry is at {path} could not be checked ({found})"
+    entries = ""
+    for place in transaction:
+        held = _holds_entries(place)
+        if held is True:
+            entries = f"; transaction entries preserved at {place}"
+            break
+        if held is not False:
+            entries = f"; whether transaction entries are at {place} could not be checked ({held})"
+            break
     return TemplateInstallError(
         f"cannot safely reconcile interrupted template transaction: {detail}; {canonical}{entries}"
     )
@@ -1232,11 +1270,14 @@ def _reconcile_legacy_interrupted_transaction(path: Path) -> bool:
     except FileNotFoundError:
         return False
     except OSError as error:
-        raise _recovery_failure(path, directory, f"cannot inspect transaction: {error}") from error
+        raise _recovery_failure(
+            path, (directory,), f"cannot inspect transaction: {error}"
+        ) from error
 
     directory_pin: file_io.PinnedPath | None = None
     entries: list[_RecoveryEntry] = []
-    preserved_directory: Path | None = directory
+    # A record or lock that retiring moved but could neither verify nor undo.
+    moved: Path | None = None
     try:
         try:
             directory_pin = _validate_transaction_directory(directory)
@@ -1430,31 +1471,38 @@ def _reconcile_legacy_interrupted_transaction(path: Path) -> bool:
 
             record_entry.verify_named(logical_path=record_path)
             lock.verify_named(logical_path=lock_path)
-            _retain_recovery_record_intact(
-                record_access,
-                record_entry,
-                logical_path=record_path,
-                retained_parent=path.parent,
-                logical_retained_parent=path.parent,
-            )
+            try:
+                _retain_recovery_record_intact(
+                    record_access,
+                    record_entry,
+                    logical_path=record_path,
+                    retained_parent=path.parent,
+                    logical_retained_parent=path.parent,
+                )
+            except _TransactionEntryMovedError as error:
+                moved = error.moved_to
+                raise
             _fsync_pinned_directory(directory_pin, directory)
-            _discard_recovery_regular(
-                lock_access,
-                lock,
-                logical_path=lock_path,
-                retained_parent=path.parent,
-                logical_retained_parent=path.parent,
-            )
-            # The record and the lock are retired: the access-only directory
-            # stays, but no transaction entry remains in it.
-            preserved_directory = None
+            try:
+                _discard_recovery_regular(
+                    lock_access,
+                    lock,
+                    logical_path=lock_path,
+                    retained_parent=path.parent,
+                    logical_retained_parent=path.parent,
+                )
+            except _TransactionEntryMovedError as error:
+                moved = error.moved_to
+                raise
             _fsync_pinned_directory(directory_pin, directory)
         except TemplateInstallError as error:
-            raise _recovery_failure(path, preserved_directory, str(error)) from error
+            places = (directory,) if moved is None else (moved, directory)
+            raise _recovery_failure(path, places, str(error)) from error
         except OSError as error:
+            places = (directory,) if moved is None else (moved, directory)
             raise _recovery_failure(
                 path,
-                preserved_directory,
+                places,
                 f"filesystem operation failed: {error}",
             ) from error
     finally:
@@ -1476,12 +1524,12 @@ def _reconcile_locator_transaction(path: Path) -> bool:
     except FileNotFoundError:
         return False
     except OSError as error:
-        raise _recovery_failure(path, locator, f"cannot inspect transaction: {error}") from error
+        raise _recovery_failure(path, (locator,), f"cannot inspect transaction: {error}") from error
 
     entries: list[_RecoveryEntry] = []
-    # Where the transaction's remaining entries are: the locator until it is
-    # retired, then its lock, then nothing.
-    remaining: Path | None = locator
+    # A record or lock that retiring moved but could neither verify nor undo.
+    moved: Path | None = None
+    lock_path: Path | None = None
     try:
         try:
             record_entry = _open_recovery_entry(locator, MAX_TRANSACTION_RECORD_BYTES)
@@ -1618,10 +1666,8 @@ def _reconcile_locator_transaction(path: Path) -> bool:
                     logical_retained_parent=path.parent,
                 )
             except _TransactionEntryMovedError as error:
-                remaining = error.moved_to
+                moved = error.moved_to
                 raise
-            # Retired: what is left of the transaction is its lock.
-            remaining = lock_path
             _fsync_parent(locator)
             lock.verify_named()
             try:
@@ -1632,16 +1678,17 @@ def _reconcile_locator_transaction(path: Path) -> bool:
                     logical_retained_parent=path.parent,
                 )
             except _TransactionEntryMovedError as error:
-                remaining = error.moved_to
+                moved = error.moved_to
                 raise
-            remaining = None
             _fsync_parent(lock_path)
         except TemplateInstallError as error:
-            raise _recovery_failure(path, remaining, str(error)) from error
+            places = tuple(place for place in (moved, locator, lock_path) if place is not None)
+            raise _recovery_failure(path, places, str(error)) from error
         except OSError as error:
+            places = tuple(place for place in (moved, locator, lock_path) if place is not None)
             raise _recovery_failure(
                 path,
-                remaining,
+                places,
                 f"filesystem operation failed: {error}",
             ) from error
     finally:
@@ -1678,8 +1725,8 @@ def _discard_orphaned_locks(path: Path) -> None:
     creating it). Anything else is left as it is; failures are not raised.
     """
 
-    if os.path.lexists(_transaction_locator(path)):
-        return
+    if _present(_transaction_locator(path)) is not False:
+        return  # a locator, or one that can't be looked for: its lock isn't orphaned
     prefix = _transaction_leaf_prefix(path, "lock")
     try:
         names = sorted(name for name in os.listdir(path.parent) if name.startswith(prefix))
@@ -1826,9 +1873,24 @@ def _begin_publication_transaction(
         _fsync_parent(record)
     except OSError as error:
         cleanup_remainders: list[Path] = []
+        # Entries that may remain but couldn't be looked at: said as unchecked.
+        cleanup_unchecked: list[tuple[Path, OSError]] = []
         cleanup_sync_error: OSError | None = None
         if isinstance(error, file_io.PathChangedError) and error.preserved_path is not None:
             cleanup_remainders.append(error.preserved_path)
+
+        def note_if_remaining(entry: Path) -> bool:
+            """List ``entry`` if it is there, or as unchecked if it can't be looked at.
+
+            False only when it is known to be gone.
+            """
+            found = _present(entry)
+            if found is True:
+                cleanup_remainders.append(entry)
+            elif found is not False:
+                cleanup_unchecked.append((entry, found))
+            return found is not False
+
         locator_publication_is_uncertain = (
             isinstance(error, file_io.PathChangedError)
             and error.preserved_path == final_record
@@ -1866,10 +1928,7 @@ def _begin_publication_transaction(
                 if regular_path is None:
                     return True
                 if identity is None:
-                    if os.path.lexists(regular_path):
-                        cleanup_remainders.append(regular_path)
-                        return False
-                    return True
+                    return not note_if_remaining(regular_path)
                 moved_to: Path | None = None
                 try:
                     if retain_intact:
@@ -1899,8 +1958,8 @@ def _begin_publication_transaction(
                     moved_to = _moved_to(error)
                 if moved_to is not None:
                     cleanup_remainders.append(moved_to)
-                if not removed and os.path.lexists(regular_path):
-                    cleanup_remainders.append(regular_path)
+                if not removed:
+                    note_if_remaining(regular_path)
                 return removed
 
             if locator_publication_is_uncertain:
@@ -1911,8 +1970,8 @@ def _begin_publication_transaction(
                 # dependency so either the valid record can replay or the
                 # conflicting evidence can be inspected without a wedge.
                 for preserved in (record, final_record, swap, lock):
-                    if preserved is not None and os.path.lexists(preserved):
-                        cleanup_remainders.append(preserved)
+                    if preserved is not None:
+                        note_if_remaining(preserved)
             elif locator_was_published:
                 candidate_retired = cleanup_owned_regular(
                     swap,
@@ -1952,8 +2011,8 @@ def _begin_publication_transaction(
                             cleanup_sync_error = sync_error
                 else:
                     for preserved in (record, swap, lock):
-                        if preserved is not None and os.path.lexists(preserved):
-                            cleanup_remainders.append(preserved)
+                        if preserved is not None:
+                            note_if_remaining(preserved)
             else:
                 cleanup_owned_regular(record, record_identity, record_fingerprint)
                 cleanup_owned_regular(swap, candidate_identity, candidate_fingerprint)
@@ -1978,6 +2037,12 @@ def _begin_publication_transaction(
             unique_remainders = tuple(dict.fromkeys(cleanup_remainders))
             remainder = "; cleanup entries remain at " + ", ".join(
                 str(candidate) for candidate in unique_remainders
+            )
+        if cleanup_unchecked:
+            remainder += (
+                "; whether cleanup entries remain at "
+                + ", ".join(f"{entry} ({reason})" for entry, reason in cleanup_unchecked)
+                + " could not be checked"
             )
         if cleanup_sync_error is not None:
             remainder += f"; cleanup directory could not be synced: {cleanup_sync_error}"
@@ -2104,18 +2169,31 @@ def _preserve_regular_at_backup(
     )
 
 
+def _remainder(*places: Path | None) -> Path | None:
+    """The first of ``places`` where something is, or may be (it can't be looked at)."""
+    for place in places:
+        if place is not None and _present(place) is not False:
+            return place
+    return None
+
+
 def _cleanup_publication_transaction(
     transaction: _PublicationTransaction,
     *,
     discard_candidate: bool,
 ) -> Path | None:
-    """Clean owned entries; return the discoverable path to any remainder."""
+    """Clean owned entries; return the discoverable path to any remainder.
+
+    The remainder is looked at, not inferred from which step failed: an entry
+    a retirement moved is where `_moved_to` says, and one that is already gone
+    from its name is no remainder.
+    """
 
     candidate_fingerprint: file_io.FileFingerprint | None = None
     if discard_candidate:
         candidate_fingerprint = _entry_candidate_fingerprint(transaction.swap, transaction)
         if candidate_fingerprint is None:
-            return transaction.swap
+            return _remainder(transaction.swap, transaction.record, transaction.lock)
         try:
             _retain_regular_intact(
                 transaction.swap,
@@ -2126,10 +2204,19 @@ def _cleanup_publication_transaction(
                 logical_path=transaction.swap,
             )
         except (OSError, ValueError) as error:
-            return _moved_to(error) or transaction.swap
+            return _moved_to(error) or _remainder(
+                transaction.swap, transaction.record, transaction.lock
+            )
         _fsync_parent(transaction.swap)
-    elif os.path.lexists(transaction.swap):
-        return transaction.swap
+    else:
+        swap_found = _present(transaction.swap)
+        if swap_found is True:
+            return transaction.swap
+        if swap_found is not False:
+            # Whether the displaced entry left the swap can't be checked: keep
+            # the locator, which leads the next reconcile to it, rather than
+            # retire it blind. It is what remains.
+            return transaction.record
 
     # A retirement that moved its entry but could not verify or undo the move
     # left it where `_moved_to` says: that is the remainder, not its old name.
@@ -2143,10 +2230,10 @@ def _cleanup_publication_transaction(
             logical_path=transaction.record,
         )
     except OSError as error:
-        return _moved_to(error) or transaction.record
+        return _moved_to(error) or _remainder(transaction.record, transaction.lock)
     _fsync_parent(transaction.record)
     try:
-        lock_removed = file_io.discard_regular_if_same(
+        file_io.discard_regular_if_same(
             transaction.lock,
             expected_identity=transaction.lock_identity,
             expected_fingerprint=transaction.lock_fingerprint,
@@ -2154,8 +2241,12 @@ def _cleanup_publication_transaction(
             logical_retained_parent=transaction.lock.parent,
         )
     except OSError as error:
-        return _moved_to(error) or transaction.lock
-    if not lock_removed:
+        moved = _moved_to(error)
+        if moved is not None:
+            return moved
+    # Whether it was discarded, failed, or found replaced: what is at its name
+    # (or can't be looked at) remains; nothing there is no remainder.
+    if _present(transaction.lock) is not False:
         return transaction.lock
     _fsync_parent(transaction.lock)
     return None
@@ -2802,10 +2893,16 @@ def inspect() -> TemplateCheck:
             "Wall-in-One's block in Noctalia's settings has lost its end marker; "
             "fix it by hand, then check again.",
         )
-    interrupted = (
-        _transaction_locator(settings_path).exists()
-        or _transaction_directory(settings_path).exists()
-    )
+    interrupted = False
+    for transaction in (_transaction_locator(settings_path), _transaction_directory(settings_path)):
+        found = _present(transaction)
+        if isinstance(found, OSError):
+            return TemplateCheck(
+                "unavailable",
+                "Whether an earlier change to Noctalia's settings was interrupted can't be "
+                f"checked: {found}",
+            )
+        interrupted = interrupted or found
     if interrupted:
         return TemplateCheck(
             "stale",
@@ -2873,12 +2970,23 @@ def inspect() -> TemplateCheck:
 def status() -> str:
     """One-line summary for the CLI."""
     settings_path = paths.noctalia_settings_path()
-    if not settings_path.is_file():
+    try:
+        settings_status = settings_path.stat()
+    except FileNotFoundError:
+        return f"not installed (no Noctalia settings at {settings_path})"
+    except OSError as error:
+        return f"unknown (Noctalia's settings at {settings_path} can't be checked: {error})"
+    if not stat.S_ISREG(settings_status.st_mode):
         return f"not installed (no Noctalia settings at {settings_path})"
     entry = _existing_entry(_read_settings(settings_path))
     if entry is None:
         return "not installed"
     output = paths.palette_path()
-    rendered = "rendered" if output.is_file() else "not yet rendered"
+    try:
+        rendered = "rendered" if stat.S_ISREG(output.stat().st_mode) else "not yet rendered"
+    except FileNotFoundError:
+        rendered = "not yet rendered"
+    except OSError as error:
+        rendered = f"in a state that can't be checked ({error})"
     enabled = "enabled" if entry.get("enabled") is True else "disabled"
     return f"installed, {enabled}; palette {rendered} at {output}"

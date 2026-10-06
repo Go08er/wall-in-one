@@ -808,9 +808,15 @@ class _CandidateLeftBehind:
         entry at ``temporary`` was proven to be the candidate just before."""
         if discarded:
             return f"{self.reason}; the publication candidate was discarded"
-        if not os.path.lexists(temporary):
-            what = "the publication candidate" if self.proven else "the entry moved back"
+        what = "the publication candidate" if self.proven else "the entry moved back"
+        found = _entry_present(temporary)
+        if found is False:
             return f"{self.reason}; {what} is no longer at {temporary}"
+        if found is not True:
+            return (
+                f"{self.reason}; whether {what} is still at {temporary} "
+                f"could not be checked ({found})"
+            )
         if still_ours:
             return f"{self.reason}; the publication candidate remains preserved at {temporary}"
         return (
@@ -819,14 +825,30 @@ class _CandidateLeftBehind:
         )
 
 
+def _entry_present(path: Path) -> bool | OSError:
+    """Whether an entry is at ``path``, without following it.
+
+    False only when it is known to be absent (``FileNotFoundError``); any other
+    failure to look is returned, so "can't look" is never taken for "not there".
+    """
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        return error
+    return True
+
+
 def _remaining_at(temporary: Path, otherwise: Path | None) -> Path | None:
     """``PathChangedError.preserved_path`` for a publication that ended in error.
 
-    The temporary when an entry remains there (it is named in the message),
-    else ``otherwise``: where file_io left the entry it could not move back,
-    or None when nothing is preserved anywhere.
+    The temporary unless it is known to be empty (an entry there is named in
+    the message, and one that can't be looked at may still be there), else
+    ``otherwise``: where file_io left the entry it could not move back, or
+    None when nothing is preserved anywhere.
     """
-    return temporary if os.path.lexists(temporary) else otherwise
+    return otherwise if _entry_present(temporary) is False else temporary
 
 
 def _restore_relocated_publication_entry(
@@ -897,6 +919,15 @@ def _restore_relocated_publication_entry(
             return f"the {relocated_description} remains at {path}: {error}"
         if same_candidate:
             return _CandidateLeftBehind(f"the publication candidate could not be put back: {error}")
+        # Not put back: where it is now is looked at, not inferred from the failure.
+        found = _entry_present(temporary)
+        if found is False:
+            return f"the {relocated_description} is no longer at {temporary}: {error}"
+        if found is not True:
+            return (
+                f"the {relocated_description} could not be put back ({error}); whether it "
+                f"is still at {temporary} could not be checked ({found})"
+            )
         return f"the {relocated_description} remains preserved at {temporary}: {error}"
     if same_candidate:
         # The verified move put exactly the candidate back under its public

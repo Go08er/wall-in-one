@@ -489,10 +489,12 @@ def test_a_candidate_that_could_not_be_inspected_is_proven_then_discarded(
 def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
     folder: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The control: the temporary can't be read at all, so the candidate can't be
-    proven ours. The cleanup may then discard only the exact generation it wrote; on
-    a filesystem where the renames changed its ctime that isn't it, so it stays.
-    Whichever happens, the message says so, and names the temporary."""
+    """The control: the temporary can't be looked at at all, so the candidate can't
+    be proven ours. The cleanup may then discard only the exact generation it wrote;
+    on a filesystem where the renames changed its ctime that isn't it, so it stays.
+    Whichever happens, the message says so: discarded, or, since the temporary can't
+    be looked at, that whether it is still there could not be checked (never that
+    it is gone)."""
     target = folder / "state.json"
 
     with (
@@ -506,11 +508,75 @@ def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
     assert f"could not inspect the entry moved back to {moved[0]}" in said, said
     if os.path.lexists(moved[0]):
         assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "left as it is"
-        assert said.endswith(
-            f"; the entry now at {moved[0]} is not provably the publication candidate, "
-            "so it was left as it is"
+        assert f"; whether the entry moved back is still at {moved[0]} could not be checked (" in (
+            said
         ), said
         assert raised.value.preserved_path == moved[0]
     else:
         assert said.endswith("; the publication candidate was discarded"), said
         assert raised.value.preserved_path is None
+
+
+def test_a_temporary_that_cannot_be_looked_at_is_not_said_to_be_empty(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The candidate is moved back to its temporary, then the folder turns
+    unsearchable (a native EACCES): it can't be inspected, put back, discarded or
+    looked at. Whether it is still there is said to be unchecked, never that it is
+    gone."""
+    target = folder / "state.json"
+
+    with (
+        put_back_refused(monkeypatch, target, lambda name: name.parent.chmod(0o600)) as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+    folder.chmod(0o700)
+
+    said = str(raised.value)
+    assert len(moved) == 1 and moved[0].read_text(encoding="utf-8") == CANDIDATE
+    # Failed on 778fbbc: "the entry moved back is no longer at <temporary>".
+    assert f"is no longer at {moved[0]}" not in said, said
+    assert f"could not inspect the entry moved back to {moved[0]}" in said, said
+    unchecked = f"; whether the entry moved back is still at {moved[0]} could not be checked ("
+    assert unchecked in said, said
+    assert raised.value.preserved_path == moved[0]
+
+
+def test_a_concurrent_entry_gone_from_the_temporary_is_not_said_to_remain(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent edit is moved back to the temporary and inspected; something
+    outside then deletes it before it can be put back. It isn't said to remain."""
+    target = folder / "state.json"
+    holds = state_file._holds_publication_candidate
+    inspected: list[Path] = []
+
+    def then_deleted(
+        entry: Path,
+        candidate: file_io.PinnedPath,
+        fingerprint: file_io.FileFingerprint,
+        document: bytes,
+    ) -> tuple[os.stat_result, bool]:
+        result = holds(entry, candidate, fingerprint, document)
+        if not inspected:
+            inspected.append(entry)
+            entry.unlink()
+        return result
+
+    def repair(path: Path) -> None:
+        path.write_text("manual in-place repair\n", encoding="utf-8")
+
+    monkeypatch.setattr(state_file, "_holds_publication_candidate", then_deleted)
+    with (
+        after_the_publication(monkeypatch, target, repair),
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert len(inspected) == 1 and not inspected[0].exists() and not target.exists()
+    # Failed on 778fbbc: "the concurrent entry remains preserved at <deleted temporary>".
+    assert f"remains preserved at {inspected[0]}" not in said, said
+    assert f"the concurrent entry is no longer at {inspected[0]}" in said, said
+    assert raised.value.preserved_path is None

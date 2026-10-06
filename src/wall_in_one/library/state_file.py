@@ -788,16 +788,20 @@ def _holds_publication_candidate(
 
 @dataclass(frozen=True, slots=True)
 class _CandidateLeftBehind:
-    """This writer's proven candidate could not be put back: it is at the temporary.
+    """An entry moved back to this writer's temporary stays there.
 
-    Then the writer's cleanup proves it ours again and discards it, as after
+    Either this writer's proven candidate, which could not be put back at its
+    name, or an entry that could not be inspected there (``proven`` False).
+    Then the writer's cleanup proves it ours (again) and discards it, as after
     any failed write: it is only this writer's own unpublished bytes (the call
     raises, and nothing adopts them), and a temporary left behind would be a
-    stray file in the store's folder. What is said of it waits for that
-    cleanup (`said`): discarded, or still there when it could not be.
+    stray file in the store's folder. Nothing not provably ours is discarded.
+    What is said of it waits for that cleanup (`said`): discarded, or still
+    there when it could not be.
     """
 
     reason: str
+    proven: bool = True
 
     def said(self, temporary: Path, *, discarded: bool, still_ours: bool) -> str:
         """After the cleanup: ``discarded`` by it, or not; ``still_ours`` if the
@@ -805,7 +809,8 @@ class _CandidateLeftBehind:
         if discarded:
             return f"{self.reason}; the publication candidate was discarded"
         if not os.path.lexists(temporary):
-            return f"{self.reason}; the publication candidate is no longer at {temporary}"
+            what = "the publication candidate" if self.proven else "the entry moved back"
+            return f"{self.reason}; {what} is no longer at {temporary}"
         if still_ours:
             return f"{self.reason}; the publication candidate remains preserved at {temporary}"
         return (
@@ -843,7 +848,10 @@ def _restore_relocated_publication_entry(
     except FileNotFoundError:
         return None
     except OSError as error:
-        return f"could not inspect a relocated concurrent state entry: {error}"
+        # Ours or not isn't known: the cleanup proves it, or leaves it, and says which.
+        return _CandidateLeftBehind(
+            f"could not inspect the entry moved back to {temporary}: {error}", proven=False
+        )
     current_type = stat.S_IFMT(current.st_mode)
     current_fingerprint = (
         file_io.file_fingerprint(current) if current_type == stat.S_IFREG else None

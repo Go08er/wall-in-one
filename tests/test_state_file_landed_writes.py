@@ -411,3 +411,98 @@ def test_an_entry_replacing_the_candidate_before_the_cleanup_is_left_and_not_cla
         f"; the entry now at {moved[0]} is not provably the publication candidate, "
         "so it was left as it is"
     ), said
+
+
+@contextlib.contextmanager
+def moved_back_uninspectable(
+    monkeypatch: pytest.MonkeyPatch, target: Path, *, failures: int
+) -> Iterator[list[Path]]:
+    """The publication's verification read fails once, so the candidate is moved
+    back to its temporary; then the next ``failures`` reads of that temporary fail
+    too (a real EIO each), so it can't be inspected there.
+
+    Yields the temporaries it was moved back to.
+    """
+    rename = file_io._rename_noreplace
+    lstat = Path.lstat
+    moved_back: list[Path] = []
+    failing = False
+    remaining = 0
+
+    def publish(source: Path, destination: Path) -> None:
+        nonlocal failing, remaining
+        rename(source, destination)
+        if source.name.endswith(".tmp") and destination == target and not moved_back:
+            failing = True
+        elif source == target and destination.name.endswith(".tmp"):
+            moved_back.append(destination)
+            remaining = failures
+
+    def verify(path: Path) -> os.stat_result:
+        nonlocal failing, remaining
+        if failing and path == target:
+            failing = False
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        if remaining and moved_back and path == moved_back[0]:
+            remaining -= 1
+            raise OSError(errno.EIO, "injected read failure of the temporary")
+        return lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", publish)
+    monkeypatch.setattr(Path, "lstat", verify)
+    yield moved_back
+
+
+def test_a_candidate_that_could_not_be_inspected_is_proven_then_discarded(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moved back to its temporary, the candidate can't be inspected there once.
+    The cleanup proves it ours then, discards it, and says so. It used to say only
+    "could not inspect a relocated concurrent state entry" (ours, not concurrent),
+    and to leave it in the folder: the cleanup's fingerprint predated the renames."""
+    target = folder / "state.json"
+
+    with (
+        moved_back_uninspectable(monkeypatch, target, failures=1) as moved,
+        state_file.collecting_writes() as wrote,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert len(moved) == 1 and not target.exists()
+    assert not moved[0].exists(), "discarded, not left in the folder"
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    assert sorted(entry.name for entry in folder.iterdir()) == [retained.name]
+    assert all(entry.stat().st_size == 0 for entry in retained.iterdir()), "emptied"
+    assert f"could not inspect the entry moved back to {moved[0]}" in said, said
+    assert said.endswith("; the publication candidate was discarded"), said
+    assert wrote == []
+
+
+def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the temporary can't be read at all, so the candidate can't be
+    proven ours. The cleanup may then discard only the exact generation it wrote; on
+    a filesystem where the renames changed its ctime that isn't it, so it stays.
+    Whichever happens, the message says so, and names the temporary."""
+    target = folder / "state.json"
+
+    with (
+        moved_back_uninspectable(monkeypatch, target, failures=1_000) as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert len(moved) == 1 and not target.exists()
+    assert f"could not inspect the entry moved back to {moved[0]}" in said, said
+    if os.path.lexists(moved[0]):
+        assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "left as it is"
+        assert said.endswith(
+            f"; the entry now at {moved[0]} is not provably the publication candidate, "
+            "so it was left as it is"
+        ), said
+    else:
+        assert said.endswith("; the publication candidate was discarded"), said

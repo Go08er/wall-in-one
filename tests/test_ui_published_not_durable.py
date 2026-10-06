@@ -10,6 +10,7 @@ caller heard "failed" while the files said otherwise.
 from __future__ import annotations
 
 import errno
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -169,5 +170,37 @@ def test_startup_repair_that_cleared_the_default_before_the_sync_failed_opens_au
         assert bool(application.authoring_ready)
         assert config.load_strict().active_playlist == ""
         assert application.settings.active_playlist == ""
+    finally:
+        _close(application)
+
+
+def test_a_rename_that_repointed_the_default_before_the_sync_failed_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An older profile's default names the playlist by name; the rename repoints it first."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    dock = playlists.Store.open().create("Dock")
+    config.save(replace(config.Settings(), active_playlist="Dock"))
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: True)
+    assert application.settings.active_playlist == "Dock"
+    failed = _sync_fails_for(monkeypatch, "settings.toml")
+    # Run here, off the lane, a warning goes to the log unless a sink is set.
+    monkeypatch.setattr(state_file, "_durability_sink", None, raising=False)
+    caplog.set_level(logging.WARNING)
+    try:
+        work = application.prepare_playlist_rename(dock.id, "Harbour")
+        result = work()  # before: SettingsNotDurableError, and the rename never ran
+
+        assert failed == [paths.settings_path()]
+        assert result.renamed is not None and result.renamed.name == "Harbour"
+        assert result.settings is not None and result.settings.active_playlist == dock.id
+        assert sum(SAVED_BUT in message for message in caplog.messages) == 1
+        application.adopt_playlist_rename(result)
+        assert application.settings.active_playlist == dock.id
+        assert config.load_strict().active_playlist == dock.id
     finally:
         _close(application)

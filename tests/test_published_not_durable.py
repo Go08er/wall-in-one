@@ -160,6 +160,50 @@ def test_a_store_keeps_what_it_published_when_the_folder_sync_fails(
     assert len(_warnings(caplog)) == 1 and case.filename in _warnings(caplog)[0]
 
 
+REMOVALS: dict[str, Callable[[Any], object]] = {
+    "playlists": lambda store: store.delete("x"),
+    "schedules": lambda store: store.remove("a"),
+    "displays": lambda store: store.unassign("DP-1"),
+    "pairings": lambda store: store.forget_identity(pairings.Identity.of(_item(A))),
+    "favourites": lambda store: store.discard(A),
+}
+
+
+@pytest.mark.parametrize(
+    "case", [case for case in CASES if case.name in REMOVALS], ids=list(REMOVALS)
+)
+def test_a_removal_from_an_unreadable_file_still_refuses_and_a_readable_one_saves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: Case,
+) -> None:
+    """Both rules at once: refused before anything is written, or saved once published."""
+    target = tmp_path / "state" / case.filename
+    target.parent.mkdir(parents=True)
+    document = json.dumps(case.current, indent=2) + "\n"
+    target.write_text(document, encoding="utf-8")
+    store = case.open(target)
+    before = case.held(store)
+    failed = _sync_fails_for(monkeypatch, case.filename)
+    caplog.set_level(logging.WARNING)
+    target.write_bytes(b"{ not json")
+
+    with pytest.raises(Exception) as refused:
+        REMOVALS[case.name](store)
+
+    assert getattr(refused.value, "kind", None) == "unreadable", refused.value
+    assert target.read_bytes() == b"{ not json" and failed == [] and not _warnings(caplog)
+    target.write_text(document, encoding="utf-8")
+
+    REMOVALS[case.name](store)
+
+    assert failed == [target]
+    on_disk = case.held(case.open(target))
+    assert on_disk != before and case.held(store) == on_disk
+    assert len(_warnings(caplog)) == 1
+
+
 def test_window_preferences_published_before_the_sync_failed_are_saved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

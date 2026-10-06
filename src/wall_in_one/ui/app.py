@@ -5349,7 +5349,8 @@ class Application(Adw.Application):
             settings: config.Settings | None = None
             try:
                 if default:
-                    settings = config.repoint_playlist_default(default, pid)
+                    repoint = functools.partial(config.repoint_playlist_default, default, pid)
+                    settings = _settings_published(repoint)
                     if settings is not None:
                         saved.append("the default playlist")
                 if named_by:

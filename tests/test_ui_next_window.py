@@ -37,6 +37,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.started import started_application  # noqa: E402
 from tests.test_next_status_line import BATTERY, two_display_status  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
@@ -499,7 +500,7 @@ def test_next_window_renders_from_the_model_not_the_forwarded_calls(
 ) -> None:
     """The forwarded show_* calls are no-ops; the subscription does the work."""
     store_not_ported(monkeypatch)
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     views: list[RuntimeStatusView] = []
     subscribers = application.status_model._subscribers
@@ -558,7 +559,7 @@ def test_a_next_window_gone_before_its_first_layout_leaves_a_later_run_able_to_e
     process never returned from GLib's final flush. The shell now lets the
     idle end when the window goes, so the context drains and the run ends.
     """
-    shown = Application(ui="next")
+    shown = started_application(ui="next")
     window = NextWindow(shown, shown.settings)
     window.present()  # mapped now; laid out only by a main loop, which never runs
     try:
@@ -605,7 +606,7 @@ def away(window: NextWindow) -> None:
 
 def test_a_returning_window_selects_the_row_of_the_page_it_shows() -> None:
     """Navigation while the window is away moves the page; the row follows on return."""
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     window.present()
     try:
@@ -628,7 +629,7 @@ def test_a_returning_window_selects_the_row_of_the_page_it_shows() -> None:
 
 
 def test_a_sidebar_rebuilt_while_away_is_selected_by_page_not_position() -> None:
-    application = Application(ui="next")
+    application = started_application(ui="next")
     session = application.session
     window = NextWindow(application, application.settings)
     window.present()
@@ -671,7 +672,7 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
     saves is ``tests/test_ui_next_editing.py``'s); without the part the Library
     shows no button that only pretends, and an adapter whose add is already
     done gets the page's toast with its Undo."""
-    application = Application(ui="next")
+    application = started_application(ui="next")
     added: list[str] = []
     toasts: list[str] = []
 
@@ -727,7 +728,7 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
 
 def test_the_new_interface_settings_page_chooses_the_interface_to_start() -> None:
     """Whoever starts the new interface can choose classic again from inside it."""
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     target = paths.ui_prefs_path()
     window.present()
@@ -764,7 +765,7 @@ def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written()
     target.parent.mkdir(parents=True, exist_ok=True)
     document = 'version = 5\ninterface = "classic"\n'
     target.write_text(document)
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     try:
         page = window.pages["settings"]
@@ -790,7 +791,7 @@ def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_ret
     ui_prefs.update({"thumbnail_size": "small"})
     obstacle = target.parent / "ui.toml.v1-backup"
     obstacle.mkdir()
-    application = Application(ui="next")
+    application = started_application(ui="next")
     reports: list[str] = []
     # The keeper takes the application's report when the window builds it.
     monkeypatch.setattr(application, "window_report", reports.append)
@@ -823,7 +824,7 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
     ui_prefs.update({"thumbnail_size": "small"})
     obstacle = target.parent / "ui.toml.v1-backup"
     obstacle.mkdir()
-    application = Application(ui="next")
+    application = started_application(ui="next")
     reports: list[str] = []
     monkeypatch.setattr(application, "window_report", reports.append)
     window = NextWindow(application, application.settings)
@@ -848,7 +849,7 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
         application.session.shutdown()
 
     target.write_text("version = 9\n")
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     try:
         page = window.pages["settings"]
@@ -867,7 +868,7 @@ def test_a_failed_look_save_goes_back_everywhere_and_the_same_choice_then_saves(
     """The new interface's look follows ui.toml, with a real refusal: no lock can be taken."""
     lock = paths.app_config_dir() / ".ui.toml.mutation.lock"
     lock.mkdir(parents=True)
-    application = Application(ui="next")
+    application = started_application(ui="next", first_activation_done=True)
     reports: list[str] = []
     monkeypatch.setattr(application, "window_report", reports.append)
     window = NextWindow(application, application.settings)
@@ -902,7 +903,7 @@ def test_a_failed_look_save_goes_back_everywhere_and_the_same_choice_then_saves(
 
 def test_the_new_settings_rows_stop_following_the_keeper_when_the_window_goes() -> None:
     """As classic Settings does on unrealize; they follow it again if the window returns."""
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     keeper = window.preferences
     window.present()

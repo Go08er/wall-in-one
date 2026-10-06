@@ -30,6 +30,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.started import started_application  # noqa: E402
 from tests.test_settings_v0_1_4_keys import V0_1_4_SETTINGS_KEYS  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, ui_prefs  # noqa: E402
@@ -106,7 +107,7 @@ class Opened:
 
 
 def _open(monkeypatch: pytest.MonkeyPatch) -> Opened:
-    application = Application(ui="next")
+    application = started_application(ui="next")
     application._authoring_migration_ready = True
     monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)
     window = NextWindow(application, application.settings)

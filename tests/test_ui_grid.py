@@ -33,6 +33,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import settle  # noqa: E402
+from tests.started import started  # noqa: E402
 from wall_in_one.library.filter import Query, Sort  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE, WallpaperGrid, WallpaperTile  # noqa: E402
@@ -1054,7 +1055,7 @@ def test_showing_the_library_repushes_the_favourites(
 
         def refresh_library(self) -> None: ...
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
     tile = window._grid._tiles[wallpaper]
@@ -1199,7 +1200,7 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
             )
             return adopted
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     item = application.session.library.find(wallpaper)
     assert item is not None
@@ -1281,7 +1282,7 @@ def apply_window(tmp_path: Path) -> Iterator[tuple[MainWindow, list[Path], list[
             targeted.append((chosen.path, connector))
             return True
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
     window._runtime_media_status = {
@@ -1447,7 +1448,7 @@ def test_quick_choice_menu_action_really_plays_instead_of_opening_the_editor(
             self.played.append(chosen.path)
             return True
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
     action = window.lookup_action("apply-wallpaper")
@@ -1491,7 +1492,7 @@ def test_borked_media_has_a_warning_and_no_global_or_targeted_play_action(
             self.played.append(chosen.path)
             return True
 
-    application = FakeApp()
+    application = started(FakeApp())
     item = application.session.library.items[0]
     application.session.pairings.mark_borked(item, "renderer crashed", "automatic-apply")
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
@@ -1560,7 +1561,7 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
 
         def refresh_library(self) -> None: ...
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
     assert isinstance(window._library_controls, Adw.WrapBox)
@@ -1623,7 +1624,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
         def with_task_durability(self, message: str) -> str:
             return message
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_runtime_protocol_error("Runtime returned status in an unexpected format")
     assert "invalid status reply" in window._runtime_control_status.get_text()
@@ -1860,7 +1861,7 @@ def test_media_highlights_and_playing_label_follow_atomic_runtime_status(
         def runtime_action_async(self, _verb: str, _argument: str | None = None) -> bool:
             return True
 
-    application = FakeApp()
+    application = started(FakeApp())
     window = MainWindow(application, application.settings)  # type: ignore[arg-type]
     window.show_library(application.session)
     local_cursor = application.session.cursor
@@ -2003,7 +2004,7 @@ def test_management_pages_render_real_pairing_playlist_and_schedule_data(
 
         def window_report(self, _message: str) -> None: ...
 
-    application = FakeApp()
+    application = started(FakeApp())
     made = application.session.playlists.create("Evening")
     application.session.playlists.add(made.id, wallpaper)
     application.session.schedules.add(made.id, weekdays=["sat"], start="22:00", end="06:00")

@@ -21,6 +21,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.started import started_application  # noqa: E402
 from tests.test_next_status_line import two_display_status  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
@@ -43,7 +44,7 @@ def toolkit() -> None:
 def shown(request: pytest.FixtureRequest) -> Iterator[tuple[Application, Gtk.Window]]:
     """An application with the window ``--ui`` names, shown, and closed afterwards."""
     ui = cast(UiKind, request.param)
-    application = Application(ui=ui)
+    application = started_application(ui, first_activation_done=True)
     window = application._build_window()
     application._window = window
     window.present()
@@ -101,7 +102,7 @@ def _actions(menu: Gio.MenuModel) -> list[str]:
 def test_rescan_is_in_the_new_windows_main_menu_as_in_the_classic_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    application = Application(ui="next")
+    application = started_application(ui="next", first_activation_done=True)
     rescans: list[bool] = []
     monkeypatch.setattr(application, "refresh_library", lambda **_: rescans.append(True))
     window = NextWindow(application, application.settings)
@@ -128,7 +129,7 @@ def test_settings_shows_this_sessions_log_with_file_paths_hidden(
     library = Path.home() / 'Walls "for" Bob\u2019s desk'
     library.mkdir(parents=True)
     config.update({"roots": (library,)})
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     application._window = window
     toasts: list[str] = []

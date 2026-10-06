@@ -19,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.started import started_application  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
 from wall_in_one.theme.noctalia import ALL_SCHEMES  # noqa: E402
@@ -266,10 +267,9 @@ def test_application_side_settings_refresh_the_open_preferences_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Exercise the application/window seam used by non-Preferences updates."""
-    from wall_in_one.ui.app import Application
     from wall_in_one.ui.window import MainWindow
 
-    application = Application(ui="classic")
+    application = started_application(ui="classic")
     application._authoring_migration_ready = True
     window = MainWindow(application, application.settings)
     application._window = window

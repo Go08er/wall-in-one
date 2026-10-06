@@ -28,6 +28,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.started import started_application  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402
     FakeRuntime,
     Step,
@@ -458,7 +459,7 @@ def test_a_failed_repair_pauses_changes_and_its_notice_tries_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     sandboxed_runtime(monkeypatch, tmp_path)
-    application = Application(ui="next")
+    application = started_application(ui="next")
     window = NextWindow(application, application.settings)
     application._window = window
     window.present()

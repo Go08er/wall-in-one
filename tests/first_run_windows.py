@@ -16,6 +16,7 @@ import pytest
 from gi.repository import Adw, Gtk
 
 from tests.gtk_helpers import spin_until
+from tests.started import started_application
 from wall_in_one.ui.app import Application
 from wall_in_one.ui.next.window import NextWindow
 from wall_in_one.ui.window import MainWindow
@@ -31,7 +32,7 @@ def application_with_window(ui: Ui) -> tuple[Application, Gtk.Window]:
     present dialogs over. The new interface gets its real window, shown, since
     the welcome screen is part of it.
     """
-    application = Application(ui=ui)
+    application = started_application(ui)
     window: Gtk.Window
     if ui == "next":
         window = NextWindow(application, application.settings)

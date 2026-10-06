@@ -995,6 +995,36 @@ def _recovery_role(entry: _RecoveryEntry | None, record: _RecoveryRecord) -> str
     return "other"
 
 
+class _TransactionEntryMovedError(TemplateInstallError):
+    """A transaction entry's retirement moved it, then could be neither verified nor undone.
+
+    It is at ``moved_to`` (the retained namespace or a deletion claim), no
+    longer at its own name, and the message says so.
+    """
+
+    def __init__(self, message: str, moved_to: Path) -> None:
+        super().__init__(message)
+        self.moved_to = moved_to
+
+
+def _moved_to(error: BaseException) -> Path | None:
+    """Where an unverified move left its entry, if it did not stay or go back."""
+    if isinstance(error, file_io.PathChangedError):
+        return error.preserved_path
+    return None
+
+
+def _cannot_retire(what: str, displayed_path: Path, error: OSError) -> TemplateInstallError:
+    """The error for an entry that couldn't be retired, saying where it is when it moved."""
+    moved_to = _moved_to(error)
+    if moved_to is None:
+        return TemplateInstallError(f"cannot safely {what} {displayed_path}: {error}")
+    return _TransactionEntryMovedError(
+        f"cannot safely {what} {displayed_path}: {error}; it remains preserved at {moved_to}",
+        moved_to,
+    )
+
+
 def _discard_recovery_regular(
     access_path: Path,
     entry: _RecoveryEntry,
@@ -1020,9 +1050,7 @@ def _discard_recovery_regular(
             ),
         )
     except OSError as error:
-        raise TemplateInstallError(
-            f"cannot safely discard transaction entry {displayed_path}: {error}"
-        ) from error
+        raise _cannot_retire("discard transaction entry", displayed_path, error) from error
     if not removed:
         raise TemplateInstallError(
             f"transaction entry {displayed_path} changed before safe cleanup"
@@ -1081,9 +1109,7 @@ def _retain_recovery_record_intact(
             logical_path=displayed_path,
         )
     except OSError as error:
-        raise TemplateInstallError(
-            f"cannot safely retire transaction record {displayed_path}: {error}"
-        ) from error
+        raise _cannot_retire("retire transaction record", displayed_path, error) from error
 
 
 def _retain_recovery_candidate_intact(
@@ -1112,15 +1138,28 @@ def _retain_recovery_candidate_intact(
             logical_path=displayed_path,
         )
     except OSError as error:
-        raise TemplateInstallError(
-            f"cannot safely retire transaction candidate {displayed_path}: {error}"
-        ) from error
+        raise _cannot_retire("retire transaction candidate", displayed_path, error) from error
 
 
-def _recovery_failure(path: Path, transaction: Path, detail: str) -> TemplateInstallError:
+def _recovery_failure(path: Path, transaction: Path | None, detail: str) -> TemplateInstallError:
+    """Reconciliation stopped: why, and where the settings and the transaction are.
+
+    Each place is named only while something is there: ``transaction`` is
+    where the transaction's remaining entries can be found (None once none
+    remain), and the settings can be absent when something outside deleted them.
+    """
+    canonical = (
+        f"canonical entry preserved at {path}"
+        if os.path.lexists(path)
+        else f"no canonical entry is at {path}"
+    )
+    entries = (
+        f"; transaction entries preserved at {transaction}"
+        if transaction is not None and os.path.lexists(transaction)
+        else ""
+    )
     return TemplateInstallError(
-        f"cannot safely reconcile interrupted template transaction: {detail}; "
-        f"canonical entry preserved at {path}; transaction entries preserved at {transaction}"
+        f"cannot safely reconcile interrupted template transaction: {detail}; {canonical}{entries}"
     )
 
 
@@ -1197,7 +1236,7 @@ def _reconcile_legacy_interrupted_transaction(path: Path) -> bool:
 
     directory_pin: file_io.PinnedPath | None = None
     entries: list[_RecoveryEntry] = []
-    preserved_directory = directory
+    preserved_directory: Path | None = directory
     try:
         try:
             directory_pin = _validate_transaction_directory(directory)
@@ -1406,6 +1445,9 @@ def _reconcile_legacy_interrupted_transaction(path: Path) -> bool:
                 retained_parent=path.parent,
                 logical_retained_parent=path.parent,
             )
+            # The record and the lock are retired: the access-only directory
+            # stays, but no transaction entry remains in it.
+            preserved_directory = None
             _fsync_pinned_directory(directory_pin, directory)
         except TemplateInstallError as error:
             raise _recovery_failure(path, preserved_directory, str(error)) from error
@@ -1437,6 +1479,9 @@ def _reconcile_locator_transaction(path: Path) -> bool:
         raise _recovery_failure(path, locator, f"cannot inspect transaction: {error}") from error
 
     entries: list[_RecoveryEntry] = []
+    # Where the transaction's remaining entries are: the locator until it is
+    # retired, then its lock, then nothing.
+    remaining: Path | None = locator
     try:
         try:
             record_entry = _open_recovery_entry(locator, MAX_TRANSACTION_RECORD_BYTES)
@@ -1565,27 +1610,38 @@ def _reconcile_locator_transaction(path: Path) -> bool:
                 )
 
             record_entry.verify_named()
-            _retain_recovery_record_intact(
-                locator,
-                record_entry,
-                retained_parent=path.parent,
-                logical_retained_parent=path.parent,
-            )
+            try:
+                _retain_recovery_record_intact(
+                    locator,
+                    record_entry,
+                    retained_parent=path.parent,
+                    logical_retained_parent=path.parent,
+                )
+            except _TransactionEntryMovedError as error:
+                remaining = error.moved_to
+                raise
+            # Retired: what is left of the transaction is its lock.
+            remaining = lock_path
             _fsync_parent(locator)
             lock.verify_named()
-            _discard_recovery_regular(
-                lock_path,
-                lock,
-                retained_parent=path.parent,
-                logical_retained_parent=path.parent,
-            )
+            try:
+                _discard_recovery_regular(
+                    lock_path,
+                    lock,
+                    retained_parent=path.parent,
+                    logical_retained_parent=path.parent,
+                )
+            except _TransactionEntryMovedError as error:
+                remaining = error.moved_to
+                raise
+            remaining = None
             _fsync_parent(lock_path)
         except TemplateInstallError as error:
-            raise _recovery_failure(path, locator, str(error)) from error
+            raise _recovery_failure(path, remaining, str(error)) from error
         except OSError as error:
             raise _recovery_failure(
                 path,
-                locator,
+                remaining,
                 f"filesystem operation failed: {error}",
             ) from error
     finally:
@@ -1997,8 +2053,7 @@ def _cleanup_publication_transaction(
         candidate_fingerprint = _entry_candidate_fingerprint(transaction.swap, transaction)
         if candidate_fingerprint is None:
             return transaction.swap
-        candidate_retired = False
-        with contextlib.suppress(OSError, ValueError):
+        try:
             _retain_regular_intact(
                 transaction.swap,
                 expected_identity=transaction.candidate_identity,
@@ -2007,16 +2062,15 @@ def _cleanup_publication_transaction(
                 logical_retained_parent=transaction.record.parent,
                 logical_path=transaction.swap,
             )
-            candidate_retired = True
-        if not candidate_retired:
-            return transaction.swap
+        except (OSError, ValueError) as error:
+            return _moved_to(error) or transaction.swap
         _fsync_parent(transaction.swap)
     elif os.path.lexists(transaction.swap):
         return transaction.swap
 
-    record_removed = False
-    lock_removed = False
-    with contextlib.suppress(OSError):
+    # A retirement that moved its entry but could not verify or undo the move
+    # left it where `_moved_to` says: that is the remainder, not its old name.
+    try:
         _retain_regular_intact(
             transaction.record,
             expected_identity=transaction.record_identity,
@@ -2025,11 +2079,10 @@ def _cleanup_publication_transaction(
             logical_retained_parent=transaction.record.parent,
             logical_path=transaction.record,
         )
-        record_removed = True
-    if not record_removed:
-        return transaction.record
+    except OSError as error:
+        return _moved_to(error) or transaction.record
     _fsync_parent(transaction.record)
-    with contextlib.suppress(OSError):
+    try:
         lock_removed = file_io.discard_regular_if_same(
             transaction.lock,
             expected_identity=transaction.lock_identity,
@@ -2037,6 +2090,8 @@ def _cleanup_publication_transaction(
             retained_parent=transaction.lock.parent,
             logical_retained_parent=transaction.lock.parent,
         )
+    except OSError as error:
+        return _moved_to(error) or transaction.lock
     if not lock_removed:
         return transaction.lock
     _fsync_parent(transaction.lock)
@@ -2086,11 +2141,7 @@ def _resolve_failed_exchange(
         except (OSError, ValueError) as error:
             # Its move into the retained namespace can land and then be neither
             # verified nor undone: then that is where it is, not at the swap.
-            preserved = (
-                error.preserved_path
-                if isinstance(error, file_io.PathChangedError) and error.preserved_path is not None
-                else transaction.swap
-            )
+            preserved = _moved_to(error) or transaction.swap
             return (f"the candidate remains preserved at {preserved}", False)
         _fsync_parent(path)
         return (f"the concurrent entry was restored to {path}", True)
@@ -2227,9 +2278,11 @@ def _write_atomically(path: Path, text: str, expected: _SettingsSnapshot) -> Pat
                 expected_fingerprint=old_fingerprint,
             )
         except OSError as error:
+            # A move that landed at the backup name but could be neither
+            # verified nor undone left them there, not at the swap.
             raise TemplateInstallError(
                 f"{path} was updated, but its displaced settings remain at "
-                f"{transaction.swap}: {error}"
+                f"{_moved_to(error) or transaction.swap}: {error}"
             ) from error
         remainder = _cleanup_publication_transaction(transaction, discard_candidate=False)
         if remainder is not None:

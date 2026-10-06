@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -874,6 +875,225 @@ def test_a_candidate_retired_but_not_verified_is_named_where_it_is(
     _assert_no_current_transaction(settings_path)
 
 
+def _double_fault_on_move(
+    monkeypatch: pytest.MonkeyPatch,
+    folder: Path,
+    matches: Callable[[Path, Path], bool],
+) -> list[Path]:
+    """The first move ``matches`` accepts lands; its verification read then fails
+    once (a real EIO) and moving it back is refused, the scratch settings folder
+    having turned read-only (a native EACCES). The caller restores the folder.
+
+    Returns the destinations it landed at (one, once it happened).
+    """
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    landed: list[Path] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not landed and matches(source, destination):
+            landed.append(destination)
+            failing = destination
+            folder.chmod(0o500)
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    return landed
+
+
+def _into_retained(source: Path) -> Callable[[Path, Path], bool]:
+    """A retirement of ``source`` into the retained namespace."""
+    return lambda moved, destination: (
+        moved == source and destination.name.startswith(file_io.RETAINED_ENTRY_PREFIX)
+    )
+
+
+def _interrupted_transaction(settings_path: Path) -> tuple[Path, Path, Path]:
+    """A staged transaction left as a process killed before its exchange leaves it."""
+    with template._read_settings_snapshot(settings_path) as snapshot:
+        backup = template._backup(settings_path, snapshot)
+        transaction = template._begin_publication_transaction(
+            settings_path,
+            (SAMPLE_SETTINGS + "\n# the staged candidate\n").encode(),
+            snapshot,
+            backup,
+        )
+        transaction.close()
+    return _current_transaction_entries(settings_path)
+
+
+def test_a_retired_locator_left_unverified_is_the_named_remainder(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install is done; retiring its locator lands in the retained namespace but
+    can be neither verified nor undone. The remainder named is where it is."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    locator = template._transaction_locator(settings_path)
+    landed = _double_fault_on_move(monkeypatch, folder, _into_retained(locator))
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.install()
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY / landed[0].name
+    assert not locator.exists() and retained.is_file()
+    assert "was updated, but its recovery cleanup remains at" in said, said
+    # Failed on e98f1c6: it named the locator, which had moved.
+    assert said.endswith(f"recovery cleanup remains at {retained}"), said
+
+
+def test_a_lock_claimed_but_unverified_is_the_named_remainder(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install is done and its locator retired; discarding the lock claims it
+    (moves it into a deletion claim) but can neither verify nor undo that move."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    locks: list[Path] = []
+    real_begin = template._begin_publication_transaction
+
+    def begin(*args: object, **kwargs: object) -> object:
+        transaction = real_begin(*args, **kwargs)  # type: ignore[arg-type]
+        locks.append(transaction.lock)
+        return transaction
+
+    monkeypatch.setattr(template, "_begin_publication_transaction", begin)
+    landed = _double_fault_on_move(
+        monkeypatch,
+        folder,
+        lambda source, destination: (
+            bool(locks) and source.name == locks[0].name and destination.name == "entry"
+        ),
+    )
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.install()
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    assert len(landed) == 1 and not locks[0].exists()
+    claimed = said.rpartition("recovery cleanup remains at ")[2]
+    # Failed on e98f1c6: it named the lock's old name, now empty.
+    assert claimed != str(locks[0]), said
+    assert Path(claimed).name == "entry" and os.path.lexists(claimed), said
+
+
+def test_displaced_settings_left_unverified_are_named_where_they_are(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exchange is done; moving the displaced settings to their backup name
+    lands but can be neither verified nor undone: they are at that name."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    landed = _double_fault_on_move(
+        monkeypatch, folder, lambda _source, destination: ".original" in destination.name
+    )
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.install()
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    assert len(landed) == 1 and landed[0].read_text(encoding="utf-8") == SAMPLE_SETTINGS
+    assert "was updated, but its displaced settings remain at" in said, said
+    # Failed on e98f1c6: it named the swap, which they had left.
+    assert f"displaced settings remain at {landed[0]}:" in said, said
+
+
+def test_reconciling_names_a_locator_left_unverified_where_it_is(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconciling an interrupted transaction: retiring its locator lands in the
+    retained namespace but can be neither verified nor undone."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    locator, _candidate, lock = _interrupted_transaction(settings_path)
+    landed = _double_fault_on_move(monkeypatch, folder, _into_retained(locator))
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.uninstall(reload_config=False)
+    finally:
+        folder.chmod(mode)
+
+    said = str(raised.value)
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY / landed[0].name
+    assert not locator.exists() and retained.is_file() and lock.exists()
+    assert f"cannot safely retire transaction record {locator}" in said, said
+    assert f"it remains preserved at {retained}" in said, said
+    # Failed on e98f1c6: "transaction entries preserved at <locator>", which had moved.
+    assert said.endswith(f"; transaction entries preserved at {retained}"), said
+
+
+def test_reconciling_without_settings_does_not_say_they_are_preserved(
+    fake_home: Path,
+) -> None:
+    """Something outside deleted Noctalia's settings while a transaction was
+    interrupted: reconciling refuses, and doesn't claim they are preserved."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator, _candidate, _lock = _interrupted_transaction(settings_path)
+    settings_path.unlink()
+
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.uninstall(reload_config=False)
+
+    said = str(raised.value)
+    assert "canonical settings are absent" in said, said
+    # Failed on e98f1c6: "canonical entry preserved at <settings>", which was absent.
+    assert f"canonical entry preserved at {settings_path}" not in said, said
+    assert f"no canonical entry is at {settings_path}" in said, said
+    assert said.endswith(f"; transaction entries preserved at {locator}"), said
+
+
+def test_legacy_reconciling_after_its_entries_are_retired_names_none(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy transaction's record and lock are retired, then syncing its
+    directory fails (a directory fsync EIO): no entry remains to be named."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    _interrupted_transaction(settings_path)
+    legacy = _convert_current_transaction_to_legacy(settings_path)
+    real_sync = template._fsync_pinned_directory
+    syncs = 0
+
+    def sync(pin: file_io.PinnedPath, logical_path: Path) -> None:
+        nonlocal syncs
+        syncs += 1
+        if syncs == 3:  # after the lock, the last entry, is discarded
+            raise template.TemplateInstallError(
+                f"cannot sync template transaction directory {logical_path}: [Errno 5] EIO"
+            )
+        real_sync(pin, logical_path)
+
+    monkeypatch.setattr(template, "_fsync_pinned_directory", sync)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.uninstall(reload_config=False)
+
+    said = str(raised.value)
+    assert syncs == 3 and tuple(legacy.iterdir()) == ()
+    # Failed on e98f1c6: "transaction entries preserved at <the empty directory>".
+    assert "transaction entries preserved" not in said, said
+    assert said.endswith(f"; canonical entry preserved at {settings_path}"), said
+
+
 @pytest.mark.parametrize("kind", ("regular", "directory"))
 def test_install_never_keeps_a_substituted_candidate_name_public(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, kind: str
@@ -1331,7 +1551,10 @@ template.install(reload_config=False)
     assert failed
     assert not locator.exists()
     assert lock.exists()
-    assert str(locator) in str(caught.value)
+    # The locator is retired: what remains is the lock, and that is where the
+    # message sends you. (It used to name the retired locator.)
+    assert str(caught.value).endswith(f"; transaction entries preserved at {lock}")
+    assert f"preserved at {locator}" not in str(caught.value)
     assert settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS
 
     result = template.uninstall(reload_config=False)

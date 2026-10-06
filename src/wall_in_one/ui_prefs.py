@@ -503,12 +503,7 @@ def _back_up_before_bump(
     try:
         state_file.backup_before_bump(target, observed=observed, replaced=replaced)
     except OSError as error:
-        backup = state_file.version_backup_path(target, replaced)
-        raise UiPrefsError(
-            f"could not keep a copy of {target.name} (version {replaced}) as {backup.name} "
-            f"before saving it as version {version}: {error.strerror or error}. "
-            "Nothing was changed."
-        ) from error
+        raise UiPrefsError(state_file.backup_refusal(target, replaced, version, error)) from error
 
 
 def launch_interface(path: Path | None = None) -> Interface:

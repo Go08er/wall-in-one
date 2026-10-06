@@ -627,7 +627,10 @@ copied beside it as `<file>.v<old>-backup`, for example
 `schedules.json.v2-backup`, with the same permissions. That copy is made once
 and never overwritten, even if the file is bumped again later; the app never
 deletes it. If the copy cannot be made, the edit is refused with the reason
-`no-backup` and nothing is changed. A file stays in its newer format after
+`no-backup` and nothing is changed. If the copy is written but writing it does
+not finish cleanly (it can't be checked in place, or its folder doesn't sync),
+the edit is refused with `no-backup` too: the file is not changed, the copy
+stays, and the message says so. A file stays in its newer format after
 you stop using the feature, for example after clearing the last rule name, so
 it does not switch formats back and forth and the backup always holds the
 file as it was before its first bump.

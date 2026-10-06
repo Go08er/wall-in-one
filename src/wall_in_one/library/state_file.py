@@ -660,14 +660,62 @@ def backup_before_bump(path: Path, *, observed: StateFileObservation, replaced: 
     if _kept_backup(backup):
         return backup
     contents, permissions = _observed_bytes(observed)
+    landed: list[Path] = []
     try:
-        write_atomic_bytes(backup, contents, replace_existing=False, mode=permissions)
+        with collecting_writes() as landed:
+            write_atomic_bytes(backup, contents, replace_existing=False, mode=permissions)
     except FileExistsError:
         # Another writer kept one first. The first copy is the one that counts.
         if _kept_backup(backup):
             return backup
         raise
+    except OSError as error:
+        if backup in landed:
+            # Written, then its write failed (its folder didn't sync, or it
+            # could not be verified in place): no bump on it, but it is there.
+            raise BackupNotConfirmedError(backup, error) from error
+        raise
+    finally:
+        # Collected here to know what landed; still told to whoever collects.
+        for written in landed:
+            record_write(written)
     return backup
+
+
+class BackupNotConfirmedError(OSError):
+    """`backup_before_bump` wrote the copy, then its write failed.
+
+    The copy is at ``backup``, complete, but its folder did not sync or it
+    could not be verified in place (and was then put back, or left there,
+    proven to be the copy). The store refuses the bump all the same, and says
+    the copy stays (`backup_refusal`), never that it couldn't keep one.
+    """
+
+    def __init__(self, backup: Path, error: OSError) -> None:
+        detail = error.strerror or str(error)
+        super().__init__(error.errno, detail)
+        self.backup = backup
+
+
+def backup_refusal(target: Path, replaced: int, version: int, error: OSError) -> str:
+    """A store's refusal to bump ``target`` from ``replaced`` to ``version`` without its copy.
+
+    Ends "Nothing was changed." when no copy was kept: then nothing was. When
+    the copy was written but its write then failed (`BackupNotConfirmedError`),
+    the store file is unchanged and the copy stays, and it says exactly that.
+    """
+    backup = version_backup_path(target, replaced)
+    if isinstance(error, BackupNotConfirmedError):
+        return (
+            f"a copy of {target.name} (version {replaced}) was written as {backup.name} "
+            f"before saving it as version {version}, but writing it did not finish cleanly "
+            f"({error.strerror or error}). {target.name} was not changed; the copy stays."
+        )
+    return (
+        f"could not keep a copy of {target.name} (version {replaced}) as {backup.name} "
+        f"before saving it as version {version}: {error.strerror or error}. "
+        "Nothing was changed."
+    )
 
 
 def joined_faults(faults: list[str]) -> str | None:
@@ -684,6 +732,56 @@ def fsync_parent(path: Path) -> None:
         os.close(descriptor)
 
 
+def _holds_publication_candidate(
+    entry: Path,
+    candidate: file_io.PinnedPath,
+    candidate_fingerprint: file_io.FileFingerprint,
+    candidate_document: bytes,
+) -> tuple[os.stat_result, bool]:
+    """``entry``'s status, and whether it is provably our publication candidate.
+
+    Proven means: a regular file that is the pinned candidate inode (by
+    identity, and by the fingerprint both the name and the pin report), whose
+    bytes are exactly the document this writer wrote, unchanged while they
+    were read. Raises ``FileNotFoundError`` when ``entry`` is gone and
+    ``OSError`` when it cannot be inspected.
+    """
+    current = entry.lstat()
+    pinned = candidate.status()
+    if stat.S_IFMT(current.st_mode) != stat.S_IFREG:
+        return current, False
+    current_fingerprint = file_io.file_fingerprint(current)
+    if not (
+        (current.st_dev, current.st_ino) == candidate_fingerprint[:2]
+        and (pinned.st_dev, pinned.st_ino) == candidate_fingerprint[:2]
+        and current_fingerprint == file_io.file_fingerprint(pinned)
+    ):
+        return current, False
+    chunks: list[bytes] = []
+    offset = 0
+    remaining = len(candidate_document) + 1
+    while remaining:
+        chunk = os.pread(candidate.descriptor, min(remaining, 64 * 1024), offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+        remaining -= len(chunk)
+    after = candidate.status()
+    named_after = entry.lstat()
+    proven = (
+        b"".join(chunks) == candidate_document
+        and stat.S_ISREG(after.st_mode)
+        and stat.S_ISREG(named_after.st_mode)
+        and (named_after.st_dev, named_after.st_ino) == candidate_fingerprint[:2]
+        and file_io.file_fingerprint(after)
+        == file_io.file_fingerprint(named_after)
+        == current_fingerprint
+        and (after.st_dev, after.st_ino) == candidate_fingerprint[:2]
+    )
+    return current, proven
+
+
 def _restore_relocated_publication_entry(
     temporary: Path,
     path: Path,
@@ -698,50 +796,24 @@ def _restore_relocated_publication_entry(
     temporary, so the restored entry can be a concurrent manual repair rather
     than our candidate.  The candidate remains pinned while this comparison
     and no-replace restoration run.
+
+    When the entry is provably our candidate (`_holds_publication_candidate`)
+    and it is restored to ``path``, that is this writer's write landing: it
+    is recorded (`record_write`) the moment it is back at ``path``. A
+    concurrent entry put back is somebody else's, and is not.
     """
     try:
-        current = temporary.lstat()
-        pinned = candidate.status()
+        current, same_candidate = _holds_publication_candidate(
+            temporary, candidate, candidate_fingerprint, candidate_document
+        )
     except FileNotFoundError:
         return None
     except OSError as error:
         return f"could not inspect a relocated concurrent state entry: {error}"
     current_type = stat.S_IFMT(current.st_mode)
-    same_candidate = False
     current_fingerprint = (
         file_io.file_fingerprint(current) if current_type == stat.S_IFREG else None
     )
-    if (
-        current_type == stat.S_IFREG
-        and (current.st_dev, current.st_ino) == candidate_fingerprint[:2]
-        and (pinned.st_dev, pinned.st_ino) == candidate_fingerprint[:2]
-        and current_fingerprint == file_io.file_fingerprint(pinned)
-    ):
-        chunks: list[bytes] = []
-        offset = 0
-        remaining = len(candidate_document) + 1
-        try:
-            while remaining:
-                chunk = os.pread(candidate.descriptor, min(remaining, 64 * 1024), offset)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                offset += len(chunk)
-                remaining -= len(chunk)
-            after = candidate.status()
-            named_after = temporary.lstat()
-        except OSError as error:
-            return f"could not inspect a relocated concurrent state entry: {error}"
-        same_candidate = (
-            b"".join(chunks) == candidate_document
-            and stat.S_ISREG(after.st_mode)
-            and stat.S_ISREG(named_after.st_mode)
-            and (named_after.st_dev, named_after.st_ino) == candidate_fingerprint[:2]
-            and file_io.file_fingerprint(after)
-            == file_io.file_fingerprint(named_after)
-            == current_fingerprint
-            and (after.st_dev, after.st_ino) == candidate_fingerprint[:2]
-        )
     relocated_description = "publication candidate" if same_candidate else "concurrent entry"
     if current_type == 0 or current_type == stat.S_IFDIR:
         return f"a concurrent directory entry remains preserved at {temporary}"
@@ -760,12 +832,55 @@ def _restore_relocated_publication_entry(
             f"the {relocated_description} remains preserved at {temporary}"
         )
     except OSError as error:
+        if isinstance(error, file_io.PathChangedError) and error.preserved_path == path:
+            # The move back landed, but could not be verified nor undone: the
+            # entry is at ``path``, not at the temporary. Ours only if proven.
+            retained = _retained_publication_candidate(
+                path, candidate, candidate_fingerprint, candidate_document
+            )
+            if retained is not None:
+                return retained
+            return f"the {relocated_description} remains at {path}: {error}"
         return f"the {relocated_description} remains preserved at {temporary}: {error}"
+    if same_candidate:
+        # The verified move put exactly the candidate back under its public
+        # name: from now on every reader sees this writer's complete bytes.
+        record_write(path)
     try:
         fsync_parent(path)
     except OSError as error:
-        return f"the concurrent entry was restored to {path}, but sync failed: {error}"
+        return f"the {relocated_description} was restored to {path}, but sync failed: {error}"
     return f"the {relocated_description} was restored to {path}"
+
+
+def _retained_publication_candidate(
+    path: Path,
+    candidate: file_io.PinnedPath,
+    candidate_fingerprint: file_io.FileFingerprint,
+    candidate_document: bytes,
+) -> str | None:
+    """After an unverified claim that stayed at ``path``: is it provably our candidate?
+
+    ``atomic_move_no_replace`` leaves an entry it could not verify, and could
+    not move back, at the destination (``preserved_path``). When that entry
+    is provably our candidate it is this writer's write: recorded, its folder
+    synced, and said. Anything else (or an entry that can't be inspected) is
+    left as it is and not recorded.
+    """
+    try:
+        _current, proven = _holds_publication_candidate(
+            path, candidate, candidate_fingerprint, candidate_document
+        )
+    except OSError:
+        return None
+    if not proven:
+        return None
+    record_write(path)
+    try:
+        fsync_parent(path)
+    except OSError as error:
+        return f"the publication candidate remains at {path}, but sync failed: {error}"
+    return f"the publication candidate remains at {path}"
 
 
 class PublishedNotDurableError(OSError):
@@ -1039,6 +1154,13 @@ def write_atomic_bytes(
                     temporary_fingerprint,
                     candidate_document,
                 )
+                if restoration is None and error.preserved_path == path:
+                    restoration = _retained_publication_candidate(
+                        path,
+                        temporary_pin,
+                        temporary_fingerprint,
+                        candidate_document,
+                    )
                 if restoration is None:
                     raise
                 raise file_io.PathChangedError(

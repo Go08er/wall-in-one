@@ -1432,6 +1432,12 @@ class _FakeApp:
     def play_item(self, item: MediaItem) -> Response:
         return self.apply(lambda: self.session.select(item.path))
 
+    def require_current_library(self) -> None:
+        """This session's library is the inventory: nothing to wait for."""
+
+    def pairing_currency_refusal(self, _item: MediaItem) -> str:
+        return ""
+
     def favourites_changed(self) -> None:
         self.restarred += 1
 

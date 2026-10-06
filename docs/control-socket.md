@@ -192,6 +192,14 @@ its still, and `still <video> default` or `reset-pairing` that would leave a
 video without one. The reply's kind is `nothing-to-play`, and nothing is
 written.
 
+The same changes wait while the app knows its library isn't current: after a
+removal, until the scan after it has finished, and after the library folders or
+Wallpaper Engine scanning change, until their scan has. The library it holds
+then can still name a file that is gone, so `playlist-add`, `playlist-remove`
+and `select`, and `still` or `reset-pairing` for a wallpaper a playlist holds,
+are refused with kind `library-not-current`, and nothing is written. Try again
+once the scan has finished (refresh the library if it failed).
+
 Pairing commands use ` :: ` between their two operands. That delimiter is
 required when both sides may contain spaces—for example a video path and a
 representative-still path, or a wallpaper path and `community:Tokyo Night`.

@@ -18,7 +18,7 @@ import pytest
 
 from tests.gtk_helpers import spin_until
 from tests.test_next_status_line import BATTERY, two_display_status
-from wall_in_one import config, paths, ui_prefs
+from wall_in_one import config, paths, runtime_config, ui_prefs
 from wall_in_one.library import pairings, playlists
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
@@ -89,6 +89,8 @@ class FakeApplication:
         self.after_favourites: Callable[[], None] = lambda: None
         # The Playlists page's part (`real_playlists.PlaylistBackend`).
         self.playlist_changes = 0
+        #: Why the library isn't current (a scan after a removal, say), or empty.
+        self.library_refusal = ""
         self.after_playlists: Callable[[], None] = lambda: None
         self.activated: list[str] = []
         #: When set, the next settings write fails with this message.
@@ -182,6 +184,11 @@ class FakeApplication:
 
     def current_item_for_authoring(self, item: MediaItem) -> MediaItem:
         return item
+
+    def require_current_library(self) -> None:
+        """Refused while `library_refusal` says why, as the application's is."""
+        if self.library_refusal:
+            raise runtime_config.LibraryNotCurrentError(self.library_refusal)
 
     def favourites_changed(self) -> None:
         self.published += 1

@@ -801,6 +801,22 @@ class PlaybackGuardError(ValueError):
     kind = "nothing-to-play"
 
 
+class LibraryNotCurrentError(ValueError):
+    """A playlist change refused because the library it would be judged by isn't current.
+
+    After a removal commits, until a scan after it is accepted, and after the
+    library folders or Workshop scanning change, until their scan lands, the
+    application knows its in-memory library may still name files that are
+    gone. A wallpaper taken from it, or a check judged by it, could pass and
+    then leave a playlist the compiler refuses once the scan lands, which
+    stops every later publication. Raised at the head of the authoring lane,
+    by the application (`Application.require_current_library`); nothing is
+    written. ``kind`` lets a control-socket caller branch on it.
+    """
+
+    kind = "library-not-current"
+
+
 def _quoted_name(playlist: Playlist) -> str:
     return f"\u201c{playlist.name}\u201d"
 

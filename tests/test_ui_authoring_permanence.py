@@ -77,6 +77,9 @@ class PlaylistApp:
 
     def window_report(self, _message: str) -> None: ...
 
+    def require_current_library(self) -> None:
+        """The library this fake holds is always current."""
+
     def current_item_for_authoring(self, item: MediaItem) -> MediaItem:
         current = self.session.library.find(item.path)
         if current is None:

@@ -3397,11 +3397,18 @@ class Application(Adw.Application):
             if still is None
             else []
         )
+        # A chosen still taken from a library that isn't current, or none at
+        # all, judged by one: refused while a playlist holds the wallpaper.
+        stale = self.pairing_currency_refusal(current)
 
         def work() -> _StillPairingMutationResult:
             effective = still
             if effective is None:
                 effective = pairings.synthesize(current, roots).still
+            if stale and (still is not None or effective is None):
+                raise runtime_config.LibraryNotCurrentError(
+                    f"{current.name}\u2019s still was not changed: {stale}"
+                )
             if effective is None and unresolved:
                 raise runtime_config.PlaybackGuardError(
                     f"{current.name}\u2019s still was not changed: it would have none, and "
@@ -3428,9 +3435,14 @@ class Application(Adw.Application):
         store = self._session.pairings
         roots = self._session.library.roots
         unresolved = runtime_config.pairing_refusals_if_unresolved(current, self._session)
+        stale = self.pairing_currency_refusal(current)
 
         def work() -> _PairingResetMutationResult:
             effective = pairings.synthesize(current, roots).still
+            if effective is None and stale:
+                raise runtime_config.LibraryNotCurrentError(
+                    f"{current.name} was not reset: {stale}"
+                )
             if effective is None and unresolved:
                 raise runtime_config.PlaybackGuardError(
                     f"{current.name} was not reset: it would have no still, and "
@@ -3467,6 +3479,67 @@ class Application(Adw.Application):
                 reconcile_workshop=False,
             )
         return adopted
+
+    def library_currency_refusal(self) -> str:
+        """Why no playlist change may be taken from, or judged by, the library now; or empty.
+
+        The two states in which the compiler refuses to install a document
+        built from `session.library` (`_compile_runtime_request`): an
+        inventory a pending or committed removal made invalid, until a scan
+        after it is accepted (that library still names the removed file on
+        purpose), and one that belongs to older library sources (folders or
+        Workshop scanning changed, and their scan has not landed). A playlist
+        entry taken from it, or a playability check judged by it, could pass
+        and leave a playlist the compiler refuses once the scan lands.
+        """
+        with self._runtime_config_lock:
+            valid = self._inventory_valid
+            sources = self._accepted_library_sources
+        if not valid:
+            return (
+                "the library is being scanned again after a removal, so wallpapers can\u2019t "
+                "be taken from it yet; wait for that scan to finish (refresh the library if it "
+                "failed), then try again"
+            )
+        # Before any scan is accepted (None), the library holds nothing a scan
+        # found under other folders: nothing to take from older sources.
+        if sources is not None and sources != (self._settings.roots, self._settings.scan_workshop):
+            return (
+                "the library is being scanned for its changed folders, so wallpapers can\u2019t "
+                "be taken from it yet; wait for that scan to finish (refresh the library if it "
+                "failed), then try again"
+            )
+        return ""
+
+    def require_current_library(self) -> None:
+        """Refused (`runtime_config.LibraryNotCurrentError`) while the library isn't current.
+
+        `library_currency_refusal` says why. Called from the ``prepare`` of
+        every playlist change that takes wallpapers from the library or is
+        judged by it, at the head of the authoring lane, so whichever window
+        or verb asked, nothing is written.
+        """
+        refusal = self.library_currency_refusal()
+        if refusal:
+            raise runtime_config.LibraryNotCurrentError(refusal)
+
+    def pairing_currency_refusal(self, item: MediaItem) -> str:
+        """`library_currency_refusal`, when a playlist holds ``item``; else empty.
+
+        For a pairing change that may leave ``item`` with no still: what that
+        would break is judged by the library (`runtime_config.pairing_refusal`),
+        so it is refused while that library isn't current, unless no playlist
+        holds the wallpaper at all.
+        """
+        refusal = self.library_currency_refusal()
+        if not refusal:
+            return ""
+        held = any(
+            entry.path == item.path
+            for playlist in self._session.playlists.all()
+            for entry in playlist.entries
+        )
+        return refusal if held else ""
 
     def current_item_for_authoring(self, item: MediaItem) -> MediaItem:
         """Resolve one item after prior queued lifecycle changes have landed."""
@@ -4794,8 +4867,9 @@ class Application(Adw.Application):
                 f"Playback unavailable for {item.name}; see Library for details and removal options"
             )
         try:
+            self.require_current_library()
             runtime_config.refuse_unresolved_quick_choice(item, self._session)
-        except runtime_config.PlaybackGuardError as error:
+        except (runtime_config.PlaybackGuardError, runtime_config.LibraryNotCurrentError) as error:
             return server.failed(error)
         try:
             chosen = (
@@ -4840,6 +4914,7 @@ class Application(Adw.Application):
             self._quick_choice_pending = False
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            self.require_current_library()
             current = self._session.library.find(item.path)
             if current is None or current.path in self._removed_item_paths:
                 raise ValueError(f"{item.name} was removed before Quick choice could save")
@@ -4921,6 +4996,7 @@ class Application(Adw.Application):
             self._quick_choice_pending = False
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            self.require_current_library()
             current = self._session.library.find(item.path)
             if current is None or current.path in self._removed_item_paths:
                 raise ValueError(f"{item.name} was removed before Quick choice could save")
@@ -6570,6 +6646,7 @@ class _Commands:
             return self._app.play_item(item)
 
         def prepare() -> Callable[[], tuple[MediaItem, playlists.Playlist]]:
+            self._app.require_current_library()
             session = self._app.session
             item = server.resolve(session.library, value, verb="select")
             health = session.pairings.health(pairings.Identity.of(item))
@@ -6640,8 +6717,22 @@ class _Commands:
             if chosen != "default":
                 requested = server.parse_path(chosen, verb="still")
                 still = session.library.require_representative_still(requested).path
+                stale = self._app.pairing_currency_refusal(item)
+                if stale:
+                    return server.failed(
+                        runtime_config.LibraryNotCurrentError(
+                            f"{item.name}\u2019s still was not changed: {stale}"
+                        )
+                    )
             elif item.is_moving and item.paired_still is None:
                 # The headless service resolves the default from its scan.
+                stale = self._app.pairing_currency_refusal(item)
+                if stale:
+                    return server.failed(
+                        runtime_config.LibraryNotCurrentError(
+                            f"{item.name}\u2019s still was not changed: {stale}"
+                        )
+                    )
                 unresolved = runtime_config.pairing_refusals_if_unresolved(item, session)
                 if unresolved:
                     return server.failed(
@@ -6735,6 +6826,11 @@ class _Commands:
             item = server.resolve(session.library, value, verb="reset-pairing")
             if item.is_moving and item.paired_still is None:
                 # The headless service resolves the default from its scan.
+                stale = self._app.pairing_currency_refusal(item)
+                if stale:
+                    return server.failed(
+                        runtime_config.LibraryNotCurrentError(f"{item.name} was not reset: {stale}")
+                    )
                 unresolved = runtime_config.pairing_refusals_if_unresolved(item, session)
                 if unresolved:
                     return server.failed(
@@ -6949,6 +7045,7 @@ class _Commands:
             session = self._app.session
             playlist = session.playlists.find(name)
             item = server.resolve(session.library, source, verb="playlist-add")
+            self._app.require_current_library()
             add = runtime_config.checked_entries_addition(
                 playlist.id,
                 [item.path],
@@ -6960,9 +7057,15 @@ class _Commands:
             return Response.success(f"{item.name} added to {playlist.name}")
 
         def prepare() -> Callable[[], tuple[playlists.Playlist, MediaItem]]:
+            # Never from a library the app knows is stale: a removed file it
+            # still lists would leave this playlist holding nothing the
+            # compiler keeps once the scan lands.
+            self._app.require_current_library()
             session = self._app.session
             playlist = session.playlists.find(name)
-            item = server.resolve(session.library, source, verb="playlist-add")
+            item = self._app.current_item_for_authoring(
+                server.resolve(session.library, source, verb="playlist-add")
+            )
             playlist_store = session.playlists
 
             def work() -> tuple[playlists.Playlist, MediaItem]:
@@ -6987,6 +7090,7 @@ class _Commands:
         if self._app.legacy_service:
             session = self._app.session
             playlist = session.playlists.find(name)
+            self._app.require_current_library()
             remove = runtime_config.checked_entries_removal(
                 playlist.id,
                 [entry],
@@ -6998,6 +7102,8 @@ class _Commands:
             return Response.success(f"removed {entry} from {playlist.name}")
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            # Judged by the library: never by one the app knows is stale.
+            self._app.require_current_library()
             session = self._app.session
             playlist = session.playlists.find(name)
             playlist_store = session.playlists

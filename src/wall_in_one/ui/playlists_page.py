@@ -1899,6 +1899,8 @@ class PlaylistsPage(Gtk.Box):
                 self._app.window_report(message)
 
         def prepare() -> Any:
+            # Never from a library the application knows isn't current.
+            self._app.require_current_library()
             current = self._app.current_item_for_authoring(item)
             if store.get(selected) is None:
                 raise ValueError("the selected playlist was deleted before the drop saved")
@@ -2058,6 +2060,8 @@ class PlaylistsPage(Gtk.Box):
                 self._app.playlists_changed()
 
             def prepare() -> Any:
+                # Never from a library the application knows isn't current.
+                self._app.require_current_library()
                 current = self._app.current_item_for_authoring(item)
                 if store.get(selected) is None:
                     raise ValueError("the selected playlist was deleted before the item saved")
@@ -2107,13 +2111,18 @@ class PlaylistsPage(Gtk.Box):
             def remove_it() -> playlists.Playlist:
                 return store.remove_entry(selected, entry_id)
 
+            def prepare() -> Any:
+                # Refused at the head of the lane if the playlist would break,
+                # judged by a library the application knows is current.
+                self._app.require_current_library()
+                return runtime_config.checked_entries_removal(
+                    selected, [entry_id], remove_it, self._app.session
+                )
+
             self._app.authoring_action_async(
                 remove_it,
                 saved,
-                # Refused at the head of the lane if the playlist would break.
-                prepare=lambda: runtime_config.checked_entries_removal(
-                    selected, [entry_id], remove_it, self._app.session
-                ),
+                prepare=prepare,
                 failure=self._app.window_report,
             )
 

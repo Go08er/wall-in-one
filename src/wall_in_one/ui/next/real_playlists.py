@@ -42,6 +42,13 @@ Making a playlist with nothing to play the default is refused when asked,
 and again by the application at its own settings write
 (`Application._prepare_settings_batch`), whichever page asked.
 
+**A library that isn't current.** While the application knows its library
+may still name files that are gone (a removal's scan has not landed, or the
+library folders changed and their scan has not), nothing is taken from it or
+judged by it: adding, making a playlist with wallpapers, copying, removing
+entries and Undo are refused at the head of the queue, saying to wait for the
+scan (`Application.require_current_library`). An empty playlist is still made.
+
 **Hidden playlists.** "Your pick" is the ``quick-choice`` playlist and its
 per-display ``quick-choice:<hash>`` siblings; "All wallpapers" is generated
 from the library. None of them is edited, renamed or deleted here; "All
@@ -153,6 +160,8 @@ class PlaylistBackend(Protocol):
     ) -> bool: ...
 
     def current_item_for_authoring(self, item: MediaItem) -> MediaItem: ...
+
+    def require_current_library(self) -> None: ...
 
     def playlists_changed(self) -> None: ...
 
@@ -614,6 +623,8 @@ class RealPlaylists:
         self._creating.add(pid)
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            if views:
+                backend.require_current_library()
             items = [backend.current_item_for_authoring(view.item) for view in views]
             self._require_playing(items)
             entries = [playlists.Entry(playlists.new_id(), str(item.path)) for item in items]
@@ -649,6 +660,9 @@ class RealPlaylists:
         self._creating.add(copy)
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            # Its entries come from the library (All wallpapers) or are
+            # judged by it: never by one the application knows is stale.
+            self._backend.require_current_library()
             if pid == runtime_config.FALLBACK_PLAYLIST_ID:
                 source_name = "All wallpapers"
                 sources = [str(item.path) for item in session.library.items]
@@ -807,6 +821,7 @@ class RealPlaylists:
         name = playlist.name
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            backend.require_current_library()
             current = self._require(pid, "the wallpapers")
             items = [backend.current_item_for_authoring(view.item) for view in views]
             self._require_playing(items)
@@ -848,6 +863,8 @@ class RealPlaylists:
         def prepare() -> Callable[
             [], tuple[playlists.Playlist, tuple[tuple[int, playlists.Entry], ...]]
         ]:
+            # Judged by the library: never by one the application knows is stale.
+            self._backend.require_current_library()
             current = self._require(pid, "the removal")
             removed = tuple(
                 (index, entry) for index, entry in enumerate(current.entries) if entry.id in chosen
@@ -887,6 +904,7 @@ class RealPlaylists:
         name = playlist.name if playlist is not None else "the playlist"
 
         def prepare() -> Callable[[], playlists.Playlist]:
+            self._backend.require_current_library()
             current = self._require(pid, "Undo")
             if tuple(entry.id for entry in current.entries) != left:
                 raise RefusedError(

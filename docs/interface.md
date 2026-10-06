@@ -180,6 +180,9 @@ Also:
   for their stills), is refused, saying why. An empty playlist can always be
   made.
 - One with nothing that plays can't become the default.
+- While the library is being scanned again after a removal, or for changed
+  folders, adding, removing, copying and Undo wait for that scan and say so:
+  the library the app holds then can still name a file that is gone.
 - "Your pick" stays hidden.
 - Long playlists show 72 rows at a time. A wallpaper dropped below the last row
   shown goes to the end of the playlist.

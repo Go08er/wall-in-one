@@ -994,11 +994,12 @@ class PreferencesPage(Adw.PreferencesPage):
                 else "The key could not be written to disk"
             )
 
-        self._app.authoring_action_async(
+        if not self._app.authoring_action_async(
             lambda: credentials.save_key(key),
             saved,
             failure=failed,
-        )
+        ):
+            self._save_api_key.set_sensitive(True)  # refused at once (quitting, say)
 
     def _on_clear_api_key(self, _button: Gtk.Button) -> None:
         if not self._app.require_authoring_ready():
@@ -1015,11 +1016,12 @@ class PreferencesPage(Adw.PreferencesPage):
             # Safe to quote, unlike a save's: removal names the file, never a key.
             self._report(f"The saved key could not be removed: {message}")
 
-        self._app.authoring_action_async(
+        if not self._app.authoring_action_async(
             credentials.clear_key,
             cleared,
             failure=failed,
-        )
+        ):
+            self._clear_api_key.set_sensitive(True)  # refused at once (quitting, say)
 
     def _report(self, message: str) -> None:
         self._app.window_report(message)

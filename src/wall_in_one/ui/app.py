@@ -3363,8 +3363,15 @@ class Application(Adw.Application):
         return Response.failure(message, kind=SAVED_NOT_APPLIED)
 
     def _show_what_was_saved(self) -> None:
-        """Publish and show what the stores hold, after a task's adoption failed partway."""
-        self._publish_runtime_for_context()
+        """Publish and show what the stores hold, after a task's adoption failed partway.
+
+        Never raises: it runs on a path that has already failed once, and the
+        reply to the task's caller follows it.
+        """
+        try:
+            self._publish_runtime_for_context()
+        except Exception as error:
+            self.activity_log.record("app", f"What was saved could not be published: {error}")
         window = self._window
         if window is None:
             return
@@ -4913,10 +4920,15 @@ class Application(Adw.Application):
             if response.ok and on_success is not None:
                 on_success(runtime_answered)
         finally:
-            # The single-flight flag is released whatever the callback did.
+            # Released whatever the callback did (it reaches the window): the
+            # single-flight flag, the caller's own completion, and busy below.
             self._runtime_action_pending = False
-        if on_complete is not None:
-            on_complete(response, runtime_answered)
+            try:
+                if on_complete is not None:
+                    on_complete(response, runtime_answered)
+            finally:
+                if not self._runtime_shutdown:
+                    self._status_model.set_busy(False)
         current = (
             not self._runtime_shutdown
             and window is not None
@@ -4924,10 +4936,9 @@ class Application(Adw.Application):
             and self._window_generation == generation
         )
         # A command belongs to the application, not to one incarnation of
-        # its window. The single-flight busy flag is released for whichever
-        # window is open now; only the result stays away from a reopened one.
-        if not self._runtime_shutdown:
-            self._status_model.set_busy(False)
+        # its window. The single-flight busy flag was released above for
+        # whichever window is open now; only the result stays away from a
+        # reopened one.
         if current and window is not None:
             if not response.ok:
                 window.report(response.message)
@@ -5068,12 +5079,15 @@ class Application(Adw.Application):
                 self._window.playlists_changed(self._session)
 
         def saved(chosen: playlists.Playlist) -> None:
+            # Saved: released first, before anything here that can raise
+            # (`playlists_changed` reaches the window). What follows the save
+            # is the runtime call's, which holds its own flag.
+            release_choice()
             try:
                 self._session.use_playlist(chosen.id)
             except ApplyError as error:
                 # Saved (a health marker landed meanwhile, say): published and
                 # said as saved, never as a choice that didn't happen.
-                release_choice()
                 self.playlists_changed()
                 self.window_report(f"Saved, but it couldn't be applied: {error}")
                 return
@@ -5150,6 +5164,10 @@ class Application(Adw.Application):
                 self._window.playlists_changed(self._session)
 
         def saved(chosen: playlists.Playlist) -> None:
+            # Saved: released first, before anything here that can raise
+            # (`playlists_changed` reaches the window). What follows the save
+            # is the runtime call's, which holds its own flag.
+            release_choice()
             self.playlists_changed()
             started = self._start_gui_runtime_call(
                 lambda: self._send_gui_runtime_on(connector, "playlist-use", chosen.id),
@@ -6521,7 +6539,6 @@ class Application(Adw.Application):
         is said not to be current, until a scan succeeds (Z-2).
         """
         if unapplied is not None:
-            self._show_what_was_saved()
             sources_changed = (result.settings.roots, result.settings.scan_workshop) != (
                 previous.roots,
                 previous.scan_workshop,
@@ -6529,25 +6546,31 @@ class Application(Adw.Application):
             if sources_changed and not scanned and not self._service_start:
                 # Adoption stopped before the window's scan of the new folders
                 # began. (The service scans inside adoption, `Session.update_settings`.)
+                # Started before publishing, so the publication waits for it
+                # rather than saying the library doesn't match the folders.
                 try:
                     self.refresh_library()
                 except Exception as error:  # said with the rest, below
                     unapplied = RuntimeError(f"{unapplied}; and the library scan: {error}")
+        # Settled first: every caller hears it saved before anything here that
+        # reaches the window, and one caller's failure is never another's.
+        followed: list[str] = []
         for _generation, success, _failure in callbacks:
             if success is not None:
                 try:
                     success(result.settings)
                 except Exception as error:
-                    self.window_report(
-                        f"Settings were saved, but what follows them failed: {error}"
-                    )
+                    followed.append(f"Settings were saved, but what follows them failed: {error}")
         if unapplied is not None:
-            self.window_report(f"Settings were saved, but they couldn't be applied: {unapplied}")
+            self._show_what_was_saved()  # never raises
+            followed.append(f"Settings were saved, but they couldn't be applied: {unapplied}")
         if result.not_durable:
-            self.window_report(
+            followed.append(
                 "Settings were saved, but Wall-in-One couldn't confirm they're safely on "
                 f"disk: {result.not_durable}"
             )
+        for said in followed:
+            self.window_report(said)
 
     def _settings_batch_saved_not_applied(self, message: str) -> None:
         """The lane's saved-but-not-applied route for a settings batch: touch no generation.
@@ -6611,15 +6634,23 @@ class Application(Adw.Application):
             ).validated()
             requested = self._settings_requested
         try:
-            if self._window is not None:
-                self._window.apply_settings(requested)
+            # Each caller settles first, before what reaches the window; one
+            # caller's failure never skips another's.
             delivered = False
+            raised: list[Exception] = []
             for _generation, _success, failure in callbacks:
                 if failure is not None:
-                    failure(message)
                     delivered = True
+                    try:
+                        failure(message)
+                    except Exception as error:
+                        raised.append(error)
+            if self._window is not None:
+                self._window.apply_settings(requested)
             if not delivered:
                 self.window_report(f"Settings were not saved; nothing changed: {message}")
+            if raised:
+                raise raised[0]
         finally:
             if retry:
                 self._start_settings_authoring()

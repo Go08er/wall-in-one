@@ -489,15 +489,15 @@ class RealPalettes:
             return palettes.write_custom(chosen, document)
 
         def saved(entry: palettes.PaletteEntry) -> None:
+            done(True)  # settled first: what follows reaches the window
             if self._catalog is not None:
                 # The old snapshot holds the old file: not actionable until rescanned.
                 self._catalog.invalidate()
             report(f"Saved {entry.name}")
-            done(True)
 
         def failed(message: str) -> None:
+            done(False)  # settled first: what follows reaches the window
             report(f"The palette was not saved: {message}")
-            done(False)
 
         if not self._backend.authoring_action_async(work, saved, failure=failed):
             done(False)
@@ -948,20 +948,20 @@ class RealSettings:
             return
 
         def saved(_path: Path) -> None:
+            done(KEY_SAVED)  # settled first: what follows reaches the window
             self._refresh_key()
             self._report("Wallhaven API key saved")
-            done(KEY_SAVED)
 
         def failed(message: str) -> None:
             # Composed from the error's kind, never from what was typed, so no
             # path out of here can put the key on screen or into the log.
             refused = "credential:" in message
+            done(KEY_REFUSED if refused else KEY_FAILED)  # settled first
             self._report(
                 "That does not look like a Wallhaven API key"
                 if refused
                 else "The key could not be written to disk"
             )
-            done(KEY_REFUSED if refused else KEY_FAILED)
 
         if not self._backend.authoring_action_async(
             lambda: credentials.save_key(key), saved, failure=failed

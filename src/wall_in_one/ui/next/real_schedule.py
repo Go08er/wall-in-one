@@ -545,16 +545,18 @@ class RealScheduling:
             return work
 
         def finish(_result: object) -> None:
+            # Saved: settled first, so nothing below that can raise (they reach
+            # the window) leaves the control waiting.
+            self._settle(settled, True)
             publish()
             self._owner.emit_changed(*topics)
-            self._settle(settled, True)
 
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
+            self._settle(settled, False)  # settled first: what follows reaches the window
             self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
             self._owner.emit_changed(*topics)
-            self._settle(settled, False)
 
         accepted = self._backend.authoring_action_async(
             work, finish, prepare=prepare, failure=failed
@@ -581,17 +583,18 @@ class RealScheduling:
         reported = False
 
         def saved(_settings: config.Settings) -> None:
+            # Saved: settled first, before what can raise (it reaches the window).
+            self._settle(settled, True)
             if after is not None:
                 after()
             self._owner.emit_changed(*topics)
-            self._settle(settled, True)
 
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
+            self._settle(settled, False)  # settled first: what follows reaches the window
             self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
             self._owner.emit_changed(*topics)
-            self._settle(settled, False)
 
         accepted = self._backend.update_settings_async(on_success=saved, on_error=failed, **changes)
         if not accepted and not reported:
@@ -843,11 +846,7 @@ class RealScheduling:
             return work
 
         def finish(outcome: _Forgotten) -> None:
-            # The settings first, so what is published is what is saved.
-            self._backend.adopt_colors_forget(outcome.colors)
             committed = bool(outcome.rules or outcome.playlist)
-            if committed:
-                self._backend.schedule_edited()  # publish what committed
             said, ok = "", True
             if outcome.playlist is None:
                 said, ok = self._partly_forgotten(connector, plan, outcome), False
@@ -855,20 +854,30 @@ class RealScheduling:
                 said, ok = self._colors_still_follow(connector, outcome), False
             elif outcome.colors is not None and outcome.colors.kept:
                 said, ok = self._colors_kept(connector, outcome), committed
-            if said:
-                self._backend.window_report(said)
-            self._owner.emit_changed(*topics)
-            self._settle(settled, ok)
+            try:
+                # The settings first, so what is published is what is saved.
+                self._backend.adopt_colors_forget(outcome.colors)
+                if committed:
+                    self._backend.schedule_edited()  # publish what committed
+                if said:
+                    self._backend.window_report(said)
+                self._owner.emit_changed(*topics)
+            finally:
+                # Settled whatever adopting it did (it reaches the window): the
+                # settings come first, so this can't simply move up.
+                self._settle(settled, ok)
 
         def failed(error: str) -> None:
             nonlocal reported
             reported = True
-            self._backend.adopt_colors_forget(None)  # nothing saved: what is requested again
-            self._backend.window_report(
-                f"Forgetting {connector} was not saved; nothing changed: {error}"
-            )
-            self._owner.emit_changed(*topics)
-            self._settle(settled, False)
+            try:
+                self._backend.adopt_colors_forget(None)  # nothing saved: what is requested again
+                self._backend.window_report(
+                    f"Forgetting {connector} was not saved; nothing changed: {error}"
+                )
+                self._owner.emit_changed(*topics)
+            finally:
+                self._settle(settled, False)  # after the settings, whatever they did
 
         blocked = self.schedule_blocked()
         if blocked:

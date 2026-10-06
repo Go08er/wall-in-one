@@ -1040,4 +1040,5 @@ class _PaletteEditor(Adw.Dialog):
             self._on_error(message)
 
         self._name.remove_css_class("error")
-        self._app.authoring_action_async(work, saved, failure=failed)
+        if not self._app.authoring_action_async(work, saved, failure=failed):
+            self._save.set_sensitive(True)  # refused at once (quitting, say)

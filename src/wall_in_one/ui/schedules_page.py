@@ -1243,22 +1243,24 @@ class SchedulesPage(Gtk.ScrolledWindow):
             def failed(error: str) -> None:
                 nonlocal reported
                 reported = True
-                self._app.window_report(str(error))
-                # ComboRow has already adopted the clicked index. Once nothing
-                # else is queued for this screen, put it back on the durable
-                # store, so a failed write cannot masquerade as a saved one;
-                # a later queued choice keeps showing until it settles.
+                # Settled first, before what reaches the window. ComboRow has
+                # already adopted the clicked index. Once nothing else is
+                # queued for this screen, put it back on the durable store, so
+                # a failed write cannot masquerade as a saved one; a later
+                # queued choice keeps showing until it settles.
                 if settle_intent(self._pending_assignments, connector):
                     self._reconcile_assignment(connector, row, choices)
+                self._app.window_report(str(error))
 
             def saved(_result: object) -> None:
-                self._app.runtime_config_changed()
-                self._app.window_report(f"Updated {connector}")
-                self._fingerprint = self._authoring_fingerprint(self._app.session)
+                # Settled first, before what can raise (it reaches the window).
                 # An earlier queued choice may have failed and put the row
                 # back meanwhile; the last one to settle shows what is saved.
                 if settle_intent(self._pending_assignments, connector):
                     self._reconcile_assignment(connector, row, choices)
+                self._fingerprint = self._authoring_fingerprint(self._app.session)
+                self._app.runtime_config_changed()
+                self._app.window_report(f"Updated {connector}")
 
             def prepare() -> Any:
                 if 0 < index <= len(choices):
@@ -1316,15 +1318,17 @@ class SchedulesPage(Gtk.ScrolledWindow):
             def failed(error: str) -> None:
                 nonlocal reported
                 reported = True
-                self._app.window_report(str(error))
+                # Settled first, before what reaches the window.
                 if settle_intent(self._pending_enabled, rule_id):
                     self._reconcile_enabled(rule_id, row)
+                self._app.window_report(str(error))
 
             def saved(_rule: schedules.Rule) -> None:
-                self._app.schedule_edited()
-                self._fingerprint = self._authoring_fingerprint(self._app.session)
+                # Settled first, before what can raise (it reaches the window).
                 if settle_intent(self._pending_enabled, rule_id):
                     self._reconcile_enabled(rule_id, row)
+                self._fingerprint = self._authoring_fingerprint(self._app.session)
+                self._app.schedule_edited()
 
             queue_intent(self._pending_enabled, rule_id, wanted)
             accepted = self._app.authoring_action_async(

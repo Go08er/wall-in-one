@@ -40,6 +40,7 @@ from tests.test_ui_astra030_y1 import (  # noqa: E402
     _settled,
     profiles,
 )
+from wall_in_one import config  # noqa: E402
 from wall_in_one.library import schedules  # noqa: E402
 from wall_in_one.session import RemovalResult  # noqa: E402
 
@@ -159,3 +160,46 @@ def test_a_saved_repair_whose_adoption_failed_rests_the_gate_at_repair(
     assert application.retry_authoring_repair()
     spin_until(lambda: application.authoring_ready, BOUND, what="Try again")
     assert application.authoring_gate == "open"
+
+
+def test_try_again_after_a_failed_adoption_adopts_what_the_repair_saved(
+    profiles: Callable[..., Profile], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Try again finds nothing left to repair on disk; memory still learns what was saved.
+
+    Before: the retry adopted its own (empty) deltas only, so the session kept
+    the removed rule and the deleted default until a restart or that store's
+    next write.
+    """
+    profile = profiles()
+    application = profile.application
+    store = application.session.schedules
+    store.add("deleted-playlist", weekdays=("mon",))  # a dangling rule, in memory too
+    application._settings = config.update({"active_playlist": "deleted-playlist"})
+    application.session.update_settings(application._settings, rescan_library=False)
+    real_adopt = store.adopt_worker_forget_playlists
+
+    def adopting(_playlists: object) -> None:
+        raise RuntimeError("injected: adopting the repair failed")
+
+    monkeypatch.setattr(store, "adopt_worker_forget_playlists", adopting)
+    application._authoring_migration_ready = False
+    application._authoring_repair_started = False
+    application._open_authoring_after_migration()
+    spin_until(
+        lambda: _lane_idle(application) and application.authoring_gate == "repair",
+        BOUND,
+        what="the repair",
+    )
+    assert schedules.Store.open().rules == () and config.load_strict().active_playlist == ""
+    assert [rule.playlist for rule in store.rules] == ["deleted-playlist"], "not adopted yet"
+    assert application.settings.active_playlist == "deleted-playlist"
+
+    monkeypatch.setattr(store, "adopt_worker_forget_playlists", real_adopt)
+    assert application.retry_authoring_repair()
+    spin_until(lambda: application.authoring_ready, BOUND, what="Try again")
+
+    assert [rule.playlist for rule in application.session.schedules.rules] == []
+    assert application.settings.active_playlist == ""
+    assert application.session.settings.active_playlist == ""
+    assert application.requested_settings.active_playlist == ""

@@ -550,6 +550,8 @@ class Application(Adw.Application):
         # may tell a control client to ask the user for a decision.
         self._authoring_gate_state: _AuthoringGateState = "checking"
         self._authoring_repair_started = False
+        #: Saved repairs whose adoption here failed, adopted again by the next.
+        self._unadopted_repairs: tuple[_PlaylistReferenceRepairResult, ...] = ()
         self._headless_authoring_started = False
         self._activation_waiting_for_repair = False
         # Process work, done once: the first window to pass the migration gate
@@ -933,32 +935,51 @@ class Application(Adw.Application):
         The repair's writes are saved before this runs. If adopting them here
         fails, the gate rests at ``repair`` (Try again runs it once more and
         finds nothing left to repair), never at ``checking`` until a restart;
-        the lane says what was saved (`SAVED_NOT_APPLIED`).
+        the lane says what was saved (`SAVED_NOT_APPLIED`). What that repair
+        saved is adopted again by the next one, before its own: on disk it is
+        done, so Try again would otherwise leave memory naming what it removed.
         """
+        earlier = self._unadopted_repairs
         try:
+            for unadopted in earlier:
+                self._adopt_playlist_reference_repair(unadopted, again=True)
             self._adopt_playlist_reference_repair(result)
         except Exception:
+            self._unadopted_repairs = (*earlier, result)
             self._authoring_repair_started = False
             self._authoring_gate_state = "repair"
             self._first_run_changed()
             raise
+        self._unadopted_repairs = ()
         return self._open_after_playlist_reference_repair(result)
 
-    def _adopt_playlist_reference_repair(self, result: _PlaylistReferenceRepairResult) -> None:
-        """The repair's deltas, in this process's stores and settings."""
+    def _adopt_playlist_reference_repair(
+        self, result: _PlaylistReferenceRepairResult, *, again: bool = False
+    ) -> None:
+        """The repair's deltas, in this process's stores and settings.
+
+        Each is a semantic delta, so adopting one ``again`` changes nothing it
+        already changed. ``again``, only the default it set is taken from its
+        settings: nothing newer may be replaced by that older snapshot.
+        """
         self._session.schedules.adopt_worker_forget_playlists(result.schedule_playlists)
         self._session.displays.adopt_worker_forget_playlists(result.display_playlists)
         self._session.schedules.adopt_worker_retarget(dict(result.schedule_retargets))
         self._session.displays.adopt_worker_retarget(dict(result.display_retargets))
         if result.settings is not None:
             previous = self._settings
+            settings = (
+                replace(previous, active_playlist=result.settings.active_playlist)
+                if again
+                else result.settings
+            )
             with self._settings_authoring_lock:
-                self._settings_requested = result.settings
-            self._settings = result.settings
-            self._session.update_settings(result.settings, rescan_library=False)
+                self._settings_requested = settings
+            self._settings = settings
+            self._session.update_settings(settings, rescan_library=False)
             if self._window is not None:
-                self._window.apply_settings(result.settings)
-            if previous.active_playlist != result.settings.active_playlist:
+                self._window.apply_settings(settings)
+            if previous.active_playlist != settings.active_playlist:
                 self._session.playlists_changed()
         elif result.schedule_playlists or result.schedule_retargets:
             self._session.playlists_changed()

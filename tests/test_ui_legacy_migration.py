@@ -286,7 +286,8 @@ def test_existing_current_authoring_shows_conflicts_and_never_offers_import(
         dialog = shown[-1]
         assert str(conflict) in dialog.get_body()
         assert dialog.get_response_label("fresh") == "Keep current"
-        assert dialog.get_response_label("import") is None
+        # Absent, asked without a critical: a missing id isn't a label to read.
+        assert not dialog.has_response("import")
     finally:
         _close(application, parent)
 
@@ -313,7 +314,7 @@ def test_interrupted_import_only_offers_resume_and_not_now(
         dialog = shown[-1]
         assert dialog.get_response_label("import") == "Resume import"
         assert dialog.get_response_label("later") == "Not now"
-        assert dialog.get_response_label("fresh") is None
+        assert not dialog.has_response("fresh")
     finally:
         _close(application, parent)
 

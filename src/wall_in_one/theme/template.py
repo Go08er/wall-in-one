@@ -2083,11 +2083,15 @@ def _resolve_failed_exchange(
                 logical_retained_parent=transaction.record.parent,
                 logical_path=transaction.swap,
             )
-        except OSError, ValueError:
-            return (
-                f"the candidate remains preserved at {transaction.swap}",
-                False,
+        except (OSError, ValueError) as error:
+            # Its move into the retained namespace can land and then be neither
+            # verified nor undone: then that is where it is, not at the swap.
+            preserved = (
+                error.preserved_path
+                if isinstance(error, file_io.PathChangedError) and error.preserved_path is not None
+                else transaction.swap
             )
+            return (f"the candidate remains preserved at {preserved}", False)
         _fsync_parent(path)
         return (f"the concurrent entry was restored to {path}", True)
 

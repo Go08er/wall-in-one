@@ -806,6 +806,74 @@ def test_install_restores_entry_that_wins_immediately_before_exchange(
     _assert_no_current_transaction(settings_path)
 
 
+def test_a_candidate_retired_but_not_verified_is_named_where_it_is(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Noctalia write wins immediately before the exchange, so the candidate is
+    exchanged back and retired (moved into the retained namespace). That move lands,
+    but its verification read fails (a real EIO, once) and moving it back is refused
+    (the scratch settings folder turned read-only: a native EACCES). The candidate is
+    in the retained namespace, and the message names it there, not at the swap name
+    it has left."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    folder_mode = stat.S_IMODE(folder.stat().st_mode)
+    real_exchange = template._rename_exchange
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    retired: list[Path] = []
+    swaps: list[Path] = []
+    failing: Path | None = None
+
+    def replace_before_candidate_exchange(source: Path, destination: Path) -> None:
+        if destination == settings_path and not swaps:
+            swaps.append(source)
+            replacement = settings_path.with_name("settings.pre-exchange-replacement.toml")
+            replacement.write_text(SAMPLE_SETTINGS, encoding="utf-8")
+            os.replace(replacement, settings_path)
+        real_exchange(source, destination)
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        into_retained = destination.name.startswith(file_io.RETAINED_ENTRY_PREFIX)
+        if swaps and source == swaps[0] and into_retained and not retired:
+            retired.append(destination)
+            failing = destination
+            folder.chmod(0o500)
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(template, "_rename_exchange", replace_before_candidate_exchange)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    try:
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.install()
+    finally:
+        folder.chmod(folder_mode)
+
+    said = str(raised.value)
+    assert len(swaps) == 1 and len(retired) == 1
+    swap = swaps[0]
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY / retired[0].name
+    assert settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS, "Noctalia's write won"
+    assert not swap.exists(), "the candidate left the swap name"
+    assert retained.is_file(), "it is in the retained namespace"
+    assert "settings were not replaced" in said, said
+    # Failed on 0b273cc: "the candidate remains preserved at <swap>", which was empty.
+    assert f"the candidate remains preserved at {swap}" not in said, said
+    assert f"the candidate remains preserved at {retained}" in said, said
+    # The locator stays for the next operation, which reconciles it and installs.
+    assert template.install().changed
+    _assert_no_current_transaction(settings_path)
+
+
 @pytest.mark.parametrize("kind", ("regular", "directory"))
 def test_install_never_keeps_a_substituted_candidate_name_public(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, kind: str

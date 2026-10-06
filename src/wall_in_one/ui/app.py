@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import re
 import sys
 import threading
 from collections import deque
@@ -112,6 +113,11 @@ def _unfinished_library_cleanup(result: LibraryRefreshResult) -> str:
             "Workshop uninstall" + manage.metadata_cleanup_note(result.workshop_cleanup_failures)
         )
     return " ".join(said)
+
+
+#: A caller's claim that a failed task changed nothing ("...; nothing changed:
+#: error"), the one wording every window caller uses for it.
+_NOTHING_CHANGED: Final = re.compile(r"[;,] nothing changed(?=[:.]|$)")
 
 
 def _with_durability(message: str, warnings: Sequence[str]) -> str:
@@ -271,6 +277,8 @@ class _Said:
     #: Whether the work changed anything on disk (`state_file.record_write`): the
     #: only proof that a task which failed afterwards saved something.
     wrote: bool = False
+    #: The work changed something, then failed: its caller's "nothing changed" isn't true.
+    partly: bool = False
     #: Said in place of the caller's first report: a write landed, then its
     #: adoption failed (`Application._after_failed_finish`).
     instead: str = ""
@@ -2413,6 +2421,8 @@ class Application(Adw.Application):
         * a task whose write landed but whose adoption failed is said as the
           lane says it ("Saved, but it couldn't be applied: ..."), in place
           of the caller's first message, whose failure wording isn't true;
+        * a task whose work changed something and then failed (a damaged file
+          moved aside, its replacement refused) is never "nothing changed";
         * the first message also says what the task saved but couldn't
           confirm durable, so one task is one message.
 
@@ -2425,6 +2435,8 @@ class Application(Adw.Application):
         if spoken.instead and not spoken.instead_said:
             spoken.instead_said = True
             message = spoken.instead
+        elif spoken.partly:
+            message = _NOTHING_CHANGED.sub("", message)
         if spoken.warnings and not spoken.said:
             spoken.said = True
             message = _with_durability(message, spoken.warnings)
@@ -3222,7 +3234,10 @@ class Application(Adw.Application):
             try:
                 result = future.result()
             except Exception as error:
-                reply(server.failed(error))  # the work refused
+                # Refused. If it changed something first (a damaged file moved
+                # aside), its caller's "nothing changed" isn't true.
+                task.spoken.partly = task.spoken.wrote
+                reply(server.failed(error))
                 return GLib.SOURCE_REMOVE
             try:
                 outcome = task.finish(result)
@@ -3353,8 +3368,9 @@ class Application(Adw.Application):
                 accepted = False
             if response.ok:
                 return
-            # Saved but not applied: the caller still puts its controls back,
-            # and what it says is made true of the task (`with_task_durability`).
+            # Saved but not applied, or changed then refused: the caller still
+            # puts its controls back, and what it says is made true of the
+            # task (`with_task_durability`).
             if failure is not None:
                 failure(response.message)
             else:

@@ -558,7 +558,11 @@ still read) first moves the exact generation that failed to a numbered
 replacement: if an editor installs a valid document before or during that
 boundary, the manual repair remains canonical and the app reports its own
 mutation as failed. The same rule applies to an in-place repair of the
-original inode.
+original inode. If the move succeeds but the replacement then can't be
+written (a read-only folder, say), the change isn't saved and the refusal says
+where the original is kept: "playlists.json could not be used, so it was kept
+as …/playlists.json.broken; its replacement was not saved: …". It is never
+reported as "nothing changed", since the original is no longer at its name.
 
 Taking something out is not a repair. Deleting, unassigning, unstarring,
 forgetting or renaming a record in one of these files while it can't be read

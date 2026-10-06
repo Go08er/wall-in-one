@@ -867,6 +867,19 @@ def record_write(path: Path) -> None:
         collected.append(path)
 
 
+def replacement_not_saved(target: Path, backup: Path, error: BaseException) -> str:
+    """A damaged file was moved aside to ``backup``, then its replacement failed.
+
+    The original is safe at its backup and no new file was written, so the
+    message says both; "nothing changed" would hide where the file went.
+    """
+    detail = error.args[0] if error.args and isinstance(error.args[0], str) else str(error)
+    return (
+        f"{target.name} could not be used, so it was kept as {backup}; "
+        f"its replacement was not saved: {detail}"
+    )
+
+
 @contextlib.contextmanager
 def collecting_writes() -> Iterator[list[Path]]:
     """Collect this thread's `record_write` calls in the yielded list."""

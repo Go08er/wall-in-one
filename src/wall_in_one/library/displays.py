@@ -615,22 +615,29 @@ class Store:
                         _back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:
                         try:
-                            state_file.preserve_faulted(target, observed=observed)
+                            backup = state_file.preserve_faulted(target, observed=observed)
                         except OSError as error:
                             raise DisplayError(
                                 "local-io",
                                 f"could not preserve unreadable {target}: "
                                 f"{error.strerror or error}",
                             ) from error
-                        with state_file.published_counts():
-                            save(
-                                working.assignments,
-                                target,
-                                replace_existing=False,
-                                unknown=reading.unknown,
-                                beats_global_rules=working.beats_global_rules,
-                                version=version,
-                            )
+                        try:
+                            with state_file.published_counts():
+                                save(
+                                    working.assignments,
+                                    target,
+                                    replace_existing=False,
+                                    unknown=reading.unknown,
+                                    beats_global_rules=working.beats_global_rules,
+                                    version=version,
+                                )
+                        except DisplayError as error:
+                            # The damaged original is safe at ``backup``: say where,
+                            # and that no new file was written, never "nothing changed".
+                            raise DisplayError(
+                                error.kind, state_file.replacement_not_saved(target, backup, error)
+                            ) from error
                     else:
                         with state_file.published_counts():
                             save(

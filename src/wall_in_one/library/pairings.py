@@ -1314,7 +1314,7 @@ class Store:
             # Do not overwrite bytes we could not understand: they are
             # somebody's choices, in some form, and a copy costs nothing.
             try:
-                state_file.preserve_faulted(target, observed=observed)
+                backup = state_file.preserve_faulted(target, observed=observed)
             except OSError as error:
                 raise PairingError(
                     "local-io",
@@ -1324,8 +1324,15 @@ class Store:
             self._fault_kind = None
             # Published but not confirmed durable is written, as the move
             # aside above is (`state_file.preserve_faulted` says it, then goes on).
-            with state_file.published_counts():
-                save(records, target, replace_existing=False, unknown=unknown)
+            try:
+                with state_file.published_counts():
+                    save(records, target, replace_existing=False, unknown=unknown)
+            except PairingError as error:
+                # The damaged original is safe at ``backup``: say where, and
+                # that no new file was written, never "nothing changed".
+                raise PairingError(
+                    error.kind, state_file.replacement_not_saved(target, backup, error)
+                ) from error
         else:
             with state_file.published_counts():
                 save(records, target, unknown=unknown)

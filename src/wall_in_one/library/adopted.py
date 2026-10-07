@@ -95,6 +95,15 @@ _MARKER_KEYS: Final = frozenset({"schema", "plugin", "kind", "ownership"})
 class AdoptionError(Exception):
     """The adoption manifest is malformed or its strict proof is incomplete."""
 
+    def __init__(self, *args: object) -> None:
+        # For a person: no internal descriptor spelling of a path.
+        super().__init__(
+            *(
+                file_io.public_text(argument) if isinstance(argument, str) else argument
+                for argument in args
+            )
+        )
+
 
 class _ChangedAdoptionError(Exception):
     """Valid persisted evidence no longer matches the current filesystem."""

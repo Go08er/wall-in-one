@@ -99,6 +99,15 @@ def _descriptor_closer(descriptor: int) -> Callable[[], None]:
 class TemplateInstallError(Exception):
     """Registering or removing the template failed."""
 
+    def __init__(self, *args: object) -> None:
+        # For a person: no internal descriptor spelling of a path.
+        super().__init__(
+            *(
+                file_io.public_text(argument) if isinstance(argument, str) else argument
+                for argument in args
+            )
+        )
+
 
 class SettingsChangedError(TemplateInstallError):
     """Noctalia's settings changed since the caller read them; nothing was written."""

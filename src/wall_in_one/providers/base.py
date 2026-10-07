@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Protocol, cast, runtime_checkable
 
+from wall_in_one import file_io
 from wall_in_one.library.model import Kind
 
 #: Ceiling on results returned from one search, whatever the remote says.
@@ -44,7 +45,8 @@ class ProviderError(Exception):
     """
 
     def __init__(self, kind: str, message: str) -> None:
-        super().__init__(message)
+        # For a person: no internal descriptor spelling of a path.
+        super().__init__(file_io.public_text(message))
         self.kind = kind
 
     def __str__(self) -> str:

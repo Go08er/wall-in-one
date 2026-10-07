@@ -1869,3 +1869,40 @@ def test_a_commit_that_does_not_land_puts_the_download_back_at_its_staging_name(
     now = time.time() + download.STAGING_MAX_AGE_SECONDS + 60
     assert download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=now) == (staged,)
     assert _visible_entries(directory) == {marker, destination}
+
+
+def test_a_provider_error_names_the_real_folder_never_a_descriptor_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The managed folder is reached through this process's descriptor
+    (``/proc/self/fd/N``), which file operations then name in their errors. The
+    message a person reads names the real folder instead."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    staged = _staged(directory)
+    destination = directory / "aurora.mp4"
+    _edited_while_unverified(
+        monkeypatch,
+        lambda source, target: (
+            source.name.startswith(download.COMMIT_PREFIX) and target.name == destination.name
+        ),
+    )
+    transfer = http.Transfer(
+        url="https://motionbgs.com/media/42/aurora.mp4",
+        status=200,
+        content_type="video/mp4",
+        size=staged.stat().st_size,
+        path=staged,
+    )
+    with pytest.raises(ProviderError) as caught, transfer:
+        assert transfer.path is not None
+        download.install(
+            transfer.path,
+            destination,
+            download.MOTIONBGS_LOCATION.sidecar_suffix,
+            _provenance("MotionBGS", destination),
+        )
+
+    said = str(caught.value)
+    # Failed on a301554: "could not verify /proc/self/fd/<n>/.wall-in-one-commit-...".
+    assert "/proc/" not in said, said
+    assert f"could not verify {directory.resolve()}/{download.COMMIT_PREFIX}" in said, said

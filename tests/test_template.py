@@ -3301,3 +3301,23 @@ def test_edit_settings_refuses_a_file_rewritten_since_it_was_read(fake_home: Pat
 
     assert settings_path.read_bytes() == rewritten
     assert sorted(path.name for path in settings_path.parent.iterdir()) == before
+
+
+def test_template_errors_name_real_paths_never_descriptor_paths(tmp_path: Path) -> None:
+    """A path reached through this process's descriptor is named, in a template
+    error, as the real path it reaches; a closed one is described, not named."""
+    folder = tmp_path / "noctalia"
+    folder.mkdir()
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        error = template.TemplateInstallError(
+            f"cannot sync /proc/self/fd/{descriptor}/settings.toml "
+            f"(also /proc/{os.getpid()}/fd/{descriptor})"
+        )
+    finally:
+        os.close(descriptor)
+    closed = template.TemplateInstallError(f"cannot sync /proc/self/fd/{descriptor}/x")
+
+    # Failed on a301554: the descriptor spelling reached the message.
+    assert str(error) == (f"cannot sync {folder.resolve()}/settings.toml (also {folder.resolve()})")
+    assert str(closed) == "cannot sync (a folder that is no longer open)/x"

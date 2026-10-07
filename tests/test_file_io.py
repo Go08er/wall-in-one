@@ -1454,3 +1454,48 @@ def test_recovery_preserves_a_v1_claim_without_generation_evidence(tmp_path: Pat
 
     assert caught.value.preserved_path == claimed
     assert claimed.read_bytes() == b"old journal claim"
+
+
+def test_public_text_names_what_a_descriptor_path_reaches(tmp_path: Path) -> None:
+    """This process's descriptor spellings become the real path; a closed one is
+    described; another process's are left alone."""
+    folder = tmp_path / "pinned"
+    folder.mkdir()
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        said = file_io.public_text(
+            f"a /proc/self/fd/{descriptor}/x b /proc/{os.getpid()}/fd/{descriptor} c /proc/1/fd/3"
+        )
+    finally:
+        os.close(descriptor)
+
+    assert said == f"a {folder.resolve()}/x b {folder.resolve()} c /proc/1/fd/3"
+    assert file_io.public_text(f"/proc/self/fd/{descriptor}/y") == (
+        "(a folder that is no longer open)/y"
+    )
+
+
+@pytest.mark.parametrize("kind", ["upgrade", "transaction", "adoption"])
+def test_upgrade_and_adoption_errors_name_real_paths(tmp_path: Path, kind: str) -> None:
+    """A path reached through this process's descriptor is named, in an
+    upgrade, transaction or adoption error, as the real path it reaches."""
+    from wall_in_one import deployed_upgrade, deployed_upgrade_transaction
+    from wall_in_one.library import adopted
+
+    folder = tmp_path / "state"
+    folder.mkdir()
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        message = f"cannot publish /proc/self/fd/{descriptor}/runtime.toml"
+        error: Exception
+        if kind == "upgrade":
+            error = deployed_upgrade.UpgradeError(message)
+        elif kind == "transaction":
+            error = deployed_upgrade_transaction.TransactionError(message)
+        else:
+            error = adopted.AdoptionError(message)
+    finally:
+        os.close(descriptor)
+
+    # Failed on a301554: the descriptor spelling reached the message.
+    assert str(error) == f"cannot publish {folder.resolve()}/runtime.toml"

@@ -80,7 +80,8 @@ class ManageError(Exception):
         retain_intent: bool = False,
         physical: Removal | Trashed | None = None,
     ) -> None:
-        super().__init__(message)
+        # For a person: no internal descriptor spelling of a path.
+        super().__init__(file_io.public_text(message))
         self.kind = kind
         #: True only when the source removal/trash move crossed its commit
         #: point before a later durability check failed. Callers use this to

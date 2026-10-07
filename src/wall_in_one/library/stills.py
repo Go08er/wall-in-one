@@ -80,6 +80,15 @@ LIFECYCLE_LOCK_POLL_SECONDS: Final = 0.025
 class StillError(Exception):
     """A still could not be made. Never fatal: the video still plays."""
 
+    def __init__(self, *args: object) -> None:
+        # For a person: no internal descriptor spelling of a path.
+        super().__init__(
+            *(
+                file_io.public_text(argument) if isinstance(argument, str) else argument
+                for argument in args
+            )
+        )
+
 
 def _close_descriptor_preserving_error(descriptor: int, purpose: str) -> None:
     """Close one capability without replacing an exception already in flight."""

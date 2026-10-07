@@ -1848,6 +1848,9 @@ def test_a_sidecar_edited_while_unverified_is_left_not_discarded(
     said = str(raised.value)
     temporary = tmp_path / landed[0][0].name
     assert not sidecar.exists()
+    # Failed on a301554: the error named the folder as /proc/self/fd/<n>.
+    assert "/proc/" not in said, said
+    assert f"could not verify {tmp_path.resolve()}/" in said, said
     # Failed on a4fa2f0: discarded by its current metadata, edit and all.
     assert temporary.read_bytes() == landed[0][1], "the edit survives"
     assert said.endswith(

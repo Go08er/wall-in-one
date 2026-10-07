@@ -14,6 +14,7 @@ import ctypes
 import errno
 import hashlib
 import os
+import re
 import secrets
 import stat
 import sys
@@ -22,6 +23,31 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
+
+#: How this process spells a path through one of its own descriptors.
+_DESCRIPTOR_PATH: Final = re.compile(r"/proc/(self|\d+)/fd/(\d+)")
+
+
+def public_text(text: str) -> str:
+    """``text`` with this process's descriptor spellings of paths made public.
+
+    Pinned folders and files are reached through ``/proc/self/fd/N`` (or
+    ``/proc/<this pid>/fd/N``), and file operations name what they were given.
+    Those spellings are internal: in a message for a person each becomes the
+    path its descriptor reaches now, or a plain description once it is closed.
+    """
+
+    def public(match: re.Match[str]) -> str:
+        owner, number = match.groups()
+        if owner != "self" and int(owner) != os.getpid():
+            return match.group(0)
+        try:
+            target = os.readlink(f"/proc/self/fd/{number}")
+        except OSError:
+            return "(a folder that is no longer open)"
+        return target if target.startswith("/") else "(a folder that is no longer open)"
+
+    return _DESCRIPTOR_PATH.sub(public, text)
 
 
 class FileReadError(OSError):

@@ -3303,21 +3303,57 @@ def test_edit_settings_refuses_a_file_rewritten_since_it_was_read(fake_home: Pat
     assert sorted(path.name for path in settings_path.parent.iterdir()) == before
 
 
-def test_template_errors_name_real_paths_never_descriptor_paths(tmp_path: Path) -> None:
-    """A path reached through this process's descriptor is named, in a template
-    error, as the real path it reaches; a closed one is described, not named."""
-    folder = tmp_path / "noctalia"
-    folder.mkdir()
-    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+def test_a_reused_descriptor_never_names_an_unrelated_folder(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cold review's repro of 700ed2c: a legacy lock's discard claims it and
+    can neither verify nor undo the move; by the time the template error is made
+    the inner descriptor its text named is closed, and another thread has opened
+    an unrelated folder, which gets that number. The message names the lock where
+    it was (said at the source, while its descriptor was live), never that folder."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    _interrupted_transaction(settings_path)
+    legacy = _convert_current_transaction_to_legacy(settings_path)
+    mode = stat.S_IMODE(legacy.stat().st_mode)
+    _double_fault_on_move(
+        monkeypatch,
+        legacy,
+        lambda source, destination: source.name == "lock" and destination.name == "entry",
+    )
+    unrelated = tmp_path / "somebody-elses-unrelated-folder"
+    unrelated.mkdir()
+    held: list[int] = []
+    real_cannot_retire = template._cannot_retire
+
+    def cannot_retire(
+        what: str, displayed_path: Path, error: OSError
+    ) -> template.TemplateInstallError:
+        held.append(os.open(unrelated, os.O_RDONLY | os.O_DIRECTORY))  # another thread
+        return real_cannot_retire(what, displayed_path, error)
+
+    monkeypatch.setattr(template, "_cannot_retire", cannot_retire)
     try:
-        error = template.TemplateInstallError(
-            f"cannot sync /proc/self/fd/{descriptor}/settings.toml "
-            f"(also /proc/{os.getpid()}/fd/{descriptor})"
-        )
+        with pytest.raises(template.TemplateInstallError) as raised:
+            template.uninstall(reload_config=False)
+    finally:
+        legacy.chmod(mode)
+        for descriptor in held:
+            os.close(descriptor)
+
+    said = str(raised.value)
+    # Failed on 700ed2c: "could not verify <the unrelated folder>/lock".
+    assert str(unrelated) not in said, said
+    assert "/proc/" not in said, said
+    assert f"could not verify {legacy}/lock after its atomic claim" in said, said
+
+
+def test_template_errors_never_carry_a_descriptor_spelling() -> None:
+    """The last word: any descriptor spelling left in a template error becomes a
+    fixed description; it is never looked up (its number may be someone else's)."""
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        error = template.TemplateInstallError(f"cannot sync /proc/self/fd/{descriptor}/x")
     finally:
         os.close(descriptor)
-    closed = template.TemplateInstallError(f"cannot sync /proc/self/fd/{descriptor}/x")
 
-    # Failed on a301554: the descriptor spelling reached the message.
-    assert str(error) == (f"cannot sync {folder.resolve()}/settings.toml (also {folder.resolve()})")
-    assert str(closed) == "cannot sync (a folder that is no longer open)/x"
+    assert str(error) == f"cannot sync {file_io.DESCRIPTOR_STAND_IN}/x"

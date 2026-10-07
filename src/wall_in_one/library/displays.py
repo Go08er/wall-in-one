@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, TypeVar
 
-from wall_in_one import paths
+from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 
 STATE_FILENAME: Final = "displays.json"
@@ -72,7 +72,8 @@ class DisplayError(Exception):
     """
 
     def __init__(self, kind: str, message: str) -> None:
-        super().__init__(message)
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
+        super().__init__(file_io.public_text(message))
         self.kind = kind
 
     def __str__(self) -> str:

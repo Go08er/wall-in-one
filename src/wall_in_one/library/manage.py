@@ -80,7 +80,7 @@ class ManageError(Exception):
         retain_intent: bool = False,
         physical: Removal | Trashed | None = None,
     ) -> None:
-        # For a person: no internal descriptor spelling of a path.
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
         super().__init__(file_io.public_text(message))
         self.kind = kind
         #: True only when the source removal/trash move crossed its commit

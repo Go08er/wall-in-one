@@ -159,7 +159,7 @@ class UpgradeError(Exception):
     """The deployed profile cannot be adopted without guessing."""
 
     def __init__(self, message: str, *, status: FailureStatus = "corrupt") -> None:
-        # For a person: no internal descriptor spelling of a path.
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
         super().__init__(file_io.public_text(message))
         self.status = status
 

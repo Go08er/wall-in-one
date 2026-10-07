@@ -872,3 +872,36 @@ def test_a_retirement_that_could_not_be_verified_is_not_said_to_have_changed(
     assert "changed after it was proven" not in said, said
     assert said.endswith(f"), so it was left at {moved[0]}"), said
     assert "the entry moved back could not be retired intact (" in said, said
+
+
+@pytest.mark.parametrize(
+    "store", ["playlists", "schedules", "displays", "favourites", "pairings", "ui_prefs"]
+)
+def test_store_errors_never_carry_a_descriptor_spelling(store: str) -> None:
+    """A store's refusal that embeds an OS error's text (a path reached through
+    this process's descriptor included) says a fixed description instead."""
+    from wall_in_one import ui_prefs
+    from wall_in_one.library import displays, favourites, pairings, schedules
+
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        text = f"could not write /proc/self/fd/{descriptor}/state.json: I/O error"
+        error: Exception
+        if store == "playlists":
+            error = playlists.PlaylistError("local-io", text)
+        elif store == "schedules":
+            error = schedules.ScheduleError("local-io", text)
+        elif store == "displays":
+            error = displays.DisplayError("local-io", text)
+        elif store == "favourites":
+            error = favourites.FavouritesError("local-io", text)
+        elif store == "pairings":
+            error = pairings.PairingError("local-io", text)
+        else:
+            error = ui_prefs.UiPrefsError(text)
+    finally:
+        os.close(descriptor)
+
+    # Failed on 700ed2c: the store errors kept the descriptor spelling.
+    assert "/proc/" not in str(error), str(error)
+    assert f"could not write {file_io.DESCRIPTOR_STAND_IN}/state.json" in str(error)

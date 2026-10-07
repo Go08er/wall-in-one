@@ -100,7 +100,7 @@ class TemplateInstallError(Exception):
     """Registering or removing the template failed."""
 
     def __init__(self, *args: object) -> None:
-        # For a person: no internal descriptor spelling of a path.
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
         super().__init__(
             *(
                 file_io.public_text(argument) if isinstance(argument, str) else argument
@@ -1143,6 +1143,7 @@ def _discard_recovery_regular(
             logical_retained_parent=(
                 retained_parent if logical_retained_parent is None else logical_retained_parent
             ),
+            said_as=displayed_path,
         )
     except OSError as error:
         raise _cannot_retire("discard transaction entry", displayed_path, error) from error

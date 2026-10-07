@@ -1456,12 +1456,11 @@ def test_recovery_preserves_a_v1_claim_without_generation_evidence(tmp_path: Pat
     assert claimed.read_bytes() == b"old journal claim"
 
 
-def test_public_text_names_what_a_descriptor_path_reaches(tmp_path: Path) -> None:
-    """This process's descriptor spellings become the real path; a closed one is
-    described; another process's are left alone."""
-    folder = tmp_path / "pinned"
-    folder.mkdir()
-    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+def test_public_text_never_looks_a_descriptor_up(tmp_path: Path) -> None:
+    """This process's descriptor spellings become a fixed description, even for
+    a descriptor open right now (by the time a message is read, its number may
+    be someone else's); another process's spelling is left alone."""
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         said = file_io.public_text(
             f"a /proc/self/fd/{descriptor}/x b /proc/{os.getpid()}/fd/{descriptor} c /proc/1/fd/3"
@@ -1469,33 +1468,47 @@ def test_public_text_names_what_a_descriptor_path_reaches(tmp_path: Path) -> Non
     finally:
         os.close(descriptor)
 
-    assert said == f"a {folder.resolve()}/x b {folder.resolve()} c /proc/1/fd/3"
-    assert file_io.public_text(f"/proc/self/fd/{descriptor}/y") == (
-        "(a folder that is no longer open)/y"
+    stand_in = file_io.DESCRIPTOR_STAND_IN
+    assert said == f"a {stand_in}/x b {stand_in} c /proc/1/fd/3"
+    assert str(tmp_path) not in said
+
+
+def test_respelled_says_only_that_descriptor() -> None:
+    """A spelling is said as its folder only where it is that spelling, never as
+    the prefix of a longer number."""
+    text = "x /proc/self/fd/1/a y /proc/self/fd/14/b"
+    assert file_io.respelled(text, "/proc/self/fd/1", "/home/me/one") == (
+        "x /home/me/one/a y /proc/self/fd/14/b"
     )
 
 
-@pytest.mark.parametrize("kind", ["upgrade", "transaction", "adoption"])
-def test_upgrade_and_adoption_errors_name_real_paths(tmp_path: Path, kind: str) -> None:
-    """A path reached through this process's descriptor is named, in an
-    upgrade, transaction or adoption error, as the real path it reaches."""
+@pytest.mark.parametrize(
+    "kind",
+    ["upgrade", "transaction", "adoption", "removal", "still", "provider"],
+)
+def test_person_facing_errors_never_carry_a_descriptor_spelling(kind: str) -> None:
+    """Every error a person reads that can carry a descriptor spelling says the
+    fixed description instead."""
     from wall_in_one import deployed_upgrade, deployed_upgrade_transaction
-    from wall_in_one.library import adopted
+    from wall_in_one.library import adopted, manage, stills
+    from wall_in_one.providers.base import ProviderError
 
-    folder = tmp_path / "state"
-    folder.mkdir()
-    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        message = f"cannot publish /proc/self/fd/{descriptor}/runtime.toml"
-        error: Exception
-        if kind == "upgrade":
-            error = deployed_upgrade.UpgradeError(message)
-        elif kind == "transaction":
-            error = deployed_upgrade_transaction.TransactionError(message)
-        else:
-            error = adopted.AdoptionError(message)
-    finally:
-        os.close(descriptor)
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    os.close(descriptor)
+    message = f"cannot publish /proc/self/fd/{descriptor}/runtime.toml"
+    error: Exception
+    if kind == "upgrade":
+        error = deployed_upgrade.UpgradeError(message)
+    elif kind == "transaction":
+        error = deployed_upgrade_transaction.TransactionError(message)
+    elif kind == "adoption":
+        error = adopted.AdoptionError(message)
+    elif kind == "removal":
+        error = manage.ManageError("local-io", message)
+    elif kind == "still":
+        error = stills.StillError(message)
+    else:
+        error = ProviderError("local-io", message)
 
-    # Failed on a301554: the descriptor spelling reached the message.
-    assert str(error) == f"cannot publish {folder.resolve()}/runtime.toml"
+    assert "/proc/" not in str(error), str(error)
+    assert f"cannot publish {file_io.DESCRIPTOR_STAND_IN}/runtime.toml" in str(error)

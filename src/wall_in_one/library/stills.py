@@ -81,7 +81,7 @@ class StillError(Exception):
     """A still could not be made. Never fatal: the video still plays."""
 
     def __init__(self, *args: object) -> None:
-        # For a person: no internal descriptor spelling of a path.
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
         super().__init__(
             *(
                 file_io.public_text(argument) if isinstance(argument, str) else argument
@@ -913,6 +913,9 @@ def _write_sidecar_publication(
     except StillError:
         raise
     except OSError as error:
+        if source is not None:
+            # Said while the folder's descriptor is certainly still its own.
+            file_io.respell_error(error, str(access_path.parent), str(path.parent))
         raise StillError(f"could not write {path}: {error.strerror or error}") from error
     finally:
         try:

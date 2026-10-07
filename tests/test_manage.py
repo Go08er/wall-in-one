@@ -2382,19 +2382,3 @@ def test_removability_is_about_the_roots_not_the_ownership(root: Path, tmp_path:
     assert not manage.is_removable(item_for(inside, provider="external"), (root,))
     assert not manage.is_removable(item_for(outside), (root,))
     assert not manage.is_removable(item_for(inside))
-
-
-def test_removal_errors_name_real_paths_never_descriptor_paths(tmp_path: Path) -> None:
-    """A path reached through this process's descriptor is named, in a removal
-    error, as the real path it reaches."""
-    folder = tmp_path / "wallpapers"
-    folder.mkdir()
-    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        error = manage.ManageError("local-io", f"could not move /proc/self/fd/{descriptor}/a.png")
-    finally:
-        os.close(descriptor)
-
-    # Failed on a301554: the descriptor spelling reached the message.
-    assert str(error).endswith(f"could not move {folder.resolve()}/a.png"), str(error)
-    assert "/proc/" not in str(error)

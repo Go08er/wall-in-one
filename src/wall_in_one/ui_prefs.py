@@ -114,6 +114,15 @@ _SHORT_ESCAPES: Final = {
 class UiPrefsError(Exception):
     """ui.toml could not be saved."""
 
+    def __init__(self, *args: object) -> None:
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
+        super().__init__(
+            *(
+                file_io.public_text(argument) if isinstance(argument, str) else argument
+                for argument in args
+            )
+        )
+
 
 class UiPrefsReadOnlyError(UiPrefsError):
     """This build must not write ui.toml; the message says why."""

@@ -70,7 +70,7 @@ class TransactionError(Exception):
     """The automatic upgrade could not safely make forward progress."""
 
     def __init__(self, message: str, *, status: TransactionStatus = "corrupt") -> None:
-        # For a person: no internal descriptor spelling of a path.
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
         super().__init__(file_io.public_text(message))
         self.status = status
 

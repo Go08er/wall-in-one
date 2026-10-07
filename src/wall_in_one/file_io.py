@@ -25,29 +25,52 @@ from pathlib import Path
 from typing import Any, Final
 
 #: How this process spells a path through one of its own descriptors.
-_DESCRIPTOR_PATH: Final = re.compile(r"/proc/(self|\d+)/fd/(\d+)")
+_DESCRIPTOR_SPELLING: Final = re.compile(r"/proc/(?:self|(\d+))/fd/\d+(?![0-9])")
+#: What a person is told instead, when nothing better was said at the source.
+DESCRIPTOR_STAND_IN: Final = "(a folder Wall-in-One had open)"
+
+
+def respelled(text: str, spelling: str, public: str) -> str:
+    """``text`` with the descriptor ``spelling`` (``/proc/self/fd/N``, or a
+    path under it) said as ``public``, where it was used.
+
+    Only for a spelling whose descriptor was live when ``text`` was made and
+    is known to the caller: it never looks the number up. A longer number that
+    merely starts with it (``/proc/self/fd/14`` against ``/proc/self/fd/1``)
+    is left alone.
+    """
+    return re.sub(re.escape(spelling) + r"(?![0-9])", lambda _match: public, text)
+
+
+def respell_error(error: BaseException, spelling: str, public: str) -> None:
+    """Say ``spelling`` as ``public`` in ``error``'s message, in place (see `respelled`)."""
+    error.args = tuple(
+        respelled(argument, spelling, public) if isinstance(argument, str) else argument
+        for argument in error.args
+    )
+    if isinstance(error, OSError):
+        if isinstance(error.strerror, str):
+            error.strerror = respelled(error.strerror, spelling, public)
+        if isinstance(error.filename, str):
+            error.filename = respelled(error.filename, spelling, public)
 
 
 def public_text(text: str) -> str:
-    """``text`` with this process's descriptor spellings of paths made public.
+    """``text`` without this process's descriptor spellings of paths.
 
-    Pinned folders and files are reached through ``/proc/self/fd/N`` (or
-    ``/proc/<this pid>/fd/N``), and file operations name what they were given.
-    Those spellings are internal: in a message for a person each becomes the
-    path its descriptor reaches now, or a plain description once it is closed.
+    The last word, for messages to a person: whatever spelling was not already
+    said as its real path where it was made (`respelled`) becomes a fixed
+    description. It never looks a descriptor up: by now the number may name
+    something else entirely.
     """
 
-    def public(match: re.Match[str]) -> str:
-        owner, number = match.groups()
-        if owner != "self" and int(owner) != os.getpid():
+    def stand_in(match: re.Match[str]) -> str:
+        owner = match.group(1)
+        if owner is not None and int(owner) != os.getpid():
             return match.group(0)
-        try:
-            target = os.readlink(f"/proc/self/fd/{number}")
-        except OSError:
-            return "(a folder that is no longer open)"
-        return target if target.startswith("/") else "(a folder that is no longer open)"
+        return DESCRIPTOR_STAND_IN
 
-    return _DESCRIPTOR_PATH.sub(public, text)
+    return _DESCRIPTOR_SPELLING.sub(stand_in, text)
 
 
 class FileReadError(OSError):
@@ -1372,6 +1395,9 @@ def claim_for_deletion(
         directory_pin = _pin_private_claim_directory(access_directory)
     claimed = directory / "entry"
     owns_pin = pinned_source is None
+    # This function's own descriptor spelling of the source, said as its public
+    # path in any error (the descriptor is gone before the caller reads it).
+    source_spelling: str | None = None
     try:
         source_parent_pin = _pin_directory_for_durability(path.parent)
         try:
@@ -1383,6 +1409,7 @@ def claim_for_deletion(
                 )
             claim_fingerprint = expected_fingerprint or pinned_source.fingerprint
             source_access = Path("/proc/self/fd") / str(source_parent_pin.descriptor) / path.name
+            source_spelling = str(source_access.parent)
             move_pin = PinnedPath(
                 source_access,
                 os.dup(pinned_source.descriptor),
@@ -1437,16 +1464,20 @@ def claim_for_deletion(
                 pinned_source.close()
         finally:
             directory_pin.close()
-        detail = str(error).replace(str(directory_anchor), str(directory))
+        detail = respelled(str(error), str(directory_anchor), str(directory))
         detail = detail.replace(str(path), str(public_path))
+        if source_spelling is not None:
+            detail = respelled(detail, source_spelling, str(public_path.parent))
         preserved = claimed if error.preserved_path is not None else None
         raise PathChangedError(detail, preserved_path=preserved) from error
-    except OSError, ValueError:
+    except (OSError, ValueError) as error:
         try:
             if owns_pin and pinned_source is not None:
                 pinned_source.close()
         finally:
             directory_pin.close()
+        if source_spelling is not None:
+            respell_error(error, source_spelling, str(public_path.parent))
         raise
     return ClaimedPath(
         public_path,
@@ -1764,8 +1795,13 @@ def discard_regular_if_same(
     pinned_source: PinnedPath | None = None,
     retained_parent: Path | None = None,
     logical_retained_parent: Path | None = None,
+    said_as: Path | None = None,
 ) -> bool:
     """Best-effort logical deletion of one known regular directory entry.
+
+    ``said_as`` is how ``path`` is said in errors, when the caller reaches it
+    through a descriptor of its own (live for this call); it changes no path
+    that is used.
 
     The generation is matched by identity and metadata only (``expected_fingerprint``):
     with coarse timestamps an in-place edit of the same size can match it. So a
@@ -1779,6 +1815,31 @@ def discard_regular_if_same(
     replacement, or a failure with a safe restore return ``False``. An unsafe
     restore conflict raises :class:`PathChangedError` with ``preserved_path``.
     """
+    try:
+        return _discard_regular_if_same(
+            path,
+            expected_identity=expected_identity,
+            expected_fingerprint=expected_fingerprint,
+            pinned_source=pinned_source,
+            retained_parent=retained_parent,
+            logical_retained_parent=logical_retained_parent,
+        )
+    except OSError as error:
+        if said_as is not None:
+            respell_error(error, str(path), str(said_as))
+            respell_error(error, str(path.parent), str(said_as.parent))
+        raise
+
+
+def _discard_regular_if_same(
+    path: Path,
+    *,
+    expected_identity: PathIdentity,
+    expected_fingerprint: FileFingerprint | None,
+    pinned_source: PinnedPath | None,
+    retained_parent: Path | None,
+    logical_retained_parent: Path | None,
+) -> bool:
     try:
         claim = claim_for_deletion(
             path,

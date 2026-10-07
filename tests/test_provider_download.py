@@ -1876,7 +1876,7 @@ def test_a_provider_error_names_the_real_folder_never_a_descriptor_path(
 ) -> None:
     """The managed folder is reached through this process's descriptor
     (``/proc/self/fd/N``), which file operations then name in their errors. The
-    message a person reads names the real folder instead."""
+    message a person reads names the folder, said while its descriptor was live."""
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
     staged = _staged(directory)
     destination = directory / "aurora.mp4"
@@ -1903,6 +1903,6 @@ def test_a_provider_error_names_the_real_folder_never_a_descriptor_path(
         )
 
     said = str(caught.value)
-    # Failed on a301554: "could not verify /proc/self/fd/<n>/.wall-in-one-commit-...".
     assert "/proc/" not in said, said
-    assert f"could not verify {directory.resolve()}/{download.COMMIT_PREFIX}" in said, said
+    assert file_io.DESCRIPTOR_STAND_IN not in said, said
+    assert f"could not verify {directory}/{download.COMMIT_PREFIX}" in said, said

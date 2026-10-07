@@ -32,7 +32,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Final
@@ -185,6 +185,27 @@ class _AnchoredPath(Path):
 
     def with_segments(self, *pathsegments: str | os.PathLike[str]) -> _AnchoredPath:
         return type(self)(*pathsegments, directory_anchor=self._directory_anchor)
+
+
+@contextlib.contextmanager
+def _anchored_errors(
+    anchors: Callable[[], tuple[_DirectoryAnchor | None, ...]],
+) -> Iterator[None]:
+    """Say these live anchors' descriptor spellings as their folders in an error.
+
+    File operations here go through ``/proc/self/fd/N/...`` and name what they
+    were given; an error passing out of this block has each live anchor's
+    spelling said as its real folder, while the anchor (so its number) is
+    certainly still its own. Whatever else remains is left to
+    `file_io.public_text`'s stand-in.
+    """
+    try:
+        yield
+    except OSError as error:
+        for anchor in anchors():
+            if anchor is not None and not anchor._closed:
+                file_io.respell_error(error, str(anchor.proc_path), str(anchor.logical))
+        raise
 
 
 def _anchor_for_directory(directory: Path) -> _DirectoryAnchor | None:
@@ -546,6 +567,7 @@ def _consume_staged_file(staged: _StagedFile, *, discard: bool) -> bool:
                         expected_identity=staged.fingerprint[:2],
                         expected_fingerprint=staged.fingerprint,
                         pinned_source=staged.pin,
+                        said_as=Path(os.fspath(staged.path)),
                     )
                 except file_io.PathChangedError as error:
                     preserved = error.preserved_path
@@ -1225,7 +1247,11 @@ def install(
     try:
         # Serialise install/discard over the shared Transfer capability.  The
         # lock is re-entrant because commit consumption unregisters the lease.
-        with staged_file.lock, stills.media_path_lifecycle_lock(destination):
+        with (
+            staged_file.lock,
+            stills.media_path_lifecycle_lock(destination),
+            _anchored_errors(lambda: (staged_file.directory_anchor, destination_anchor)),
+        ):
             _verify_staged_file(staged_file)
             if destination_anchor is not None:
                 _bind_staged_directory(staged_file, destination_anchor)
@@ -1658,6 +1684,7 @@ def _discard_owned(
             expected_identity=expected_fingerprint[:2],
             expected_fingerprint=expected_fingerprint,
             pinned_source=pinned_source,
+            said_as=Path(os.fspath(path)),
         )
     except file_io.PathChangedError as error:
         preserved = error.preserved_path
@@ -1700,13 +1727,14 @@ def _atomic_write(destination: Path, payload: bytes, *, prefix: str) -> None:
             temporary, temporary_pin, temporary_fingerprint
         )
         try:
-            file_io.atomic_move_no_replace(
-                _operation_path(temporary),
-                _operation_path(destination),
-                expected_identity=temporary_fingerprint[:2],
-                expected_fingerprint=temporary_fingerprint,
-                pinned_source=temporary_pin,
-            )
+            with _anchored_errors(lambda: (_anchor_for_directory(destination.parent),)):
+                file_io.atomic_move_no_replace(
+                    _operation_path(temporary),
+                    _operation_path(destination),
+                    expected_identity=temporary_fingerprint[:2],
+                    expected_fingerprint=temporary_fingerprint,
+                    pinned_source=temporary_pin,
+                )
         except file_io.PathChangedError:
             relocated = True
             raise

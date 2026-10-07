@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -259,7 +260,12 @@ def test_install_syncs_media_before_publishing_exact_sidecar(
 
     def moved(source: Path, target: Path) -> None:
         real_rename(source, target)
-        events.append("sidecar-move" if str(target).endswith(".motionbgs.json") else "media-move")
+        if target.name.startswith(download.COMMIT_PREFIX):
+            events.append("to-commit-name")
+        elif str(target).endswith(".motionbgs.json"):
+            events.append("sidecar-move")
+        else:
+            events.append("media-move")
 
     monkeypatch.setattr(file_io, "_rename_noreplace", moved)
     monkeypatch.setattr(
@@ -269,9 +275,11 @@ def test_install_syncs_media_before_publishing_exact_sidecar(
 
     download.install(staged, destination, ".motionbgs.json", b"{}\n")
 
-    assert events[:4] == [
+    assert events[:6] == [
+        "to-commit-name",
         "media-move",
         "directory-fsync",
+        "to-commit-name",
         "sidecar-move",
         "directory-fsync",
     ]
@@ -700,7 +708,8 @@ def test_media_publication_rejects_same_type_reuse_with_spoofed_identity(
 
     def replace_after_final_check(source: Path, target: Path) -> None:
         nonlocal raced
-        if source.name == staged.name and target.name == destination.name and not raced:
+        published_from_commit_name = source.name.startswith(download.COMMIT_PREFIX)
+        if published_from_commit_name and target.name == destination.name and not raced:
             source.rename(preserved_original)
             source.write_bytes(replacement)
             raced = True
@@ -721,9 +730,14 @@ def test_media_publication_rejects_same_type_reuse_with_spoofed_identity(
     assert caught.value.kind == "local-io"
     assert not destination.exists()
     assert not sidecar.exists()
-    assert staged.read_bytes() == replacement
+    # The replacement won the commit name (published from there, never from
+    # its staging name); it is not this download's, so it is left as it is.
+    (commit,) = (
+        path for path in directory.iterdir() if path.name.startswith(download.COMMIT_PREFIX)
+    )
+    assert commit.read_bytes() == replacement
     assert preserved_original.read_bytes() == b"validated media bytes"
-    assert _visible_entries(directory) == {marker, staged}
+    assert _visible_entries(directory) == {marker, commit}
     assert download._STAGED_FILES == {}
     assert _open_fd_count() == initial_fds
 
@@ -1516,6 +1530,8 @@ moves = 0
 def crashing_rename(source, target):
     global moves
     real_rename(source, target)
+    if Path(target).name.startswith(download.COMMIT_PREFIX):
+        return  # only publications count
     moves += 1
     if moves == fail_after:
         os._exit(77)
@@ -1581,3 +1597,275 @@ def test_process_death_leaves_only_fail_closed_publication_states(
         assert _visible_entries(directory) == {marker, destination, sidecar}
         assert destination.read_bytes() == b"validated media bytes"
         _assert_bound_provenance(sidecar.read_bytes(), payload)
+
+
+# -- AA-1's rule: what was public is never discarded by its metadata -------
+
+
+def _flip_in_place(path: Path) -> bytes:
+    """Rewrite ``path`` in place: same inode and length, its first byte changed."""
+    data = path.read_bytes()
+    edited = bytes([data[0] ^ 0x20]) + data[1:]
+    with path.open("r+b") as handle:
+        handle.write(edited)
+    return edited
+
+
+def _edited_while_unverified(
+    monkeypatch: pytest.MonkeyPatch, moving: object
+) -> list[tuple[Path, bytes]]:
+    """The first move ``moving(source, destination)`` accepts lands; the entry is
+    edited in place at its destination (same inode and length) and its
+    verification read fails once (a real EIO), so the rollback moves it back.
+
+    Returns ``(source, edited bytes)`` once it happened.
+    """
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    landed: list[tuple[Path, bytes]] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not landed and moving(source, destination):  # type: ignore[operator]
+            landed.append((source, _flip_in_place(destination)))
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(5, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    return landed
+
+
+def _retained_under(directory: Path) -> list[Path]:
+    retained = directory / file_io.RETAINED_ENTRY_DIRECTORY
+    if not retained.is_dir():
+        return []
+    return sorted(entry for entry in retained.iterdir() if entry.is_file())
+
+
+def _named(directory: Path, prefix: str) -> list[Path]:
+    return sorted(path for path in directory.iterdir() if path.name.startswith(prefix))
+
+
+def test_an_atomic_write_edited_while_unverified_is_retired_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_atomic_write` publishes from a commit name; the move lands, the file is
+    edited in place there, and the verification read fails once, so it is moved
+    back. It was public: it is retired intact (edit and all), out of every
+    staging and commit name, and said where."""
+    destination = tmp_path / "sidecar.json"
+    landed = _edited_while_unverified(
+        monkeypatch,
+        lambda source, target: (
+            source.name.startswith(download.COMMIT_PREFIX) and target.name == destination.name
+        ),
+    )
+
+    with pytest.raises(ProviderError) as caught:
+        download._atomic_write(destination, b"{}\n", prefix=download.SIDECAR_STAGING_PREFIX)
+
+    said = str(caught.value)
+    commit = tmp_path / landed[0][0].name
+    retired = _retained_under(tmp_path)
+    assert not destination.exists() and not commit.exists()
+    assert _named(tmp_path, download.SIDECAR_STAGING_PREFIX) == []
+    # Failed on 30ebf3f: discarded by its current metadata, edit and all.
+    assert [entry.read_bytes() for entry in retired] == [landed[0][1]], "intact"
+    assert said.endswith(
+        f"; what was at {commit}, what was written or an edit of it, "
+        f"was retired intact to {retired[0]}"
+    ), said
+
+
+def test_a_provenance_record_edited_while_unverified_is_retired_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the media commit, the provenance record (published from a commit
+    name) lands, is edited in place there, and its verification read fails once,
+    so it is moved back. It is retired intact, and the committed-media error says
+    where."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    staged = _staged(directory)
+    destination = directory / "aurora.mp4"
+    sidecar = Path(str(destination) + download.MOTIONBGS_LOCATION.sidecar_suffix)
+    landed = _edited_while_unverified(
+        monkeypatch,
+        lambda source, target: (
+            source.name.startswith(download.COMMIT_PREFIX) and target.name == sidecar.name
+        ),
+    )
+    transfer = http.Transfer(
+        url="https://motionbgs.com/media/42/aurora.mp4",
+        status=200,
+        content_type="video/mp4",
+        size=staged.stat().st_size,
+        path=staged,
+    )
+    with pytest.raises(ProviderError) as caught, transfer:
+        assert transfer.path is not None
+        download.install(
+            transfer.path,
+            destination,
+            download.MOTIONBGS_LOCATION.sidecar_suffix,
+            _provenance("MotionBGS", destination),
+        )
+
+    said = str(caught.value)
+    commit = directory / landed[0][0].name
+    retired = _retained_under(directory)
+    assert "irreversible media commit" in said and destination.is_file()
+    assert not sidecar.exists() and not commit.exists()
+    # Failed on 30ebf3f: discarded by its current metadata, edit and all.
+    assert [entry.read_bytes() for entry in retired] == [landed[0][1]], "intact"
+    assert said.endswith(
+        f"; what was at {commit}, the provenance record or an edit of it, "
+        f"was retired intact to {retired[0]}"
+    ), said
+
+
+@pytest.mark.parametrize("timestamps", ["coarse", "fine"])
+def test_a_once_public_download_is_retired_intact_and_never_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timestamps: str
+) -> None:
+    """The media's commit (from its commit name) lands, it is edited in place at
+    its public name, and the verification read fails once, so it is moved back.
+    It was public: it is retired intact out of the staging and commit names, the
+    transfer's cleanup never discards it, the error says where, and a day later
+    the staging sweep, which claims only staging names, leaves it."""
+    from tests.test_state_file_landed_writes import _with_timestamps
+
+    _with_timestamps(monkeypatch, timestamps)  # the case below runs within one second
+    directory, marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    staged = _staged(directory)
+    destination = directory / "aurora.mp4"
+    landed = _edited_while_unverified(
+        monkeypatch,
+        lambda source, target: (
+            source.name.startswith(download.COMMIT_PREFIX) and target.name == destination.name
+        ),
+    )
+    transfer = http.Transfer(
+        url="https://motionbgs.com/media/42/aurora.mp4",
+        status=200,
+        content_type="video/mp4",
+        size=staged.stat().st_size,
+        path=staged,
+    )
+    with pytest.raises(ProviderError) as caught, transfer:
+        assert transfer.path is not None
+        download.install(
+            transfer.path,
+            destination,
+            download.MOTIONBGS_LOCATION.sidecar_suffix,
+            _provenance("MotionBGS", destination),
+        )
+
+    said = str(caught.value)
+    commit = directory / landed[0][0].name
+    retired = _retained_under(directory)
+    assert not destination.exists() and not staged.exists() and not commit.exists()
+    # Failed on 30ebf3f: with coarse timestamps the transfer discarded the edit;
+    # with fine ones it stayed under its staging name, for the sweep to take.
+    assert [entry.read_bytes() for entry in retired] == [landed[0][1]], "intact"
+    assert said.endswith(
+        f"; what was at {commit}, the download or an edit of it, was retired intact to {retired[0]}"
+    ), said
+    a_day_later = time.time() + download.STAGING_MAX_AGE_SECONDS + 60
+    download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=a_day_later)
+    assert [entry.read_bytes() for entry in _retained_under(directory)] == [landed[0][1]]
+    assert _visible_entries(directory) == {marker}
+
+
+_CRASH_AT_COMMIT_NAME = r"""
+import os
+import sys
+from pathlib import Path
+from wall_in_one.providers import download
+
+real_rename = download.file_io._rename_noreplace
+
+def crash_once_named(source, target):
+    real_rename(source, target)
+    if Path(target).name.startswith(download.COMMIT_PREFIX):
+        os._exit(77)
+
+download.file_io._rename_noreplace = crash_once_named
+download.install(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], b"{}\n")
+"""
+
+
+def test_the_sweep_takes_crash_left_staging_but_never_a_commit_name(tmp_path: Path) -> None:
+    """A partial download crash-left at its staging name (never published) is
+    reclaimed after a day; one crash-left at its commit name, just before its
+    publication, is never claimed by the sweep: only staging names are, and
+    nothing is ever published from one."""
+    directory, marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    partial = _staged(directory, "partial")
+    staged = _staged(directory, "crashed")
+    destination = directory / "aurora.mp4"
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = str(root / "src") + (os.pathsep + existing if existing else "")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _CRASH_AT_COMMIT_NAME,
+            str(staged),
+            str(destination),
+            ".motionbgs.json",
+        ],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 77, completed.stderr
+    (commit,) = _named(directory, download.COMMIT_PREFIX)
+    assert not staged.exists() and not destination.exists()
+
+    now = time.time() + download.STAGING_MAX_AGE_SECONDS + 60
+    removed = download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=now)
+
+    assert removed == (partial,), "the crash-left partial download is reclaimed"
+    assert commit.read_bytes() == b"validated media bytes", "never claimed"
+    assert _visible_entries(directory) == {marker, commit}
+
+
+def test_a_commit_that_does_not_land_puts_the_download_back_at_its_staging_name(
+    tmp_path: Path,
+) -> None:
+    """The control for the undo of a commit name: a conflict at the destination
+    refuses the media commit, so the download, never public, goes back to its
+    staging name, where a retry or, a day later, the staging sweep finds it."""
+    directory, marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    staged = _staged(directory)
+    destination = directory / "aurora.mp4"
+    destination.write_bytes(b"x" * len(b"validated media bytes"))
+
+    with pytest.raises(ProviderError) as caught:
+        download.install(
+            staged,
+            destination,
+            download.MOTIONBGS_LOCATION.sidecar_suffix,
+            _provenance("MotionBGS", destination),
+        )
+
+    assert caught.value.kind == "conflict"
+    assert staged.read_bytes() == b"validated media bytes", "back at its staging name"
+    assert _named(directory, download.COMMIT_PREFIX) == []
+    now = time.time() + download.STAGING_MAX_AGE_SECONDS + 60
+    assert download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=now) == (staged,)
+    assert _visible_entries(directory) == {marker, destination}

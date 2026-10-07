@@ -26,6 +26,7 @@ import contextlib
 import errno
 import json
 import os
+import secrets
 import stat
 import sys
 import tempfile
@@ -82,6 +83,13 @@ LEGACY_STAGING_PREFIXES: Final[tuple[str, ...]] = (
     ".wall-in-one-staged-",
     ".wall-in-one-tmp-",
 )
+
+#: Every publication moves its entry to its public name from a name with this
+#: prefix, never from a staging name. The recovery sweep claims only staging
+#: names; whatever a failed publication moves back (after it was public for a
+#: moment) therefore lands under a commit name, which no sweep ever claims,
+#: even if the process dies before it is settled.
+COMMIT_PREFIX: Final = ".wall-in-one-commit-"
 
 #: A live transfer may legitimately take minutes. Recovery waits a day so it
 #: cannot race another process that is still validating a large download.
@@ -242,6 +250,11 @@ class _StagedFile:
     references: int = 0
     consumed: bool = False
     registered: bool = False
+    #: Its media commit could not be verified and whatever was at the
+    #: destination was moved back: it was public for a moment, so it is never
+    #: discarded by its staged metadata (`_consume_staged_file`); it was
+    #: settled (retired intact) by the commit (`_settle_relocated`).
+    relocated: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
@@ -523,7 +536,10 @@ def _consume_staged_file(staged: _StagedFile, *, discard: bool) -> bool:
         if staged.consumed:
             return False
         try:
-            if discard:
+            # After a media commit that could not be verified, what is here was
+            # public for a moment and may have been edited in place: it is left
+            # (the commit's error said where), never discarded by metadata.
+            if discard and not staged.relocated:
                 try:
                     removed = file_io.discard_regular_if_same(
                         _operation_path(staged.path, directory_anchor),
@@ -1175,6 +1191,10 @@ def install(
     and check-then-unlink cannot prove inode ownership atomically. A failure
     after the media move is reported as a committed outcome with unknown final
     durability rather than pretending the download did not land.
+    Both are published from a commit name, never from a staging name (see
+    `COMMIT_PREFIX`): whatever an unverified publication moves back is retired
+    intact (`_settle_relocated`), and never lands under a name the recovery
+    sweep claims.
     On a pre-commit failure, ownership of ``staged`` remains with the caller:
     a :class:`Transfer` discards it on context exit, while a bare app-shaped
     staging path remains eligible for the marker-gated age-bounded recovery
@@ -1198,6 +1218,10 @@ def install(
         ) from error
     sidecar_destination = destination.with_name(destination.name + sidecar_suffix)
     media_committed = False
+    # Where a download or provenance record moved back after an unverified
+    # publication went.
+    staged_left = ""
+    sidecar_left = ""
     try:
         # Serialise install/discard over the shared Transfer capability.  The
         # lock is re-entrant because commit consumption unregisters the lease.
@@ -1215,13 +1239,39 @@ def install(
                 staged=staged_file,
             )
             refuse_cancellation(cancelled)
-            file_io.atomic_move_no_replace(
-                _operation_path(staged_file.path, staged_file.directory_anchor),
-                _operation_path(destination, destination_anchor),
-                expected_identity=staged_file.fingerprint[:2],
-                expected_fingerprint=staged_file.fingerprint,
-                pinned_source=staged_file.pin,
+            # Published from a commit name, never from its staging name (see
+            # `COMMIT_PREFIX`).
+            staging_path = staged_file.path
+            staged_file.path, staged_file.fingerprint = _to_commit_name(
+                staged_file.path,
+                staged_file.pin,
+                staged_file.fingerprint,
+                staged_file.directory_anchor,
             )
+            try:
+                file_io.atomic_move_no_replace(
+                    _operation_path(staged_file.path, staged_file.directory_anchor),
+                    _operation_path(destination, destination_anchor),
+                    expected_identity=staged_file.fingerprint[:2],
+                    expected_fingerprint=staged_file.fingerprint,
+                    pinned_source=staged_file.pin,
+                )
+            except file_io.PathChangedError:
+                # What is at the commit name now was public for a moment:
+                # retired intact (`_settle_relocated`), never discarded.
+                staged_file.relocated = True
+                staged_left = _settle_relocated(
+                    staged_file.path,
+                    staged_file.pin,
+                    written=None,
+                    what="the download",
+                    anchor=staged_file.directory_anchor,
+                )
+                raise
+            except BaseException:
+                # Not published: back to its staging name, as it was.
+                _back_to_staging_name(staged_file, staging_path, staged_file.directory_anchor)
+                raise
             media_committed = True
             paths.fsync_directory(
                 destination_anchor.proc_path if destination_anchor is not None else directory
@@ -1254,6 +1304,7 @@ def install(
             sidecar_pin = _pin_created_temporary(descriptor, sidecar_temporary)
             sidecar_descriptor: int | None = descriptor
             sidecar_fingerprint: file_io.FileFingerprint | None = None
+            sidecar_relocated = False
             try:
                 sidecar_fingerprint = sidecar_pin.fingerprint
                 owned_descriptor = sidecar_descriptor
@@ -1281,13 +1332,21 @@ def install(
                 # No cancellation boundary is allowed after media commit: make
                 # the exact authority durable whenever the process can still
                 # do so. A conflict leaves the media visible but unmanaged.
-                file_io.atomic_move_no_replace(
-                    _operation_path(sidecar_temporary),
-                    _operation_path(sidecar_destination),
-                    expected_identity=sidecar_fingerprint[:2],
-                    expected_fingerprint=sidecar_fingerprint,
-                    pinned_source=sidecar_pin,
+                # Published from a commit name, never a staging name.
+                sidecar_temporary, sidecar_fingerprint = _to_commit_name(
+                    sidecar_temporary, sidecar_pin, sidecar_fingerprint
                 )
+                try:
+                    file_io.atomic_move_no_replace(
+                        _operation_path(sidecar_temporary),
+                        _operation_path(sidecar_destination),
+                        expected_identity=sidecar_fingerprint[:2],
+                        expected_fingerprint=sidecar_fingerprint,
+                        pinned_source=sidecar_pin,
+                    )
+                except file_io.PathChangedError:
+                    sidecar_relocated = True
+                    raise
                 paths.fsync_directory(
                     destination_anchor.proc_path if destination_anchor is not None else directory
                 )
@@ -1299,11 +1358,22 @@ def install(
                             f"the sidecar staging file {sidecar_temporary}",
                         )
                 finally:
-                    _discard_pinned_temporary(
-                        sidecar_temporary,
-                        sidecar_pin,
-                        fallback=sidecar_fingerprint,
-                    )
+                    if sidecar_relocated:
+                        try:
+                            sidecar_left = _settle_relocated(
+                                sidecar_temporary,
+                                sidecar_pin,
+                                written=sidecar_payload,
+                                what="the provenance record",
+                            )
+                        finally:
+                            sidecar_pin.close()
+                    else:
+                        _discard_pinned_temporary(
+                            sidecar_temporary,
+                            sidecar_pin,
+                            fallback=sidecar_fingerprint,
+                        )
     except file_io.PathChangedError as error:
         preserved = error.preserved_path
         if media_committed:
@@ -1311,12 +1381,13 @@ def install(
                 "local-io",
                 "download reached its irreversible media commit, but exact provenance could "
                 "not be published; the file remains visible and conservatively user-owned: "
-                f"{error}",
+                f"{error}{sidecar_left}",
             ) from error
         raise ProviderError(
             "local-io",
             f"provider publication observed a changed entry"
-            f"{f' preserved at {preserved}' if preserved is not None else ''}: {error}",
+            f"{f' preserved at {preserved}' if preserved is not None else ''}: {error}"
+            f"{staged_left}",
         ) from error
     except ProviderError as error:
         if media_committed:
@@ -1450,6 +1521,130 @@ def _discard_pinned_temporary(
         raise
 
 
+def _to_commit_name(
+    path: Path,
+    pinned: file_io.PinnedPath,
+    fingerprint: file_io.FileFingerprint,
+    anchor: _DirectoryAnchor | None = None,
+) -> tuple[Path, file_io.FileFingerprint]:
+    """Move a private entry from its staging name to a fresh commit name.
+
+    Called just before it is published (see `COMMIT_PREFIX`). The entry is
+    never public at either name. Returns the commit name and the generation
+    there (a rename moves its ctime).
+    """
+    for _attempt in range(100):
+        commit = path.with_name(f"{COMMIT_PREFIX}{secrets.token_hex(8)}")
+        try:
+            file_io.atomic_move_no_replace(
+                _operation_path(path, anchor),
+                _operation_path(commit, anchor),
+                expected_identity=fingerprint[:2],
+                expected_fingerprint=fingerprint,
+                pinned_source=pinned,
+            )
+        except FileExistsError:
+            continue
+        pinned.path = _operation_path(commit, anchor)
+        return commit, file_io.file_fingerprint(pinned.status())
+    raise OSError(f"could not name {path} for its publication")
+
+
+def _back_to_staging_name(
+    staged: _StagedFile, staging: Path, anchor: _DirectoryAnchor | None
+) -> None:
+    """Undo `_to_commit_name` for a download whose commit did not land.
+
+    It was never public; back at its staging name it stays the caller's to
+    retry or the sweep's to reclaim. Best effort: if it can't go back it stays
+    under its commit name, never swept.
+    """
+    commit = staged.path
+    with contextlib.suppress(OSError, ValueError):
+        file_io.atomic_move_no_replace(
+            _operation_path(commit, anchor),
+            _operation_path(staging, anchor),
+            expected_identity=staged.fingerprint[:2],
+            expected_fingerprint=staged.fingerprint,
+            pinned_source=staged.pin,
+        )
+        staged.path = staging
+        staged.pin.path = _operation_path(staging, anchor)
+        staged.fingerprint = file_io.file_fingerprint(staged.pin.status())
+
+
+def _pinned_holds(
+    pinned: file_io.PinnedPath, current: file_io.FileFingerprint, expected: bytes
+) -> bool:
+    try:
+        held = file_io.read_pinned_regular_bytes(
+            pinned, len(expected), expected_fingerprint=current
+        )
+    except OSError, ValueError:
+        return False
+    return held == expected
+
+
+def _settle_relocated(
+    path: Path,
+    pinned: file_io.PinnedPath,
+    *,
+    written: bytes | None,
+    what: str,
+    anchor: _DirectoryAnchor | None = None,
+) -> str:
+    """Settle what a publication moved back to ``path``, its commit name.
+
+    Its move to the public name could not be verified, so the rollback moved
+    whatever was there back: it was public for a moment, may have been edited
+    in place, and a writer still holding it may write after any proof. Nothing
+    is truncated: the pinned entry is retired intact into the retained folder,
+    whatever its bytes (``written``, when known, only decides how it is
+    described). If that is refused it stays at its commit name, which no sweep
+    ever claims (`COMMIT_PREFIX`). ``pinned`` stays open.
+
+    Returns what to add to the error: where it went, or where it is.
+    """
+    try:
+        current = file_io.file_fingerprint(pinned.status())
+    except (OSError, ValueError) as error:
+        failure: BaseException = error
+    else:
+        proven = written is not None and _pinned_holds(pinned, current, written)
+        try:
+            retired = file_io._retain_exact_entry(
+                _operation_path(path, anchor),
+                expected_identity=current[:2],
+                expected_file_type=stat.S_IFREG,
+                expected_fingerprint=current,
+                pinned_source=pinned,
+                logical_parent=path.parent,
+            )
+        except file_io.PathChangedError as error:
+            if error.preserved_path is not None:
+                return (
+                    f"; what was at {path} was moved to {error.preserved_path}, "
+                    "but could not be verified there"
+                )
+            failure = error
+        except (OSError, ValueError) as error:
+            failure = error
+        else:
+            if proven:
+                return (
+                    f"; {what}, proven just before (it may have changed since), "
+                    f"was retired intact to {retired}"
+                )
+            return f"; what was at {path}, {what} or an edit of it, was retired intact to {retired}"
+    try:
+        Path(os.fspath(path)).lstat()
+    except FileNotFoundError:
+        return ""
+    except OSError as error:
+        return f"; whether anything remains at {path} could not be checked ({error})"
+    return f"; what is at {path} could not be retired intact ({failure}), so it was left there"
+
+
 def _discard_owned(
     path: Path,
     *,
@@ -1488,6 +1683,7 @@ def _atomic_write(destination: Path, payload: bytes, *, prefix: str) -> None:
     temporary_pin = _pin_created_temporary(descriptor, temporary)
     temporary_descriptor: int | None = descriptor
     temporary_fingerprint: file_io.FileFingerprint | None = None
+    relocated = False
     try:
         temporary_fingerprint = temporary_pin.fingerprint
         owned_descriptor = temporary_descriptor
@@ -1499,21 +1695,37 @@ def _atomic_write(destination: Path, payload: bytes, *, prefix: str) -> None:
             sink.flush()
             os.fsync(sink.fileno())
         temporary_fingerprint = temporary_pin.fingerprint
-        file_io.atomic_move_no_replace(
-            _operation_path(temporary),
-            _operation_path(destination),
-            expected_identity=temporary_fingerprint[:2],
-            expected_fingerprint=temporary_fingerprint,
-            pinned_source=temporary_pin,
+        # Published from a commit name, never a staging name (`COMMIT_PREFIX`).
+        temporary, temporary_fingerprint = _to_commit_name(
+            temporary, temporary_pin, temporary_fingerprint
         )
+        try:
+            file_io.atomic_move_no_replace(
+                _operation_path(temporary),
+                _operation_path(destination),
+                expected_identity=temporary_fingerprint[:2],
+                expected_fingerprint=temporary_fingerprint,
+                pinned_source=temporary_pin,
+            )
+        except file_io.PathChangedError:
+            relocated = True
+            raise
         anchor = _anchor_for_directory(destination.parent)
         paths.fsync_directory(anchor.proc_path if anchor is not None else destination.parent)
     except file_io.PathChangedError as error:
         preserved = error.preserved_path
+        left = ""
+        if relocated:
+            try:
+                left = _settle_relocated(
+                    temporary, temporary_pin, written=payload, what="what was written"
+                )
+            finally:
+                temporary_pin.close()
         raise ProviderError(
             "local-io",
             f"provider publication observed a changed entry"
-            f"{f' preserved at {preserved}' if preserved is not None else ''}: {error}",
+            f"{f' preserved at {preserved}' if preserved is not None else ''}: {error}{left}",
         ) from error
     except FileExistsError as error:
         raise ProviderError(
@@ -1531,8 +1743,9 @@ def _atomic_write(destination: Path, payload: bytes, *, prefix: str) -> None:
                     f"the staging file {temporary}",
                 )
         finally:
-            _discard_pinned_temporary(
-                temporary,
-                temporary_pin,
-                fallback=temporary_fingerprint,
-            )
+            if not relocated:
+                _discard_pinned_temporary(
+                    temporary,
+                    temporary_pin,
+                    fallback=temporary_fingerprint,
+                )

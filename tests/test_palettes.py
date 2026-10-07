@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -8,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from wall_in_one import file_io
 from wall_in_one.theme import palettes
 from wall_in_one.theme.palette import MAX_PALETTE_BYTES, Mode, PaletteError
 from wall_in_one.theme.palettes import Origin, PaletteWriteError
@@ -632,3 +634,28 @@ def test_a_generated_pair_can_be_saved_as_a_palette_file(
     assert entry.colours is not None
     for token in ("primary", "surface", "outline", "terminal_normal_red"):
         assert entry.colours.dark[token] == pair.dark[token]
+
+
+def test_a_failed_link_names_the_temporary_file_never_its_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new palette is linked in from an unnamed temporary file through this
+    process's descriptor; when the link fails (no space left, as the kernel would
+    say it), the error says "a temporary file", not ``/proc/self/fd/N`` (nor the
+    folder stand-in: it isn't a folder)."""
+    real_link = os.link
+
+    def no_space(source: Any, target: Any, *args: Any, **kwargs: Any) -> None:
+        if str(source).startswith("/proc/self/fd/"):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(source), None, str(target))
+        real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", no_space)
+    with pytest.raises(palettes.PaletteWriteError) as raised:
+        palettes.write_custom("Mine", _document())
+
+    said = str(raised.value)
+    # Failed on 67e9c57: "... No space left on device: '/proc/self/fd/<n>' -> ...".
+    assert "/proc/" not in said, said
+    assert file_io.DESCRIPTOR_STAND_IN not in said, said
+    assert "'a temporary file' -> " in said, said

@@ -56,6 +56,15 @@ from wall_in_one.theme.palette import (
 class PaletteWriteError(PaletteError):
     """A palette could not be written, or must never be."""
 
+    def __init__(self, *args: object) -> None:
+        # For a person: no descriptor spelling of a path (`file_io.public_text`).
+        super().__init__(
+            *(
+                file_io.public_text(argument) if isinstance(argument, str) else argument
+                for argument in args
+            )
+        )
+
 
 class PaletteNameTakenError(PaletteWriteError):
     """Another palette a person can pick already has this name; nothing was written."""
@@ -832,7 +841,14 @@ def _publish_new(target: Path, serialised: str, name: str) -> None:
             while view:
                 view = view[os.write(descriptor, view) :]
             os.fsync(descriptor)
-            os.link(f"/proc/self/fd/{descriptor}", target, follow_symlinks=True)
+            unnamed = f"/proc/self/fd/{descriptor}"
+            try:
+                os.link(unnamed, target, follow_symlinks=True)
+            except OSError as error:
+                # The source is this palette's unnamed temporary file: said as
+                # that, while its descriptor is certainly still its own.
+                file_io.respell_error(error, unnamed, "a temporary file")
+                raise
         except FileExistsError as error:
             raise PaletteNameTakenError(name_taken_message(name, None)) from error
         except OSError as error:

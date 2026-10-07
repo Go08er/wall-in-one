@@ -25,7 +25,11 @@ from pathlib import Path
 from typing import Any, Final
 
 #: How this process spells a path through one of its own descriptors.
-_DESCRIPTOR_SPELLING: Final = re.compile(r"/proc/(?:self|(\d+))/fd/\d+(?![0-9])")
+#: Only a whole spelling: at the start, or after whitespace, a quote or an
+#: opening bracket; never the middle of a real path that happens to contain it.
+_DESCRIPTOR_SPELLING: Final = re.compile(
+    r"(?:^|(?<=[\s'\"(\[{<=:,]))/proc/(?:self|(\d+))/fd/\d+(?![0-9])"
+)
 #: What a person is told instead, when nothing better was said at the source.
 DESCRIPTOR_STAND_IN: Final = "(a folder Wall-in-One had open)"
 

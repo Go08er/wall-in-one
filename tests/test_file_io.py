@@ -1512,3 +1512,15 @@ def test_person_facing_errors_never_carry_a_descriptor_spelling(kind: str) -> No
 
     assert "/proc/" not in str(error), str(error)
     assert f"cannot publish {file_io.DESCRIPTOR_STAND_IN}/runtime.toml" in str(error)
+
+
+def test_public_text_leaves_a_real_path_that_merely_contains_a_spelling() -> None:
+    """Only a whole descriptor spelling is replaced: a real path whose middle
+    happens to read ``/proc/self/fd/N`` is left exactly as it is."""
+    real = "/home/u/mirror/proc/self/fd/3/clip.mp4"
+
+    # Failed on 67e9c57: "/home/u/mirror(a folder Wall-in-One had open)/clip.mp4".
+    assert file_io.public_text(f"cannot read {real}") == f"cannot read {real}"
+    assert file_io.public_text(f"'/proc/self/fd/3' -> {real}") == (
+        f"'{file_io.DESCRIPTOR_STAND_IN}' -> {real}"
+    )

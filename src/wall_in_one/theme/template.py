@@ -611,21 +611,45 @@ def _settle_relocated_backup(
     document: bytes,
 ) -> str:
     """After a backup copy's move to its name could not be verified, and whatever
-    was at that name was moved back to ``temporary``: discard it only if it
-    provably still holds exactly the copy (it was public for a moment, and could
-    have been edited in place); otherwise leave it, and say where it is.
+    was at that name was moved back to ``temporary``: it was public for a moment,
+    so it may have been edited in place, and a writer still holding it open may
+    write after any proof. Nothing is truncated: if it provably still holds
+    exactly the copy it is retired intact into the retained folder (late bytes
+    survive there); otherwise it is left, and said where it is.
 
-    Returns what to add to the error: nothing once discarded or when nothing is
-    there, else where the uncertain entry remains.
+    Returns what to add to the error: where it was retired to or remains, or
+    nothing when nothing is there.
     """
     try:
         proven = _assert_candidate_unchanged(temporary, descriptor, identity, document)
     except TemplateInstallError:
         proven = None
-    if proven is not None and _discard_candidate_if_owned(
-        temporary, identity, expected_fingerprint=proven
-    ):
-        return ""
+    if proven is not None:
+        try:
+            retired = _retain_regular_intact(
+                temporary,
+                expected_identity=identity,
+                expected_fingerprint=proven,
+                retained_parent=temporary.parent,
+                logical_retained_parent=temporary.parent,
+                logical_path=temporary,
+            )
+        except file_io.PathChangedError as error:
+            moved = _moved_to(error)
+            if moved is not None:
+                return (
+                    f"; what was at {temporary} was moved to {moved}, "
+                    "but could not be verified there"
+                )
+            if _present(temporary) is True:
+                return (
+                    f"; what is at {temporary} changed after it was proven to be the copy, "
+                    "so it was left as it is"
+                )
+        except OSError, ValueError:
+            pass
+        else:
+            return f"; the copy was retired intact to {retired}"
     found = _present(temporary)
     if found is False:
         return ""
@@ -1836,6 +1860,9 @@ def _begin_publication_transaction(
     record_fingerprint: file_io.FileFingerprint | None = None
     lock_identity: file_io.PathIdentity | None = None
     lock_fingerprint: file_io.FileFingerprint | None = None
+    # Set once the locator's move to its fixed name could not be verified and
+    # whatever was there was moved back: it was public for a moment.
+    locator_moved_back = False
     try:
         lock_descriptor, lock_name = tempfile.mkstemp(
             prefix=_transaction_leaf_prefix(path, "lock"),
@@ -1914,14 +1941,18 @@ def _begin_publication_transaction(
         record_status = os.fstat(record_descriptor)
         record_fingerprint = file_io.file_fingerprint(record_status)
         _fsync_parent(record)
-        file_io.atomic_move_no_replace(
-            record,
-            final_record,
-            expected_identity=record_identity,
-            expected_file_type=stat.S_IFREG,
-            expected_fingerprint=record_fingerprint,
-            externally_pinned=True,
-        )
+        try:
+            file_io.atomic_move_no_replace(
+                record,
+                final_record,
+                expected_identity=record_identity,
+                expected_file_type=stat.S_IFREG,
+                expected_fingerprint=record_fingerprint,
+                externally_pinned=True,
+            )
+        except file_io.PathChangedError:
+            locator_moved_back = True
+            raise
         record = final_record
         record_status = os.fstat(record_descriptor)
         named_record = record.lstat()
@@ -1939,6 +1970,8 @@ def _begin_publication_transaction(
         _fsync_parent(record)
     except OSError as error:
         cleanup_remainders: list[Path] = []
+        # Entries retired intact rather than discarded: where each went.
+        cleanup_retired: list[tuple[Path, Path]] = []
         # Entries that may remain but couldn't be looked at: said as unchecked.
         cleanup_unchecked: list[tuple[Path, OSError]] = []
         cleanup_sync_error: OSError | None = None
@@ -2080,7 +2113,33 @@ def _begin_publication_transaction(
                         if preserved is not None:
                             note_if_remaining(preserved)
             else:
-                cleanup_owned_regular(record, record_identity, record_fingerprint)
+                if locator_moved_back and record is not None:
+                    # The locator was public for a moment and was moved back:
+                    # it may have been edited in place there, so it is never
+                    # truncated. It is retired intact, and said where.
+                    try:
+                        if record_identity is None or record_fingerprint is None:
+                            raise ValueError("the moved-back locator's generation is unknown")
+                        cleanup_retired.append(
+                            (
+                                record,
+                                _retain_regular_intact(
+                                    record,
+                                    expected_identity=record_identity,
+                                    expected_fingerprint=record_fingerprint,
+                                    retained_parent=path.parent,
+                                    logical_retained_parent=path.parent,
+                                    logical_path=record,
+                                ),
+                            )
+                        )
+                    except (OSError, ValueError) as retire_error:
+                        moved = _moved_to(retire_error)
+                        if moved is not None:
+                            cleanup_remainders.append(moved)
+                        note_if_remaining(record)
+                else:
+                    cleanup_owned_regular(record, record_identity, record_fingerprint)
                 cleanup_owned_regular(swap, candidate_identity, candidate_fingerprint)
                 cleanup_owned_regular(lock, lock_identity, lock_fingerprint)
                 try:
@@ -2104,6 +2163,8 @@ def _begin_publication_transaction(
             remainder = "; cleanup entries remain at " + ", ".join(
                 str(candidate) for candidate in unique_remainders
             )
+        for entry, retired in cleanup_retired:
+            remainder += f"; {entry} was retired intact to {retired}"
         if cleanup_unchecked:
             remainder += (
                 "; whether cleanup entries remain at "

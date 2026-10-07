@@ -792,22 +792,35 @@ class _CandidateLeftBehind:
 
     Either this writer's proven candidate, which could not be put back at its
     name, or an entry that could not be inspected there (``proven`` False).
-    Then the writer's cleanup proves it ours (again) and discards it, as after
-    any failed write: it is only this writer's own unpublished bytes (the call
-    raises, and nothing adopts them), and a temporary left behind would be a
-    stray file in the store's folder. Nothing not provably ours is discarded.
-    What is said of it waits for that cleanup (`said`): discarded, or still
-    there when it could not be.
+    Then the writer's cleanup proves it ours (again) and retires it intact into
+    the retained folder, so it is no stray file in the store's folder; nothing
+    is truncated, so bytes a late in-place write lands after the proof survive.
+    Nothing not provably ours is moved. What is said of it waits for that
+    cleanup (`said`): where it was retired to, or where it still is.
     """
 
     reason: str
     proven: bool = True
 
-    def said(self, temporary: Path, *, discarded: bool, still_ours: bool) -> str:
-        """After the cleanup: ``discarded`` by it, or not; ``still_ours`` if the
-        entry at ``temporary`` was proven to be the candidate just before."""
-        if discarded:
-            return f"{self.reason}; the publication candidate was discarded"
+    def said(
+        self,
+        temporary: Path,
+        *,
+        retired: Path | None,
+        unverified: Path | None,
+        changed: bool,
+        still_ours: bool,
+    ) -> str:
+        """After the cleanup: ``retired`` to where, or moved to ``unverified`` and
+        not verified there, or refused because it ``changed`` after its proof;
+        ``still_ours`` if the entry at ``temporary`` was proven the candidate."""
+        if retired is not None:
+            return f"{self.reason}; the publication candidate was retired intact to {retired}"
+        if unverified is not None:
+            return (
+                f"{self.reason}; what was at {temporary} was moved to {unverified}, "
+                "but could not be verified there"
+            )
         what = "the publication candidate" if self.proven else "the entry moved back"
         found = _entry_present(temporary)
         if found is False:
@@ -816,6 +829,11 @@ class _CandidateLeftBehind:
             return (
                 f"{self.reason}; whether {what} is still at {temporary} "
                 f"could not be checked ({found})"
+            )
+        if changed:
+            return (
+                f"{self.reason}; the entry at {temporary} changed after it was proven to be "
+                "the publication candidate, so it was left as it is"
             )
         if still_ours:
             return f"{self.reason}; the publication candidate remains preserved at {temporary}"
@@ -1276,10 +1294,13 @@ def write_atomic_bytes(
             with contextlib.suppress(OSError):
                 temporary_fingerprint = temporary_pin.fingerprint
         still_ours = False
+        retired: Path | None = None
+        unverified: Path | None = None
+        changed = False
         if not relocated:
             # Nothing was moved: the temporary is this writer's own, never
             # published, and its exact generation is discarded.
-            discarded = file_io.discard_regular_if_same(
+            file_io.discard_regular_if_same(
                 temporary,
                 expected_identity=temporary_identity,
                 expected_fingerprint=temporary_fingerprint,
@@ -1288,13 +1309,14 @@ def write_atomic_bytes(
         else:
             # The publication moved an entry back here: this very inode may have
             # been edited in place meanwhile (same size, and with coarse
-            # timestamps the same metadata), or be a concurrent entry. Only bytes
-            # proven, now, to be exactly ours may be discarded, and then by their
-            # current generation; a failed or unavailable proof preserves
-            # whatever is there (it is said where), never a metadata-only discard.
-            # And only on the left-behind route, whose message is made after
-            # this: any other route has already said what remains here.
-            discarded = False
+            # timestamps the same metadata), or be a concurrent entry, and a
+            # writer that still holds it open can write in place even after a
+            # proof. So nothing here is ever truncated: bytes proven, now, to be
+            # exactly ours are retired intact into the retained folder (a late
+            # write then survives there); a failed or unavailable proof leaves
+            # whatever is there, and it is said where. Only on the left-behind
+            # route, whose message is made after this: any other route has
+            # already said what remains here.
             proven: file_io.FileFingerprint | None = None
             if left_behind is not None and temporary_fingerprint is not None:
                 with contextlib.suppress(OSError):
@@ -1304,18 +1326,36 @@ def write_atomic_bytes(
                     if still_ours:
                         proven = file_io.file_fingerprint(current)
             if proven is not None:
-                discarded = file_io.discard_regular_if_same(
-                    temporary,
-                    expected_identity=temporary_identity,
-                    expected_fingerprint=proven,
-                    pinned_source=temporary_pin,
-                )
+                try:
+                    retired = file_io._retain_exact_entry(
+                        temporary,
+                        expected_identity=temporary_identity,
+                        expected_file_type=stat.S_IFREG,
+                        expected_fingerprint=proven,
+                        pinned_source=temporary_pin,
+                    )
+                except file_io.PathChangedError as error:
+                    if error.preserved_path is not None:
+                        unverified = error.preserved_path
+                    else:
+                        # Refused: it changed after its proof (a late write).
+                        changed = True
+                        still_ours = False
+                except OSError:
+                    pass  # not moved: still at the temporary, as proven
         if left_behind is not None and isinstance(failure, file_io.PathChangedError):
+            said = left_behind.said(
+                temporary,
+                retired=retired,
+                unverified=unverified,
+                changed=changed,
+                still_ours=still_ours,
+            )
             raise file_io.PathChangedError(
-                f"{failure}; "
-                f"{left_behind.said(temporary, discarded=discarded, still_ours=still_ours)}",
-                # Settled by the cleanup: nothing once discarded, else what stays.
-                preserved_path=None if discarded else _remaining_at(temporary, None),
+                f"{failure}; {said}",
+                # Settled by the cleanup: where it was retired or moved to, else
+                # what stays at the temporary.
+                preserved_path=retired or unverified or _remaining_at(temporary, None),
             ) from failure
         raise
     finally:

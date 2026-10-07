@@ -1628,6 +1628,129 @@ def test_a_backup_copy_edited_while_unverified_survives(
     ), said
 
 
+def _flip_first_letter(path: Path) -> str:
+    """Rewrite ``path`` in place, same inode and length, one letter changed."""
+    text = path.read_text(encoding="utf-8")
+    index = next(i for i, char in enumerate(text) if char.isalpha())
+    edited = text[:index] + text[index].swapcase() + text[index + 1 :]
+    with path.open("r+b") as handle:
+        handle.write(edited.encode("utf-8"))
+    return edited
+
+
+@pytest.mark.parametrize("timestamps", ["coarse", "fine"])
+def test_a_late_write_to_a_proven_backup_copy_survives(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, timestamps: str
+) -> None:
+    """The residual, for the backup copy: its move to the backup name can't be
+    verified (a one-shot EIO) and it is moved back; it proves to be exactly the
+    copy, then a writer still holding it writes same-length bytes in place before
+    it is settled. Nothing is truncated: with coarse timestamps it is retired
+    intact, late bytes and all; with fine ones the move refuses it, and it stays,
+    said to have changed."""
+    from tests.test_state_file_landed_writes import _with_timestamps
+
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    _with_timestamps(monkeypatch, timestamps)
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    real_proof = template._assert_candidate_unchanged
+    landed: list[tuple[Path, Path]] = []
+    late: list[str] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not landed and ".backup-" in source.name and ".bak-" in destination.name:
+            landed.append((source, destination))
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    def proof_then_late_write(
+        path: Path, descriptor: int, identity: file_io.PathIdentity, document: bytes
+    ) -> file_io.FileFingerprint:
+        proven = real_proof(path, descriptor, identity, document)
+        if ".backup-" in path.name and not late:
+            late.append(_flip_first_letter(path))
+        return proven
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(template, "_assert_candidate_unchanged", proof_then_late_write)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    temporary, _destination = landed[0]
+    retained = settings_path.parent / file_io.RETAINED_ENTRY_DIRECTORY
+    retired = [entry for entry in retained.iterdir()] if retained.is_dir() else []
+    assert late and settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS
+    if timestamps == "coarse":
+        # Failed on a4fa2f0: discarded after the proof, truncating the late bytes.
+        assert [entry.read_text(encoding="utf-8") for entry in retired] == late
+        assert said.endswith(f"; the copy was retired intact to {retired[0]}"), said
+    else:
+        # Failed on a4fa2f0 for its words: "the copy remains at", though changed.
+        assert retired == [] and temporary.read_text(encoding="utf-8") == late[0]
+        assert said.endswith(
+            f"; what is at {temporary} changed after it was proven to be the copy, "
+            "so it was left as it is"
+        ), said
+
+
+def test_a_moved_back_locator_is_retired_intact(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging: the locator's move to its fixed name lands, it is edited in place
+    there (same inode and length), and its verification read fails once (a real
+    EIO), so it is moved back to its staging name. It was public: it is retired
+    intact, edit and all, never truncated, and said where."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    locator = template._transaction_locator(settings_path)
+    stage = template._transaction_leaf_prefix(settings_path, "locator-stage")
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    edited: list[str] = []
+    staged: list[Path] = []
+    failing = False
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not edited and source.name.startswith(stage) and destination == locator:
+            staged.append(source)
+            edited.append(_flip_first_letter(locator))
+            failing = True
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing and path == locator:
+            failing = False
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    retained = settings_path.parent / file_io.RETAINED_ENTRY_DIRECTORY
+    holding = [entry for entry in retained.iterdir() if entry.stat().st_size > 0]
+    assert edited and not locator.exists() and not staged[0].exists()
+    # Failed on a4fa2f0: discarded by its descriptor's current metadata, edit and all.
+    assert [entry.read_text(encoding="utf-8") for entry in holding] == edited
+    assert f"{staged[0]} was retired intact to {holding[0]}" in said, said
+    assert settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS
+
+
 @pytest.mark.parametrize("kind", ("regular", "directory"))
 def test_install_never_keeps_a_substituted_candidate_name_public(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, kind: str

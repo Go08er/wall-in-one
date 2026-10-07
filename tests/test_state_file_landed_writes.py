@@ -320,13 +320,19 @@ def put_back_refused(
     yield moved_back
 
 
-def test_a_candidate_that_cannot_be_put_back_is_said_as_discarded(
+def _retired_entries(folder: Path) -> list[Path]:
+    """What the retained folder beside the store holds."""
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    return sorted(retained.iterdir()) if retained.is_dir() else []
+
+
+def test_a_candidate_that_cannot_be_put_back_is_said_as_retired(
     folder: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A manual repair takes the name before the candidate can be put back: the
-    repair wins, and the writer's cleanup discards the candidate at its temporary.
-    Said as discarded; it used to say "remains preserved at <temporary>", which
-    the cleanup had just removed."""
+    repair wins, and the writer's cleanup retires the proven candidate intact into
+    the retained folder, and says where. It once said "remains preserved at
+    <temporary>", which the cleanup had just emptied; then "discarded"."""
     target = folder / "state.json"
     repair = "manual repair\n"
 
@@ -339,16 +345,12 @@ def test_a_candidate_that_cannot_be_put_back_is_said_as_discarded(
 
     said = str(raised.value)
     assert len(moved) == 1 and target.read_text(encoding="utf-8") == repair
-    assert not moved[0].exists(), "the cleanup discarded the candidate"
-    # No stray file: besides the repair, only what every discard leaves, its
-    # emptied inode in the retained container (`file_io.RETAINED_ENTRY_DIRECTORY`).
-    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
-    assert sorted(entry.name for entry in folder.iterdir()) == sorted([target.name, retained.name])
-    assert all(entry.stat().st_size == 0 for entry in retained.iterdir()), "emptied"
+    assert not moved[0].exists(), "no stray temporary in the store's folder"
+    retired = _retired_entries(folder)
+    assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == CANDIDATE, "intact"
     assert f"a newer concurrent entry remains at {target}" in said, said
-    # Failed on d2260e9: "...; the publication candidate remains preserved at <gone>".
-    assert said.endswith("; the publication candidate was discarded"), said
-    assert raised.value.preserved_path is None, "nothing is preserved: it was discarded"
+    assert said.endswith(f"; the publication candidate was retired intact to {retired[0]}"), said
+    assert raised.value.preserved_path == retired[0]
     assert wrote == []
 
 
@@ -459,13 +461,14 @@ def moved_back_uninspectable(
     yield moved_back
 
 
-def test_a_candidate_that_could_not_be_inspected_is_proven_then_discarded(
+def test_a_candidate_that_could_not_be_inspected_is_proven_then_retired(
     folder: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Moved back to its temporary, the candidate can't be inspected there once.
-    The cleanup proves it ours then, discards it, and says so. It used to say only
-    "could not inspect a relocated concurrent state entry" (ours, not concurrent),
-    and to leave it in the folder: the cleanup's fingerprint predated the renames."""
+    The cleanup proves it ours then, retires it intact, and says where. It used to
+    say only "could not inspect a relocated concurrent state entry" (ours, not
+    concurrent), and to leave it in the folder: the cleanup's fingerprint predated
+    the renames."""
     target = folder / "state.json"
 
     with (
@@ -477,13 +480,12 @@ def test_a_candidate_that_could_not_be_inspected_is_proven_then_discarded(
 
     said = str(raised.value)
     assert len(moved) == 1 and not target.exists()
-    assert not moved[0].exists(), "discarded, not left in the folder"
-    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
-    assert sorted(entry.name for entry in folder.iterdir()) == [retained.name]
-    assert all(entry.stat().st_size == 0 for entry in retained.iterdir()), "emptied"
+    assert not moved[0].exists(), "retired, not left in the store's folder"
+    retired = _retired_entries(folder)
+    assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == CANDIDATE, "intact"
     assert f"could not inspect the entry moved back to {moved[0]}" in said, said
-    assert said.endswith("; the publication candidate was discarded"), said
-    assert raised.value.preserved_path is None
+    assert said.endswith(f"; the publication candidate was retired intact to {retired[0]}"), said
+    assert raised.value.preserved_path == retired[0]
     assert wrote == []
 
 
@@ -766,3 +768,57 @@ def test_a_concurrent_entry_said_to_remain_is_never_discarded_later(
     # Failed on 7fa7135's first version: proven ours by the cleanup, and discarded.
     assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "still there, as said"
     assert raised.value.preserved_path == moved[0]
+
+
+@pytest.mark.parametrize("timestamps", ["coarse", "fine"])
+def test_a_late_write_after_a_positive_proof_survives(
+    folder: Path, monkeypatch: pytest.MonkeyPatch, timestamps: str
+) -> None:
+    """The cold review of a4fa2f0's residual: the cleanup proves the left-behind
+    candidate ours, then a writer still holding the old public file writes
+    same-length bytes in place before it is settled. Nothing is truncated: with
+    coarse timestamps the entry is retired intact, late bytes and all; with fine
+    ones the move refuses the changed entry, which stays, said to have changed."""
+    target = folder / "state.json"
+    _with_timestamps(monkeypatch, timestamps)
+    holds = state_file._holds_publication_candidate
+    proofs: list[bool] = []
+
+    def proof_then_late_write(
+        entry: Path,
+        candidate: file_io.PinnedPath,
+        fingerprint: file_io.FileFingerprint,
+        document: bytes,
+    ) -> tuple[os.stat_result, bool]:
+        result = holds(entry, candidate, fingerprint, document)
+        proofs.append(result[1])
+        if len(proofs) == 2 and result[1]:  # the cleanup's proof was positive
+            _edit_in_place(entry, MANUAL)
+        return result
+
+    monkeypatch.setattr(state_file, "_holds_publication_candidate", proof_then_late_write)
+    with (
+        relocated_with_a_repair(monkeypatch, target, edit="never") as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert proofs == [True, True] and target.read_text(encoding="utf-8") == REPAIR
+    assert "discarded" not in said, said
+    retired = _retired_entries(folder)
+    if timestamps == "coarse":
+        # Failed on a4fa2f0: truncated by the discard, the late bytes were lost.
+        assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == MANUAL
+        assert not moved[0].exists()
+        assert said.endswith(f"; the publication candidate was retired intact to {retired[0]}")
+        assert raised.value.preserved_path == retired[0]
+    else:
+        # Failed on a4fa2f0 for its words: "the publication candidate remains
+        # preserved", though it held the late bytes.
+        assert retired == [] and moved[0].read_text(encoding="utf-8") == MANUAL
+        assert said.endswith(
+            f"; the entry at {moved[0]} changed after it was proven to be the publication "
+            "candidate, so it was left as it is"
+        ), said
+        assert raised.value.preserved_path == moved[0]

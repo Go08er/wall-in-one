@@ -132,6 +132,9 @@ class _ImageTemporary:
     logical_path: Path
     pin: file_io.PinnedPath | None = field(repr=False)
     published: bool = False
+    #: Its move to the public still name could not be verified and whatever
+    #: was there was moved back: it was public for a moment.
+    relocated: bool = False
 
     @property
     def writer_path(self) -> Path:
@@ -159,10 +162,32 @@ class _ImageTemporary:
         return self
 
     def close(self) -> None:
-        """Release only the exact output inode created by ``mkstemp``."""
+        """Release only the exact output inode created by ``mkstemp``.
+
+        Never published, it is discarded. Moved back after a publication that
+        could not be verified, it was public for a moment and may have been
+        edited in place: it is retired intact into the retained folder instead,
+        never truncated.
+        """
         pin = self.pin
         try:
-            if pin is not None and not self.published:
+            if pin is not None and not self.published and self.relocated:
+                with contextlib.suppress(OSError, ValueError):
+                    retired = file_io._retain_exact_entry(
+                        self.path,
+                        expected_identity=pin.identity,
+                        expected_file_type=stat.S_IFREG,
+                        expected_fingerprint=pin.fingerprint,
+                        pinned_source=pin,
+                        retained_parent=self.path.parent,
+                        logical_parent=self.logical_path.parent,
+                    )
+                    LOGGER.info(
+                        "A still moved back from %s was retired intact to %s",
+                        self.logical_path,
+                        retired,
+                    )
+            elif pin is not None and not self.published:
                 with contextlib.suppress(OSError, ValueError):
                     file_io.discard_regular_if_same(
                         self.path,
@@ -675,6 +700,64 @@ def write_sidecar(video: Path, still: Path) -> Path:
         source.close()
 
 
+def _retire_if_written(
+    path: Path,
+    pin: file_io.PinnedPath,
+    written: bytes,
+    *,
+    logical_parent: Path | None = None,
+) -> bool:
+    """Retire ``path`` intact only if its bytes are provably, now, exactly ``written``.
+
+    It was public, so it may have been edited in place since: matching its
+    identity and metadata alone is no proof of whose bytes they are, and a
+    writer still holding it can write after a proof. So nothing is truncated:
+    proven bytes are moved intact into the retained folder (a late write
+    survives there), and a failed or unavailable proof moves nothing.
+    """
+    try:
+        current = pin.fingerprint
+        held = file_io.read_pinned_regular_bytes(pin, len(written), expected_fingerprint=current)
+    except OSError, ValueError:
+        return False
+    if held != written:
+        return False
+    try:
+        file_io._retain_exact_entry(
+            path,
+            expected_identity=pin.identity,
+            expected_file_type=stat.S_IFREG,
+            expected_fingerprint=current,
+            pinned_source=pin,
+            logical_parent=logical_parent,
+        )
+    except OSError, ValueError:
+        return False
+    return True
+
+
+def _left_unproven(path: Path, what: str, *, shown: Path | None = None) -> StillError:
+    """The error for a ``what`` at ``path`` that was not provably ours to withdraw.
+
+    Said with the failure being handled, if any, and where the entry is
+    (``shown``: its public spelling, when ``path`` reaches it through a pin).
+    """
+    active = sys.exception()
+    reason = f"{active}; " if active is not None else ""
+    named = path if shown is None else shown
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return StillError(f"{reason}{what} is no longer at {named}")
+    except OSError as error:
+        return StillError(
+            f"{reason}whether {what} is still at {named} could not be checked ({error})"
+        )
+    return StillError(
+        f"{reason}{what} at {named} is no longer exactly what was written, so it was left as it is"
+    )
+
+
 @dataclass(slots=True)
 class _SidecarPublication:
     """A newly published sidecar generation which can be rolled back exactly."""
@@ -682,22 +765,31 @@ class _SidecarPublication:
     path: Path
     access_path: Path
     pin: file_io.PinnedPath | None = field(default=None, repr=False)
+    #: What was published; a rollback withdraws only these exact bytes.
+    written: bytes = field(default=b"", repr=False)
 
     def rollback(self) -> None:
+        """Withdraw the published sidecar, if it is still exactly what was written.
+
+        It is retired intact into the retained folder, never truncated.
+        Otherwise it is left as it is (something may have edited it in place),
+        and a `StillError` says so and where, with the failure being handled.
+        """
         pin = self.pin
         if pin is None:
             return
         try:
-            file_io.discard_regular_if_same(
+            withdrawn = _retire_if_written(
                 self.access_path,
-                expected_identity=pin.identity,
-                expected_fingerprint=pin.fingerprint,
-                pinned_source=pin,
-                logical_retained_parent=self.path.parent,
+                pin,
+                self.written,
+                logical_parent=self.path.parent,
             )
         finally:
             pin.close()
             self.pin = None
+        if not withdrawn:
+            raise _left_unproven(self.path, "the pairing record")
 
     def close(self) -> None:
         if self.pin is not None:
@@ -723,6 +815,9 @@ def _write_sidecar_publication(
     public_pin: file_io.PinnedPath | None = None
     publication: _SidecarPublication | None = None
     committed = False
+    # Set once the move to its public name could not be verified and whatever
+    # was there was moved back: what is at the temporary is not known to be ours.
+    relocated = False
     handed_off = False
     try:
         existing = file_io.read_regular_bytes(access_path, pairing.MAX_SIDECAR_BYTES)
@@ -758,20 +853,24 @@ def _write_sidecar_publication(
             != encoded
         ):
             raise StillError(f"could not retain the pairing candidate for {path}")
-        file_io.atomic_move_no_replace(
-            temporary,
-            access_path,
-            expected_identity=candidate_fingerprint[:2],
-            expected_fingerprint=candidate_fingerprint,
-            pinned_source=temporary_pin,
-        )
+        try:
+            file_io.atomic_move_no_replace(
+                temporary,
+                access_path,
+                expected_identity=candidate_fingerprint[:2],
+                expected_fingerprint=candidate_fingerprint,
+                pinned_source=temporary_pin,
+            )
+        except file_io.PathChangedError:
+            relocated = True
+            raise
         committed = True
         public_pin = file_io.PinnedPath(
             access_path,
             os.dup(temporary_pin.descriptor),
             stat.S_IFREG,
         )
-        publication = _SidecarPublication(path, access_path, public_pin)
+        publication = _SidecarPublication(path, access_path, public_pin, written=encoded)
         paths.fsync_directory(access_path.parent)
         published = public_pin.status()
         public_named = access_path.lstat()
@@ -801,8 +900,10 @@ def _write_sidecar_publication(
     finally:
         try:
             if temporary_pin is not None:
+                left = False
                 try:
-                    if not committed:
+                    if not committed and not relocated:
+                        # Never published: this writer's own candidate.
                         with contextlib.suppress(OSError, ValueError):
                             file_io.discard_regular_if_same(
                                 temporary_pin.path,
@@ -810,8 +911,24 @@ def _write_sidecar_publication(
                                 expected_fingerprint=temporary_pin.fingerprint,
                                 pinned_source=temporary_pin,
                             )
+                    elif not committed:
+                        # It was public for a moment: only the exact bytes
+                        # written are retired, intact.
+                        with contextlib.suppress(OSError):
+                            left = not _retire_if_written(
+                                temporary_pin.path,
+                                temporary_pin,
+                                encoded,
+                                logical_parent=path.parent,
+                            )
                 finally:
                     temporary_pin.close()
+                if left:
+                    raise _left_unproven(
+                        temporary_pin.path,
+                        "the pairing candidate",
+                        shown=path.with_name(temporary_pin.path.name),
+                    )
         finally:
             if publication is not None and not handed_off:
                 # Any error after the atomic move still owns exact rollback
@@ -1091,6 +1208,8 @@ def _publish_image(
             media_committed = True
             temporary.mark_published()
         except BaseException as error:
+            if isinstance(error, file_io.PathChangedError):
+                temporary.relocated = True
             if claim is not None:
                 try:
                     restored = claim.restore()

@@ -10,6 +10,7 @@ Nothing here touches the user's library. Every path is under `tmp_path`.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import random
@@ -1787,3 +1788,176 @@ def test_a_lifecycle_lock_that_times_out_names_no_lock_path(
         "something else is saving or removing it right now; try again in a moment"
     )
     assert ".lock" in caplog.text
+
+
+# -- AA-1's rule: nothing that was public is truncated without a proof ----
+
+
+def _flip_in_place(path: Path) -> bytes:
+    """Rewrite ``path`` in place: same inode and length, its first byte changed."""
+    data = path.read_bytes()
+    edited = bytes([data[0] ^ 0x20]) + data[1:]
+    with path.open("r+b") as handle:
+        handle.write(edited)
+    return edited
+
+
+def _retained(folder: Path) -> list[Path]:
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    if not retained.is_dir():
+        return []
+    return sorted(entry for entry in retained.iterdir() if entry.is_file())
+
+
+def test_a_sidecar_edited_while_unverified_is_left_not_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pairing record's move to its name lands, it is edited in place there
+    (same inode and length), and its verification read fails once (a real EIO), so
+    it is moved back to its temporary. Its bytes are no longer the record's: it is
+    left, and said to be, not discarded."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not decoded here")
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    landed: list[tuple[Path, bytes]] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not landed and destination.name == sidecar.name:
+            landed.append((source, _flip_in_place(destination)))
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(stills.StillError) as raised:
+        stills.write_sidecar(video, chosen)
+
+    said = str(raised.value)
+    temporary = tmp_path / landed[0][0].name
+    assert not sidecar.exists()
+    # Failed on a4fa2f0: discarded by its current metadata, edit and all.
+    assert temporary.read_bytes() == landed[0][1], "the edit survives"
+    assert said.endswith(
+        f"the pairing candidate at {temporary} is no longer exactly what was written, "
+        "so it was left as it is"
+    ), said
+
+
+def test_a_published_sidecar_edited_before_its_rollback_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pairing record is published, then edited in place (same inode and
+    length), then syncing its folder fails (a real EIO), so it is rolled back. Its
+    bytes are no longer the record's: it stays, and the error says so."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not decoded here")
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_sync = paths.fsync_directory
+    edited: list[bytes] = []
+
+    def sync(directory: Path) -> None:
+        if not edited and sidecar.exists():
+            edited.append(_flip_in_place(sidecar))
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(paths, "fsync_directory", sync)
+    with pytest.raises(stills.StillError) as raised:
+        stills.write_sidecar(video, chosen)
+
+    said = str(raised.value)
+    # Failed on a4fa2f0: the rollback discarded it by its current metadata.
+    assert sidecar.read_bytes() == edited[0], "the edit survives at its name"
+    assert said.endswith(
+        f"the pairing record at {sidecar} is no longer exactly what was written, "
+        "so it was left as it is"
+    ), said
+
+
+def test_a_published_sidecar_rolled_back_unchanged_is_retired_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pairing record is published, then syncing its folder fails (a real
+    EIO), so it is rolled back. Its bytes are provably the record's: it is
+    withdrawn from its name and retired intact, never truncated."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not decoded here")
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_sync = paths.fsync_directory
+    published: list[bytes] = []
+
+    def sync(directory: Path) -> None:
+        if not published and sidecar.exists():
+            published.append(sidecar.read_bytes())
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(paths, "fsync_directory", sync)
+    with pytest.raises(stills.StillError):
+        stills.write_sidecar(video, chosen)
+
+    assert published and not sidecar.exists(), "withdrawn from its name"
+    # Failed on a4fa2f0: discarded, leaving only an emptied inode.
+    assert [entry.read_bytes() for entry in _retained(tmp_path)] == published
+
+
+def test_a_still_moved_back_after_an_unverified_publication_is_retired_intact(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rendered still's move to its name lands, it is edited in place there,
+    and its verification read fails once (a real EIO), so it is moved back. It
+    was public: closing it retires it intact, never truncated."""
+    target = pairing.still_directory(root) / "capture.png"
+    target.parent.mkdir(parents=True)
+    context = stills._pin_target_directory(root, target)
+    temporary = stills._private_image_temporary(target, context)
+    temporary.path.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+    temporary.retain_rendered()
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    edited: list[bytes] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not edited and source == temporary.path:
+            edited.append(_flip_in_place(destination))
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    try:
+        with pytest.raises(file_io.PathChangedError):
+            stills._publish_image(temporary, target, context.child(target.name), context, None)
+        temporary.close()
+    finally:
+        context.close()
+
+    assert edited and not target.exists()
+    # Failed on a4fa2f0: discarded by its current metadata, leaving an emptied inode.
+    assert [entry.read_bytes() for entry in _retained(target.parent)] == edited

@@ -533,6 +533,9 @@ def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
     temporary = Path(name)
     candidate_identity: file_io.PathIdentity | None = None
     candidate_fingerprint: file_io.FileFingerprint | None = None
+    # Set once the copy's move to its backup name could not be verified and
+    # whatever was there was moved back: settled there, not by the cleanup.
+    settled = False
     try:
         created = os.fstat(descriptor)
         candidate_identity = created.st_dev, created.st_ino
@@ -561,7 +564,16 @@ def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
                 )
             except FileExistsError:
                 continue
-            except (file_io.PathChangedError, OSError) as error:
+            except file_io.PathChangedError as error:
+                settled = True
+                assert candidate_identity is not None
+                left = _settle_relocated_backup(
+                    temporary, descriptor, candidate_identity, snapshot.document
+                )
+                raise TemplateInstallError(
+                    f"cannot atomically back up {path}: {error}{left}"
+                ) from error
+            except OSError as error:
                 raise TemplateInstallError(f"cannot atomically back up {path}: {error}") from error
             try:
                 _fsync_parent(destination)
@@ -575,18 +587,53 @@ def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
         raise TemplateInstallError(f"cannot create a backup of {path}: {error}") from error
     finally:
         try:
-            with contextlib.suppress(OSError, ValueError):
-                candidate_fingerprint = file_io.file_fingerprint(os.fstat(descriptor))
-            with contextlib.suppress(OSError, ValueError):
-                _discard_candidate_if_owned(
-                    temporary,
-                    candidate_identity,
-                    expected_fingerprint=candidate_fingerprint,
-                )
+            # Never published (or settled above): the temporary is this
+            # process's own copy, discarded by its exact generation.
+            if not settled:
+                with contextlib.suppress(OSError, ValueError):
+                    candidate_fingerprint = file_io.file_fingerprint(os.fstat(descriptor))
+                with contextlib.suppress(OSError, ValueError):
+                    _discard_candidate_if_owned(
+                        temporary,
+                        candidate_identity,
+                        expected_fingerprint=candidate_fingerprint,
+                    )
         finally:
             _close_owned_resources(
                 [(_descriptor_closer(descriptor), f"the temporary settings backup {temporary}")]
             )
+
+
+def _settle_relocated_backup(
+    temporary: Path,
+    descriptor: int,
+    identity: file_io.PathIdentity,
+    document: bytes,
+) -> str:
+    """After a backup copy's move to its name could not be verified, and whatever
+    was at that name was moved back to ``temporary``: discard it only if it
+    provably still holds exactly the copy (it was public for a moment, and could
+    have been edited in place); otherwise leave it, and say where it is.
+
+    Returns what to add to the error: nothing once discarded or when nothing is
+    there, else where the uncertain entry remains.
+    """
+    try:
+        proven = _assert_candidate_unchanged(temporary, descriptor, identity, document)
+    except TemplateInstallError:
+        proven = None
+    if proven is not None and _discard_candidate_if_owned(
+        temporary, identity, expected_fingerprint=proven
+    ):
+        return ""
+    found = _present(temporary)
+    if found is False:
+        return ""
+    if found is True and proven is not None:
+        return f"; the copy remains at {temporary}"
+    if found is True:
+        return f"; what is at {temporary} is not provably the copy, so it was left as it is"
+    return f"; whether anything remains at {temporary} could not be checked ({found})"
 
 
 def _assert_claim_unchanged(

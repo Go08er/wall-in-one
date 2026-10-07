@@ -1741,6 +1741,12 @@ def discard_regular_if_same(
 ) -> bool:
     """Best-effort logical deletion of one known regular directory entry.
 
+    The generation is matched by identity and metadata only (``expected_fingerprint``):
+    with coarse timestamps an in-place edit of the same size can match it. So a
+    caller discards only an entry it owns and never published, or one whose
+    bytes it has just proven to be exactly its own; never after a failed or
+    unavailable proof of them.
+
     ``True`` means the expected generation left its public name and its private
     capability was consumed.  The exact inode may remain as an inert hidden
     claim because Linux cannot condition an unlink on inode identity. Absence,

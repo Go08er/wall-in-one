@@ -1204,6 +1204,9 @@ def write_atomic_bytes(
     temporary_fingerprint: file_io.FileFingerprint | None = None
     temporary_pin: file_io.PinnedPath | None = None
     left_behind: _CandidateLeftBehind | None = None
+    # Set once the no-replace publication moved entries and moved one back:
+    # what is at the temporary is then no longer known to be ours.
+    relocated = False
     try:
         temporary_pin = file_io.PinnedPath(
             temporary,
@@ -1235,6 +1238,7 @@ def write_atomic_bytes(
                     pinned_source=temporary_pin,
                 )
             except file_io.PathChangedError as error:
+                relocated = True
                 restoration = _restore_relocated_publication_entry(
                     temporary,
                     path,
@@ -1271,24 +1275,41 @@ def write_atomic_bytes(
         if temporary_fingerprint is None:
             with contextlib.suppress(OSError):
                 temporary_fingerprint = temporary_pin.fingerprint
-        expected_fingerprint = temporary_fingerprint
         still_ours = False
-        if left_behind is not None and temporary_fingerprint is not None:
-            # Our candidate, back at the temporary after renames that changed
-            # its ctime: proven ours again, now, it is discarded like any
-            # failed write's temporary instead of staying in the folder.
-            with contextlib.suppress(OSError):
-                current, still_ours = _holds_publication_candidate(
-                    temporary, temporary_pin, temporary_fingerprint, contents
+        if not relocated:
+            # Nothing was moved: the temporary is this writer's own, never
+            # published, and its exact generation is discarded.
+            discarded = file_io.discard_regular_if_same(
+                temporary,
+                expected_identity=temporary_identity,
+                expected_fingerprint=temporary_fingerprint,
+                pinned_source=temporary_pin,
+            )
+        else:
+            # The publication moved an entry back here: this very inode may have
+            # been edited in place meanwhile (same size, and with coarse
+            # timestamps the same metadata), or be a concurrent entry. Only bytes
+            # proven, now, to be exactly ours may be discarded, and then by their
+            # current generation; a failed or unavailable proof preserves
+            # whatever is there (it is said where), never a metadata-only discard.
+            # And only on the left-behind route, whose message is made after
+            # this: any other route has already said what remains here.
+            discarded = False
+            proven: file_io.FileFingerprint | None = None
+            if left_behind is not None and temporary_fingerprint is not None:
+                with contextlib.suppress(OSError):
+                    current, still_ours = _holds_publication_candidate(
+                        temporary, temporary_pin, temporary_fingerprint, contents
+                    )
+                    if still_ours:
+                        proven = file_io.file_fingerprint(current)
+            if proven is not None:
+                discarded = file_io.discard_regular_if_same(
+                    temporary,
+                    expected_identity=temporary_identity,
+                    expected_fingerprint=proven,
+                    pinned_source=temporary_pin,
                 )
-                if still_ours:
-                    expected_fingerprint = file_io.file_fingerprint(current)
-        discarded = file_io.discard_regular_if_same(
-            temporary,
-            expected_identity=temporary_identity,
-            expected_fingerprint=expected_fingerprint,
-            pinned_source=temporary_pin,
-        )
         if left_behind is not None and isinstance(failure, file_io.PathChangedError):
             raise file_io.PathChangedError(
                 f"{failure}; "

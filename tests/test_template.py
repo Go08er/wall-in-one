@@ -1581,6 +1581,53 @@ template.install(reload_config=False)
     assert _transaction_locks(settings_path) == []
 
 
+def test_a_backup_copy_edited_while_unverified_survives(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AA-1, the template's backup copy: its move to the backup name lands, it is
+    edited in place there (same inode, same length), and the verification read
+    fails once (a real EIO), so the rollback moves it back to its temporary. Its
+    bytes are no longer the copy's: it is left, and said to be, not discarded."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    edited = SAMPLE_SETTINGS.replace("wallpaper", "WALLPAPER", 1)
+    assert len(edited) == len(SAMPLE_SETTINGS) and edited != SAMPLE_SETTINGS
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    landed: list[tuple[Path, Path]] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not landed and ".backup-" in source.name and ".bak-" in destination.name:
+            landed.append((source, destination))
+            with destination.open("r+b") as handle:
+                handle.write(edited.encode("utf-8"))
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    temporary, destination = landed[0]
+    assert settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS, "untouched"
+    assert not destination.exists()
+    # Failed on d958c43: the cleanup discarded it by its current metadata.
+    assert temporary.read_text(encoding="utf-8") == edited, "the edit survives"
+    assert said.endswith(
+        f"; what is at {temporary} is not provably the copy, so it was left as it is"
+    ), said
+
+
 @pytest.mark.parametrize("kind", ("regular", "directory"))
 def test_install_never_keeps_a_substituted_candidate_name_public(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, kind: str

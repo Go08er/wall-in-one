@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
@@ -490,11 +491,9 @@ def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
     folder: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The control: the temporary can't be looked at at all, so the candidate can't
-    be proven ours. The cleanup may then discard only the exact generation it wrote;
-    on a filesystem where the renames changed its ctime that isn't it, so it stays.
-    Whichever happens, the message says so: discarded, or, since the temporary can't
-    be looked at, that whether it is still there could not be checked (never that
-    it is gone)."""
+    be proven ours, and an unavailable proof forbids discarding it (AA-1): it stays,
+    and since it can't be looked at, whether it is still there is said to be
+    unchecked (never that it is gone)."""
     target = folder / "state.json"
 
     with (
@@ -506,28 +505,26 @@ def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
     said = str(raised.value)
     assert len(moved) == 1 and not target.exists()
     assert f"could not inspect the entry moved back to {moved[0]}" in said, said
-    if os.path.lexists(moved[0]):
-        assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "left as it is"
-        assert f"; whether the entry moved back is still at {moved[0]} could not be checked (" in (
-            said
-        ), said
-        assert raised.value.preserved_path == moved[0]
-    else:
-        assert said.endswith("; the publication candidate was discarded"), said
-        assert raised.value.preserved_path is None
+    assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "left as it is"
+    assert f"; whether the entry moved back is still at {moved[0]} could not be checked (" in (
+        said
+    ), said
+    assert raised.value.preserved_path == moved[0]
 
 
+@pytest.mark.parametrize("mode", [0o600, 0o400, 0o000], ids=["0600", "0400", "0000"])
 def test_a_temporary_that_cannot_be_looked_at_is_not_said_to_be_empty(
-    folder: Path, monkeypatch: pytest.MonkeyPatch
+    folder: Path, monkeypatch: pytest.MonkeyPatch, mode: int
 ) -> None:
-    """The candidate is moved back to its temporary, then the folder turns
-    unsearchable (a native EACCES): it can't be inspected, put back, discarded or
-    looked at. Whether it is still there is said to be unchecked, never that it is
-    gone."""
+    """AA-2. The candidate is moved back to its temporary by the real publication
+    rollback, then the private folder loses its search permission (a native EACCES,
+    at 0600, 0400 and 0000): it can't be inspected, put back, discarded or looked
+    at. Whether it is still there is said to be unchecked, never that it is gone;
+    with the permissions back, it is there, byte for byte."""
     target = folder / "state.json"
 
     with (
-        put_back_refused(monkeypatch, target, lambda name: name.parent.chmod(0o600)) as moved,
+        put_back_refused(monkeypatch, target, lambda name: name.parent.chmod(mode)) as moved,
         pytest.raises(file_io.PathChangedError) as raised,
     ):
         state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
@@ -580,3 +577,192 @@ def test_a_concurrent_entry_gone_from_the_temporary_is_not_said_to_remain(
     assert f"remains preserved at {inspected[0]}" not in said, said
     assert f"the concurrent entry is no longer at {inspected[0]}" in said, said
     assert raised.value.preserved_path is None
+
+
+# AA-1: a failed or unavailable proof of the bytes forbids discarding them.
+MANUAL = "recovered MUTATION\n"  # a concurrent in-place edit: same inode, same length
+REPAIR = "a newer public repair\n"
+assert len(MANUAL) == len(CANDIDATE)
+
+
+def _edit_in_place(path: Path, text: str) -> None:
+    """Rewrite ``path``'s bytes in place: same inode, same length."""
+    with path.open("r+b") as handle:
+        handle.write(text.encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _with_timestamps(monkeypatch: pytest.MonkeyPatch, precision: str) -> None:
+    """Fingerprints see mtime and ctime at one-second precision ("coarse"), as on a
+    filesystem with coarse timestamps, or natively ("fine"). Identities, writes,
+    renames and discards stay native. Starts just after a second begins, so a case
+    falls within one second."""
+    if precision == "coarse":
+        real = file_io.file_fingerprint
+
+        def coarse(status: os.stat_result) -> file_io.FileFingerprint:
+            device, inode, size, mtime, ctime = real(status)
+            second = 1_000_000_000
+            return device, inode, size, mtime - mtime % second, ctime - ctime % second
+
+        monkeypatch.setattr(file_io, "file_fingerprint", coarse)
+    time.sleep(1.02 - time.time() % 1)
+
+
+@contextlib.contextmanager
+def relocated_with_a_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    *,
+    edit: str,
+    inspectable: bool = True,
+) -> Iterator[list[Path]]:
+    """The candidate is published, its verification read fails once (a real EIO)
+    and the real rollback moves it back to its temporary; a newer public repair
+    then takes the name, so it can't be put back. A concurrent in-place edit of the
+    candidate's inode happens ``edit``: "published" (before the rollback) or
+    "left" (after it was proven ours and couldn't be put back). With
+    ``inspectable`` False the temporary can't be looked at after the rollback.
+
+    Yields the temporaries it was moved back to.
+    """
+    rename = file_io._rename_noreplace
+    lstat = Path.lstat
+    moved_back: list[Path] = []
+    published = False
+    failing = False
+
+    def publish(source: Path, destination: Path) -> None:
+        nonlocal published, failing
+        if moved_back and source == moved_back[0] and destination == target:
+            try:
+                rename(source, destination)  # putting it back: the repair holds the name
+            finally:
+                if edit == "left":
+                    _edit_in_place(source, MANUAL)
+            return
+        rename(source, destination)
+        if not published and source.name.endswith(".tmp") and destination == target:
+            published = True
+            if edit == "published":
+                _edit_in_place(target, MANUAL)
+            failing = True
+        elif source == target and destination.name.endswith(".tmp"):
+            moved_back.append(destination)
+            target.write_text(REPAIR, encoding="utf-8")
+
+    def verify(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing and path == target:
+            failing = False
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        if not inspectable and moved_back and path == moved_back[0]:
+            raise OSError(errno.EIO, "injected read failure of the temporary")
+        return lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", publish)
+    monkeypatch.setattr(Path, "lstat", verify)
+    yield moved_back
+
+
+@pytest.mark.parametrize("timestamps", ["coarse", "fine"])
+def test_a_concurrent_edit_moved_back_survives_the_cleanup(
+    folder: Path, monkeypatch: pytest.MonkeyPatch, timestamps: str
+) -> None:
+    """AA-1, the restored concurrent-entry route (Astra's counterexample): the
+    published candidate is edited in place, moved back by the rollback, and can't be
+    put back past a newer repair. Its bytes aren't the candidate's, so it is a
+    concurrent entry: it survives, with the repair, and is said to be there."""
+    target = folder / "state.json"
+    _with_timestamps(monkeypatch, timestamps)
+
+    with (
+        relocated_with_a_repair(monkeypatch, target, edit="published") as moved,
+        state_file.collecting_writes() as wrote,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert target.read_text(encoding="utf-8") == REPAIR, "the newer repair stays"
+    # Failed on d958c43 with coarse timestamps: the cleanup consumed these bytes.
+    assert moved[0].read_text(encoding="utf-8") == MANUAL, "the displaced edit survives"
+    assert f"the concurrent entry remains preserved at {moved[0]}" in said, said
+    assert raised.value.preserved_path == moved[0]
+    assert wrote == []
+
+
+@pytest.mark.parametrize("timestamps", ["coarse", "fine"])
+@pytest.mark.parametrize("proof", ["rejected", "unavailable"])
+def test_a_left_behind_entry_that_is_not_proven_ours_survives_the_cleanup(
+    folder: Path, monkeypatch: pytest.MonkeyPatch, timestamps: str, proof: str
+) -> None:
+    """AA-1, the left-behind route: the candidate is moved back and can't be put
+    back past a newer repair; then its inode is edited in place. The cleanup's proof
+    of its bytes fails ("rejected": they differ) or can't be made ("unavailable":
+    the temporary can't be looked at). Either way it survives and is said to stay."""
+    target = folder / "state.json"
+    _with_timestamps(monkeypatch, timestamps)
+    edit = "left" if proof == "rejected" else "published"
+
+    with (
+        relocated_with_a_repair(
+            monkeypatch, target, edit=edit, inspectable=proof == "rejected"
+        ) as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert target.read_text(encoding="utf-8") == REPAIR, "the newer repair stays"
+    # Failed on d958c43 with coarse timestamps: discarded after the proof failed.
+    assert os.lstat(moved[0]) and Path(moved[0]).read_bytes() == MANUAL.encode(), said
+    assert "was discarded" not in said, said
+    if proof == "rejected":
+        assert said.endswith(
+            f"; the entry now at {moved[0]} is not provably the publication candidate, "
+            "so it was left as it is"
+        ), said
+    else:
+        assert f"whether the entry moved back is still at {moved[0]} could not be checked" in (
+            said
+        ), said
+    assert raised.value.preserved_path == moved[0]
+
+
+def test_a_concurrent_entry_said_to_remain_is_never_discarded_later(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AA-1, the order of things: what was moved back was not provably ours when it
+    was inspected, so it was said to remain at the temporary; by the cleanup it
+    proves ours (the bytes came back). What was said stays true: it is not
+    discarded."""
+    target = folder / "state.json"
+    holds = state_file._holds_publication_candidate
+    proofs: list[bool] = []
+
+    def first_not_then_ours(
+        entry: Path,
+        candidate: file_io.PinnedPath,
+        fingerprint: file_io.FileFingerprint,
+        document: bytes,
+    ) -> tuple[os.stat_result, bool]:
+        status, proven = holds(entry, candidate, fingerprint, document)
+        proven = proven and bool(proofs)  # the first inspection: not provably ours
+        proofs.append(proven)
+        return status, proven
+
+    monkeypatch.setattr(state_file, "_holds_publication_candidate", first_not_then_ours)
+    with (
+        relocated_with_a_repair(monkeypatch, target, edit="never") as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    assert proofs[0] is False
+    assert f"the concurrent entry remains preserved at {moved[0]}" in said, said
+    # Failed on 7fa7135's first version: proven ours by the cleanup, and discarded.
+    assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "still there, as said"
+    assert raised.value.preserved_path == moved[0]

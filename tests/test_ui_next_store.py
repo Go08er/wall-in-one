@@ -933,6 +933,36 @@ def test_a_facts_read_asked_for_during_one_that_failed_still_happens(
     assert len(calls) == 2
 
 
+def test_an_owned_read_asked_for_during_one_that_failed_still_happens(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before: the failure dropped the re-read the library change asked for (no badges)."""
+    import threading
+
+    from wall_in_one import browse
+
+    page = store.page()
+    page.activate(None)
+    spin_until(lambda: store.store._owned_future is None, 5)
+    gate = threading.Event()
+    calls: list[int] = []
+    real = vars(browse.Browser)["owned"]
+
+    def owned(browser: browse.Browser) -> object:
+        calls.append(1)
+        if len(calls) == 1:
+            gate.wait(5)
+            raise RuntimeError("injected: a library folder couldn't be walked")
+        return real.fget(browser)
+
+    monkeypatch.setattr(browse.Browser, "owned", property(owned))
+    store.store._refresh_owned()  # the read that fails
+    spin_until(lambda: bool(calls), 5)
+    store.store._forget_owned()  # the library changed meanwhile: read it again
+    gate.set()
+    spin_until(lambda: len(calls) == 2 and store.store._owned_future is None, 5)
+
+
 def test_a_view_is_the_providers_candidate(store: Store) -> None:
     view = CandidateView(candidate("ab1234"))
     assert view.id == "wallhaven:ab1234" and view.provider == WALLHAVEN

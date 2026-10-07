@@ -571,7 +571,10 @@ class RealStore:
             future.result()
         except Exception:
             # Ownership is a display hint, never download authority; a later
-            # search or rescan retries an unreadable drive.
+            # search or rescan retries an unreadable drive. A read asked for
+            # meanwhile (the library changed) still happens.
+            if generation != self._owned_generation:
+                self._refresh_owned()
             return
         if generation != self._owned_generation:
             self._refresh_owned()

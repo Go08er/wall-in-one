@@ -11,6 +11,7 @@ import json
 import os
 import time
 import tomllib
+import types
 from pathlib import Path
 from typing import Final
 
@@ -249,50 +250,62 @@ def test_only_provably_inert_leftovers_move(
 
 
 def test_commit_named_download_files_are_listed_and_archived_never_deleted(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A download's file left at its commit name in a managed download folder (an
     interrupted publication, or one public for a moment that couldn't be retired)
     used to be invisible: nothing reclaims it. Tidy up now lists it, offering to
     archive one that is exactly Wall-in-One's (bytes kept, Undo puts it back),
-    and keeps, with the reason, one in progress or not provably its own."""
+    and keeps, with the reason, one in progress or not provably its own.
+
+    Its ctime is set by its rename and can't be backdated, so "an hour later" is
+    `tidy.plan(now=...)` (and Tidy's clock, for the apply)."""
     root = tmp_path / "library"
     motion = root / "Wall-in-One" / "MotionBGS"
     motion.mkdir(parents=True)
 
-    def commit_file(name: str, data: bytes, *, age: float = OLD, mode: int = 0o600) -> Path:
+    def commit_file(name: str, data: bytes, *, mode: int = 0o600) -> Path:
         path = motion / f"{download.COMMIT_PREFIX}{name}"
         path.write_bytes(data)
         path.chmod(mode)
-        os.utime(path, (age, age))
         return path
 
     left = commit_file("0123456789abcdef", b"once public video bytes")
-    recent = commit_file("fedcba9876543210", b"publishing now", age=time.time())
     foreign_shape = commit_file("not-ours", b"someone else's")
     shared = commit_file("00112233445566ff", b"two names")
     os.link(shared, tmp_path / "another-name")
     public_mode = commit_file("aaaaaaaaaaaaaaaa", b"made public", mode=0o644)
 
-    found = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+    # Mid-publish: its bytes are old (mtime), its commit rename is now (ctime).
+    os.utime(left, (OLD, OLD))
+    now = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+    # Failed on 220d011: with only its mtime old, it was offered for archiving.
+    assert left not in {change.path for change in now.changes}
+    assert "may belong to a download in progress" in _reasons(now)[left]
+
+    later = time.time() + 2 * tidy.CLAIM_GRACE_SECONDS
+    found = tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS)
 
     # Failed on 1965700: none of these was listed at all.
     assert {change.path for change in found.changes} == {left}
     change = next(change for change in found.changes if change.path == left)
     assert "a download left while publishing it" in change.detail and change.size == 23
     reasons = _reasons(found)
-    assert "may belong to a download in progress" in reasons[recent]
     assert "doesn't recognize" in reasons[foreign_shape]
     assert "another name still links" in reasons[shared]
     assert "private ones Wall-in-One gives" in reasons[public_mode]
 
+    # Tidy's own clock only (its module's `time`), an hour on.
+    monkeypatch.setattr(
+        tidy, "time", types.SimpleNamespace(time=lambda: later, time_ns=time.time_ns)
+    )
     result = tidy.apply(tidy.LEFTOVERS, found, roots=(root,))
 
     assert result.changed and result.archive is not None
     assert not left.exists()
     archived = [path for path in (result.archive / "items").iterdir()]
     assert [path.read_bytes() for path in archived] == [b"once public video bytes"]
-    for kept in (recent, foreign_shape, shared, public_mode):
+    for kept in (foreign_shape, shared, public_mode):
         assert kept.exists(), kept
     # Tidy up's name for these is the download's own.
     assert getattr(tidy, "_COMMIT_PREFIX", None) == download.COMMIT_PREFIX

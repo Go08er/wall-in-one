@@ -856,7 +856,10 @@ def _survey_commit_name(
     deleted: it may be what was public for a moment. Kept, with the reason,
     unless it is exactly such a file: Wall-in-One's name for it, a regular
     private file of this user with no other name, unchanged for an hour (so no
-    download is publishing it now), on the archive's drive.
+    download is publishing it now), on the archive's drive. "Unchanged" counts
+    its ctime too: the rename to a commit name sets it to that moment, and
+    nothing in user space can set it back, so a file mid-publish always looks
+    recent, even one whose bytes (mtime) are old.
     """
     status = _lstat(child)
     if status is None:
@@ -871,7 +874,7 @@ def _survey_commit_name(
         survey.kept.append(
             Kept(child, "its permissions aren't the private ones Wall-in-One gives these files")
         )
-    elif now - status.st_mtime < CLAIM_GRACE_SECONDS:
+    elif now - max(status.st_mtime, status.st_ctime) < CLAIM_GRACE_SECONDS:
         survey.kept.append(
             Kept(child, "it changed in the last hour and may belong to a download in progress")
         )

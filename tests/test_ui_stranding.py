@@ -31,6 +31,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.test_ui_next_displays import LAYOUT  # noqa: E402
 from tests.test_ui_next_editing import first_scan, wallpaper  # noqa: E402
 from tests.test_ui_next_slice import finish, run  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402,F401
@@ -41,13 +42,18 @@ from tests.test_ui_next_window import (  # noqa: E402,F401
     toolkit,
 )
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
+from tests.test_ui_tidy import _idle, section  # noqa: E402,F401
 from wall_in_one import config, runtime_config  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.theme import palettes  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.next import real_schedule  # noqa: E402
+from wall_in_one.ui.next.displays import DisplaysPage  # noqa: E402
 from wall_in_one.ui.next.real_settings import RealSettings, _colors, _Editing  # noqa: E402
+from wall_in_one.ui.next.schedule import SchedulePage  # noqa: E402
+from wall_in_one.ui.next.schedule_editor import RuleEditor  # noqa: E402
 from wall_in_one.ui.next.settings_state import KEY_SAVED, PaletteDraft  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.schedules_page import SchedulesPage  # noqa: E402
@@ -448,3 +454,226 @@ def test_a_runtime_call_whose_success_redraw_raised_still_completes(
         assert application.play_item_async(second), "the next Apply is accepted"
     finally:
         _close(application)
+
+
+# -- AA-3: the native pages' own completion callbacks --------------------------------------
+#
+# The adapters settle first (above); each page's own callback is a follow-up
+# too. These go through the real page, injecting one raise in its toast.
+
+
+def _dock(application: Application, tmp_path: Path) -> playlists.Playlist:
+    dock = application.session.playlists.create(
+        "Dock",
+        entries=[playlists.Entry(playlists.new_id(), wallpaper(tmp_path, "dawn.png"))],
+    )
+    application.playlists_changed()
+    return dock
+
+
+def _editor(page: SchedulePage) -> RuleEditor | None:
+    """The editor open now (read afresh: mypy would keep an earlier answer)."""
+    return page.editor
+
+
+def test_aa3_a_rule_editor_whose_added_toast_raised_is_released(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Astra's repro: Add a valid rule, the first success toast raises once."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        _dock(application, tmp_path)
+        yield "the playlist to be published", lambda: settled(application)
+        page = window.pages["schedule"]
+        assert isinstance(page, SchedulePage)
+        page.new_rule(weekdays=frozenset({0, 1, 2, 3, 4}), start=540, end=1020)
+        editor = page.editor
+        assert editor is not None
+        calls = _raises_once(window.state, "toast", monkeypatch)
+        editor.commit()
+        yield "the rule to save", lambda: settled(application) and bool(calls)
+        assert len(schedules.Store.open().rules) == 1, "the rule was saved"
+        # Before: "Saving…" for good, Save off, and commit() did nothing.
+        assert not editor._saving, "the editor still holds the save"
+        assert _editor(page) is None, "a saved rule's editor closes"
+
+        page.new_rule(weekdays=frozenset({5, 6}), start=600, end=660)
+        again = _editor(page)
+        assert again is not None
+        again.commit()
+        yield "the next rule", lambda: settled(application) and _editor(page) is None
+        assert len(schedules.Store.open().rules) == 2
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_aa3_the_schedule_fallback_whose_toast_raised_is_settled(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page's own queued default choice, released before its toast."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        dock = _dock(application, tmp_path)
+        yield "the playlist to be published", lambda: settled(application)
+        page = window.pages["schedule"]
+        assert isinstance(page, SchedulePage)
+        page.flush()
+        before = page._fallback_ids[page.fallback_row.get_selected()]
+        calls = _raises_once(window.state, "toast", monkeypatch)
+        page.fallback_row.set_selected(page._fallback_ids.index(dock.id))
+        yield "the default to save", lambda: settled(application) and bool(calls)
+        assert application.settings.active_playlist == dock.id
+        # Before: the queued choice stayed, so the row never showed what is saved again.
+        assert page._pending_default == {}, page._pending_default
+
+        page.fallback_row.set_selected(page._fallback_ids.index(before))
+        yield "the next default", lambda: settled(application) and not page._pending_default
+        page.flush()
+        assert page._fallback_ids[page.fallback_row.get_selected()] == before
+        assert config.load_strict().active_playlist != dock.id, "the next choice saved"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def _displays_mode(page: DisplaysPage, first: bool) -> None:
+    page.mode_group.set_active_name("independent" if first else "mirrored")
+
+
+def _displays_plays(page: DisplaysPage, first: bool) -> None:
+    page.demo("select:HDMI-A-1")
+    dock = next(pid for pid in page._plays_ids if pid and pid != page._plays_ids[0])
+    page.plays_row.set_selected(page._plays_ids.index(dock) if first else 0)
+
+
+def _displays_colors(page: DisplaysPage, first: bool) -> None:
+    page.use_for_colors("HDMI-A-1" if first else "DP-1")
+
+
+DISPLAYS_SITES: list[tuple[str, Callable[[DisplaysPage, bool], None], str, bool]] = [
+    ("mode", _displays_mode, "_pending_mode", False),
+    ("plays", _displays_plays, "_pending_assign", True),
+    ("colors", _displays_colors, "_pending_colors", True),
+]
+
+
+@pytest.mark.parametrize(
+    ("gesture", "pending", "independent"),
+    [pytest.param(g, p, i, id=name) for name, g, p, i in DISPLAYS_SITES],
+)
+def test_aa3_a_displays_control_whose_toast_raised_is_settled(
+    runtime: FakeRuntime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gesture: Callable[[DisplaysPage, bool], None],
+    pending: str,
+    independent: bool,
+) -> None:
+    """Astra's unproved siblings: each Displays control's queued choice, before its toast."""
+    monkeypatch.setattr(real_schedule, "_monitor_displays", lambda: list(LAYOUT))
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        _dock(application, tmp_path)
+        if independent:
+            application.update_settings(
+                display_mode=config.DISPLAY_MODE_INDEPENDENT, theme_source_connector="DP-1"
+            )
+        yield "the setup to be published", lambda: settled(application)
+        page = window.pages["displays"]
+        assert isinstance(page, DisplaysPage)
+        page.refresh()
+        page.flush()
+        before = (config.load_strict(), dict(displays.Store.open().all()))
+        calls = _raises_once(window.state, "toast", monkeypatch)
+        gesture(page, True)
+        yield "the choice to save", lambda: settled(application) and bool(calls)
+        assert (config.load_strict(), dict(displays.Store.open().all())) != before, "saved"
+        # Before: the queued choice stayed, so the control never showed what is saved again.
+        assert getattr(page, pending) == {}, getattr(page, pending)
+
+        saved = (config.load_strict(), dict(displays.Store.open().all()))
+        gesture(page, False)
+        yield "the next choice", lambda: settled(application) and not getattr(page, pending)
+        assert (config.load_strict(), dict(displays.Store.open().all())) != saved, "accepted"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def _widgets(root: Gtk.Widget) -> Iterator[Gtk.Widget]:
+    child = root.get_first_child()
+    while child is not None:
+        yield child
+        yield from _widgets(child)
+        child = child.get_next_sibling()
+
+
+def _default_row(page: SchedulesPage) -> Adw.ComboRow:
+    """The Default rotation group's playlist row (rebuilt by each refresh)."""
+    (group,) = [
+        widget
+        for widget in _widgets(page)
+        if isinstance(widget, Adw.PreferencesGroup) and widget.get_title() == "Default rotation"
+    ]
+    (row,) = [widget for widget in _widgets(group) if isinstance(widget, Adw.ComboRow)]
+    return row
+
+
+def test_aa3_classic_default_playlist_not_saved_is_put_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The classic Schedules page said a refused default before putting its row back."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        session = application.session
+        _dock(application, tmp_path)
+        yield "the setup to be published", lambda: settled(application)
+        page = SchedulesPage(application)
+        page.refresh(session)
+        real_update = config.update
+        refusals: list[int] = []
+
+        def update(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+            if not refusals:
+                refusals.append(1)
+                raise config.ConfigError("cannot save settings.toml: No space left on device")
+            return real_update(changes, *arguments, **keywords)
+
+        monkeypatch.setattr(config, "update", update)
+        calls = _raises_once(application, "window_report", monkeypatch)
+        _default_row(page).set_selected(1)
+        yield "the refusal", lambda: settled(application) and bool(calls)
+        assert application.settings.active_playlist == ""
+        # Before: the row kept showing the refused choice as the default.
+        assert _default_row(page).get_selected() == 0, "put back on what is saved"
+
+        _default_row(page).set_selected(1)
+        yield (
+            "the next choice",
+            lambda: settled(application) and bool(application.settings.active_playlist),
+        )
+        assert config.load_strict().active_playlist == session.playlists.by_name("Dock").id  # type: ignore[union-attr]
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)

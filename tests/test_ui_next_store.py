@@ -693,6 +693,39 @@ def test_a_download_the_library_already_holds_is_a_conflict(store: Store) -> Non
     spin_until(lambda: page.cards[item.id].in_library, 5)
 
 
+def test_a_download_whose_report_raised_stops_showing_as_downloading(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AA-3's sibling in the Store: the conflict's report came before the batch ended
+    and the page heard, so a report that raised left the card "Downloading…"."""
+    page = store.page()
+    page.activate(None)
+    _searched(page)
+    item = page.pages.current[0]
+    # Another process lands it after this page read the folders: a conflict, reported.
+    _record_download(store.root, candidate(item.id.partition(":")[2]))
+    real_report = store.backend.window_report
+    raised: list[str] = []
+
+    def report_raises_once(message: str) -> None:
+        if not raised:
+            raised.append(message)
+            raise RuntimeError("injected: the report failed")
+        real_report(message)
+
+    monkeypatch.setattr(store.backend, "window_report", report_raises_once)
+    store.store.download(item)
+    spin_until(lambda: not store.store.downloads.busy and bool(raised), 5)
+    # Before: the card kept "Downloading…", and the batch never ended.
+    spin_until(lambda: not page.cards[item.id].busy, 5, what="the card to stop downloading")
+    assert page.queue_label.get_label() == ""
+
+    other = page.pages.current[1]
+    store.store.download(other)
+    spin_until(lambda: bool(store.toasts), 5, what="the next download")
+    assert store.toasts == [f"\u201c{other.title}\u201d is in your library"]
+
+
 def test_a_download_another_request_holds_is_busy(store: Store) -> None:
     page = store.page()
     page.activate(None)

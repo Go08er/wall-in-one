@@ -698,14 +698,15 @@ class DisplaysPage(Page):
         queue_intent(self._pending_mode, _MODE, mode)
 
         def settled(saved: bool) -> None:
+            # The queued choice first, before the toast (it reaches the window).
+            if settle_intent(self._pending_mode, _MODE):
+                self.refresh()
             if saved:
                 self.state.toast(
                     "Each display plays its own playlist again"
                     if mode == "independent"
                     else "Every display shows the same rotation"
                 )
-            if settle_intent(self._pending_mode, _MODE):
-                self.refresh()
 
         self.scheduling.choose_display_mode(mode, settled)
 
@@ -725,14 +726,15 @@ class DisplaysPage(Page):
         queue_intent(self._pending_assign, connector, pid)
 
         def settled(saved: bool) -> None:
+            # The queued choice first, before the toast (it reaches the window).
+            if settle_intent(self._pending_assign, connector):
+                self.refresh()
             if saved:
                 self.state.toast(
                     f"{connector} plays “{self._name(pid)}” when nothing is scheduled"
                     if pid
                     else f"{connector} plays the default when nothing is scheduled"
                 )
-            if settle_intent(self._pending_assign, connector):
-                self.refresh()
 
         self.scheduling.assign_display(connector, pid, settled)
 
@@ -752,10 +754,11 @@ class DisplaysPage(Page):
         queue_intent(self._pending_colors, _COLORS, connector)
 
         def settled(saved: bool) -> None:
-            if saved:
-                self.state.toast(f"Desktop colors now follow {connector}")
+            # The queued choice first, before the toast (it reaches the window).
             if settle_intent(self._pending_colors, _COLORS):
                 self.refresh()
+            if saved:
+                self.state.toast(f"Desktop colors now follow {connector}")
 
         self.scheduling.choose_color_source(connector, settled)
         self.refresh()
@@ -842,9 +845,9 @@ class DisplaysPage(Page):
 
     def forget(self, connector: str) -> None:
         def settled(saved: bool) -> None:
+            self.refresh()  # what is saved now, before the toast (it reaches the window)
             if saved:
                 self.state.toast(f"Forgot {connector}")
-            self.refresh()
 
         self.scheduling.forget_display(connector, settled)
 

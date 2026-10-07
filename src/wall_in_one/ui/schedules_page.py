@@ -1208,13 +1208,15 @@ class SchedulesPage(Gtk.ScrolledWindow):
             wanted = choices[index - 1].id if 0 < index <= len(choices) else ""
 
             def failed(error: str) -> None:
-                self._app.window_report(f"Default playlist was not saved; nothing changed: {error}")
+                # Put back first, before what reaches the window: a failed
+                # write must not keep showing as the default.
                 self._fingerprint = None
                 self.refresh(self._app.session)
+                self._app.window_report(f"Default playlist was not saved; nothing changed: {error}")
 
             def saved(_settings: config.Settings) -> None:
-                self._app.schedule_edited()
                 self._fingerprint = self._authoring_fingerprint(self._app.session)
+                self._app.schedule_edited()
 
             self._app.update_settings_async(
                 active_playlist=wanted,

@@ -357,9 +357,11 @@ class TidySection(Adw.PreferencesGroup):
     def _finished(self, result: tidy.Result | None, error: str) -> None:
         self._running = None
         self._replan = False
-        self._report(result.message if result is not None else error)
+        # The buttons and the next preview first: the report reaches the
+        # window, which can raise, and must not leave them as if still running.
         self._refresh_buttons()
         self.refresh()
+        self._report(result.message if result is not None else error)
 
     def _report(self, message: str) -> None:
         report = getattr(self._app, "window_report", None)

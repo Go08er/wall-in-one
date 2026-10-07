@@ -649,24 +649,30 @@ class RealStore:
         # has still finished.
         self._finished += 1
         try:
-            done = future.result()
-        except CancelledError:
-            done = None
-        except ProviderError as error:
-            # Words for "busy" (another request holds this download) and
-            # "conflict" (the library already has it) come from the claim.
-            self._backend.window_report(str(error))
-            if error.kind == "conflict":
-                self._forget_owned()
-            done = None
-        except Exception as error:  # a worker must never take the app down
-            self._backend.window_report(f"download failed: {error}")
-            done = None
-        if done is not None:
-            self._landed_one(item, done, then)
-        if self._finished >= self._queued:
-            self._lane_drained()
-        self._host.emit_changed("store")
+            try:
+                done = future.result()
+            except CancelledError:
+                done = None
+            except ProviderError as error:
+                # Words for "busy" (another request holds this download) and
+                # "conflict" (the library already has it) come from the claim.
+                if error.kind == "conflict":
+                    self._forget_owned()
+                self._backend.window_report(str(error))
+                done = None
+            except Exception as error:  # a worker must never take the app down
+                self._backend.window_report(f"download failed: {error}")
+                done = None
+            if done is not None:
+                self._landed_one(item, done, then)
+        finally:
+            # Whatever saying it did (a toast or report reaches the window):
+            # the batch ends, and the card stops showing it as downloading.
+            try:
+                if self._finished >= self._queued:
+                    self._lane_drained()
+            finally:
+                self._host.emit_changed("store")
 
     def _landed_one(self, item: StoreItemView, done: Downloaded, then: Then) -> None:
         path = done.result.path

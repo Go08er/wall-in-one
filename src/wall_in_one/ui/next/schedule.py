@@ -1113,10 +1113,11 @@ class SchedulePage(Page):
         queue_intent(self._pending_default, _DEFAULT, pid)
 
         def settled(saved: bool) -> None:
-            if saved:
-                self.state.toast(f"“{self._name(pid)}” plays when nothing is scheduled")
+            # The queued choice first, before the toast (it reaches the window).
             if settle_intent(self._pending_default, _DEFAULT):
                 self._rebuild_fallback(self._independent())
+            if saved:
+                self.state.toast(f"“{self._name(pid)}” plays when nothing is scheduled")
 
         self.scheduling.choose_default_playlist(pid, settled)
 
@@ -1248,6 +1249,9 @@ class SchedulePage(Page):
 
     def save(self, draft: RuleView, original: RuleView | None, settled: Settled) -> None:
         def done(saved: bool) -> None:
+            # The editor first: it holds "Saving…" until it hears, and the
+            # toast below reaches the window, which can raise (AA-3).
+            settled(saved)
             if saved:
                 if original is None:
                     self.state.toast(
@@ -1256,7 +1260,6 @@ class SchedulePage(Page):
                     )
                 else:
                     self.state.toast("Rule saved")
-            settled(saved)
 
         self.scheduling.save_rule(original.id if original is not None else "", draft, done)
 

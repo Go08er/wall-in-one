@@ -176,14 +176,21 @@ class Host(Protocol):
 
 
 class Worker:
-    """One thread for small reads; each answer is handed to GTK unless closed since."""
+    """One thread for small reads; each answer is handed to GTK unless closed since.
+
+    So is a read that failed (``failed``, with why): whatever the page shows
+    while it waits ("Checking…") always ends, in what was found or in a
+    "couldn't check" of its own.
+    """
 
     def __init__(self, name: str) -> None:
         self._name = name
         self._jobs: ThreadPoolExecutor | None = None
         self._generation = 0
 
-    def run(self, work: Callable[[], _T], done: Callable[[_T], None]) -> None:
+    def run(
+        self, work: Callable[[], _T], done: Callable[[_T], None], failed: Callable[[str], None]
+    ) -> None:
         if self._jobs is None:
             self._jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix=self._name)
         generation = self._generation
@@ -195,8 +202,9 @@ class Worker:
                     return GLib.SOURCE_REMOVE
                 try:
                     result = completed.result()
-                except Exception:  # a read failed: keep what is shown, say it in the log
+                except Exception as error:  # the page is told, and the log has the rest
                     LOGGER.exception("settings: a background read failed")
+                    failed(str(error) or error.__class__.__name__)
                     return GLib.SOURCE_REMOVE
                 done(result)
                 return GLib.SOURCE_REMOVE
@@ -222,7 +230,9 @@ class _FolderCheck:
     roots: tuple[Path, ...]
     missing: frozenset[Path]
     suggestion: str
-    scenes: bool
+    #: None when it couldn't be checked (``problem`` says why).
+    scenes: bool | None
+    problem: str = ""
 
 
 def _check_folders(roots: tuple[Path, ...]) -> _FolderCheck:
@@ -450,7 +460,11 @@ class RealPalettes:
                 )
             )
 
-        self._worker.run(read, opened)
+        def unread(error: str) -> None:
+            self._backend.window_report(f"{entry.name} couldn't be read: {error}")
+            done(None)
+
+        self._worker.run(read, opened, unread)
 
     def save_palette_draft(
         self,
@@ -746,6 +760,8 @@ class RealSettings:
         self._palettes.shutdown()
         # A read dropped now is asked for again when the page next looks.
         self._checking = None
+        if self._folders is not None and self._folders.problem:
+            self._folders = None
         self._key_known = False
         self._template_known = False
 
@@ -812,7 +828,15 @@ class RealSettings:
                 self._folders = result
                 self._host.emit_changed("settings")
 
-            self._worker.run(lambda: _check_folders(roots), checked)
+            def unchecked(error: str) -> None:
+                if self._checking == roots:
+                    self._checking = None
+                # Kept, so the page says so rather than asking again on every look;
+                # forgotten when the folders change or the page next opens.
+                self._folders = _FolderCheck(roots, frozenset(), "", None, problem=error)
+                self._host.emit_changed("settings")
+
+            self._worker.run(lambda: _check_folders(roots), checked, unchecked)
         return known
 
     def folder_list(self) -> Sequence[Folder]:
@@ -829,6 +853,10 @@ class RealSettings:
     def scenes_available(self) -> bool | None:
         known = self._check()
         return known.scenes if known is not None else None
+
+    def folder_check_problem(self) -> str:
+        known = self._folders
+        return known.problem if known is not None and known.roots == self._roots() else ""
 
     def _set_roots(self, roots: tuple[Path, ...], saved: str = "") -> None:
         def succeeded(_settings: config.Settings) -> None:
@@ -934,8 +962,12 @@ class RealSettings:
             self._key = status
             self._host.emit_changed("settings")
 
+        def unknown(error: str) -> None:
+            self._key = KeyStatus(f"Couldn't check the key: {error}")
+            self._host.emit_changed("settings")
+
         self._key_known = True
-        self._worker.run(describe_key, known)
+        self._worker.run(describe_key, known, unknown)
 
     def key_status(self) -> KeyStatus:
         if not self._key_known:
@@ -1018,8 +1050,14 @@ class RealSettings:
             self._template = status
             self._host.emit_changed("settings")
 
+        def unknown(error: str) -> None:
+            self._template = TemplateStatus(
+                "unavailable", f"Couldn't check Noctalia's settings: {error}"
+            )
+            self._host.emit_changed("settings")
+
         self._template_known = True
-        self._worker.run(read_template, known)
+        self._worker.run(read_template, known, unknown)
 
     def install_template(self) -> None:
         """The row's button: `template.install` on the authoring lane, never otherwise."""

@@ -139,6 +139,39 @@ def opened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Opened]:
         _close(shown)
 
 
+def test_reads_that_failed_say_so_on_the_page_never_checking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The key, the template and the renderer rows, each read failing on the worker."""
+    from wall_in_one.ui.next import real_settings
+
+    def failing(*_arguments: object) -> Any:
+        raise RuntimeError("injected: the read failed")
+
+    for read in ("describe_key", "read_template", "_check_folders"):
+        monkeypatch.setattr(real_settings, read, failing)
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    shown = _open(monkeypatch)
+    try:
+        page = shown.page
+        spin_until(
+            lambda: (
+                page._renderer.get_subtitle() != "Checking…"
+                and page._key_row.get_subtitle() != "Checking…"
+                and "Checking" not in (page._template_row.get_subtitle() or "")
+            ),
+            5,
+        )
+        assert page._renderer.get_subtitle() == "Couldn't check: injected: the read failed"
+        assert page._key_row.get_subtitle() == "Couldn't check the key: injected: the read failed"
+        assert page._template_row.get_subtitle() == (
+            "Couldn't check Noctalia's settings: injected: the read failed"
+        )
+    finally:
+        _close(shown)
+
+
 def _another(row: Any, binding_choices: tuple[tuple[str, str], ...], value: Any) -> Any:
     """A different valid value for ``row`` than ``value``."""
     if isinstance(row, Adw.SwitchRow):

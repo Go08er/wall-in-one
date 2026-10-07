@@ -530,15 +530,76 @@ def test_a_worker_answer_after_close_is_dropped() -> None:
         finished.set()
         return 1
 
-    worker.run(work, delivered.append)
+    failures: list[str] = []
+    worker.run(work, delivered.append, failures.append)
     worker.close()
     gate.set()
     assert finished.wait(5)
     end = time.monotonic() + 0.3
     spin_until(lambda: time.monotonic() > end, what="a moment of main loop")
-    assert delivered == [], "the window had gone: nothing reaches GTK"
+    assert delivered == [] and failures == [], "the window had gone: nothing reaches GTK"
 
     reopened: list[int] = []
-    worker.run(lambda: 2, reopened.append)
+    worker.run(lambda: 2, reopened.append, failures.append)
     spin_until(lambda: reopened == [2], what="a read after the window came back")
+    assert failures == []
     worker.close()
+
+
+def _failing(*_arguments: object) -> Any:
+    raise RuntimeError("injected: the read failed")
+
+
+@pytest.mark.parametrize("read", ["describe_key", "read_template", "_check_folders"])
+def test_a_failed_background_read_ends_its_checking_state(
+    part: tuple[RealSettings, Host], monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    """Before: the failure was logged and dropped, and the row said "Checking…" for good."""
+    settings, host = part
+    monkeypatch.setattr(real_settings, read, _failing)
+    if read == "describe_key":
+        assert settings.key_status().text == "Checking…"
+    elif read == "read_template":
+        assert settings.template_status().state == "checking"
+    else:
+        assert settings.scenes_available() is None and settings.folder_check_problem() == ""
+    spin_until(lambda: "settings" in host.topics, what="the failed read to reach the page")
+
+    if read == "describe_key":
+        assert settings.key_status().text == "Couldn't check the key: injected: the read failed"
+    elif read == "read_template":
+        status = settings.template_status()
+        assert status.state == "unavailable" and not status.action
+        assert status.detail == "Couldn't check Noctalia's settings: injected: the read failed"
+    else:
+        assert settings.folder_check_problem() == "injected: the read failed"
+        assert settings.scenes_available() is None
+        calls: list[int] = []
+
+        def counted(*_arguments: object) -> Any:
+            calls.append(1)
+            return _failing()
+
+        monkeypatch.setattr(real_settings, read, counted)
+        settings.folder_list()
+        settings.scenes_available()
+        assert calls == [], "said once, not asked again on every look"
+        settings.close()  # the page next opens: asked again
+        assert settings.folder_check_problem() == ""
+
+
+def test_a_palette_that_couldnt_be_read_ends_the_drafts_wait(
+    backend: FakeApplication, part: tuple[RealSettings, Host], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, _host = part
+    _custom("Mine")
+    manager = settings.palette_manager
+    manager.open_palettes()
+    spin_until(lambda: manager.palette_list().phase == "ready", what="the catalogue")
+    mine = next(item for item in manager.palette_list().items if item.name == "Mine")
+    monkeypatch.setattr(palettes, "read_document", _failing)
+    drafts: list[PaletteDraft | None] = []
+    manager.palette_draft(mine.key, copy=True, done=drafts.append)
+    spin_until(lambda: drafts, what="the draft's answer")
+    assert drafts == [None]
+    assert backend.reports[-1] == "Mine couldn't be read: injected: the read failed"

@@ -383,6 +383,10 @@ class SettingsAccess(Protocol):
         """linux-wallpaperengine is installed; None until that is known."""
         ...
 
+    def folder_check_problem(self) -> str:
+        """Why the folders and the renderer couldn't be checked, or empty."""
+        ...
+
     def theme_sources(self) -> ThemeSources: ...
 
     # -- the Wallhaven key ---------------------------------------------------------

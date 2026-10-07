@@ -2151,6 +2151,9 @@ class AppState(GObject.Object):
     def scenes_available(self) -> bool:
         return True
 
+    def folder_check_problem(self) -> str:
+        return ""  # the demo's folders are always checked
+
     def theme_sources(self) -> ThemeSources:
         return ThemeSources(
             tuple((connector, True) for connector in self.connectors()),

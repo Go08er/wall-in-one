@@ -887,6 +887,52 @@ def test_the_workshop_hand_off_is_offered_only_with_steam(
     assert store.toasts == ["Opening the Wallpaper Engine Workshop (https://example/y)"]
 
 
+def test_a_workshop_link_that_couldnt_be_made_is_said(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before: the click was dropped without a word."""
+    from wall_in_one.library import workshop
+
+    def failing(*_arguments: object, **_keywords: object) -> tuple[str, str]:
+        raise RuntimeError("injected: no links")
+
+    monkeypatch.setattr(workshop, "links", failing)
+    store.store.open_workshop()
+    spin_until(lambda: bool(store.toasts), 5)
+    assert store.toasts == ["The Wallpaper Engine Workshop couldn't be opened: injected: no links"]
+
+
+def test_a_facts_read_asked_for_during_one_that_failed_still_happens(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before: the failure dropped the re-read asked for meanwhile, so the facts stayed old."""
+    import threading
+
+    from wall_in_one.library import workshop
+
+    page = store.page()
+    page.activate(None)
+    spin_until(lambda: store.store._facts_future is None, 5)
+    assert not store.store.has_workshop
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def steam(*_arguments: object, **_keywords: object) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            gate.wait(5)
+            raise RuntimeError("injected: Steam's roots couldn't be read")
+        return True
+
+    monkeypatch.setattr(workshop, "is_steam_installed", steam)
+    store.store.refresh_facts()  # the read that fails
+    spin_until(lambda: bool(calls), 5)
+    store.store.refresh_facts()  # asked for meanwhile
+    gate.set()
+    spin_until(lambda: store.store.has_workshop, 5)
+    assert len(calls) == 2
+
+
 def test_a_view_is_the_providers_candidate(store: Store) -> None:
     view = CandidateView(candidate("ab1234"))
     assert view.id == "wallhaven:ab1234" and view.provider == WALLHAVEN

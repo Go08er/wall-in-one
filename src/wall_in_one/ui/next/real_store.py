@@ -798,6 +798,10 @@ class RealStore:
         try:
             nsfw, steam = future.result()
         except Exception:
+            # What is known stays; a read asked for meanwhile still happens.
+            if self._facts_again:
+                self._facts_again = False
+                self.refresh_facts()
             return
         changed = (nsfw, steam) != (self._nsfw_blocked, self._steam)
         self._nsfw_blocked, self._steam = nsfw, steam
@@ -830,7 +834,8 @@ class RealStore:
                     return
                 try:
                     preferred, fallback = done.result()
-                except Exception:
+                except Exception as error:  # the click is answered, never dropped
+                    self._host.toast(f"The Wallpaper Engine Workshop couldn't be opened: {error}")
                     return
                 if not preferred:
                     return

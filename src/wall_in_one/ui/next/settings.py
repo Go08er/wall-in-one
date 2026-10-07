@@ -1425,8 +1425,11 @@ class SettingsPage(Page):
         note = access.battery_note()
         self._battery_note.set_subtitle(note)
         available = access.scenes_available()
+        problem = access.folder_check_problem()
         self._renderer.set_subtitle(
-            "Checking…"
+            f"Couldn't check: {problem}"
+            if problem
+            else "Checking…"
             if available is None
             else "linux-wallpaperengine is available"
             if available

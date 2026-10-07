@@ -180,6 +180,12 @@ COMPANION_KEYS: Final[frozenset[str]] = frozenset(
 _CLAIM_FOLDER: Final = re.compile(r"\Aentry-[a-z0-9_]{8}\Z")
 _DELETION_RECORD: Final = re.compile(r"\Aentry-[0-9a-f]{32}\Z")
 _TOKEN: Final = re.compile(r"\A[0-9a-f]{32}\Z")
+#: The name a download's file takes just before it is published (see
+#: `wall_in_one.providers.download.COMMIT_PREFIX`). One left behind is either
+#: from an interrupted publication or was public for a moment and could not be
+#: retired; nothing else ever reclaims it.
+_COMMIT_PREFIX: Final = ".wall-in-one-commit-"
+_COMMIT_NAME: Final = re.compile(r"\A\.wall-in-one-commit-[0-9a-f]{16}\Z")
 _TEMPLATE_TABLE: Final = ("theme", "templates", "user", template.TEMPLATE_ID)
 _PLUGIN_TABLE: Final = ("plugin_settings", PLUGIN_ID)
 
@@ -724,6 +730,9 @@ def _survey(roots: Sequence[Path], now: float) -> _Survey:
         except OSError:
             children = []
         for child in children:
+            if in_managed and child.name.startswith(_COMMIT_PREFIX):
+                _survey_commit_name(child, survey, now, movable)
+                continue
             if not child.name.startswith(file_io.DELETION_CLAIM_PREFIX):
                 continue
             status = _lstat(child)
@@ -833,6 +842,54 @@ def _survey(roots: Sequence[Path], now: float) -> _Survey:
                     Kept(child, "Wall-in-One can't prove the operation that made it has finished")
                 )
     return survey
+
+
+def _survey_commit_name(
+    child: Path,
+    survey: _Survey,
+    now: float,
+    movable: Callable[[Path, os.stat_result], str],
+) -> None:
+    """A file a download left at its commit name, in a managed download folder.
+
+    Offered for archiving (which keeps its bytes; Undo moves it back), never
+    deleted: it may be what was public for a moment. Kept, with the reason,
+    unless it is exactly such a file: Wall-in-One's name for it, a regular
+    private file of this user with no other name, unchanged for an hour (so no
+    download is publishing it now), on the archive's drive.
+    """
+    status = _lstat(child)
+    if status is None:
+        return
+    if not _COMMIT_NAME.match(child.name):
+        survey.kept.append(Kept(child, "Tidy up doesn't recognize this entry"))
+    elif not stat.S_ISREG(status.st_mode):
+        survey.kept.append(Kept(child, "it isn't a regular file"))
+    elif status.st_nlink != 1:
+        survey.kept.append(Kept(child, "another name still links to this file"))
+    elif stat.S_IMODE(status.st_mode) != 0o600:
+        survey.kept.append(
+            Kept(child, "its permissions aren't the private ones Wall-in-One gives these files")
+        )
+    elif now - status.st_mtime < CLAIM_GRACE_SECONDS:
+        survey.kept.append(
+            Kept(child, "it changed in the last hour and may belong to a download in progress")
+        )
+    elif reason := movable(child, status):
+        survey.kept.append(Kept(child, reason))
+    else:
+        stamp = datetime.datetime.fromtimestamp(status.st_mtime).strftime("%Y-%m-%d")
+        survey.leftovers.append(
+            _Leftover(
+                child,
+                False,
+                (status.st_dev, status.st_ino),
+                file_io.file_fingerprint(status),
+                status.st_size,
+                f"a file a download left while publishing it ({format_size(status.st_size)}, "
+                f"last changed {stamp})",
+            )
+        )
 
 
 def _leftovers_token(leftovers: Sequence[_Leftover]) -> str:

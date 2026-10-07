@@ -26,6 +26,7 @@ from wall_in_one import (
     tidy,
 )
 from wall_in_one.library import manage, removals
+from wall_in_one.providers import download
 from wall_in_one.theme import noctalia, template
 
 FIXTURES: Final = Path(__file__).parent / "fixtures" / "companion"
@@ -245,6 +246,56 @@ def test_only_provably_inert_leftovers_move(
     assert "another name still links" in reasons[linked]
     assert "a copy of a Trash record that holds 58 bytes" in reasons[trash_copy]
     assert "doesn't recognize" in reasons[stray_fifo]
+
+
+def test_commit_named_download_files_are_listed_and_archived_never_deleted(
+    tmp_path: Path,
+) -> None:
+    """A download's file left at its commit name in a managed download folder (an
+    interrupted publication, or one public for a moment that couldn't be retired)
+    used to be invisible: nothing reclaims it. Tidy up now lists it, offering to
+    archive one that is exactly Wall-in-One's (bytes kept, Undo puts it back),
+    and keeps, with the reason, one in progress or not provably its own."""
+    root = tmp_path / "library"
+    motion = root / "Wall-in-One" / "MotionBGS"
+    motion.mkdir(parents=True)
+
+    def commit_file(name: str, data: bytes, *, age: float = OLD, mode: int = 0o600) -> Path:
+        path = motion / f"{download.COMMIT_PREFIX}{name}"
+        path.write_bytes(data)
+        path.chmod(mode)
+        os.utime(path, (age, age))
+        return path
+
+    left = commit_file("0123456789abcdef", b"once public video bytes")
+    recent = commit_file("fedcba9876543210", b"publishing now", age=time.time())
+    foreign_shape = commit_file("not-ours", b"someone else's")
+    shared = commit_file("00112233445566ff", b"two names")
+    os.link(shared, tmp_path / "another-name")
+    public_mode = commit_file("aaaaaaaaaaaaaaaa", b"made public", mode=0o644)
+
+    found = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+
+    # Failed on 1965700: none of these was listed at all.
+    assert {change.path for change in found.changes} == {left}
+    change = next(change for change in found.changes if change.path == left)
+    assert "a download left while publishing it" in change.detail and change.size == 23
+    reasons = _reasons(found)
+    assert "may belong to a download in progress" in reasons[recent]
+    assert "doesn't recognize" in reasons[foreign_shape]
+    assert "another name still links" in reasons[shared]
+    assert "private ones Wall-in-One gives" in reasons[public_mode]
+
+    result = tidy.apply(tidy.LEFTOVERS, found, roots=(root,))
+
+    assert result.changed and result.archive is not None
+    assert not left.exists()
+    archived = [path for path in (result.archive / "items").iterdir()]
+    assert [path.read_bytes() for path in archived] == [b"once public video bytes"]
+    for kept in (recent, foreign_shape, shared, public_mode):
+        assert kept.exists(), kept
+    # Tidy up's name for these is the download's own.
+    assert getattr(tidy, "_COMMIT_PREFIX", None) == download.COMMIT_PREFIX
 
 
 def test_upgrade_folders_stay_until_the_upgrade_is_recorded_finished(

@@ -40,7 +40,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from wall_in_one import file_io, paths, worker_processes
 from wall_in_one.library import pairing
@@ -706,7 +706,7 @@ def _retire_if_written(
     written: bytes,
     *,
     logical_parent: Path | None = None,
-) -> bool:
+) -> Literal["retired", "unproven", "not-retired"]:
     """Retire ``path`` intact only if its bytes are provably, now, exactly ``written``.
 
     It was public, so it may have been edited in place since: matching its
@@ -714,14 +714,15 @@ def _retire_if_written(
     writer still holding it can write after a proof. So nothing is truncated:
     proven bytes are moved intact into the retained folder (a late write
     survives there), and a failed or unavailable proof moves nothing.
+    "not-retired": proven, but the move was refused (or undone); it stays.
     """
     try:
         current = pin.fingerprint
         held = file_io.read_pinned_regular_bytes(pin, len(written), expected_fingerprint=current)
     except OSError, ValueError:
-        return False
+        return "unproven"
     if held != written:
-        return False
+        return "unproven"
     try:
         file_io._retain_exact_entry(
             path,
@@ -732,13 +733,16 @@ def _retire_if_written(
             logical_parent=logical_parent,
         )
     except OSError, ValueError:
-        return False
-    return True
+        return "not-retired"
+    return "retired"
 
 
-def _left_unproven(path: Path, what: str, *, shown: Path | None = None) -> StillError:
-    """The error for a ``what`` at ``path`` that was not provably ours to withdraw.
+def _left_unproven(
+    path: Path, what: str, *, shown: Path | None = None, proven: bool = False
+) -> StillError:
+    """The error for a ``what`` at ``path`` that was not withdrawn.
 
+    Not provably ours, or (``proven``) proven but its retirement refused.
     Said with the failure being handled, if any, and where the entry is
     (``shown``: its public spelling, when ``path`` reaches it through a pin).
     """
@@ -752,6 +756,10 @@ def _left_unproven(path: Path, what: str, *, shown: Path | None = None) -> Still
     except OSError as error:
         return StillError(
             f"{reason}whether {what} is still at {named} could not be checked ({error})"
+        )
+    if proven:
+        return StillError(
+            f"{reason}{what} at {named} could not be retired intact, so it was left there"
         )
     return StillError(
         f"{reason}{what} at {named} is no longer exactly what was written, so it was left as it is"
@@ -779,7 +787,7 @@ class _SidecarPublication:
         if pin is None:
             return
         try:
-            withdrawn = _retire_if_written(
+            outcome = _retire_if_written(
                 self.access_path,
                 pin,
                 self.written,
@@ -788,8 +796,8 @@ class _SidecarPublication:
         finally:
             pin.close()
             self.pin = None
-        if not withdrawn:
-            raise _left_unproven(self.path, "the pairing record")
+        if outcome != "retired":
+            raise _left_unproven(self.path, "the pairing record", proven=outcome == "not-retired")
 
     def close(self) -> None:
         if self.pin is not None:
@@ -900,7 +908,7 @@ def _write_sidecar_publication(
     finally:
         try:
             if temporary_pin is not None:
-                left = False
+                outcome = "retired"
                 try:
                     if not committed and not relocated:
                         # Never published: this writer's own candidate.
@@ -914,20 +922,20 @@ def _write_sidecar_publication(
                     elif not committed:
                         # It was public for a moment: only the exact bytes
                         # written are retired, intact.
-                        with contextlib.suppress(OSError):
-                            left = not _retire_if_written(
-                                temporary_pin.path,
-                                temporary_pin,
-                                encoded,
-                                logical_parent=path.parent,
-                            )
+                        outcome = _retire_if_written(
+                            temporary_pin.path,
+                            temporary_pin,
+                            encoded,
+                            logical_parent=path.parent,
+                        )
                 finally:
                     temporary_pin.close()
-                if left:
+                if outcome != "retired":
                     raise _left_unproven(
                         temporary_pin.path,
                         "the pairing candidate",
                         shown=path.with_name(temporary_pin.path.name),
+                        proven=outcome == "not-retired",
                     )
         finally:
             if publication is not None and not handed_off:

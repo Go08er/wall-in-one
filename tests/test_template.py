@@ -1695,7 +1695,10 @@ def test_a_late_write_to_a_proven_backup_copy_survives(
     if timestamps == "coarse":
         # Failed on a4fa2f0: discarded after the proof, truncating the late bytes.
         assert [entry.read_text(encoding="utf-8") for entry in retired] == late
-        assert said.endswith(f"; the copy was retired intact to {retired[0]}"), said
+        assert said.endswith(
+            "; the copy, proven just before (it may have changed since), "
+            f"was retired intact to {retired[0]}"
+        ), said
     else:
         # Failed on a4fa2f0 for its words: "the copy remains at", though changed.
         assert retired == [] and temporary.read_text(encoding="utf-8") == late[0]
@@ -1703,6 +1706,52 @@ def test_a_late_write_to_a_proven_backup_copy_survives(
             f"; what is at {temporary} changed after it was proven to be the copy, "
             "so it was left as it is"
         ), said
+
+
+def test_a_backup_copy_whose_retirement_could_not_be_verified_is_not_said_changed(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backup copy is moved back after an unverified move and proven to be
+    the copy; then its retirement's move into the retained folder lands but its
+    verification read fails once (a real EIO), so the move is undone. Nothing
+    changed it: it is said to be left because it couldn't be retired."""
+    _write_noctalia_settings(SAMPLE_SETTINGS)
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    landed: list[tuple[Path, Path]] = []
+    retiring: list[Path] = []
+    failing: Path | None = None
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if not landed and ".backup-" in source.name and ".bak-" in destination.name:
+            landed.append((source, destination))
+            failing = destination
+        elif landed and not retiring and destination.name.startswith(file_io.RETAINED_ENTRY_PREFIX):
+            retiring.append(destination)
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = None
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    temporary, _destination = landed[0]
+    assert retiring, "the retirement's move landed"
+    assert temporary.read_text(encoding="utf-8") == SAMPLE_SETTINGS, "put back, unchanged"
+    # Failed on 30ebf3f: "changed after it was proven to be the copy".
+    assert "changed after it was proven" not in said, said
+    assert f"; what is at {temporary} could not be retired intact (" in said, said
+    assert said.endswith("), so it was left there"), said
 
 
 def test_a_moved_back_locator_is_retired_intact(

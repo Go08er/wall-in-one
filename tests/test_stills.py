@@ -1918,6 +1918,62 @@ def test_a_published_sidecar_rolled_back_unchanged_is_retired_intact(
     assert [entry.read_bytes() for entry in _retained(tmp_path)] == published
 
 
+def test_a_sidecar_whose_retirement_could_not_be_verified_is_not_said_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The published pairing record is rolled back (a directory fsync EIO); it is
+    exactly what was written, but its retirement's move lands and its
+    verification read fails once (a real EIO), so the move is undone. It is said
+    to be left because it couldn't be retired, not that it changed."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not decoded here")
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_sync = paths.fsync_directory
+    real_rename = file_io._rename_noreplace
+    real_lstat = Path.lstat
+    synced: list[bool] = []
+    failing: Path | None = None
+
+    def sync(directory: Path) -> None:
+        if not synced and sidecar.exists():
+            synced.append(True)
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(directory)
+
+    def rename(source: Path, destination: Path) -> None:
+        nonlocal failing
+        real_rename(source, destination)
+        if (
+            synced
+            and failing is None
+            and destination.name.startswith(file_io.RETAINED_ENTRY_PREFIX)
+        ):
+            failing = destination
+
+    def lstat(path: Path) -> os.stat_result:
+        nonlocal failing
+        if failing is not None and path == failing:
+            failing = Path("/nonexistent/already-failed")
+            raise OSError(errno.EIO, "injected one-shot verification read failure")
+        return real_lstat(path)
+
+    monkeypatch.setattr(paths, "fsync_directory", sync)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(stills.StillError) as raised:
+        stills.write_sidecar(video, chosen)
+
+    said = str(raised.value)
+    assert sidecar.is_file(), "put back at its name"
+    # Failed on 30ebf3f: "is no longer exactly what was written".
+    assert "no longer exactly what was written" not in said, said
+    assert said.endswith(
+        f"the pairing record at {sidecar} could not be retired intact, so it was left there"
+    ), said
+
+
 def test_a_still_moved_back_after_an_unverified_publication_is_retired_intact(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

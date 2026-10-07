@@ -642,14 +642,29 @@ def _settle_relocated_backup(
                     "but could not be verified there"
                 )
             if _present(temporary) is True:
+                # Refused, and not moved (or moved and put back, which moves
+                # its ctime): changed after its proof only if what a rename
+                # can't change shows it (size, mtime).
+                try:
+                    changed = file_io.file_fingerprint(os.fstat(descriptor))[:4] != proven[:4]
+                except OSError, ValueError:
+                    changed = False
+                if changed:
+                    return (
+                        f"; what is at {temporary} changed after it was proven to be the "
+                        "copy, so it was left as it is"
+                    )
                 return (
-                    f"; what is at {temporary} changed after it was proven to be the copy, "
-                    "so it was left as it is"
+                    f"; what is at {temporary} could not be retired intact ({error}), "
+                    "so it was left there"
                 )
         except OSError, ValueError:
             pass
         else:
-            return f"; the copy was retired intact to {retired}"
+            return (
+                "; the copy, proven just before (it may have changed since), "
+                f"was retired intact to {retired}"
+            )
     found = _present(temporary)
     if found is False:
         return ""

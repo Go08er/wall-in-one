@@ -320,6 +320,13 @@ def put_back_refused(
     yield moved_back
 
 
+#: How a retired candidate is said: proven just before, it may have changed since.
+RETIRED_INTACT = (
+    "; the entry moved back, proven to be the publication candidate just before "
+    "(it may have changed since), was retired intact to {}"
+)
+
+
 def _retired_entries(folder: Path) -> list[Path]:
     """What the retained folder beside the store holds."""
     retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
@@ -349,7 +356,7 @@ def test_a_candidate_that_cannot_be_put_back_is_said_as_retired(
     retired = _retired_entries(folder)
     assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == CANDIDATE, "intact"
     assert f"a newer concurrent entry remains at {target}" in said, said
-    assert said.endswith(f"; the publication candidate was retired intact to {retired[0]}"), said
+    assert said.endswith(RETIRED_INTACT.format(retired[0])), said
     assert raised.value.preserved_path == retired[0]
     assert wrote == []
 
@@ -374,7 +381,9 @@ def test_a_candidate_the_cleanup_cannot_discard_is_said_where_it_is(
     assert len(moved) == 1 and not target.exists()
     assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "kept, where it is said to be"
     assert "the publication candidate could not be put back" in said, said
-    assert said.endswith(f"; the publication candidate remains preserved at {moved[0]}"), said
+    # It could not be retired (the folder refuses): said so, and where it is.
+    assert "; the entry moved back could not be retired intact (" in said, said
+    assert said.endswith(f"), so it was left at {moved[0]}"), said
     # Failed on cc99c61: None, though the candidate remains there.
     assert raised.value.preserved_path == moved[0]
     assert wrote == []
@@ -484,7 +493,7 @@ def test_a_candidate_that_could_not_be_inspected_is_proven_then_retired(
     retired = _retired_entries(folder)
     assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == CANDIDATE, "intact"
     assert f"could not inspect the entry moved back to {moved[0]}" in said, said
-    assert said.endswith(f"; the publication candidate was retired intact to {retired[0]}"), said
+    assert said.endswith(RETIRED_INTACT.format(retired[0])), said
     assert raised.value.preserved_path == retired[0]
     assert wrote == []
 
@@ -811,7 +820,7 @@ def test_a_late_write_after_a_positive_proof_survives(
         # Failed on a4fa2f0: truncated by the discard, the late bytes were lost.
         assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == MANUAL
         assert not moved[0].exists()
-        assert said.endswith(f"; the publication candidate was retired intact to {retired[0]}")
+        assert said.endswith(RETIRED_INTACT.format(retired[0])), said
         assert raised.value.preserved_path == retired[0]
     else:
         # Failed on a4fa2f0 for its words: "the publication candidate remains
@@ -822,3 +831,44 @@ def test_a_late_write_after_a_positive_proof_survives(
             "candidate, so it was left as it is"
         ), said
         assert raised.value.preserved_path == moved[0]
+
+
+def test_a_retirement_that_could_not_be_verified_is_not_said_to_have_changed(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The left-behind candidate is proven ours, then its retirement's move into
+    the retained folder lands but its verification read fails once (a real EIO),
+    so the move is undone. Nothing changed it: it is said to have been left where
+    it is because it couldn't be retired, not that it changed after its proof."""
+    target = folder / "state.json"
+    real_lstat = Path.lstat
+    retiring: list[Path] = []
+
+    with relocated_with_a_repair(monkeypatch, target, edit="never") as moved:
+        patched_lstat = Path.lstat  # the helper's one-shot verification failure
+        patched_rename = file_io._rename_noreplace
+
+        def rename(source: Path, destination: Path) -> None:
+            patched_rename(source, destination)
+            if not retiring and destination.name.startswith(file_io.RETAINED_ENTRY_PREFIX):
+                retiring.append(destination)
+
+        def lstat(path: Path) -> os.stat_result:
+            if retiring and path == retiring[0] and len(retiring) == 1:
+                retiring.append(path)
+                raise OSError(errno.EIO, "injected one-shot verification read failure")
+            return patched_lstat(path)
+
+        monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+        monkeypatch.setattr(Path, "lstat", lstat)
+        with pytest.raises(file_io.PathChangedError) as raised:
+            state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+    monkeypatch.setattr(Path, "lstat", real_lstat)
+
+    said = str(raised.value)
+    assert len(retiring) == 2, "the retirement's move landed and its read failed"
+    assert moved[0].read_text(encoding="utf-8") == CANDIDATE, "put back, unchanged"
+    # Failed on 30ebf3f: "changed after it was proven to be the publication candidate".
+    assert "changed after it was proven" not in said, said
+    assert said.endswith(f"), so it was left at {moved[0]}"), said
+    assert "the entry moved back could not be retired intact (" in said, said

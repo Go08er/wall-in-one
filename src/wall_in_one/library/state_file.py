@@ -809,13 +809,23 @@ class _CandidateLeftBehind:
         retired: Path | None,
         unverified: Path | None,
         changed: bool,
+        retire_failed: OSError | None,
         still_ours: bool,
     ) -> str:
         """After the cleanup: ``retired`` to where, or moved to ``unverified`` and
-        not verified there, or refused because it ``changed`` after its proof;
-        ``still_ours`` if the entry at ``temporary`` was proven the candidate."""
+        not verified there, or refused because it ``changed`` after its proof, or
+        not retired for another reason (``retire_failed``); ``still_ours`` if
+        the entry at ``temporary`` was proven the candidate.
+
+        Once retired it is never called the candidate outright: its proof came
+        just before, and a late write may have landed since.
+        """
         if retired is not None:
-            return f"{self.reason}; the publication candidate was retired intact to {retired}"
+            return (
+                f"{self.reason}; the entry moved back, proven to be the publication "
+                f"candidate just before (it may have changed since), was retired intact "
+                f"to {retired}"
+            )
         if unverified is not None:
             return (
                 f"{self.reason}; what was at {temporary} was moved to {unverified}, "
@@ -834,6 +844,11 @@ class _CandidateLeftBehind:
             return (
                 f"{self.reason}; the entry at {temporary} changed after it was proven to be "
                 "the publication candidate, so it was left as it is"
+            )
+        if retire_failed is not None:
+            return (
+                f"{self.reason}; the entry moved back could not be retired intact "
+                f"({retire_failed}), so it was left at {temporary}"
             )
         if still_ours:
             return f"{self.reason}; the publication candidate remains preserved at {temporary}"
@@ -1297,6 +1312,7 @@ def write_atomic_bytes(
         retired: Path | None = None
         unverified: Path | None = None
         changed = False
+        retire_failed: OSError | None = None
         if not relocated:
             # Nothing was moved: the temporary is this writer's own, never
             # published, and its exact generation is discarded.
@@ -1338,17 +1354,26 @@ def write_atomic_bytes(
                     if error.preserved_path is not None:
                         unverified = error.preserved_path
                     else:
-                        # Refused: it changed after its proof (a late write).
-                        changed = True
+                        # Refused, and not moved (or moved and put back, which
+                        # moves its ctime): changed after its proof only if
+                        # what a rename can't change shows it (size, mtime).
+                        try:
+                            changed = (
+                                file_io.file_fingerprint(temporary_pin.status())[:4] != proven[:4]
+                            )
+                        except OSError, ValueError:
+                            changed = False
+                        retire_failed = error
                         still_ours = False
-                except OSError:
-                    pass  # not moved: still at the temporary, as proven
+                except OSError as error:
+                    retire_failed = error  # not moved: still at the temporary
         if left_behind is not None and isinstance(failure, file_io.PathChangedError):
             said = left_behind.said(
                 temporary,
                 retired=retired,
                 unverified=unverified,
                 changed=changed,
+                retire_failed=retire_failed,
                 still_ours=still_ours,
             )
             raise file_io.PathChangedError(

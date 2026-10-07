@@ -731,6 +731,12 @@ class PairingsPage(Gtk.Box):
 
         def saved(result: Any) -> None:
             settle_intent(self._still_intent, key)
+            if self._editing(item):
+                # Saves land in order, so this is now the durable choice; the
+                # picker keeps showing a later queued one until it lands. Shown
+                # first, before adopting it, which reaches the window.
+                self._still_selected = still
+                self._reflect_still_selection()
             current = self._app.adopt_pairing_still(result.item, result.effective_still)
             bundle = self._app.session.pairings.resolve_accepted(
                 current,
@@ -738,10 +744,6 @@ class PairingsPage(Gtk.Box):
             )
             if self._editing(item):
                 self._rendered = self._editor_key(current, bundle)
-                # Saves land in order, so this is now the durable choice; the
-                # picker keeps showing a later queued one until it lands.
-                self._still_selected = still
-                self._reflect_still_selection()
             self._request_adaptive_previews(bundle)
             self._app.pairing_changed(current)
 
@@ -751,8 +753,8 @@ class PairingsPage(Gtk.Box):
             nonlocal reported
             reported = True
             settle_intent(self._still_intent, key)
+            self._reflect_still_selection()  # the picker first, before the report
             self._app.window_report(str(error))
-            self._reflect_still_selection()
 
         accepted = self._app.authoring_action_async(
             lambda: store.choose_still(item, still),
@@ -1022,9 +1024,10 @@ class PairingsPage(Gtk.Box):
             nonlocal reported
             reported = True
             last = settle_intent(self._palette_intent, key)
-            self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
+            # The controls first, before the report (it reaches the window).
             if last and self._editing(item):
                 self._settle_palette_controls()
+            self._app.window_report(f"Colour policy was not saved; nothing changed: {error}")
 
         accepted = self._app.authoring_action_async(
             lambda: mutation(store, item),
@@ -1077,8 +1080,11 @@ class PairingsPage(Gtk.Box):
 
         def saved(result: Any) -> None:
             current = self._app.adopt_pairing_still(result.item, result.effective_still)
-            self._app.pairing_changed(current)
-            self._show_editor(current, restore_focus="reset")
+            try:
+                self._app.pairing_changed(current)
+            finally:
+                # The editor shows the reset, whatever the window did with it.
+                self._show_editor(current, restore_focus="reset")
 
         self._app.authoring_action_async(
             lambda: store.reset(item),

@@ -817,3 +817,105 @@ def test_a_failed_palette_rolls_back_after_switching_pairings_meanwhile(
     page.shutdown()
     catalog.shutdown()
     session.shutdown()
+
+
+# -- AA-3b: the picker is put back before what reaches the window ----------------------------
+
+
+def _raising_once(target: object, name: str, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    real = getattr(target, name)
+    calls: list[int] = []
+
+    def once(*arguments: Any, **keywords: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError(f"injected: {name} failed")
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(target, name, once)
+    return calls
+
+
+def _video_with_cover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Session, PairingApp, pairings_page.PairingsPage, MediaItem, MediaItem]:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video_path = tmp_path / "motion" / "clip.mp4"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"video")
+    video = _item(video_path, Kind.VIDEO)
+    cover_path = tmp_path / "cover.png"
+    cover_path.write_bytes(b"image")
+    cover = _item(cover_path)
+    session = _session(tmp_path, item=video, stills=(cover,))
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    page.edit(session, video)
+    return session, application, page, video, cover
+
+
+def test_a_still_not_saved_puts_the_picker_back_before_its_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, application, page, video, cover = _video_with_cover(tmp_path, monkeypatch)
+    card = page._still_cards_by_path[cover.path]
+    _raising_once(session.pairings, "choose_still", monkeypatch)
+    reported = _raising_once(application, "window_report", monkeypatch)
+
+    card.set_active(True)  # its handler raises with the report: GTK logs it
+
+    assert reported and page._still_intent == {}
+    # Before: the chosen card stayed selected, though nothing was saved.
+    assert page._automatic_still.get_active() and not card.get_active()
+    assert session.pairings.get(pairings.Identity.of(video)) is None
+    page.shutdown()
+    session.shutdown()
+
+
+def test_a_saved_still_is_shown_as_saved_before_it_is_adopted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, application, page, video, cover = _video_with_cover(tmp_path, monkeypatch)
+    card = page._still_cards_by_path[cover.path]
+    adopted = _raising_once(application, "adopt_pairing_still", monkeypatch)
+
+    card.set_active(True)  # adopting it raises: GTK logs it
+
+    assert adopted
+    saved = session.pairings.get(pairings.Identity.of(video))
+    assert saved is not None and saved.still == cover.path
+    # Before: the picker's saved choice was still Automatic, so the next redraw
+    # showed Automatic for a still that was saved.
+    assert page._still_selected == cover.path
+    page._reflect_still_selection()
+    assert card.get_active() and not page._automatic_still.get_active()
+    page.shutdown()
+    session.shutdown()
+
+
+def test_a_reset_redraws_the_editor_whatever_the_window_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, application, page, video, cover = _video_with_cover(tmp_path, monkeypatch)
+    session.pairings.choose_still(video, cover.path)
+    page.edit(session, video)
+    shown: list[MediaItem] = []
+    real_show = page._show_editor
+
+    def show(item: MediaItem, **keywords: Any) -> None:
+        shown.append(item)
+        real_show(item, **keywords)
+
+    monkeypatch.setattr(page, "_show_editor", show)
+    _raising_once(application, "pairing_changed", monkeypatch)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        page._reset(video)
+
+    assert session.pairings.get(pairings.Identity.of(video)) is None, "reset"
+    # Before: the editor kept showing the still that was reset away.
+    assert [item.path for item in shown] == [video.path]
+    assert page._automatic_still.get_active()
+    page.shutdown()
+    session.shutdown()

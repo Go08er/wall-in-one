@@ -1801,15 +1801,21 @@ class PlaylistsPage(Gtk.Box):
         )
 
     def _commit_row_drag(self, row: _PlaylistEntryRow, source: int, target: int) -> None:
-        changed = target != source
-        if changed:
-            store = self._app.session.playlists
-            selected = self._selected
-            self._app.authoring_action_async(
-                lambda: store.move_entry(selected, row.identifier, target),
-                lambda _playlist: self._app.playlists_changed(),
-                failure=self._app.window_report,
-            )
+        try:
+            if target != source:
+                store = self._app.session.playlists
+                selected = self._selected
+                self._app.authoring_action_async(
+                    lambda: store.move_entry(selected, row.identifier, target),
+                    lambda _playlist: self._app.playlists_changed(),
+                    failure=self._app.window_report,
+                )
+        finally:
+            # The drag ends whatever queuing the move did (a refusal is said in
+            # the window, which can raise): never a list left mid-drag.
+            self._release_row_drag(row)
+
+    def _release_row_drag(self, row: _PlaylistEntryRow) -> None:
         self._order_list.clear_motion()
         row.surface.remove_css_class("wio-reorder-lifted")
         self._drag_source_index = -1
@@ -1833,9 +1839,11 @@ class PlaylistsPage(Gtk.Box):
         publish = self._playlist_change_after_drag
         self._playlist_change_after_drag = False
         self._dragging = False
-        if publish:
-            self._app.playlists_changed()
-        self._finish_deferred_health_refresh()
+        try:
+            if publish:
+                self._app.playlists_changed()
+        finally:
+            self._finish_deferred_health_refresh()
 
     def _finish_deferred_health_refresh(self) -> None:
         if not self._health_refresh_after_drag:

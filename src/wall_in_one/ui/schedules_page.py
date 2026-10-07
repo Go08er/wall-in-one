@@ -1074,21 +1074,24 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if self._loading:
                 return
             index = row.get_selected()
-            (
-                self._app.activate_playlist_async(choices[index - 1].id)
-                if 0 < index <= len(choices)
-                else self._app.resume_schedule_async()
-            )
-            # A ComboRow changes before its callback runs. Put it immediately
-            # back on the last service-owned snapshot; the subsequent status
-            # response is what makes a successful command visible. A failure
-            # therefore cannot leave an optimistic manual/schedule claim.
-            self._loading = True
             try:
-                truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
-                row.set_selected(self._playback_selected(self._app.session, choices, truth))
+                (
+                    self._app.activate_playlist_async(choices[index - 1].id)
+                    if 0 < index <= len(choices)
+                    else self._app.resume_schedule_async()
+                )
             finally:
-                self._loading = False
+                # A ComboRow changes before its callback runs. Put it back on
+                # the last service-owned snapshot, whatever starting the
+                # command did; the subsequent status response is what makes a
+                # successful command visible. A failure therefore cannot leave
+                # an optimistic manual/schedule claim.
+                self._loading = True
+                try:
+                    truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+                    row.set_selected(self._playback_selected(self._app.session, choices, truth))
+                finally:
+                    self._loading = False
             # The next accepted status reconciles this row.  Do not invalidate
             # the authored fingerprint: doing so would rebuild unrelated
             # schedule controls on the next refresh and discard editor state.
@@ -1107,25 +1110,31 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return
             if self._loading:
                 return
-            started = (
-                self._app.activate_playlist_on_async(connector, choices[index - 1].id)
-                if 0 < index <= len(choices)
-                else self._app.resume_schedule_on_async(connector)
-            )
-            # Runtime truth owns this selector. Revert the optimistic GTK
-            # change immediately; the next atomic snapshot advances it only
-            # after Rust has accepted and applied the route transition.
-            truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
-            display = truth.display(connector) if truth is not None else None
-            self._loading = True
+            started = False
             try:
-                self._set_display_selected(
-                    connector,
-                    row,
-                    self._display_playback_selected(display, choices) if display is not None else 0,
+                started = (
+                    self._app.activate_playlist_on_async(connector, choices[index - 1].id)
+                    if 0 < index <= len(choices)
+                    else self._app.resume_schedule_on_async(connector)
                 )
             finally:
-                self._loading = False
+                # Runtime truth owns this selector. Revert the optimistic GTK
+                # change, whatever starting the command did; the next atomic
+                # snapshot advances it only after Rust has accepted and
+                # applied the route transition.
+                truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+                display = truth.display(connector) if truth is not None else None
+                self._loading = True
+                try:
+                    self._set_display_selected(
+                        connector,
+                        row,
+                        self._display_playback_selected(display, choices)
+                        if display is not None
+                        else 0,
+                    )
+                finally:
+                    self._loading = False
             if started:
                 self._playback_truth = None
 
@@ -1170,24 +1179,26 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if self._loading:
                 return
             wanted = button.get_active()
-            self._app.runtime_action_on_async(connector, verb, "on" if wanted else "off")
-            # A mode button is still runtime truth, not an optimistic local
-            # setting. Put it back until the next atomic status confirms the
-            # service accepted the request.
-            truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
-            display = truth.display(connector) if truth is not None else None
-            current = (
-                display.shuffle
-                if display is not None and verb == "shuffle"
-                else display.cycle_enabled
-                if display is not None
-                else False
-            )
-            self._loading = True
             try:
-                button.set_active(current)
+                self._app.runtime_action_on_async(connector, verb, "on" if wanted else "off")
             finally:
-                self._loading = False
+                # A mode button is still runtime truth, not an optimistic local
+                # setting. Put it back, whatever starting the command did,
+                # until the next atomic status confirms the service accepted it.
+                truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+                display = truth.display(connector) if truth is not None else None
+                current = (
+                    display.shuffle
+                    if display is not None and verb == "shuffle"
+                    else display.cycle_enabled
+                    if display is not None
+                    else False
+                )
+                self._loading = True
+                try:
+                    button.set_active(current)
+                finally:
+                    self._loading = False
 
         return changed
 
@@ -1362,8 +1373,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
             def saved(_rule: schedules.Rule) -> None:
                 self._rule_pin = rule_id
+                self._refresh_rules()  # the saved order first, before publishing
                 self._app.schedule_edited()
-                self._refresh_rules()
 
             self._app.authoring_action_async(
                 lambda: store.move(rule_id, position),
@@ -1379,8 +1390,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
 
             def saved(_rule: schedules.Rule) -> None:
                 self._rule_pin = rule_id
+                self._refresh_rules()  # the saved order first, before publishing
                 self._app.schedule_edited()
-                self._refresh_rules()
 
             self._app.authoring_action_async(
                 lambda: store.move_relative(rule_id, step),
@@ -1395,8 +1406,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             store = self._app.session.schedules
 
             def saved(_changed: bool) -> None:
+                self._refresh_rules()  # what is saved first, before publishing
                 self._app.schedule_edited()
-                self._refresh_rules()
 
             self._app.authoring_action_async(
                 lambda: store.remove(rule_id),
@@ -1452,11 +1463,14 @@ class SchedulesPage(Gtk.ScrolledWindow):
             )
 
         def saved(rule: schedules.Rule) -> None:
+            # The editor and the list first, before publishing (it reaches the
+            # window and can raise): a form left filled in "new rule" mode
+            # would save the same rule again.
             self._rule_pin = rule.id
             self._editing_rule = ""
-            self._app.schedule_edited()
             self._clear_rule_editor()
             self._refresh_rules()
+            self._app.schedule_edited()
 
         def prepare() -> Any:
             # Judged by the library: never by one the app knows is stale.

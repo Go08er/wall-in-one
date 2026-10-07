@@ -3060,11 +3060,20 @@ class Application(Adw.Application):
         )
 
     def require_authoring_ready(self, *, report: bool = True) -> bool:
-        """Refuse a GUI mutation until the predecessor decision is settled."""
+        """Refuse a GUI mutation until the predecessor decision is settled.
+
+        A refusal is always False, never an exception: callers settle what a
+        gesture holds (a queued choice, a disabled control) when refused, so
+        saying why must not raise past them. The reason is in the activity log
+        before the window is asked to show it.
+        """
         if self.authoring_ready:
             return True
         if report:
-            self.window_report(self._migration_blocked_response().message)
+            try:
+                self.window_report(self._migration_blocked_response().message)
+            except Exception as error:  # the window may be what failed: refused all the same
+                self.activity_log.record("app", f"The window could not show it: {error}")
         return False
 
     def _migration_blocked_response(self) -> Response:

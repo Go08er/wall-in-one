@@ -16,8 +16,9 @@ accepted.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,6 +32,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.test_ui_authoring_permanence import _session as _permanence_session  # noqa: E402
 from tests.test_ui_next_displays import LAYOUT  # noqa: E402
 from tests.test_ui_next_editing import first_scan, wallpaper  # noqa: E402
 from tests.test_ui_next_slice import finish, run  # noqa: E402
@@ -41,13 +43,20 @@ from tests.test_ui_next_window import (  # noqa: E402,F401
     settled,
     toolkit,
 )
+from tests.test_ui_pairing_picker import (  # noqa: E402
+    QuietPreviewLoader,
+    QuietThumbnailLoader,
+    _mode_index,
+)
+from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
 from tests.test_ui_tidy import _idle, section  # noqa: E402,F401
 from wall_in_one import config, runtime_config  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
-from wall_in_one.library import displays, playlists, schedules  # noqa: E402
+from wall_in_one.library import displays, pairings, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.theme import palettes  # noqa: E402
+from wall_in_one.ui import pairings_page, playlists_page  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next import real_schedule  # noqa: E402
 from wall_in_one.ui.next.displays import DisplaysPage  # noqa: E402
@@ -677,3 +686,263 @@ def test_aa3_classic_default_playlist_not_saved_is_put_back_before_its_report(
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
+
+
+# -- AA-3b: the classic pages put their controls back before a call that can raise ---------
+
+
+def _rule_shapes(rules: Sequence[schedules.Rule]) -> list[tuple[object, ...]]:
+    return [
+        (rule.playlist, rule.months, rule.weekdays, rule.start, rule.end, rule.connector)
+        for rule in rules
+    ]
+
+
+def test_aa3b_classic_rule_save_whose_publication_raised_cannot_save_it_twice(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editor was cleared after publishing: left filled in "new rule" mode when that
+    raised, so a second Save added the same rule again. Remove's list, likewise."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        session = application.session
+        dock = _dock(application, tmp_path)
+        yield "the setup to be published", lambda: settled(application)
+        page = SchedulesPage(application)
+        page.refresh(session)
+        choices = session.playlists.all()
+        page._rule_playlist.set_selected([p.id for p in choices].index(dock.id))
+        page._weekdays[0].set_active(True)
+        calls = _raises_once(application, "schedule_edited", monkeypatch)
+        page._rule_commit.emit("clicked")
+        yield "the rule to save", lambda: settled(application) and bool(calls)
+        assert len(schedules.Store.open().rules) == 1
+        cleared = not any(button.get_active() for button in page._weekdays)
+
+        page._rule_commit.emit("clicked")
+        yield "a second Save", lambda: settled(application)
+        shapes = _rule_shapes(schedules.Store.open().rules)
+        # Before: still filled in, in "new rule" mode, so this saved it again.
+        assert len(set(shapes)) == len(shapes), f"a duplicate rule: {shapes}"
+        assert cleared, "the editor was cleared once the rule saved"
+
+        rows = len(page._rule_rows)
+        (first, *_rest) = schedules.Store.open().rules
+        calls = _raises_once(application, "schedule_edited", monkeypatch)
+        page._make_remove(first.id)(Gtk.Button())
+        yield "the removal", lambda: settled(application) and bool(calls)
+        assert first.id not in [rule.id for rule in schedules.Store.open().rules]
+        assert len(page._rule_rows) == rows - 1 or not schedules.Store.open().rules, (
+            "the list shows what is saved"
+        )
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def _pairings_page(application: Application, monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    page = pairings_page.PairingsPage(application, lambda: None)
+    (item, *_rest) = application.session.library.items
+    page.edit(application.session, item)
+    return page, item
+
+
+def test_aa3b_classic_colour_not_saved_is_put_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's second nit: it reported, then put the colour controls back."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+    wallpaper(tmp_path, "dawn.png")
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        page, item = _pairings_page(application, monkeypatch)
+        keep, light = _mode_index(pairings.Mode.KEEP), _mode_index(pairings.Mode.LIGHT)
+        assert page._mode_row.get_selected() == keep
+        refused = _raises_once(pairings.Store, "choose_mode", monkeypatch)
+        reported = _raises_once(application, "window_report", monkeypatch)
+        page._mode_row.set_selected(light)
+        yield "the refusal", lambda: settled(application) and bool(reported)
+        assert refused and page._palette_intent == {}
+        # Before: Light stayed selected, though nothing was saved.
+        assert page._mode_row.get_selected() == keep, "put back on what is saved"
+
+        page._mode_row.set_selected(light)
+        yield "the next choice", lambda: settled(application) and not page._palette_intent
+        saved = pairings.Store.open().get(pairings.Identity.of(item))
+        assert saved is not None and saved.palette.mode is pairings.Mode.LIGHT
+        page.shutdown()
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_aa3b_a_refusal_whose_report_raised_still_lets_the_gesture_settle(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lane's own refusal (authoring not open) reported through the window: when
+    that raised, it raised past the caller, which never settled its queued choice."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+    wallpaper(tmp_path, "dawn.png")
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        page, _item = _pairings_page(application, monkeypatch)
+        keep, light = _mode_index(pairings.Mode.KEEP), _mode_index(pairings.Mode.LIGHT)
+        monkeypatch.setattr(application, "_authoring_migration_ready", False)
+        reported = _raises_once(application, "window_report", monkeypatch)
+        page._mode_row.set_selected(light)
+        assert reported, "the refusal was said, and that raised"
+        # Before: the queued choice stayed, and Light with it.
+        assert page._palette_intent == {}, page._palette_intent
+        assert page._mode_row.get_selected() == keep
+        monkeypatch.setattr(application, "_authoring_migration_ready", True)
+        page.shutdown()
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_aa3b_a_settings_refusal_whose_report_raised_still_reaches_its_caller(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal on the settings lane: the caller's ``on_error`` puts its control
+    back, but saying why raised first, so it never ran."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        _dock(application, tmp_path)
+        yield "the setup to be published", lambda: settled(application)
+        page = SchedulesPage(application)
+        page.refresh(application.session)
+        monkeypatch.setattr(application, "_authoring_migration_ready", False)
+        reported = _raises_once(application, "window_report", monkeypatch)
+        _default_row(page).set_selected(1)
+        assert reported, "the refusal was said, and that raised"
+        # Before: the row kept showing a default that was never saved.
+        assert _default_row(page).get_selected() == 0, "put back on what is saved"
+        assert application.settings.active_playlist == ""
+        monkeypatch.setattr(application, "_authoring_migration_ready", True)
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def _playback_row(page: SchedulesPage, application: Application, choices: Any) -> Any:
+    row = Adw.ComboRow(model=Gtk.StringList.new(["Schedule", *(p.name for p in choices)]))
+    changed = page._make_playback_changed(choices)
+    return row, changed, "activate_playlist_async", lambda: row.set_selected(1), row.get_selected
+
+
+def _display_row(page: SchedulesPage, application: Application, choices: Any) -> Any:
+    row = Adw.ComboRow(model=Gtk.StringList.new(["Schedule", *(p.name for p in choices)]))
+    changed = page._make_display_playback_changed("DP-1", choices)
+    return row, changed, "activate_playlist_on_async", lambda: row.set_selected(1), row.get_selected
+
+
+def _mode_button(page: SchedulesPage, application: Application, choices: Any) -> Any:
+    button = Gtk.ToggleButton()
+    changed = page._make_display_mode_changed("DP-1", "shuffle")
+    return (
+        button,
+        changed,
+        "runtime_action_on_async",
+        lambda: button.set_active(True),
+        lambda: int(button.get_active()),
+    )
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        pytest.param(_playback_row, id="playback"),
+        pytest.param(_display_row, id="display-playback"),
+        pytest.param(_mode_button, id="display-shuffle"),
+    ],
+)
+def test_aa3b_classic_runtime_controls_go_back_whatever_starting_the_command_did(
+    runtime: FakeRuntime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: Callable[[SchedulesPage, Application, Any], Any],
+) -> None:
+    """Runtime truth owns these: each is put back at once, even if the call raised."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        _dock(application, tmp_path)
+        yield "the setup to be published", lambda: settled(application)
+        page = SchedulesPage(application)
+        page.refresh(application.session)
+        widget, changed, call, click, shown = control(
+            page, application, application.session.playlists.all()
+        )
+        before = shown()
+        calls = _raises_once(application, call, monkeypatch)
+        click()
+        with pytest.raises(RuntimeError, match="injected"):
+            changed(widget, None) if not isinstance(widget, Gtk.ToggleButton) else changed(widget)
+        assert calls
+        # Before: the optimistic choice stayed, claiming what the runtime never took.
+        assert shown() == before, "put back on runtime truth"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_aa3b_a_classic_entry_drag_ends_whatever_queuing_its_move_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal said through a window that raised left the list mid-drag."""
+    monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
+    session, playlist, items = _permanence_session(tmp_path)
+    session.playlists.add(playlist.id, items[1].path, entry_id="second")
+
+    def refuse(*_arguments: object, **_keywords: object) -> bool:
+        raise RuntimeError("injected: the refusal could not be said")
+
+    app = SimpleNamespace(
+        session=session, authoring_action_async=refuse, window_report=lambda _m: None
+    )
+    page = playlists_page.PlaylistsPage(app)  # type: ignore[arg-type]
+    page.refresh(session)
+    row = page._entry_rows["first"]
+    page._begin_drag()
+    with pytest.raises(RuntimeError, match="injected"):
+        page._commit_row_drag(row, 0, 1)
+    # Before: still dragging, so the list refused every later change.
+    assert not page._dragging
+
+    def publish_raises() -> None:
+        raise RuntimeError("injected: playlists_changed failed")
+
+    app.playlists_changed = publish_raises
+    page._begin_drag()
+    page._playlist_change_after_drag = True
+    page._health_refresh_after_drag = True
+    with pytest.raises(RuntimeError, match="injected"):
+        page._finish_drag()
+    # Before: the health refresh it deferred during the drag was never done.
+    assert not page._health_refresh_after_drag
+    session.shutdown()

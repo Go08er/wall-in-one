@@ -659,17 +659,47 @@ def _manifests() -> _Manifests:
     return _Manifests(found, unreadable)
 
 
-def _undo_withheld(action: str, manifests: _Manifests) -> str:
-    """Why Undo (or Keep Archived) for ``action`` must wait, or "".
+def _unread_latest(action: str, manifests: _Manifests) -> _UnreadArchive | None:
+    """An archive that can't be read and may be ``action``'s latest, if there is one.
 
-    While an archive that can't be read may be one of ``action``'s (its
-    folder's name says so, or doesn't say), the newest readable one is not
-    known to be the latest: Undo never falls back to an older archive.
+    Its folder's name says it is one of ``action``'s, or doesn't say. While
+    there is one, the newest readable archive of ``action`` is not known to be
+    the latest, so nothing is decided from it: see `_undo_withheld` and
+    `_edit_withheld`.
     """
     for unread in manifests.unreadable:
         if unread.action in (None, action):
-            return f"{unread.why}, and it may hold a later change; Undo waits until it can be read"
-    return ""
+            return unread
+    return None
+
+
+def _undo_withheld(action: str, manifests: _Manifests) -> str:
+    """Why Undo (or Keep Archived) for ``action`` must wait, or "".
+
+    Undo never falls back to an older archive (`_unread_latest`).
+    """
+    unread = _unread_latest(action, manifests)
+    if unread is None:
+        return ""
+    return f"{unread.why}, and it may hold a later change; Undo waits until it can be read"
+
+
+def _edit_withheld(action: str, manifests: _Manifests) -> str:
+    """Why a change to Noctalia's settings, or its Retry Reload, must wait, or "".
+
+    The archive that can't be read may be the latest edit of ``action``, with
+    an Undo still waiting for Noctalia's reload: applying again would journal
+    a newer edit over it (`_refuse_while_undo_pends`), and Retry Reload would
+    finish or confirm an older edit instead.
+    """
+    unread = _unread_latest(action, manifests)
+    if unread is None:
+        return ""
+    return (
+        f"{unread.why[:1].upper()}{unread.why[1:]}, so whether an Undo of this change "
+        "still waits for Noctalia to reload isn't known. Apply and Retry Reload wait "
+        "until it can be read"
+    )
 
 
 def _latest(action: Action, manifests: _Manifests) -> _Manifest | None:
@@ -2257,6 +2287,10 @@ def _refuse_while_undo_pends(action: Action, manifests: _Manifests) -> None:
     The newer journal would hide the pending one from Retry Reload, and with it
     the cleanup of anything that Undo still owns (the created template).
     """
+    withheld = _edit_withheld(action, manifests)
+    if withheld:
+        # The pending Undo, if there is one, may be in the archive that can't be read.
+        raise TidyError(f"{withheld}.")
     if _pending_undo(action, manifests) is not None:
         raise TidyError(f"{_UNDO_PENDING_BLOCK}.")
 
@@ -2776,11 +2810,32 @@ def plan(
             retry="Retry Reload",
             blocked=_UNDO_PENDING_BLOCK,
         )
+    palette, plugin = (_with_edit_withheld(found, manifests) for found in (palette, plugin))
     leftovers, palette, old_template, plugin = (
         _with_undo_withheld(found, manifests)
         for found in (leftovers, palette, old_template, plugin)
     )
     return Plan((leftovers, palette, old_template, plugin, _plan_thumbnails()))
+
+
+def _with_edit_withheld(found: ActionPlan, manifests: _Manifests) -> ActionPlan:
+    """``found`` with Apply blocked and Retry Reload withdrawn while `_edit_withheld` says so.
+
+    What the newest *readable* edit says is pending (the retry, and the notes
+    that tell the person to retry) is withdrawn with it: that edit may be an
+    older one. The block says why neither is offered.
+    """
+    reason = _edit_withheld(found.action, manifests)
+    if not reason:
+        return found
+    return replace(
+        found,
+        blocked=reason,
+        retry="",
+        notes=tuple(
+            note for note in found.notes if note not in (_RELOAD_PENDING_NOTE, _UNDO_RELOAD_NOTE)
+        ),
+    )
 
 
 def _with_undo_withheld(found: ActionPlan, manifests: _Manifests) -> ActionPlan:
@@ -2790,7 +2845,8 @@ def _with_undo_withheld(found: ActionPlan, manifests: _Manifests) -> ActionPlan:
         return found
     # Not the newest readable archive's Undo with a caveat: that one may be
     # an older change, and Keep Archived would mark the wrong archive.
-    unread = next(item for item in manifests.unreadable if item.action in (None, found.action))
+    unread = _unread_latest(found.action, manifests)
+    assert unread is not None  # `_undo_withheld` gave a reason
     return replace(found, undo=Undo(unread.directory, "", "", blocked=reason))
 
 
@@ -2838,6 +2894,9 @@ def retry(action: Action) -> Result:
         raise TidyError("There's nothing to retry for this action.")
     with _exclusive():
         manifests = _manifests()
+        withheld = _edit_withheld(action, manifests)
+        if withheld:
+            raise TidyError(f"{withheld}.")
         waiting = _pending_undo(action, manifests)
         if waiting is not None:
             _require_undo_room(waiting, items=0)

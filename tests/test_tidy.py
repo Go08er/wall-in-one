@@ -754,6 +754,62 @@ def test_an_old_template_in_an_archive_that_cannot_be_read_is_not_called_missing
     assert str(refused.value) == f"Nothing was changed: {undo.blocked}."
 
 
+@pytest.mark.parametrize("action", [tidy.PALETTE_TEMPLATE, tidy.PLUGIN_SETTINGS])
+def test_apply_and_retry_wait_while_the_latest_edit_archive_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, action: tidy.Action
+) -> None:
+    """An Undo of a change to Noctalia's settings put the settings back and still
+    waits for Noctalia to reload, so Apply is refused until Retry Reload finishes
+    it. Then that edit's archive can't be read (a native EACCES). That is not "no
+    Undo pending": Apply is refused with the reason, nothing is journalled over
+    the pending Undo, and Retry Reload says why it waits instead of finding
+    nothing to retry. Once the archive can be read, Retry Reload finishes the Undo."""
+    if action == tidy.PALETTE_TEMPLATE:
+        _stale, archive = _template_switch(monkeypatch, confirmed=True)
+    else:
+        _noctalia_settings()
+        monkeypatch.setattr(noctalia, "reload_config", lambda: None)
+        monkeypatch.setattr(tidy, "_reload_noctalia", lambda: True)
+        applied = tidy.apply(action, tidy.plan(roots=()).action(action)).archive
+        assert applied is not None
+        archive = applied
+    settings = paths.noctalia_settings_path()
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: False)
+    tidy.undo(action)
+    restored = settings.read_bytes()
+    archives = sorted(tidy.archive_root().iterdir())
+    pending = tidy.plan(roots=()).action(action)
+    assert pending.changes and pending.retry == "Retry Reload"
+    assert pending.blocked == tidy._UNDO_PENDING_BLOCK
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: True)
+
+    with _unsearchable(archive):
+        found = tidy.plan(roots=()).action(action)
+        with pytest.raises(tidy.TidyError) as refused:
+            # Failed on e1d63c0: it applied, journalling a newer edit over the pending Undo.
+            tidy.apply(action, found)
+        with pytest.raises(tidy.TidyError) as waits:
+            # Failed on e1d63c0: "There's no reload left to retry."
+            tidy.retry(action)
+
+    reason = (
+        f"The manifest of the archive {archive} can't be read (Permission denied), so "
+        "whether an Undo of this change still waits for Noctalia to reload isn't known. "
+        "Apply and Retry Reload wait until it can be read"
+    )
+    # Failed on e1d63c0: ready, with no reason, as if no Undo were pending.
+    assert found.changes and not found.ready and found.blocked == reason
+    assert found.retry == "" and tidy._UNDO_RELOAD_NOTE not in found.notes
+    assert str(refused.value) == f"{reason}." == str(waits.value)
+    assert settings.read_bytes() == restored, "nothing was applied"
+    assert sorted(tidy.archive_root().iterdir()) == archives, "and nothing was journalled"
+
+    again = tidy.plan(roots=()).action(action)
+    assert again.retry == "Retry Reload" and again.blocked == tidy._UNDO_PENDING_BLOCK
+    finished = tidy.retry(action)
+    assert finished.changed and "the Undo is complete" in finished.message
+
+
 def test_a_file_that_cannot_be_looked_at_is_not_called_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

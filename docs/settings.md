@@ -157,12 +157,16 @@ that folder.
 An archive that is there but can't be read (its folder or `manifest.json`
 can't be opened, or the manifest isn't one this version reads) is never
 treated as no archive. While there is one, the Undo it may belong to is shown
-with the reason and can't be chosen, rather than undoing an older change, and
+with the reason and can't be chosen, rather than undoing an older change.
 Archive the old palette template waits, because that archive may be the
-template fix whose reload Noctalia never confirmed. Both come back as soon as
-the archive can be read; to set a damaged one aside, move its folder out of
-`tidy-archive` (its Undo goes with it). An archive folder with no `manifest.json` changed nothing and
-is ignored.
+template fix whose reload Noctalia never confirmed. For the two changes to
+Noctalia's settings, Apply and Retry Reload wait as well, because an Undo of
+that change may still be waiting for Noctalia to reload. All of it comes back
+as soon as the archive can be read. To set a damaged archive aside, move its
+folder out of `tidy-archive`; Tidy up then treats it as if it never existed,
+so its Undo goes with it, and a template archive made after that isn't
+checked against it. An archive folder with no `manifest.json` changed nothing
+and is ignored.
 
 After an update, a card at the top of the window offers the first four once,
 in either interface, when there is something to tidy; Review opens Settings →

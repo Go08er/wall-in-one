@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import time
@@ -1370,3 +1371,95 @@ def test_a_slow_decoder_cannot_hold_startup_past_the_rebuild_budget(
     monkeypatch.setattr(stills, "_run", fast_render)
     assert capture_upgrade.prepare().migrated == 1, "the next start finishes the rebuild"
     assert not fixture.capture.exists()
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_source_that_cannot_be_looked_at_is_not_an_orphan(
+    tmp_path: Path, cleanup_environment: list[Path], monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """Only a missing source makes its old capture an orphan. Here the source's
+    folder loses its search permission after the rebuild pass looked at it (a
+    native EACCES at the retire step). The video's own choice names a missing
+    image, so nothing replaced the old capture: it is kept."""
+    fixture = _cleanup_fixture(tmp_path)
+    stills.write_sidecar(fixture.source, fixture.root / "deleted-manual.png")
+    original = fixture.capture.read_bytes()
+    confirm = capture_upgrade._runtime_references
+
+    def confirm_then_lose_the_folder(document: bytes) -> frozenset[str]:
+        references = confirm(document)
+        fixture.source.parent.chmod(mode)
+        return references
+
+    monkeypatch.setattr(capture_upgrade, "_runtime_references", confirm_then_lose_the_folder)
+    try:
+        result = capture_upgrade.prepare()
+    finally:
+        fixture.source.parent.chmod(0o700)
+
+    # Failed on 6f92aa5: migrated=1, the capture and its record destroyed and
+    # the video left with no still at all.
+    assert result == capture_upgrade.Result(retained=1)
+    assert fixture.capture.read_bytes() == original
+    assert fixture.authority.sidecar_path.exists()
+    assert cleanup_environment == []
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_capture_that_cannot_be_looked_at_is_counted_as_kept(
+    tmp_path: Path,
+    cleanup_environment: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mode: int,
+) -> None:
+    """The old captures' folder loses its search permission before the retire
+    step (a native EACCES). A capture that can't be looked at is not one already
+    retired: it is counted as kept, and the log says why."""
+    fixture = _cleanup_fixture(tmp_path)
+    _new_capture(fixture)
+    original = fixture.capture.read_bytes()
+    confirm = capture_upgrade._runtime_references
+
+    def confirm_then_lose_the_folder(document: bytes) -> frozenset[str]:
+        references = confirm(document)
+        fixture.capture.parent.chmod(mode)
+        return references
+
+    monkeypatch.setattr(capture_upgrade, "_runtime_references", confirm_then_lose_the_folder)
+    try:
+        with caplog.at_level(logging.WARNING, logger=capture_upgrade.LOGGER.name):
+            result = capture_upgrade.prepare()
+    finally:
+        fixture.capture.parent.chmod(0o700)
+
+    # Failed on 6f92aa5: Result(), as if there had been nothing to retire.
+    assert result == capture_upgrade.Result(retained=1)
+    assert fixture.capture.read_bytes() == original
+    assert "Could not retire automatic capture" in caplog.text
+    assert "Permission denied" in caplog.text
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_captures_that_cannot_be_looked_at_defer_the_cleanup_aloud(
+    tmp_path: Path, cleanup_environment: list[Path], caplog: pytest.LogCaptureFixture, mode: int
+) -> None:
+    """With the old captures' folder unsearchable from the start (a native
+    EACCES), there is not "nothing to clean up": the cleanup is deferred, and
+    the log says so."""
+    fixture = _cleanup_fixture(tmp_path)
+    _new_capture(fixture)
+    original = fixture.capture.read_bytes()
+    fixture.capture.parent.chmod(mode)
+    try:
+        with caplog.at_level(logging.WARNING, logger=capture_upgrade.LOGGER.name):
+            result = capture_upgrade.prepare()
+    finally:
+        fixture.capture.parent.chmod(0o700)
+
+    assert result == capture_upgrade.Result()
+    assert fixture.capture.read_bytes() == original
+    # Failed on 6f92aa5: nothing was logged.
+    assert "Generated-still cleanup deferred" in caplog.text
+    assert "Permission denied" in caplog.text
+    assert cleanup_environment == []

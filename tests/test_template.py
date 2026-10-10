@@ -1744,6 +1744,53 @@ def test_a_late_write_to_a_proven_backup_copy_survives(
         ), said
 
 
+def test_a_locator_left_at_its_name_unseen_keeps_everything_it_names(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transaction locator's move to its fixed name lands, and the settings
+    folder can't be searched while that move is verified and undone (a native
+    EACCES on both); it can be again by the cleanup. The locator is at its name
+    and names the candidate and the lock, so they are kept, not discarded."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    folder = settings_path.parent
+    locator = template._transaction_locator(settings_path)
+    staged = (SAMPLE_SETTINGS + "\n# the staged candidate\n").encode()
+    real_rename = file_io._rename_noreplace
+    real_restore = file_io._restore_after_failed_verification
+    landed: list[Path] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not landed and destination == locator:
+            landed.append(source)
+            folder.chmod(0o000)
+
+    def restore_then_see_again(source: Path, destination: Path) -> Path | None:
+        try:
+            return real_restore(source, destination)
+        finally:
+            folder.chmod(0o700)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(file_io, "_restore_after_failed_verification", restore_then_see_again)
+    try:
+        with template._read_settings_snapshot(settings_path) as snapshot:
+            backup = template._backup(settings_path, snapshot)
+            with pytest.raises(template.TemplateInstallError) as raised:
+                template._begin_publication_transaction(settings_path, staged, snapshot, backup)
+    finally:
+        folder.chmod(0o700)
+
+    said = str(raised.value)
+    assert landed and not landed[0].exists(), "the locator stayed at its fixed name"
+    record = json.loads(locator.read_bytes())
+    candidate, lock = folder / record["candidate"], folder / record["lock"]
+    # Failed on 59e6a5d: both discarded, under a locator that still names them.
+    assert candidate.read_bytes() == staged
+    assert lock.is_file()
+    assert f"cleanup entries remain at {locator}, {candidate}, {lock}" in said, said
+
+
 def test_a_backup_copy_whose_retirement_could_not_be_verified_is_not_said_changed(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

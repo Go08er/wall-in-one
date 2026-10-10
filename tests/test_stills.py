@@ -2072,6 +2072,99 @@ def test_a_still_moved_back_that_cannot_be_retired_is_said_where_it_is(
     assert str(survivors[0]) in caplog.text
 
 
+def _rendered(_video: Path, temporary: Path, _seek: float, *, processes: object = None) -> str:
+    del processes
+    temporary.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+    return ""
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_still_left_at_its_name_unseen_is_not_said_to_have_moved_back(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: int
+) -> None:
+    """The stills folder loses its search permission right after the rendered
+    still's move to its name (a native EACCES): the move can be neither verified
+    nor undone. The still is at its public name and there is no temporary. The
+    error says where it was left, not that it "moved back" to a temporary it
+    never returned to."""
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    real_rename = file_io._rename_noreplace
+    temporaries: list[str] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not temporaries and destination.name == target.name:
+            temporaries.append(source.name)
+            target.parent.chmod(mode)
+
+    monkeypatch.setattr(stills, "_run", _rendered)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    try:
+        with caplog.at_level(logging.INFO), pytest.raises(stills.StillError) as raised:
+            stills.generate(video, root)
+    finally:
+        target.parent.chmod(0o700)
+
+    said = str(raised.value)
+    temporary = target.with_name(temporaries[0])
+    assert target.read_bytes() == b"\x89PNG\r\n\x1a\nrendered" and not temporary.exists()
+    assert _retained(target.parent) == []
+    # Failed on 6f92aa5: "the still moved back from its name could not be retired
+    # intact (...); whether it is still at <temporary> could not be checked".
+    assert "moved back" not in said and "moved back" not in caplog.text, said
+    assert said.endswith(
+        f"; the still could not be verified and was left at {target}; whether anything is "
+        f"at {temporary} could not be checked (Permission denied)"
+    ), said
+    assert "/proc/" not in said, said
+
+
+def test_a_still_left_at_its_name_is_not_said_to_be_at_a_temporary_somebody_took(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The rendered still's move to its name lands, it is edited in place there
+    (so it no longer verifies), and something else takes the temporary's name, so
+    it can't be moved back. The edited still is at its public name: the error
+    says so, and that what is at the temporary is not it. Neither is touched."""
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    real_rename = file_io._rename_noreplace
+    temporaries: list[str] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not temporaries and destination.name == target.name:
+            temporaries.append(source.name)
+            with target.open("ab") as handle:
+                handle.write(b" and edited")
+            target.with_name(source.name).write_text("somebody else's", encoding="utf-8")
+
+    monkeypatch.setattr(stills, "_run", _rendered)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    with caplog.at_level(logging.INFO), pytest.raises(stills.StillError) as raised:
+        stills.generate(video, root)
+
+    said = str(raised.value)
+    temporary = target.with_name(temporaries[0])
+    assert target.read_bytes() == b"\x89PNG\r\n\x1a\nrendered and edited", "the edit survives"
+    assert temporary.read_text(encoding="utf-8") == "somebody else's"
+    assert _retained(target.parent) == []
+    # Failed on 6f92aa5: "the still moved back from its name could not be retired
+    # intact (...), so it was left at <temporary>": somebody else's file, and the
+    # edited still at its name not mentioned.
+    assert "moved back" not in said and "moved back" not in caplog.text, said
+    assert said.endswith(
+        f"; the still could not be verified and was left at {target}; what is now at "
+        f"{temporary} is not that still and was left as it is"
+    ), said
+    assert "/proc/" not in said, said
+
+
 def test_a_still_moved_back_after_an_unverified_publication_is_retired_intact(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

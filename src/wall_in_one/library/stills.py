@@ -158,8 +158,9 @@ class _ImageTemporary:
     logical_path: Path
     pin: file_io.PinnedPath | None = field(repr=False)
     published: bool = False
-    #: Its move to the public still name could not be verified and whatever
-    #: was there was moved back: it was public for a moment.
+    #: Its move to the public still name could not be verified and it was
+    #: moved back: it was public for a moment. Not set when it stayed at that
+    #: name, nor when it never left this one (`came_back`).
     relocated: bool = False
 
     @property
@@ -182,6 +183,48 @@ class _ImageTemporary:
 
     def mark_published(self) -> None:
         self.published = True
+
+    def came_back(self) -> bool:
+        """Whether this output is at its temporary name again after a failed move.
+
+        Asked when the move's error names no place it stayed. False only when
+        that is known: nothing is at the temporary name, or what is there is
+        not this output (the move never began, and `close` then has nothing of
+        its own to retire). A name that can't be looked at may hold it, so it
+        is treated as having been public.
+        """
+        if self.pin is None:
+            return False
+        try:
+            named = self.path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return (named.st_dev, named.st_ino) == self.pin.identity
+
+    def left_public(self, target: Path) -> str:
+        """What to add to a move's error when the output stayed at ``target``.
+
+        Its move there could be neither verified nor undone (file_io's
+        preserved path): something else took the temporary's name, or the
+        folder can't be looked at. It is at the public name, not back here, so
+        `close` has nothing to retire and whatever is at the temporary name is
+        not it.
+        """
+        said = f"; the still could not be verified and was left at {target}"
+        found = file_io.entry_presence(self.path)
+        if found is True:
+            return (
+                f"{said}; what is now at {self.logical_path} is not that still and was "
+                "left as it is"
+            )
+        if found is False:
+            return said
+        return (
+            f"{said}; whether anything is at {self.logical_path} could not be checked "
+            f"({_why(found)})"
+        )
 
     def _not_retired(self, error: OSError | ValueError) -> str:
         """Where the moved-back output is after its retirement was refused, for a person."""
@@ -1312,14 +1355,22 @@ def _publish_image(
             media_committed = True
             temporary.mark_published()
         except BaseException as error:
+            stayed = ""
             if isinstance(error, file_io.PathChangedError):
-                temporary.relocated = True
+                if error.preserved_path is not None:
+                    # Neither verified nor moved back: the still is at its
+                    # public name. It is not relocated, and the error says so.
+                    stayed = temporary.left_public(target)
+                else:
+                    temporary.relocated = temporary.came_back()
             if isinstance(error, OSError):
                 # Said by its real folder while that folder's descriptor is
                 # certainly still its own: afterwards the spelling means nothing.
                 file_io.respell_error(
                     error, str(temporary.path.parent), str(temporary.logical_path.parent)
                 )
+                if stayed and error.args and isinstance(error.args[0], str):
+                    error.args = (f"{error.args[0]}{stayed}", *error.args[1:])
             if claim is not None:
                 try:
                     restored = claim.restore()

@@ -1557,3 +1557,113 @@ def test_a_moved_entry_that_cannot_be_looked_at_is_not_said_to_be_restored(
     assert destination.read_text(encoding="utf-8") == "kept" and not source.exists()
     # Failed on 59e6a5d: None, which every caller reads as "moved back".
     assert raised.value.preserved_path == destination
+
+
+def _claimed(tmp_path: Path) -> tuple[Path, file_io.ClaimedPath, Path]:
+    """A file moved into a replayable deletion claim, and that claim's folder."""
+    source = tmp_path / "wallpaper.png"
+    source.write_bytes(b"pixels")
+    fingerprint = file_io.regular_file_fingerprint(source)
+    token = "0123456789abcdef0123456789abcdef"
+    claim = file_io.claim_for_deletion(
+        source,
+        expected_identity=fingerprint[:2],
+        expected_fingerprint=fingerprint,
+        operation_token=token,
+    )
+    return source, claim, file_io.deletion_claim_directory(source, token)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_claim_that_cannot_be_looked_at_is_not_said_to_be_gone(tmp_path: Path, mode: int) -> None:
+    """The claim's folder loses its search permission (a native EACCES on every
+    lookup beneath it), so the claim can't be verified. The file is still in it:
+    the error names where, and does not read "can't look" as "nothing is left"."""
+    source, claim, folder = _claimed(tmp_path)
+    folder.chmod(mode)
+    try:
+        with pytest.raises(file_io.PathChangedError) as raised:
+            claim.discard()
+    finally:
+        folder.chmod(0o700)
+        claim.close()
+
+    assert (folder / "entry").read_bytes() == b"pixels" and not source.exists()
+    # Failed on 6f92aa5: None ("no longer available"): nothing left to recover.
+    assert raised.value.preserved_path == folder / "entry"
+    assert f"could not be inspected at {folder / 'entry'}" in str(raised.value)
+
+
+def test_a_claim_whose_entry_is_gone_is_still_said_to_be_gone(tmp_path: Path) -> None:
+    """The other half of the rule: ``FileNotFoundError`` is absence, and only it."""
+    _source, claim, folder = _claimed(tmp_path)
+    (folder / "entry").unlink()
+    try:
+        with pytest.raises(file_io.PathChangedError) as raised:
+            claim.discard()
+        assert not claim.is_present()
+    finally:
+        claim.close()
+
+    assert raised.value.preserved_path is None
+    assert "is no longer available" in str(raised.value)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_claim_entry_that_cannot_be_looked_at_still_counts_as_present(
+    tmp_path: Path, mode: int
+) -> None:
+    """`is_present` is what a removal asks before it reports the file as removed.
+    An entry in a folder that can't be searched is not known to be gone."""
+    _source, claim, folder = _claimed(tmp_path)
+    try:
+        assert claim.is_present()
+        folder.chmod(mode)
+        try:
+            # Failed on 6f92aa5: False.
+            assert claim.is_present()
+            assert isinstance(claim.presence(), PermissionError)
+        finally:
+            folder.chmod(0o700)
+        assert claim.presence() is True
+    finally:
+        claim.close()
+
+
+def test_a_discard_that_leaves_its_claim_unreachable_does_not_answer_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`discard_regular_if_same` answers ``False`` when nothing was left in a claim.
+    Here the claim's folder loses its search permission once the claim has been
+    verified: the entry can't be opened to be destroyed, moved back, or looked
+    at (each a native EACCES). It is still in the claim, and that is raised with
+    its place, as it already was for a claim that could be looked at."""
+    source = tmp_path / "record.json"
+    source.write_bytes(b"transaction record")
+    fingerprint = file_io.regular_file_fingerprint(source)
+    verify = file_io.ClaimedPath._verify
+    folders: list[Path] = []
+
+    def verify_then_lose_the_folder(claim: file_io.ClaimedPath, **options: bool) -> None:
+        verify(claim, **options)
+        if not folders:
+            folders.append(claim.path.parent)
+            claim.path.parent.chmod(0o600)
+
+    monkeypatch.setattr(file_io.ClaimedPath, "_verify", verify_then_lose_the_folder)
+    try:
+        # Failed on 6f92aa5: returned False, the answer for "safely put back".
+        with pytest.raises(file_io.PathChangedError) as raised:
+            file_io.discard_regular_if_same(
+                source,
+                expected_identity=fingerprint[:2],
+                expected_fingerprint=fingerprint,
+            )
+    finally:
+        for folder in folders:
+            folder.chmod(0o700)
+
+    (folder,) = folders
+    assert (folder / "entry").read_bytes() == b"transaction record" and not source.exists()
+    assert raised.value.preserved_path == folder / "entry"
+    assert f"whether it is still at {folder / 'entry'} could not be checked" in str(raised.value)

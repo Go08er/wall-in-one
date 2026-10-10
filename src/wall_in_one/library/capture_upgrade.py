@@ -104,6 +104,20 @@ def _runtime_references(document: bytes) -> frozenset[str]:
         time.sleep(0.1)
 
 
+def _there(path: Path, *, follow_symlinks: bool = False) -> bool:
+    """Whether an entry is at ``path``; one that can't be looked at raises.
+
+    Only a missing entry is absent. Reading "can't look" as "not there" would
+    let a hidden source pass for an orphan, or a hidden capture for one
+    already retired. Every caller is inside a handler that keeps the capture
+    and logs the reason.
+    """
+    presence = file_io.entry_presence(path, follow_symlinks=follow_symlinks)
+    if isinstance(presence, OSError):
+        raise presence
+    return presence
+
+
 def _discard(pin: file_io.PinnedPath, generation: file_io.FileFingerprint, parent: Path) -> None:
     if not file_io.discard_regular_if_same(
         pin.path,
@@ -212,7 +226,7 @@ def _has_other_still(entry: adopted.Authority, target: Path) -> bool:
     # Relative paths and symlink aliases must not disguise either automatic
     # capture as a separate choice, bypassing its protection/validation.
     return not selected.samefile(entry.capture_path) and (
-        not target.exists() or not selected.samefile(target)
+        not _there(target, follow_symlinks=True) or not selected.samefile(target)
     )
 
 
@@ -230,16 +244,16 @@ def _rebuild(
             return  # An orphan needs no replacement.
         if _has_other_still(entry, target):
             return  # Keep the separate choice; no automatic replacement is needed.
-        if os.path.lexists(target):
+        if _there(target):
             _validate_replacement(target)
         removed = _withdraw_old_selector(entry)
         selector = entry.source_path.with_name(entry.source_path.name + pairing.SIDECAR_SUFFIX)
-        if not removed and os.path.lexists(selector):
+        if not removed and _there(selector):
             # The normal publisher cannot overwrite this choice, even if its
             # image is missing. Do not render an output it must roll back.
             return
     try:
-        if removed or not os.path.lexists(target):
+        if removed or not _there(target):
             # generate takes its own source lock, uses atomic publication and
             # never overwrites a different source-sidecar choice.
             stills.generate(entry.source_path, adoption.root, processes=processes)
@@ -273,13 +287,13 @@ def _rebuild_within_budget(adoption: adopted.Adoption) -> set[Path]:
     timer.start()
     try:
         for entry in adoption.authorities:
-            if not os.path.lexists(entry.capture_path):
-                continue
-            if processes.cancelled():
-                failed.add(entry.capture_path)
-                deferred += 1
-                continue
             try:
+                if not _there(entry.capture_path):
+                    continue
+                if processes.cancelled():
+                    failed.add(entry.capture_path)
+                    deferred += 1
+                    continue
                 _rebuild(adoption, entry, processes)
             except (OSError, ValueError, stills.StillError, ProviderError) as error:
                 failed.add(entry.capture_path)
@@ -305,14 +319,14 @@ def prepare() -> Result:
     try:
         adoption = adopted.recorded()
         if adoption is None or not any(
-            os.path.lexists(entry.capture_path) or os.path.lexists(entry.sidecar_path)
+            _there(entry.capture_path) or _there(entry.sidecar_path)
             for entry in adoption.authorities
         ):
             return Result()
         # An existing GUI owns an accepted Library snapshot. Do not delete
         # files underneath it when a second launch or service restart arrives.
         # A stale socket is harmless: normal app startup handles its removal.
-        if os.path.lexists(paths.socket_path()):
+        if _there(paths.socket_path()):
             LOGGER.info("Automatic-capture cleanup will run after the app is closed and reopened")
             return Result()
         with runtime_config.compiler_lock(), contextlib.ExitStack() as stack:
@@ -366,10 +380,10 @@ def prepare() -> Result:
                 source = MediaItem(entry.source_path, Kind.VIDEO, 0, 0)
                 try:
                     with stills.source_lifecycle_lock(source):
-                        if not os.path.lexists(entry.capture_path):
-                            if os.path.lexists(entry.sidecar_path):
+                        if not _there(entry.capture_path):
+                            if _there(entry.sidecar_path):
                                 with _metadata(adoption, entry) as (metadata, metadata_generation):
-                                    if os.path.lexists(entry.capture_path):
+                                    if _there(entry.capture_path):
                                         raise OSError("old capture pathname was repopulated")
                                     _discard(
                                         metadata, metadata_generation, entry.sidecar_path.parent
@@ -382,7 +396,7 @@ def prepare() -> Result:
                             metadata_generation,
                         ):
                             target = stills.destination(entry.source_path, adoption.root)
-                            if os.path.lexists(entry.source_path):
+                            if _there(entry.source_path):
                                 selected = pairing.read_sidecar(entry.source_path)
                                 if selected is not None and selected.samefile(entry.capture_path):
                                     raise OSError("the original capture is still selected")

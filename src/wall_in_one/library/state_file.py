@@ -873,6 +873,19 @@ def _entry_present(path: Path) -> bool | OSError:
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _LeftAtItsName:
+    """An entry the put-back move left at the public name, and what is said of it.
+
+    That move landed and could be neither verified nor undone, so the entry is
+    at ``place`` and not at the temporary. The error raised for it gives
+    ``place`` as its ``preserved_path``, matching what ``said`` says.
+    """
+
+    said: str
+    place: Path
+
+
 def _remaining_at(temporary: Path, otherwise: Path | None) -> Path | None:
     """``PathChangedError.preserved_path`` for a publication that ended in error.
 
@@ -897,7 +910,7 @@ def _restore_relocated_publication_entry(
     candidate_document: bytes,
     *,
     stayed: bool = False,
-) -> str | _CandidateLeftBehind | None:
+) -> str | _CandidateLeftBehind | _LeftAtItsName | None:
     """Restore a post-publication replacement relocated to our temporary.
 
     ``atomic_move_no_replace`` restores an unverified destination to its
@@ -965,9 +978,12 @@ def _restore_relocated_publication_entry(
             retained = _retained_publication_candidate(
                 path, candidate, candidate_fingerprint, candidate_document
             )
-            if retained is not None:
-                return retained
-            return f"the {relocated_description} remains at {path}: {error}"
+            return _LeftAtItsName(
+                retained
+                if retained is not None
+                else f"the {relocated_description} remains at {path}: {error}",
+                path,
+            )
         if same_candidate:
             return _CandidateLeftBehind(f"the publication candidate could not be put back: {error}")
         # Not put back: where it is now is looked at, not inferred from the failure.
@@ -1224,6 +1240,23 @@ def write_atomic_text(
     )
 
 
+def _undiscarded_temporary(cleanup: OSError) -> str:
+    """What to add to a failed write whose unpublished temporary was not discarded."""
+    left = cleanup.preserved_path if isinstance(cleanup, file_io.PathChangedError) else None
+    where = f" and was left at {left}" if left is not None else ""
+    return f"; its unpublished temporary file could not be discarded ({cleanup}){where}"
+
+
+def _say_also(failure: OSError | UnicodeError, addition: str) -> None:
+    """Add ``addition`` to ``failure``'s message in place, keeping its type and fields."""
+    if isinstance(failure, OSError) and isinstance(failure.strerror, str):
+        failure.strerror = f"{failure.strerror}{addition}"
+    elif isinstance(failure, OSError) and failure.args and isinstance(failure.args[0], str):
+        failure.args = (f"{failure.args[0]}{addition}", *failure.args[1:])
+    else:
+        failure.add_note(addition.removeprefix("; "))
+
+
 def write_atomic_bytes(
     path: Path,
     contents: bytes,
@@ -1302,6 +1335,12 @@ def write_atomic_bytes(
                     # Said once the cleanup below has settled the temporary.
                     left_behind = restoration
                     raise
+                if isinstance(restoration, _LeftAtItsName):
+                    # The put-back left it at the name: that is where it is,
+                    # whatever the first move's error gave.
+                    raise file_io.PathChangedError(
+                        f"{error}; {restoration.said}", preserved_path=restoration.place
+                    ) from error
                 if restoration is None and error.preserved_path == path:
                     restoration = _retained_publication_candidate(
                         path,
@@ -1335,12 +1374,22 @@ def write_atomic_bytes(
         if not relocated:
             # Nothing was moved: the temporary is this writer's own, never
             # published, and its exact generation is discarded.
-            file_io.discard_regular_if_same(
-                temporary,
-                expected_identity=temporary_identity,
-                expected_fingerprint=temporary_fingerprint,
-                pinned_source=temporary_pin,
-            )
+            try:
+                file_io.discard_regular_if_same(
+                    temporary,
+                    expected_identity=temporary_identity,
+                    expected_fingerprint=temporary_fingerprint,
+                    pinned_source=temporary_pin,
+                )
+            except OSError as cleanup:
+                # The write's own failure stays the error raised: a caller
+                # tells a FileExistsError from the rest. A temporary that could
+                # not be discarded is added to it, never said instead of it.
+                left = _undiscarded_temporary(cleanup)
+                # Logged too: a caller that turns the failure into words of
+                # its own (a taken name, say) drops what is added to it.
+                LOGGER.warning("After a failed write to %s%s", path, left)
+                _say_also(failure, left)
         else:
             # The publication moved an entry back here: this very inode may have
             # been edited in place meanwhile (same size, and with coarse

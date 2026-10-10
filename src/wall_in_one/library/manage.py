@@ -1091,7 +1091,9 @@ def _discard_pinned_artifacts(
                 expected_fingerprint=artifact.fingerprint,
                 pinned_source=pin,
             ):
-                if not os.path.lexists(access):
+                # Only a companion known to be gone needs no mention. One that
+                # can't be looked at is still there as far as is known: kept.
+                if file_io.entry_presence(access) is False:
                     continue
                 raise OSError(f"could not safely discard {access}")
             paths.fsync_directory(access.parent)
@@ -1499,18 +1501,32 @@ def _remove_pinned(
                 f"could not remove {path}; the original file was restored: "
                 f"{error.strerror or error}",
             ) from error
-        claim_survives = claim.is_present()
+        claimed = claim.presence()
         source_is_original = False
         with contextlib.suppress(OSError, ValueError):
             source_is_original = file_io.regular_file_fingerprint(target) == expected_fingerprint
-        if claim_survives or source_is_original:
-            preserved = claim.path if claim_survives else path
+        if claimed is True or source_is_original:
+            preserved = claim.path if claimed is True else path
             with contextlib.suppress(OSError):
                 paths.fsync_directory(target.parent)
             raise ManageError(
                 "local-io",
                 f"could not finish removing {path}; the file remains preserved at "
                 f"{preserved}, and its pending removal record was retained for recovery",
+                retain_intent=True,
+            ) from error
+        if isinstance(claimed, OSError):
+            # The claim can't be looked at (its folder lost search permission,
+            # an I/O error). That is not the file being gone: it was moved
+            # there, and nothing here saw it destroyed or moved back. So the
+            # removal is not committed and its companions are not consumed.
+            with contextlib.suppress(OSError):
+                paths.fsync_directory(target.parent)
+            raise ManageError(
+                "local-io",
+                f"could not finish removing {path}; whether the file is still at "
+                f"{claim.path} could not be checked ({claimed.strerror or claimed}), "
+                "so its pending removal record was retained for recovery",
                 retain_intent=True,
             ) from error
         physical = _completed_removal_outcome(

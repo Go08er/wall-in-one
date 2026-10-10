@@ -805,6 +805,24 @@ def pin_regular_path_beneath(root: Path, path: Path) -> RootScopedPin:
     )
 
 
+def entry_presence(path: Path, *, follow_symlinks: bool = False) -> bool | OSError:
+    """Whether an entry is at ``path``: ``False`` only when it is known to be absent.
+
+    ``os.path.lexists`` (and ``Path.exists``) answer ``False`` for anything
+    they could not look at: a folder that lost its search permission, an I/O
+    error. Recovery and cleanup then read "can't look" as "nothing is left
+    there". Here only ``FileNotFoundError`` is absence. Any other failure is
+    returned, so the caller keeps the entry and says it could not be checked.
+    """
+    try:
+        os.stat(path, follow_symlinks=follow_symlinks)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        return error
+    return True
+
+
 def _restore_after_failed_verification(
     source: Path,
     destination: Path,
@@ -1026,9 +1044,19 @@ class ClaimedPath:
             pinned = self._pin.status()
             status = self._directory_pin.entry.lstat()
         except OSError as error:
+            # Only a missing entry is gone. One that can't be looked at (its
+            # folder lost search permission, an I/O error) is where the claim
+            # put it, as far as anything here knows, and the error says so.
+            presence = entry_presence(self._directory_pin.entry)
+            if isinstance(presence, OSError):
+                raise PathChangedError(
+                    f"the private claim for {self.original} could not be inspected at "
+                    f"{self.path}: {presence.strerror or presence}",
+                    preserved_path=self.path,
+                ) from error
             raise PathChangedError(
                 f"the private claim for {self.original} is no longer available",
-                preserved_path=self.path if os.path.lexists(self._directory_pin.entry) else None,
+                preserved_path=self.path if presence else None,
             ) from error
         if (
             not _same_pinned_entry(pinned, status, stat.S_IFREG)
@@ -1249,9 +1277,23 @@ class ClaimedPath:
             finally:
                 os.close(descriptor)
 
+    def presence(self) -> bool | OSError:
+        """Whether the retained claim entry is still in its pinned directory.
+
+        ``False`` only when it is known to be gone (or the claim was consumed);
+        an ``OSError`` when it could not be looked at, which is not absence.
+        """
+        if self._consumed:
+            return False
+        return entry_presence(self._directory_pin.entry)
+
     def is_present(self) -> bool:
-        """Whether the exact retained claim entry remains in its pinned directory."""
-        return not self._consumed and os.path.lexists(self._directory_pin.entry)
+        """Whether the claim entry remains, as far as is known (see `presence`).
+
+        An entry that could not be looked at counts as remaining: a caller
+        that read it as gone would report the claimed file as removed.
+        """
+        return self.presence() is not False
 
     def restore(self) -> bool:
         """Durably restore without replacement; leave it preserved on conflict."""
@@ -1886,11 +1928,23 @@ def _discard_regular_if_same(
             and error.preserved_path is not None
         ):
             raise
-        if not restored and os.path.lexists(claim.path):
-            raise PathChangedError(
-                f"the private claim for {path} could not be restored",
-                preserved_path=claim.path,
-            ) from error
+        if not restored:
+            # ``False`` is only for an entry known to have left its claim. One
+            # still in it, or one whose claim can't be looked at, is said with
+            # the place it was put.
+            presence = entry_presence(claim.path)
+            if isinstance(presence, OSError):
+                raise PathChangedError(
+                    f"the private claim for {path} could not be restored, and whether "
+                    f"it is still at {claim.path} could not be checked: "
+                    f"{presence.strerror or presence}",
+                    preserved_path=claim.path,
+                ) from error
+            if presence:
+                raise PathChangedError(
+                    f"the private claim for {path} could not be restored",
+                    preserved_path=claim.path,
+                ) from error
         return False
     finally:
         with contextlib.suppress(OSError):

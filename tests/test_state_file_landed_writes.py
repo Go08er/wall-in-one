@@ -577,6 +577,92 @@ def test_a_candidate_that_stayed_at_its_name_unseen_is_not_said_to_have_moved_ba
     assert wrote == [], "unproven: never recorded as a write"
 
 
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_candidate_put_back_at_its_name_unseen_is_preserved_there(
+    folder: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """AB-2's class, on the put-back. The candidate's publication does not verify
+    (its mtime moved), so it is moved back, proven ours and put back at its name;
+    then the folder loses its search permission (a native EACCES), so that move
+    can be neither verified nor undone. The message says the candidate remains at
+    its name, and the preserved path is that name too, not the empty temporary."""
+    target = folder / "state.json"
+    rename = file_io._rename_noreplace
+    moves: list[tuple[str, str]] = []
+
+    def move(source: Path, destination: Path) -> None:
+        rename(source, destination)
+        moves.append((source.name, destination.name))
+        if len(moves) == 1:
+            status = target.stat()
+            os.utime(target, ns=(status.st_atime_ns, status.st_mtime_ns + 5_000_000_000))
+        elif len(moves) == 3:
+            folder.chmod(mode)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    try:
+        with (
+            state_file.collecting_writes() as wrote,
+            pytest.raises(file_io.PathChangedError) as raised,
+        ):
+            state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+    finally:
+        folder.chmod(0o700)
+
+    said = str(raised.value)
+    temporary = moves[0][0]
+    assert moves == [
+        (temporary, "state.json"),
+        ("state.json", temporary),
+        (temporary, "state.json"),
+    ]
+    assert target.read_text(encoding="utf-8") == CANDIDATE
+    assert sorted(entry.name for entry in folder.iterdir()) == ["state.json"], "no temporary"
+    assert f"the publication candidate remains at {target}" in said, said
+    # Failed on 6f92aa5: the temporary, which is gone.
+    assert raised.value.preserved_path == target
+    assert wrote == [], "unverified at its name: never recorded as a write"
+
+
+def test_a_refused_write_stays_a_refusal_when_its_temporary_cannot_be_discarded(
+    folder: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The name is taken, so the no-replace write is refused (FileExistsError) and
+    nothing was moved. Then the cleanup's claim of the unpublished temporary can be
+    neither verified nor undone: its claim folder loses its search permission as
+    the temporary lands in it (a native EACCES). The refusal is still what is
+    raised, for a caller that tells it from other failures; where the temporary
+    was left is added to it and logged."""
+    target = folder / "state.json"
+    target.write_text("a manual repair\n", encoding="utf-8")
+    rename = file_io._rename_noreplace
+    lost: list[Path] = []
+
+    def move(source: Path, destination: Path) -> None:
+        rename(source, destination)
+        if not lost and destination.name == "entry":
+            # The claim reaches its folder through a descriptor: its real path.
+            lost.append(Path(os.readlink(destination.parent)))
+            lost[0].chmod(0o000)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    try:
+        # Failed on 6f92aa5: the cleanup's PathChangedError was raised instead.
+        with caplog.at_level("WARNING"), pytest.raises(FileExistsError) as raised:
+            state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+    finally:
+        for claim in lost:
+            claim.chmod(0o700)
+
+    (claim,) = lost
+    said = str(raised.value)
+    assert target.read_text(encoding="utf-8") == "a manual repair\n"
+    assert (claim / "entry").read_text(encoding="utf-8") == CANDIDATE
+    assert "its unpublished temporary file could not be discarded (" in said, said
+    assert f" and was left at {claim / 'entry'}" in said, said
+    assert str(claim / "entry") in caplog.text
+
+
 @pytest.mark.parametrize("mode", [0o600, 0o400, 0o000], ids=["0600", "0400", "0000"])
 def test_a_temporary_that_cannot_be_looked_at_is_not_said_to_be_empty(
     folder: Path, monkeypatch: pytest.MonkeyPatch, mode: int

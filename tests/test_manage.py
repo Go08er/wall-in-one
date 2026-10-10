@@ -2382,3 +2382,147 @@ def test_removability_is_about_the_roots_not_the_ownership(root: Path, tmp_path:
     assert not manage.is_removable(item_for(inside, provider="external"), (root,))
     assert not manage.is_removable(item_for(outside), (root,))
     assert not manage.is_removable(item_for(inside))
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_remove_is_not_committed_when_its_claim_cannot_be_looked_at(
+    root: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """The claim folder loses its search permission once the file is in it (a
+    native EACCES): the file can't be destroyed, moved back, or looked at. That
+    is not the file being gone. The removal is not committed, its record stays
+    for recovery, and the error doesn't claim to know where the file is."""
+    item = downloaded(root)
+    expected_bytes = item.path.read_bytes()
+    folder = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN)
+    claim_for_deletion = file_io.claim_for_deletion
+
+    def claim_then_lose_the_folder(path: Path, **options: object) -> file_io.ClaimedPath:
+        claim = claim_for_deletion(path, **options)  # type: ignore[arg-type]
+        if options.get("operation_token") == REMOVAL_TOKEN:
+            folder.chmod(mode)
+        return claim
+
+    monkeypatch.setattr(file_io, "claim_for_deletion", claim_then_lose_the_folder)
+    try:
+        with pytest.raises(ManageError) as caught:
+            _remove(item, (root,))
+    finally:
+        folder.chmod(0o700)
+
+    assert caught.value.kind == "local-io"
+    # Failed on 6f92aa5: committed ("removed ..., but the final unlink outcome
+    # could not be confirmed") with the whole file still in the claim folder.
+    assert caught.value.retain_intent and not caught.value.committed
+    assert (folder / "entry").read_bytes() == expected_bytes
+    assert not item.path.exists()
+    said = str(caught.value)
+    assert f"whether the file is still at {folder / 'entry'} could not be checked" in said, said
+    assert "remains preserved at" not in said, said
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_a_companion_that_cannot_be_looked_at_is_reported_as_kept(
+    tmp_path: Path, mode: int
+) -> None:
+    """A companion whose folder can't be searched can't be discarded (a native
+    EACCES). It is still there, so the removal reports it as kept."""
+    folder = tmp_path / "stills"
+    folder.mkdir()
+    companion = folder / "clip.png"
+    companion.write_bytes(b"companion")
+    pin = file_io.pin_regular_path(companion)
+    artifact = manage._PinnedArtifact(
+        companion, companion, pin, pin.fingerprint[:2], pin.fingerprint
+    )
+    folder.chmod(mode)
+    try:
+        outcome = manage._discard_pinned_artifacts((artifact,))
+    finally:
+        folder.chmod(0o700)
+        pin.close()
+
+    assert companion.read_bytes() == b"companion"
+    # Failed on 6f92aa5: ((), ()), the companion in neither list.
+    assert outcome == ((), (companion,))
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_trash_is_committed_when_the_moved_file_cannot_be_looked_at(
+    root: Path, data_home: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """The trash's files folder loses its search permission right after the move
+    (a native EACCES): the file can be neither verified nor moved back. It is in
+    the trash, so the move is committed and its record stays with it."""
+    path = root / "holiday.png"
+    path.write_bytes(b"expected")
+    item = item_for(path)
+    files = data_home / "Trash" / "files"
+    rename = file_io._rename_noreplace
+    moved: list[Path] = []
+
+    def move(old: Path, new: Path) -> None:
+        rename(old, new)
+        if not moved and old.name == path.name and new.parent.name == "files":
+            moved.append(new)
+            files.chmod(mode)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    try:
+        with pytest.raises(ManageError) as caught:
+            _trash(item, (root,))
+    finally:
+        files.chmod(0o700)
+
+    assert moved and caught.value.kind == "changed"
+    # Failed on 59e6a5d: "was replaced while it was being moved; nothing was
+    # deleted", uncommitted, with the file in the trash and its record withdrawn.
+    assert caught.value.committed and isinstance(caught.value.physical, manage.Trashed)
+    assert caught.value.physical.destination == files / "holiday.png"
+    assert (files / "holiday.png").read_bytes() == b"expected" and not path.exists()
+    assert (data_home / "Trash" / "info" / "holiday.png.trashinfo").is_file()
+    assert f"the unverified entry was preserved at {files / 'holiday.png'}" in str(caught.value)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_remove_keeps_its_record_when_the_claimed_file_cannot_be_looked_at(
+    root: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """The claim folder loses its search permission right after the file is moved
+    into it (a native EACCES): the claim can be neither verified nor undone. The
+    file is in the claim folder, so the removal's record is kept, and a replay
+    finishes the removal from it."""
+    item = downloaded(root)
+    expected, fingerprint = _expected(item.path), _fingerprint(item.path)
+    original = item.path.read_bytes()
+    folder = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN)
+    rename = file_io._rename_noreplace
+    moved: list[Path] = []
+
+    def move(old: Path, new: Path) -> None:
+        rename(old, new)
+        if not moved and old.name == item.path.name and new.name == "entry":
+            moved.append(new)
+            folder.chmod(mode)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    try:
+        with pytest.raises(ManageError) as caught:
+            _remove(item, (root,))
+    finally:
+        folder.chmod(0o700)
+
+    assert moved and caught.value.kind == "changed"
+    # Failed on 59e6a5d: "was replaced while removal claimed it; nothing was
+    # deleted", no record kept, with the whole file in the claim folder.
+    assert caught.value.retain_intent and not caught.value.committed
+    assert (folder / "entry").read_bytes() == original and not item.path.exists()
+    assert f"an unverified entry was preserved at {folder / 'entry'}" in str(caught.value)
+
+    assert manage.recover_removal_claim(
+        item.path,
+        expected_source=expected,
+        expected_fingerprint=fingerprint,
+        operation_token=REMOVAL_TOKEN,
+    )
+    assert not (folder / "entry").exists() and not item.path.exists()

@@ -639,7 +639,73 @@ def _removal_journal() -> tuple[frozenset[str] | None, str]:
     return frozenset(intent.token for intent in store.records), ""
 
 
-def _survey(roots: Sequence[Path], now: float) -> _Survey:
+def _kept_beside_items(
+    roots: Sequence[Path],
+    item_folders: Sequence[Path],
+    surveyed: Sequence[Path],
+    survey: _Survey,
+) -> None:
+    """List, read-only, what Wall-in-One kept beside the library's own files.
+
+    A pairing record that was replaced or rolled back is retired whole into
+    ``.wall-in-one-retained`` in the folder of the video it belongs to: a
+    wallpaper root itself, or any folder under one. Those are the person's
+    folders, not Wall-in-One's, so nothing here is ever offered for archiving,
+    moved or claimed: what holds data (or isn't recognised) is listed as kept,
+    and an empty record or claim folder, which keeps nothing, is passed over.
+
+    Bounded by what the app already knows instead of a walk of the library:
+    each root, and each of ``item_folders`` (the folders holding the library's
+    items) that lies under a root. One ``lstat`` per folder; only a retained
+    folder that exists is listed, never the folder's own entries.
+    """
+    seen: set[tuple[int, int]] = set()
+    for folder in surveyed:
+        found = _real_directory(folder)
+        if found is not None:
+            seen.add((found.st_dev, found.st_ino))
+    candidates = [
+        *roots,
+        *(
+            folder
+            for folder in item_folders
+            if any(folder == root or root in folder.parents for root in roots)
+        ),
+    ]
+    for folder in candidates:
+        found = _real_directory(folder)
+        if found is None or (found.st_dev, found.st_ino) in seen:
+            continue
+        seen.add((found.st_dev, found.st_ino))
+        retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+        if _real_directory(retained) is None:
+            continue
+        try:
+            entries = sorted(retained.iterdir())
+        except OSError as error:
+            survey.kept.append(Kept(retained, f"it can't be listed ({error.strerror})"))
+            continue
+        for entry in entries:
+            status = _lstat(entry)
+            if status is None:
+                continue
+            if stat.S_ISDIR(status.st_mode) and _CLAIM_FOLDER.match(entry.name):
+                if not _is_empty_directory(entry):
+                    survey.kept.append(Kept(entry, "this claim folder isn't empty"))
+            elif stat.S_ISREG(status.st_mode) and _DELETION_RECORD.match(entry.name):
+                if status.st_size > 0:
+                    survey.kept.append(
+                        Kept(
+                            entry,
+                            "a copy Wall-in-One kept instead of deleting it; it holds "
+                            f"{format_size(status.st_size)} and stays beside your files",
+                        )
+                    )
+            else:
+                survey.kept.append(Kept(entry, "Tidy up doesn't recognize this entry"))
+
+
+def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()) -> _Survey:
     survey = _Survey()
     finished = deployed_upgrade_transaction.finished_claims()
     archive_device = _real_directory(paths.app_config_dir())
@@ -673,7 +739,8 @@ def _survey(roots: Sequence[Path], now: float) -> _Survey:
             return "it's on a different drive from the archive folder, so it can't just be moved"
         return ""
 
-    for parent in _leftover_parents(roots):
+    parents = _leftover_parents(roots)
+    for parent in parents:
         parent_status = _real_directory(parent)
         in_managed = (
             parent_status is not None and (parent_status.st_dev, parent_status.st_ino) in managed
@@ -886,6 +953,7 @@ def _survey(roots: Sequence[Path], now: float) -> _Survey:
                 survey.kept.append(
                     Kept(child, "Wall-in-One can't prove the operation that made it has finished")
                 )
+    _kept_beside_items(roots, item_folders, parents, survey)
     return survey
 
 
@@ -968,9 +1036,12 @@ def _leftovers_summary(leftovers: Sequence[_Leftover]) -> str:
 
 
 def _plan_leftovers(
-    roots: Sequence[Path], now: float, manifests: Sequence[_Manifest]
+    roots: Sequence[Path],
+    now: float,
+    manifests: Sequence[_Manifest],
+    item_folders: Sequence[Path] = (),
 ) -> tuple[ActionPlan, list[_Leftover]]:
-    survey = _survey(roots, now)
+    survey = _survey(roots, now, item_folders)
     undo = _archive_undo(_latest(LEFTOVERS, manifests))
     plan = ActionPlan(
         action=LEFTOVERS,
@@ -2363,16 +2434,24 @@ def _roots(roots: Sequence[Path] | None) -> tuple[Path, ...]:
     return tuple(roots) if roots is not None else config.load().roots
 
 
-def plan(*, roots: Sequence[Path] | None = None, now: float | None = None) -> Plan:
+def plan(
+    *,
+    roots: Sequence[Path] | None = None,
+    now: float | None = None,
+    item_folders: Sequence[Path] = (),
+) -> Plan:
     """The exact preview of every action. Reads only; never creates or locks a file.
 
     ``roots`` are the library roots (default: settings.toml's), whose managed
-    folders are searched for leftovers.
+    folders are searched for leftovers. ``item_folders`` are the folders that
+    hold the library's items: what Wall-in-One kept beside one of them is
+    listed as kept, never offered (`_kept_beside_items`), so it changes no
+    action's token and `apply` does not need it.
     """
     manifests = _manifests()
     settings, unreadable = _read_noctalia()
     leftovers, _items = _plan_leftovers(
-        _roots(roots), time.time() if now is None else now, manifests
+        _roots(roots), time.time() if now is None else now, manifests, item_folders
     )
     old_template, _found = _plan_old_palette_template(settings, manifests)
     plugin, _keys = _plan_plugin_settings(settings, unreadable, manifests)

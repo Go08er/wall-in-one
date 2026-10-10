@@ -113,6 +113,18 @@ def _roots(application: Application) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _item_folders(application: Application) -> tuple[Path, ...]:
+    """The folders holding the library's items, as the last scan found them.
+
+    Where Wall-in-One may have kept a copy beside one of the person's own
+    files; Tidy up lists those as kept (`tidy.plan`).
+    """
+    session = getattr(application, "session", None)
+    library = getattr(session, "library", None)
+    items = getattr(library, "items", ())
+    return tuple(dict.fromkeys(item.path.parent for item in items))
+
+
 def _home(path: Path) -> str:
     text = str(path)
     home = os.path.expanduser("~")
@@ -290,7 +302,10 @@ class TidySection(Adw.PreferencesGroup):
         self._check.set_sensitive(False)
         self._refresh_buttons()
         roots = _roots(self._app)
-        if not self._lane.submit(lambda: tidy.plan(roots=roots), self._show_plan):
+        folders = _item_folders(self._app)
+        if not self._lane.submit(
+            lambda: tidy.plan(roots=roots, item_folders=folders), self._show_plan
+        ):
             self._planning = False
             self._check.set_sensitive(True)
 

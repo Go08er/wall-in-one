@@ -7,6 +7,7 @@ own, along with the edits to a Noctalia-written settings file.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import time
@@ -17,6 +18,8 @@ from typing import Final
 
 import pytest
 
+from tests import released
+from tests.released import released_source  # noqa: F401 -- a fixture
 from wall_in_one import (
     deployed_upgrade,
     deployed_upgrade_transaction,
@@ -26,7 +29,7 @@ from wall_in_one import (
     thumbnails,
     tidy,
 )
-from wall_in_one.library import manage, removals
+from wall_in_one.library import manage, pairing, removals, stills
 from wall_in_one.providers import download
 from wall_in_one.theme import noctalia, template
 
@@ -309,6 +312,131 @@ def test_commit_named_download_files_are_listed_and_archived_never_deleted(
         assert kept.exists(), kept
     # Tidy up's name for these is the download's own.
     assert getattr(tidy, "_COMMIT_PREFIX", None) == download.COMMIT_PREFIX
+
+
+def kept_pairing_record(video: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A pairing record Wall-in-One really kept beside ``video``: its publication
+    is rolled back (a directory fsync EIO), which retires the record whole into
+    the video's folder. Returns the kept copy."""
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"not decoded here")
+    chosen = video.with_name("chosen.png")
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_sync = paths.fsync_directory
+    failed: list[Path] = []
+
+    def sync(directory: Path) -> None:
+        if not failed and sidecar.exists():
+            failed.append(directory)
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(directory)
+
+    with monkeypatch.context() as patching:
+        patching.setattr(paths, "fsync_directory", sync)
+        with pytest.raises(stills.StillError):
+            stills.write_sidecar(video, chosen)
+    (copy,) = (
+        entry
+        for entry in (video.parent / file_io.RETAINED_ENTRY_DIRECTORY).iterdir()
+        if entry.is_file() and entry.stat().st_size > 0
+    )
+    return copy
+
+
+def test_a_copy_kept_beside_an_ordinary_video_is_listed_as_kept_never_offered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AB-7. A pairing record that was rolled back is retired whole beside its
+    video: in the wallpaper root itself, or a folder under it. Those are the
+    person's folders, which the survey never looked into. The copies are now
+    listed as kept, each root always and each folder that holds a library item;
+    nothing there is ever offered, and no walk of the library is made."""
+    root = tmp_path / "library"
+    nested = root / "trips" / "2025"
+    at_root = kept_pairing_record(root / "clip.mp4", monkeypatch)
+    in_nested = kept_pairing_record(nested / "clip.mp4", monkeypatch)
+    # What keeps nothing is passed over: an emptied record, an empty claim folder.
+    empty_record = _record(nested, name="e" * 32)
+    empty_folder = _claim_folder(nested, "entry-empty000")
+    # Not beside anything the app knows, or not under a root: not looked for.
+    elsewhere = kept_pairing_record(root / "elsewhere" / "clip.mp4", monkeypatch)
+    outside = kept_pairing_record(tmp_path / "outside" / "clip.mp4", monkeypatch)
+
+    found = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+    # Failed on 267c301: nothing beside a video was listed at all.
+    assert at_root in _reasons(found), "the root itself is always looked at"
+    assert in_nested not in _reasons(found), "a folder nobody named is not walked into"
+
+    folders = (root, nested, tmp_path / "outside")
+    named = tidy.plan(roots=(root,), item_folders=folders).action(tidy.LEFTOVERS)
+    reasons = _reasons(named)
+    for copy in (at_root, in_nested):
+        assert reasons[copy].startswith("a copy Wall-in-One kept instead of deleting it")
+        assert f"holds {tidy.format_size(copy.stat().st_size)}" in reasons[copy]
+    assert not {empty_record, empty_folder, elsewhere, outside} & set(reasons)
+    offered = {change.path for change in named.changes}
+    assert not any(root in path.parents for path in offered), "nothing of theirs is offered"
+    assert named.token == found.token, "what is offered, and so apply, is unchanged"
+    for copy in (at_root, in_nested, elsewhere, outside):
+        assert copy.stat().st_size > 0, "a preview reads only"
+
+
+#: The released 0.2.2 rolls a pairing record back: its own code, in a child.
+_RELEASED_ROLLBACK = r"""
+import errno
+
+from wall_in_one import paths
+from wall_in_one.library import pairing, stills
+
+video = Path(sys.argv[1])
+sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+real_sync = paths.fsync_directory
+failed = []
+
+
+def sync(directory):
+    if not failed and sidecar.exists():
+        failed.append(directory)
+        raise OSError(errno.EIO, "injected directory sync failure")
+    real_sync(directory)
+
+
+paths.fsync_directory = sync
+try:
+    stills.write_sidecar(video, video.with_name("chosen.png"))
+except stills.StillError:
+    print("ROLLED-BACK", flush=True)
+"""
+
+
+def test_what_the_released_version_left_beside_a_video_is_passed_over(
+    released_source: Path,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Review rule 4 for AB-7: what can a retained folder 0.2.2 left beside a video
+    hold? Its rollback (the released code, run for real) discards the record, so
+    what stays there is emptied: it keeps nothing, and is neither listed as kept
+    nor offered. Same folder name and record names as today's."""
+    root = tmp_path / "library"
+    video = root / "trips" / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"not decoded here")
+    video.with_name("chosen.png").write_bytes(b"png")
+
+    done = released.run(released_source, _RELEASED_ROLLBACK, str(video))
+
+    assert done.returncode == 0 and "ROLLED-BACK" in done.stdout, done.stdout + done.stderr
+    retained = video.parent / file_io.RETAINED_ENTRY_DIRECTORY
+    left = sorted(retained.iterdir())
+    assert left, "the released rollback left its residue beside the video"
+    for entry in left:  # an emptied record, and the empty claim folder it was emptied in
+        assert entry.stat().st_size == 0 if entry.is_file() else not any(entry.iterdir()), entry
+    found = tidy.plan(
+        roots=(root,), item_folders=(video.parent,), now=time.time() + 2 * 24 * 3600
+    ).action(tidy.LEFTOVERS)
+    assert not set(left) & set(_reasons(found))
+    assert not set(left) & {change.path for change in found.changes}
 
 
 def test_upgrade_folders_stay_until_the_upgrade_is_recorded_finished(

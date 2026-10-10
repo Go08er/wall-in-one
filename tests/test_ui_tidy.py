@@ -8,6 +8,7 @@ profile. The card runs the real application on the golden profile, in
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,7 +23,11 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.shown_text import shown_texts  # noqa: E402
-from tests.test_tidy import _claim_folder, _noctalia_settings  # noqa: E402
+from tests.test_tidy import (  # noqa: E402
+    _claim_folder,
+    _noctalia_settings,
+    kept_pairing_record,
+)
 from wall_in_one import paths, tidy  # noqa: E402
 from wall_in_one.theme import noctalia  # noqa: E402
 from wall_in_one.ui.tidy_section import TidyLane, TidySection  # noqa: E402
@@ -42,6 +47,7 @@ class _Application:
 
     def __init__(self) -> None:
         self.settings = SimpleNamespace(roots=())
+        self.session = SimpleNamespace(library=SimpleNamespace(items=()))
         self.tidy_lane = TidyLane()
         self.reports: list[str] = []
         self.ready = True
@@ -153,6 +159,34 @@ def test_the_section_previews_applies_and_undoes_each_action(
     leftovers.undo.emit("clicked")
     spin_until(lambda: _idle(group) and leftovers.plan.undo is None, timeout=10)
     assert len(list((paths.app_state_dir() / ".wall-in-one-retained").iterdir())) == 3
+
+
+def test_the_section_lists_a_copy_kept_beside_a_library_video(
+    section: tuple[TidySection, _Application],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AB-7, as the window shows it: the folders of the library's items come from
+    the last scan, and a copy kept beside a video in one of them is a "Kept" row."""
+    group, application = section
+    root = tmp_path / "library"
+    video = root / "trips" / "2025" / "clip.mp4"
+    kept_pairing_record(video, monkeypatch)
+    application.settings = SimpleNamespace(roots=(root,))
+    application.session = SimpleNamespace(
+        library=SimpleNamespace(items=(SimpleNamespace(path=video),))
+    )
+
+    group.refresh()
+    spin_until(lambda: _idle(group))
+
+    texts = _texts(group, tidy.LEFTOVERS)
+    # Failed on 267c301: no row for it at all.
+    assert any(
+        text.startswith("Kept: a copy Wall-in-One kept instead of deleting it") for text in texts
+    ), texts
+    leftovers = group.row(tidy.LEFTOVERS)
+    assert leftovers is not None and not leftovers.plan.changes, "and nothing is offered"
 
 
 def test_a_preview_gone_stale_is_refused_and_replaced(

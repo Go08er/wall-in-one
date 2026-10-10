@@ -65,7 +65,7 @@ from tests.test_ui_pairing_picker import (  # noqa: E402
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
 from tests.test_ui_tidy import _idle, section  # noqa: E402,F401
-from wall_in_one import config, paths, runtime_config  # noqa: E402
+from wall_in_one import config, paths, runtime_config, ui_prefs  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import displays, pairings, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
@@ -73,9 +73,11 @@ from wall_in_one.theme import noctalia, palettes  # noqa: E402
 from wall_in_one.theme.palette import PaletteError  # noqa: E402
 from wall_in_one.ui import pairings_page, playlists_page  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
+from wall_in_one.ui.launch_rows import LaunchRows  # noqa: E402
 from wall_in_one.ui.next import real_schedule, real_settings  # noqa: E402
 from wall_in_one.ui.next.displays import DisplaysPage  # noqa: E402
 from wall_in_one.ui.next.playlists import PlaylistPage  # noqa: E402
+from wall_in_one.ui.next.prefs import UiPrefsKeeper  # noqa: E402
 from wall_in_one.ui.next.real_settings import RealSettings, _colors, _Editing  # noqa: E402
 from wall_in_one.ui.next.schedule import SchedulePage  # noqa: E402
 from wall_in_one.ui.next.schedule_editor import RuleEditor  # noqa: E402
@@ -1333,3 +1335,130 @@ def test_ab6_the_player_bars_toggles_go_back_whatever_the_command_did(
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
+
+
+# -- AB-6, after its review: the same order where a report is not the last thing ------------
+
+
+def _report_raising_once(said: list[str]) -> Callable[[str], None]:
+    def report(message: str) -> None:
+        said.append(message)
+        if len(said) == 1:
+            raise RuntimeError("injected: the window could not show it")
+
+    return report
+
+
+def test_ab6_a_failed_ui_toml_save_goes_back_before_its_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's repro: reported first, so the keeper kept the unsaved value and
+    told nobody; the window went on showing what ui.toml does not hold."""
+    said: list[str] = []
+    target = tmp_path / "ui.toml"
+    keeper = UiPrefsKeeper(_report_raising_once(said), target)
+    told: list[int] = []
+    keeper.subscribe(lambda: told.append(1))
+    durable = keeper.prefs.thumbnail_size
+    wanted = "small" if durable != "small" else "large"
+    update = ui_prefs.update
+
+    def refuse(*_arguments: Any, **_keywords: Any) -> Any:
+        raise OSError("injected: ui.toml could not be written")
+
+    monkeypatch.setattr(ui_prefs, "update", refuse)
+    try:
+        assert keeper.change(thumbnail_size=wanted)
+        spin_until(lambda: not keeper.busy, 10, what="the failed save to come back")
+        assert said and "not saved" in said[0], said
+        assert ui_prefs.load(target).prefs.thumbnail_size == durable, "nothing was saved"
+        # Before: still the value that was not saved, and nobody told.
+        assert keeper.prefs.thumbnail_size == durable
+        assert told == [1], "the window was told to show what is durable"
+
+        monkeypatch.setattr(ui_prefs, "update", update)
+        assert keeper.change(thumbnail_size=wanted)
+        spin_until(lambda: not keeper.busy, 10, what="the next save")
+        assert ui_prefs.load(target).prefs.thumbnail_size == wanted
+    finally:
+        keeper.close(wait=True)
+
+
+def test_ab6_the_launch_rows_go_back_before_a_read_only_ui_toml_is_said(
+    tmp_path: Path,
+) -> None:
+    """Shared with the classic window: the Interface and GPU rows of a ui.toml this
+    version may not write stayed as clicked when saying why raised."""
+    target = tmp_path / "ui.toml"
+    target.write_text("version = 99\n", encoding="utf-8")
+    keeper = UiPrefsKeeper(lambda _message: None, target)
+    assert keeper.read_only
+    said: list[str] = []
+    rows = LaunchRows(keeper, _report_raising_once(said))
+    try:
+        interface, gpu = rows.interface.get_selected(), rows.gpu.get_active()
+        rows.interface.set_selected(1 - interface)  # its handler raises with the report
+        assert said and said[0] == keeper.read_only
+        # Before: the row stayed on the choice ui.toml does not hold.
+        assert rows.interface.get_selected() == interface
+        heard = len(said)
+        rows.gpu.set_active(not gpu)  # the next refusal is said as usual
+        assert len(said) > heard and rows.gpu.get_active() == gpu
+    finally:
+        rows.close()
+        keeper.close(wait=True)
+
+
+def test_ab6_a_palette_applied_is_read_again_before_it_is_said(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The palette manager's Apply: the re-read of what Noctalia then renders was
+    scheduled after the report."""
+    shown = _open_settings(monkeypatch)
+    try:
+        application = shown.application
+
+        def apply(_source: str, _name: str, *, on_complete: Any = None) -> bool:
+            on_complete("")
+            return True
+
+        monkeypatch.setattr(application, "apply_noctalia_palette_async", apply)
+        shown.window.open_palette_browser()
+        dialog = shown.page._dialogs[-1]
+        assert isinstance(dialog, PalettesDialog)
+        manager = dialog.manager
+        spin_until(lambda: manager.palette_list().phase == "ready", 10, what="the catalogue")
+        (nord,) = [item for item in manager.palette_list().items if item.name == "Nord"]
+        reloads: list[int] = []
+        monkeypatch.setattr(application, "reload_palette", lambda *_a, **_k: reloads.append(1))
+        reported = _raises_once(application, "window_report", monkeypatch)
+        with pytest.raises(RuntimeError, match="injected"):
+            manager.apply_catalog_palette(nord.key)
+        assert reported
+        # Before: never scheduled, so the window kept the colours from before.
+        spin_until(lambda: reloads, 5, what="the colours read again once Noctalia has rendered")
+    finally:
+        _close_settings(shown)
+
+
+def test_ab6_a_palette_reloaded_tells_the_pages_before_it_is_said(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Colours row's Reload: the pages heard of the new colours after the report."""
+    shown = _open_settings(monkeypatch)
+    try:
+        application = shown.application
+        access = shown.page.access
+        assert access is not None
+        resolved = SimpleNamespace(origin=SimpleNamespace(value="fallback"))
+        monkeypatch.setattr(application, "reload_palette", lambda done: done(resolved, ""))
+        topics: list[str] = []
+        shown.window.state.connect("changed", lambda _state, topic: topics.append(topic))
+        reported = _raises_once(application, "window_report", monkeypatch)
+        with pytest.raises(RuntimeError, match="injected"):
+            access.reload_app_palette()
+        assert reported
+        # Before: the pages were never told the colours changed.
+        assert "theme" in topics
+    finally:
+        _close_settings(shown)

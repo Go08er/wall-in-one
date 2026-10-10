@@ -94,8 +94,8 @@ class LaunchRows:
 
     def _change(self, **fields: Any) -> None:
         if not self._keeper.change(**fields):
+            self.show()  # back to what ui.toml holds, before the report (it can raise)
             self._report(self._keeper.read_only)
-            self.show()  # back to what ui.toml holds
 
     def _on_interface(self, row: Adw.ComboRow, _property: object) -> None:
         index = row.get_selected()

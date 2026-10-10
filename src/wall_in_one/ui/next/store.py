@@ -543,10 +543,12 @@ class StorePage(Page):
             if page == 1:
                 self._show_problem(answer)
             else:
-                # Keep every page reached; stop offering a Next that fails.
+                # Keep every page reached; stop offering a Next that fails. The
+                # pager first: the toast reaches the window and can raise, and
+                # nothing later ends "Loading the next page…" (AB-6).
                 self.pages.stop()
-                self.state.toast(answer.reported)
                 self._update_pager()
+                self.state.toast(answer.reported)
             return
         before = self.pages.pages
         self.pages.add(answer, page)
@@ -986,8 +988,12 @@ class StorePage(Page):
         if variant is None:
             variant = self.query.quality if item.provider == MOTIONBGS else ""
         self.picked.pop(item.id, None)
-        self.store.download(item, variant=variant, then="apply" if apply else "")
-        self._update_selection_bar()
+        try:
+            self.store.download(item, variant=variant, then="apply" if apply else "")
+        finally:
+            # Whatever the download said (a refusal is a toast or a report, and
+            # either can raise): the bar counts what is still picked.
+            self._update_selection_bar()
 
     def apply_item(self, item: StoreItemView) -> None:
         if not self.store.in_library(item):

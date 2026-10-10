@@ -184,13 +184,23 @@ class UiPrefsKeeper:
         GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def _adopt(self, saved: _Saved) -> None:
-        """Report a failure, then show what is durable unless something newer is coming."""
+        """Show what is durable unless something newer is coming, then report a failure.
+
+        In that order (AB-6): the report reaches the window and can raise, and
+        a failed save must not leave the window on the value that wasn't saved,
+        or this keeper not knowing the file is read-only.
+        """
         self._in_flight -= 1
-        if saved.error:
-            if not self._closed:
-                self._report(saved.error)
-            else:
-                LOGGER.warning("%s", saved.error)
+        try:
+            self._show_durable(saved)
+        finally:
+            if saved.error:
+                if not self._closed:
+                    self._report(saved.error)
+                else:
+                    LOGGER.warning("%s", saved.error)
+
+    def _show_durable(self, saved: _Saved) -> None:
         if saved.revision != self._revision or self._pending or self._timer:
             return  # a later save is in flight or waiting; it reconciles
         if saved.prefs == self.prefs and saved.read_only == self.read_only:

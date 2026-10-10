@@ -403,8 +403,10 @@ class RealPalettes:
             if error:
                 report(f"{entry.name} was not applied: {error}")
                 return
-            report(f"{entry.name} applied")
+            # The re-read first: the report can raise, and the colours shown
+            # must follow what Noctalia now renders.
             GLib.timeout_add(SETTLE_MS, self._settle)
+            report(f"{entry.name} applied")
 
         self._backend.apply_noctalia_palette_async(
             entry.origin.value, entry.name, on_complete=applied
@@ -1036,8 +1038,8 @@ class RealSettings:
         def reloaded(resolved: source.ResolvedPalette | None, error: str) -> None:
             if error or resolved is None:
                 return  # the application has said why
+            self._host.emit_changed("theme")  # the pages first: the report can raise
             self._report(f"Palette reloaded ({resolved.origin.value})")
-            self._host.emit_changed("theme")
 
         self._backend.reload_palette(reloaded)
 

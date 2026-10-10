@@ -969,3 +969,70 @@ def test_a_view_is_the_providers_candidate(store: Store) -> None:
     assert view.detail == "3840 \u00d7 2160" and not view.is_moving
     moving = CandidateView(candidate("xyz", MOTIONBGS))
     assert moving.is_moving and moving.detail == "Video · 4K"
+
+
+# -- AB-6: the page shows what is true before anything is said --------------------------------
+
+
+def _toasts_raise(store: Store, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every toast raises on its way through the application; what was being said."""
+    raised: list[str] = []
+
+    def durability_raises(message: str) -> str:
+        raised.append(message)
+        raise RuntimeError("injected: the toast failed")
+
+    monkeypatch.setattr(store.backend, "with_task_durability", durability_raises)
+    return raised
+
+
+def test_a_later_page_that_failed_ends_its_spinner_before_it_is_said(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's repro: the toast came before the pager, and when it raised the
+    spinner and "Loading the next page…" stayed, with nothing left to end them."""
+    store.script.pages[(WALLHAVEN, "", 1)] = result(*ids(3), has_next=True)
+    answer = store.script.answer
+
+    def failing(name: str, query: SearchQuery) -> SearchResult:
+        if query.page == 2:
+            raise ProviderError("timeout", "the site did not answer")
+        return answer(name, query)
+
+    monkeypatch.setattr(store.script, "answer", failing)
+    page = store.page()
+    page.activate(None)
+    _searched(page)
+    assert page.next.get_sensitive() and not page._fetch_spinner.get_visible()
+    raised = _toasts_raise(store, monkeypatch)
+
+    page.show_next()  # the provider's next page: it fails
+    spin_until(lambda: bool(raised), 5, what="the failed page to be said")
+
+    assert not page.fetching
+    assert not page._fetch_spinner.get_visible(), "the spinner has ended"
+    assert page.next.get_tooltip_text() == "Next page"
+    assert not page.next.get_sensitive(), "a Next that fails is not offered again"
+    assert _shown(page) == ids(3), "every page reached is kept"
+
+
+def test_a_refused_download_leaves_the_bar_counting_what_is_still_picked(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The download's refusal is a toast, and the bar was brought up to date after it."""
+    page = store.page()
+    page.activate(None)
+    _searched(page)
+    first, second = page.pages.current[:2]
+    page.toggle_pick(first)
+    page.toggle_pick(second)
+    assert page._selection_label.get_label() == "2 selected"
+    monkeypatch.setattr(store.store, "download_blocked", lambda: "Add a library folder first")
+    raised = _toasts_raise(store, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        page.download(first)  # refused, and saying so raises
+
+    assert raised == ["Add a library folder first"] and list(page.picked) == [second.id]
+    # Before: still "2 selected", with one picked.
+    assert page._selection_label.get_label() == "1 selected"

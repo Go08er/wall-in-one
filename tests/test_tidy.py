@@ -448,6 +448,166 @@ def test_what_the_survey_cannot_look_at_is_listed_and_never_offered(tmp_path: Pa
     assert not any(managed in change.path.parents for change in found.changes)
 
 
+def _archived_download_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path, float]:
+    """A download's commit-named file (it holds data), archived by Tidy up.
+
+    Returns the wallpaper root, where the file was, the archive, and "now".
+    """
+    root = tmp_path / "library"
+    motion = root / "Wall-in-One" / "MotionBGS"
+    motion.mkdir(parents=True)
+    left = motion / f"{download.COMMIT_PREFIX}0123456789abcdef"
+    left.write_bytes(b"once public video bytes")
+    left.chmod(0o600)
+    later = time.time() + 2 * tidy.CLAIM_GRACE_SECONDS
+    monkeypatch.setattr(
+        tidy, "time", types.SimpleNamespace(time=lambda: later, time_ns=time.time_ns)
+    )
+    found = tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS)
+    result = tidy.apply(tidy.LEFTOVERS, found, roots=(root,))
+    assert result.archive is not None and not left.exists()
+    return root, left, result.archive, later
+
+
+def test_an_undo_that_cannot_look_into_the_archive_writes_nothing_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-review's probe. The archive's items folder loses its search
+    permission, and the person chooses Undo. The file is in the archive; Undo
+    can't look at it. Nothing is called missing: the record stays, the reason
+    is given, Undo stays offered, and it works once the folder can be looked into."""
+    root, left, archive, later = _archived_download_file(tmp_path, monkeypatch)
+    (archived,) = (archive / "items").iterdir()
+
+    with _unsearchable(archive / "items"):
+        undone = tidy.undo(tidy.LEFTOVERS)
+
+    manifest = json.loads((archive / "manifest.json").read_text())
+    (record,) = manifest["items"]
+    assert archived.read_bytes() == b"once public video bytes", "it is still in the archive"
+    # Failed on 148eb31: "1 item is in neither place any more", marked undone.
+    assert "neither place" not in undone.message, undone.message
+    assert "1 item couldn't be checked" in undone.message and not undone.changed
+    assert record["outcome"] == "moved" and manifest["state"] == "applied"
+    assert record["undo_error"] == "the archive couldn't be checked (Permission denied)"
+    assert tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS).undo is not None
+
+    again = tidy.undo(tidy.LEFTOVERS)
+    assert again.changed and left.read_bytes() == b"once public video bytes"
+
+
+def test_a_move_whose_arrival_cannot_be_checked_is_not_recorded_as_never_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Apply's twin: the move into the archive lands, and right then the archive's
+    items folder loses its search permission, so the move can be neither verified
+    nor undone, and where the item is can't be looked at. It is not journalled as
+    "stayed where it was": the record stays planned, the message says it couldn't
+    be checked, and Undo finds it in the archive and puts it back."""
+    root = tmp_path / "library"
+    motion = root / "Wall-in-One" / "MotionBGS"
+    motion.mkdir(parents=True)
+    left = motion / f"{download.COMMIT_PREFIX}0123456789abcdef"
+    left.write_bytes(b"once public video bytes")
+    left.chmod(0o600)
+    later = time.time() + 2 * tidy.CLAIM_GRACE_SECONDS
+    monkeypatch.setattr(
+        tidy, "time", types.SimpleNamespace(time=lambda: later, time_ns=time.time_ns)
+    )
+    found = tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS)
+    real_rename = file_io._rename_noreplace
+    sealed: list[Path] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not sealed and destination.parent.name == "items":
+            sealed.append(destination.parent)
+            destination.parent.chmod(0o600)  # there, and no longer searchable
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    try:
+        result = tidy.apply(tidy.LEFTOVERS, found, roots=(root,))
+    finally:
+        for folder in sealed:
+            folder.chmod(0o700)
+    monkeypatch.setattr(file_io, "_rename_noreplace", real_rename)
+
+    assert result.archive is not None and sealed
+    (record,) = json.loads((result.archive / "manifest.json").read_text())["items"]
+    (archived,) = (result.archive / "items").iterdir()
+    assert archived.read_bytes() == b"once public video bytes" and not left.exists()
+    # Failed on 148eb31: outcome "skipped: ...", "1 item ... stayed where it was".
+    assert record["outcome"] == "planned" and "couldn't be checked" in record["note"]
+    assert "stayed where it was" not in result.message, result.message
+    assert "Where 1 item ended up couldn't be checked" in result.message
+
+    undone = tidy.undo(tidy.LEFTOVERS)
+    assert undone.changed and left.read_bytes() == b"once public video bytes"
+
+
+def test_archives_that_cannot_be_looked_into_are_said_not_taken_for_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive folder itself can't be searched: its archives can't be read, so
+    no Undo can be offered. The plan says why, and Undo says it couldn't look,
+    not "There's nothing to undo"."""
+    root, _left, archive, later = _archived_download_file(tmp_path, monkeypatch)
+
+    with _unsearchable(archive.parent):
+        found = tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS)
+        undone = tidy.undo(tidy.LEFTOVERS)
+
+    assert found.undo is None
+    # Failed on 148eb31: no note, and "There's nothing to undo."
+    assert any("can't be looked into (Permission denied)" in note for note in found.notes)
+    assert "can't be looked into" in undone.message and "nothing was undone" in undone.message
+    assert tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS).undo is not None
+
+
+def test_a_file_that_cannot_be_looked_at_is_not_called_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wording, in the safe direction: Noctalia's settings and the old palette
+    template, in folders that can't be searched, are said to be unlookable, not
+    "weren't found" or "There's no old template file"."""
+    settings = _noctalia_settings()
+    with _unsearchable(settings.parent):
+        found, why = tidy._read_noctalia()
+    # Failed on 148eb31: (None, ""), which the plans show as "weren't found".
+    assert found is None and why == "Noctalia's settings can't be looked at (Permission denied)."
+
+    folder = tmp_path / "state-elsewhere"
+    folder.mkdir()
+    stale = folder / "palette.json.tmpl"
+    stale.write_text("{}")
+    monkeypatch.setattr(tidy, "_stale_template", lambda: stale)
+    with _unsearchable(folder):
+        plan, _status = tidy._plan_old_palette_template(None, [])
+    # Failed on 148eb31: "There's no old template file."
+    assert plan.summary == (
+        "The old template file can't be looked at (Permission denied), so it's left alone."
+    )
+    assert not plan.changes
+
+
+def test_a_managed_folder_that_cannot_be_listed_is_said_once(tmp_path: Path) -> None:
+    """A row for a thing is said once, not once by each part of the survey."""
+    root = tmp_path / "library"
+    managed = root / "Wall-in-One"
+    (managed / "MotionBGS").mkdir(parents=True)
+    managed.chmod(0o300)  # searchable, not listable
+    try:
+        found = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+    finally:
+        managed.chmod(0o700)
+
+    rows = [kept for kept in found.kept if kept.path == managed]
+    # Failed on 148eb31: the same row twice.
+    assert [kept.reason for kept in rows] == ["it can't be listed (Permission denied)"]
+
+
 #: The released 0.2.2 rolls a pairing record back: its own code, in a child.
 _RELEASED_ROLLBACK = r"""
 import errno

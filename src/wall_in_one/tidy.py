@@ -374,6 +374,10 @@ def _emptiness(path: Path) -> bool | OSError:
         return error
 
 
+def _why(error: OSError) -> str:
+    return str(error.strerror or error)
+
+
 def _unlookable(path: Path, error: OSError, *, folder: bool = True) -> Kept:
     """The kept row for something the survey could not look at. It is never acted on."""
     how = "looked into" if folder else "inspected"
@@ -444,8 +448,12 @@ def _new_archive(action: Action) -> Path:
     paths.ensure_directory(root.parent)
     with contextlib.suppress(FileExistsError):
         root.mkdir(mode=0o700)
-    found = _real_directory(root)
-    if found is None:
+    found = _look(root)
+    if isinstance(found, OSError):
+        raise TidyError(
+            f"{root} can't be looked into ({_why(found)}), so nothing can be archived there"
+        )
+    if found is None or not stat.S_ISDIR(found.st_mode):
         raise TidyError(f"{root} is not a folder, so nothing can be archived there")
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
     for attempt in range(1000):
@@ -565,6 +573,35 @@ def _manifests() -> list[_Manifest]:
             found.append(_Manifest(directory, document))
     found.sort(key=lambda manifest: (manifest.created, manifest.directory.name), reverse=True)
     return found
+
+
+def _archive_trouble() -> str:
+    """Why earlier archives can't all be looked at just now, or "".
+
+    `_manifests` leaves out what it can't read, which is right for deciding
+    what Undo can act on, but "no archive" would then be said for "can't
+    look". A plan carries this instead, so a missing Undo is explained.
+    """
+    root = archive_root()
+    found = _look(root)
+    if isinstance(found, OSError):
+        return f"Earlier archives in {root} can't be looked into ({_why(found)})"
+    if found is None or not stat.S_ISDIR(found.st_mode):
+        return ""
+    try:
+        children = sorted(root.iterdir())
+    except OSError as error:
+        return f"Earlier archives in {root} can't be listed ({_why(error)})"
+    for directory in children:
+        status = _look(directory)
+        if isinstance(status, OSError):
+            return f"An archive in {root} can't be looked into ({_why(status)})"
+        if status is None or not stat.S_ISDIR(status.st_mode):
+            continue
+        manifest = _look(directory / MANIFEST)
+        if isinstance(manifest, OSError):
+            return f"The archive {directory} can't be looked into ({_why(manifest)})"
+    return ""
 
 
 def _latest(action: Action, manifests: Sequence[_Manifest]) -> _Manifest | None:
@@ -1056,6 +1093,7 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                     Kept(child, "Wall-in-One can't prove the operation that made it has finished")
                 )
     _kept_beside_items(roots, item_folders, parents, survey)
+    survey.kept = list(dict.fromkeys(survey.kept))  # one row for a thing, said once
     return survey
 
 
@@ -1242,7 +1280,8 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
     _write_manifest(archive, document)
     moved = [record for record in items if record["outcome"] == "moved"]
     noted = [record for record in moved if record.get("note")]
-    skipped = len(items) - len(moved)
+    unchecked = [record for record in items if record["outcome"] == "planned"]
+    skipped = len(items) - len(moved) - len(unchecked)
     message = f"Archived {_plural(len(moved), 'item')} in {archive}."
     if len(noted) == 1:
         message += (
@@ -1253,6 +1292,11 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
         message += (
             f" {len(noted)} of them changed while they were being archived and are kept "
             "there as they are now (manifest.json says how); Undo puts them back."
+        )
+    if unchecked:
+        message += (
+            f" Where {_plural(len(unchecked), 'item')} ended up couldn't be checked "
+            "(manifest.json says why); Undo looks for it in both places."
         )
     if skipped:
         message += f" {_plural(skipped, 'item')} changed meanwhile and stayed where it was."
@@ -1266,10 +1310,19 @@ def _settle_location(record: dict[str, Any], destination: Path, error: object) -
     there, so Undo can move exactly that back; only an item that never left
     is recorded as skipped.
     """
-    found = _lstat(destination)
+    found = _look(destination)
     if found is None or isinstance(error, FileExistsError):
         # Nothing arrived, or the name was taken before the move: it never left.
         record["outcome"] = f"skipped: {_journal_text(error)}"
+        return
+    if isinstance(found, OSError):
+        # Can't look is not "it never left": the record stays planned, which
+        # Undo settles by looking for the item in both places.
+        record["outcome"] = "planned"
+        record["note"] = (
+            f"the move didn't finish cleanly ({_journal_text(error)}), and where the item "
+            f"is now couldn't be checked ({found.strerror or found})"
+        )
         return
     record["outcome"] = "moved"
     record["identity"] = [found.st_dev, found.st_ino]
@@ -1290,11 +1343,19 @@ def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
         _settle_location(record, destination, error)
         return
     record["outcome"] = "moved"
-    if (
-        record["type"] == "dir"
-        and not record["entry_sha256"]
-        and not _is_empty_directory(destination)
-    ):
+    gained: bool | OSError = False
+    if record["type"] == "dir" and not record["entry_sha256"]:
+        empty = _emptiness(destination)
+        gained = empty if isinstance(empty, OSError) else not empty
+    if isinstance(gained, OSError):
+        # It is in the archive; whether something wrote into it meanwhile
+        # can't be told, so it stays there, and the journal says so.
+        record["note"] = (
+            "whether it gained contents while it was being archived couldn't be checked "
+            f"({gained.strerror or gained}); it's kept in the archive as it is"
+        )
+        return
+    if gained:
         # Something wrote into it while it moved, so it wasn't a leftover after
         # all: put it back. If that can't be done (its name was taken again),
         # it stays archived with its contents and the journal says so.
@@ -1305,7 +1366,7 @@ def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
                 expected_identity=(int(record["identity"][0]), int(record["identity"][1])),
             )
         except (OSError, ValueError) as error:
-            if _lstat(destination) is not None:
+            if isinstance(_look(destination), os.stat_result):
                 record["note"] = (
                     "it gained contents while it was being archived and couldn't be put "
                     f"back ({_journal_text(error)}); it's kept in the archive with them"
@@ -1329,6 +1390,7 @@ def _undo_archive(manifest: _Manifest) -> Result:
     restored = 0
     failed = 0
     missing = 0
+    unchecked = 0
     touched: set[Path] = set()
     for record in document.get("items", []):
         if record.get("outcome") not in _IN_ARCHIVE:
@@ -1336,9 +1398,23 @@ def _undo_archive(manifest: _Manifest) -> Result:
         original = Path(record["original"])
         archived = manifest.directory / record["archived"]
         identity = (int(record["identity"][0]), int(record["identity"][1]))
-        at_archive = _lstat(archived)
+        at_archive = _look(archived)
+        if isinstance(at_archive, OSError):
+            # Can't look is not "gone": the record stays as it is, retryable.
+            record["undo_error"] = (
+                f"the archive couldn't be checked ({at_archive.strerror or at_archive})"
+            )
+            unchecked += 1
+            continue
         if at_archive is None or (at_archive.st_dev, at_archive.st_ino) != identity:
-            at_original = _lstat(original)
+            at_original = _look(original)
+            if isinstance(at_original, OSError):
+                record["undo_error"] = (
+                    "its original place couldn't be checked "
+                    f"({at_original.strerror or at_original})"
+                )
+                unchecked += 1
+                continue
             if at_original is not None and (at_original.st_dev, at_original.st_ino) == identity:
                 record["outcome"] = "restored"
                 record.pop("undo_error", None)
@@ -1347,7 +1423,7 @@ def _undo_archive(manifest: _Manifest) -> Result:
             missing += 1
             continue
         if original.parent.name == file_io.RETAINED_ENTRY_DIRECTORY and (
-            _lstat(original.parent) is None
+            _look(original.parent) is None
         ):
             with contextlib.suppress(FileExistsError):
                 original.parent.mkdir(mode=0o700)
@@ -1387,6 +1463,12 @@ def _undo_archive(manifest: _Manifest) -> Result:
             f" {_plural(failed, 'item')} couldn't be put back yet (manifest.json in "
             f"{manifest.directory} says why) and stay archived; Undo can be tried again."
         )
+    if unchecked:
+        message += (
+            f" {_plural(unchecked, 'item')} couldn't be checked (manifest.json in "
+            f"{manifest.directory} says why) and {'stays' if unchecked == 1 else 'stay'} "
+            "recorded as archived; Undo can be tried again."
+        )
     if missing:
         message += (
             f" {_plural(missing, 'item')} {'is' if missing == 1 else 'are'} in neither place "
@@ -1413,7 +1495,10 @@ class _NoctaliaSettings:
 def _read_noctalia() -> tuple[_NoctaliaSettings | None, str]:
     """Noctalia's settings, or ``None`` with why (empty when simply absent)."""
     target = paths.noctalia_settings_path()
-    if _lstat(target) is None:
+    there = _look(target)
+    if isinstance(there, OSError):
+        return None, f"Noctalia's settings can't be looked at ({_why(there)})."
+    if there is None:
         return None, ""
     try:
         data = template.read_settings_document()
@@ -1763,7 +1848,10 @@ def _plan_palette_template(
             f"{_toml_string(str(stale))} → {_toml_string(str(target))}",
         )
     ]
-    target_exists = _lstat(target) is not None
+    target_found = _look(target)
+    if isinstance(target_found, OSError) and not blocked:
+        blocked = f"The current template file can't be looked at ({_why(target_found)})."
+    target_exists = target_found is not None
     if not target_exists:
         size = _lstat(template.bundled_template())
         changes.append(
@@ -2015,7 +2103,12 @@ def _missing_undo_target(manifest: _Manifest, manifests: Sequence[_Manifest]) ->
     still not where Noctalia's settings would point.
     """
     old = Path(str(manifest.document.get("old_input_path", "")))
-    found = _lstat(old)
+    found = _look(old)
+    if isinstance(found, OSError):
+        return (
+            f"the old template file {old} can't be looked at ({_why(found)}), so whether "
+            "undoing would point Noctalia at a missing file isn't known"
+        )
     if found is not None and stat.S_ISREG(found.st_mode):
         return ""
     for archive in manifests:
@@ -2171,7 +2264,13 @@ def _not_yet_rendered(settings: _NoctaliaSettings, manifests: Sequence[_Manifest
         "Waiting for Noctalia to render your colors from the new template. It does that "
         "the next time your colors change; then this step becomes available."
     )
-    palette = _lstat(paths.palette_path())
+    palette_found = _look(paths.palette_path())
+    if isinstance(palette_found, OSError):
+        return (
+            f"Your colors file can't be looked at ({_why(palette_found)}), so whether "
+            "Noctalia has rendered it from the new template isn't known."
+        )
+    palette = palette_found
     switch = _current_edit(PALETTE_TEMPLATE, manifests, settings.sha256)
     if switch is not None:
         document = switch.document
@@ -2207,7 +2306,20 @@ def _plan_old_palette_template(
     title = "Archive the old palette template"
     stale = _stale_template()
     undo = _archive_undo(_latest(OLD_PALETTE_TEMPLATE, manifests))
-    found = _lstat(stale)
+    stale_found = _look(stale)
+    if isinstance(stale_found, OSError):
+        return (
+            ActionPlan(
+                OLD_PALETTE_TEMPLATE,
+                title,
+                f"The old template file can't be looked at ({_why(stale_found)}), "
+                "so it's left alone.",
+                kept=(Kept(stale, f"it can't be inspected ({_why(stale_found)})"),),
+                undo=undo,
+            ),
+            None,
+        )
+    found = stale_found
     if found is None:
         return ActionPlan(
             OLD_PALETTE_TEMPLATE, title, "There's no old template file.", undo=undo
@@ -2269,7 +2381,13 @@ def _plan_old_palette_template(
             None,
         )
     blocked = ""
-    if _lstat(target) is None:
+    target_found = _look(target)
+    if isinstance(target_found, OSError):
+        blocked = (
+            f"The current template file can't be looked at ({_why(target_found)}), "
+            "so the old one stays for now."
+        )
+    elif target_found is None:
         blocked = "The current template file is missing, so the old one stays for now."
     else:
         blocked = _not_yet_rendered(settings, manifests)
@@ -2578,6 +2696,13 @@ def plan(
             retry="Retry Reload",
             blocked=_UNDO_PENDING_BLOCK,
         )
+    trouble = _archive_trouble()
+    if trouble:
+        note = f"{trouble}, so an Undo for one of them can't be offered just now."
+        leftovers, palette, old_template, plugin = (
+            replace(found, notes=(*found.notes, note))
+            for found in (leftovers, palette, old_template, plugin)
+        )
     return Plan((leftovers, palette, old_template, plugin, _plan_thumbnails()))
 
 
@@ -2709,6 +2834,9 @@ def undo(action: Action) -> Result:
             return Result(action, False, "There's nothing to undo.")
         latest = _latest(action, manifests)
         if latest is None:
+            trouble = _archive_trouble()
+            if trouble:
+                return Result(action, False, f"{trouble}, so nothing was undone.")
             return Result(action, False, "There's nothing to undo.")
         if action in (LEFTOVERS, OLD_PALETTE_TEMPLATE):
             _require_undo_room(latest, items=len(_archived_items(latest)))

@@ -523,6 +523,60 @@ def test_a_candidate_that_can_never_be_inspected_is_said_as_it_ends(
     assert raised.value.preserved_path == moved[0]
 
 
+@contextlib.contextmanager
+def search_lost_after_the_publication(
+    monkeypatch: pytest.MonkeyPatch, target: Path, mode: int
+) -> Iterator[list[Path]]:
+    """``target``'s folder becomes ``mode`` right after the candidate is renamed to it.
+
+    Before any verification or rollback, which then both fail natively (EACCES).
+    Yields the temporary the publication used.
+    """
+    rename = file_io._rename_noreplace
+    temporaries: list[Path] = []
+
+    def publish(source: Path, destination: Path) -> None:
+        rename(source, destination)
+        if not temporaries and destination == target:
+            temporaries.append(source)
+            target.parent.chmod(mode)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", publish)
+    yield temporaries
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o400, 0o000], ids=["0600", "0400", "0000"])
+def test_a_candidate_that_stayed_at_its_name_unseen_is_not_said_to_have_moved_back(
+    folder: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """AB-2. The folder loses its search permission right after the first
+    publication (a native EACCES, at 0600, 0400 and 0000): the candidate can't be
+    verified at its name, moved back or looked at, so it is still there. It is
+    not said to have moved back to a temporary nobody can check, the preserved
+    path is the public name, and the write, unproven, is not recorded."""
+    target = folder / "state.json"
+
+    with (
+        search_lost_after_the_publication(monkeypatch, target, mode) as temporaries,
+        state_file.collecting_writes() as wrote,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+    folder.chmod(0o700)
+
+    said = str(raised.value)
+    (temporary,) = temporaries
+    assert target.read_text(encoding="utf-8") == CANDIDATE, "complete, at the public name"
+    assert sorted(entry.name for entry in folder.iterdir()) == ["state.json"], "no temporary"
+    # Failed on 59e6a5d: "could not inspect the entry moved back to <temporary>".
+    assert "moved back to" not in said, said
+    assert f"the publication candidate may still be at {target}" in said, said
+    assert f"neither it nor {temporary} could be inspected" in said, said
+    # Failed on 59e6a5d: the absent temporary.
+    assert raised.value.preserved_path == target
+    assert wrote == [], "unproven: never recorded as a write"
+
+
 @pytest.mark.parametrize("mode", [0o600, 0o400, 0o000], ids=["0600", "0400", "0000"])
 def test_a_temporary_that_cannot_be_looked_at_is_not_said_to_be_empty(
     folder: Path, monkeypatch: pytest.MonkeyPatch, mode: int

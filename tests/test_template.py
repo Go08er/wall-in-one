@@ -1628,6 +1628,42 @@ def test_a_backup_copy_edited_while_unverified_survives(
     ), said
 
 
+def test_a_backup_copy_left_at_its_backup_name_is_said_to_be_there(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AB-3. The backup copy's move to its backup name lands and it is edited in
+    place there (so it no longer verifies), while something else takes the
+    temporary's name, so the rollback can't move it back (a native EEXIST).
+    The copy is still at the backup name: the error names that place, not only
+    the competing file at the temporary, and both files survive."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    edited = SAMPLE_SETTINGS + "# edited while unverified\n"
+    real_rename = file_io._rename_noreplace
+    landed: list[tuple[Path, Path]] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not landed and ".backup-" in source.name and ".bak-" in destination.name:
+            landed.append((source, destination))
+            destination.write_text(edited, encoding="utf-8")  # in place: same inode
+            source.write_text("somebody else's", encoding="utf-8")  # the competing source
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    with pytest.raises(template.TemplateInstallError) as raised:
+        template.install()
+
+    said = str(raised.value)
+    temporary, destination = landed[0]
+    assert settings_path.read_text(encoding="utf-8") == SAMPLE_SETTINGS, "untouched"
+    assert destination.read_text(encoding="utf-8") == edited, "the copy, where it was left"
+    assert temporary.read_text(encoding="utf-8") == "somebody else's", "and the other file"
+    # Failed on 59e6a5d: only "what is at <temporary> is not provably the copy".
+    assert f"; the backup copy could not be verified and was left at {destination}" in said, said
+    assert said.endswith(f"; what is now at {temporary} is not that copy and was left as it is"), (
+        said
+    )
+
+
 def _flip_first_letter(path: Path) -> str:
     """Rewrite ``path`` in place, same inode and length, one letter changed."""
     text = path.read_text(encoding="utf-8")

@@ -576,8 +576,14 @@ def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
             except file_io.PathChangedError as error:
                 settled = True
                 assert candidate_identity is not None
-                left = _settle_relocated_backup(
-                    temporary, descriptor, candidate_identity, snapshot.document
+                stayed = _moved_to(error)
+                left = (
+                    # Not moved back: the copy is where file_io says it left it.
+                    _unverified_backup_left(temporary, stayed)
+                    if stayed is not None
+                    else _settle_relocated_backup(
+                        temporary, descriptor, candidate_identity, snapshot.document
+                    )
                 )
                 raise TemplateInstallError(
                     f"cannot atomically back up {path}: {error}{left}"
@@ -611,6 +617,24 @@ def _backup(path: Path, snapshot: _SettingsSnapshot) -> Path:
             _close_owned_resources(
                 [(_descriptor_closer(descriptor), f"the temporary settings backup {temporary}")]
             )
+
+
+def _unverified_backup_left(temporary: Path, stayed: Path) -> str:
+    """After a backup copy's move to its name could be neither verified nor undone.
+
+    The copy is still at ``stayed`` (file_io's preserved path, the backup
+    name), not back at ``temporary``: something else took that name, or the
+    folder can't be looked at. Nothing is moved, retired or discarded here.
+    Returns what to add to the error: where the copy is, and that whatever is
+    at the temporary now is not it.
+    """
+    said = f"; the backup copy could not be verified and was left at {stayed}"
+    found = _present(temporary)
+    if found is True:
+        return f"{said}; what is now at {temporary} is not that copy and was left as it is"
+    if found is False:
+        return said
+    return f"{said}; whether anything is at {temporary} could not be checked ({found})"
 
 
 def _settle_relocated_backup(

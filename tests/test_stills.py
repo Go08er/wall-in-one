@@ -1977,6 +1977,101 @@ def test_a_sidecar_whose_retirement_could_not_be_verified_is_not_said_changed(
     ), said
 
 
+def test_a_published_sidecar_that_cannot_be_read_back_is_not_said_to_have_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AB-4. The pairing record is published, then can't be read (mode 000) and
+    its folder can't be opened to sync (mode 0300), both native EACCES, so it is
+    rolled back. Its bytes can't be read back to prove them: that is said, not
+    that they changed. With the permissions back they are exactly what was
+    written."""
+    folder = tmp_path / "videos"
+    folder.mkdir(mode=0o700)
+    video = folder / "clip.mp4"
+    video.write_bytes(b"not decoded here")
+    chosen = folder / "chosen.png"
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_rename = file_io._rename_noreplace
+    published: list[bytes] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not published and destination.name == sidecar.name:
+            published.append(destination.read_bytes())
+            destination.chmod(0)  # its bytes can't be read back
+            folder.chmod(0o300)  # its folder can't be opened to sync: rolled back
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    try:
+        with pytest.raises(stills.StillError) as raised:
+            stills.write_sidecar(video, chosen)
+    finally:
+        folder.chmod(0o700)
+        sidecar.chmod(0o600)
+
+    said = str(raised.value)
+    assert sidecar.read_bytes() == published[0], "untouched: exactly what was written"
+    assert _retained(folder) == []
+    # Failed on 59e6a5d: "is no longer exactly what was written, so it was left as it is".
+    assert "no longer exactly what was written" not in said, said
+    assert said.endswith(
+        f"the pairing record at {sidecar} could not be read back (Permission denied), so "
+        "whether it is still exactly what was written isn't known; it was left as it is"
+    ), said
+
+
+def test_a_still_moved_back_that_cannot_be_retired_is_said_where_it_is(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AB-5. The rendered still's move to its name lands and it is edited in place
+    there (so it no longer verifies), so it is moved back; then its folder is mode
+    0500, so the retained folder can't be made (a native EACCES). It stays at its
+    temporary name, edit and all: the error and the log say that real path, not
+    only a descriptor spelling that stops meaning anything."""
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    real_rename = file_io._rename_noreplace
+    steps: list[str] = []
+
+    def render(_video: Path, temporary: Path, _seek: float, *, processes: object = None) -> str:
+        del processes
+        temporary.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
+        return ""
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not steps and destination.name == target.name:
+            steps.append("published")
+            with destination.open("ab") as handle:
+                handle.write(b" and edited")  # in place: it no longer verifies
+        elif steps == ["published"] and source.name == target.name:
+            steps.append("moved back")
+            target.parent.chmod(0o500)  # the retained folder can't be made
+
+    monkeypatch.setattr(stills, "_run", render)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(stills.StillError) as raised:
+            stills.generate(video, root)
+    finally:
+        target.parent.chmod(0o700)
+
+    said = str(raised.value)
+    assert steps == ["published", "moved back"] and not target.exists()
+    survivors = [entry for entry in target.parent.iterdir() if entry.name.endswith(".tmp.png")]
+    assert len(survivors) == 1, sorted(entry.name for entry in target.parent.iterdir())
+    assert survivors[0].read_bytes() == b"\x89PNG\r\n\x1a\nrendered and edited", "the edit survives"
+    assert _retained(target.parent) == []
+    # Failed on 59e6a5d: the survivor's real path was named nowhere.
+    assert f", so it was left at {survivors[0]}" in said, said
+    assert "the still moved back from its name could not be retired intact (" in said, said
+    assert "/proc/" not in said, said
+    assert str(survivors[0]) in caplog.text
+
+
 def test_a_still_moved_back_after_an_unverified_publication_is_retired_intact(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

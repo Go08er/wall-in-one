@@ -1524,3 +1524,36 @@ def test_public_text_leaves_a_real_path_that_merely_contains_a_spelling() -> Non
     assert file_io.public_text(f"'/proc/self/fd/3' -> {real}") == (
         f"'{file_io.DESCRIPTOR_STAND_IN}' -> {real}"
     )
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o400, 0o000], ids=["0600", "0400", "0000"])
+def test_a_moved_entry_that_cannot_be_looked_at_is_not_said_to_be_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """AB-2. The folder loses its search permission right after the move (a native
+    EACCES): the entry can't be verified, moved back or looked at. That is not
+    absence: it is still at the destination, and the error says so."""
+    folder = tmp_path / "private"
+    folder.mkdir(mode=0o700)
+    source, destination = folder / "source", folder / "destination"
+    source.write_text("kept", encoding="utf-8")
+    identity = file_io.path_identity(source)
+    rename = file_io._rename_noreplace
+    moved: list[bool] = []
+
+    def move(old: Path, new: Path) -> None:
+        rename(old, new)
+        if not moved:
+            moved.append(True)
+            folder.chmod(mode)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    try:
+        with pytest.raises(file_io.PathChangedError) as raised:
+            file_io.atomic_move_no_replace(source, destination, expected_identity=identity)
+    finally:
+        folder.chmod(0o700)
+
+    assert destination.read_text(encoding="utf-8") == "kept" and not source.exists()
+    # Failed on 59e6a5d: None, which every caller reads as "moved back".
+    assert raised.value.preserved_path == destination

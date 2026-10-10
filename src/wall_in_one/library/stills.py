@@ -90,6 +90,23 @@ class StillError(Exception):
         )
 
 
+def _say_also(active: BaseException | None, addition: str) -> bool:
+    """Add ``addition`` to ``active``, the `StillError` in flight, in place.
+
+    For a cleanup that must not raise (it runs before others that release
+    what they hold) but has something a person needs to know. The caller
+    takes ``active`` (`sys.exception`) before it handles anything of its own.
+    False when it is no `StillError`: the caller's log line is then all there is.
+    """
+    if not isinstance(active, StillError) or not active.args:
+        return False
+    first = active.args[0]
+    if not isinstance(first, str):
+        return False
+    active.args = (f"{first}; {addition}", *active.args[1:])
+    return True
+
+
 def _close_descriptor_preserving_error(descriptor: int, purpose: str) -> None:
     """Close one capability without replacing an exception already in flight."""
     active_error = sys.exception()
@@ -166,6 +183,29 @@ class _ImageTemporary:
     def mark_published(self) -> None:
         self.published = True
 
+    def _not_retired(self, error: OSError | ValueError) -> str:
+        """Where the moved-back output is after its retirement was refused, for a person."""
+        if isinstance(error, OSError):
+            file_io.respell_error(error, str(self.path.parent), str(self.logical_path.parent))
+        why = file_io.public_text(str(error) or error.__class__.__name__)
+        what = "the still moved back from its name"
+        moved = error.preserved_path if isinstance(error, file_io.PathChangedError) else None
+        if moved is not None:
+            return f"{what} was moved to {moved}, but could not be verified there ({why})"
+        try:
+            self.path.lstat()
+        except FileNotFoundError:
+            return (
+                f"{what} could not be retired intact ({why}) and is no longer at "
+                f"{self.logical_path}"
+            )
+        except OSError as unseen:
+            return (
+                f"{what} could not be retired intact ({why}); whether it is still at "
+                f"{self.logical_path} could not be checked ({_why(unseen)})"
+            )
+        return f"{what} could not be retired intact ({why}), so it was left at {self.logical_path}"
+
     def publishable(self) -> _ImageTemporary:
         """This output, already named beside the target (see `_UnnamedImage`)."""
         return self
@@ -179,9 +219,10 @@ class _ImageTemporary:
         never truncated.
         """
         pin = self.pin
+        in_flight = sys.exception()
         try:
             if pin is not None and not self.published and self.relocated:
-                with contextlib.suppress(OSError, ValueError):
+                try:
                     retired = file_io._retain_exact_entry(
                         self.path,
                         expected_identity=pin.identity,
@@ -190,7 +231,17 @@ class _ImageTemporary:
                         pinned_source=pin,
                         retained_parent=self.path.parent,
                         logical_parent=self.logical_path.parent,
+                        logical_path=self.logical_path,
                     )
+                except (OSError, ValueError) as error:
+                    # Not retired, so it is still wherever it is, edits and
+                    # all. Said by its real path, now: the descriptor spelling
+                    # the failure in flight names stops meaning anything once
+                    # this closes.
+                    left = self._not_retired(error)
+                    LOGGER.warning("%s", left)
+                    _say_also(in_flight, left)
+                else:
                     LOGGER.info(
                         "A still moved back from %s was retired intact to %s",
                         self.logical_path,
@@ -709,13 +760,16 @@ def write_sidecar(video: Path, still: Path) -> Path:
         source.close()
 
 
+_Retirement = Literal["retired", "changed", "unproven", "not-retired"]
+
+
 def _retire_if_written(
     path: Path,
     pin: file_io.PinnedPath,
     written: bytes,
     *,
     logical_parent: Path | None = None,
-) -> Literal["retired", "unproven", "not-retired"]:
+) -> tuple[_Retirement, str]:
     """Retire ``path`` intact only if its bytes are provably, now, exactly ``written``.
 
     It was public, so it may have been edited in place since: matching its
@@ -723,15 +777,24 @@ def _retire_if_written(
     writer still holding it can write after a proof. So nothing is truncated:
     proven bytes are moved intact into the retained folder (a late write
     survives there), and a failed or unavailable proof moves nothing.
-    "not-retired": proven, but the move was refused (or undone); it stays.
+
+    How it ended, and for "unproven" why: "changed", its bytes are provably
+    not ``written`` any more; "unproven", they could not be read back, so
+    nothing is known either way (they may well still match); "not-retired",
+    proven, but the move was refused (or undone). In all three it stays.
     """
     try:
         current = pin.fingerprint
+    except (OSError, ValueError) as error:
+        return "unproven", _why(error)
+    if current[2] != len(written):
+        return "changed", ""  # another length: no read is needed to know
+    try:
         held = file_io.read_pinned_regular_bytes(pin, len(written), expected_fingerprint=current)
-    except OSError, ValueError:
-        return "unproven"
+    except (OSError, ValueError) as error:
+        return "unproven", _why(error)
     if held != written:
-        return "unproven"
+        return "changed", ""
     try:
         file_io._retain_exact_entry(
             path,
@@ -742,18 +805,32 @@ def _retire_if_written(
             logical_parent=logical_parent,
         )
     except OSError, ValueError:
-        return "not-retired"
-    return "retired"
+        return "not-retired", ""
+    return "retired", ""
+
+
+def _why(error: BaseException) -> str:
+    """The reason alone ("Permission denied"), without any spelling of a path."""
+    if isinstance(error, OSError) and error.errno:
+        return os.strerror(error.errno)
+    return str(error) or error.__class__.__name__
 
 
 def _left_unproven(
-    path: Path, what: str, *, shown: Path | None = None, proven: bool = False
+    path: Path,
+    what: str,
+    outcome: _Retirement,
+    why: str = "",
+    *,
+    shown: Path | None = None,
 ) -> StillError:
     """The error for a ``what`` at ``path`` that was not withdrawn.
 
-    Not provably ours, or (``proven``) proven but its retirement refused.
-    Said with the failure being handled, if any, and where the entry is
-    (``shown``: its public spelling, when ``path`` reaches it through a pin).
+    By ``outcome`` (`_retire_if_written`): its bytes changed, or they could not
+    be read back (``why``; nothing is then said about them), or they were
+    proven but its retirement was refused. Said with the failure being
+    handled, if any, and where the entry is (``shown``: its public spelling,
+    when ``path`` reaches it through a pin).
     """
     active = sys.exception()
     reason = f"{active}; " if active is not None else ""
@@ -766,9 +843,14 @@ def _left_unproven(
         return StillError(
             f"{reason}whether {what} is still at {named} could not be checked ({error})"
         )
-    if proven:
+    if outcome == "not-retired":
         return StillError(
             f"{reason}{what} at {named} could not be retired intact, so it was left there"
+        )
+    if outcome == "unproven":
+        return StillError(
+            f"{reason}{what} at {named} could not be read back ({why}), so whether it is "
+            "still exactly what was written isn't known; it was left as it is"
         )
     return StillError(
         f"{reason}{what} at {named} is no longer exactly what was written, so it was left as it is"
@@ -796,7 +878,7 @@ class _SidecarPublication:
         if pin is None:
             return
         try:
-            outcome = _retire_if_written(
+            outcome, why = _retire_if_written(
                 self.access_path,
                 pin,
                 self.written,
@@ -806,7 +888,7 @@ class _SidecarPublication:
             pin.close()
             self.pin = None
         if outcome != "retired":
-            raise _left_unproven(self.path, "the pairing record", proven=outcome == "not-retired")
+            raise _left_unproven(self.path, "the pairing record", outcome, why)
 
     def close(self) -> None:
         if self.pin is not None:
@@ -920,7 +1002,8 @@ def _write_sidecar_publication(
     finally:
         try:
             if temporary_pin is not None:
-                outcome = "retired"
+                outcome: _Retirement = "retired"
+                why = ""
                 try:
                     if not committed and not relocated:
                         # Never published: this writer's own candidate.
@@ -934,7 +1017,7 @@ def _write_sidecar_publication(
                     elif not committed:
                         # It was public for a moment: only the exact bytes
                         # written are retired, intact.
-                        outcome = _retire_if_written(
+                        outcome, why = _retire_if_written(
                             temporary_pin.path,
                             temporary_pin,
                             encoded,
@@ -946,8 +1029,9 @@ def _write_sidecar_publication(
                     raise _left_unproven(
                         temporary_pin.path,
                         "the pairing candidate",
+                        outcome,
+                        why,
                         shown=path.with_name(temporary_pin.path.name),
-                        proven=outcome == "not-retired",
                     )
         finally:
             if publication is not None and not handed_off:
@@ -1230,6 +1314,12 @@ def _publish_image(
         except BaseException as error:
             if isinstance(error, file_io.PathChangedError):
                 temporary.relocated = True
+            if isinstance(error, OSError):
+                # Said by its real folder while that folder's descriptor is
+                # certainly still its own: afterwards the spelling means nothing.
+                file_io.respell_error(
+                    error, str(temporary.path.parent), str(temporary.logical_path.parent)
+                )
             if claim is not None:
                 try:
                     restored = claim.restore()

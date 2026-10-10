@@ -879,9 +879,14 @@ def _remaining_at(temporary: Path, otherwise: Path | None) -> Path | None:
     The temporary unless it is known to be empty (an entry there is named in
     the message, and one that can't be looked at may still be there), else
     ``otherwise``: where file_io left the entry it could not move back, or
-    None when nothing is preserved anywhere.
+    None when nothing is preserved anywhere. A temporary that can't be looked
+    at does not outrank ``otherwise``: file_io said where its entry is, and
+    nothing says anything came back here.
     """
-    return otherwise if _entry_present(temporary) is False else temporary
+    found = _entry_present(temporary)
+    if found is False or (found is not True and otherwise is not None):
+        return otherwise
+    return temporary
 
 
 def _restore_relocated_publication_entry(
@@ -890,6 +895,8 @@ def _restore_relocated_publication_entry(
     candidate: file_io.PinnedPath,
     candidate_fingerprint: file_io.FileFingerprint,
     candidate_document: bytes,
+    *,
+    stayed: bool = False,
 ) -> str | _CandidateLeftBehind | None:
     """Restore a post-publication replacement relocated to our temporary.
 
@@ -905,6 +912,11 @@ def _restore_relocated_publication_entry(
     concurrent entry put back is somebody else's, and is not. When our
     candidate can't be put back and stays at the temporary, the caller's
     cleanup decides what is said of it (`_CandidateLeftBehind`).
+
+    ``stayed``: file_io could not move the unverified entry back and left it
+    at ``path`` (its ``preserved_path``). Then nothing is known to have come
+    back to the temporary, so one that can't be inspected is not described as
+    an entry moved back there.
     """
     try:
         current, same_candidate = _holds_publication_candidate(
@@ -913,6 +925,12 @@ def _restore_relocated_publication_entry(
     except FileNotFoundError:
         return None
     except OSError as error:
+        if stayed:
+            # Unproven, so never recorded as a write; where it is, is said.
+            return (
+                f"it could not be moved back either, so the publication candidate may "
+                f"still be at {path}; neither it nor {temporary} could be inspected: {error}"
+            )
         # Ours or not isn't known: the cleanup proves it, or leaves it, and says which.
         return _CandidateLeftBehind(
             f"could not inspect the entry moved back to {temporary}: {error}", proven=False
@@ -1278,6 +1296,7 @@ def write_atomic_bytes(
                     temporary_pin,
                     temporary_fingerprint,
                     candidate_document,
+                    stayed=error.preserved_path == path,
                 )
                 if isinstance(restoration, _CandidateLeftBehind):
                     # Said once the cleanup below has settled the temporary.

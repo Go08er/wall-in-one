@@ -811,13 +811,23 @@ def _restore_after_failed_verification(
 ) -> Path | None:
     """Restore a moved, unverified entry without replacing a new source.
 
-    ``None`` means restoration succeeded.  Otherwise the returned destination
-    still preserves the entry whose identity could not be established.
+    ``None`` means restoration succeeded, or the destination is known to be
+    empty.  Otherwise the returned destination still preserves the entry whose
+    identity could not be established.  A destination that can't be looked at
+    (its folder lost search permission, say) is not an empty one: the entry
+    was moved there and could not be moved back, so that is where it is, as
+    far as anyone knows.
     """
     try:
         _rename_noreplace(destination, source)
     except OSError:
-        return destination if os.path.lexists(destination) else None
+        try:
+            destination.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return destination
+        return destination
     return None
 
 

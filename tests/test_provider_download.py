@@ -1245,6 +1245,41 @@ def test_an_orphan_sidecar_is_retired_intact_never_emptied(tmp_path: Path) -> No
     assert [entry.read_bytes() for entry in retained.iterdir() if entry.is_file()] == [written]
 
 
+def test_an_orphan_sidecar_whose_media_cannot_be_looked_for_stays_where_it_is(
+    tmp_path: Path,
+) -> None:
+    """Only media known to be missing makes its record an orphan. The folder the
+    record names can't be searched (a native EACCES), so its media can't be
+    looked for, and the record, reached here by another path, is left alone.
+    Once that folder can be searched and the media is seen to be missing, the
+    same call retires it."""
+    library = tmp_path / "library"
+    library.mkdir()
+    media = library / "aurora.mp4"
+    logical = Path(str(media) + download.MOTIONBGS_LOCATION.sidecar_suffix)
+    reach = tmp_path / "reach"
+    reach.mkdir()
+    record = reach / logical.name
+    written = _provenance("MotionBGS", media)
+    record.write_bytes(written)
+    info = record.lstat()
+
+    library.chmod(0o000)
+    try:
+        retired = download._retire_orphan_sidecar(
+            record, logical, info, download.MOTIONBGS_LOCATION, None
+        )
+    finally:
+        library.chmod(0o700)
+    assert not retired and record.read_bytes() == written
+    assert not (reach / file_io.RETAINED_ENTRY_DIRECTORY).exists()
+
+    assert download._retire_orphan_sidecar(record, logical, info, download.MOTIONBGS_LOCATION, None)
+    assert not record.exists()
+    (kept,) = (reach / file_io.RETAINED_ENTRY_DIRECTORY).iterdir()
+    assert kept.read_bytes() == written
+
+
 def test_an_orphan_sidecar_edited_after_it_was_read_stays_where_it_is(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

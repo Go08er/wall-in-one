@@ -619,7 +619,7 @@ def test_a_candidate_put_back_at_its_name_unseen_is_preserved_there(
     assert target.read_text(encoding="utf-8") == CANDIDATE
     assert sorted(entry.name for entry in folder.iterdir()) == ["state.json"], "no temporary"
     assert f"the publication candidate remains at {target}" in said, said
-    # Failed on 6f92aa5: the temporary, which is gone.
+    # Failed on d8adce9: the temporary, which is gone.
     assert raised.value.preserved_path == target
     assert wrote == [], "unverified at its name: never recorded as a write"
 
@@ -647,7 +647,7 @@ def test_a_refused_write_stays_a_refusal_when_its_temporary_cannot_be_discarded(
 
     monkeypatch.setattr(file_io, "_rename_noreplace", move)
     try:
-        # Failed on 6f92aa5: the cleanup's PathChangedError was raised instead.
+        # Failed on d8adce9: the cleanup's PathChangedError was raised instead.
         with caplog.at_level("WARNING"), pytest.raises(FileExistsError) as raised:
             state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
     finally:

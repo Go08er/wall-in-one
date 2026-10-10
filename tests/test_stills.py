@@ -2067,7 +2067,7 @@ def test_a_still_moved_back_that_cannot_be_retired_is_said_where_it_is(
     assert _retained(target.parent) == []
     # Failed on 59e6a5d: the survivor's real path was named nowhere.
     assert f", so it was left at {survivors[0]}" in said, said
-    assert "the still moved back from its name could not be retired intact (" in said, said
+    assert "the unpublished still could not be retired intact (" in said, said
     assert "/proc/" not in said, said
     assert str(survivors[0]) in caplog.text
 
@@ -2112,7 +2112,7 @@ def test_a_still_left_at_its_name_unseen_is_not_said_to_have_moved_back(
     temporary = target.with_name(temporaries[0])
     assert target.read_bytes() == b"\x89PNG\r\n\x1a\nrendered" and not temporary.exists()
     assert _retained(target.parent) == []
-    # Failed on 6f92aa5: "the still moved back from its name could not be retired
+    # Failed on d8adce9: "the still moved back from its name could not be retired
     # intact (...); whether it is still at <temporary> could not be checked".
     assert "moved back" not in said and "moved back" not in caplog.text, said
     assert said.endswith(
@@ -2154,7 +2154,7 @@ def test_a_still_left_at_its_name_is_not_said_to_be_at_a_temporary_somebody_took
     assert target.read_bytes() == b"\x89PNG\r\n\x1a\nrendered and edited", "the edit survives"
     assert temporary.read_text(encoding="utf-8") == "somebody else's"
     assert _retained(target.parent) == []
-    # Failed on 6f92aa5: "the still moved back from its name could not be retired
+    # Failed on d8adce9: "the still moved back from its name could not be retired
     # intact (...), so it was left at <temporary>": somebody else's file, and the
     # edited still at its name not mentioned.
     assert "moved back" not in said and "moved back" not in caplog.text, said
@@ -2163,6 +2163,52 @@ def test_a_still_left_at_its_name_is_not_said_to_be_at_a_temporary_somebody_took
         f"{temporary} is not that still and was left as it is"
     ), said
     assert "/proc/" not in said, said
+
+
+def test_a_still_that_never_left_its_temporary_is_not_said_to_have_moved_back(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The rendered still is edited in place right after its generation was
+    taken, so its publication is refused before anything moves; then its folder
+    is mode 0500, so the retained folder can't be made (a native EACCES). It is
+    still at its temporary name, edit and all, and it never moved: the error
+    says where it is without saying it "moved back"."""
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    retain_rendered = stills._ImageTemporary.retain_rendered
+    renames: list[str] = []
+    real_rename = file_io._rename_noreplace
+
+    def taken_then_edited(temporary: stills._ImageTemporary) -> file_io.FileFingerprint:
+        fingerprint = retain_rendered(temporary)
+        with temporary.logical_path.open("ab") as handle:
+            handle.write(b" and edited")
+        target.parent.chmod(0o500)
+        return fingerprint
+
+    def rename(source: Path, destination: Path) -> None:
+        renames.append(destination.name)
+        real_rename(source, destination)
+
+    monkeypatch.setattr(stills, "_run", _rendered)
+    monkeypatch.setattr(stills._ImageTemporary, "retain_rendered", taken_then_edited)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    try:
+        with caplog.at_level(logging.INFO), pytest.raises(stills.StillError) as raised:
+            stills.generate(video, root)
+    finally:
+        target.parent.chmod(0o700)
+
+    said = str(raised.value)
+    assert target.name not in renames and not target.exists(), "it never moved"
+    (survivor,) = [entry for entry in target.parent.iterdir() if entry.name.endswith(".tmp.png")]
+    assert survivor.read_bytes() == b"\x89PNG\r\n\x1a\nrendered and edited"
+    # Failed on 76026cc: "the still moved back from its name could not be retired intact".
+    assert "moved back" not in said and "moved back" not in caplog.text, said
+    assert "the unpublished still could not be retired intact (" in said, said
+    assert said.endswith(f", so it was left at {survivor}"), said
 
 
 def test_a_still_moved_back_after_an_unverified_publication_is_retired_intact(

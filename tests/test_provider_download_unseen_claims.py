@@ -1,13 +1,14 @@
 """Download cleanup when a deletion claim can be neither verified nor undone.
 
 The claim's folder loses its search permission right after the entry is moved
-into it (a native EACCES). Since 6f92aa5 that is not read as "the entry moved
+into it (a native EACCES). Since d8adce9 that is not read as "the entry moved
 back": it is in the claim folder, and each cleanup says where. Kept apart from
 ``test_provider_download.py``, whose sweep tests are being rewritten.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -133,3 +134,92 @@ def test_recovery_stops_and_says_where_an_unseen_claim_left_a_staged_file(
     assert caught.value.kind == "local-io"
     assert "provider recovery preserved a changed entry at " in str(caught.value)
     assert str(caught.value).endswith(_claim_tail(folder)), str(caught.value)
+
+
+def _transfer(staged: Path) -> http.Transfer:
+    return http.Transfer(
+        url="https://motionbgs.com/media/42/aurora.mp4",
+        status=200,
+        content_type="video/mp4",
+        size=staged.stat().st_size,
+        path=staged,
+    )
+
+
+@pytest.mark.parametrize("shape", ["with-exit", "handler"])
+def test_a_transfer_cleanup_that_leaves_a_claim_never_replaces_the_error_in_flight(
+    tmp_path: Path,
+    unseen_claims: list[tuple[str, Path]],
+    caplog: pytest.LogCaptureFixture,
+    shape: str,
+) -> None:
+    """Something fails while a transfer is held, and discarding it then leaves
+    the staged file in a claim that can't be looked at. The first failure is the
+    cause and is what is raised; where the cleanup left the file is added to it
+    as a note and logged."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    staged = _staged(directory, "transfer")
+    transfer = _transfer(staged)
+
+    # Failed on 76026cc: ProviderError("local-io", "transfer cleanup preserved ...").
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError) as caught:
+        if shape == "with-exit":
+            with transfer:
+                raise ValueError("the body failed validation")
+        else:
+            try:
+                raise ValueError("the status was refused")
+            except ValueError:
+                transfer.discard()
+                raise
+
+    ((name, folder),) = unseen_claims
+    folder.chmod(0o700)
+    assert name == staged.name and (folder / "entry").read_bytes() == PAYLOAD
+    assert "failed validation" in str(caught.value) or "was refused" in str(caught.value)
+    (note,) = caught.value.__notes__
+    assert note.startswith("also could not discard the staged transfer: local-io: ")
+    assert note.endswith(_claim_tail(folder)), note
+    assert _claim_tail(folder) in caplog.text
+
+
+def test_retiring_a_temporary_that_could_not_be_pinned_never_replaces_that_failure(
+    tmp_path: Path,
+    unseen_claims: list[tuple[str, Path]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A new temporary can't be pinned (the one injected failure here: any cause
+    will do), and retiring it then leaves it in a claim that can't be looked at.
+    Why it could not be pinned is what is raised; the cleanup is added to it."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    descriptor, temporary = download._mkstemp(
+        prefix=download.SIDECAR_STAGING_PREFIX, directory=directory
+    )
+    os.write(descriptor, PAYLOAD)
+    pin_regular_path = file_io.pin_regular_path
+    refused: list[bool] = []
+
+    def refuse_once(path: Path, **expected: object) -> file_io.PinnedPath:
+        if not refused:
+            refused.append(True)
+            raise OSError("the temporary could not be pinned")
+        return pin_regular_path(path, **expected)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_io, "pin_regular_path", refuse_once)
+
+    # Failed on 76026cc: ProviderError("local-io", "provider cleanup preserved ...").
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(OSError, match="could not be pinned") as caught,
+    ):
+        download._pin_created_temporary(descriptor, temporary)
+
+    ((name, folder),) = unseen_claims
+    folder.chmod(0o700)
+    assert not isinstance(caught.value, ProviderError)
+    assert name == temporary.name and (folder / "entry").read_bytes() == PAYLOAD
+    (note,) = caught.value.__notes__
+    assert note.startswith(f"also could not retire provider temporary {temporary}: local-io: ")
+    assert note.endswith(_claim_tail(folder)), note
+    assert _claim_tail(folder) in caplog.text

@@ -210,6 +210,11 @@ class _ArtifactCandidate:
     adopted_role: str = ""
 
 
+def _reason(error: OSError) -> str:
+    """The reason alone ("Permission denied"), without any spelling of a path."""
+    return os.strerror(error.errno) if error.errno else str(error)
+
+
 def _cleanup_note(kept: Sequence[Path]) -> str:
     if not kept:
         return ""
@@ -1491,6 +1496,22 @@ def _remove_pinned(
     except OSError as error:
         try:
             restored = claim.restore()
+        except file_io.PathChangedError as restore_error:
+            restored = False
+            if restore_error.preserved_path is not None:
+                # The move back landed, but could be neither verified nor
+                # undone (or made durable): the file is at its own path. That
+                # is not a removal, whatever can be seen of that path now.
+                with contextlib.suppress(OSError):
+                    paths.fsync_directory(target.parent)
+                raise ManageError(
+                    "local-io",
+                    f"could not finish removing {path}; it was moved back to "
+                    f"{restore_error.preserved_path}, but that could not be confirmed "
+                    f"({restore_error}), so its pending removal record was retained for "
+                    "recovery",
+                    retain_intent=True,
+                ) from error
         except OSError:
             restored = False
         if restored:
@@ -1502,9 +1523,17 @@ def _remove_pinned(
                 f"{error.strerror or error}",
             ) from error
         claimed = claim.presence()
+        # Whether the original is at its own path again. Only a missing entry,
+        # or one that is not a regular file, is known not to be it: a path that
+        # can't be looked at may hold it.
         source_is_original = False
-        with contextlib.suppress(OSError, ValueError):
+        source_unchecked: OSError | None = None
+        try:
             source_is_original = file_io.regular_file_fingerprint(target) == expected_fingerprint
+        except FileNotFoundError, file_io.PathChangedError, ValueError:
+            pass
+        except OSError as unseen:
+            source_unchecked = unseen
         if claimed is True or source_is_original:
             preserved = claim.path if claimed is True else path
             with contextlib.suppress(OSError):
@@ -1526,6 +1555,18 @@ def _remove_pinned(
                 "local-io",
                 f"could not finish removing {path}; whether the file is still at "
                 f"{claim.path} could not be checked ({claimed.strerror or claimed}), "
+                "so its pending removal record was retained for recovery",
+                retain_intent=True,
+            ) from error
+        if source_unchecked is not None:
+            # It left its claim, and its own path can't be looked at: it may
+            # be back there. Not known to be removed, so not committed.
+            with contextlib.suppress(OSError):
+                paths.fsync_directory(target.parent)
+            raise ManageError(
+                "local-io",
+                f"could not finish removing {path}; whether the file is back at {path} "
+                f"could not be checked ({_reason(source_unchecked)}), "
                 "so its pending removal record was retained for recovery",
                 retain_intent=True,
             ) from error

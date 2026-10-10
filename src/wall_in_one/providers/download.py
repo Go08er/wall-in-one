@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import logging
 import os
 import secrets
 import stat
@@ -40,6 +41,20 @@ from typing import IO, Any, Final
 from wall_in_one import file_io, paths
 from wall_in_one.library import stills
 from wall_in_one.providers.base import CancellationProbe, ProviderError, refuse_cancellation
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _keep_the_cause(active_error: BaseException, cleanup_error: BaseException, what: str) -> None:
+    """Add a cleanup's failure to the error already in flight; never raise it instead.
+
+    The error in flight is why the caller is cleaning up at all. What the
+    cleanup could not do, and where it left an entry, goes onto that error as
+    a note and into the log.
+    """
+    detail = f"also {what}: {cleanup_error}"
+    active_error.add_note(detail)
+    LOGGER.warning("%s", detail)
 
 
 def _close_descriptor_preserving_error(descriptor: int, purpose: str) -> None:
@@ -569,8 +584,14 @@ def _release_staged_file(staged: _StagedFile) -> None:
 
 
 def _consume_staged_file(staged: _StagedFile, *, discard: bool) -> bool:
-    """End a capability after commit or an exact private-path cleanup."""
+    """End a capability after commit or an exact private-path cleanup.
+
+    Called from a `with transfer:` exit or an ``except`` block, the error
+    already in flight stays the one raised: a discard that left the staged
+    file in a claim is added to it (`_keep_the_cause`).
+    """
     removed = False
+    active_error = sys.exception()
     directory_anchor = staged.directory_anchor
     with staged.lock:
         if staged.consumed:
@@ -590,10 +611,13 @@ def _consume_staged_file(staged: _StagedFile, *, discard: bool) -> bool:
                     )
                 except file_io.PathChangedError as error:
                     preserved = error.preserved_path
-                    raise ProviderError(
+                    failure = ProviderError(
                         "local-io",
                         f"transfer cleanup preserved a changed entry at {preserved or staged.path}",
-                    ) from error
+                    )
+                    if active_error is None:
+                        raise failure from error
+                    _keep_the_cause(active_error, failure, "could not discard the staged transfer")
         finally:
             # A failed exact claim means the public name changed; the caller's
             # capability must still be retired so it cannot later authorise a
@@ -1557,10 +1581,16 @@ def _pin_created_temporary(descriptor: int, path: Path) -> file_io.PinnedPath:
             expected_identity=fingerprint[:2],
             expected_fingerprint=fingerprint,
         )
-    except BaseException:
+    except BaseException as error:
         try:
             if fingerprint is not None:
-                _discard_owned(path, expected_fingerprint=fingerprint)
+                try:
+                    _discard_owned(path, expected_fingerprint=fingerprint)
+                except Exception as cleanup_error:
+                    # Why the pin failed is the cause; the cleanup never masks it.
+                    _keep_the_cause(
+                        error, cleanup_error, f"could not retire provider temporary {path}"
+                    )
         finally:
             _close_descriptor_preserving_error(
                 descriptor,

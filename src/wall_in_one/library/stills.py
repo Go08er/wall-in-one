@@ -158,9 +158,11 @@ class _ImageTemporary:
     logical_path: Path
     pin: file_io.PinnedPath | None = field(repr=False)
     published: bool = False
-    #: Its move to the public still name could not be verified and it was
-    #: moved back: it was public for a moment. Not set when it stayed at that
-    #: name, nor when it never left this one (`came_back`).
+    #: Its publication failed and it is at its temporary name (`came_back`),
+    #: where it may have been public for a moment (moved and moved back) or
+    #: have changed since it was rendered: it is retired intact, not discarded.
+    #: Which of the two isn't known, so nothing said of it claims it moved.
+    #: Not set when it stayed at the public name.
     relocated: bool = False
 
     @property
@@ -185,13 +187,13 @@ class _ImageTemporary:
         self.published = True
 
     def came_back(self) -> bool:
-        """Whether this output is at its temporary name again after a failed move.
+        """Whether this output is, or may be, at its temporary name after a failed move.
 
         Asked when the move's error names no place it stayed. False only when
         that is known: nothing is at the temporary name, or what is there is
-        not this output (the move never began, and `close` then has nothing of
-        its own to retire). A name that can't be looked at may hold it, so it
-        is treated as having been public.
+        not this output (`close` then has nothing of its own to retire). A
+        name that can't be looked at may hold it. True does not say it ever
+        left: a move refused before it began leaves it here just the same.
         """
         if self.pin is None:
             return False
@@ -227,11 +229,14 @@ class _ImageTemporary:
         )
 
     def _not_retired(self, error: OSError | ValueError) -> str:
-        """Where the moved-back output is after its retirement was refused, for a person."""
+        """Where the unpublished output is after its retirement was refused, for a person.
+
+        Not "moved back": it may never have left its temporary name (`came_back`).
+        """
         if isinstance(error, OSError):
             file_io.respell_error(error, str(self.path.parent), str(self.logical_path.parent))
         why = file_io.public_text(str(error) or error.__class__.__name__)
-        what = "the still moved back from its name"
+        what = "the unpublished still"
         moved = error.preserved_path if isinstance(error, file_io.PathChangedError) else None
         if moved is not None:
             return f"{what} was moved to {moved}, but could not be verified there ({why})"
@@ -256,10 +261,10 @@ class _ImageTemporary:
     def close(self) -> None:
         """Release only the exact output inode created by ``mkstemp``.
 
-        Never published, it is discarded. Moved back after a publication that
-        could not be verified, it was public for a moment and may have been
-        edited in place: it is retired intact into the retained folder instead,
-        never truncated.
+        Never published, it is discarded. Left at its temporary name by a
+        publication that failed (`relocated`), it may have been public for a
+        moment and edited in place: it is retired intact into the retained
+        folder instead, never truncated.
         """
         pin = self.pin
         in_flight = sys.exception()
@@ -286,7 +291,7 @@ class _ImageTemporary:
                     _say_also(in_flight, left)
                 else:
                     LOGGER.info(
-                        "A still moved back from %s was retired intact to %s",
+                        "An unpublished still at %s was retired intact to %s",
                         self.logical_path,
                         retired,
                     )

@@ -2411,7 +2411,7 @@ def test_remove_is_not_committed_when_its_claim_cannot_be_looked_at(
         folder.chmod(0o700)
 
     assert caught.value.kind == "local-io"
-    # Failed on 6f92aa5: committed ("removed ..., but the final unlink outcome
+    # Failed on d8adce9: committed ("removed ..., but the final unlink outcome
     # could not be confirmed") with the whole file still in the claim folder.
     assert caught.value.retain_intent and not caught.value.committed
     assert (folder / "entry").read_bytes() == expected_bytes
@@ -2443,7 +2443,7 @@ def test_a_companion_that_cannot_be_looked_at_is_reported_as_kept(
         pin.close()
 
     assert companion.read_bytes() == b"companion"
-    # Failed on 6f92aa5: ((), ()), the companion in neither list.
+    # Failed on d8adce9: ((), ()), the companion in neither list.
     assert outcome == ((), (companion,))
 
 
@@ -2526,3 +2526,90 @@ def test_remove_keeps_its_record_when_the_claimed_file_cannot_be_looked_at(
         operation_token=REMOVAL_TOKEN,
     )
     assert not (folder / "entry").exists() and not item.path.exists()
+
+
+def _downloaded_read_only(root: Path) -> MediaItem:
+    """A downloaded wallpaper that can't be opened for writing: a discard's native EACCES."""
+    path = downloaded(root).path
+    path.chmod(0o444)
+    # Its provenance binds the generation, which the chmod moved on.
+    path.with_name(path.name + ".wallhaven.json").write_text(
+        provenance(path, "Wallhaven"), encoding="utf-8"
+    )
+    return item_for(path, Kind.STILL, Ownership.MANAGED)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])
+def test_remove_is_not_committed_when_the_file_is_moved_back_unseen(
+    root: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """The claimed file can't be opened for writing (a native EACCES), so it can't
+    be destroyed and is moved back. Then its own folder loses its search
+    permission (a native EACCES), so that move can be neither verified nor
+    undone. The file is at its own path: nothing was removed, and the record is
+    kept."""
+    item = _downloaded_read_only(root)
+    original = item.path.read_bytes()
+    public = item.path.parent
+    claim = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN) / "entry"
+    rename = file_io._rename_noreplace
+    back: list[bool] = []
+
+    def move(old: Path, new: Path) -> None:
+        rename(old, new)
+        if not back and old.name == "entry" and new.name == item.path.name:
+            back.append(True)
+            public.chmod(mode)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    try:
+        with pytest.raises(ManageError) as caught:
+            _remove(item, (root,))
+    finally:
+        public.chmod(0o755)
+
+    assert back and caught.value.kind == "local-io"
+    # Failed on 76026cc: committed ("removed ..., but the final unlink outcome
+    # could not be confirmed"), with the file whole at its own path.
+    assert caught.value.retain_intent and not caught.value.committed
+    assert item.path.read_bytes() == original and not claim.exists()
+    said = str(caught.value)
+    assert f"it was moved back to {item.path}, but that could not be confirmed" in said, said
+    assert "/proc/" not in said, said
+
+
+def test_remove_is_not_committed_when_its_own_path_cannot_be_looked_at(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claimed file can't be opened for writing (a native EACCES), so it can't
+    be destroyed. Before it is moved back, something else moves it back (another
+    process replaying the claim, say), and its folder then can't be searched (a
+    native EACCES). It left its claim and its own path can't be looked at: it
+    may be there, so nothing is reported as removed."""
+    item = _downloaded_read_only(root)
+    original = item.path.read_bytes()
+    public = item.path.parent
+    claim = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN) / "entry"
+    restore = file_io.ClaimedPath.restore
+
+    def somebody_restores_first(claimed: file_io.ClaimedPath) -> bool:
+        if claimed.original == item.path:
+            claim.rename(item.path)
+            public.chmod(0o000)
+        return restore(claimed)
+
+    monkeypatch.setattr(file_io.ClaimedPath, "restore", somebody_restores_first)
+    try:
+        with pytest.raises(ManageError) as caught:
+            _remove(item, (root,))
+    finally:
+        public.chmod(0o755)
+
+    assert caught.value.kind == "local-io"
+    # Failed on 76026cc: committed, with the file whole at its own path.
+    assert caught.value.retain_intent and not caught.value.committed
+    assert item.path.read_bytes() == original and not claim.exists()
+    said = str(caught.value)
+    assert (
+        f"whether the file is back at {item.path} could not be checked (Permission denied)" in said
+    ), said

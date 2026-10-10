@@ -1589,7 +1589,7 @@ def test_a_claim_that_cannot_be_looked_at_is_not_said_to_be_gone(tmp_path: Path,
         claim.close()
 
     assert (folder / "entry").read_bytes() == b"pixels" and not source.exists()
-    # Failed on 6f92aa5: None ("no longer available"): nothing left to recover.
+    # Failed on d8adce9: None ("no longer available"): nothing left to recover.
     assert raised.value.preserved_path == folder / "entry"
     assert f"could not be inspected at {folder / 'entry'}" in str(raised.value)
 
@@ -1620,7 +1620,7 @@ def test_a_claim_entry_that_cannot_be_looked_at_still_counts_as_present(
         assert claim.is_present()
         folder.chmod(mode)
         try:
-            # Failed on 6f92aa5: False.
+            # Failed on d8adce9: False.
             assert claim.is_present()
             assert isinstance(claim.presence(), PermissionError)
         finally:
@@ -1652,7 +1652,7 @@ def test_a_discard_that_leaves_its_claim_unreachable_does_not_answer_false(
 
     monkeypatch.setattr(file_io.ClaimedPath, "_verify", verify_then_lose_the_folder)
     try:
-        # Failed on 6f92aa5: returned False, the answer for "safely put back".
+        # Failed on d8adce9: returned False, the answer for "safely put back".
         with pytest.raises(file_io.PathChangedError) as raised:
             file_io.discard_regular_if_same(
                 source,

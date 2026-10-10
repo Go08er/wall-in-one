@@ -1397,7 +1397,7 @@ def test_a_source_that_cannot_be_looked_at_is_not_an_orphan(
     finally:
         fixture.source.parent.chmod(0o700)
 
-    # Failed on 6f92aa5: migrated=1, the capture and its record destroyed and
+    # Failed on d8adce9: migrated=1, the capture and its record destroyed and
     # the video left with no still at all.
     assert result == capture_upgrade.Result(retained=1)
     assert fixture.capture.read_bytes() == original
@@ -1433,7 +1433,7 @@ def test_a_capture_that_cannot_be_looked_at_is_counted_as_kept(
     finally:
         fixture.capture.parent.chmod(0o700)
 
-    # Failed on 6f92aa5: Result(), as if there had been nothing to retire.
+    # Failed on d8adce9: Result(), as if there had been nothing to retire.
     assert result == capture_upgrade.Result(retained=1)
     assert fixture.capture.read_bytes() == original
     assert "Could not retire automatic capture" in caplog.text
@@ -1459,7 +1459,7 @@ def test_captures_that_cannot_be_looked_at_defer_the_cleanup_aloud(
 
     assert result == capture_upgrade.Result()
     assert fixture.capture.read_bytes() == original
-    # Failed on 6f92aa5: nothing was logged.
+    # Failed on d8adce9: nothing was logged.
     assert "Generated-still cleanup deferred" in caplog.text
     assert "Permission denied" in caplog.text
     assert cleanup_environment == []

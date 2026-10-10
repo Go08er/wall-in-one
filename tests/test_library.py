@@ -259,6 +259,26 @@ def test_scan_ignores_hidden_directories(tmp_path: Path) -> None:
     assert [item.path.name for item in library.items] == ["visible.png"]
 
 
+def test_scan_says_so_when_a_folders_files_cannot_be_looked_at(tmp_path: Path) -> None:
+    """A folder that can be listed but not searched (mode 0600: a native EACCES on
+    each file in it). Its wallpapers are not in the library, and the scan says
+    so: an empty ``skipped`` is what a complete scan means, and the capture
+    cleanup's completeness gate and Tidy's item folders lean on it."""
+    _touch(tmp_path / "seen.png")
+    hidden = tmp_path / "hidden-away"
+    _touch(hidden / "one.png")
+    _touch(hidden / "two.png")
+    hidden.chmod(0o600)
+    try:
+        library = scan.scan([tmp_path])
+    finally:
+        hidden.chmod(0o700)
+
+    assert [item.path.name for item in library.items] == ["seen.png"]
+    # Failed on ff1f967: (), a scan that claimed to have missed nothing.
+    assert library.skipped == (f"{hidden}: files could not be looked at (Permission denied)",)
+
+
 def test_scan_reports_a_missing_root_instead_of_failing(tmp_path: Path) -> None:
     library = scan.scan([tmp_path / "nope"])
     assert library.items == ()

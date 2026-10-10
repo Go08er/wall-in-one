@@ -349,6 +349,41 @@ def _same_file_moved_on(target: Path, expected_fingerprint: SourceFingerprint) -
     return named[:2] == expected_fingerprint[:2] and named != expected_fingerprint
 
 
+def _refuse_unless_a_file(
+    path: Path,
+    target: Path,
+    prepared_pin: file_io.PinnedPath | None,
+    *,
+    symlink: ManageError,
+) -> None:
+    """Refuse a removal whose media is not a regular file at ``target``, saying which.
+
+    A symbolic link gets ``symlink``; nothing there, or something else, is
+    "no longer there". A path that can't be looked at (its folder can't be
+    searched, an I/O error) is neither, and is not called missing: it could
+    not be checked. ``path`` is how ``target`` is said.
+    """
+    failure: ManageError | None = None
+    try:
+        status = target.lstat()
+    except FileNotFoundError:
+        failure = ManageError("missing", f"{path} is no longer there")
+    except OSError as error:
+        failure = ManageError(
+            "local-io",
+            f"{path} could not be checked ({_reason(error)}); nothing was changed",
+        )
+    else:
+        if stat.S_ISLNK(status.st_mode):
+            failure = symlink
+        elif not stat.S_ISREG(status.st_mode):
+            failure = ManageError("missing", f"{path} is no longer there")
+    if failure is not None:
+        if prepared_pin is not None:
+            prepared_pin.close()
+        raise failure
+
+
 def _reason(error: OSError) -> str:
     """The reason alone ("Permission denied"), without any spelling of a path."""
     return os.strerror(error.errno) if error.errno else str(error)
@@ -1387,11 +1422,20 @@ def _require_source_pin(
         raise ManageError(
             "changed", f"{path} was replaced after removal was prepared; nothing was changed"
         ) from error
-    except (OSError, ValueError) as error:
+    except (FileNotFoundError, ValueError) as error:
         if owns_pin and pin is not None:
             pin.close()
         raise ManageError(
             "missing", f"{path} is no longer the wallpaper prepared for removal"
+        ) from error
+    except OSError as error:
+        # It can't be looked at: that says nothing about whether it changed.
+        if owns_pin and pin is not None:
+            pin.close()
+        raise ManageError(
+            "local-io",
+            f"it couldn't be checked whether {path} is still the wallpaper prepared for "
+            f"removal ({_reason(error)}); nothing was changed",
         ) from error
     return pin
 
@@ -1498,14 +1542,12 @@ def remove(
         if prepared_pin is not None:
             prepared_pin.close()
         raise ManageError("outside-root", f"{path} is not inside the library")
-    if target.is_symlink():
-        if prepared_pin is not None:
-            prepared_pin.close()
-        raise ManageError("symlink", f"{path} is a symbolic link, so it is not ours to delete")
-    if not target.is_file():
-        if prepared_pin is not None:
-            prepared_pin.close()
-        raise ManageError("missing", f"{path} is no longer there")
+    _refuse_unless_a_file(
+        path,
+        target,
+        prepared_pin,
+        symlink=ManageError("symlink", f"{path} is a symbolic link, so it is not ours to delete"),
+    )
     try:
         source_pin = _require_source_pin(
             path,
@@ -2011,10 +2053,12 @@ def trash(
             "not-ours",
             f"{path.name} lives outside your wallpaper folders, so it is not this app's to move",
         )
-    if target.is_symlink() or not target.is_file():
-        if prepared_pin is not None:
-            prepared_pin.close()
-        raise ManageError("missing", f"{path} is no longer there")
+    _refuse_unless_a_file(
+        path,
+        target,
+        prepared_pin,
+        symlink=ManageError("missing", f"{path} is no longer there"),
+    )
     try:
         source_pin = _require_source_pin(
             path,

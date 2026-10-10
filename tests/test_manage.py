@@ -2636,3 +2636,73 @@ def test_remove_is_not_committed_when_its_own_path_cannot_be_looked_at(
     assert (
         f"whether the file is back at {item.path} could not be checked (Permission denied)" in said
     ), said
+
+
+@pytest.mark.parametrize("move_to_trash", [False, True], ids=["remove", "trash"])
+def test_media_that_cannot_be_looked_at_is_not_said_to_be_gone(
+    root: Path, *, move_to_trash: bool
+) -> None:
+    """The wallpaper's folder can't be searched (mode 000: a native EACCES), so
+    the file can't be looked at. That is not "no longer there": the refusal
+    says it could not be checked, and its kind is not ``missing``."""
+    if move_to_trash:
+        path = root / "album" / "holiday.png"
+        path.parent.mkdir()
+        path.write_bytes(b"personal image")
+        item = item_for(path)
+    else:
+        item = downloaded(root)
+        path = item.path
+    expected, fingerprint = _expected(path), _fingerprint(path)
+    path.parent.chmod(0o000)
+    try:
+        with pytest.raises(ManageError) as caught:
+            if move_to_trash:
+                manage.trash(
+                    item, (root,), expected_source=expected, expected_fingerprint=fingerprint
+                )
+            else:
+                manage.remove(
+                    item,
+                    (root,),
+                    expected_source=expected,
+                    expected_fingerprint=fingerprint,
+                    operation_token=REMOVAL_TOKEN,
+                )
+    finally:
+        path.parent.chmod(0o755)
+
+    # Failed on ff1f967: "missing: ... is no longer there".
+    assert caught.value.kind == "local-io"
+    assert str(caught.value) == (
+        f"local-io: {path} could not be checked (Permission denied); nothing was changed"
+    )
+    assert path.is_file()
+
+
+def test_a_prepared_source_that_cannot_be_looked_at_is_not_said_to_have_changed(
+    root: Path,
+) -> None:
+    """Binding the removal to its prepared file fails because the file can't be
+    looked at (its folder at mode 000: a native EACCES). That is not "no longer
+    the wallpaper prepared for removal": it could not be checked."""
+    item = downloaded(root)
+    expected, fingerprint = _expected(item.path), _fingerprint(item.path)
+    item.path.parent.chmod(0o000)
+    try:
+        with pytest.raises(ManageError) as caught:
+            manage._require_source_pin(item.path, expected, fingerprint, None)
+    finally:
+        item.path.parent.chmod(0o755)
+
+    # Failed on ff1f967: "missing: ... is no longer the wallpaper prepared for removal".
+    assert caught.value.kind == "local-io"
+    assert str(caught.value) == (
+        f"local-io: it couldn't be checked whether {item.path} is still the wallpaper "
+        "prepared for removal (Permission denied); nothing was changed"
+    )
+
+    item.path.unlink()
+    with pytest.raises(ManageError) as gone:
+        manage._require_source_pin(item.path, expected, fingerprint, None)
+    assert gone.value.kind == "missing"

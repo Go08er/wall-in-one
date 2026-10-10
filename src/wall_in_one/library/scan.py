@@ -507,6 +507,8 @@ def _scan(
         tuple[file_io.FileFingerprint, int, int],
     ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
+    # Folders whose files could be listed but not looked at, each said once.
+    unseen_folders: set[Path] = set()
 
     for root in resolved_roots:
         if cancelled is not None and cancelled():
@@ -526,7 +528,18 @@ def _scan(
             try:
                 info = path.stat()
                 generation = file_io.file_fingerprint(info)
-            except OSError, ValueError:
+            except FileNotFoundError, ValueError:
+                continue  # gone since the walk listed it, or not a regular file
+            except OSError as error:
+                # Listed, but it can't be looked at (its folder can't be
+                # searched, an I/O error). It is not in the library, and the
+                # scan says so: `skipped` is what tells a complete scan from
+                # one that missed something.
+                if path.parent not in unseen_folders:
+                    unseen_folders.add(path.parent)
+                    skipped.append(
+                        f"{path.parent}: files could not be looked at ({error.strerror or error})"
+                    )
                 continue
             if pairing.is_excluded(path, info):
                 seen.add(path)  # a dry run: as if already deleted, wherever it is reached from

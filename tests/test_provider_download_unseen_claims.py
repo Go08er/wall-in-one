@@ -223,3 +223,64 @@ def test_retiring_a_temporary_that_could_not_be_pinned_never_replaces_that_failu
     assert note.startswith(f"also could not retire provider temporary {temporary}: local-io: ")
     assert note.endswith(_claim_tail(folder)), note
     assert _claim_tail(folder) in caplog.text
+
+
+@pytest.mark.parametrize("lost_before", ["the revalidation", "the discard"])
+def test_recovery_never_says_an_unseen_claim_still_holds_its_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost_before: str
+) -> None:
+    """The sweep claims an old staged file, and then the claim's folder loses its
+    search permission (a native EACCES): before the claimed entry is looked at
+    again, or after that and before it is discarded. The step fails, putting the
+    entry back fails too, and the claim can't be looked at. So where the entry is
+    isn't known: the error says it "may still be" in the claim and that this
+    could not be checked, never that it "remains" there."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    now = 10_000_000.0
+    old = now - download.STAGING_MAX_AGE_SECONDS - 1
+    staged = _staged(directory, "one")
+    os.utime(staged, (old, old))
+    claims: list[file_io.ClaimedPath] = []
+    sealed: list[Path] = []
+    claim_for_deletion = file_io.claim_for_deletion
+    is_owned_staging = download._is_owned_staging
+
+    def seal() -> None:
+        folder = Path(os.path.realpath(claims[0].path.parent))
+        sealed.append(folder)
+        folder.chmod(0o000)
+
+    def claim(path: Path, **expected: object) -> file_io.ClaimedPath:
+        made = claim_for_deletion(path, **expected)  # type: ignore[arg-type]
+        claims.append(made)
+        if lost_before == "the revalidation":
+            seal()
+        return made
+
+    def owned(name: str, info: os.stat_result, prefixes: tuple[str, ...]) -> bool:
+        answer = is_owned_staging(name, info, prefixes)
+        if claims and not sealed:  # the claimed entry was just looked at again
+            seal()
+        return answer
+
+    monkeypatch.setattr(file_io, "claim_for_deletion", claim)
+    monkeypatch.setattr(download, "_is_owned_staging", owned)
+    try:
+        with pytest.raises(ProviderError) as caught:
+            download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=now)
+    finally:
+        for folder in sealed:
+            folder.chmod(0o700)
+
+    (folder,) = sealed
+    message = str(caught.value)
+    assert not staged.exists() and (folder / "entry").read_bytes() == PAYLOAD
+    assert caught.value.kind == "local-io"
+    step = "revalidate" if lost_before == "the revalidation" else "safely clean"
+    assert f"could not {step} provider staging; " in message, message
+    # Failed on 2b8e720: "entry remains at <the claim>", said without looking.
+    assert "entry remains at" not in message, message
+    assert f"{_claim_tail(folder)}; that could not be checked (Permission denied)" in message, (
+        message
+    )
+    assert "entry may still be at " in message

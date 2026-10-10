@@ -1021,14 +1021,10 @@ def recover_abandoned(
                     try:
                         claimed_info = claim.path.lstat()
                     except OSError as error:
-                        try:
-                            restored = claim.restore()
-                        except OSError:
-                            restored = False
-                        preserved = path if restored else claim.path
                         raise ProviderError(
                             "local-io",
-                            f"could not revalidate provider staging; entry remains at {preserved}",
+                            "could not revalidate provider staging; "
+                            + _put_back_or_say_where(claim, path),
                         ) from error
                     valid = claimed_info.st_mtime <= cutoff and _is_owned_staging(
                         path.name, claimed_info, prefixes
@@ -1051,15 +1047,10 @@ def recover_abandoned(
                     try:
                         claim.discard()
                     except OSError as error:
-                        try:
-                            restored = claim.restore()
-                        except OSError:
-                            restored = False
-                        preserved = path if restored else claim.path
                         raise ProviderError(
                             "local-io",
                             "could not safely clean provider staging; "
-                            f"entry remains at {preserved}",
+                            + _put_back_or_say_where(claim, path),
                         ) from error
                     removed.append(Path(os.fspath(path)))
                 finally:
@@ -1122,6 +1113,36 @@ def _names_missing_media(raw: bytes, location: ManagedLocation, logical_media: P
         and document.get("plugin") == "goober/wall-in-one"
         and document.get("provider") == location.provider
         and document.get("path") == str(logical_media)
+    )
+
+
+def _put_back_or_say_where(claim: file_io.ClaimedPath, path: Path) -> str:
+    """Put a claimed staging entry back at ``path``; say where it is, as far as is known.
+
+    A restore that failed says nothing about where the entry is, and one that
+    made the move but could not make it durable leaves it at ``path``. So the
+    claim is looked at (`ClaimedPath.presence`), and a look that fails is said
+    as that: the entry "may still be" there, never "remains" unseen.
+    """
+    try:
+        if claim.restore():
+            return f"entry remains at {path}"
+    except OSError as error:
+        if isinstance(error, file_io.PathChangedError) and error.preserved_path is not None:
+            # The move was made; only its durability is in doubt.
+            return f"entry remains at {path}"
+        # Why is for the log; where the entry is now is looked at, not assumed.
+        LOGGER.warning(
+            "a claimed staging entry could not be put back: %s", file_io.public_text(str(error))
+        )
+    presence = claim.presence()
+    if presence is True:
+        return f"entry remains at {claim.path}"
+    if presence is False:
+        return f"entry is no longer at {claim.path}; it may be back at {path}"
+    return (
+        f"entry may still be at {claim.path}; that could not be checked "
+        f"({presence.strerror or presence})"
     )
 
 

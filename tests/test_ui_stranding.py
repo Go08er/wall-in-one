@@ -34,8 +34,22 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_ui_authoring_permanence import _session as _permanence_session  # noqa: E402
 from tests.test_ui_next_displays import LAYOUT  # noqa: E402
-from tests.test_ui_next_editing import first_scan, wallpaper  # noqa: E402
-from tests.test_ui_next_slice import finish, run  # noqa: E402
+from tests.test_ui_next_editing import (  # noqa: E402
+    durable,
+    first_scan,
+    inspector_of,
+    item_at,
+    wallpaper,
+)
+from tests.test_ui_next_settings import (  # noqa: E402
+    NOCTALIA,
+    Opened,
+    _noctalia_settings,
+    _template_state,
+)
+from tests.test_ui_next_settings import _close as _close_settings  # noqa: E402
+from tests.test_ui_next_settings import _open as _open_settings  # noqa: E402
+from tests.test_ui_next_slice import finish, library_page, run  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402,F401
     FakeRuntime,
     Step,
@@ -51,18 +65,21 @@ from tests.test_ui_pairing_picker import (  # noqa: E402
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
 from tests.test_ui_tidy import _idle, section  # noqa: E402,F401
-from wall_in_one import config, runtime_config  # noqa: E402
+from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import displays, pairings, playlists, schedules  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
-from wall_in_one.theme import palettes  # noqa: E402
+from wall_in_one.theme import noctalia, palettes  # noqa: E402
+from wall_in_one.theme.palette import PaletteError  # noqa: E402
 from wall_in_one.ui import pairings_page, playlists_page  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
-from wall_in_one.ui.next import real_schedule  # noqa: E402
+from wall_in_one.ui.next import real_schedule, real_settings  # noqa: E402
 from wall_in_one.ui.next.displays import DisplaysPage  # noqa: E402
+from wall_in_one.ui.next.playlists import PlaylistPage  # noqa: E402
 from wall_in_one.ui.next.real_settings import RealSettings, _colors, _Editing  # noqa: E402
 from wall_in_one.ui.next.schedule import SchedulePage  # noqa: E402
 from wall_in_one.ui.next.schedule_editor import RuleEditor  # noqa: E402
+from wall_in_one.ui.next.settings_palettes import PaletteEditor, PalettesDialog  # noqa: E402
 from wall_in_one.ui.next.settings_state import KEY_SAVED, PaletteDraft  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.schedules_page import SchedulesPage  # noqa: E402
@@ -946,3 +963,349 @@ def test_aa3b_a_classic_entry_drag_ends_whatever_queuing_its_move_did(
     # Before: the health refresh it deferred during the drag was never done.
     assert not page._health_refresh_after_drag
     session.shutdown()
+
+
+# -- AB-6: the new window's failure paths show what is true before they report -------------
+#
+# Each failure or refusal said something through the window, then put the
+# visible control back (or told the page). A report that raised left the
+# control showing what was never saved. One raise is injected in the report;
+# what is shown must already be the durable truth, and the next gesture is taken.
+
+
+def test_ab6_an_inspector_colour_not_saved_goes_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Astra's first repro: disk at the default, the inspector and its view still Light."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+    dusk = wallpaper(tmp_path, "dusk.jpg")
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        library_page(window).inspect(window.state.wallpaper(dusk))
+        item = item_at(application, dusk)
+        theme = inspector_of(window).theme_mode
+        assert theme is not None
+        before = theme.get_active_name()
+        assert before != "light"
+        refused = _raises_once(pairings.Store, "choose_mode", monkeypatch)
+        reported = _raises_once(application, "window_report", monkeypatch)
+        theme.set_active_name("light")
+        assert window.state.wallpaper(dusk).theme_mode == "light", "queued: shown until it settles"
+        yield "the refused save", lambda: settled(application) and bool(reported)
+        assert refused and durable(item) == pairings.PalettePolicy(), "nothing was saved"
+        # Before: the inspector and its cached view still said Light.
+        assert window.state.wallpaper(dusk).theme_mode == before
+        theme = inspector_of(window).theme_mode
+        assert theme is not None and theme.get_active_name() == before
+
+        theme.set_active_name("light")
+        yield (
+            "the next choice",
+            lambda: settled(application) and durable(item).mode is pairings.Mode.LIGHT,
+        )
+        theme = inspector_of(window).theme_mode
+        assert theme is not None and theme.get_active_name() == "light"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_ab6_an_inspector_colour_refused_outright_goes_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same control, refused before anything is queued (edits are off)."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+    dusk = wallpaper(tmp_path, "dusk.jpg")
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        library_page(window).inspect(window.state.wallpaper(dusk))
+        item = item_at(application, dusk)
+        editing = window.state.editing
+        assert editing is not None
+        theme = inspector_of(window).theme_mode
+        assert theme is not None
+        before = theme.get_active_name()
+        allowed = editing.editing_blocked
+        monkeypatch.setattr(editing, "editing_blocked", lambda: "Changes to wallpapers are off")
+        reported = _raises_once(application, "window_report", monkeypatch)
+        theme.set_active_name("dark")  # its handler raises with the report: GTK logs it
+        assert reported and durable(item) == pairings.PalettePolicy()
+        # Before: the clicked choice stayed selected.
+        theme = inspector_of(window).theme_mode
+        assert theme is not None and theme.get_active_name() == before
+
+        monkeypatch.setattr(editing, "editing_blocked", allowed)
+        theme.set_active_name("dark")
+        yield (
+            "the next choice",
+            lambda: settled(application) and durable(item).mode is pairings.Mode.DARK,
+        )
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def _template_page(monkeypatch: pytest.MonkeyPatch) -> tuple[Opened, list[str]]:
+    """The new window's Settings over a Noctalia that has no palette template yet."""
+    asked: list[str] = []
+    monkeypatch.setattr(noctalia, "reload_config", lambda: asked.append("reload"))
+
+    def apply_templates() -> None:
+        if "render refused" not in asked:
+            asked.append("render refused")
+            raise noctalia.NoctaliaError("its socket went away.")
+        asked.append("render")
+
+    monkeypatch.setattr(noctalia, "apply_templates", apply_templates)
+    _noctalia_settings(NOCTALIA)
+    shown = _open_settings(monkeypatch)
+    page = shown.page
+    spin_until(
+        lambda: _template_state(shown) == "missing" and page._template_button.get_sensitive(),
+        10,
+        what="the template row's first read",
+    )
+    return shown, asked
+
+
+def test_ab6_a_template_install_refused_gives_install_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Astra's second repro: the busy bit cleared, Install still off with its spinner."""
+    shown, _asked = _template_page(monkeypatch)
+    try:
+        page = shown.page
+        _raises_once(real_settings, "install_template", monkeypatch)
+        reported = _raises_once(shown.application, "window_report", monkeypatch)
+        page.install_template()  # the button
+        assert page._template_spinner.get_visible() and not page._template_button.get_sensitive()
+        shown.wait("the refusal", lambda: reported)
+        # Before: off, with its spinner, until some other settings signal.
+        assert page._template_button.get_sensitive(), "Install is offered again"
+        assert not page._template_spinner.get_visible()
+
+        page.install_template()
+        shown.wait("the install", lambda: _template_state(shown) == "installed")
+    finally:
+        _close_settings(shown)
+
+
+def test_ab6_a_template_render_refused_gives_render_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The render sibling: Noctalia refuses, and saying so raises."""
+    shown, asked = _template_page(monkeypatch)
+    try:
+        page = shown.page
+        page.install_template()
+        shown.wait("the install", lambda: _template_state(shown) == "installed")
+        spin_until(
+            lambda: page._render_row.get_visible() and page._render_button.get_sensitive(),
+            10,
+            what="Render now, offered",
+        )
+        reported = _raises_once(shown.application, "window_report", monkeypatch)
+        page.render_templates()  # the button
+        assert page._template_spinner.get_visible() and not page._render_button.get_sensitive()
+        shown.wait("the refusal", lambda: reported)
+        assert asked == ["reload", "render refused"]
+        # Before: off, with the spinner, until some other settings signal.
+        assert page._render_button.get_sensitive(), "Render now is offered again"
+        assert not page._template_spinner.get_visible()
+
+        page.render_templates()
+        shown.wait("the render", lambda: "render" in asked)
+    finally:
+        _close_settings(shown)
+
+
+def test_ab6_a_playlist_removal_not_saved_releases_its_rows_before_the_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Playlists page holds what it asked to remove, and "Saving…", until it hears."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        dock = _dock(application, tmp_path)
+        application.session.playlists.add(dock.id, Path(wallpaper(tmp_path, "dusk.jpg")))
+        application.playlists_changed()
+        yield "the playlist to be published", lambda: settled(application)
+        window.navigate(f"playlist:{dock.id}")
+        page = window.pages["playlist"]
+        assert isinstance(page, PlaylistPage)
+        first, second = application.session.playlists.find(dock.id).entries
+        refused = _raises_once(playlists.Store, "remove_entries", monkeypatch)
+        reported = _raises_once(application, "window_report", monkeypatch)
+        page.remove_entries([first.id])
+        assert page._removing == {first.id} and page._saving.get_visible()
+        yield "the refused removal", lambda: settled(application) and bool(reported)
+        assert refused and len(playlists.Store.open().find(dock.id).entries) == 2
+        # Before: the row stayed "removing" under "Saving…", and asking again did nothing.
+        assert page._removing == set(), page._removing
+        assert not page._saving.get_visible()
+
+        page.remove_entries([first.id])
+        yield (
+            "the next removal",
+            lambda: (
+                settled(application)
+                and [entry.id for entry in playlists.Store.open().find(dock.id).entries]
+                == [second.id]
+            ),
+        )
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_ab6_a_refused_default_playlist_settles_the_schedule_page_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write refused before it is queued (settings from a newer version): the page's
+    queued choice was settled only after the report."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        dock = _dock(application, tmp_path)
+        yield "the playlist to be published", lambda: settled(application)
+        page = window.pages["schedule"]
+        assert isinstance(page, SchedulePage)
+        page.flush()
+        before = page.fallback_row.get_selected()
+        wanted = page._fallback_ids.index(dock.id)
+        assert wanted != before
+        monkeypatch.setattr(application, "_settings_unknown_keys", ("from_a_newer_version",))
+        reported = _raises_once(application, "window_report", monkeypatch)
+        page.fallback_row.set_selected(wanted)  # its handler raises with the report
+        assert reported and application.settings.active_playlist != dock.id
+        # Before: the queued choice stayed for good, and the row with it.
+        assert page._pending_default == {}, page._pending_default
+        page.flush()
+        assert page.fallback_row.get_selected() == before
+
+        monkeypatch.setattr(application, "_settings_unknown_keys", ())
+        page.fallback_row.set_selected(wanted)
+        yield (
+            "the next choice",
+            lambda: settled(application) and config.load_strict().active_playlist == dock.id,
+        )
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+def test_ab6_a_refused_settings_switch_goes_back_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settings from a newer version: refused before anything is queued, so nothing
+    else puts the row back."""
+    target = paths.settings_path()
+    document = target.read_text()
+    target.write_text(document + 'wallpaper_rules = "from a newer version"\n')
+    shown = _open_settings(monkeypatch)
+    try:
+        row = shown.row("shuffle")
+        before = row.get_active()
+        reported = _raises_once(shown.application, "window_report", monkeypatch)
+        row.set_active(not before)  # its handler raises with the report: GTK logs it
+        assert reported
+        # Before: the switch stayed where it was clicked, though nothing was saved.
+        assert row.get_active() == before
+
+        target.write_text(document)
+        monkeypatch.setattr(shown.application, "_settings_unknown_keys", ())
+        row.set_active(not before)
+        shown.wait("the next change", lambda: config.load().shuffle == (not before))
+    finally:
+        _close_settings(shown)
+
+
+def test_ab6_a_palette_save_refused_outright_releases_the_editor_before_its_report(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editor holds its Save until it hears; a refusal said first never told it."""
+    shown = _open_settings(monkeypatch)
+    try:
+        palettes.write_custom(
+            "Evening",
+            {
+                "dark": {key: "#202830" for key, _label in palettes.EDITABLE_KEYS},
+                "light": {key: "#f0f0f0" for key, _label in palettes.EDITABLE_KEYS},
+            },
+        )
+        shown.window.open_palette_browser()
+        dialog = shown.page._dialogs[-1]
+        assert isinstance(dialog, PalettesDialog)
+        manager = dialog.manager
+        spin_until(lambda: manager.palette_list().phase == "ready", 10, what="the catalogue")
+        (evening,) = [item for item in manager.palette_list().items if item.name == "Evening"]
+        dialog.edit(evening, copy=True)
+        spin_until(
+            lambda: isinstance(dialog.nav.get_visible_page(), PaletteEditor), 10, what="the editor"
+        )
+        editor = dialog.nav.get_visible_page()
+        assert isinstance(editor, PaletteEditor)
+        editor.name.set_text("Evening red")
+        with_overrides = palettes.with_overrides
+        refused: list[int] = []
+
+        def refuse_once(*arguments: Any, **keywords: Any) -> Any:
+            if not refused:
+                refused.append(1)
+                raise PaletteError("that is not a colour")
+            return with_overrides(*arguments, **keywords)
+
+        monkeypatch.setattr(palettes, "with_overrides", refuse_once)
+        reported = _raises_once(shown.application, "window_report", monkeypatch)
+        with pytest.raises(RuntimeError, match="injected"):
+            editor.save()
+        assert refused and reported
+        # Before: "saving" for good, Save off, and save() did nothing.
+        assert not editor._saving and editor.save_button.get_sensitive()
+
+        editor.save()
+        shown.wait("the saved palette", lambda: palettes.custom_path("Evening red").is_file())
+    finally:
+        _close_settings(shown)
+
+
+def test_ab6_the_player_bars_toggles_go_back_whatever_the_command_did(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime truth owns Shuffle and Cycle: a refusal that raised left them as clicked."""
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        yield first_scan(application, window)
+        bar = window.playerbar
+        for toggle in (bar._shuffle, bar._rotate):
+            before = toggle.get_active()
+            reported = _raises_once(application, "window_report", monkeypatch)
+            toggle.set_active(not before)  # no runtime here: refused, and saying so raises
+            assert reported
+            # Before: it stayed as clicked, claiming what the runtime never took.
+            assert toggle.get_active() == before
+            toggle.set_active(not before)  # the next click: refused and said, as usual
+            assert len(reported) >= 2 and toggle.get_active() == before
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)

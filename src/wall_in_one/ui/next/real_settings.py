@@ -392,8 +392,8 @@ class RealPalettes:
         entry = self._entries.get(key)
         report = self._backend.window_report
         if entry is None:
+            self.rescan_palettes()  # the list first: the report can raise
             report("That palette is no longer there; the list is being refreshed")
-            self.rescan_palettes()
             return
         if not entry.origin.is_applicable:
             report(f"{entry.name} lives in a layout Noctalia no longer reads; duplicate it first")
@@ -419,19 +419,21 @@ class RealPalettes:
         self, key: str, *, copy: bool, done: Callable[[PaletteDraft | None], None]
     ) -> None:
         entry = self._entries.get(key)
+        # Each refusal: the caller hears first, then the report (which reaches
+        # the window and can raise).
         if entry is None:
+            done(None)
             self._backend.window_report(
                 "That palette is no longer there; the list is being refreshed"
             )
-            done(None)
             return
         if entry.path is None:
-            self._backend.window_report(f"{entry.name} has no file to copy")
             done(None)
+            self._backend.window_report(f"{entry.name} has no file to copy")
             return
         if not copy and not entry.is_editable:
-            self._backend.window_report(f"{entry.name} is read-only; duplicate it to edit")
             done(None)
+            self._backend.window_report(f"{entry.name} is read-only; duplicate it to edit")
             return
         path = entry.path
 
@@ -443,8 +445,8 @@ class RealPalettes:
 
         def opened(document: dict[str, object] | str) -> None:
             if isinstance(document, str):
-                self._backend.window_report(document)
                 done(None)
+                self._backend.window_report(document)
                 return
             done(
                 PaletteDraft(
@@ -461,8 +463,8 @@ class RealPalettes:
             )
 
         def unread(error: str) -> None:
-            self._backend.window_report(f"{entry.name} couldn't be read: {error}")
             done(None)
+            self._backend.window_report(f"{entry.name} couldn't be read: {error}")
 
         self._worker.run(read, opened, unread)
 
@@ -475,9 +477,11 @@ class RealPalettes:
     ) -> None:
         editing = draft.origin
         report = self._backend.window_report
+        # Each refusal: the editor hears first (it holds its Save until it
+        # does), then the report, which reaches the window and can raise.
         if not isinstance(editing, _Editing):
-            report("That draft did not come from this window")
             done(False)
+            report("That draft did not come from this window")
             return
         in_place = editing.in_place
         overrides: dict[Mode, dict[str, str]] = {
@@ -486,14 +490,14 @@ class RealPalettes:
         }
         problem = self.palette_name_problem(draft, name)
         if problem:
-            report(problem)
             done(False)
+            report(problem)
             return
         try:
             document = palettes.with_overrides(editing.document, overrides)
         except PaletteError as error:
-            report(str(error))
             done(False)
+            report(str(error))
             return
         chosen = in_place.name if in_place is not None else name.strip()
 
@@ -581,10 +585,13 @@ class RealPalettes:
         label = scheme_label(scheme)
 
         def finished(error: str) -> None:
+            # The row first, whatever happened: it shows the click until it
+            # hears, and each report below reaches the window and can raise.
+            self._host.emit_changed("settings")
             if not error:
-                backend.window_report(f"Default scheme is now {label}")
                 if sync_noctalia:
                     GLib.timeout_add(SETTLE_MS, self._settle)
+                backend.window_report(f"Default scheme is now {label}")
             elif backend.settings.preview_scheme == scheme:
                 # The preference was saved before Noctalia was asked: a partial
                 # success, said as one.
@@ -593,7 +600,6 @@ class RealPalettes:
                 )
             else:
                 backend.window_report(f"The default scheme was not saved; nothing changed: {error}")
-            self._host.emit_changed("settings")
 
         backend.use_preview_scheme(scheme, sync_noctalia=sync_noctalia, on_complete=finished)
 
@@ -799,15 +805,17 @@ class RealSettings:
         # page uses too: independent displays need an attached one to follow.
         wanted = settings_edit(self._backend.requested_settings, changes, self._live_connectors())
         if isinstance(wanted, str):
+            self._host.emit_changed("settings")  # the row goes back first: the report can raise
             self._report(wanted)
-            self._host.emit_changed("settings")
             return
         if not wanted:
             return  # what is saved or being saved already: no second write
 
         def failed(error: str) -> None:
-            self._report(f"Settings were not saved; nothing changed: {error}")
+            # The rows first (AB-6): they show the click until they hear, and
+            # the report reaches the window and can raise.
             self._host.emit_changed("settings")
+            self._report(f"Settings were not saved; nothing changed: {error}")
 
         self._backend.update_settings_async(on_error=failed, **wanted)
 
@@ -864,8 +872,8 @@ class RealSettings:
                 self._report(saved)
 
         def failed(error: str) -> None:
+            self._host.emit_changed("settings")  # the rows first: the report can raise
             self._report(f"Library folders were not saved; nothing changed: {error}")
-            self._host.emit_changed("settings")
 
         self._backend.update_settings_async(roots=roots, on_success=succeeded, on_error=failed)
 
@@ -1010,8 +1018,8 @@ class RealSettings:
 
         def failed(message: str) -> None:
             # Safe to quote, unlike a save's: removal names the file, never a key.
+            self._host.emit_changed("settings")  # the row first: the report can raise
             self._report(f"The saved key could not be removed: {message}")
-            self._host.emit_changed("settings")
 
         self._backend.authoring_action_async(credentials.clear_key, cleared, failure=failed)
 
@@ -1080,11 +1088,13 @@ class RealSettings:
 
         def failed(message: str) -> None:
             self._template_busy = False
+            # The row first (AB-6): Install stays off, with its spinner, until
+            # the page hears, and the report reaches the window and can raise.
+            self._host.emit_changed("settings")
+            self.check_template()
             # The lane names an exception's type for anything but a ValueError;
             # this sentence already says everything.
             self._report(message.removeprefix(f"{template.TemplateInstallError.__name__}: "))
-            self._host.emit_changed("settings")
-            self.check_template()
 
         if not self._backend.authoring_action_async(install_template, finished, failure=failed):
             self._template_busy = False
@@ -1113,9 +1123,9 @@ class RealSettings:
 
         def failed(message: str) -> None:
             self._template_busy = False
-            self._report(message.removeprefix(f"{template.TemplateInstallError.__name__}: "))
-            self._host.emit_changed("settings")
+            self._host.emit_changed("settings")  # the row first, as for an install (AB-6)
             self.check_template()
+            self._report(message.removeprefix(f"{template.TemplateInstallError.__name__}: "))
 
         if not self._backend.authoring_action_async(render_templates, finished, failure=failed):
             self._template_busy = False

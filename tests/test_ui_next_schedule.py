@@ -495,3 +495,63 @@ def test_a_drop_whose_move_fails_goes_back_to_the_saved_order(
         assert "nothing changed" in backend.reports[-1]
     finally:
         view.close()
+
+
+def test_a_dropped_rule_goes_back_before_its_failure_is_said(
+    backend: Publishing, items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AB-6: the page heard of a failed move only after it was said; a report that
+    raised left the row where it was dropped, on a priority that was never saved."""
+    pid = _playlist(backend.session, "Day", items[0])
+    store = backend.session.schedules
+    a, b = store.add(pid), store.add(pid)
+    move = store.move_relative
+    refused: list[int] = []
+
+    def refuse_once(rule_id: str, step: int) -> schedules.Rule:
+        if not refused:
+            refused.append(1)
+            raise schedules.ScheduleError("local-io", "the disk is full")
+        return move(rule_id, step)
+
+    monkeypatch.setattr(store, "move_relative", refuse_once)
+    report = backend.window_report
+    raised: list[str] = []
+
+    def report_raises_once(message: str) -> None:
+        if not raised:
+            raised.append(message)
+            raise RuntimeError("injected: the report failed")
+        report(message)
+
+    monkeypatch.setattr(backend, "window_report", report_raises_once)
+    view = Shown(backend)
+    try:
+        page = view.page
+
+        def shown() -> list[str]:
+            """The rows on screen, top to bottom (not the list they were built from)."""
+            return [row.rule.id for row in page.rule_list.get_rows() if isinstance(row, RuleRow)]
+
+        spin_until(lambda: min(page.rule_list.row_heights() or [0]) > 0, 5, what="row heights")
+        assert shown() == [b.id, a.id]
+        _drag(page, 1, 0)
+        spin_until(lambda: not page.rule_list.busy, 5, what="the dropped row to settle")
+        assert shown() == [a.id, b.id], "shown where it was dropped"
+        with pytest.raises(RuntimeError, match="injected"):
+            backend.run_authoring()
+        page.flush()
+        assert "nothing changed" in raised[0]
+        assert [rule.id for rule in store.rules] == [a.id, b.id]
+        # Before: still as dropped, until something else redrew the page.
+        assert shown() == [b.id, a.id], "back on what is saved"
+
+        rebuilt = page.rule_list
+        spin_until(lambda: min(rebuilt.row_heights() or [0]) > 0, 5, what="the new rows' heights")
+        _drag(page, 1, 0)
+        spin_until(lambda: not page.rule_list.busy, 5, what="the dropped row to settle")
+        view.settle()
+        assert [rule.id for rule in store.rules] == [b.id, a.id], "the next drop is saved"
+        assert shown() == [a.id, b.id]
+    finally:
+        view.close()

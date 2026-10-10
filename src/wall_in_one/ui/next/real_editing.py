@@ -556,8 +556,12 @@ class RealEditing:
         item = self._shown.item_of(wid)
         if item is None:
             return
-        if self._refused():
-            self._settle_view(wid, force=True)  # the clicked control goes back
+        blocked = self.editing_blocked()
+        if blocked:
+            # The clicked control goes back first: the report reaches the
+            # window and can raise, and must not leave it showing the click.
+            self._settle_view(wid, force=True)
+            self._report(blocked)
             return
         shown = self._shown_policy(item)
         try:
@@ -565,8 +569,8 @@ class RealEditing:
                 shown, mode=mode, scheme=scheme, palette=palette, theme_mode=theme_mode
             )
         except ValueError as error:
+            self._settle_view(wid, force=True)  # the control first, then the report
             self._report(f"Colors for {item.name} were not saved: {error}")
-            self._settle_view(wid, force=True)
             return
         # Against what the controls show, never the durable record alone: going
         # back to the saved choice while another is queued is a real gesture.
@@ -622,9 +626,11 @@ class RealEditing:
             nonlocal reported
             reported = True
             last = settle_intent(self._palette_intent, key)
-            self._report(f"Colors for {item.name} were not saved; nothing changed: {error}")
+            # The view first (AB-6): the report reaches the window and can
+            # raise, and the controls must not go on showing what wasn't saved.
             if last:
                 self._settle_view(wid, force=True)
+            self._report(f"Colors for {item.name} were not saved; nothing changed: {error}")
 
         accepted = backend.authoring_action_async(
             lambda: mutation(store, item),

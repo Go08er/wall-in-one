@@ -358,6 +358,63 @@ def test_rotation_choices_are_runtime_commands_shown_from_the_runtime(
         view.close()
 
 
+def test_runtime_choices_go_back_whatever_the_command_did(
+    backend: Publishing, items: tuple[MediaItem, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AB-6: these show the runtime's answer, not the click. A refusal said through a
+    window that raised, or a command that raised, left them as clicked."""
+    _playlist(backend.session, "Evening", items[0])
+    _independent(backend.session)
+    view = Shown(backend)
+    try:
+        view.select("HDMI-A-1")
+        page = view.page
+        assert page.play_row.get_selected() == 0 and len(page._play_ids) > 1
+
+        # No runtime yet: playing a playlist now is refused, and saying so raises.
+        report = backend.window_report
+        raised: list[str] = []
+
+        def report_raises_once(message: str) -> None:
+            if not raised:
+                raised.append(message)
+                raise RuntimeError("injected: the report failed")
+            report(message)
+
+        monkeypatch.setattr(backend, "window_report", report_raises_once)
+        page.play_row.set_selected(1)  # its handler raises with the report: GTK logs it
+        assert raised
+        page.flush()
+        # Before: the refused playlist stayed selected as what is playing now.
+        assert page.play_row.get_selected() == 0, "back on the runtime's answer"
+
+        view.answer(two_display_status())
+        view.select("HDMI-A-1")
+        assert page.cycle_toggle.get_active(), "the runtime says Cycle is on"
+        send = backend.runtime_action_on_async
+        failed: list[int] = []
+
+        def send_raises_once(connector: str, verb: str, argument: str | None = None) -> bool:
+            if not failed:
+                failed.append(1)
+                raise RuntimeError("injected: the command could not be started")
+            return send(connector, verb, argument)
+
+        monkeypatch.setattr(backend, "runtime_action_on_async", send_raises_once)
+        page.cycle_toggle.set_active(False)  # raises from the command
+        assert failed and backend.sent == []
+        page.flush()
+        # Before: Cycle stayed off, though the runtime was never asked.
+        assert page.cycle_toggle.get_active(), "back on the runtime's answer"
+
+        page.cycle_toggle.set_active(False)  # the next click reaches the runtime
+        assert ("HDMI-A-1", "cycle", "off") in backend.sent
+        page.play_row.set_selected(1)
+        assert backend.sent[-1][:2] == ("HDMI-A-1", "playlist-use")
+    finally:
+        view.close()
+
+
 def test_a_newer_display_file_turns_the_display_choices_off(
     backend: Publishing,
 ) -> None:

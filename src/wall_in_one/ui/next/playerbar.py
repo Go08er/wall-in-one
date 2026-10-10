@@ -216,13 +216,19 @@ class PlayerBar(Gtk.Box):
 
     def _on_shuffle(self, button: Gtk.ToggleButton) -> None:
         if not self._building and self.state.controls is not None:
-            self.state.controls.set_shuffle(button.get_active(), self.state.scope)
-            self.refresh()  # back to what the runtime says until it says otherwise
+            try:
+                self.state.controls.set_shuffle(button.get_active(), self.state.scope)
+            finally:
+                # Back to what the runtime says until it says otherwise, whatever
+                # the command did (a refusal is said in the window, which can raise).
+                self.refresh()
 
     def _on_rotate(self, button: Gtk.ToggleButton) -> None:
         if not self._building and self.state.controls is not None:
-            self.state.controls.set_rotate(button.get_active())
-            self.refresh()  # back to what the runtime says until it says otherwise
+            try:
+                self.state.controls.set_rotate(button.get_active())
+            finally:
+                self.refresh()  # back to what the runtime says, whatever the command did
 
     def _on_scope(self, action: Gio.SimpleAction, value: GLib.Variant | None) -> None:
         if value is None:

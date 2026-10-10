@@ -512,9 +512,11 @@ class RealScheduling:
             settled(saved)
 
     def _refuse(self, settled: Settled | None, message: str, *topics: str) -> None:
-        self._backend.window_report(message)
+        # The pages and the waiting control first (AB-6): the report reaches
+        # the window and can raise, and must not leave a queued choice showing.
         self._owner.emit_changed(*topics)
         self._settle(settled, False)
+        self._backend.window_report(message)
 
     def _store_write(
         self,
@@ -555,8 +557,8 @@ class RealScheduling:
             nonlocal reported
             reported = True
             self._settle(settled, False)  # settled first: what follows reaches the window
+            self._owner.emit_changed(*topics)  # and the pages, before the report
             self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
-            self._owner.emit_changed(*topics)
 
         accepted = self._backend.authoring_action_async(
             work, finish, prepare=prepare, failure=failed
@@ -593,8 +595,8 @@ class RealScheduling:
             nonlocal reported
             reported = True
             self._settle(settled, False)  # settled first: what follows reaches the window
+            self._owner.emit_changed(*topics)  # and the pages, before the report
             self._backend.window_report(f"{what} was not saved; nothing changed: {error}")
-            self._owner.emit_changed(*topics)
 
         accepted = self._backend.update_settings_async(on_success=saved, on_error=failed, **changes)
         if not accepted and not reported:
@@ -859,9 +861,9 @@ class RealScheduling:
                 self._backend.adopt_colors_forget(outcome.colors)
                 if committed:
                     self._backend.schedule_edited()  # publish what committed
+                self._owner.emit_changed(*topics)  # the pages, before what didn't save is said
                 if said:
                     self._backend.window_report(said)
-                self._owner.emit_changed(*topics)
             finally:
                 # Settled whatever adopting it did (it reaches the window): the
                 # settings come first, so this can't simply move up.
@@ -872,10 +874,10 @@ class RealScheduling:
             reported = True
             try:
                 self._backend.adopt_colors_forget(None)  # nothing saved: what is requested again
+                self._owner.emit_changed(*topics)  # the pages, before the report
                 self._backend.window_report(
                     f"Forgetting {connector} was not saved; nothing changed: {error}"
                 )
-                self._owner.emit_changed(*topics)
             finally:
                 self._settle(settled, False)  # after the settings, whatever they did
 
@@ -944,48 +946,56 @@ class RealScheduling:
     def set_display_rotation(
         self, connector: str, *, cycle: bool | None = None, shuffle: bool | None = None
     ) -> None:
-        if not self._runtime_ready():
-            return
-        for verb, value in (("cycle", cycle), ("shuffle", shuffle)):
-            if value is None:
-                continue
-            argument = "on" if value else "off"
-            if self._independent(connector):
-                self._backend.runtime_action_on_async(connector, verb, argument)
-            else:
-                self._backend.runtime_action_async(verb, argument)
-        # The status that follows moves the switches; ask the pages to show the
-        # runtime's answer until then.
-        self._owner.emit_changed("routes")
+        try:
+            if not self._runtime_ready():
+                return
+            for verb, value in (("cycle", cycle), ("shuffle", shuffle)):
+                if value is None:
+                    continue
+                argument = "on" if value else "off"
+                if self._independent(connector):
+                    self._backend.runtime_action_on_async(connector, verb, argument)
+                else:
+                    self._backend.runtime_action_async(verb, argument)
+        finally:
+            # The status that follows moves the switches; ask the pages to show
+            # the runtime's answer until then, whatever the command did (a
+            # refusal is said in the window, which can raise).
+            self._owner.emit_changed("routes")
 
     def use_saved_rotation(self, connector: str) -> None:
-        if not self._runtime_ready():
-            return
-        if self._independent(connector):
-            self._backend.reset_display_modes_on_async(connector)
-        else:
-            self._backend.runtime_action_async("cycle", "default")
-        self._owner.emit_changed("routes")
+        try:
+            if not self._runtime_ready():
+                return
+            if self._independent(connector):
+                self._backend.reset_display_modes_on_async(connector)
+            else:
+                self._backend.runtime_action_async("cycle", "default")
+        finally:
+            self._owner.emit_changed("routes")  # as above: whatever the command did
 
     def play_now(self, connector: str, pid: str) -> None:
-        if not self._runtime_ready():
+        try:
+            if not self._runtime_ready():
+                return
+            one = self._independent(connector)
+            if not pid:
+                if one:
+                    self._backend.resume_schedule_on_async(connector)
+                else:
+                    self._backend.resume_schedule_async()
+            else:
+                problem = self.playlist_blocked(pid)
+                if problem:
+                    self._backend.window_report(problem)
+                elif one:
+                    self._backend.activate_playlist_on_async(connector, pid)
+                else:
+                    self._backend.activate_playlist_async(pid)
+        finally:
+            # The row goes back to the runtime's answer whatever the command
+            # did: a refusal is said in the window, which can raise.
             self._owner.emit_changed("routes")
-            return
-        one = self._independent(connector)
-        if not pid:
-            if one:
-                self._backend.resume_schedule_on_async(connector)
-            else:
-                self._backend.resume_schedule_async()
-        else:
-            problem = self.playlist_blocked(pid)
-            if problem:
-                self._backend.window_report(problem)
-            elif one:
-                self._backend.activate_playlist_on_async(connector, pid)
-            else:
-                self._backend.activate_playlist_async(pid)
-        self._owner.emit_changed("routes")
 
 
 def _monitor_displays() -> list[DisplayInfo]:

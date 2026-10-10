@@ -1082,9 +1082,11 @@ class RealSettings:
 
         def finished(result: template.InstallResult) -> None:
             self._template_busy = False
-            self._report(_installed_sentence(result))
+            # The row first, and its state re-read: a report that raised left
+            # it saying "Not installed", Install offered, for one that was.
             self._host.emit_changed("settings")
             self.check_template()
+            self._report(_installed_sentence(result))
 
         def failed(message: str) -> None:
             self._template_busy = False
@@ -1115,11 +1117,11 @@ class RealSettings:
 
         def finished(_result: None) -> None:
             self._template_busy = False
-            self._report(_rendered_sentence())
-            self._host.emit_changed("settings")
+            self._host.emit_changed("settings")  # the row first, as for an install
             self.check_template()
             # Noctalia renders after it answers; look once more when it has had a moment.
             GLib.timeout_add(SETTLE_MS, self._check_again)
+            self._report(_rendered_sentence())
 
         def failed(message: str) -> None:
             self._template_busy = False

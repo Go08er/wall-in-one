@@ -1127,6 +1127,30 @@ def test_ab6_a_template_render_refused_gives_render_back_before_its_report(
         _close_settings(shown)
 
 
+def test_ab6_a_template_installed_is_shown_installed_before_it_is_said(
+    runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same row's success path: the install landed, saying so raised, and the row
+    went on offering Install for a template that was installed."""
+    shown, _asked = _template_page(monkeypatch)
+    try:
+        page = shown.page
+        reported = _raises_once(shown.application, "window_report", monkeypatch)
+        page.install_template()  # the button
+        shown.wait("the install", lambda: reported)
+        assert "wall-in-one" in paths.noctalia_settings_path().read_text(encoding="utf-8")
+        # Before: "Not installed", Install offered, until something else re-read the row.
+        spin_until(
+            lambda: _template_state(shown) == "installed",
+            5,
+            what="the row to say Installed, as Noctalia's settings do",
+        )
+        assert not page._template_button.get_visible()
+        assert not page._template_spinner.get_visible()
+    finally:
+        _close_settings(shown)
+
+
 def test_ab6_a_playlist_removal_not_saved_releases_its_rows_before_the_report(
     runtime: FakeRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

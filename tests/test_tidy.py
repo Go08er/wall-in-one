@@ -550,20 +550,208 @@ def test_a_move_whose_arrival_cannot_be_checked_is_not_recorded_as_never_left(
 def test_archives_that_cannot_be_looked_into_are_said_not_taken_for_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The archive folder itself can't be searched: its archives can't be read, so
-    no Undo can be offered. The plan says why, and Undo says it couldn't look,
-    not "There's nothing to undo"."""
+    """The archive folder can't be searched, so its archive can't be read. That is
+    not "no archive": Undo is shown withheld, naming the archive and why, and
+    choosing it anyway changes nothing and says the same. When the archive
+    folder can't even be listed, which archives there are isn't known, and every
+    action's Undo waits."""
     root, _left, archive, later = _archived_download_file(tmp_path, monkeypatch)
 
     with _unsearchable(archive.parent):
         found = tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS)
-        undone = tidy.undo(tidy.LEFTOVERS)
+        with pytest.raises(tidy.TidyError) as refused:
+            tidy.undo(tidy.LEFTOVERS)
 
-    assert found.undo is None
-    # Failed on 148eb31: no note, and "There's nothing to undo."
-    assert any("can't be looked into (Permission denied)" in note for note in found.notes)
-    assert "can't be looked into" in undone.message and "nothing was undone" in undone.message
-    assert tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS).undo is not None
+    # Failed on 148eb31: no Undo at all, and "There's nothing to undo."
+    assert found.undo is not None and found.undo.archive == archive
+    assert found.undo.blocked == (
+        f"the archive {archive} can't be looked into (Permission denied), and it may hold "
+        "a later change; Undo waits until it can be read"
+    )
+    assert str(refused.value) == f"Nothing was changed: {found.undo.blocked}."
+
+    archive.parent.chmod(0o300)  # searchable, not listable
+    try:
+        every = tidy.plan(roots=(root,), now=later)
+    finally:
+        archive.parent.chmod(0o700)
+    for action in sorted(tidy.OFFERED):
+        undo = every.action(action).undo
+        assert undo is not None and undo.archive == archive.parent, action
+        assert "can't be listed (Permission denied)" in undo.blocked, action
+
+    offered = tidy.plan(roots=(root,), now=later).action(tidy.LEFTOVERS).undo
+    assert offered is not None and not offered.blocked and offered.archive == archive
+
+
+def test_undo_never_falls_back_to_an_older_archive(
+    finished: deployed_upgrade_transaction.FinishedClaims,
+) -> None:
+    """A2. Leftovers were archived twice, and the newer archive can't be read (its
+    folder lost its search permission: a native EACCES). The older archive is not
+    the latest one. Undo is withheld, naming the archive that can't be read;
+    neither Undo nor Keep Archived touches the older one. Once the newer archive
+    can be read again, Undo puts back what it holds."""
+    parent = paths.app_state_dir()
+    first = _claim_folder(parent, "entry-aaaaaaaa")
+    older = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS)).archive
+    second = _claim_folder(parent, "entry-bbbbbbbb")
+    newer = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS)).archive
+    assert older is not None and newer is not None and older != newer
+    assert not first.exists() and not second.exists()
+    offered = tidy.plan(roots=()).action(tidy.LEFTOVERS).undo
+    assert offered is not None and offered.archive == newer and not offered.blocked
+
+    with _unsearchable(newer):
+        found = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+        with pytest.raises(tidy.TidyError) as refused:
+            # Failed on 2b8e720: it put entry-aaaaaaaa back, from the older archive.
+            tidy.undo(tidy.LEFTOVERS)
+        with pytest.raises(tidy.TidyError, match="Nothing was changed"):
+            tidy.keep_archived(tidy.LEFTOVERS)
+
+    # Failed on 2b8e720: Undo was offered, for the older archive.
+    assert found.undo is not None and found.undo.archive == newer
+    assert found.undo.blocked == (
+        f"the manifest of the archive {newer} can't be read (Permission denied), and it "
+        "may hold a later change; Undo waits until it can be read"
+    )
+    assert str(refused.value) == f"Nothing was changed: {found.undo.blocked}."
+    assert not first.exists() and not second.exists(), "nothing was put back"
+    assert json.loads((older / "manifest.json").read_text())["state"] == "applied"
+
+    undone = tidy.undo(tidy.LEFTOVERS)
+    assert undone.changed and undone.archive == newer
+    assert second.is_dir() and not first.exists(), "the latest change is what Undo undoes"
+
+
+@pytest.mark.parametrize(
+    ("damage", "said"),
+    [
+        ("cut short", "isn't valid JSON"),
+        ("another version", "isn't one this version of Wall-in-One can read"),
+        ("not a file", "is not a regular file"),
+    ],
+)
+def test_an_archive_whose_manifest_cannot_be_understood_is_not_an_absent_one(
+    finished: deployed_upgrade_transaction.FinishedClaims, damage: str, said: str
+) -> None:
+    """There, and not readable by this version: the same as one that can't be
+    looked into. What it archived is still in it, so Undo is not "nothing to undo"."""
+    folder = _claim_folder(paths.app_state_dir(), "entry-aaaaaaaa")
+    archive = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS)).archive
+    assert archive is not None and not folder.exists()
+    manifest = archive / "manifest.json"
+    if damage == "cut short":
+        manifest.write_text(manifest.read_text()[:-20])
+    elif damage == "another version":
+        manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "version": 2}))
+    else:
+        manifest.unlink()
+        manifest.mkdir()
+
+    found = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+
+    # Failed on 2b8e720: no Undo, as if nothing had been archived.
+    assert found.undo is not None and found.undo.archive == archive
+    assert said in found.undo.blocked, found.undo.blocked
+    with pytest.raises(tidy.TidyError, match="Nothing was changed"):
+        tidy.undo(tidy.LEFTOVERS)
+
+
+def test_an_archive_folder_without_a_manifest_withholds_nothing(
+    finished: deployed_upgrade_transaction.FinishedClaims,
+) -> None:
+    """A crash right after an archive folder was made. Every action journals
+    before it changes anything, so a folder with no manifest changed nothing, and
+    the latest archive is still the latest."""
+    _claim_folder(paths.app_state_dir(), "entry-aaaaaaaa")
+    archive = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS)).archive
+    (tidy.archive_root() / "2099-01-01-000000-leftovers" / "items").mkdir(parents=True)
+
+    undo = tidy.plan(roots=()).action(tidy.LEFTOVERS).undo
+
+    assert undo is not None and undo.archive == archive and not undo.blocked
+    assert tidy._manifests().unreadable == ()
+
+
+def _template_switch(monkeypatch: pytest.MonkeyPatch, *, confirmed: bool) -> tuple[Path, Path]:
+    """Tidy up's own switch to the new template, its reload confirmed by Noctalia
+    or not, and then a colors file written after it.
+
+    Returns the old template file and the switch's archive.
+    """
+    settings = _noctalia_settings()
+    stale = paths.app_state_dir() / "palette.json.tmpl"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}")
+    monkeypatch.setattr(noctalia, "reload_config", lambda: None)
+    monkeypatch.setattr(tidy, "_reload_noctalia", lambda: confirmed)
+    switched = tidy.apply(tidy.PALETTE_TEMPLATE, tidy.plan(roots=()).action(tidy.PALETTE_TEMPLATE))
+    assert switched.archive is not None and str(stale) not in settings.read_text()
+    palette = paths.palette_path()
+    palette.parent.mkdir(parents=True, exist_ok=True)
+    palette.write_text("{}")
+    later = time.time() + 60
+    os.utime(palette, (later, later))
+    return stale, switched.archive
+
+
+def test_the_old_template_stays_while_an_archive_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2. Tidy up switched Noctalia to the new template and Noctalia never
+    confirmed reloading its settings: the running shell may still render from the
+    old file, so the old template stays. Then the switch's archive can't be read
+    (a native EACCES). That is not "no switch": the weaker test, colors written
+    after the settings were, proves nothing here. The action is withheld with the
+    reason, and applying it anyway archives nothing."""
+    stale, archive = _template_switch(monkeypatch, confirmed=False)
+    readable = tidy.plan(roots=()).action(tidy.OLD_PALETTE_TEMPLATE)
+    assert readable.changes and "didn't confirm" in readable.blocked
+
+    with _unsearchable(archive):
+        found = tidy.plan(roots=()).action(tidy.OLD_PALETTE_TEMPLATE)
+        with pytest.raises(tidy.TidyError) as refused:
+            # Failed on 2b8e720: it archived the file Noctalia may still render from.
+            tidy.apply(tidy.OLD_PALETTE_TEMPLATE, found)
+
+    # Failed on 2b8e720: ready, with nothing said.
+    assert found.changes and not found.ready
+    assert found.blocked == (
+        f"The manifest of the archive {archive} can't be read (Permission denied), so "
+        "whether Noctalia confirmed reloading its settings after the template fix isn't "
+        "known. The old template file stays for now."
+    )
+    assert str(refused.value) == found.blocked
+    assert stale.read_text() == "{}", "the old template file is where it was"
+    assert tidy.plan(roots=()).action(tidy.OLD_PALETTE_TEMPLATE).blocked == readable.blocked
+
+
+def test_an_old_template_in_an_archive_that_cannot_be_read_is_not_called_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old template file was archived, and that archive can't be read. Undoing
+    the template switch is still refused, and the reason is what is known: the
+    file isn't at its place, and whether an archive holds it can't be told."""
+    stale, _switch = _template_switch(monkeypatch, confirmed=True)
+    archive = tidy.apply(
+        tidy.OLD_PALETTE_TEMPLATE, tidy.plan(roots=()).action(tidy.OLD_PALETTE_TEMPLATE)
+    ).archive
+    assert archive is not None and not stale.exists()
+
+    with _unsearchable(archive):
+        undo = tidy.plan(roots=()).action(tidy.PALETTE_TEMPLATE).undo
+        with pytest.raises(tidy.TidyError) as refused:
+            tidy.undo(tidy.PALETTE_TEMPLATE)
+
+    # Failed on 2b8e720: "the old template file ... isn't there, so undoing would ...".
+    assert undo is not None and undo.blocked == (
+        f"the old template file {stale} isn't at its place and the manifest of the archive "
+        f"{archive} can't be read (Permission denied), so whether an archive holds it isn't "
+        "known; undoing would point Noctalia at a missing file"
+    )
+    assert str(refused.value) == f"Nothing was changed: {undo.blocked}."
 
 
 def test_a_file_that_cannot_be_looked_at_is_not_called_missing(
@@ -584,7 +772,7 @@ def test_a_file_that_cannot_be_looked_at_is_not_called_missing(
     stale.write_text("{}")
     monkeypatch.setattr(tidy, "_stale_template", lambda: stale)
     with _unsearchable(folder):
-        plan, _status = tidy._plan_old_palette_template(None, [])
+        plan, _status = tidy._plan_old_palette_template(None, tidy._Manifests())
     # Failed on 148eb31: "There's no old template file."
     assert plan.summary == (
         "The old template file can't be looked at (Permission denied), so it's left alone."

@@ -261,6 +261,47 @@ def test_an_undo_left_unfinished_offers_undo_again_or_keep_archived(
     assert not leftovers.keep.get_visible() and "no longer offered" in application.reports[-1]
 
 
+def test_undo_is_shown_withheld_with_its_reason_while_its_archive_cannot_be_read(
+    section: tuple[TidySection, _Application],
+) -> None:
+    """A2, as the window shows it: the archive can't be read, so Undo is there,
+    can't be chosen, and its row says which archive and why."""
+    group, _application = section
+    _claim_folder(paths.app_state_dir(), "entry-eeeeeeee")
+    group.refresh()
+    spin_until(lambda: _idle(group) and bool(group.row(tidy.LEFTOVERS)))
+    leftovers = group.row(tidy.LEFTOVERS)
+    assert leftovers is not None and leftovers.plan.ready
+    leftovers.apply.emit("clicked")
+    spin_until(lambda: _idle(group) and leftovers.plan.undo is not None, timeout=10)
+    assert leftovers.plan.undo is not None and leftovers.undo.get_sensitive()
+    archive = leftovers.plan.undo.archive
+
+    archive.chmod(0o600)  # there, and no longer searchable
+    try:
+        group.refresh()
+        spin_until(
+            lambda: (
+                _idle(group)
+                and leftovers.plan.undo is not None
+                and bool(leftovers.plan.undo.blocked)
+            ),
+            timeout=10,
+        )
+    finally:
+        archive.chmod(0o700)
+
+    # Failed on 2b8e720: no Undo button and no row, as if nothing had been archived.
+    assert leftovers.undo.get_visible() and not leftovers.undo.get_sensitive()
+    assert not leftovers.keep.get_visible()
+    (row,) = [text for text in _texts(group, tidy.LEFTOVERS) if text.startswith("Undo")]
+    assert row.startswith("Undo isn't possible yet: The manifest of the archive "), row
+    assert row.endswith(
+        "can't be read (Permission denied), and it may hold a later change; Undo waits "
+        "until it can be read."
+    ), row
+
+
 def test_apply_is_unavailable_with_its_reason_while_an_undo_waits_for_its_reload(
     section: tuple[TidySection, _Application], monkeypatch: pytest.MonkeyPatch
 ) -> None:

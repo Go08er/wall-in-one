@@ -86,7 +86,7 @@ import re
 import stat
 import time
 import tomllib
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -343,14 +343,6 @@ def _real_directory(path: Path) -> os.stat_result | None:
     return found if found is not None and stat.S_ISDIR(found.st_mode) else None
 
 
-def _is_empty_directory(path: Path) -> bool:
-    try:
-        with os.scandir(path) as listing:
-            return next(listing, None) is None
-    except OSError:
-        return False
-
-
 def _look(path: Path) -> os.stat_result | OSError | None:
     """``path``'s status, not following it. None only when it is known to be absent.
 
@@ -375,6 +367,10 @@ def _emptiness(path: Path) -> bool | OSError:
 
 
 def _why(error: OSError) -> str:
+    """The reason alone. `file_io.FileReadError` wraps the fault it met in a sentence."""
+    cause = error.__cause__
+    if isinstance(error, file_io.FileReadError) and isinstance(cause, OSError):
+        error = cause
     return str(error.strerror or error)
 
 
@@ -547,64 +543,136 @@ def _journal_text(error: object) -> str:
     return "\u2026"
 
 
-def _manifests() -> list[_Manifest]:
-    """Every readable archive manifest, newest first."""
+@dataclass(frozen=True, slots=True)
+class _UnreadArchive:
+    """An archive that is there but can't be read. It is not an absent one."""
+
+    directory: Path
+    #: What is wrong, as a clause: "the archive ... can't be looked into (...)".
+    why: str
+    #: The action its folder's name says it holds, or None when the name doesn't say.
+    action: str | None
+
+
+class _Manifests(list[_Manifest]):
+    """Every readable archive manifest, newest first, and the archives that can't be read.
+
+    An archive whose folder or ``manifest.json`` can't be read may be the
+    latest of its action, or hold the template switch whose reload Noctalia
+    never confirmed. So nothing is decided as if it were absent:
+    `_undo_withheld` and `_not_yet_rendered` withhold while ``unreadable``
+    names one, and say why.
+    """
+
+    def __init__(
+        self, readable: Iterable[_Manifest] = (), unreadable: Iterable[_UnreadArchive] = ()
+    ) -> None:
+        super().__init__(readable)
+        self.unreadable: tuple[_UnreadArchive, ...] = tuple(unreadable)
+
+
+_ARCHIVE_NAME: Final = re.compile(r"\A\d{4}-\d{2}-\d{2}-\d{6}-(?P<action>.+?)(?:-\d+)?\Z")
+
+
+def _archive_action(name: str) -> str | None:
+    """The action an archive folder's name says it holds (`_new_archive`), if it does."""
+    matched = _ARCHIVE_NAME.match(name)
+    return matched["action"] if matched and matched["action"] in ACTIONS else None
+
+
+def _manifests() -> _Manifests:
+    """Every readable archive manifest, newest first; see `_Manifests` for the rest."""
     root = archive_root()
-    if _real_directory(root) is None:
-        return []
     found: list[_Manifest] = []
-    try:
-        children = sorted(root.iterdir(), reverse=True)
-    except OSError:
-        return []
+    unreadable: list[_UnreadArchive] = []
+    children: list[Path] = []
+    there = _look(root)
+    if isinstance(there, OSError):
+        unreadable.append(
+            _UnreadArchive(
+                root, f"the archive folder {root} can't be looked into ({_why(there)})", None
+            )
+        )
+    elif there is not None and stat.S_ISDIR(there.st_mode):
+        try:
+            children = sorted(root.iterdir(), reverse=True)
+        except OSError as error:
+            unreadable.append(
+                _UnreadArchive(
+                    root, f"the archive folder {root} can't be listed ({_why(error)})", None
+                )
+            )
     for directory in children:
-        if _real_directory(directory) is None:
+        action = _archive_action(directory.name)
+        status = _look(directory)
+        if isinstance(status, OSError):
+            unreadable.append(
+                _UnreadArchive(
+                    directory,
+                    f"the archive {directory} can't be looked into ({_why(status)})",
+                    action,
+                )
+            )
+            continue
+        if status is None or not stat.S_ISDIR(status.st_mode):
             continue
         try:
             raw = file_io.read_regular_bytes(directory / MANIFEST, MAX_MANIFEST_BYTES)
-            document = json.loads(raw) if raw is not None else None
-        except OSError, ValueError:
+        except OSError as error:
+            unreadable.append(
+                _UnreadArchive(
+                    directory,
+                    f"the manifest of the archive {directory} can't be read ({_why(error)})",
+                    action,
+                )
+            )
+            continue
+        if raw is None:
+            # No manifest: every action journals before it changes anything
+            # (`_new_archive`, then `_write_manifest`), so this one changed nothing.
+            continue
+        try:
+            document = json.loads(raw)
+        except ValueError, RecursionError:
+            unreadable.append(
+                _UnreadArchive(
+                    directory, f"the manifest of the archive {directory} isn't valid JSON", action
+                )
+            )
             continue
         if (
-            isinstance(document, dict)
-            and document.get("kind") == MANIFEST_KIND
-            and document.get("version") == MANIFEST_VERSION
+            not isinstance(document, dict)
+            or document.get("kind") != MANIFEST_KIND
+            or document.get("version") != MANIFEST_VERSION
         ):
-            found.append(_Manifest(directory, document))
-    found.sort(key=lambda manifest: (manifest.created, manifest.directory.name), reverse=True)
-    return found
-
-
-def _archive_trouble() -> str:
-    """Why earlier archives can't all be looked at just now, or "".
-
-    `_manifests` leaves out what it can't read, which is right for deciding
-    what Undo can act on, but "no archive" would then be said for "can't
-    look". A plan carries this instead, so a missing Undo is explained.
-    """
-    root = archive_root()
-    found = _look(root)
-    if isinstance(found, OSError):
-        return f"Earlier archives in {root} can't be looked into ({_why(found)})"
-    if found is None or not stat.S_ISDIR(found.st_mode):
-        return ""
-    try:
-        children = sorted(root.iterdir())
-    except OSError as error:
-        return f"Earlier archives in {root} can't be listed ({_why(error)})"
-    for directory in children:
-        status = _look(directory)
-        if isinstance(status, OSError):
-            return f"An archive in {root} can't be looked into ({_why(status)})"
-        if status is None or not stat.S_ISDIR(status.st_mode):
+            unreadable.append(
+                _UnreadArchive(
+                    directory,
+                    f"the manifest of the archive {directory} isn't one this version of "
+                    "Wall-in-One can read",
+                    action,
+                )
+            )
             continue
-        manifest = _look(directory / MANIFEST)
-        if isinstance(manifest, OSError):
-            return f"The archive {directory} can't be looked into ({_why(manifest)})"
+        found.append(_Manifest(directory, document))
+    found.sort(key=lambda manifest: (manifest.created, manifest.directory.name), reverse=True)
+    return _Manifests(found, unreadable)
+
+
+def _undo_withheld(action: str, manifests: _Manifests) -> str:
+    """Why Undo (or Keep Archived) for ``action`` must wait, or "".
+
+    While an archive that can't be read may be one of ``action``'s (its
+    folder's name says so, or doesn't say), the newest readable one is not
+    known to be the latest: Undo never falls back to an older archive.
+    """
+    for unread in manifests.unreadable:
+        if unread.action in (None, action):
+            return f"{unread.why}, and it may hold a later change; Undo waits until it can be read"
     return ""
 
 
-def _latest(action: Action, manifests: Sequence[_Manifest]) -> _Manifest | None:
+def _latest(action: Action, manifests: _Manifests) -> _Manifest | None:
     """The newest archive of ``action`` that Undo could still act on."""
     for manifest in manifests:
         if manifest.action == action and manifest.state in ("applying", "applied"):
@@ -1181,7 +1249,7 @@ def _leftovers_summary(leftovers: Sequence[_Leftover]) -> str:
 def _plan_leftovers(
     roots: Sequence[Path],
     now: float,
-    manifests: Sequence[_Manifest],
+    manifests: _Manifests,
     item_folders: Sequence[Path] = (),
 ) -> tuple[ActionPlan, list[_Leftover]]:
     survey = _survey(roots, now, item_folders)
@@ -1725,9 +1793,7 @@ def _effective_state(manifest: _Manifest, current_sha: str | None) -> str:
     return "applying"
 
 
-def _settings_undo(
-    action: Action, manifests: Sequence[_Manifest], current: str | None
-) -> Undo | None:
+def _settings_undo(action: Action, manifests: _Manifests, current: str | None) -> Undo | None:
     for manifest in manifests:
         if manifest.action != action:
             continue
@@ -1751,9 +1817,7 @@ def _settings_undo(
     return None
 
 
-def _current_edit(
-    action: Action, manifests: Sequence[_Manifest], current: str | None
-) -> _Manifest | None:
+def _current_edit(action: Action, manifests: _Manifests, current: str | None) -> _Manifest | None:
     """The newest settings edit of ``action`` still in effect (not undone)."""
     for manifest in manifests:
         if manifest.action != action:
@@ -1766,7 +1830,7 @@ def _current_edit(
     return None
 
 
-def _reload_pending(action: Action, manifests: Sequence[_Manifest], current: str | None) -> bool:
+def _reload_pending(action: Action, manifests: _Manifests, current: str | None) -> bool:
     """Whether the edit in effect is on disk but Noctalia never confirmed reloading it."""
     edit = _current_edit(action, manifests, current)
     return edit is not None and edit.document.get("reloaded") is not True
@@ -1786,7 +1850,7 @@ def _stale_template() -> Path:
 
 
 def _plan_palette_template(
-    settings: _NoctaliaSettings | None, unreadable: str, manifests: Sequence[_Manifest]
+    settings: _NoctaliaSettings | None, unreadable: str, manifests: _Manifests
 ) -> ActionPlan:
     title = "Fix the palette template name"
     undo = _settings_undo(PALETTE_TEMPLATE, manifests, settings.sha256 if settings else None)
@@ -2095,7 +2159,7 @@ def _restore_settings(
     return message + tail, reloaded
 
 
-def _missing_undo_target(manifest: _Manifest, manifests: Sequence[_Manifest]) -> str:
+def _missing_undo_target(manifest: _Manifest, manifests: _Manifests) -> str:
     """Why undoing the template switch would point Noctalia at a missing file, or "".
 
     The old template file must exist on disk, whatever any archive's state:
@@ -2129,6 +2193,13 @@ def _missing_undo_target(manifest: _Manifest, manifests: Sequence[_Manifest]) ->
                 "Put the old template file back first: choose Undo on “Archive the old "
                 "palette template”"
             )
+    unread = manifests.unreadable
+    if unread:
+        return (
+            f"the old template file {old} isn't at its place and {unread[0].why}, so "
+            "whether an archive holds it isn't known; undoing would point Noctalia at a "
+            "missing file"
+        )
     return (
         f"the old template file {old} isn't there, so undoing would point Noctalia at a "
         "missing file"
@@ -2180,7 +2251,7 @@ _UNDO_PENDING_BLOCK: Final = (
 )
 
 
-def _refuse_while_undo_pends(action: Action, manifests: Sequence[_Manifest]) -> None:
+def _refuse_while_undo_pends(action: Action, manifests: _Manifests) -> None:
     """Apply must not start a newer edit over an Undo still waiting for its reload.
 
     The newer journal would hide the pending one from Retry Reload, and with it
@@ -2239,7 +2310,7 @@ def _retire_created_template(manifest: _Manifest, document: Mapping[str, Any]) -
     return f" The new template file went into {manifest.directory}."
 
 
-def _pending_undo(action: Action, manifests: Sequence[_Manifest]) -> _Manifest | None:
+def _pending_undo(action: Action, manifests: _Manifests) -> _Manifest | None:
     """The newest edit of ``action``, if its Undo waits for Noctalia to reload."""
     for manifest in manifests:
         if manifest.action == action:
@@ -2250,7 +2321,7 @@ def _pending_undo(action: Action, manifests: Sequence[_Manifest]) -> _Manifest |
 # -- action 2b: the old palette template file ------------------------------------------
 
 
-def _not_yet_rendered(settings: _NoctaliaSettings, manifests: Sequence[_Manifest]) -> str:
+def _not_yet_rendered(settings: _NoctaliaSettings, manifests: _Manifests) -> str:
     """Why there is no proof yet that Noctalia renders from the new template, or "".
 
     With Tidy up's own switch in effect the proof is a palette written after
@@ -2264,6 +2335,15 @@ def _not_yet_rendered(settings: _NoctaliaSettings, manifests: Sequence[_Manifest
         "Waiting for Noctalia to render your colors from the new template. It does that "
         "the next time your colors change; then this step becomes available."
     )
+    unread = manifests.unreadable
+    if unread:
+        # It may be the template switch whose reload Noctalia never confirmed:
+        # the time test below would then be no proof at all.
+        return (
+            f"{unread[0].why[:1].upper()}{unread[0].why[1:]}, so whether Noctalia "
+            "confirmed reloading its settings after the template fix isn't known. The "
+            "old template file stays for now."
+        )
     palette_found = _look(paths.palette_path())
     if isinstance(palette_found, OSError):
         return (
@@ -2301,7 +2381,7 @@ def _not_yet_rendered(settings: _NoctaliaSettings, manifests: Sequence[_Manifest
 
 
 def _plan_old_palette_template(
-    settings: _NoctaliaSettings | None, manifests: Sequence[_Manifest]
+    settings: _NoctaliaSettings | None, manifests: _Manifests
 ) -> tuple[ActionPlan, os.stat_result | None]:
     title = "Archive the old palette template"
     stale = _stale_template()
@@ -2484,7 +2564,7 @@ def _legacy_gate() -> str:
 
 
 def _plan_plugin_settings(
-    settings: _NoctaliaSettings | None, unreadable: str, manifests: Sequence[_Manifest]
+    settings: _NoctaliaSettings | None, unreadable: str, manifests: _Manifests
 ) -> tuple[ActionPlan, list[str]]:
     title = "Remove the old plugin's settings"
     undo = _settings_undo(PLUGIN_SETTINGS, manifests, settings.sha256 if settings else None)
@@ -2696,14 +2776,22 @@ def plan(
             retry="Retry Reload",
             blocked=_UNDO_PENDING_BLOCK,
         )
-    trouble = _archive_trouble()
-    if trouble:
-        note = f"{trouble}, so an Undo for one of them can't be offered just now."
-        leftovers, palette, old_template, plugin = (
-            replace(found, notes=(*found.notes, note))
-            for found in (leftovers, palette, old_template, plugin)
-        )
+    leftovers, palette, old_template, plugin = (
+        _with_undo_withheld(found, manifests)
+        for found in (leftovers, palette, old_template, plugin)
+    )
     return Plan((leftovers, palette, old_template, plugin, _plan_thumbnails()))
+
+
+def _with_undo_withheld(found: ActionPlan, manifests: _Manifests) -> ActionPlan:
+    """``found`` with its Undo blocked, and the reason, while `_undo_withheld` says so."""
+    reason = _undo_withheld(found.action, manifests)
+    if not reason:
+        return found
+    # Not the newest readable archive's Undo with a caveat: that one may be
+    # an older change, and Keep Archived would mark the wrong archive.
+    unread = next(item for item in manifests.unreadable if item.action in (None, found.action))
+    return replace(found, undo=Undo(unread.directory, "", "", blocked=reason))
 
 
 def apply(
@@ -2815,6 +2903,9 @@ def undo(action: Action) -> Result:
         raise TidyError("The thumbnail cache has no Undo: thumbnails are made again as you browse.")
     with _exclusive():
         manifests = _manifests()
+        withheld = _undo_withheld(action, manifests)
+        if withheld:
+            raise TidyError(f"Nothing was changed: {withheld}.")
         if action in (PALETTE_TEMPLATE, PLUGIN_SETTINGS):
             # Finish whatever an earlier edit left half done before reading.
             template.recover_interrupted_edit()
@@ -2834,9 +2925,6 @@ def undo(action: Action) -> Result:
             return Result(action, False, "There's nothing to undo.")
         latest = _latest(action, manifests)
         if latest is None:
-            trouble = _archive_trouble()
-            if trouble:
-                return Result(action, False, f"{trouble}, so nothing was undone.")
             return Result(action, False, "There's nothing to undo.")
         if action in (LEFTOVERS, OLD_PALETTE_TEMPLATE):
             _require_undo_room(latest, items=len(_archived_items(latest)))
@@ -2853,7 +2941,11 @@ def keep_archived(action: Action) -> Result:
     if action not in (LEFTOVERS, OLD_PALETTE_TEMPLATE):
         raise TidyError("Only archived items can be kept.")
     with _exclusive():
-        latest = _latest(action, _manifests())
+        manifests = _manifests()
+        withheld = _undo_withheld(action, manifests)
+        if withheld:
+            raise TidyError(f"Nothing was changed: {withheld}.")
+        latest = _latest(action, manifests)
         if latest is None:
             return Result(action, False, "There's nothing archived to keep.")
         _require_undo_room(latest, items=0)

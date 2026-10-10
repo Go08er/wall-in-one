@@ -17,6 +17,7 @@ read, and a hard exit for the crash-left cases.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -36,7 +37,8 @@ LATER_SECONDS = download.STAGING_MAX_AGE_SECONDS + 3600
 
 #: The released producer. ``argv``: the wallpaper root, and the case.
 #:
-#: Whichever entry the case publishes (its move from a staging name to its
+#: ``install`` is an ordinary, successful download. Otherwise, whichever
+#: entry the case publishes (its move from a staging name to its
 #: public name) is edited in place there, same inode and length; the
 #: verification read that follows fails once, so the released code moves it
 #: back to its staging name. With ``-crash`` the process dies right then, as a
@@ -61,6 +63,7 @@ publishing = {
     "media": (download.MEDIA_STAGING_PREFIX, "aurora.mp4"),
     "provenance": (download.SIDECAR_STAGING_PREFIX, "aurora.mp4" + location.sidecar_suffix),
     "marker": (download.MARKER_STAGING_PREFIX, location.marker_name),
+    "install": ("\0", "\0"),  # nothing is interfered with
 }[entry]
 real_rename = file_io._rename_noreplace
 real_lstat = Path.lstat
@@ -134,6 +137,8 @@ try:
         download.install(transfer.path, destination, location.sidecar_suffix, provenance)
 except ProviderError as error:
     print("REFUSED", error, flush=True)
+else:
+    print("INSTALLED", flush=True)
 """
 
 
@@ -141,7 +146,8 @@ def _produce(source: Path, root: Path, case: str) -> subprocess.CompletedProcess
     root.mkdir(exist_ok=True)
     done = released.run(source, PRODUCER, str(root), case)
     assert done.returncode == (77 if case.endswith("-crash") else 0), done.stderr
-    assert "MOVED-BACK" in done.stdout, done.stdout + done.stderr
+    expected = "INSTALLED" if case == "install" else "MOVED-BACK"
+    assert expected in done.stdout, done.stdout + done.stderr
     return done
 
 
@@ -297,6 +303,42 @@ def test_tidy_archives_a_released_staging_file_intact_and_keeps_what_is_not_one(
 
 def _reasons(plan: tidy.ActionPlan) -> dict[Path, str]:
     return {kept.path: kept.reason for kept in plan.kept}
+
+
+# -- a provenance record whose media is gone ------------------------------------------
+
+
+def test_a_released_sidecar_a_person_added_to_is_retired_intact(
+    released_source: Path,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """The released version downloads a wallpaper, ordinarily. The person adds a
+    note to its provenance record, and later deletes the video by hand. A day on,
+    this app's sweep finds the record without its media: it is recognised by four
+    fields, not its bytes, so it is moved whole into the retained folder, never
+    emptied, and Tidy up shows where it is."""
+    root = tmp_path / "wallpapers"
+    _produce(released_source, root, "install")
+    folder = _folder(root)
+    media = folder / "aurora.mp4"
+    sidecar = folder / ("aurora.mp4" + download.MOTIONBGS_LOCATION.sidecar_suffix)
+    assert media.read_bytes() == MEDIA
+    document = json.loads(sidecar.read_bytes())
+    document["notes"] = "the one from the trip; keep the source link"
+    noted = json.dumps(document, indent=2).encode()
+    sidecar.write_bytes(noted)
+    media.unlink()
+    _aged(sidecar)
+
+    download.managed_directory(root, download.MOTIONBGS_LOCATION)  # this app, as usual
+
+    assert not sidecar.exists(), "its name is free for the next download"
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    kept = [entry for entry in retained.iterdir() if entry.is_file()]
+    # Failed on c881ffd: the record was claimed and truncated, the note lost.
+    assert [entry.read_bytes() for entry in kept] == [noted], "whole, note and all"
+    found = tidy.plan(roots=(root,), now=time.time() + LATER_SECONDS).action(tidy.LEFTOVERS)
+    assert f"holds {tidy.format_size(len(noted))}" in _reasons(found)[kept[0]]
 
 
 # -- this version's own staging names are still reclaimed -----------------------------

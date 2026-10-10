@@ -925,7 +925,8 @@ def recover_abandoned(
     (`LEGACY_STAGING_PREFIXES`) may have been public, so it is never touched.
     Recent files are left alone because another process may still be
     downloading. A predecessor-version final provider sidecar with no adjacent
-    media is inert to the scanner and safe to remove once old. The current
+    media is inert to the scanner; once old it is moved, intact, into the
+    retained folder (`_retire_orphan_sidecar`), never emptied. The current
     media-first protocol can instead leave visible user-owned media, which
     recovery deliberately never removes. Arbitrary dotfiles, symlinks and
     non-regular files are never touched.
@@ -965,19 +966,15 @@ def recover_abandoned(
                     continue
                 if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
                     continue
-                staging = _is_owned_staging(entry.name, info, prefixes)
-                media: Path | None = None
-                orphan_sidecar = False
                 if path.name.endswith(location.sidecar_suffix):
-                    media = Path(str(path)[: -len(location.sidecar_suffix)])
-                    orphan_sidecar = _is_owned_orphan_sidecar(
-                        retained_path,
-                        location,
-                        info.st_size,
-                        media_path=_operation_path(media, anchor),
-                        logical_path=Path(os.fspath(path)),
-                    )
-                if not staging and not orphan_sidecar:
+                    # A final provider sidecar: public, and maybe an older
+                    # version's. Never discarded (`_retire_orphan_sidecar`).
+                    if _retire_orphan_sidecar(
+                        retained_path, Path(os.fspath(path)), info, location, anchor
+                    ):
+                        removed.append(Path(os.fspath(path)))
+                    continue
+                if not _is_owned_staging(entry.name, info, prefixes):
                     continue
                 try:
                     claim = file_io.claim_for_deletion(
@@ -1009,17 +1006,9 @@ def recover_abandoned(
                             "local-io",
                             f"could not revalidate provider staging; entry remains at {preserved}",
                         ) from error
-                    valid = claimed_info.st_mtime <= cutoff
-                    if staging:
-                        valid = valid and _is_owned_staging(path.name, claimed_info, prefixes)
-                    if orphan_sidecar and media is not None:
-                        valid = valid and _is_owned_orphan_sidecar(
-                            claim.path,
-                            location,
-                            claimed_info.st_size,
-                            media_path=_operation_path(media, anchor),
-                            logical_path=Path(os.fspath(path)),
-                        )
+                    valid = claimed_info.st_mtime <= cutoff and _is_owned_staging(
+                        path.name, claimed_info, prefixes
+                    )
                     if not valid:
                         try:
                             restored = claim.restore()
@@ -1090,34 +1079,17 @@ def _is_owned_staging(
     )
 
 
-def _is_owned_orphan_sidecar(
-    path: Path,
-    location: ManagedLocation,
-    size: int,
-    *,
-    media_path: Path | None = None,
-    logical_path: Path | None = None,
-) -> bool:
-    """Prove an orphan is our provider provenance before unlinking it.
+def _names_missing_media(raw: bytes, location: ManagedLocation, logical_media: Path) -> bool:
+    """Whether ``raw`` is our provider provenance for exactly ``logical_media``.
 
-    A suffix is only a naming convention, not deletion authority. Recovery
-    therefore requires the same identity fields emitted by both providers and
-    an exact path binding to the missing adjacent media. This keeps an old
-    user-authored ``*.motionbgs.json`` file out of the cleanup sweep.
+    A suffix is only a naming convention. This requires the identity fields
+    both providers emit and an exact path binding to the adjacent media, which
+    keeps a user-authored ``*.motionbgs.json`` out of the recovery sweep. It
+    is four fields, not the bytes: a person may have added to the document.
     """
-    named_path = path if logical_path is None else logical_path
-    if not named_path.name.endswith(location.sidecar_suffix) or size > MAX_SIDECAR_BYTES:
-        return False
-    logical_media = Path(str(named_path)[: -len(location.sidecar_suffix)])
-    observed_media = logical_media if media_path is None else media_path
-    if os.path.lexists(observed_media):
-        return False
     try:
-        raw = file_io.read_regular_bytes(path, MAX_SIDECAR_BYTES)
-        if raw is None:
-            return False
         document: object = json.loads(raw)
-    except OSError, ValueError, RecursionError:
+    except ValueError, RecursionError:
         return False
     return (
         isinstance(document, dict)
@@ -1127,6 +1099,74 @@ def _is_owned_orphan_sidecar(
         and document.get("provider") == location.provider
         and document.get("path") == str(logical_media)
     )
+
+
+def _retire_orphan_sidecar(
+    access: Path,
+    logical: Path,
+    info: os.stat_result,
+    location: ManagedLocation,
+    anchor: _DirectoryAnchor | None,
+) -> bool:
+    """Retire a final provider sidecar whose media is gone, intact. True once it moved.
+
+    Such a record is inert to the scanner, and only keeps its name from the
+    next download. But it is a public file, possibly written by an older
+    version, and it is recognised by four fields rather than its bytes
+    (`_names_missing_media`): a person may have added to it. So it is never
+    truncated: the exact generation that was read is moved, whole, into the
+    retained folder beside it (`.wall-in-one-retained`), where Tidy up lists
+    it. Anything that cannot be proven (the media can't be looked for, the
+    record changed since it was read) leaves it where it is.
+    """
+    if info.st_size > MAX_SIDECAR_BYTES:
+        return False
+    logical_media = Path(str(logical)[: -len(location.sidecar_suffix)])
+    try:
+        _operation_path(logical_media, anchor).lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False  # can't look is not "gone"
+    else:
+        return False
+    fingerprint = file_io.file_fingerprint(info)
+    try:
+        pinned = file_io.pin_regular_path(
+            access, expected_identity=fingerprint[:2], expected_fingerprint=fingerprint
+        )
+    except OSError, ValueError:
+        return False
+    try:
+        try:
+            raw = file_io.read_pinned_regular_bytes(
+                pinned, MAX_SIDECAR_BYTES, expected_fingerprint=fingerprint
+            )
+        except OSError, ValueError:
+            return False
+        if not _names_missing_media(raw, location, logical_media):
+            return False
+        try:
+            file_io._retain_exact_entry(
+                access,
+                expected_identity=fingerprint[:2],
+                expected_file_type=stat.S_IFREG,
+                expected_fingerprint=fingerprint,
+                pinned_source=pinned,
+                logical_parent=logical.parent,
+            )
+        except file_io.PathChangedError as error:
+            if error.preserved_path is not None:
+                raise ProviderError(
+                    "local-io",
+                    f"provider recovery preserved a changed entry at {error.preserved_path}",
+                ) from error
+            return False
+        except OSError, ValueError:
+            return False
+        return True
+    finally:
+        pinned.close()
 
 
 def _write_marker(directory: Path, location: ManagedLocation) -> Path:

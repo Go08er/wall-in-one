@@ -1225,10 +1225,32 @@ def test_recovery_restores_a_staging_replacement_that_wins_the_claim_race(
     assert original.read_bytes() == b"validated media bytes"
 
 
-def test_orphan_recovery_revalidates_claimed_contents_before_deletion(
+def test_an_orphan_sidecar_is_retired_intact_never_emptied(tmp_path: Path) -> None:
+    """A final provider sidecar whose media is gone is moved, whole, into the
+    retained folder: its name is free again and its bytes are kept."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    now = 10_000_000.0
+    old = now - download.STAGING_MAX_AGE_SECONDS - 1
+    media = directory / "missing.mp4"
+    orphan = Path(str(media) + download.MOTIONBGS_LOCATION.sidecar_suffix)
+    written = _provenance("MotionBGS", media)
+    orphan.write_bytes(written)
+    os.utime(orphan, (old, old))
+
+    removed = download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=now)
+
+    assert removed == (orphan,) and not orphan.exists()
+    retained = Path(os.fspath(directory)) / file_io.RETAINED_ENTRY_DIRECTORY
+    # Failed on c881ffd: discarded, leaving an emptied inode.
+    assert [entry.read_bytes() for entry in retained.iterdir() if entry.is_file()] == [written]
+
+
+def test_an_orphan_sidecar_edited_after_it_was_read_stays_where_it_is(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The record is rewritten between its check and its retirement: it is no
+    longer the generation that was read, so it is not moved at all."""
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
     now = 10_000_000.0
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
@@ -1236,29 +1258,15 @@ def test_orphan_recovery_revalidates_claimed_contents_before_deletion(
     orphan = Path(str(media) + download.MOTIONBGS_LOCATION.sidecar_suffix)
     orphan.write_bytes(_provenance("MotionBGS", media))
     os.utime(orphan, (old, old))
-    real_claim = file_io.claim_for_deletion
+    real_retain = file_io._retain_exact_entry
 
-    def mutate_after_claim(
-        path: Path,
-        *,
-        expected_identity: file_io.PathIdentity,
-        operation_token: str | None = None,
-        expected_fingerprint: file_io.FileFingerprint | None = None,
-        pinned_source: file_io.PinnedPath | None = None,
-    ) -> file_io.ClaimedPath:
-        claim = real_claim(
-            path,
-            expected_identity=expected_identity,
-            operation_token=operation_token,
-            expected_fingerprint=expected_fingerprint,
-            pinned_source=pinned_source,
-        )
+    def rewritten_first(path: Path, **kwargs: object) -> Path:
         if path.name == orphan.name:
-            claim.path.write_bytes(b'{"notes":"now user-authored"}\n')
-            os.utime(claim.path, (old, old))
-        return claim
+            orphan.write_bytes(b'{"notes":"now user-authored"}\n')
+            os.utime(orphan, (old, old))
+        return real_retain(path, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(file_io, "claim_for_deletion", mutate_after_claim)
+    monkeypatch.setattr(file_io, "_retain_exact_entry", rewritten_first)
 
     assert (
         download.recover_abandoned(

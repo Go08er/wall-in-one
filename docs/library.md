@@ -373,9 +373,10 @@ commit. A kill, conflict or local error in that interval can leave visible
 media, but without its exact authority it scans as user-owned and can only be
 moved to Trash. This version's own hidden staging files
 (`.wall-in-one-v2-…-stage-*`), which were never in place under a visible name,
-and unmistakable predecessor orphan sidecars with no media are removed after
-24 hours; recent entries, symlinks, unknown files and visible media are left
-alone.
+are removed after 24 hours; recent entries, symlinks, unknown files and
+visible media are left alone. An unmistakable provider sidecar whose media is
+gone is, after 24 hours, moved whole into the hidden `.wall-in-one-retained`
+folder beside it, never emptied: it may hold something you added.
 
 A staging file left by 0.2.2 or earlier (`.wall-in-one-media-stage-*`,
 `-sidecar-stage-*`, `-marker-stage-*`, `.wall-in-one-staged-*`,

@@ -371,9 +371,20 @@ write and sync its bound sidecar, recheck the named media, and publish the
 sidecar without replacement. Cancellation is not accepted after the media
 commit. A kill, conflict or local error in that interval can leave visible
 media, but without its exact authority it scans as user-owned and can only be
-moved to Trash. Hidden staging files and unmistakable predecessor orphan
-sidecars with no media are removed after 24 hours; recent entries, symlinks,
-unknown files and visible media are left alone.
+moved to Trash. This version's own hidden staging files
+(`.wall-in-one-v2-…-stage-*`), which were never in place under a visible name,
+and unmistakable predecessor orphan sidecars with no media are removed after
+24 hours; recent entries, symlinks, unknown files and visible media are left
+alone.
+
+A staging file left by 0.2.2 or earlier (`.wall-in-one-media-stage-*`,
+`-sidecar-stage-*`, `-marker-stage-*`, `.wall-in-one-staged-*`,
+`.wall-in-one-tmp-*`) is never removed automatically. Those versions
+published straight from these names, and put a file back under one when its
+publication could not be checked, so such a file may have been in place, and
+edited, for a moment. It stays where it is; [Tidy up](settings.md#tidy-up)
+lists it and offers to archive it, which keeps its bytes. The same goes for a
+file a download left under a `.wall-in-one-commit-*` name.
 
 Trash metadata names are reserved with no-replace links, then the exact
 journaled media generation is moved to the matching Trash name with Linux's

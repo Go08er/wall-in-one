@@ -1148,8 +1148,16 @@ def test_recovery_is_old_owned_files_only(tmp_path: Path) -> None:
     sentinel.write_bytes(b"precious")
     symlink = directory / f"{download.MEDIA_STAGING_PREFIX}link"
     symlink.symlink_to(sentinel)
+    # Exactly the shape a released version staged under (AB-1): never swept.
+    released_names = [
+        directory / f"{prefix}abcdefgh" for prefix in download.LEGACY_STAGING_PREFIXES
+    ]
+    for path in released_names:
+        path.write_bytes(b"left by an older version")
+        path.chmod(0o600)
 
     for path in (
+        *released_names,
         old_stage,
         unrelated,
         prefix_lookalike,
@@ -1167,6 +1175,9 @@ def test_recovery_is_old_owned_files_only(tmp_path: Path) -> None:
     removed = download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=now)
 
     assert set(removed) == {old_stage, orphan}
+    assert len(released_names) == 5
+    for path in released_names:
+        assert path.read_bytes() == b"left by an older version", path.name
     assert recent_stage.is_file()
     assert unrelated.is_file()
     assert prefix_lookalike.read_bytes() == b"keep lookalike"

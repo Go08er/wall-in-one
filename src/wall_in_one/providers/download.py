@@ -75,11 +75,30 @@ MAX_SIDECAR_BYTES: Final = 64 * 1024
 MAX_NAME_ATTEMPTS: Final = 10_000
 
 #: Typed hidden names make recovery conservative: only files this subsystem
-#: could have created are ever swept after a hard kill.
-MEDIA_STAGING_PREFIX: Final = ".wall-in-one-media-stage-"
-SIDECAR_STAGING_PREFIX: Final = ".wall-in-one-sidecar-stage-"
-MARKER_STAGING_PREFIX: Final = ".wall-in-one-marker-stage-"
+#: could have created, and that provably were never public, are ever swept
+#: after a hard kill.
+#:
+#: These "v2" names are what this version's producers stage under, and only
+#: they: such a name was never public, because every publication here moves
+#: its entry to the public name from a commit name (`COMMIT_PREFIX`), and
+#: whatever a failed publication moves back lands there too. The recovery
+#: sweep reclaims these names and no others.
+MEDIA_STAGING_PREFIX: Final = ".wall-in-one-v2-media-stage-"
+SIDECAR_STAGING_PREFIX: Final = ".wall-in-one-v2-sidecar-stage-"
+MARKER_STAGING_PREFIX: Final = ".wall-in-one-v2-marker-stage-"
+#: What releases up to 0.2.2 staged under. Those versions published straight
+#: from these names, and moved an entry back to them when its publication
+#: could not be verified: a file left under one may have been public, and
+#: edited while it was. Nothing can prove afterwards that it was not (name,
+#: owner, mode and age say nothing about it), so no path here ever sweeps,
+#: claims, truncates or discards one: they stay where they are, and Tidy up
+#: lists them and offers to archive them (which keeps their bytes). No v2 or
+#: commit name starts with one of these, nor the other way round, so neither
+#: version's sweep ever takes the other's names.
 LEGACY_STAGING_PREFIXES: Final[tuple[str, ...]] = (
+    ".wall-in-one-media-stage-",
+    ".wall-in-one-sidecar-stage-",
+    ".wall-in-one-marker-stage-",
     ".wall-in-one-staged-",
     ".wall-in-one-tmp-",
 )
@@ -901,6 +920,9 @@ def recover_abandoned(
 ) -> tuple[Path, ...]:
     """Remove old, unmistakably app-owned remnants of interrupted installs.
 
+    Only this version's staging names (the v2 prefixes), which were never
+    public. What an older version left under its own staging names
+    (`LEGACY_STAGING_PREFIXES`) may have been public, so it is never touched.
     Recent files are left alone because another process may still be
     downloading. A predecessor-version final provider sidecar with no adjacent
     media is inert to the scanner and safe to remove once old. The current
@@ -925,12 +947,8 @@ def recover_abandoned(
         )
 
     cutoff = (time.time() if now is None else now) - STAGING_MAX_AGE_SECONDS
-    prefixes = (
-        MEDIA_STAGING_PREFIX,
-        SIDECAR_STAGING_PREFIX,
-        MARKER_STAGING_PREFIX,
-        *LEGACY_STAGING_PREFIXES,
-    )
+    # Never `LEGACY_STAGING_PREFIXES`: see there.
+    prefixes = (MEDIA_STAGING_PREFIX, SIDECAR_STAGING_PREFIX, MARKER_STAGING_PREFIX)
     removed: list[Path] = []
     try:
         # Opening the proc alias gives scandir an independent directory-stream

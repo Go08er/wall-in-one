@@ -186,6 +186,25 @@ _TOKEN: Final = re.compile(r"\A[0-9a-f]{32}\Z")
 #: retired; nothing else ever reclaims it.
 _COMMIT_PREFIX: Final = ".wall-in-one-commit-"
 _COMMIT_NAME: Final = re.compile(r"\A\.wall-in-one-commit-[0-9a-f]{16}\Z")
+#: What releases up to 0.2.2 staged downloads under (see
+#: `wall_in_one.providers.download.LEGACY_STAGING_PREFIXES`). Those versions
+#: published straight from these names and moved an entry back to them when
+#: its publication could not be verified, so a file left under one may have
+#: been public, and edited. No sweep takes one; here it is listed, and
+#: archiving it (which keeps its bytes) is offered.
+_LEGACY_STAGING_PREFIXES: Final = (
+    ".wall-in-one-media-stage-",
+    ".wall-in-one-sidecar-stage-",
+    ".wall-in-one-marker-stage-",
+    ".wall-in-one-staged-",
+    ".wall-in-one-tmp-",
+)
+_LEGACY_STAGING_NAME: Final = re.compile(
+    r"\A\.wall-in-one-(?:media-stage|sidecar-stage|marker-stage|staged|tmp)-[a-z0-9_]{8}\Z"
+)
+#: How long one must be unchanged first: the day the released version's own
+#: sweep waits, since that version may still be running, and downloading.
+LEGACY_STAGING_GRACE_SECONDS: Final = 24 * 3600.0
 _TEMPLATE_TABLE: Final = ("theme", "templates", "user", template.TEMPLATE_ID)
 _PLUGIN_TABLE: Final = ("plugin_settings", PLUGIN_ID)
 
@@ -731,7 +750,33 @@ def _survey(roots: Sequence[Path], now: float) -> _Survey:
             children = []
         for child in children:
             if in_managed and child.name.startswith(_COMMIT_PREFIX):
-                _survey_commit_name(child, survey, now, movable)
+                _survey_download_leftover(
+                    child,
+                    survey,
+                    now,
+                    movable,
+                    name=_COMMIT_NAME,
+                    grace=CLAIM_GRACE_SECONDS,
+                    recent="it changed in the last hour and may belong to a download in progress",
+                    what="a file a download left while publishing it",
+                )
+                continue
+            if in_managed and child.name.startswith(_LEGACY_STAGING_PREFIXES):
+                _survey_download_leftover(
+                    child,
+                    survey,
+                    now,
+                    movable,
+                    name=_LEGACY_STAGING_NAME,
+                    grace=LEGACY_STAGING_GRACE_SECONDS,
+                    recent=(
+                        "it changed in the last day and may belong to an older version's "
+                        "download in progress"
+                    ),
+                    what=(
+                        "a file an older version's download left behind, which may have been public"
+                    ),
+                )
                 continue
             if not child.name.startswith(file_io.DELETION_CLAIM_PREFIX):
                 continue
@@ -844,27 +889,34 @@ def _survey(roots: Sequence[Path], now: float) -> _Survey:
     return survey
 
 
-def _survey_commit_name(
+def _survey_download_leftover(
     child: Path,
     survey: _Survey,
     now: float,
     movable: Callable[[Path, os.stat_result], str],
+    *,
+    name: re.Pattern[str],
+    grace: float,
+    recent: str,
+    what: str,
 ) -> None:
-    """A file a download left at its commit name, in a managed download folder.
+    """A file a download left under a name no sweep takes, in a managed download folder.
 
-    Offered for archiving (which keeps its bytes; Undo moves it back), never
-    deleted: it may be what was public for a moment. Kept, with the reason,
-    unless it is exactly such a file: Wall-in-One's name for it, a regular
-    private file of this user with no other name, unchanged for an hour (so no
-    download is publishing it now), on the archive's drive. "Unchanged" counts
-    its ctime too: the rename to a commit name sets it to that moment, and
-    nothing in user space can set it back, so a file mid-publish always looks
-    recent, even one whose bytes (mtime) are old.
+    Either at this version's commit name, or under a staging name of a
+    released version. Offered for archiving (which keeps its bytes; Undo moves
+    it back), never deleted: it may be what was public for a moment. Kept,
+    with the reason, unless it is exactly such a file: Wall-in-One's ``name``
+    for it, a regular private file of this user with no other name, unchanged
+    for ``grace`` seconds (so no download is using it now; said as
+    ``recent``), on the archive's drive. "Unchanged" counts its ctime too: a
+    rename to the name sets it to that moment, and nothing in user space can
+    set it back, so a file mid-publish always looks recent, even one whose
+    bytes (mtime) are old.
     """
     status = _lstat(child)
     if status is None:
         return
-    if not _COMMIT_NAME.match(child.name):
+    if not name.match(child.name):
         survey.kept.append(Kept(child, "Tidy up doesn't recognize this entry"))
     elif not stat.S_ISREG(status.st_mode):
         survey.kept.append(Kept(child, "it isn't a regular file"))
@@ -874,10 +926,8 @@ def _survey_commit_name(
         survey.kept.append(
             Kept(child, "its permissions aren't the private ones Wall-in-One gives these files")
         )
-    elif now - max(status.st_mtime, status.st_ctime) < CLAIM_GRACE_SECONDS:
-        survey.kept.append(
-            Kept(child, "it changed in the last hour and may belong to a download in progress")
-        )
+    elif now - max(status.st_mtime, status.st_ctime) < grace:
+        survey.kept.append(Kept(child, recent))
     elif reason := movable(child, status):
         survey.kept.append(Kept(child, reason))
     else:
@@ -889,8 +939,7 @@ def _survey_commit_name(
                 (status.st_dev, status.st_ino),
                 file_io.file_fingerprint(status),
                 status.st_size,
-                f"a file a download left while publishing it ({format_size(status.st_size)}, "
-                f"last changed {stamp})",
+                f"{what} ({format_size(status.st_size)}, last changed {stamp})",
             )
         )
 

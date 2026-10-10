@@ -208,6 +208,20 @@ def _is_consumed_regular_tombstone(
     )
 
 
+def require_writable(pinned: PinnedPath) -> None:
+    """Raise ``OSError`` unless the exact pinned regular file can be opened for writing.
+
+    Opening it is the whole check: nothing is written and no timestamp moves.
+    `ClaimedPath.discard` needs exactly this access to destroy a claimed file,
+    so a caller can refuse before it moves anything it could not then destroy.
+    """
+    descriptor = os.open(
+        f"/proc/self/fd/{pinned.descriptor}",
+        os.O_WRONLY | os.O_CLOEXEC | os.O_NONBLOCK,
+    )
+    os.close(descriptor)
+
+
 def regular_file_fingerprint(path: Path) -> FileFingerprint:
     """Inspect one named regular file and capture its generation evidence."""
     try:

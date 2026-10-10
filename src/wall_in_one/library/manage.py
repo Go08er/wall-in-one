@@ -210,6 +210,145 @@ class _ArtifactCandidate:
     adopted_role: str = ""
 
 
+@dataclass(slots=True)
+class _WithdrawnAuthority:
+    """Download records taken out of their public names for one removal, each whole.
+
+    Provenance is deletion authority for the media's pathname, so it leaves
+    that name before the media can (`_withdraw_download_authority`). It is
+    only withdrawn, though: each record sits intact in a private claim until
+    the removal's fate is known. Once the media has left its name the records
+    are destroyed (`consume`). If it never did, they are put back, byte for
+    byte; if the removal's own record is retained for recovery, or a record
+    can't be put back, it stays whole in its claim and the error names where
+    (`settle`). A wallpaper that was not removed never loses its record.
+    """
+
+    #: Each record's public path, and the claim it sits in.
+    claims: list[tuple[Path, file_io.ClaimedPath]] = field(default_factory=list)
+    #: Set at the media's commit point: from then on the records are consumed.
+    media_left: bool = False
+    _settled: bool = False
+    _removed: tuple[Path, ...] = ()
+    _kept: tuple[Path, ...] = ()
+
+    def consume(self) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        """The media left its name: destroy each record. (removed, kept); done once."""
+        if not self._settled:
+            self._settled = True
+            removed: list[Path] = []
+            kept: list[Path] = []
+            for logical, claim in self.claims:
+                try:
+                    claim.discard()
+                except OSError:
+                    # Still in its claim, as far as is known: reported as kept.
+                    kept.append(claim.path)
+                    with contextlib.suppress(OSError):
+                        claim.close()
+                else:
+                    removed.append(logical)
+            self._removed, self._kept = tuple(removed), tuple(kept)
+        return self._removed, self._kept
+
+    def settle(
+        self,
+        error: BaseException,
+        *,
+        target: Path,
+        expected_fingerprint: SourceFingerprint,
+    ) -> None:
+        """The removal ended in ``error``: decide each record's fate and say it.
+
+        Consumed if the media left its name. Kept whole in its claim if the
+        removal's record is retained for recovery (the media is neither at its
+        name for certain nor gone). Put back otherwise. What a person needs to
+        know is added to ``error``.
+        """
+        if self._settled:
+            return
+        if self.media_left or (isinstance(error, ManageError) and error.committed):
+            self.consume()
+            return
+        self._settled = True
+        if not self.claims:
+            return
+        if isinstance(error, ManageError) and error.retain_intent:
+            note = self._keep()
+        else:
+            note = self._put_back(_same_file_moved_on(target, expected_fingerprint))
+        if not note:
+            return
+        if isinstance(error, ManageError) and error.args and isinstance(error.args[0], str):
+            error.args = (f"{error.args[0]}; {file_io.public_text(note)}", *error.args[1:])
+        else:
+            error.add_note(note)
+
+    def _keep(self) -> str:
+        notes = []
+        for _logical, claim in self.claims:
+            notes.append(f"its download record was kept at {claim.path}")
+            with contextlib.suppress(OSError):
+                claim.close()
+        return "; ".join(notes)
+
+    def _put_back(self, moved_on: bool) -> str:
+        """Put each record back at its name without replacing anything; what to say.
+
+        ``moved_on``: the media is the same file, but no longer the generation
+        its record binds (moving it into a claim and back changed its change
+        time). The record is put back as it was all the same, never re-bound
+        here: a rollback must not write deletion authority.
+        """
+        notes = []
+        returned = False
+        for logical, claim in self.claims:
+            try:
+                restored = claim.restore()
+            except file_io.PathChangedError as error:
+                if error.preserved_path is not None:
+                    notes.append(
+                        f"its download record was put back at {logical}, but that could not "
+                        f"be confirmed ({error})"
+                    )
+                else:
+                    notes.append(
+                        f"its download record could not be put back ({error}) and was kept "
+                        f"at {claim.path}"
+                    )
+            except OSError as error:
+                notes.append(
+                    f"its download record could not be put back ({_reason(error)}) and was "
+                    f"kept at {claim.path}"
+                )
+            else:
+                if restored:
+                    returned = True
+                    continue
+                notes.append(
+                    f"something else is now at {logical}, so its download record was kept "
+                    f"at {claim.path}"
+                )
+            with contextlib.suppress(OSError):
+                claim.close()
+        if returned and moved_on:
+            notes.append(
+                "its download record was put back, but no longer matches the file (moving "
+                "the file changed its change time), so the wallpaper now counts as a local "
+                "file; nothing was deleted"
+            )
+        return "; ".join(notes)
+
+
+def _same_file_moved_on(target: Path, expected_fingerprint: SourceFingerprint) -> bool:
+    """Whether ``target`` is the expected file at a later generation (known, not guessed)."""
+    try:
+        named = file_io.regular_file_fingerprint(target)
+    except OSError, ValueError:
+        return False
+    return named[:2] == expected_fingerprint[:2] and named != expected_fingerprint
+
+
 def _reason(error: OSError) -> str:
     """The reason alone ("Permission denied"), without any spelling of a path."""
     return os.strerror(error.errno) if error.errno else str(error)
@@ -952,8 +1091,13 @@ def _withdraw_download_authority(
     required: bool,
     source_pin: file_io.PinnedPath,
     expected_fingerprint: SourceFingerprint,
-) -> tuple[tuple[Path, ...], tuple[_PinnedArtifact, ...]]:
-    """Durably remove provenance before its media path can become vacant."""
+) -> tuple[_WithdrawnAuthority, tuple[_PinnedArtifact, ...]]:
+    """Durably take provenance out of its name before its media path can become vacant.
+
+    Each record is moved, whole, into a private claim (`_WithdrawnAuthority`):
+    out of its public name, so it can confer nothing there, and not destroyed,
+    so a removal that does not commit can put it back.
+    """
     provider_sidecars = tuple(
         artifact
         for artifact in pinned
@@ -1000,48 +1144,56 @@ def _withdraw_download_authority(
             # Provider-shaped documents for another media generation are not
             # ours to unlink. Their generation binding leaves them inert after
             # this local file is moved to Trash.
-            return (), tuple(
+            return _WithdrawnAuthority(), tuple(
                 candidate for candidate in pinned if candidate not in provider_sidecars
             )
         raise ManageError(
             "not-ours",
             f"{item.path.name} no longer has one exact download provenance record",
         )
-    removed: list[Path] = []
+    withdrawn = _WithdrawnAuthority()
     for artifact in authority:
         try:
-            discarded = file_io.discard_regular_if_same(
+            claim = file_io.claim_for_deletion(
                 artifact.access,
                 expected_identity=artifact.identity,
                 expected_fingerprint=artifact.fingerprint,
                 pinned_source=artifact.pin,
+                logical_path=artifact.logical,
             )
-            if not discarded:
-                raise file_io.PathChangedError(
-                    f"{artifact.logical} changed before download authority was withdrawn"
-                )
-            paths.fsync_directory(artifact.access.parent)
         except file_io.PathChangedError as error:
             detail = (
                 f"; an unverified entry was preserved at {error.preserved_path}"
                 if error.preserved_path is not None
                 else ""
             )
-            raise ManageError(
+            failure = ManageError(
                 "changed",
                 f"{artifact.logical} changed before removal; "
                 f"the wallpaper was left untouched{detail}",
-            ) from error
+            )
+            withdrawn.settle(failure, target=item.path, expected_fingerprint=expected_fingerprint)
+            raise failure from error
+        except FileNotFoundError as error:
+            failure = ManageError(
+                "changed",
+                f"{artifact.logical} changed before removal; the wallpaper was left untouched",
+            )
+            withdrawn.settle(failure, target=item.path, expected_fingerprint=expected_fingerprint)
+            raise failure from error
         except OSError as error:
-            raise ManageError(
+            failure = ManageError(
                 "local-io",
-                f"could not withdraw download authority for {item.path}: {error}",
-            ) from error
-        removed.append(artifact.logical)
+                f"could not withdraw download authority for {item.path}: {_reason(error)}; "
+                "the wallpaper was left untouched",
+            )
+            withdrawn.settle(failure, target=item.path, expected_fingerprint=expected_fingerprint)
+            raise failure from error
+        withdrawn.claims.append((artifact.logical, claim))
     # Invalid provider-shaped documents were never deletion authority and are
     # not app-owned companions. Exclude them without unlinking them.
     remaining = tuple(candidate for candidate in pinned if candidate not in provider_sidecars)
-    return tuple(removed), remaining
+    return withdrawn, remaining
 
 
 def _discard_committed_adopted_artifacts(
@@ -1119,11 +1271,13 @@ def _discard_pinned_artifacts(
 
 def _completed_removal_outcome(
     item: MediaItem,
-    authority_removed: Sequence[Path],
+    withdrawn: _WithdrawnAuthority,
     remaining_artifacts: Sequence[_PinnedArtifact],
     artifact_kept: Sequence[Path],
 ) -> Removal:
     """Assemble one committed delete after consuming every pre-pinned companion."""
+    authority_removed, authority_kept = withdrawn.consume()
+    artifact_kept = (*artifact_kept, *authority_kept)
     adopted_removed, remaining_artifacts, adopted_kept = _discard_committed_adopted_artifacts(
         remaining_artifacts
     )
@@ -1141,11 +1295,13 @@ def _completed_removal_outcome(
 def _completed_trash_outcome(
     item: MediaItem,
     destination: Path,
-    authority_removed: Sequence[Path],
+    withdrawn: _WithdrawnAuthority,
     remaining_artifacts: Sequence[_PinnedArtifact],
     artifact_kept: Sequence[Path],
 ) -> Trashed:
     """Assemble one committed trash move after consuming pre-pinned companions."""
+    authority_removed, authority_kept = withdrawn.consume()
+    artifact_kept = (*artifact_kept, *authority_kept)
     adopted_removed, remaining_artifacts, adopted_kept = _discard_committed_adopted_artifacts(
         remaining_artifacts
     )
@@ -1430,26 +1586,75 @@ def _remove_pinned(
 ) -> Removal:
     """Commit one managed removal while its prepare-time inode stays pinned."""
     path = item.path
-    target = source_path
-    source_identity = source_pin.identity
     if source_pin.fingerprint != expected_fingerprint:
         raise ManageError(
             "changed",
             f"{path} changed after removal was prepared; nothing was changed",
         )
+    # A claimed file is destroyed through a write descriptor. One that can't
+    # be opened for writing could only be moved into its claim and back, and
+    # that round trip changes the generation its download record binds. So it
+    # is refused here, before anything is withdrawn or moved.
+    try:
+        file_io.require_writable(source_pin)
+    except OSError as error:
+        raise ManageError(
+            "local-io",
+            f"could not remove {path}: it can't be opened for writing "
+            f"({_reason(error)}); nothing was changed",
+        ) from error
 
     # Download provenance is deletion authority for this pathname. Withdraw
     # its exact pre-commit generation first so a crash after the media unlink
     # can never confer ownership on a later unrelated same-name file. A crash
     # in the narrow opposite window leaves the original media conservatively
-    # unmanaged, not destructively authorized.
-    authority_removed, remaining_artifacts = _withdraw_download_authority(
+    # unmanaged, not destructively authorized. It is withdrawn whole, not
+    # destroyed: a removal that does not commit puts it back (`settle`).
+    withdrawn, remaining_artifacts = _withdraw_download_authority(
         item,
         artifact_pins,
         required=True,
         source_pin=source_pin,
         expected_fingerprint=expected_fingerprint,
     )
+    try:
+        return _remove_withdrawn(
+            item,
+            operation_token=operation_token,
+            source_pin=source_pin,
+            expected_fingerprint=expected_fingerprint,
+            source_path=source_path,
+            withdrawn=withdrawn,
+            remaining_artifacts=remaining_artifacts,
+            artifact_kept=artifact_kept,
+        )
+    except BaseException as error:
+        withdrawn.settle(error, target=source_path, expected_fingerprint=expected_fingerprint)
+        raise
+
+
+def _remove_withdrawn(
+    item: MediaItem,
+    *,
+    operation_token: str,
+    source_pin: file_io.PinnedPath,
+    expected_fingerprint: SourceFingerprint,
+    source_path: Path,
+    withdrawn: _WithdrawnAuthority,
+    remaining_artifacts: Sequence[_PinnedArtifact],
+    artifact_kept: Sequence[Path],
+) -> Removal:
+    """The removal proper, once download authority is out of its name.
+
+    Every way out is one of three for the records `withdrawn` holds: a commit
+    (the media left its name; `_completed_removal_outcome` consumes them), an
+    error that retains the pending removal record (they stay in their
+    claims), or any other error (they are put back). `_remove_pinned` settles
+    the last two from the error raised here.
+    """
+    path = item.path
+    target = source_path
+    source_identity = source_pin.identity
     try:
         claim = file_io.claim_for_deletion(
             target,
@@ -1572,7 +1777,7 @@ def _remove_pinned(
             ) from error
         physical = _completed_removal_outcome(
             item,
-            authority_removed,
+            withdrawn,
             remaining_artifacts,
             artifact_kept,
         )
@@ -1586,12 +1791,14 @@ def _remove_pinned(
     finally:
         with contextlib.suppress(OSError):
             claim.close()
+    # The commit point: the media is destroyed. Its records go with it.
+    withdrawn.media_left = True
     try:
         paths.fsync_directory(target.parent)
     except OSError as error:
         physical = _completed_removal_outcome(
             item,
-            authority_removed,
+            withdrawn,
             remaining_artifacts,
             artifact_kept,
         )
@@ -1603,7 +1810,7 @@ def _remove_pinned(
         ) from error
     return _completed_removal_outcome(
         item,
-        authority_removed,
+        withdrawn,
         remaining_artifacts,
         artifact_kept,
     )
@@ -1878,17 +2085,11 @@ def _trash_pinned(
 ) -> Trashed:
     """Commit one trash move while its prepare-time inode stays pinned."""
     path = item.path
-    target = source_path
-    authority_removed, remaining_artifacts = _withdraw_download_authority(
-        item,
-        artifact_pins,
-        required=False,
-        source_pin=source_pin,
-        expected_fingerprint=expected_fingerprint,
-    )
-
     files = trash_directory() / "files"
     info = trash_directory() / "info"
+    # What can't possibly succeed is refused before anything is withdrawn: a
+    # trash that can't be prepared, and a wallpaper on another filesystem than
+    # the trash (a move there is never a rename).
     try:
         paths.ensure_directory(files)
         paths.ensure_directory(info)
@@ -1896,14 +2097,73 @@ def _trash_pinned(
         raise ManageError(
             "local-io", f"could not prepare the trash: {error.strerror or error}"
         ) from error
+    try:
+        # Folder against folder: on some filesystems a file reports another
+        # device than the folder it is in.
+        elsewhere = source_path.parent.stat().st_dev != files.stat().st_dev
+    except OSError:
+        elsewhere = False  # can't tell: the move itself will say
+    if elsewhere:
+        raise ManageError(
+            "cross-device",
+            f"{path.name} is on another filesystem, so it cannot be moved to the trash",
+        )
+    withdrawn, remaining_artifacts = _withdraw_download_authority(
+        item,
+        artifact_pins,
+        required=False,
+        source_pin=source_pin,
+        expected_fingerprint=expected_fingerprint,
+    )
+    try:
+        return _trash_withdrawn(
+            item,
+            source_pin=source_pin,
+            expected_fingerprint=expected_fingerprint,
+            source_path=source_path,
+            files=files,
+            info=info,
+            withdrawn=withdrawn,
+            remaining_artifacts=remaining_artifacts,
+            artifact_kept=artifact_kept,
+        )
+    except BaseException as error:
+        withdrawn.settle(error, target=source_path, expected_fingerprint=expected_fingerprint)
+        raise
 
+
+def _trash_withdrawn(
+    item: MediaItem,
+    *,
+    source_pin: file_io.PinnedPath,
+    expected_fingerprint: SourceFingerprint,
+    source_path: Path,
+    files: Path,
+    info: Path,
+    withdrawn: _WithdrawnAuthority,
+    remaining_artifacts: Sequence[_PinnedArtifact],
+    artifact_kept: Sequence[Path],
+) -> Trashed:
+    """The trash move proper, once download authority is out of its name.
+
+    As in `_remove_withdrawn`: a commit consumes the records `withdrawn`
+    holds (`_completed_trash_outcome`), and every error that is not one is
+    settled by `_trash_pinned`, which puts them back.
+    """
+    path = item.path
+    target = source_path
     original = path.absolute()
     original_identity = source_pin.identity
     original_fingerprint = expected_fingerprint
     stamp = datetime.now().replace(microsecond=0).isoformat()
     payload = f"[Trash Info]\nPath={quote(str(original), safe='/')}\nDeletionDate={stamp}\n"
     payload_bytes = payload.encode("utf-8")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".wall-in-one-trashinfo-", dir=info)
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".wall-in-one-trashinfo-", dir=info)
+    except OSError as error:
+        raise ManageError(
+            "local-io", f"could not write the trash record: {error.strerror or error}"
+        ) from error
     temporary = Path(temporary_name)
     temporary_status = os.fstat(descriptor)
     temporary_identity = temporary_status.st_dev, temporary_status.st_ino
@@ -2044,7 +2304,7 @@ def _trash_pinned(
                     physical_outcome = _completed_trash_outcome(
                         item,
                         error.preserved_path,
-                        authority_removed,
+                        withdrawn,
                         remaining_artifacts,
                         artifact_kept,
                     )
@@ -2089,6 +2349,7 @@ def _trash_pinned(
                 raise _with_trash_cleanup_conflict(failure, preserved) from error
 
             move_committed = True
+            withdrawn.media_left = True
             try:
                 paths.fsync_directory(files)
                 paths.fsync_directory(target.parent)
@@ -2099,7 +2360,7 @@ def _trash_pinned(
                 physical_outcome = _completed_trash_outcome(
                     item,
                     destination,
-                    authority_removed,
+                    withdrawn,
                     remaining_artifacts,
                     artifact_kept,
                 )
@@ -2119,7 +2380,7 @@ def _trash_pinned(
                 physical_outcome = _completed_trash_outcome(
                     item,
                     destination,
-                    authority_removed,
+                    withdrawn,
                     remaining_artifacts,
                     artifact_kept,
                 )
@@ -2137,7 +2398,7 @@ def _trash_pinned(
             physical_outcome = _completed_trash_outcome(
                 item,
                 destination,
-                authority_removed,
+                withdrawn,
                 remaining_artifacts,
                 artifact_kept,
             )

@@ -412,6 +412,16 @@ where it is. Records that still cannot be cleared after the media commit, for
 example because a newer version saved a file in between, are reported as
 incomplete cleanup with a refresh to retry, never as nothing having changed.
 
+A removal that does not go through leaves a downloaded wallpaper a download.
+Its download record (`<file>.wallhaven.json` or `<file>.motionbgs.json`) is
+set aside whole before the file is touched and destroyed only once the file is
+gone; otherwise it is put back as it was. A downloaded file that can't be
+opened for writing (a read-only one, say) is refused first, with nothing
+changed. In the rare case where the file had already been moved aside and was
+moved back, the record is put back too but no longer matches the file, so the
+wallpaper counts as one of your own from then on: the message says so, and
+nothing was deleted.
+
 A manually chosen still remains a separate library item. Removing the moving
 wallpaper deletes the association but never the still file or that still's own
 Pairing metadata. Conversely, explicitly removing the still clears only the

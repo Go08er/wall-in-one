@@ -471,6 +471,7 @@ def test_remove_withdraws_download_authority_before_the_media_claim(
 ) -> None:
     item = downloaded(root)
     sidecar = item.path.with_name(item.path.name + ".wallhaven.json")
+    written = sidecar.read_bytes()
     real_claim = file_io.claim_for_deletion
 
     def stop_at_media_claim(path: Path, **options: object) -> file_io.ClaimedPath:
@@ -486,8 +487,10 @@ def test_remove_withdraws_download_authority_before_the_media_claim(
 
     assert caught.value.kind == "local-io"
     assert item.path.is_file()
-    assert not sidecar.exists()
-    assert not scan.has_download_sidecar(item.path)
+    # Withdrawn, not destroyed: the media was never claimed, so its record is
+    # put back and it is still a download. (Until ff1f967 it was destroyed.)
+    assert sidecar.read_bytes() == written
+    assert scan.has_download_sidecar(item.path)
 
 
 def test_remove_withdraws_every_valid_download_authority(root: Path) -> None:
@@ -661,6 +664,7 @@ def test_trash_withdraws_new_download_authority_before_the_media_move(
     managed = downloaded(root)
     item = item_for(managed.path)
     sidecar = item.path.with_name(item.path.name + ".wallhaven.json")
+    written = sidecar.read_bytes()
     real_move = file_io.atomic_move_no_replace
 
     def stop_at_media_move(source: Path, destination: Path, **options: object) -> None:
@@ -676,8 +680,10 @@ def test_trash_withdraws_new_download_authority_before_the_media_move(
 
     assert caught.value.kind == "local-io"
     assert item.path.is_file()
-    assert not sidecar.exists()
-    assert not scan.has_download_sidecar(item.path)
+    # Withdrawn, not destroyed: the media never moved, so its record is put
+    # back and still binds it. (Until ff1f967 it was destroyed.)
+    assert sidecar.read_bytes() == written
+    assert scan.has_download_sidecar(item.path)
 
 
 def test_remove_without_a_prepared_source_identity_is_refused(root: Path) -> None:
@@ -2528,6 +2534,21 @@ def test_remove_keeps_its_record_when_the_claimed_file_cannot_be_looked_at(
     assert not (folder / "entry").exists() and not item.path.exists()
 
 
+def _read_only_once_claimed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The media turns read-only once it is in its claim, so it can't be opened
+    to be destroyed (a discard's native EACCES). Before the claim it could be,
+    so the removal's pre-flight passed."""
+    claim_for_deletion = file_io.claim_for_deletion
+
+    def claim(path: Path, **options: object) -> file_io.ClaimedPath:
+        claimed = claim_for_deletion(path, **options)  # type: ignore[arg-type]
+        if options.get("operation_token") == REMOVAL_TOKEN:
+            claimed.path.chmod(0o444)
+        return claimed
+
+    monkeypatch.setattr(file_io, "claim_for_deletion", claim)
+
+
 def _downloaded_read_only(root: Path) -> MediaItem:
     """A downloaded wallpaper that can't be opened for writing: a discard's native EACCES."""
     path = downloaded(root).path
@@ -2548,7 +2569,8 @@ def test_remove_is_not_committed_when_the_file_is_moved_back_unseen(
     permission (a native EACCES), so that move can be neither verified nor
     undone. The file is at its own path: nothing was removed, and the record is
     kept."""
-    item = _downloaded_read_only(root)
+    item = downloaded(root)
+    _read_only_once_claimed(monkeypatch)
     original = item.path.read_bytes()
     public = item.path.parent
     claim = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN) / "entry"
@@ -2586,7 +2608,8 @@ def test_remove_is_not_committed_when_its_own_path_cannot_be_looked_at(
     process replaying the claim, say), and its folder then can't be searched (a
     native EACCES). It left its claim and its own path can't be looked at: it
     may be there, so nothing is reported as removed."""
-    item = _downloaded_read_only(root)
+    item = downloaded(root)
+    _read_only_once_claimed(monkeypatch)
     original = item.path.read_bytes()
     public = item.path.parent
     claim = file_io.deletion_claim_directory(item.path, REMOVAL_TOKEN) / "entry"

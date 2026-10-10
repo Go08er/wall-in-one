@@ -20,8 +20,11 @@ and ``wall_in_one.providers.http``; of the state-file stores
 (``library.state_file``, ``playlists``, ``displays``, ``schedules``,
 ``favourites``, ``pairings``, and ``ui_prefs``); of ``library.stills``; and of
 ``theme.template``, with the palette template it installs
-(``data/palette.json.tmpl.frozen``: any file is vendored the same way). To
-probe another module, freeze it and whatever it imports::
+(``data/palette.json.tmpl.frozen``: any file is vendored the same way); and of
+the startup paths: ``session``, ``library.capture_upgrade`` (with
+``library.adopted``), ``library.manage`` and ``library.removals``, and
+``legacy_migration``. To probe another module, freeze it and whatever it
+imports::
 
     git show 1840dde:src/wall_in_one/<module>.py \\
         > tests/fixtures/released_0_2_2/wall_in_one/<module>.py.frozen

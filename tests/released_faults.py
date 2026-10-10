@@ -19,22 +19,31 @@ child, in its own scratch profile, under its one plan:
     through its ordinary error path.
 ``{"edit": n}``
     Right after change ``n`` put an entry at a public name, that entry is edited
-    in place (same inode, same length), as a person or another program would.
-    With ``"fail"`` as well, a later call then fails: the released code finds
-    its publication unverifiable and moves the edited entry wherever it does.
+    in place (same inode), as a person or another program would: one byte
+    (``"as": "flip"``, the default, the same length), a note added at its end
+    (``"extend"``) or its last third cut off (``"truncate"``). With ``"fail"``
+    as well, a later call then fails: the released code finds its publication
+    unverifiable and moves the edited entry wherever it does.
 
-``{"meddle": n, "which": k, "how": "edit"}``
+``{"meddle": n, "which": k, "how": "flip"}``
     Just before call ``n``, the ``k``-th file then in the profile is edited in
-    place (``"how": "replace"``: rewritten under a new inode, as a program that
-    saves atomically does), and the released code carries on: a person, or
-    Noctalia, changing a file while the released code is in the middle of it.
+    place (``"how"``: ``"extend"`` or ``"truncate"`` as above; ``"replace"``:
+    rewritten under a new inode, as a program that saves atomically does), and
+    the released code carries on: a person, or Noctalia, changing a file while
+    the released code is in the middle of it.
 
 While armed, the tracer numbers every filesystem call the released
 ``wall_in_one`` makes (never the import system's), and records every inode
 that was ever at a public name (one with no leading dot): that, and whatever
 a person edited, is what must outlive any cleanup. ``fsync`` is numbered, and
 can fail, but is not carried out: a killed process loses nothing the kernel
-has, and a power cut is not something a test can stage.
+has, and a power cut is not something a test can stage. What a person already
+had before the released code ran, a script lays out itself (with the released
+code, where its format is the released code's) and names with ``had(...)``.
+
+`Watch` is the same for this checkout's code, in this process: its filesystem
+calls counted, and at one of them an entry made impossible to look at
+(mode 000, so every failure after it is the kernel's own).
 """
 
 from __future__ import annotations
@@ -43,12 +52,14 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Final
 
 import pytest
@@ -125,9 +136,31 @@ def _numbered(kind, name, where):
     return index
 
 
+def had(*paths):
+    # What a person already had at a public name before the released code ran.
+    for path in paths:
+        _STATE["public"].append([0, _os.fspath(path), _os.lstat(path).st_ino])
+
+
 def _flipped(data):
     at = next((i for i, byte in enumerate(data) if chr(byte).isascii() and chr(byte).isalpha()), 0)
     return at, bytes([(data or b" ")[at] ^ 0x20])
+
+
+def _edit(path, how):
+    # In place, the same inode: one byte, a note at the end, or the last third gone.
+    descriptor = _REAL["open"](path, _os.O_RDWR | _os.O_NOFOLLOW)
+    try:
+        size = _os.fstat(descriptor).st_size
+        if how == "extend":
+            _os.pwrite(descriptor, b"\n# a person's note\n", size)
+        elif how == "truncate" and size > 1:
+            _os.ftruncate(descriptor, max(1, size * 2 // 3))
+        else:
+            at, byte = _flipped(_os.pread(descriptor, size, 0))
+            _os.pwrite(descriptor, byte, at)
+    finally:
+        _os.close(descriptor)
 
 
 def _meddle(index):
@@ -145,21 +178,17 @@ def _meddle(index):
     if which >= len(found):
         return
     path = found[which]
-    with open(path, "rb") as source:
-        data = source.read()
-    at, byte = _flipped(data)
     if _PLAN.get("how") == "replace":
+        with open(path, "rb") as source:
+            data = source.read()
+        at, byte = _flipped(data)
         fresh = path + ".rewritten-by-someone"
         with open(fresh, "wb") as sink:
             sink.write(data[:at] + byte + data[at + 1 :])
         _os.chmod(fresh, _os.stat(path).st_mode & 0o777)
         _REAL["replace"](fresh, path)
     else:
-        descriptor = _REAL["open"](path, _os.O_RDWR | _os.O_NOFOLLOW)
-        try:
-            _os.pwrite(descriptor, byte, at)
-        finally:
-            _os.close(descriptor)
+        _edit(path, _PLAN.get("how", "flip"))
     _STATE["edited"].append([index, path, _REAL["lstat"](path).st_ino])
 
 
@@ -191,12 +220,7 @@ def _published(index, path):
         return
     _STATE["public"].append([index, path, status.st_ino])
     if _PLAN.get("edit") == index and status.st_size > 0:
-        descriptor = _REAL["open"](path, _os.O_RDWR | _os.O_NOFOLLOW)
-        try:
-            at, byte = _flipped(_os.pread(descriptor, status.st_size, 0))
-            _os.pwrite(descriptor, byte, at)
-        finally:
-            _os.close(descriptor)
+        _edit(path, _PLAN.get("as", "flip"))
         _STATE["edited"].append([index, path, status.st_ino])
 
 
@@ -358,13 +382,16 @@ def profile_environment(base: Path) -> dict[str, str]:
 
 
 def run(
-    source: Path, script: str, jobs: Sequence[Job], *, timeout: float = 300.0
+    source: Path, script: str, jobs: Sequence[Job], *, timeout: float | None = None
 ) -> list[Produced]:
     """Run each job in a fork of one released child; what each produced, in order.
 
     ``script`` (after `TRACER`) imports the released modules, calls
-    ``trace_filesystem`` and ends with ``serve(operation)``.
+    ``trace_filesystem`` and ends with ``serve(operation)``. The whole batch
+    gets five minutes and half a second a job, unless ``timeout`` says.
     """
+    if timeout is None:
+        timeout = 300.0 + 0.5 * len(jobs)
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(source)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -460,6 +487,21 @@ def _files(root: Path) -> Iterator[Path]:
             yield Path(directory) / name
 
 
+def _read_unnoticed(path: Path) -> bytes:
+    """``path``'s bytes, read without touching its access time.
+
+    A snapshot must not change what it looks at, and an access time can be
+    evidence: the released removal stamps one on a file it is about to empty,
+    and replay knows the emptied file by it.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NOATIME", 0))
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            return source.read()
+    finally:
+        os.close(descriptor)
+
+
 def tree(*roots: Path) -> Tree:
     """Snapshot every regular file under ``roots`` (no links followed)."""
     found: list[Entry] = []
@@ -471,31 +513,44 @@ def tree(*roots: Path) -> Tree:
                 continue
             if not os.path.isfile(path) or path.is_symlink():
                 continue
-            data = path.read_bytes()
+            data = _read_unnoticed(path)
             found.append(
                 Entry(path, status.st_ino, status.st_size, hashlib.sha256(data).hexdigest(), data)
             )
     return Tree(tuple(found))
 
 
-def edit_in_place(path: Path) -> None:
-    """Change one byte of ``path`` in place: the same inode, the same length.
+#: The ways a person's edit changes a file here: one byte in place, a note
+#: added at its end, its last third cut off. The last two change its length,
+#: which a check of sizes meets differently from a check of bytes.
+EDITS: Final = ("flip", "extend", "truncate")
+NOTE: Final = b"\n# a person's note\n"
 
-    The case of its first letter (a comment's or a key's, in a text file),
-    as the tracer's own edit does; its first byte if it has no letter.
+
+def edit_in_place(path: Path, how: str = "flip") -> None:
+    """Edit ``path`` in place (the same inode), one of `EDITS`, as the tracer does.
+
+    ``flip``: the case of its first letter (a comment's or a key's, in a text
+    file), or its first byte if it has no letter; the same length.
     """
     with path.open("r+b") as handle:
-        data = handle.read() or b" "
-        at = next(
-            (
-                index
-                for index, byte in enumerate(data)
-                if chr(byte).isascii() and chr(byte).isalpha()
-            ),
-            0,
-        )
-        handle.seek(at)
-        handle.write(bytes([data[at] ^ 0x20]))
+        data = handle.read()
+        if how == "extend":
+            handle.write(NOTE)
+        elif how == "truncate" and len(data) > 1:
+            handle.truncate(max(1, len(data) * 2 // 3))
+        else:
+            data = data or b" "
+            at = next(
+                (
+                    index
+                    for index, byte in enumerate(data)
+                    if chr(byte).isascii() and chr(byte).isalpha()
+                ),
+                0,
+            )
+            handle.seek(at)
+            handle.write(bytes([data[at] ^ 0x20]))
         handle.flush()
 
 
@@ -560,31 +615,39 @@ def single_faults(trace: Produced, *, full: bool) -> list[dict[str, object]]:
 def edits_while_public(trace: Produced, *, full: bool) -> list[dict[str, object]]:
     """An in-place edit right after each publication, alone and then followed by a
     failure at each of the next calls or a kill before each of the next changes:
-    the released code finds what it published changed under it."""
-    window = 24 if full else 8
+    the released code finds what it published changed under it.
+
+    Each of `EDITS` alone. What follows: after the one-byte edit; in full,
+    after the two that change the length too, in the narrower window.
+    """
     plans: list[dict[str, object]] = []
     for published, _path, _inode in trace.public:
-        plans.append({"edit": published})
-        later = [call for call in trace.calls if published < call.index <= published + window]
-        plans += [{"edit": published, "fail": call.index, "errno": "EIO"} for call in later]
-        plans += [
-            {"edit": published, "kill": call.index} for call in later if call.kind == "change"
-        ]
+        if not published:
+            continue  # there before the released code ran (``had``)
+        for how in EDITS:
+            edit: dict[str, object] = {"edit": published, "as": how}
+            plans.append(edit)
+            if how != "flip" and not full:
+                continue
+            window = 24 if full and how == "flip" else 8
+            later = [call for call in trace.calls if published < call.index <= published + window]
+            plans += [{**edit, "fail": call.index, "errno": "EIO"} for call in later]
+            plans += [{**edit, "kill": call.index} for call in later if call.kind == "change"]
     return plans
 
 
 def meddling(trace: Produced, *, full: bool) -> list[dict[str, object]]:
     """Someone else changing one of the files then there, just before each change.
 
-    Public names come first. Bounded: the first file, edited in place. In
-    full: the first eight, each also rewritten under a new inode.
+    Public names come first. Bounded: the first file, edited in place, one of
+    `EDITS` in turn. In full: the first eight, each of `EDITS` and each also
+    rewritten under a new inode.
     """
     plans: list[dict[str, object]] = []
-    for call in trace.changes:
+    for number, call in enumerate(trace.changes):
         for which in range(8 if full else 1):
-            plans.append({"meddle": call.index, "which": which, "how": "edit"})
-            if full:
-                plans.append({"meddle": call.index, "which": which, "how": "replace"})
+            for how in (*EDITS, "replace") if full else (EDITS[number % len(EDITS)],):
+                plans.append({"meddle": call.index, "which": which, "how": how})
     return plans
 
 
@@ -605,7 +668,123 @@ def shape(found: Tree, base: Path) -> tuple[tuple[str, int], ...]:
     )
 
 
+# -- this checkout's code, watched in this process ------------------------------------------------
+
+_WATCHED_CHANGES: Final = (
+    "replace",
+    "rename",
+    "link",
+    "unlink",
+    "remove",
+    "rmdir",
+    "mkdir",
+    "truncate",
+    "ftruncate",
+)
+_WATCHED_LOOKS: Final = ("lstat", "stat", "listdir", "scandir", "open")
+
+
+class Watch:
+    """This checkout's filesystem calls, listed; and at one, an entry no longer lookable.
+
+    ``calls`` is what each call ``wall_in_one`` itself makes while this is
+    entered was given: its changes and its looks by name. Just before call
+    ``at`` (from 1), ``unseen`` is set to mode 000: a file that can't be read,
+    or a folder nothing can be looked at in, natively (the errors after it are
+    the kernel's). `restore` puts the mode back and hides nothing more.
+    """
+
+    def __init__(self, *, unseen: Path | None = None, at: int = 0) -> None:
+        self.calls: list[str] = []
+        self._unseen = unseen
+        self._at = at
+        self._names = _WATCHED_CHANGES + _WATCHED_LOOKS
+        self._real: dict[str, Any] = {}
+        self._mode: int | None = None
+
+    def _wrapped(self, real: Callable[..., Any]) -> Callable[..., Any]:
+        def call(*arguments: Any, **keywords: Any) -> Any:
+            frame: Any = sys._getframe(1)
+            for _depth in range(12):
+                if frame is None:
+                    break
+                name = frame.f_globals.get("__name__", "")
+                if name.startswith("importlib"):
+                    break
+                if name.startswith("wall_in_one"):
+                    first = arguments[0] if arguments else ""
+                    self.calls.append("" if isinstance(first, int) else os.fsdecode(first))
+                    if len(self.calls) == self._at:
+                        self._hide()
+                    break
+                frame = frame.f_back
+            return real(*arguments, **keywords)
+
+        return call
+
+    def _hide(self) -> None:
+        if self._unseen is None or self._mode is not None:
+            return
+        try:
+            self._mode = stat.S_IMODE(os.lstat(self._unseen).st_mode)
+            os.chmod(self._unseen, 0)
+        except OSError:
+            self._mode = None  # not there (yet, or any more): nothing to hide
+
+    @property
+    def hidden(self) -> bool:
+        return self._mode is not None
+
+    def restore(self) -> None:
+        if self._mode is not None and self._unseen is not None:
+            os.chmod(self._unseen, self._mode)
+        self._mode = None
+        self._at = 0
+
+    def __enter__(self) -> Watch:
+        for name in self._names:
+            self._real[name] = getattr(os, name)
+            setattr(os, name, self._wrapped(self._real[name]))
+        return self
+
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        _error: BaseException | None,
+        _trace: TracebackType | None,
+    ) -> None:
+        for name, real in self._real.items():
+            setattr(os, name, real)
+        self._real.clear()
+        self.restore()
+
+
+def after_each_look_at(calls: Sequence[str], path: Path) -> list[int]:
+    """The calls at which ``path`` going unlookable is a new case: the first, and
+    the one after each call that named it (what was just looked at, or just
+    put there, and can't be looked at again)."""
+    named = [number + 2 for number, where in enumerate(calls) if path.name in where]
+    return sorted({1, *(at for at in named if at <= len(calls))})
+
+
 # -- a campaign: every leftover state, then this checkout's code on each ------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Variant:
+    """One more thing done to a state the released code left, before this checkout runs.
+
+    ``apply(profile)`` is what a person does there first, returning the inodes
+    they edited; ``watch(profile)`` is what this checkout's first step runs
+    under (an entry it can't look at from some call on). ``more(calls)`` names
+    further variants of the same state once this one has run: ``calls`` is
+    what each filesystem call of the first step was given, with this applied.
+    """
+
+    label: str
+    apply: Callable[[Path], frozenset[int]] = lambda _base: frozenset()
+    watch: Callable[[Path], Watch] | None = None
+    more: Callable[[Sequence[str]], Sequence[Variant]] | None = None
 
 
 @dataclass(slots=True)
@@ -619,20 +798,34 @@ class Campaign:
     states: list[tuple[tuple[str, int], ...]] = field(default_factory=list)
     faults: int = 0
     edits_after: int = 0
+    #: How many states were run again under a `Variant`.
+    varied: int = 0
 
     def summary(self, title: str) -> str:
         lines = [
             f"{title}: {self.faults} faults, {len(self.states)} distinct states, "
             f"{self.edits_after} more with one file edited afterwards"
+            + (f", {self.varied} more varied" if self.varied else "")
         ]
         lines += [f"  {count:5d}  {said}" for said, count in sorted(self.outcomes.items())]
         return "\n".join(lines)
 
 
 def _named(message: str, base: Path) -> list[Path]:
-    """Every path under ``base`` that ``message`` names."""
-    found = re.findall(rf"{re.escape(str(base))}[^\s,;:()\"']*", message)
-    return [Path(text.rstrip(".")) for text in found]
+    """Every path under ``base`` that ``message`` names.
+
+    A name may hold spaces, so each is read as far as it names something that
+    is there; one that names nothing is given up to its first space.
+    """
+    found: list[Path] = []
+    for match in re.finditer(rf"{re.escape(str(base))}[^,;:()\"'\n]*", message):
+        words = match.group().split(" ")
+        for count in range(len(words), 0, -1):
+            candidate = Path(" ".join(words[:count]).rstrip(". "))
+            if count == 1 or os.path.lexists(candidate):
+                found.append(candidate)
+                break
+    return found
 
 
 def campaign(
@@ -645,7 +838,12 @@ def campaign(
     prepare: Callable[[Path], Tree],
     consume: Callable[[Path], Iterator[tuple[str, str]]],
     superseded: Callable[[Path, bytes], bool] = lambda _relative, _data: False,
+    exempt: Callable[[Entry, Tree], bool] = lambda _entry, _before: False,
     plans: Callable[[Produced], list[dict[str, object]]] | None = None,
+    variants: Callable[[Mapping[str, object], Tree, Path, Sequence[str]], Sequence[Variant]]
+    | None = None,
+    edited_after: Callable[[Mapping[str, object]], bool] | None = None,
+    every: int = 1,
     full: bool = False,
 ) -> Campaign:
     """Run the producer under every plan, and ``consume`` on each distinct state it left.
@@ -659,10 +857,17 @@ def campaign(
     every path the step named exists. ``superseded(relative path,
     its bytes)`` says an entry is one a step rewrites by design (a store's own
     readable file), which ``consume`` then checks for itself: a step whose
-    words start with ``FINDING`` is one. ``plans`` replaces the usual plans
+    words start with ``FINDING`` is one. ``exempt(entry, the tree before the
+    step)`` is the same with more to go on. ``plans`` replaces the usual plans
     (`single_faults`, `edits_while_public`, `meddling`) with its own; ``full``
-    widens them (a `full_campaign` test), and edits every state afterwards,
-    not only those a kill leaves.
+    widens them (a `full_campaign` test), and edits every state afterwards
+    in each of `EDITS`, not only those a kill leaves in one of them.
+    ``edited_after(plan)`` chooses those states instead, and ``every`` takes
+    one in so many of their files, for a producer whose every run is long.
+
+    ``variants(plan, the state, its profile, calls)`` names what else to try on
+    a state: each `Variant` gets the state made afresh. ``calls`` is what each
+    filesystem call of this checkout's first step on it was given (`Watch`).
     """
     result = Campaign()
     plain = Job(base / "plain", {}, arguments)
@@ -678,12 +883,25 @@ def campaign(
         if plans is None
         else plans(trace)
     )
-    jobs = [Job(base / f"a{number:05d}", plan, arguments) for number, plan in enumerate(planned)]
-    result.faults = len(jobs)
+    # The run with no fault first: what the released code leaves the ordinary way.
+    jobs = [
+        Job(base / f"a{number:05d}", plan, arguments) for number, plan in enumerate([{}, *planned])
+    ]
+    result.faults = len(planned)
 
-    def examine(job: Job, first: Tree, made: Produced, edited: frozenset[int], label: str) -> None:
+    def examine(
+        job: Job,
+        first: Tree,
+        made: Produced,
+        edited: frozenset[int],
+        label: str,
+        variant: Variant | None = None,
+    ) -> list[str]:
+        calls: list[str] = []
         with monkeypatch.context() as scoped:
             scratch_profile(scoped, job.base)
+            if variant is not None:
+                edited |= variant.apply(job.base)
             before = tree(job.base)
             protected = (
                 frozenset(entry.inode for entry in first.entries)
@@ -691,60 +909,91 @@ def campaign(
                 | frozenset(inode for _call, _path, inode in made.edited)
                 | edited
             )
-            for name, said in consume(job.base):
-                told = _RANDOM.sub("*", said.replace(str(job.base), ""))
-                result.outcomes[f"{name}: {told[:170]}"] += 1
-                after = tree(job.base)
-                if said.startswith("FINDING"):
-                    result.findings.append(f"{said} [{label}, at {name}]")
-                for entry in lost(
-                    before,
-                    after,
-                    protected,
-                    lambda entry: superseded(entry.path.relative_to(job.base), entry.data),
-                ):
-                    result.findings.append(
-                        f"LOST {label}: after {name}, the {entry.size} bytes of "
-                        f"{entry.path.relative_to(job.base)} are nowhere (or in fewer places)"
-                    )
-                for path in _named(said, job.base):
-                    if not os.path.lexists(path):
+            watch = (
+                variant.watch(job.base)
+                if variant is not None and variant.watch is not None
+                else Watch()
+                if variants is not None
+                else None
+            )
+            if watch is not None:
+                watch.__enter__()
+            try:
+                for step, (name, said) in enumerate(consume(job.base)):
+                    if watch is not None:
+                        calls = calls if step else list(watch.calls)
+                        watch.restore()
+                    told = _RANDOM.sub("*", said.replace(str(job.base), ""))
+                    result.outcomes[f"{name}: {told[:170]}"] += 1
+                    after = tree(job.base)
+                    if said.startswith("FINDING"):
+                        result.findings.append(f"{said} [{label}, at {name}]")
+                    for entry in lost(
+                        before,
+                        after,
+                        protected,
+                        lambda entry: (
+                            superseded(entry.path.relative_to(job.base), entry.data)
+                            or exempt(entry, before)
+                        ),
+                    ):
                         result.findings.append(
-                            f"SAID {label}: {name} names {path.relative_to(job.base)}, which "
-                            f"isn't there: {said.replace(str(job.base), '')}"
+                            f"LOST {label}: after {name}, the {entry.size} bytes of "
+                            f"{entry.path.relative_to(job.base)} are nowhere (or in fewer places)"
                         )
+                    for path in _named(said, job.base):
+                        if not os.path.lexists(path):
+                            result.findings.append(
+                                f"SAID {label}: {name} names {path.relative_to(job.base)}, which "
+                                f"isn't there: {said.replace(str(job.base), '')}"
+                            )
+            finally:
+                if watch is not None:
+                    watch.__exit__(None, None, None)
+        return calls
 
     # Phase one: each plan once; one job per distinct state is examined.
     firsts = [prepare(job.base) for job in jobs]
     produced = run(source, script, jobs)
     distinct: dict[object, tuple[Job, tuple[tuple[str, int], ...]]] = {}
+    wanted_variants: list[tuple[Job, Variant]] = []
     for job, first, made in zip(jobs, firsts, produced, strict=True):
         assert made.status in (0, KILLED), made.errors[-2000:]
-        found = shape(tree(job.base), job.base)
+        state = tree(job.base)
+        found = shape(state, job.base)
         edited = tuple(sorted(_RANDOM.sub("*", path) for _call, path, _inode in made.edited))
         key = (found, edited, made.status)
         if key in distinct:
             continue
         distinct[key] = (job, found)
         result.states.append(found)
-        examine(job, first, made, frozenset(), f"{dict(job.plan)}")
+        calls = examine(job, first, made, frozenset(), f"{dict(job.plan)}")
+        if variants is not None:
+            wanted_variants += [
+                (job, variant) for variant in variants(job.plan, state, job.base, calls)
+            ]
 
     # Phase two: each distinct state again, once per file in it, with that file
     # edited in place by a person after the released code stopped. By default
-    # only the states a kill leaves: what is there when nothing is running.
-    again = [
-        (Job(base / f"b{number:05d}", job.plan, arguments), wanted)
-        for number, (job, wanted) in enumerate(
-            (job, wanted)
-            for job, found in distinct.values()
-            if full or "kill" in job.plan
-            for wanted in sorted({(name, size) for name, size in found if size > 0})
-        )
-    ]
+    # only the states a kill leaves (what is there when nothing is running),
+    # each file edited one of the `EDITS` in turn; in full, every state, each
+    # file edited each way.
+    again: list[tuple[Job, tuple[str, int], str]] = []
+    chosen = edited_after if edited_after is not None else lambda plan: full or "kill" in plan
+    files = 0
+    for job, found in distinct.values():
+        if not chosen(job.plan):
+            continue
+        for wanted in sorted({(name, size) for name, size in found if size > 0}):
+            files += 1
+            if files % every:
+                continue
+            for how in EDITS if full else (EDITS[len(again) % len(EDITS)],):
+                again.append((Job(base / f"b{len(again):05d}", job.plan, arguments), wanted, how))
     result.edits_after = len(again)
-    firsts = [prepare(job.base) for job, _wanted in again]
-    produced = run(source, script, [job for job, _wanted in again])
-    for (job, wanted), first, made in zip(again, firsts, produced, strict=True):
+    firsts = [prepare(job.base) for job, _wanted, _how in again]
+    produced = run(source, script, [job for job, _wanted, _how in again])
+    for (job, wanted, how), first, made in zip(again, firsts, produced, strict=True):
         matching = [
             entry
             for entry in tree(job.base).entries
@@ -752,12 +1001,30 @@ def campaign(
         ]
         if not matching:
             continue  # a dated name that fell in another second: another state
-        edit_in_place(matching[0].path)
+        edit_in_place(matching[0].path, how)
         examine(
             job,
             first,
             made,
             frozenset({matching[0].inode}),
-            f"{dict(job.plan)}, then a person edits {wanted[0]}",
+            f"{dict(job.plan)}, then a person edits {wanted[0]} ({how})",
         )
+
+    # Phase three: each state a `Variant` was asked for, made afresh for it;
+    # then whatever more each of those asks for, until none does.
+    while wanted_variants:
+        varied = [
+            (Job(base / f"c{result.varied + number:05d}", job.plan, arguments), variant)
+            for number, (job, variant) in enumerate(wanted_variants)
+        ]
+        result.varied += len(varied)
+        wanted_variants = []
+        firsts = [prepare(job.base) for job, _variant in varied]
+        produced = run(source, script, [job for job, _variant in varied])
+        for (job, variant), first, made in zip(varied, firsts, produced, strict=True):
+            calls = examine(
+                job, first, made, frozenset(), f"{dict(job.plan)}, {variant.label}", variant
+            )
+            if variant.more is not None:
+                wanted_variants += [(job, further) for further in variant.more(calls)]
     return result

@@ -23,7 +23,12 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.gtk_helpers import (  # noqa: E402
+    FIRST_FRAME_S,
+    REAL_IO_S,
+    first_frame,
+    spin_until,
+)
 from tests.shown_text import shown_texts  # noqa: E402
 from tests.test_tidy import (  # noqa: E402
     _claim_folder,
@@ -46,18 +51,6 @@ def toolkit() -> None:
 
 _Result = TypeVar("_Result")
 
-#: A wait that covers real storage (a survey of the leftovers, or an apply,
-#: undo or retry with its moves, journal writes and fsyncs) waits for the
-#: lane's worker on its own condition, not on GTK's two-second delivery bound
-#: (``tests/test_ui_runtime.py`` splits its removal waits the same way).
-REAL_IO_S = 30.0
-#: GTK lays out and paints a window's first frame in one main-loop dispatch,
-#: and nothing queued for the main loop is delivered until it returns. In a
-#: fresh process that frame is the styles, the fonts and the first layout: it
-#: measured 0.6 to 2.3 s on a loaded machine, and it is what the first wait of
-#: the first test here timed out on, its survey long finished. It is GTK's own
-#: work, not a delivery, so it gets this bound before any delivery is timed.
-FIRST_FRAME_S = 30.0
 #: A click runs one step on the worker and a survey after it, and a preview
 #: asked for meanwhile adds one more. More rounds than this is not slowness.
 _ROUNDS = 6
@@ -112,11 +105,8 @@ class _Application:
         self.tidy_lane = _ObservedLane()
         self.reports: list[str] = []
         self.ready = True
-        #: Set by the window's frame clock once its first frame is painted.
-        self.first_frame = False
-
-    def painted(self, _clock: object) -> None:
-        self.first_frame = True
+        #: Whether the window has painted its first frame (`gtk_helpers.first_frame`).
+        self.first_frame: Callable[[], bool] = lambda: False
 
     def window_report(self, message: str) -> None:
         self.reports.append(message)
@@ -135,9 +125,7 @@ def section(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TidySection, _App
     page.add(group)
     window = Gtk.Window(child=page, default_width=900, default_height=900)
     window.present()
-    clock = window.get_frame_clock()
-    assert clock is not None
-    clock.connect("after-paint", application.painted)
+    application.first_frame = first_frame(window)
     try:
         yield group, application
     finally:
@@ -152,13 +140,16 @@ def _busy(group: TidySection) -> bool:
 def _tidied(application: _Application, condition: Callable[[], object], what: str) -> None:
     """Wait for Tidy up's worker, then for GTK to deliver, until ``condition`` holds.
 
-    The window's first frame comes first (`FIRST_FRAME_S`). Then each step on
-    the worker gets the storage bound (`REAL_IO_S`), and each delivery on GTK
-    after it keeps `spin_until`'s two-second bound. A delivery can start the
-    next step (the survey after an apply), so those two alternate.
+    The window's first frame comes first (`FIRST_FRAME_S`: it is what the
+    first wait of the first test here timed out on, its survey long finished).
+    Then each step on the worker (a survey, or an apply, undo or retry with its
+    moves, journal writes and fsyncs) gets the storage bound (`REAL_IO_S`), and
+    each delivery on GTK after it keeps `spin_until`'s two-second bound. A
+    delivery can start the next step (the survey after an apply), so those two
+    alternate.
     """
     spin_until(
-        lambda: application.first_frame,
+        application.first_frame,
         FIRST_FRAME_S,
         what="the window's first frame (GTK's own first layout)",
     )

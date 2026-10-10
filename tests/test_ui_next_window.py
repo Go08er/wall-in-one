@@ -36,7 +36,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.gtk_helpers import FIRST_FRAME_S, first_frame, spin_until  # noqa: E402
 from tests.started import started_application  # noqa: E402
 from tests.test_next_status_line import BATTERY, two_display_status  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
@@ -63,6 +63,39 @@ Step = tuple[str, Callable[[], bool]]
 
 STEP_SECONDS = 10.0
 TOTAL_SECONDS = 90
+
+
+class _Patient:
+    """A step's check, unchanged, carrying its own bound (`patient`)."""
+
+    def __init__(self, ready: Callable[[], bool], seconds: float) -> None:
+        self.ready = ready
+        self.seconds = seconds
+
+    def __call__(self) -> bool:
+        return self.ready()
+
+
+def patient(step: Step, seconds: float) -> Step:
+    """``step`` with its own bound instead of `STEP_SECONDS`.
+
+    For a wait on something other than a delivery: work on a lane that
+    touches real storage (`tests.gtk_helpers.REAL_IO_S`), or GTK's first
+    frame (`first_frame_step`). The check itself is not changed.
+    """
+    label, ready = step
+    return label, _Patient(ready, seconds)
+
+
+def first_frame_step(window: Gtk.Window) -> Step:
+    """The window's first frame, as a scenario's first wait (`gtk_helpers.first_frame`).
+
+    The tick that advances a scenario runs on the application's main loop,
+    which GTK holds for the whole of that frame: seconds under load, in a
+    fresh process most of all. Waited for here, it is not counted against
+    the step that follows.
+    """
+    return patient(("the window's first frame", first_frame(window)), FIRST_FRAME_S)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -154,8 +187,9 @@ def run_application(application: Application, scenario: Iterator[Step]) -> int:
     The scenario starts after the first activation and performs its actions
     between yields. When it is exhausted the application must exit by
     itself (the scenario's last action closes the window). A wait that does
-    not complete within STEP_SECONDS, or a run longer than TOTAL_SECONDS,
-    quits the application and fails the test instead of hanging the suite.
+    not complete within STEP_SECONDS (or its own bound, see `patient`), or a
+    run longer than TOTAL_SECONDS, quits the application and fails the test
+    instead of hanging the suite.
 
     The waits run inside the application's own main loop rather than
     iterating the default context from outside, so they are checked by a
@@ -186,7 +220,8 @@ def run_application(application: Application, scenario: Iterator[Step]) -> int:
                     label, ready = next(scenario)
                 except StopIteration:
                     return GLib.SOURCE_REMOVE
-                waiting.append((label, ready, time.monotonic() + STEP_SECONDS))
+                seconds = ready.seconds if isinstance(ready, _Patient) else STEP_SECONDS
+                waiting.append((label, ready, time.monotonic() + seconds))
         except BaseException as error:
             return fail(error)
 

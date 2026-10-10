@@ -33,11 +33,14 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 from tests.golden import harness, sandbox  # noqa: E402
 from tests.golden.harness import Allowance, Change  # noqa: E402
 from tests.golden.test_idle import first_start_writes  # noqa: E402
+from tests.gtk_helpers import REAL_IO_S  # noqa: E402
 from tests.test_next_status_line import two_display_status  # noqa: E402
 from tests.test_ui_next_window import (  # noqa: E402
     FakeRuntime,
     Step,
     application_lanes,
+    first_frame_step,
+    patient,
     run_application,
     sandboxed_runtime,
     settled,
@@ -372,9 +375,15 @@ def test_an_explicit_one_display_apply_is_never_widened_after_that_display_goes(
             shown(message)
 
         monkeypatch.setattr(window, "report", report)
-        yield (
-            "the first scan",
-            lambda: settled(application) and window.library_text == "80 wallpapers in the library",
+        yield first_frame_step(window)
+        yield patient(
+            (
+                "the first scan",
+                lambda: (
+                    settled(application) and window.library_text == "80 wallpapers in the library"
+                ),
+            ),
+            REAL_IO_S,
         )
         runtime.answer(status(stills))
         application.refresh_runtime_status_async()
@@ -415,15 +424,20 @@ def test_an_explicit_one_display_apply_is_never_widened_after_that_display_goes(
 
         # -- a display that still stands on its own, and an explicit All displays --------
         page.widget.activate_action("lib.apply", GLib.Variant("s", f"{target.id}|DP-1"))
-        yield (
-            "DP-1's Quick choice",
-            lambda: settled(application) and bool(runtime.requested("on")),
+        yield patient(
+            ("DP-1's Quick choice", lambda: settled(application) and bool(runtime.requested("on"))),
+            REAL_IO_S,
         )
         assert (runtime.requested("on")[0] or "").startswith("DP-1 playlist-use quick-choice:")
         page.widget.activate_action("lib.apply", GLib.Variant("s", f"{target.id}|all"))
-        yield (
-            "the global Quick choice",
-            lambda: settled(application) and runtime.requested("playlist-use") == ["quick-choice"],
+        yield patient(
+            (
+                "the global Quick choice",
+                lambda: (
+                    settled(application) and runtime.requested("playlist-use") == ["quick-choice"]
+                ),
+            ),
+            REAL_IO_S,
         )
 
         # -- mirrored displays offer no one-display target at all ------------------------

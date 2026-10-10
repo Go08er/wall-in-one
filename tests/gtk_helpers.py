@@ -10,6 +10,12 @@ that drained while one was turning.
 So every wait here checks its deadline inside the ``pending()`` loop as well as
 around it, and a wait for a condition fails loudly, naming the condition,
 rather than hanging or carrying on as if it held.
+
+A wait's two-second bound is for a delivery: a result that is ready, reaching
+the main loop. Two things that are not deliveries get their own bound, each
+on its own condition, so that their time is not counted against it:
+`first_frame` (GTK's own first layout of a window, `FIRST_FRAME_S`) and work
+on a worker that touches real storage (`REAL_IO_S`).
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, Protocol
 
 from gi.repository import GLib
 
@@ -26,6 +33,51 @@ from gi.repository import GLib
 _SLICE = 0.05
 #: Between passes, so a wait on a worker thread does not spin a core.
 _NAP = 0.002
+
+#: A wait that covers real storage on a worker (a scan, a save with its
+#: fsyncs, a move into an archive) is bounded by this, on the worker's own
+#: condition where the test can see one, and not by the bound a delivery gets:
+#: on a loaded machine that work alone runs for seconds.
+REAL_IO_S = 30.0
+#: GTK lays out and paints a window's first frame in one main-loop dispatch,
+#: and nothing queued for the main loop is delivered until it returns. In a
+#: fresh process that frame is the styles, the fonts and the first layout: it
+#: measured 0.6 to 2.3 s for a settings page and 2.3 to 4.4 s for the whole
+#: window on a loaded machine. It is GTK's own work, not a delivery, so it gets
+#: this bound (`first_frame`) before any delivery is timed.
+FIRST_FRAME_S = 30.0
+
+
+class _Framed(Protocol):
+    def get_frame_clock(self) -> Any: ...
+
+
+def first_frame(window: _Framed) -> Callable[[], bool]:
+    """A check that is true once ``window`` has painted its first frame.
+
+    Ask for it once the window is presented, from outside a frame: right
+    after ``present()``, or in a scenario's first step. Then wait for it with
+    `FIRST_FRAME_S` before the first wait that times a delivery::
+
+        painted = first_frame(window)
+        spin_until(painted, FIRST_FRAME_S, what="the window's first frame")
+
+    A window whose first frame has already gone by answers true at once (its
+    frame clock counts frames from -1), so asking late is not a wait.
+    """
+    clock = window.get_frame_clock()
+    assert clock is not None, "the window has no frame clock yet: present it first"
+    if clock.get_frame_counter() >= 0:
+        return lambda: True
+    painted = False
+
+    def after_paint(_clock: object) -> None:
+        nonlocal painted
+        painted = True
+        clock.disconnect(handler)
+
+    handler = clock.connect("after-paint", after_paint)
+    return lambda: painted
 
 
 def describe(predicate: Callable[[], object]) -> str:

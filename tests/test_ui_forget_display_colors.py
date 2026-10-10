@@ -30,6 +30,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
+from tests.gtk_helpers import REAL_IO_S  # noqa: E402
 from tests.test_ui_next_editing import (  # noqa: E402
     first_scan,
     hold_the_lane,
@@ -37,7 +38,14 @@ from tests.test_ui_next_editing import (  # noqa: E402
     wallpaper,
 )
 from tests.test_ui_next_slice import finish, run  # noqa: E402
-from tests.test_ui_next_window import FakeRuntime, Step, sandboxed_runtime, settled  # noqa: E402
+from tests.test_ui_next_window import (  # noqa: E402
+    FakeRuntime,
+    Step,
+    first_frame_step,
+    patient,
+    sandboxed_runtime,
+    settled,
+)
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
@@ -107,7 +115,8 @@ def scenario(
     window = application._window
     assert isinstance(window, NextWindow)
     said = reports_of(window, monkeypatch)
-    yield first_scan(application, window)
+    yield first_frame_step(window)
+    yield patient(first_scan(application, window), REAL_IO_S)
     session = application.session
     made = session.playlists.create(
         "Dock",
@@ -118,7 +127,7 @@ def scenario(
     shared = session.schedules.add(made.id, weekdays=("wed",))
     assert application.update_settings_async(display_mode=MIRRORED, theme_source_connector=origin)
     application.schedule_edited()
-    yield "the setup to be saved", lambda: settled(application)
+    yield patient(("the setup to be saved", lambda: settled(application)), REAL_IO_S)
     assert (application.settings.display_mode, application.settings.theme_source_connector) == (
         MIRRORED,
         origin,
@@ -134,9 +143,9 @@ def scenario(
         else:
             scheduling.forget_display("DP-2", forgot.append)
             choose(scheduling, newer, chose)
-    yield (
-        "the lane to run",
-        lambda: bool(forgot) and bool(chose) and settled(application),
+    yield patient(
+        ("the lane to run", lambda: bool(forgot) and bool(chose) and settled(application)),
+        REAL_IO_S,
     )
 
     saved = config.load_strict()
@@ -265,7 +274,8 @@ def test_forgetting_the_colors_display_with_nothing_newer_still_clears_it(
         window = application._window
         assert isinstance(window, NextWindow)
         said = reports_of(window, monkeypatch)
-        yield first_scan(application, window)
+        yield first_frame_step(window)
+        yield patient(first_scan(application, window), REAL_IO_S)
         session = application.session
         made = session.playlists.create(
             "Dock",
@@ -276,11 +286,11 @@ def test_forgetting_the_colors_display_with_nothing_newer_still_clears_it(
             display_mode=MIRRORED, theme_source_connector="DP-2"
         )
         application.schedule_edited()
-        yield "the setup to be saved", lambda: settled(application)
+        yield patient(("the setup to be saved", lambda: settled(application)), REAL_IO_S)
         heard = len(said)
         forgot: list[bool] = []
         scheduling_of(window).forget_display("DP-2", forgot.append)
-        yield "Forget DP-2", lambda: bool(forgot) and settled(application)
+        yield patient(("Forget DP-2", lambda: bool(forgot) and settled(application)), REAL_IO_S)
         saved = config.load_strict()
         assert (saved.display_mode, saved.theme_source_connector) == (MIRRORED, "")
         assert application.settings.theme_source_connector == ""

@@ -47,8 +47,20 @@ def step(name, fn):
         failures.append(f"{name}: " + traceback.format_exc()[-800:])
 
 
-def settle(until, seconds: float = 5.0) -> None:
-    """Run the main loop until ``until()`` is true (or the time is up)."""
+# How long a wait may take. What the steps wait for is short (a demo download
+# lands 1.2 s after it starts, a folder scan after 1.6 s), but it happens on
+# the main loop, and a loaded machine starves that: two downloads, 2.4 s of
+# timers, took 4.5 s at load 20 and 9 s at load 67, against a bound of 6 s.
+# A wait ends as soon as its condition holds, so this costs a passing run
+# nothing; it only bounds how long a step that will never finish takes to fail.
+PATIENCE = 60.0
+
+
+def settle(until, seconds: float = PATIENCE) -> None:
+    """Run the main loop until ``until()`` is true (or the time is up).
+
+    It returns either way: what follows asserts what it needs.
+    """
     context = GLib.MainContext.default()
     deadline = time.monotonic() + seconds
     while not until() and time.monotonic() < deadline:
@@ -134,7 +146,7 @@ def check_library_paging() -> None:
     page.select_all()
     assert len(page._selected) == len(page._cards) == size + 3  # "every wallpaper shown"
     page._select.set_active(False)
-    settle(lambda: not thumbs.LOADER.pending(), 20)
+    settle(lambda: not thumbs.LOADER.pending())
 
 
 def inspector_colors(state, library) -> None:
@@ -373,7 +385,7 @@ def settings_actions(state, window) -> None:
     # Folders: add, make one the download folder, remove (confirmed).
     page.add_folder("~/Downloads/Wallpapers")
     assert state.folders[-1].path == "~/Downloads/Wallpapers"
-    settle(lambda: not state.folders[-1].scanning, 3)
+    settle(lambda: not state.folders[-1].scanning)
     page.add_folder("~/Downloads/Wallpapers")  # already there: nothing added
     assert [f.path for f in state.folders].count("~/Downloads/Wallpapers") == 1
     first, second = state.folders[0].path, state.folders[1].path
@@ -417,7 +429,7 @@ def settings_actions(state, window) -> None:
     assert page._template_button.get_visible() and page._template_button.get_label() == "Install"
     page.install_template()
     assert state.template_status().busy and not page._template_button.get_sensitive()
-    settle(lambda: state.template_status().state == "installed", 3)
+    settle(lambda: state.template_status().state == "installed")
     assert state.template_status().state == "installed" and not page._template_button.get_visible()
     # The window's look.
     page._style_toggle.set_active_name("frosted")
@@ -484,7 +496,8 @@ def store_download(window) -> None:
     assert page.cards[targets[0].id].busy == "downloading"
     assert page.cards[targets[1].id].busy == "waiting"
     assert page.queue_label.get_label() == "Downloading 1 of 2"
-    settle(lambda: not page.store.downloads.busy, 6.0)
+    settle(lambda: not page.store.downloads.busy)
+    assert not page.store.downloads.busy, f"the downloads never finished ({PATIENCE:g} s)"
     assert all(page.cards[item.id].in_library for item in targets)
 
 
@@ -632,7 +645,7 @@ def build_steps(app, holder):
         if page == "store":
             # The demo's downloads land on timers, as real ones do: let them
             # land here, not in the middle of the next page's scenes.
-            steps.append(("store downloads land", lambda: settle(lambda: not s().downloads.busy, 10)))
+            steps.append(("store downloads land", lambda: settle(lambda: not s().downloads.busy)))
     steps.append(
         (
             "select pill library",

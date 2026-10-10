@@ -517,25 +517,24 @@ def _refuse_unless_a_file(
     searched, an I/O error) is neither, and is not called missing: it could
     not be checked. ``path`` is how ``target`` is said.
     """
-    failure: ManageError | None = None
     try:
-        status = target.lstat()
-    except FileNotFoundError:
-        failure = ManageError("missing", f"{path} is no longer there")
-    except OSError as error:
-        failure = ManageError(
-            "local-io",
-            f"{path} could not be checked ({_reason(error)}); nothing was changed",
-        )
-    else:
+        try:
+            status = target.lstat()
+        except FileNotFoundError as error:
+            raise ManageError("missing", f"{path} is no longer there") from error
+        except OSError as error:
+            raise ManageError(
+                "local-io",
+                f"{path} could not be checked ({_reason(error)}); nothing was changed",
+            ) from error
         if stat.S_ISLNK(status.st_mode):
-            failure = symlink
-        elif not stat.S_ISREG(status.st_mode):
-            failure = ManageError("missing", f"{path} is no longer there")
-    if failure is not None:
+            raise symlink
+        if not stat.S_ISREG(status.st_mode):
+            raise ManageError("missing", f"{path} is no longer there")
+    except ManageError:
         if prepared_pin is not None:
             prepared_pin.close()
-        raise failure
+        raise
 
 
 def _reason(error: OSError) -> str:

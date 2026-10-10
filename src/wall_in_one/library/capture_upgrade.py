@@ -220,7 +220,9 @@ def _validate_replacement(path: Path) -> None:
 
 def _has_other_still(entry: adopted.Authority, target: Path) -> bool:
     """An existing separate choice makes this source's old capture redundant."""
-    selected = pairing.read_sidecar(entry.source_path)
+    # Strict: a selector that can't be read is not "no other still" (it raises,
+    # and the caller keeps the capture).
+    selected = pairing.read_sidecar_strict(entry.source_path)
     if selected is None or selected in (entry.capture_path, target):
         return False
     # Relative paths and symlink aliases must not disguise either automatic
@@ -397,7 +399,10 @@ def prepare() -> Result:
                         ):
                             target = stills.destination(entry.source_path, adoption.root)
                             if _there(entry.source_path):
-                                selected = pairing.read_sidecar(entry.source_path)
+                                # Strict: a selector that can't be read may
+                                # still select this capture. It raises here,
+                                # and the capture is kept and the reason logged.
+                                selected = pairing.read_sidecar_strict(entry.source_path)
                                 if selected is not None and selected.samefile(entry.capture_path):
                                     raise OSError("the original capture is still selected")
                                 if not _has_other_still(entry, target):

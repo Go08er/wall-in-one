@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -1463,3 +1464,82 @@ def test_captures_that_cannot_be_looked_at_defer_the_cleanup_aloud(
     assert "Generated-still cleanup deferred" in caplog.text
     assert "Permission denied" in caplog.text
     assert cleanup_environment == []
+
+
+def test_a_selector_that_cannot_be_read_does_not_let_its_capture_be_retired(
+    tmp_path: Path,
+    cleanup_environment: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The video's own selector names the old capture, with a note of the
+    person's beside it, so the rebuild leaves it alone; a valid capture already
+    exists at the new name. From after the rebuild pass the selector can't be
+    read (mode 000: a native EACCES). That is not "no selection": at the retire
+    step the old capture is kept and the reason logged. Read as none, it was
+    retired, and the person's selector named a file that was gone."""
+    fixture = _cleanup_fixture(tmp_path)
+    _new_capture(fixture)
+    selector = fixture.source.with_name(fixture.source.name + pairing.SIDECAR_SUFFIX)
+    selector.write_text(
+        json.dumps({pairing.SIDECAR_STILL_KEY: str(fixture.capture), "note": "mine"}),
+        encoding="utf-8",
+    )
+    chosen = selector.read_bytes()
+    original = fixture.capture.read_bytes()
+    rebuild = capture_upgrade._rebuild_within_budget
+
+    def rebuild_then_lose_the_selector(adoption: adopted.Adoption) -> set[Path]:
+        failed = rebuild(adoption)
+        selector.chmod(0o000)
+        return failed
+
+    monkeypatch.setattr(capture_upgrade, "_rebuild_within_budget", rebuild_then_lose_the_selector)
+    try:
+        with caplog.at_level(logging.WARNING, logger=capture_upgrade.LOGGER.name):
+            result = capture_upgrade.prepare()
+    finally:
+        selector.chmod(0o600)
+
+    # Failed on ff1f967: migrated=1, and the selector named a capture that was gone.
+    assert result == capture_upgrade.Result(retained=1)
+    assert fixture.capture.read_bytes() == original
+    assert selector.read_bytes() == chosen
+    assert pairing.read_sidecar(fixture.source) == fixture.capture
+    assert "Could not retire automatic capture" in caplog.text
+    assert "Permission denied" in caplog.text
+    assert cleanup_environment == []
+
+
+def test_a_selector_read_strictly_tells_cannot_look_from_selects_nothing(tmp_path: Path) -> None:
+    """`read_sidecar_strict` answers None only for what is known: no selector,
+    one that names nothing, one whose still is missing. A selector that can't be
+    read, and a still whose folder can't be searched (each a native EACCES),
+    raise; `read_sidecar` reads both as none, as it always did."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    selector = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    stills_folder = tmp_path / "stills"
+    stills_folder.mkdir()
+    still = stills_folder / "clip.png"
+    still.write_bytes(_png())
+
+    assert pairing.read_sidecar_strict(video) is None, "no selector"
+    selector.write_text("{}", encoding="utf-8")
+    assert pairing.read_sidecar_strict(video) is None, "names nothing"
+    selector.write_text(
+        json.dumps({pairing.SIDECAR_STILL_KEY: str(tmp_path / "gone.png")}), encoding="utf-8"
+    )
+    assert pairing.read_sidecar_strict(video) is None, "names a missing still"
+    selector.write_text(json.dumps({pairing.SIDECAR_STILL_KEY: str(still)}), encoding="utf-8")
+    assert pairing.read_sidecar_strict(video) == still
+
+    for unseen, usual in ((stills_folder, 0o700), (selector, 0o600)):
+        unseen.chmod(0o000)
+        try:
+            assert pairing.read_sidecar(video) is None
+            with pytest.raises(OSError) as refused:
+                pairing.read_sidecar_strict(video)
+        finally:
+            unseen.chmod(usual)
+        assert refused.value.errno == errno.EACCES

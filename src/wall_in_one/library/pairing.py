@@ -289,11 +289,34 @@ def _still_extensions() -> tuple[str, ...]:
 
 
 def read_sidecar(video: Path) -> Path | None:
-    """Read `<video>.wall-in-one.json` and return the still it names."""
+    """Read `<video>.wall-in-one.json` and return the still it names.
+
+    For showing and playing: a selector that can't be read, or names a still
+    that can't be looked at, reads as none, and the video falls back to its
+    other stills. Not for deciding what may be destroyed: `read_sidecar_strict`.
+    """
+    return _selected_still(video, strict=False)
+
+
+def read_sidecar_strict(video: Path) -> Path | None:
+    """`read_sidecar` for a caller about to destroy what the selector may name.
+
+    ``None`` only when it is known that the video selects no still: there is no
+    selector, or it names none, or the still it names is known not to be a
+    file. A selector that can't be read (or is not a small regular file), or a
+    still that can't be looked at, is none of those: the ``OSError`` is raised,
+    for the caller to keep everything.
+    """
+    return _selected_still(video, strict=True)
+
+
+def _selected_still(video: Path, *, strict: bool) -> Path | None:
     sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
         raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
     except OSError:
+        if strict:
+            raise
         return None
     if raw is None:
         return None
@@ -309,7 +332,18 @@ def read_sidecar(video: Path) -> Path | None:
     candidate = Path(recorded)
     if not candidate.is_absolute():
         candidate = video.parent / candidate
+    if strict:
+        return candidate if _present_or_raise(candidate) else None
     return candidate if present(candidate) else None
+
+
+def _present_or_raise(path: Path) -> bool:
+    """`present`, but only a missing entry is absent: one that can't be looked at raises."""
+    try:
+        status = path.stat()
+    except FileNotFoundError, NotADirectoryError:
+        return False
+    return stat.S_ISREG(status.st_mode) and not is_excluded(path, status)
 
 
 def legacy_automatic_identity(still: Path) -> str | None:

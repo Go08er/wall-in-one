@@ -594,7 +594,10 @@ is: nothing can be said to be gone from a file whose contents aren't known.
 Renaming a playlist reads every file that names it before it writes any of
 them, so it is refused the same way if one of them can't be read. Changing a
 rule, a playlist or an entry that isn't among what could be read is refused
-the same way too, rather than said not to exist.
+the same way too, rather than said not to exist. Deleting a playlist reads
+`settings.toml` first: if that can't be read or parsed, whether the playlist is
+the saved default can't be known, so the deletion is refused and nothing is
+deleted. A `settings.toml` that isn't there names no default and stops nothing.
 
 A file that can't be read at all is not damaged: its permissions don't let the
 app read it, or the disk reported an error. It is never moved aside or written

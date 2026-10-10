@@ -5676,8 +5676,9 @@ class Application(Adw.Application):
             # commits, every independent cleanup is attempted and reported;
             # throwing on the first tail would hide a real deletion and leave
             # later references needlessly dangling.  The one tail checked
-            # first is a saved default that read-only settings cannot clear:
-            # refusing the whole deletion beats a default naming nothing.
+            # first is a saved default that could not then be cleared, because
+            # the settings are read-only or can't be read at all: refusing
+            # the whole deletion beats a default naming nothing.
             config.require_playlist_deletable(playlist.id, also=named_by)
             playlist_store.delete(playlist.id)
             failures: list[str] = []

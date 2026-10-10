@@ -123,9 +123,37 @@ def test_deleting_the_saved_default_is_refused_up_front_only_when_read_only(
     paths.settings_path().write_bytes(b'active_playlist = "favorite"\n')
     config.require_playlist_deletable("favorite")
 
-    # Malformed settings keep their existing outcome: the deletion goes ahead
-    # and clearing the default reports its own error afterwards.
-    paths.settings_path().write_bytes(b"roots = [\n")
+
+def test_deleting_a_playlist_is_refused_when_the_settings_cannot_be_checked(
+    tmp_path: Path,
+) -> None:
+    """Whether a playlist is the saved default is read from ``settings.toml``.
+    When that can't be read (mode 000: a native EACCES) or can't be parsed, it
+    could not be checked: the deletion is refused, not waved through to leave
+    the default naming nothing. A file that is not there names nothing."""
+    settings = paths.settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_bytes(b'active_playlist = "favorite"\n')
+    settings.chmod(0o000)
+    try:
+        # Failed on ff1f967: returned, and the deletion went ahead.
+        with pytest.raises(config.SettingsUnreadableError) as unread:
+            config.require_playlist_deletable("favorite")
+    finally:
+        settings.chmod(0o600)
+    said = str(unread.value)
+    assert unread.value.kind == "unreadable"
+    assert said.startswith(
+        "unreadable: it couldn't be checked whether this playlist is the saved default ("
+    )
+    assert "Permission denied" in said and said.endswith(". Nothing was deleted.")
+
+    # Malformed is as unknown as unreadable. (Until ff1f967 this went ahead.)
+    settings.write_bytes(b"roots = [\n")
+    with pytest.raises(config.SettingsUnreadableError, match="couldn't be checked"):
+        config.require_playlist_deletable("favorite")
+
+    settings.unlink()
     config.require_playlist_deletable("favorite")
 
 

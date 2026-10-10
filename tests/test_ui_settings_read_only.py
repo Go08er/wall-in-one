@@ -18,6 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from wall_in_one import config, paths  # noqa: E402
+from wall_in_one.control import server  # noqa: E402
 from wall_in_one.library import playlists  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.preferences import PreferencesPage  # noqa: E402
@@ -160,6 +161,42 @@ def test_deleting_the_saved_default_playlist_is_refused_whole(
     assert result.settings is None
     assert playlists.Store.open().get(other.id) is None
     assert paths.settings_path().read_bytes() == before
+
+
+def test_deleting_a_playlist_is_refused_whole_when_the_settings_cannot_be_read(
+    tmp_path: Path, make_application: Callable[[], Application]
+) -> None:
+    """``settings.toml`` can't be read (mode 000: a native EACCES), so whether the
+    playlist is the saved default could not be checked. The one path every way
+    in shares (both windows, ``ctl playlist-delete``, ``--service``) refuses the
+    whole deletion; it used to go ahead and leave the default naming nothing."""
+    store = playlists.Store.open()
+    default = store.create("Evening")
+    root = tmp_path / "Library"
+    root.mkdir()
+    settings = config.save(
+        config.Settings(roots=(root,), scan_workshop=False, active_playlist=default.id)
+    )
+    before = settings.read_bytes()
+    app = make_application()
+    settings.chmod(0o000)
+    try:
+        # Failed on ff1f967: deleted, with "saved default: cannot read ..." as a
+        # cleanup failure.
+        with pytest.raises(config.SettingsUnreadableError) as refused:
+            app._prepare_playlist_delete(default.id)()
+    finally:
+        settings.chmod(0o600)
+
+    assert playlists.Store.open().get(default.id) is not None
+    assert settings.read_bytes() == before
+    # What ctl and --service answer, and the message the lane hands both windows.
+    response = server.failed(refused.value)
+    assert not response.ok and response.kind == "unreadable"
+    assert response.message.startswith(
+        "unreadable: it couldn't be checked whether this playlist is the saved default ("
+    )
+    assert response.message.endswith(". Nothing was deleted.")
 
 
 def test_startup_repair_of_a_dangling_default_fails_closed_with_the_message(

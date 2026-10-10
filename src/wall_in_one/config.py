@@ -138,6 +138,19 @@ def read_only_message(unknown_keys: Sequence[str]) -> str:
     )
 
 
+class SettingsUnreadableError(ConfigError):
+    """A change was refused because settings.toml could not be read to check it.
+
+    Carries the stores' ``unreadable`` kind, and reads ``kind: message`` as
+    their errors do: nothing was changed, and what the file holds isn't known.
+    """
+
+    kind: Final = state_file.UNREADABLE
+
+    def __str__(self) -> str:
+        return f"{self.kind}: {super().__str__()}"
+
+
 class SettingsReadOnlyError(ConfigError):
     """A write was refused because settings.toml has keys this build lacks."""
 
@@ -910,21 +923,28 @@ def forget_color_source(connector: str, path: Path | None = None) -> tuple[Setti
 def require_playlist_deletable(
     playlist: str, path: Path | None = None, *, also: tuple[str, ...] = ()
 ) -> None:
-    """Refuse up front a deletion that would need a read-only settings write.
+    """Refuse up front a deletion whose saved default could not then be cleared.
 
     Deleting the saved default playlist also clears ``active_playlist``. When
-    that write is refused, the deletion has already committed and the saved
+    that write can't happen, the deletion has already committed and the saved
     default points at nothing, which stops runtime compilation. Callers check
     this before deleting so the whole operation is refused instead.
 
-    Only that case is refused. An unreadable or malformed file keeps its
-    existing outcome: the deletion proceeds and clearing the default reports
-    its own error. ``also`` are other references to the same playlist (its
-    name, which an older profile's default may hold).
+    Two cases are refused. The settings are read-only (they hold keys this
+    build does not know) and name this playlist: `SettingsReadOnlyError`. Or
+    the settings can't be read, or can't be parsed: whether they name this
+    playlist could not be checked, and "can't look" is not "isn't the
+    default" (`SettingsUnreadableError`). A settings file that is not there
+    (a first run) names nothing, and the deletion goes ahead. ``also`` are
+    other references to the same playlist (its name, which an older profile's
+    default may hold).
     """
     try:
         loaded = load_strict_document(path)
-    except ConfigError:
-        return
+    except ConfigError as error:
+        raise SettingsUnreadableError(
+            "it couldn't be checked whether this playlist is the saved default "
+            f"({error}). Nothing was deleted."
+        ) from error
     if loaded.read_only and loaded.settings.active_playlist in (playlist, *also):
         raise SettingsReadOnlyError(loaded.unknown_keys)

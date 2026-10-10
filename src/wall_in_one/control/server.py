@@ -494,6 +494,7 @@ def remove_wallpaper(
         expected_source=expected_source,
         expected_fingerprint=expected_fingerprint,
         prepared_pin=prepared_pin,
+        operation_token=operation_token,
         lookup_path=lookup_path,
         source_root=source_root,
         lookup_root=lookup_root,

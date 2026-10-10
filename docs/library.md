@@ -412,15 +412,23 @@ where it is. Records that still cannot be cleared after the media commit, for
 example because a newer version saved a file in between, are reported as
 incomplete cleanup with a refresh to retry, never as nothing having changed.
 
-A removal that does not go through leaves a downloaded wallpaper a download.
-Its download record (`<file>.wallhaven.json` or `<file>.motionbgs.json`) is
-set aside whole before the file is touched and destroyed only once the file is
-gone; otherwise it is put back as it was. A downloaded file that can't be
-opened for writing (a read-only one, say) is refused first, with nothing
-changed. In the rare case where the file had already been moved aside and was
-moved back, the record is put back too but no longer matches the file, so the
-wallpaper counts as one of your own from then on: the message says so, and
-nothing was deleted.
+A removal that does not go through does not cost a downloaded wallpaper its
+download record (`<file>.wallhaven.json` or `<file>.motionbgs.json`). The
+record is set aside whole before the file is touched, in a hidden folder
+beside it named from the removal (`.wall-in-one-removal-…`), and is destroyed
+only once the file is gone. If the file never left its place, the record is
+put back as it was. If the removal is left unfinished (the file was set aside
+too and could be neither destroyed nor moved back, or the app was interrupted
+or died part-way), the record stays whole where it was set aside, and the
+message names the place when there is one. The next start or library refresh
+finishes that removal: the record goes back to its name if the file is
+untouched, and is destroyed once the file is gone.
+
+A downloaded file that can't be opened for writing (a read-only one, say) is
+refused first, with nothing changed. In the rare case where the file had
+already been moved aside and was moved back, the record is put back too but no
+longer matches the file, so the wallpaper counts as one of your own from then
+on: the message says so, and nothing was deleted.
 
 A manually chosen still remains a separate library item. Removing the moving
 wallpaper deletes the association but never the still file or that still's own
@@ -447,8 +455,11 @@ operation may remove is pinned before the media commit. Cleanup acts only
 through those exact retained generations. A crash replay has no surviving
 artifact pins, so it clears durable favourites, Pairings and playlists but
 never rediscovers a same-name physical companion which could belong to a later
-installation. A live cleanup failure is reported with the preserved paths; it
-is not converted into authority to delete them on a later refresh.
+installation. The wallpaper's own download record is no such rediscovery: the
+removal set it aside in a claim named from its own token, so the replay finds
+exactly that record and puts it back or destroys it, as described above. A
+live cleanup failure is reported with the preserved paths; it is not converted
+into authority to delete them on a later refresh.
 
 A crash-left private media claim is replayed only when its journaled generation
 still matches. Before truncating a singly linked regular inode, Wall-in-One

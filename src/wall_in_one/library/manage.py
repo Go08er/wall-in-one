@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import os
 import stat
 import sys
@@ -210,6 +211,39 @@ class _ArtifactCandidate:
     adopted_role: str = ""
 
 
+def _record_claim_token(operation_token: str, suffix: str) -> str:
+    """The token naming a download record's claim, derived from its removal's own.
+
+    A removal that dies leaves its record in a claim. The pending-removal
+    journal already holds the removal's token, so a claim named from that
+    token is one its replay can find (`settle_record_claims`) with no field
+    of its own in the journal. One name per record suffix, and never the
+    media's own claim, whose name is the token itself.
+    """
+    named = f"download record {suffix} of removal {operation_token}"
+    return hashlib.sha256(named.encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass(slots=True)
+class _WithdrawnRecord:
+    """One download record in its claim: its public path, and the claim's folder
+    when that is named from the removal's token (an emptied one is removed)."""
+
+    logical: Path
+    claim: file_io.ClaimedPath
+    folder: Path | None = None
+
+    def drop_emptied_folder(self) -> None:
+        """Remove this record's claim folder once the record has left it.
+
+        ``rmdir`` removes only an empty folder, so nothing can be lost by it,
+        whoever made the folder now at that name.
+        """
+        if self.folder is not None:
+            with contextlib.suppress(OSError):
+                os.rmdir(self.folder)
+
+
 @dataclass(slots=True)
 class _WithdrawnAuthority:
     """Download records taken out of their public names for one removal, each whole.
@@ -217,15 +251,27 @@ class _WithdrawnAuthority:
     Provenance is deletion authority for the media's pathname, so it leaves
     that name before the media can (`_withdraw_download_authority`). It is
     only withdrawn, though: each record sits intact in a private claim until
-    the removal's fate is known. Once the media has left its name the records
-    are destroyed (`consume`). If it never did, they are put back, byte for
-    byte; if the removal's own record is retained for recovery, or a record
-    can't be put back, it stays whole in its claim and the error names where
-    (`settle`). A wallpaper that was not removed never loses its record.
+    the removal's fate is known. What becomes of it goes by where the media
+    is, not by what kind of error ended the removal (`settle`):
+
+    - the media left its name: the records are destroyed (`consume`);
+    - the media was moved out of its name and is not known to be back (it is
+      in its claim, or in the trash unverified, or an interrupt arrived while
+      it was being moved): the records stay whole in their claims. The
+      removal is unfinished, and whatever finishes it finishes them;
+    - the media never left its name, or is back: the records are put back,
+      byte for byte.
+
+    A removal that has a token names each record's claim from it
+    (`_record_claim_token`), so the replay of a removal that died can find
+    the record and do the same (`settle_record_claims`).
     """
 
-    #: Each record's public path, and the claim it sits in.
-    claims: list[tuple[Path, file_io.ClaimedPath]] = field(default_factory=list)
+    records: list[_WithdrawnRecord] = field(default_factory=list)
+    #: The media was moved out of its name, or may have been, and is not known
+    #: to be back. Set before the move is attempted; cleared only by an outcome
+    #: that proves it never moved or came back.
+    media_at_risk: bool = False
     #: Set at the media's commit point: from then on the records are consumed.
     media_left: bool = False
     _settled: bool = False
@@ -238,16 +284,17 @@ class _WithdrawnAuthority:
             self._settled = True
             removed: list[Path] = []
             kept: list[Path] = []
-            for logical, claim in self.claims:
+            for record in self.records:
                 try:
-                    claim.discard()
+                    record.claim.discard()
                 except OSError:
                     # Still in its claim, as far as is known: reported as kept.
-                    kept.append(claim.path)
+                    kept.append(record.claim.path)
                     with contextlib.suppress(OSError):
-                        claim.close()
+                        record.claim.close()
                 else:
-                    removed.append(logical)
+                    removed.append(record.logical)
+                    record.drop_emptied_folder()
             self._removed, self._kept = tuple(removed), tuple(kept)
         return self._removed, self._kept
 
@@ -260,10 +307,10 @@ class _WithdrawnAuthority:
     ) -> None:
         """The removal ended in ``error``: decide each record's fate and say it.
 
-        Consumed if the media left its name. Kept whole in its claim if the
-        removal's record is retained for recovery (the media is neither at its
-        name for certain nor gone). Put back otherwise. What a person needs to
-        know is added to ``error``.
+        By the media's state (see the class), whatever ``error`` is: an
+        interrupt while the media sits in its claim keeps the records exactly
+        as a retained removal does. What a person needs to know is added to
+        ``error``.
         """
         if self._settled:
             return
@@ -271,9 +318,10 @@ class _WithdrawnAuthority:
             self.consume()
             return
         self._settled = True
-        if not self.claims:
+        if not self.records:
             return
-        if isinstance(error, ManageError) and error.retain_intent:
+        retained = isinstance(error, ManageError) and error.retain_intent
+        if self.media_at_risk or retained:
             note = self._keep()
         else:
             note = self._put_back(_same_file_moved_on(target, expected_fingerprint))
@@ -286,10 +334,10 @@ class _WithdrawnAuthority:
 
     def _keep(self) -> str:
         notes = []
-        for _logical, claim in self.claims:
-            notes.append(f"its download record was kept at {claim.path}")
+        for record in self.records:
+            notes.append(f"its download record was kept at {record.claim.path}")
             with contextlib.suppress(OSError):
-                claim.close()
+                record.claim.close()
         return "; ".join(notes)
 
     def _put_back(self, moved_on: bool) -> str:
@@ -302,7 +350,8 @@ class _WithdrawnAuthority:
         """
         notes = []
         returned = False
-        for logical, claim in self.claims:
+        for record in self.records:
+            logical, claim = record.logical, record.claim
             try:
                 restored = claim.restore()
             except file_io.PathChangedError as error:
@@ -324,6 +373,7 @@ class _WithdrawnAuthority:
             else:
                 if restored:
                     returned = True
+                    record.drop_emptied_folder()
                     continue
                 notes.append(
                     f"something else is now at {logical}, so its download record was kept "
@@ -338,6 +388,110 @@ class _WithdrawnAuthority:
                 "file; nothing was deleted"
             )
         return "; ".join(notes)
+
+
+def settle_record_claims(
+    path: Path,
+    operation_token: str,
+    *,
+    source_fingerprint: SourceFingerprint | None,
+    put_back: bool,
+    lookup_path: Path | None = None,
+) -> tuple[str, ...]:
+    """Finish what a removal that died left of its download records.
+
+    For the replay of a pending removal, which knows by then where the media
+    is. ``put_back``: the media is exactly as it was prepared, so the removal
+    never happened and each record goes back to its name. Otherwise the
+    removal is committed and each record is destroyed, as the removal would
+    have done. The claims are found by name alone (`_record_claim_token`), and
+    what one holds is acted on only if it is the download record of exactly
+    the generation this removal prepared; anything else is left where it is.
+
+    Nothing is there, and nothing is done, for a removal that settled its own
+    records, and for one prepared by a version that withdrew them another way.
+    Returns what could not be done, for the caller to report and retry.
+    """
+    try:
+        file_io.deletion_claim_directory(path, operation_token)
+    except ValueError:
+        return ()  # no token to derive a name from: never a claim of ours
+    target = path if lookup_path is None else lookup_path
+    failures: list[str] = []
+    for suffix, provider in _PROVIDER_SIDECAR_PROVIDERS.items():
+        logical = path.with_name(path.name + suffix)
+        access = target.with_name(target.name + suffix)
+        token = _record_claim_token(operation_token, suffix)
+        folder = file_io.deletion_claim_directory(access, token)
+        shown = file_io.deletion_claim_directory(logical, token) / "entry"
+        try:
+            status = (folder / "entry").lstat()
+        except FileNotFoundError:
+            # No claim, or an emptied one of ours (rmdir can't remove data).
+            with contextlib.suppress(OSError):
+                os.rmdir(folder)
+            continue
+        except OSError as error:
+            failures.append(
+                f"the download record kept at {shown} could not be looked at ({_reason(error)})"
+            )
+            continue
+        if stat.S_ISREG(status.st_mode) and status.st_size == 0:
+            continue  # destroyed already: the removal died before tidying its residue
+        try:
+            fingerprint = file_io.file_fingerprint(status)
+            claim = file_io.recover_deletion_claim(
+                access,
+                expected_identity=fingerprint[:2],
+                operation_token=token,
+                expected_fingerprint=fingerprint,
+                logical_path=logical,
+            )
+        except (OSError, ValueError) as error:
+            failures.append(f"what is at {shown} was left as it is ({error})")
+            continue
+        if claim is None:
+            continue
+        try:
+            raw = file_io.read_regular_bytes(folder / "entry", pairing.MAX_SIDECAR_BYTES)
+            authority = (
+                None
+                if raw is None
+                else scan.download_authority_from_bytes(
+                    raw, expected_path=path, expected_provider=provider
+                )
+            )
+            if (
+                authority is None
+                or source_fingerprint is None
+                or not authority.matches_generation(source_fingerprint)
+                or file_io.regular_file_fingerprint(folder / "entry") != fingerprint
+            ):
+                failures.append(
+                    f"what is at {shown} is not the download record of the file this removal "
+                    "prepared, so it was left as it is"
+                )
+                continue
+            if put_back:
+                if claim.restore():
+                    with contextlib.suppress(OSError):
+                        os.rmdir(folder)
+                else:
+                    failures.append(
+                        f"something else is now at {logical}, so its download record was "
+                        f"kept at {shown}"
+                    )
+            else:
+                claim.discard()
+                with contextlib.suppress(OSError):
+                    os.rmdir(folder)
+        except (OSError, ValueError) as error:
+            doing = "put back" if put_back else "removed"
+            failures.append(f"the download record kept at {shown} could not be {doing} ({error})")
+        finally:
+            with contextlib.suppress(OSError):
+                claim.close()
+    return tuple(file_io.public_text(failure) for failure in failures)
 
 
 def _same_file_moved_on(target: Path, expected_fingerprint: SourceFingerprint) -> bool:
@@ -1126,12 +1280,15 @@ def _withdraw_download_authority(
     required: bool,
     source_pin: file_io.PinnedPath,
     expected_fingerprint: SourceFingerprint,
+    operation_token: str | None = None,
 ) -> tuple[_WithdrawnAuthority, tuple[_PinnedArtifact, ...]]:
     """Durably take provenance out of its name before its media path can become vacant.
 
     Each record is moved, whole, into a private claim (`_WithdrawnAuthority`):
     out of its public name, so it can confer nothing there, and not destroyed,
-    so a removal that does not commit can put it back.
+    so a removal that does not commit can put it back. With the removal's
+    ``operation_token`` the claim is named from it (`_record_claim_token`), so
+    the replay of a removal that died can find the record too.
     """
     provider_sidecars = tuple(
         artifact
@@ -1188,6 +1345,11 @@ def _withdraw_download_authority(
         )
     withdrawn = _WithdrawnAuthority()
     for artifact in authority:
+        record_token = (
+            None
+            if operation_token is None
+            else _record_claim_token(operation_token, artifact.logical.name[len(item.path.name) :])
+        )
         try:
             claim = file_io.claim_for_deletion(
                 artifact.access,
@@ -1195,6 +1357,7 @@ def _withdraw_download_authority(
                 expected_fingerprint=artifact.fingerprint,
                 pinned_source=artifact.pin,
                 logical_path=artifact.logical,
+                operation_token=record_token,
             )
         except file_io.PathChangedError as error:
             detail = (
@@ -1224,7 +1387,15 @@ def _withdraw_download_authority(
             )
             withdrawn.settle(failure, target=item.path, expected_fingerprint=expected_fingerprint)
             raise failure from error
-        withdrawn.claims.append((artifact.logical, claim))
+        withdrawn.records.append(
+            _WithdrawnRecord(
+                artifact.logical,
+                claim,
+                None
+                if record_token is None
+                else file_io.deletion_claim_directory(artifact.access, record_token),
+            )
+        )
     # Invalid provider-shaped documents were never deletion authority and are
     # not app-owned companions. Exclude them without unlinking them.
     remaining = tuple(candidate for candidate in pinned if candidate not in provider_sidecars)
@@ -1658,6 +1829,7 @@ def _remove_pinned(
         required=True,
         source_pin=source_pin,
         expected_fingerprint=expected_fingerprint,
+        operation_token=operation_token,
     )
     try:
         return _remove_withdrawn(
@@ -1697,6 +1869,9 @@ def _remove_withdrawn(
     path = item.path
     target = source_path
     source_identity = source_pin.identity
+    # From here the media may be out of its name. Only an outcome that proves
+    # it never moved, or came back, says otherwise: an interrupt does not.
+    withdrawn.media_at_risk = True
     try:
         claim = file_io.claim_for_deletion(
             target,
@@ -1719,15 +1894,19 @@ def _remove_withdrawn(
                 "record was retained for recovery",
                 retain_intent=True,
             ) from error
+        withdrawn.media_at_risk = False  # refused before the move, or moved back
         raise ManageError(
             "changed",
             f"{path} was replaced while removal claimed it; nothing was deleted",
         ) from error
     except FileNotFoundError as error:
+        withdrawn.media_at_risk = False
         raise ManageError("missing", f"{path} is no longer there") from error
     except ValueError as error:
+        withdrawn.media_at_risk = False
         raise ManageError("unrecorded", f"invalid persisted removal token: {error}") from error
     except OSError as error:
+        withdrawn.media_at_risk = False  # the claim failed before anything moved
         raise ManageError(
             "local-io", f"could not claim {path} for removal: {error.strerror or error}"
         ) from error
@@ -1762,6 +1941,7 @@ def _remove_withdrawn(
         except OSError:
             restored = False
         if restored:
+            withdrawn.media_at_risk = False  # back at its name, verified
             with contextlib.suppress(OSError):
                 paths.fsync_directory(target.parent)
             raise ManageError(
@@ -2014,6 +2194,7 @@ def trash(
     expected_source: SourceIdentity | None = None,
     expected_fingerprint: SourceFingerprint | None = None,
     prepared_pin: file_io.PinnedPath | None = None,
+    operation_token: str | None = None,
     adopted_authority: adopted.Authority | None = None,
     lookup_path: Path | None = None,
     source_root: Path | None = None,
@@ -2022,6 +2203,10 @@ def trash(
     source_context: file_io.PinnedDirectoryContext | None = None,
 ) -> Trashed:
     """Move ``item`` into trash and report its destination and artifact cleanup.
+
+    ``operation_token`` is the pending-removal intent's, when there is one: a
+    download record withdrawn for the move is then claimed under a name the
+    intent's replay can find (`settle_record_claims`).
 
     The reversible verb, and therefore the right one for a file the user made.
     Only the home trash is implemented: a wallpaper on another filesystem
@@ -2102,6 +2287,7 @@ def trash(
                     source_path=target,
                     artifact_pins=artifact_pins,
                     artifact_kept=artifact_kept,
+                    operation_token=operation_token,
                 )
                 committed = True
             if result is None:  # pragma: no cover - successful helper always returns
@@ -2126,6 +2312,7 @@ def _trash_pinned(
     source_path: Path,
     artifact_pins: Sequence[_PinnedArtifact],
     artifact_kept: Sequence[Path],
+    operation_token: str | None = None,
 ) -> Trashed:
     """Commit one trash move while its prepare-time inode stays pinned."""
     path = item.path
@@ -2158,6 +2345,7 @@ def _trash_pinned(
         required=False,
         source_pin=source_pin,
         expected_fingerprint=expected_fingerprint,
+        operation_token=operation_token,
     )
     try:
         return _trash_withdrawn(
@@ -2317,6 +2505,9 @@ def _trash_withdrawn(
                     "move; the source was not moved",
                 )
                 raise _with_trash_cleanup_conflict(failure, preserved) from error
+            # From here the media may be out of its name: only an outcome
+            # that proves it never moved, or came back, says otherwise.
+            withdrawn.media_at_risk = True
             try:
                 file_io.atomic_move_no_replace(
                     target,
@@ -2326,6 +2517,7 @@ def _trash_withdrawn(
                     pinned_source=source_pin,
                 )
             except FileExistsError as error:
+                withdrawn.media_at_risk = False  # the name was taken: nothing moved
                 preserved = _unlink_if_same(
                     record,
                     record_identity,
@@ -2360,6 +2552,7 @@ def _trash_withdrawn(
                         committed=True,
                         physical=physical_outcome,
                     ) from error
+                withdrawn.media_at_risk = False  # refused before the move, or moved back
                 preserved = _unlink_if_same(
                     record,
                     record_identity,
@@ -2372,6 +2565,7 @@ def _trash_withdrawn(
                 )
                 raise _with_trash_cleanup_conflict(failure, preserved) from error
             except OSError as error:
+                withdrawn.media_at_risk = False  # the rename itself failed: nothing moved
                 preserved = _unlink_if_same(
                     record,
                     record_identity,

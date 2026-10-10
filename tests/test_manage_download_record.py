@@ -72,11 +72,23 @@ def _record(item: MediaItem) -> Path:
 
 
 def _whole_copies(item: MediaItem, written: bytes) -> list[Path]:
-    """Every claim entry beside ``item`` that still holds the record's bytes."""
-    retained = item.path.parent / file_io.RETAINED_ENTRY_DIRECTORY
-    if not retained.is_dir():
-        return []
-    return [entry for entry in retained.glob("*/entry") if entry.read_bytes() == written]
+    """Every claim entry beside ``item`` that still holds the record's bytes.
+
+    A removal names the record's claim from its own token; a trash move given
+    no token uses a nameless one in the retained folder.
+    """
+    folder = item.path.parent
+    claims = [
+        *folder.glob(f"{file_io.DELETION_CLAIM_PREFIX}*/entry"),
+        *folder.glob(f"{file_io.RETAINED_ENTRY_DIRECTORY}/*/entry"),
+    ]
+    return [entry for entry in claims if entry.read_bytes() == written]
+
+
+def _record_claim(item: MediaItem, token: str = REMOVAL_TOKEN) -> Path:
+    """Where a removal with ``token`` keeps ``item``'s record while it is withdrawn."""
+    named = manage._record_claim_token(token, ".wallhaven.json")
+    return file_io.deletion_claim_directory(_record(item), named)
 
 
 def _fate(item: MediaItem, written: bytes, said: str) -> str:
@@ -407,6 +419,10 @@ def test_the_download_record_at_every_exit_of_a_removal(
     assert _fate(item, written, said) == fate, said
     assert committed == (fate == "consumed")
     assert "/proc/" not in said, said
+    # Kept, it is where the removal's token leads; otherwise that folder is gone.
+    claim = _record_claim(item, token)
+    assert (claim / "entry").exists() == (fate == "kept")
+    assert claim.exists() == (fate == "kept")
     if fate == "back" and item.path.exists() and _fingerprint(item.path) == untouched:
         assert scan.has_download_sidecar(item.path), "untouched, so still a download"
 
@@ -726,6 +742,47 @@ def test_the_download_record_at_every_exit_of_a_trash_move(
     assert committed == (fate == "consumed")
     if fate == "back" and item.path.exists() and _fingerprint(item.path) == untouched:
         assert scan.has_download_sidecar(item.path), "untouched, so still a download"
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["refused", "interrupted"])
+def test_a_trash_move_given_its_token_names_the_record_claim_from_it(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, interrupted: bool
+) -> None:
+    """The session passes a trash move its pending-removal token, and the record
+    is then claimed where that token leads, as a removal's is. Refused at the
+    rename (EXDEV, injected), the media never moved: the record is put back and
+    the claim folder is gone. Interrupted during the move, the media may have
+    moved: the record is kept there, for the replay to settle."""
+    item = downloaded(root)
+    written = _record(item).read_bytes()
+    rename = file_io._rename_noreplace
+
+    def move(old: Path, new: Path) -> None:
+        if old.name == item.path.name and new.parent.name == "files":
+            if interrupted:
+                raise KeyboardInterrupt
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        rename(old, new)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+
+    with pytest.raises(KeyboardInterrupt if interrupted else ManageError):
+        manage.trash(
+            item,
+            (root,),
+            expected_source=_expected(item.path),
+            expected_fingerprint=_fingerprint(item.path),
+            operation_token=REMOVAL_TOKEN,
+        )
+
+    claim = _record_claim(item)
+    if interrupted:
+        assert not _record(item).exists()
+        assert (claim / "entry").read_bytes() == written
+    else:
+        assert _record(item).read_bytes() == written
+        assert not claim.exists()
+        assert scan.has_download_sidecar(item.path), "untouched, so its record still binds it"
 
 
 # -- what the released version left --------------------------------------------

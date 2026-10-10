@@ -521,6 +521,7 @@ class RemovalPlan:
                         expected_source=intent.source_identity,
                         expected_fingerprint=intent.source_fingerprint,
                         prepared_pin=source_pin,
+                        operation_token=intent.token,
                         adopted_authority=adopted_authority,
                         lookup_path=anchored_source,
                         source_root=intent.source_root,
@@ -1244,6 +1245,20 @@ class Session:
                 if error.kind != "local-io" or not self._removals.owns(intent):
                     return (f"removal journal: {error}",)
                 journal_failure = f"removal journal: {error}"
+            # A removal that died after its media left may have left the
+            # media's download record whole in its claim. The removal is
+            # committed, so the record goes too; nothing is there otherwise.
+            unconsumed = manage.settle_record_claims(
+                intent.path,
+                intent.token,
+                source_fingerprint=intent.source_fingerprint,
+                put_back=False,
+                lookup_path=(
+                    None
+                    if artifact_source_context is None
+                    else artifact_source_context.child(intent.path.name)
+                ),
+            )
             failures = list(
                 self._cleanup_removed_item(
                     intent.item,
@@ -1258,6 +1273,7 @@ class Session:
                     artifact_source_context=artifact_source_context,
                 )
             )
+            failures.extend(unconsumed)
             if failures:
                 if journal_failure is not None:
                     failures.insert(0, journal_failure)
@@ -1342,7 +1358,19 @@ class Session:
                         # A crash before the physical operation left only a
                         # prepared intent. The exact original generation is still
                         # present, so this is safe to cancel and must not become
-                        # missing-drive pruning.
+                        # missing-drive pruning. Its download record may have
+                        # been withdrawn already: it goes back first, and the
+                        # intent stays while it can't.
+                        unreturned = manage.settle_record_claims(
+                            intent.path,
+                            intent.token,
+                            source_fingerprint=intent.source_fingerprint,
+                            put_back=True,
+                            lookup_path=anchored_source,
+                        )
+                        if unreturned:
+                            failures.extend(f"{intent.item.name}: {left}" for left in unreturned)
+                            continue
                         try:
                             self._removals.discard(intent)
                         except removals.RemovalJournalError as error:

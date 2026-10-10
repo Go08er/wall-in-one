@@ -7,12 +7,15 @@ own, along with the edits to a Noctalia-written settings file.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
+import stat
 import time
 import tomllib
 import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
@@ -380,6 +383,69 @@ def test_a_copy_kept_beside_an_ordinary_video_is_listed_as_kept_never_offered(
     assert named.token == found.token, "what is offered, and so apply, is unchanged"
     for copy in (at_root, in_nested, elsewhere, outside):
         assert copy.stat().st_size > 0, "a preview reads only"
+
+
+@contextlib.contextmanager
+def _unsearchable(folder: Path) -> Iterator[None]:
+    """``folder`` readable but not searchable (a native EACCES on what it holds)."""
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    folder.chmod(0o600)
+    try:
+        yield
+    finally:
+        folder.chmod(mode)
+
+
+def test_a_kept_copy_in_a_folder_that_cannot_be_looked_into_is_said_not_passed_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cold review's probe of AB-7: the folder beside the videos loses its
+    search permission. The copy is there; Tidy up can't look. It says so, about
+    the retained folder it couldn't look into, instead of listing nothing."""
+    root = tmp_path / "library"
+    nested = root / "trips"
+    copy = kept_pairing_record(nested / "clip.mp4", monkeypatch)
+    retained = nested / file_io.RETAINED_ENTRY_DIRECTORY
+    listed = tidy.plan(roots=(root,), item_folders=(nested,)).action(tidy.LEFTOVERS)
+    assert copy in _reasons(listed), "the control: listed while it can be looked at"
+
+    with _unsearchable(nested):
+        found = tidy.plan(roots=(root,), item_folders=(nested,)).action(tidy.LEFTOVERS)
+
+    assert copy.stat().st_size > 0, "the copy is still there"
+    # Failed on 29999ba: nothing at all was said about the folder.
+    assert "it can't be looked into (Permission denied)" in _reasons(found)[retained]
+    assert not found.changes
+
+
+def test_what_the_survey_cannot_look_at_is_listed_and_never_offered(tmp_path: Path) -> None:
+    """The same in the survey of Wall-in-One's own folders. An empty claim folder
+    that would be archived is, once it can't be inspected, listed with the reason
+    and not offered; a download folder whose retained folder, or whose own
+    entries, can't be looked into is listed too."""
+    root = tmp_path / "library"
+    managed = root / "Wall-in-One"
+    motion = managed / "MotionBGS"
+    motion.mkdir(parents=True)
+    in_state = _claim_folder(paths.app_state_dir())
+    in_motion = _claim_folder(motion)
+    offered = {change.path for change in tidy.plan(roots=(root,)).action(tidy.LEFTOVERS).changes}
+    assert {in_state, in_motion} <= offered, "the control: both are archived when inspectable"
+
+    with _unsearchable(in_state.parent), _unsearchable(motion):
+        found = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+    reasons = _reasons(found)
+    # Failed on 29999ba: each was skipped without a word.
+    assert reasons[in_state] == "it can't be inspected (Permission denied)"
+    assert reasons[motion / file_io.RETAINED_ENTRY_DIRECTORY] == (
+        "it can't be looked into (Permission denied)"
+    )
+    assert not {in_state, in_motion} & {change.path for change in found.changes}
+
+    with _unsearchable(managed):
+        found = tidy.plan(roots=(root,)).action(tidy.LEFTOVERS)
+    assert _reasons(found)[managed] == "what it holds can't be looked into (Permission denied)"
+    assert not any(managed in change.path.parents for change in found.changes)
 
 
 #: The released 0.2.2 rolls a pairing record back: its own code, in a child.

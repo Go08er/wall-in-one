@@ -351,6 +351,35 @@ def _is_empty_directory(path: Path) -> bool:
         return False
 
 
+def _look(path: Path) -> os.stat_result | OSError | None:
+    """``path``'s status, not following it. None only when it is known to be absent.
+
+    Any other failure to look (a folder that can't be searched, an I/O error)
+    is returned, for the survey to say: "can't look" is never "nothing there".
+    """
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return error
+
+
+def _emptiness(path: Path) -> bool | OSError:
+    """Whether a folder is empty, or why that can't be told."""
+    try:
+        with os.scandir(path) as listing:
+            return next(listing, None) is None
+    except OSError as error:
+        return error
+
+
+def _unlookable(path: Path, error: OSError, *, folder: bool = True) -> Kept:
+    """The kept row for something the survey could not look at. It is never acted on."""
+    how = "looked into" if folder else "inspected"
+    return Kept(path, f"it can't be {how} ({error.strerror or error})")
+
+
 def _upgrade_gate() -> str:
     """Why Noctalia's settings or the upgrade's evidence must not change now, or ""."""
     try:
@@ -595,8 +624,12 @@ class _Survey:
     kept: list[Kept] = field(default_factory=list)
 
 
-def _leftover_parents(roots: Sequence[Path]) -> list[Path]:
-    """Every folder the app deletes in, so every folder a leftover can be in."""
+def _leftover_parents(roots: Sequence[Path], kept: list[Kept]) -> list[Path]:
+    """Every folder the app deletes in, so every folder a leftover can be in.
+
+    A folder that is there but can't be looked into is added to ``kept``,
+    saying so, and is not surveyed further: it is listed, never acted on.
+    """
     candidates = [
         paths.app_config_dir(),
         paths.app_state_dir(),
@@ -605,19 +638,43 @@ def _leftover_parents(roots: Sequence[Path]) -> list[Path]:
     ]
     for root in roots:
         managed = root / pairing_conventions.MANAGED_PARENT
-        if _real_directory(managed) is None:
+        candidates.append(managed)  # if it can't be looked into, that is said below
+        found = _look(managed)
+        if isinstance(found, OSError) or found is None or not stat.S_ISDIR(found.st_mode):
             continue
-        candidates.append(managed)
         try:
             children = sorted(managed.iterdir())
-        except OSError:
+        except OSError as error:
+            kept.append(Kept(managed, f"it can't be listed ({error.strerror})"))
             continue
-        candidates.extend(child for child in children if _real_directory(child) is not None)
+        said = False
+        for child in children:
+            status = _look(child)
+            if isinstance(status, OSError):
+                # Entries that can't be looked at (the folder isn't searchable, or
+                # one entry fails): one row for the folder, not one for each of its
+                # files; whatever can be looked at is still surveyed.
+                if not said:
+                    kept.append(
+                        Kept(
+                            managed,
+                            f"what it holds can't be looked into ({status.strerror or status})",
+                        )
+                    )
+                    said = True
+                continue
+            if status is not None and stat.S_ISDIR(status.st_mode):
+                candidates.append(child)
     unique: list[Path] = []
     seen: set[tuple[int, int]] = set()
     for candidate in candidates:
-        found = _real_directory(candidate)
-        if found is None or (found.st_dev, found.st_ino) in seen:
+        found = _look(candidate)
+        if isinstance(found, OSError):
+            kept.append(_unlookable(candidate, found))
+            continue
+        if found is None or not stat.S_ISDIR(found.st_mode):
+            continue
+        if (found.st_dev, found.st_ino) in seen:
             continue
         seen.add((found.st_dev, found.st_ino))
         unique.append(candidate)
@@ -661,24 +718,36 @@ def _kept_beside_items(
     """
     seen: set[tuple[int, int]] = set()
     for folder in surveyed:
-        found = _real_directory(folder)
-        if found is not None:
-            seen.add((found.st_dev, found.st_ino))
-    candidates = [
-        *roots,
-        *(
-            folder
-            for folder in item_folders
-            if any(folder == root or root in folder.parents for root in roots)
-        ),
-    ]
+        already = _real_directory(folder)
+        if already is not None:
+            seen.add((already.st_dev, already.st_ino))
+    candidates = dict.fromkeys(
+        [
+            *roots,
+            *(
+                folder
+                for folder in item_folders
+                if any(folder == root or root in folder.parents for root in roots)
+            ),
+        ]
+    )
     for folder in candidates:
-        found = _real_directory(folder)
-        if found is None or (found.st_dev, found.st_ino) in seen:
+        found = _look(folder)
+        if isinstance(found, OSError):
+            survey.kept.append(_unlookable(folder, found))
+            continue
+        if found is None or not stat.S_ISDIR(found.st_mode):
+            continue
+        if (found.st_dev, found.st_ino) in seen:
             continue
         seen.add((found.st_dev, found.st_ino))
         retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
-        if _real_directory(retained) is None:
+        status = _look(retained)
+        if isinstance(status, OSError):
+            # It may hold a kept copy: said, not passed over as "nothing kept".
+            survey.kept.append(_unlookable(retained, status))
+            continue
+        if status is None or not stat.S_ISDIR(status.st_mode):
             continue
         try:
             entries = sorted(retained.iterdir())
@@ -686,11 +755,16 @@ def _kept_beside_items(
             survey.kept.append(Kept(retained, f"it can't be listed ({error.strerror})"))
             continue
         for entry in entries:
-            status = _lstat(entry)
+            status = _look(entry)
             if status is None:
                 continue
-            if stat.S_ISDIR(status.st_mode) and _CLAIM_FOLDER.match(entry.name):
-                if not _is_empty_directory(entry):
+            if isinstance(status, OSError):
+                survey.kept.append(_unlookable(entry, status, folder=False))
+            elif stat.S_ISDIR(status.st_mode) and _CLAIM_FOLDER.match(entry.name):
+                empty = _emptiness(entry)
+                if isinstance(empty, OSError):
+                    survey.kept.append(_unlookable(entry, empty))
+                elif not empty:
                     survey.kept.append(Kept(entry, "this claim folder isn't empty"))
             elif stat.S_ISREG(status.st_mode) and _DELETION_RECORD.match(entry.name):
                 if status.st_size > 0:
@@ -739,25 +813,36 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
             return "it's on a different drive from the archive folder, so it can't just be moved"
         return ""
 
-    parents = _leftover_parents(roots)
+    parents = _leftover_parents(roots, survey.kept)
     for parent in parents:
         parent_status = _real_directory(parent)
         in_managed = (
             parent_status is not None and (parent_status.st_dev, parent_status.st_ino) in managed
         )
         retained = parent / file_io.RETAINED_ENTRY_DIRECTORY
-        if _real_directory(retained) is not None:
+        retained_status = _look(retained)
+        if isinstance(retained_status, OSError):
+            # There, but it can't be looked into: listed, never acted on.
+            survey.kept.append(_unlookable(retained, retained_status))
+        elif retained_status is not None and stat.S_ISDIR(retained_status.st_mode):
             try:
                 entries = sorted(retained.iterdir())
             except OSError as error:
                 survey.kept.append(Kept(retained, f"it can't be listed ({error.strerror})"))
                 entries = []
             for entry in entries:
-                status = _lstat(entry)
+                status = _look(entry)
                 if status is None:
                     continue
+                if isinstance(status, OSError):
+                    # What can't be inspected is never offered.
+                    survey.kept.append(_unlookable(entry, status, folder=False))
+                    continue
                 if stat.S_ISDIR(status.st_mode) and _CLAIM_FOLDER.match(entry.name):
-                    if not _is_empty_directory(entry):
+                    empty = _emptiness(entry)
+                    if isinstance(empty, OSError):
+                        survey.kept.append(_unlookable(entry, empty))
+                    elif not empty:
                         survey.kept.append(Kept(entry, "this claim folder isn't empty"))
                     elif now - status.st_mtime < CLAIM_GRACE_SECONDS:
                         survey.kept.append(
@@ -813,7 +898,8 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                     survey.kept.append(Kept(entry, "Tidy up doesn't recognize this entry"))
         try:
             children = sorted(parent.iterdir())
-        except OSError:
+        except OSError as error:
+            survey.kept.append(Kept(parent, f"it can't be listed ({error.strerror})"))
             children = []
         for child in children:
             if in_managed and child.name.startswith(_COMMIT_PREFIX):
@@ -847,7 +933,10 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                 continue
             if not child.name.startswith(file_io.DELETION_CLAIM_PREFIX):
                 continue
-            status = _lstat(child)
+            status = _look(child)
+            if isinstance(status, OSError):
+                survey.kept.append(_unlookable(child, status, folder=False))
+                continue
             if status is None or not stat.S_ISDIR(status.st_mode):
                 continue
             token = child.name.removeprefix(file_io.DELETION_CLAIM_PREFIX)
@@ -888,7 +977,16 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                 entry_sha = ""
                 detail = "empty folder left by Wall-in-One's finished upgrade"
                 if names:
-                    entry_status = _lstat(child / "entry")
+                    entry_status = _look(child / "entry")
+                    if isinstance(entry_status, OSError):
+                        survey.kept.append(
+                            Kept(
+                                child,
+                                "its copy can't be inspected "
+                                f"({entry_status.strerror or entry_status})",
+                            )
+                        )
+                        continue
                     if entry_status is None or not stat.S_ISREG(entry_status.st_mode):
                         survey.kept.append(Kept(child, "its entry isn't a regular file"))
                         continue
@@ -922,7 +1020,11 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                     )
                 )
             elif in_managed:
-                if not _is_empty_directory(child):
+                empty = _emptiness(child)
+                if isinstance(empty, OSError):
+                    survey.kept.append(_unlookable(child, empty))
+                    continue
+                if not empty:
                     survey.kept.append(
                         Kept(child, "it holds a file from a removal that didn't finish")
                     )
@@ -981,8 +1083,11 @@ def _survey_download_leftover(
     set it back, so a file mid-publish always looks recent, even one whose
     bytes (mtime) are old.
     """
-    status = _lstat(child)
+    status = _look(child)
     if status is None:
+        return
+    if isinstance(status, OSError):
+        survey.kept.append(_unlookable(child, status, folder=False))
         return
     if not name.match(child.name):
         survey.kept.append(Kept(child, "Tidy up doesn't recognize this entry"))

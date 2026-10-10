@@ -16,11 +16,17 @@ run from a store copy without one). ``WIO_OLD_SRC_0_2_2``, the ``src`` of a real
 0.2.2 checkout, replaces the vendored copy.
 
 What is vendored is the import closure of ``wall_in_one.providers.download``
-and ``wall_in_one.providers.http``. To probe another module, freeze it and
-whatever it imports the same way::
+and ``wall_in_one.providers.http``; of the state-file stores
+(``library.state_file``, ``playlists``, ``displays``, ``schedules``,
+``favourites``, ``pairings``, and ``ui_prefs``); of ``library.stills``; and of
+``theme.template``, with the palette template it installs
+(``data/palette.json.tmpl.frozen``: any file is vendored the same way). To
+probe another module, freeze it and whatever it imports::
 
     git show 1840dde:src/wall_in_one/<module>.py \\
         > tests/fixtures/released_0_2_2/wall_in_one/<module>.py.frozen
+
+`tests.released_faults` runs such a child under one fault at a time.
 
 A child that imports a module nobody froze fails with ``ModuleNotFoundError``:
 its only ``wall_in_one`` is the released one, never this checkout's.

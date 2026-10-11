@@ -482,37 +482,6 @@ def _warn_unknown_settings(unknown_keys: Sequence[str]) -> None:
     )
 
 
-def _leave_out_unclearable_default(loaded: config.LoadedSettings, session: Session) -> None:
-    """Build without a saved default that names no playlist and can't be cleared, and say so.
-
-    The rule the app's start follows (`runtime_config.unclearable_default`),
-    for a compile nobody watches. ``settings.toml`` can't be changed (keys
-    this build doesn't know, or it is kept read-only), so the app could not
-    clear the default either, and "repair it in the app" would be advice
-    nobody can take: refusing would stop every publication, and on a profile
-    that has never published, the service with it. The document is built as
-    with no default, and one ``warning:`` line names the file and the key.
-
-    Where the settings can be changed nothing is left out and the compile
-    stays strict: the app clears such a default at its next start. Nor is
-    anything left out over playlists that were not read in full; the compiler
-    refuses that file by name.
-    """
-    from wall_in_one import runtime_config
-
-    found = runtime_config.unclearable_default(session.playlists, loaded)
-    if found is None:
-        return
-    reference, why = found
-    session.leave_out_default(reference)
-    print(
-        f"warning: active_playlist in {paths.settings_path()} names a playlist that "
-        f"doesn't exist ({reference!r}), and the file can't be changed ({why}); "
-        "building without a default playlist",
-        file=sys.stderr,
-    )
-
-
 def _write_runtime_config() -> int:
     """Compile authoring state for Rust without constructing a GTK application."""
     from wall_in_one import config, runtime_config
@@ -545,7 +514,6 @@ def _write_runtime_config() -> int:
                 # journal is still present in ``authoring_faults`` below and
                 # therefore fails publication closed.
                 session.refresh(mutate_removals=False)
-                _leave_out_unclearable_default(loaded, session)
                 changed = _update_runtime(settings, session)
             finally:
                 session.shutdown()
@@ -645,7 +613,6 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
             # Health sync may update Pairings under its mutation lock, but it
             # must not opportunistically rewrite the other authoring stores.
             session.refresh(mutate_removals=False)
-            _leave_out_unclearable_default(loaded, session)
             faults = session.authoring_faults()
             if faults:
                 details = "; ".join(f"{name}: {fault}" for name, fault in faults)

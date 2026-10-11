@@ -24,10 +24,10 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings, state_file
+from wall_in_one.library import pairings, schedules, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.session import SAVED_PLAYLISTS, SAVED_USES, Session
@@ -75,12 +75,137 @@ class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
 
 
+#: `LeftOut.why`: no playlist answers to the reference, by id or by name.
+DOES_NOT_EXIST: Final = "doesn't exist"
+#: `LeftOut.why`: the playlist exists but holds nothing the compiler keeps
+#: (it is empty, or every wallpaper in it is missing or has no still yet).
+NOTHING_TO_PLAY: Final = "has nothing to play"
+
+#: `LeftOut.owner`: whose reference it is.
+DEFAULT_OWNER: Final = "default"
+SCHEDULE_OWNER: Final = "schedule"
+DISPLAY_OWNER: Final = "display"
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class LeftOut:
+    """One saved reference to a playlist the runtime document was built without.
+
+    The compiler never refuses over a playlist that can't play. A reference
+    to one (the default, a schedule rule's, a display's own playlist) is left
+    out, everything else is published, and this says what was left out so
+    that whoever compiled can say it: the application as a standing notice,
+    an unattended command as a ``warning:`` line.
+
+    What leaving it out means depends on whose it is. The default is built as
+    "All media". A schedule rule is not emitted, so whatever would apply
+    without it applies. A display's own playlist is not emitted, so that
+    display follows the rules and the default.
+    """
+
+    #: `DEFAULT_OWNER`, `SCHEDULE_OWNER` or `DISPLAY_OWNER`.
+    owner: str
+    #: The rule's id or the display's connector; empty for the default.
+    owner_id: str
+    #: The reference as it is saved: a playlist's id or its name.
+    reference: str
+    #: The playlist's name when it exists (``why`` is then `NOTHING_TO_PLAY`).
+    playlist: str
+    #: `DOES_NOT_EXIST` or `NOTHING_TO_PLAY`.
+    why: str
+
+    def sentence(self, rules: int = 1) -> str:
+        """What was left out and what happens instead, for a person.
+
+        ``rules``: how many schedule rules this one sentence speaks for.
+        """
+        missing = self.why == DOES_NOT_EXIST
+        if self.owner == DISPLAY_OWNER:
+            own = (
+                f"{self.owner_id}\u2019s own playlist doesn\u2019t exist ({self.reference})"
+                if missing
+                else (
+                    f"{self.owner_id}\u2019s own playlist, \u201c{self.playlist}\u201d, "
+                    "has nothing to play"
+                )
+            )
+            return f"{own}, so that display follows the schedule and the default."
+        named = (
+            f"a playlist that doesn\u2019t exist ({self.reference})"
+            if missing
+            else f"\u201c{self.playlist}\u201d, which has nothing to play"
+        )
+        if self.owner == DEFAULT_OWNER:
+            return (
+                f"The default names {named}, so \u201c{FALLBACK_PLAYLIST_NAME}\u201d plays instead."
+            )
+        if rules == 1:
+            return f"A schedule rule names {named}, so that rule is left out."
+        return f"{rules} schedule rules name {named}, so those rules are left out."
+
+    def warning(self) -> str:
+        """The same for an unattended command's ``warning:`` line: ids, and where it is saved."""
+        named = (
+            f"a playlist that doesn't exist ({self.reference!r})"
+            if self.why == DOES_NOT_EXIST
+            else f"playlist {self.playlist!r}, which has nothing to play"
+        )
+        if self.owner == DEFAULT_OWNER:
+            return (
+                f"active_playlist in {paths.settings_path()} names {named}; "
+                f'building with "{FALLBACK_PLAYLIST_NAME}" as the default'
+            )
+        if self.owner == SCHEDULE_OWNER:
+            return f"schedule rule {self.owner_id!r} names {named}; building without that rule"
+        return (
+            f"the display assignment for {self.owner_id!r} names {named}; building "
+            "without it, so that display follows the schedule and the default"
+        )
+
+
+#: The order a notice speaks in: the default, the rules, then the displays.
+_NOTICE_ORDER: Final = (DEFAULT_OWNER, SCHEDULE_OWNER, DISPLAY_OWNER)
+
+
+def left_out_notice(left_out: Iterable[LeftOut]) -> str:
+    """Everything one runtime document was built without, as one notice for a person; or empty.
+
+    A sentence per reference (`LeftOut.sentence`): the default, then the
+    rules, then the displays. Rules that name the same playlist for the same
+    reason are counted in one sentence, not repeated.
+    """
+    said: dict[tuple[int, str, str, str, str], tuple[LeftOut, int]] = {}
+    for one in set(left_out):
+        whose = "" if one.owner == SCHEDULE_OWNER else one.owner_id
+        key = (_NOTICE_ORDER.index(one.owner), whose, one.reference, one.playlist, one.why)
+        said[key] = (one, said[key][1] + 1 if key in said else 1)
+    return " ".join(one.sentence(count) for _key, (one, count) in sorted(said.items()))
+
+
+@dataclass(frozen=True, slots=True)
+class Compiled:
+    """One compile: ``runtime.toml``, its optional overrides, and what was left out."""
+
+    document: str
+    #: ``runtime-overrides.toml``; None when no override is in use and the file must not exist.
+    overrides: str | None
+    left_out: tuple[LeftOut, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class Published:
-    """What one `publish_changes` did to disk: the files it wrote and removed."""
+    """What one `publish_changes` did to disk, and what its document was built without.
+
+    The files it wrote and removed, and ``left_out``: every reference to a
+    playlist that can't play, which the document it compiled leaves out
+    (`LeftOut`). ``left_out`` is that document's, whether or not any byte
+    changed: a publication that found the files already current still says
+    what they leave out. Truthy when a file changed.
+    """
 
     written: tuple[Path, ...] = ()
     removed: tuple[Path, ...] = ()
+    left_out: tuple[LeftOut, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.written or self.removed)
@@ -732,67 +857,23 @@ def default_playlist_id(reference: str, session: Session) -> str:
     playlist the default?" asks this, never ``reference == playlist.id``, so
     such a default is shown as the default it is and not as "All media".
 
-    Empty for nothing saved, and for a reference no playlist answers to (one
-    left out, `Session.leave_out_default`, or one the start has not repaired):
-    no playlist is the default then.
+    Empty for nothing saved, and for a reference no playlist answers to (the
+    compiler leaves it out, `LeftOut`, until the start clears it or a
+    playlist answers to it): no playlist is the default then.
     """
     found = find_playlist(reference, session) if reference else None
     return found.id if found is not None else ""
 
 
-class _Listing(Protocol):
-    """The playlists as read from their file: a `playlists.Store`, a session's or a worker's."""
-
-    @property
-    def fault(self) -> str | None: ...
-
-    def get(self, reference: str) -> Playlist | None: ...
-
-    def by_name(self, name: str) -> Playlist | None: ...
-
-
-def unclearable_default(
-    listing: _Listing,
-    loaded: config.LoadedSettings,
-    *,
-    refused: config.ConfigError | None = None,
-    path: Path | None = None,
-) -> tuple[str, str] | None:
-    """A saved default that names no playlist and can't be cleared: ``(reference, why)``.
-
-    The one rule every compiler follows, the app's start and the unattended
-    ones alike. Such a default is left out (`Session.leave_out_default`) and
-    said, and the document is built as with no default, instead of every
-    publication being refused for as long as the file stays as it is. None
-    means the rule doesn't apply, and whoever asked does what it always did:
-
-    * ``listing`` was not read in full (it couldn't be read, is damaged, or
-      was saved by a newer build): nothing is known about what it names, and
-      "couldn't look" is not "no such playlist". The compiler refuses that
-      file itself, naming it;
-    * the default names a playlist, by id or by name, or "All media";
-    * ``settings.toml`` could be changed (`config.why_settings_cannot_change`):
-      the app clears the default at its next start, and until then an
-      unattended compile stays strict.
-    """
-    reference = loaded.settings.active_playlist
-    if not reference or reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
-        return None
-    if listing.fault is not None:
-        return None
-    if listing.get(reference) is not None or listing.by_name(reference) is not None:
-        return None
-    why = config.why_settings_cannot_change(loaded, path, refused=refused)
-    return (reference, why) if why else None
-
-
 def use_refusal(reference: str, session: Session) -> str:
     """Why ``reference`` can't be the default, a rule's or a display's playlist; empty if it can.
 
-    The compiler refuses a document naming a playlist it can't build
-    (`runtime_playlist`), and the service then keeps the previous one; a
-    playlist whose every wallpaper playback skips compiles but never shows
-    anything. "All media" can always be used.
+    A reference to a playlist the compiler can't build is left out of the
+    runtime document (`LeftOut`): the default would play "All media", the rule
+    or the display's own playlist would not apply. Nobody means that by
+    choosing one, so the choice is refused here instead. A playlist whose
+    every wallpaper playback skips compiles but never shows anything. "All
+    media" can always be used.
     """
     if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
         return ""
@@ -814,8 +895,9 @@ def leaves_nothing_to_play(before: Sequence[Playability], after: Sequence[Playab
     """Whether a removal takes away the last thing a used playlist can play.
 
     Refused when nothing that plays would remain where something did, and
-    also when nothing that compiles would remain: a used playlist the
-    compiler can't build stops every later publication. A playlist that
+    also when nothing that compiles would remain: whatever uses a playlist
+    the compiler can't build is left out of the runtime document (`LeftOut`),
+    which is not what removing a wallpaper is meant to do. A playlist that
     already had nothing playing may still lose skipped entries while one
     that compiles remains, so it can be cleaned up.
     """
@@ -856,7 +938,10 @@ def listed(words: Sequence[str]) -> str:
 
 
 class PlaybackGuardError(ValueError):
-    """A change refused because publication, or a playlist in use, would break.
+    """A change refused because it would leave a playlist with nothing to play.
+
+    A courtesy at the gesture, not what publication relies on: the compiler
+    builds without a playlist that can't play and says so (`LeftOut`).
 
     Raised at the head of the authoring lane (or, in the headless service,
     just before the write). ``kind`` lets a control-socket caller branch on
@@ -873,10 +958,10 @@ class LibraryNotCurrentError(ValueError):
     library folders or Workshop scanning change, until their scan lands, the
     application knows its in-memory library may still name files that are
     gone. A wallpaper taken from it, or a check judged by it, could pass and
-    then leave a playlist the compiler refuses once the scan lands, which
-    stops every later publication. Raised at the head of the authoring lane,
-    by the application (`Application.require_current_library`); nothing is
-    written. ``kind`` lets a control-socket caller branch on it.
+    then leave a playlist with nothing to play once the scan lands, which
+    the compiler builds without (`LeftOut`). Raised at the head of the
+    authoring lane, by the application (`Application.require_current_library`);
+    nothing is written. ``kind`` lets a control-socket caller branch on it.
     """
 
     kind = "library-not-current"
@@ -895,13 +980,14 @@ LEAVES_ONLY_UNUSABLE: Final = "leaves-only-unusable"
 def change_problem(before: Sequence[Playability], after: Sequence[Playability], used: bool) -> str:
     """What a playlist going from ``before`` to ``after`` would break, or empty.
 
-    The two rules are both the compiler's (`_compile`). A playlist in use
-    must keep something to play (`leaves_nothing_to_play`):
+    Two rules, judged by what the compiler keeps (`_compile`). A playlist in
+    use must keep something to play (`leaves_nothing_to_play`):
     `LEAVES_NOTHING_TO_PLAY`. And any playlist that holds entries must keep
     one the compiler keeps, used or not, because a playlist with entries but
-    none it can resolve stops every publication: `LEAVES_ONLY_UNUSABLE`. A
-    playlist that already broke that rule may still change, so it can be
-    cleaned up. The words are the caller's (`change_refusal` has some).
+    none it can resolve is not in the runtime document at all:
+    `LEAVES_ONLY_UNUSABLE`. A playlist that already broke that rule may still
+    change, so it can be cleaned up. The words are the caller's
+    (`change_refusal` has some).
     """
     if used:
         return LEAVES_NOTHING_TO_PLAY if leaves_nothing_to_play(before, after) else ""
@@ -1290,11 +1376,13 @@ def checked_entries_addition[Work](
 def new_playlist_refusal(name: str, sources: Iterable[Path | str], session: Session) -> str:
     """`change_refusal` for a new playlist ``name`` made holding ``sources``; empty if fine.
 
-    Nothing uses a playlist that does not exist yet, so the one rule that
-    applies is the compiler's: a playlist with entries must hold one it keeps
-    (`LEAVES_ONLY_UNUSABLE`), used or not, or every publication stops. An
-    empty one is fine. It stops at the first entry that compiles, so a copy
-    of a large library is answered at once.
+    The one rule that applies to a new playlist: one with entries must hold
+    one the compiler keeps (`LEAVES_ONLY_UNUSABLE`), used or not, or it would
+    be made and never reach the runtime document. An empty one is fine, also
+    under a name a saved reference already names: that reference is left out
+    of the document until the playlist has something to play (`LeftOut`). It
+    stops at the first entry that compiles, so a copy of a large library is
+    answered at once.
     """
     known = library_index(session)
     after: list[Playability] = []
@@ -1473,7 +1561,12 @@ def runtime_applies_overrides(status: object) -> bool:
 
 def render(settings: config.Settings, session: Session) -> str:
     """Return schema-4 TOML with every currently executable decision resolved."""
-    return _compile(settings, session)[0]
+    return _compile(settings, session).document
+
+
+def compiled(settings: config.Settings, session: Session) -> Compiled:
+    """Both documents and what they were built without (`LeftOut`); nothing is written."""
+    return _compile(settings, session)
 
 
 def render_overrides(settings: config.Settings, session: Session) -> str | None:
@@ -1482,9 +1575,10 @@ def render_overrides(settings: config.Settings, session: Session) -> str | None:
     Only a compiled playlist (one with playable entries) can carry its own
     rotation, and only an independent display assignment can beat global
     rules; mirrored mode leaves assignments, and their opt-ins, dormant.
-    ``None`` means no override is in use and the file must not exist.
+    An assignment left out of ``runtime.toml`` (`LeftOut`) is left out here
+    too. ``None`` means no override is in use and the file must not exist.
     """
-    return _compile(settings, session)[1]
+    return _compile(settings, session).overrides
 
 
 def _overrides_document(
@@ -1520,8 +1614,30 @@ def _overrides_document(
     return document
 
 
-def _compile(settings: config.Settings, session: Session) -> tuple[str, str | None]:
-    """Both generated documents: ``runtime.toml`` and its optional overrides."""
+def _compile(settings: config.Settings, session: Session) -> Compiled:
+    """Both generated documents, ``runtime.toml`` and its optional overrides, and what
+    they were built without.
+
+    **Tolerant of a playlist that can't play.** A playlist with nothing the
+    runtime could play (it is empty, or every wallpaper in it is missing or
+    has no still yet) is not emitted. A reference to one, or to a playlist
+    that doesn't exist, is left out and returned (`LeftOut`): the default is
+    built as "All media", a schedule rule or a display's own playlist is not
+    emitted. Everything else is published. No save path has to prove it can't
+    create such a state, against what another program saved meanwhile, for
+    the next publication to get through; the guards that refuse to create one
+    (`checked_playlist_use` and the rest) are good manners, not what this
+    relies on. The service checks that every reference names an emitted
+    playlist, so nothing left out is ever named in either document.
+
+    **Only over stores read in full.** A store that couldn't be read, is
+    damaged or was saved by a newer build refuses the whole build, naming the
+    file (`Session.authoring_faults`): "couldn't look" is never "nothing
+    there", and a playlist that only seems to be missing must not quietly
+    turn its rules off. Everything else this checks still refuses too: the
+    wire's size and count bounds, duplicate ids, text limits, renderer
+    settings.
+    """
     _validate_settings_wire(settings)
     faults = session.authoring_faults()
     if faults:
@@ -1560,14 +1676,9 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
             if compiled is not None:
                 resolved.append(compiled)
         if not resolved:
-            if playlist.entries:
-                missing = len(playlist.entries)
-                raise RuntimeConfigError(
-                    f"playlist {playlist.name!r} has no playable entries; all {missing} "
-                    "authored entries are missing or unresolved. Restore the media or "
-                    "remove those entries; the existing runtime configuration was left "
-                    "untouched."
-                )
+            # Nothing the runtime could play: empty, or every authored entry
+            # is missing or unresolved. Not emitted; whatever refers to it is
+            # left out below, and said (`LeftOut`, `NOTHING_TO_PLAY`).
             continue
         playlists.append((playlist.id, playlist.name, tuple(resolved)))
         existing_ids.add(playlist.id)
@@ -1583,40 +1694,26 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
             )
     _validate_playlist_identity(playlists)
 
-    def runtime_playlist(reference: str, *, owner: str) -> str:
+    left_out: list[LeftOut] = []
+
+    def runtime_playlist(reference: str, *, owner: str, owner_id: str = "") -> str | None:
+        """The emitted playlist ``reference`` names; None, and noted, when it can't be used."""
         if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
             return FALLBACK_PLAYLIST_ID
-        authored = session.playlists.get(reference)
+        authored = find_playlist(reference, session)
         if authored is None:
-            authored = session.playlists.by_name(reference)
-        if authored is None:
-            raise RuntimeConfigError(
-                f"{owner} refers to unknown playlist {reference!r}; repair it in the app. "
-                "The existing runtime configuration was left untouched."
-            )
+            left_out.append(LeftOut(owner, owner_id, reference, "", DOES_NOT_EXIST))
+            return None
         if authored.id not in existing_ids:
-            raise RuntimeConfigError(
-                f"{owner} refers to playlist {authored.name!r}, which has no playable "
-                "entries. Add media or choose another playlist; the existing runtime "
-                "configuration was left untouched."
-            )
+            left_out.append(LeftOut(owner, owner_id, reference, authored.name, NOTHING_TO_PLAY))
+            return None
         return authored.id
 
-    wanted_default = settings.active_playlist
-    if (
-        wanted_default
-        and wanted_default == session.left_out_default
-        and find_playlist(wanted_default, session) is None
-    ):
-        # Names nothing, and settings.toml could not be saved to clear it
-        # (`Session.leave_out_default`): built as no default, not refused for
-        # as long as the file stays as it is.
-        wanted_default = ""
     default = (
-        runtime_playlist(wanted_default, owner="default playlist")
-        if wanted_default
-        else FALLBACK_PLAYLIST_ID
-    )
+        runtime_playlist(settings.active_playlist, owner=DEFAULT_OWNER)
+        if settings.active_playlist
+        else None
+    ) or FALLBACK_PLAYLIST_ID
     schema_version = (
         BATTERY_SCHEMA_VERSION if settings.stop_animations_on_battery else SCHEMA_VERSION
     )
@@ -1668,11 +1765,15 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
     # leaves them dormant on the wire. Independent mode emits the complete
     # authored order: Rust evaluates the shared and connector-exact rules
     # together, so the established last-match-wins rule remains literal.
-    emitted_schedules = [
-        (rule, runtime_playlist(rule.playlist, owner=f"schedule {rule.id!r}"))
-        for rule in session.schedules.rules
-        if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT or not rule.connector
-    ]
+    # A rule whose playlist can't be used is left out whole (`LeftOut`):
+    # whatever would apply without it applies.
+    emitted_schedules: list[tuple[schedules.Rule, str]] = []
+    for rule in session.schedules.rules:
+        if settings.display_mode != config.DISPLAY_MODE_INDEPENDENT and rule.connector:
+            continue
+        rule_playlist = runtime_playlist(rule.playlist, owner=SCHEDULE_OWNER, owner_id=rule.id)
+        if rule_playlist is not None:
+            emitted_schedules.append((rule, rule_playlist))
     if len(emitted_schedules) > MAX_SCHEDULES:
         raise RuntimeConfigError(f"no more than {MAX_SCHEDULES} schedule rules are supported")
     schedule_ids: set[str] = set()
@@ -1714,16 +1815,13 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
     assignments = (
         session.displays.all() if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT else ()
     )
-    emitted_assignments = [
-        (
-            connector,
-            runtime_playlist(
-                assigned_playlist,
-                owner=f"display assignment for {connector!r}",
-            ),
-        )
-        for connector, assigned_playlist in assignments
-    ]
+    # An assignment whose playlist can't be used is left out (`LeftOut`), from
+    # the overrides too: that display follows the rules and the default.
+    emitted_assignments: list[tuple[str, str]] = []
+    for connector, authored_playlist in assignments:
+        own_playlist = runtime_playlist(authored_playlist, owner=DISPLAY_OWNER, owner_id=connector)
+        if own_playlist is not None:
+            emitted_assignments.append((connector, own_playlist))
     if len(emitted_assignments) > MAX_DISPLAYS:
         raise RuntimeConfigError(f"no more than {MAX_DISPLAYS} display assignments are supported")
     seen_connectors: set[str] = set()
@@ -1765,7 +1863,7 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
         for connector, _playlist in emitted_assignments
         if session.displays.beats_global_rules(connector)
     )
-    return document, _overrides_document(rotations, beating)
+    return Compiled(document, _overrides_document(rotations, beating), tuple(left_out))
 
 
 def _read_overrides(target: Path) -> str | None:
@@ -1802,7 +1900,8 @@ def write(settings: config.Settings, session: Session, path: Path | None = None)
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
-        document, overrides = _compile(settings, session)
+        built = _compile(settings, session)
+        document, overrides = built.document, built.overrides
         previous_overrides = _read_overrides(target)
         _require_publishable(document, target)
         _publish(
@@ -1839,7 +1938,8 @@ def publish_changes(
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
-        document, overrides = _compile(settings, session)
+        built = _compile(settings, session)
+        document, overrides = built.document, built.overrides
         try:
             current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
         except (OSError, UnicodeDecodeError) as error:
@@ -1850,7 +1950,7 @@ def publish_changes(
             current_overrides
         )
         if not (document_changed or overrides_changed):
-            return Published()
+            return Published(left_out=built.left_out)
         if document_changed:
             _require_publishable(document, target)
         sidecar = overrides_path(target)
@@ -1860,7 +1960,7 @@ def publish_changes(
             *((target,) if document_changed else ()),
         )
         removed = (sidecar,) if overrides_changed and overrides is None else ()
-        changes = Published(written=written, removed=removed)
+        changes = Published(written=written, removed=removed, left_out=built.left_out)
         try:
             _publish(
                 target,

@@ -387,12 +387,11 @@ class RealScheduling:
 
         A default saved by name is its playlist
         (`runtime_config.default_playlist_id`). A saved reference no playlist
-        answers to is passed on as it is saved, whether the start left it out
-        (`Session.leave_out_default`), a compile did after it went dangling
-        under a running app, or it is waiting for the start to clear it: the
-        page shows it as "Missing playlist" with a warning, which is what it
-        is, and choosing another, or "All media", is then a change the page
-        can save.
+        answers to is passed on as it is saved. Every compile leaves it out
+        and plays "All media" (`runtime_config.LeftOut`), until the start
+        clears it or a playlist answers to it: the page shows it as "Missing
+        playlist" with a warning, which is what it is, and choosing another,
+        or "All media", is then a change the page can save.
         """
         saved = self._backend.settings.active_playlist
         if not saved:

@@ -411,7 +411,8 @@ class NextWindow(ShellWindow):
         self._refresh_window_banner()
 
     def publication_changed(self) -> None:
-        """The last publication's problem appeared or went: say so under the header."""
+        """The last publication's problem, or what it left out, appeared or went: say so
+        under the header."""
         self._refresh_window_banner()
 
     def first_run_changed(self) -> None:
@@ -502,8 +503,13 @@ class NextWindow(ShellWindow):
             return Banner(NO_FOLDER, "Choose a Folder\u2026", LIBRARY_FOLDER)
         problem = application.publication_problem
         if problem:
-            # Until a change gets through: it names the playlist, so its page helps.
+            # Until a change gets through.
             return Banner(f"{PUBLICATION_FAILED} {problem}", "Playlists", PLAYLISTS)
+        left_out = application.left_out_notice
+        if left_out:
+            # Published, without these: for as long as the playlist they name
+            # doesn't exist or has nothing to play. Its page is where to fix it.
+            return Banner(left_out, "Playlists", PLAYLISTS)
         return None
 
     def _refresh_window_banner(self) -> None:

@@ -972,8 +972,6 @@ class Session:
         #: For a view of what is saved: each file it could not read, and why
         #: (`unread`). Empty for every other Session.
         self._unread: dict[str, str] = {}
-        #: A saved default the compiler builds without (`leave_out_default`).
-        self._left_out_default = ""
 
     # -- state -----------------------------------------------------------
 
@@ -1306,24 +1304,6 @@ class Session:
             return view
 
         return read
-
-    def leave_out_default(self, reference: str) -> None:
-        """Build without the saved default ``reference`` while it names no playlist.
-
-        For a default in ``settings.toml`` that names nothing and can't be
-        cleared, because the file can't be saved (it is kept read-only, or
-        names a playlist a declarative setup has not made yet). The compiler
-        refuses a default it can't resolve, which would stop every
-        publication for as long as the file stays as it is; told this, it
-        builds as with no default instead (`runtime_config`). Only that
-        reference, and only while it resolves to nothing: once a playlist
-        answers to it, it is the default again. Empty forgets it.
-        """
-        self._left_out_default = reference
-
-    @property
-    def left_out_default(self) -> str:
-        return self._left_out_default
 
     def unread(self, *names: str) -> tuple[tuple[str, str], ...]:
         """Of the files ``names``, those this view of what is saved could not read, and why.

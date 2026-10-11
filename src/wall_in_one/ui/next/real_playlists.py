@@ -26,18 +26,21 @@ what is saved (`wall_in_one.ui.pending_edits`). Entries are always the saved
 ones; `PlaylistDetail.busy` says that changes to them are still queued.
 
 **Nothing playable.** A playlist that a schedule rule, the schedule's
-default or a display uses must keep something to play: the runtime
-configuration cannot be built otherwise (``runtime_config._compile``), and
-the service would keep the previous one. What "plays" means is the
-compiler's own answer (`runtime_config.entry_playability`): an entry it
-keeps, which playback does not skip, so a video still waiting for its
-still does not count. Removing the last entry a used playlist can play is
-refused at the head of the queue, against the saved rules, assignments and
-default (plus a default this adapter asked for that has not settled yet);
-so is leaving any playlist, used or not, with entries but none the compiler
-keeps, which would stop every publication (`runtime_config.change_problem`),
-and so is making one like that: a new playlist with wallpapers, or a copy,
-"All wallpapers" included (`runtime_config.checked_new_playlist`).
+default or a display uses should keep something to play: the runtime
+configuration is built without whatever names a playlist that can't play
+(``runtime_config._compile``, `runtime_config.LeftOut`), which nobody means
+by removing a wallpaper. What "plays" means is the compiler's own answer
+(`runtime_config.entry_playability`): an entry it keeps, which playback
+does not skip, so a video still waiting for its still does not count.
+Removing the last entry a used playlist can play is refused at the head of
+the queue, against the saved rules, assignments and default (plus a default
+this adapter asked for that has not settled yet); so is leaving any
+playlist, used or not, with entries but none the compiler keeps, which
+would never reach playback (`runtime_config.change_problem`), and so is
+making one like that: a new playlist with wallpapers, or a copy, "All
+wallpapers" included (`runtime_config.checked_new_playlist`). These
+refusals are a courtesy at the gesture. Publication does not depend on
+them: whatever another program saved meanwhile, the document is published.
 Making a playlist with nothing to play the default is refused when asked,
 and again by the application at its own settings write
 (`Application._prepare_settings_batch`), whichever page asked.
@@ -579,8 +582,7 @@ class RealPlaylists:
         if problem:
             raise RefusedError(
                 f"{quoted(current.name)} would hold only wallpapers playback can\u2019t use, "
-                "and a playlist like that stops every change from reaching playback. Remove "
-                "those too, or add one that plays first"
+                "so it would never play. Remove those too, or add one that plays first"
             )
 
     def _require_playing(self, items: Iterable[MediaItem]) -> None:
@@ -687,8 +689,8 @@ class RealPlaylists:
             # Checked here, at the head of the lane, by the compiler's own rule
             # (`runtime_config.checked_new_playlist`): a copy holding entries
             # none of which compiles (a library of videos still waiting for
-            # their stills, or a playlist whose files went) would stop every
-            # publication, used or not. An empty copy is fine.
+            # their stills, or a playlist whose files went) would never reach
+            # playback, used or not. An empty copy is fine.
             return runtime_config.checked_new_playlist(
                 name,
                 sources,

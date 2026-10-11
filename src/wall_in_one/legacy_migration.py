@@ -829,8 +829,8 @@ def _nothing_to_play_detail(names: tuple[str, ...]) -> str:
     listed = quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
     verb = "has" if len(names) == 1 else "have"
     return (
-        f"; {listed} {verb} nothing to play yet, so changes won\u2019t reach playback "
-        "until that is fixed (see the report)"
+        f"; {listed} {verb} nothing to play yet, so playback goes on without "
+        f"{'it' if len(names) == 1 else 'them'} until that is fixed (see the report)"
     )
 
 
@@ -1128,10 +1128,11 @@ def _nothing_to_play(
     """Each imported playlist holding entries but nothing the compiler can use, by name.
 
     Its entries are kept as they were (an unmounted drive is not a deletion),
-    but the compiler refuses a document with such a playlist, used or not,
-    so until one of its wallpapers is back, or it is emptied, no change
-    reaches playback. Said here, naming it, so the import report is honest;
-    the app says it too once it publishes. Found as the app will find it:
+    but the compiler builds the runtime document without such a playlist,
+    and without the default, the rule or the display's own playlist that
+    names it (`runtime_config.LeftOut`), until one of its wallpapers is back.
+    Said here, naming it, so the import report is honest; the app says what
+    it left out too once it publishes. Found as the app will find it:
     the real scan of the imported library folders (and Steam, while Workshop
     scanning is on) with the imported pairings, judged by the compiler's own
     rule (`runtime_config.entry_playability`). The scan only reads.
@@ -1182,9 +1183,10 @@ def _nothing_to_play(
                 f"\u201c{playlist.name}\u201d has nothing to play yet{used}: none of its {count} "
                 f"wallpaper{'' if count == 1 else 's'} can play from the imported library "
                 "folders now. "
-                "Its entries were kept. Until one of them is back, or the playlist is emptied, "
-                "Wall-in-One can\u2019t build the wallpaper service\u2019s configuration, so "
-                "changes won\u2019t reach playback; the app says so until then."
+                "Its entries were kept. Until one of them is back, playback goes on without "
+                "this playlist: where it is the default, \u201cAll media\u201d plays instead, "
+                "and a schedule rule or a display that uses it is left out. The app says so "
+                "until then."
             )
             names.append(playlist.name)
         return tuple(names)

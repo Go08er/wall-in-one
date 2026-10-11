@@ -141,9 +141,17 @@ def _with_durability(message: str, warnings: Sequence[str]) -> str:
     return ". ".join(said) + "." if said else ""
 
 
-def _runtime_installed(settings: config.Settings, session: Session) -> bool:
-    """`runtime_config.update`, where a pair published but not confirmed durable is installed.
+def _runtime_installed(
+    settings: config.Settings, session: Session
+) -> tuple[bool, tuple[runtime_config.LeftOut, ...]]:
+    """`runtime_config.publish_changes`: whether a file changed, and what was left out.
 
+    What was left out is the compiled document's, whether or not a byte
+    changed: every reference to a playlist that can't play, which the
+    compiler builds without (`runtime_config.LeftOut`). The lane hands it to
+    GTK, which says it when it changes (`Application._note_left_out`).
+
+    A pair published but not confirmed durable is installed.
     `runtime_config.RuntimeConfigNotDurableError` comes only after the whole
     new pair was renamed into place, so the service's watcher already reads
     it. Treated as a failure, the lane neither reloaded the service nor
@@ -153,10 +161,11 @@ def _runtime_installed(settings: config.Settings, session: Session) -> bool:
     inventory (`Application._inventory_installable`) before this, as before.
     """
     try:
-        return runtime_config.update(settings, session)
+        published = runtime_config.publish_changes(settings, session)
     except runtime_config.RuntimeConfigNotDurableError as uncertain:
         state_file.report_not_durable(str(uncertain))
-        return True
+        return True, uncertain.changes.left_out if uncertain.changes is not None else ()
+    return bool(published), published.left_out
 
 
 def _settings_published[Saved: (config.Settings, config.Settings | None)](
@@ -177,32 +186,6 @@ def _settings_published[Saved: (config.Settings, config.Settings | None)](
             return config.load_strict()
         except config.ConfigError:
             return error.settings
-
-
-def _told_the_default_rule(
-    snapshot: Session, loaded: config.LoadedSettings, already_left_out: str
-) -> None:
-    """Tell a compile's own short-lived session the rule every compiler follows.
-
-    The publication lane and the health lane each build a fresh `Session` on
-    their worker, which the start's repair never told to leave the default
-    out. Judged again here against what was just read under the compiler
-    lock (`runtime_config.unclearable_default`): a saved default that names no
-    playlist, in a ``settings.toml`` that can't be changed, is built without.
-
-    ``already_left_out`` is what the start's repair left out, for a file only
-    its save could show can't be changed (an immutable one, or its lock kept
-    read-only, which the look doesn't see). It counts only while the file
-    still names it; the compiler leaves it out only while it names nothing.
-
-    Nothing is said from here: the start says it, and a delete that could not
-    clear its default says so itself.
-    """
-    found = runtime_config.unclearable_default(snapshot.playlists, loaded)
-    if found is not None:
-        snapshot.leave_out_default(found[0])
-    elif already_left_out and already_left_out == loaded.settings.active_playlist:
-        snapshot.leave_out_default(already_left_out)
 
 
 def _playlist_namer(listing: playlists.Store, playlist_id: str) -> Callable[[str], bool]:
@@ -568,10 +551,6 @@ class _PlaylistReferenceRepairResult:
     #: References by name, now the playlist's id: (reference, id).
     schedule_retargets: tuple[tuple[str, str], ...] = ()
     display_retargets: tuple[tuple[str, str], ...] = ()
-    #: A saved default that names no playlist and could not be cleared, and
-    #: why: (reference, reason). Not a failure: this process goes on without
-    #: a default (`Session.leave_out_default`) and says so.
-    unsaved_default: tuple[str, str] | None = None
 
 
 class Application(Adw.Application):
@@ -656,9 +635,6 @@ class Application(Adw.Application):
         # may tell a control client to ask the user for a decision.
         self._authoring_gate_state: _AuthoringGateState = "checking"
         self._authoring_repair_started = False
-        #: The left-out default this process has already said, so that a
-        #: second pass of the repair doesn't say the same thing again.
-        self._unsaved_default_said: tuple[str, str] | None = None
         #: Why the gate rests at ``repair`` when the repair itself never ran to
         #: its end (its lane's guard refused it): said with every refusal.
         self._authoring_gate_reason = ""
@@ -803,6 +779,13 @@ class Application(Adw.Application):
         self._runtime_authoring_request: _RuntimeAuthoringRequest | None = None
         #: Why the last publication didn't reach the wallpaper service, or empty.
         self._publication_problem = ""
+        #: What the runtime document was built without when this process last
+        #: compiled it (`runtime_config.LeftOut`); None before the first
+        #: compile. Written by whichever lane compiled, under
+        #: `_runtime_config_lock`; said on GTK (`_note_left_out`).
+        self._compiled_left_out: tuple[runtime_config.LeftOut, ...] | None = None
+        #: The set that was last said, so it is said again only when it changes.
+        self._left_out_said: frozenset[runtime_config.LeftOut] = frozenset()
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
         # last normal window cannot cancel a committed Store -> runtime.toml
@@ -1034,7 +1017,6 @@ class Application(Adw.Application):
                         repaired_displays.append(playlist_id)
 
         saved_settings: config.Settings | None = None
-        unsaved_default: tuple[str, str] | None = None
         try:
             loaded = config.load_strict_document()
             active = loaded.settings.active_playlist
@@ -1051,20 +1033,15 @@ class Application(Adw.Application):
                 except config.ConfigError as error:
                     # Only a settings.toml that can't be changed for as long
                     # as it stays as it is (keys this build doesn't know, or
-                    # kept read-only) is not this start's to wait on. A
-                    # default that names nothing is then left out for this
-                    # process, which says so and goes on
-                    # (`runtime_config.unclearable_default`, the rule the
-                    # unattended compiles follow too); one that still names
+                    # kept read-only) is not this start's to wait on. Nothing
+                    # depends on the default being cleared: one that names
+                    # nothing is left out by every compile, which says so
+                    # (`runtime_config.LeftOut`), and one that still names
                     # its playlist, by name, has nothing wrong with it. A
                     # lock held too long or a file that stopped parsing is
-                    # the failure it always was, below.
-                    unsaved_default = runtime_config.unclearable_default(
-                        playlist_store, loaded, refused=error
-                    )
-                    if unsaved_default is None and not config.why_settings_cannot_change(
-                        loaded, refused=error
-                    ):
+                    # the failure it always was, below, so the person can
+                    # try again and have the file put right.
+                    if not config.why_settings_cannot_change(loaded, refused=error):
                         raise
                 else:
                     if saved_settings is None:
@@ -1086,7 +1063,6 @@ class Application(Adw.Application):
             schedule_retargets=tuple(retargeted_schedules),
             display_retargets=tuple(retargeted_displays),
             failures=tuple(failures),
-            unsaved_default=unsaved_default,
         )
 
     def _finish_playlist_reference_repair(
@@ -1129,8 +1105,6 @@ class Application(Adw.Application):
         self._session.displays.adopt_worker_forget_playlists(result.display_playlists)
         self._session.schedules.adopt_worker_retarget(dict(result.schedule_retargets))
         self._session.displays.adopt_worker_retarget(dict(result.display_retargets))
-        if result.unsaved_default is not None and not again:
-            self._session.leave_out_default(result.unsaved_default[0])
         if result.settings is not None:
             previous = self._settings
             settings = (
@@ -1164,21 +1138,6 @@ class Application(Adw.Application):
             )
 
         self._authoring_migration_ready = True
-        if (
-            result.unsaved_default is not None
-            and result.unsaved_default != self._unsaved_default_said
-        ):
-            reference, why = result.unsaved_default
-            # Said, never waited on: the library loads and changes are taken.
-            # Only a change that needs settings.toml saved is refused, by the
-            # save itself. Said once: a later pass (Try again after another
-            # failure) repeats it only if what it would say has changed.
-            self._unsaved_default_said = result.unsaved_default
-            self.window_report(
-                f"The saved default playlist ({reference}) doesn\u2019t exist, and it "
-                f"couldn\u2019t be cleared: {why}. Playback goes on without a default. To "
-                f"change it, edit active_playlist in {paths.settings_path()}."
-            )
         if self._service_start and not self._headless_authoring_started:
             self._headless_authoring_started = True
             # A partial import may already have linked Settings roots while
@@ -3116,7 +3075,7 @@ class Application(Adw.Application):
             self.window_report(problem or "the library is being scanned again")
             return False, False
         try:
-            changed = _runtime_installed(self._settings, self._session)
+            changed = self._installed_leaving_out(self._settings, self._session)
         except (runtime_config.RuntimeConfigError, OSError) as error:
             self.window_report(str(error))
             return False, False
@@ -3126,6 +3085,7 @@ class Application(Adw.Application):
         if changed:
             with self._runtime_config_lock:
                 self._runtime_document_generation += 1
+        self._note_left_out()
         return True, changed
 
     def _publish_runtime(self) -> bool:
@@ -3879,7 +3839,8 @@ class Application(Adw.Application):
         purpose), and one that belongs to older library sources (folders or
         Workshop scanning changed, and their scan has not landed). A playlist
         entry taken from it, or a playability check judged by it, could pass
-        and leave a playlist the compiler refuses once the scan lands.
+        and leave a playlist with nothing to play once the scan lands, which
+        the compiler then builds without (`runtime_config.LeftOut`).
         """
         with self._runtime_config_lock:
             valid = self._inventory_valid
@@ -4141,13 +4102,15 @@ class Application(Adw.Application):
         this thread while the cross-process compiler lock is held. Nothing is
         installed from a Library that isn't a valid inventory now
         (`_inventory_installable`), checked right before the install.
+
+        What the document was built without is kept (`_installed_leaving_out`)
+        for GTK to say once the publication settles (`_note_left_out`).
         """
         with (
             legacy_migration.unattended_transaction(),
             runtime_config.compiler_lock(),
         ):
-            loaded = config.load_strict_document()
-            settings = loaded.settings
+            settings = config.load_strict()
             durable_sources = (settings.roots, settings.scan_workshop)
             if request.library_sources != durable_sources:
                 raise _RuntimeLibraryNotReadyError(
@@ -4162,10 +4125,21 @@ class Application(Adw.Application):
                     raise _RuntimeInventoryInvalidError(
                         problem or "the library is being scanned again"
                     )
-                _told_the_default_rule(snapshot, loaded, self._session.left_out_default)
-                return _runtime_installed(settings, snapshot)
+                return self._installed_leaving_out(settings, snapshot)
             finally:
                 snapshot.shutdown()
+
+    def _installed_leaving_out(self, settings: config.Settings, session: Session) -> bool:
+        """`_runtime_installed`, keeping what the document was built without.
+
+        Called with the compiler lock held, or on GTK by the synchronous
+        path: the set kept is always the newest compile's, which is the
+        document on disk, whatever then becomes of its reload.
+        """
+        changed, left_out = _runtime_installed(settings, session)
+        with self._runtime_config_lock:
+            self._compiled_left_out = left_out
+        return changed
 
     def _compile_runtime_until_current(
         self,
@@ -4495,6 +4469,7 @@ class Application(Adw.Application):
                     self.refresh_runtime_status_async()
                 if not publication.deferred:
                     self._set_publication_problem(problem)
+                    self._note_left_out()
         finally:
             # Whatever reporting did: the next request, the publication hold
             # and the removal's tail are always serviced.
@@ -4510,12 +4485,53 @@ class Application(Adw.Application):
     def publication_problem(self) -> str:
         """Why the last publication didn't reach the wallpaper service, or empty.
 
-        The compiler's refusal (a playlist with nothing to play, naming it,
-        when its files went away outside the app, say) or the runtime's; the
-        service keeps the last configuration that worked meanwhile. The next
-        publication that gets through clears it.
+        The compiler's refusal (a store file it could not read, naming it, or
+        a limit of the runtime's) or the runtime's own; the service keeps the
+        last configuration that worked meanwhile. The next publication that
+        gets through clears it. A playlist that can't play is never this: the
+        document is published without what names it (`left_out_notice`).
         """
         return self._publication_problem
+
+    @property
+    def left_out_notice(self) -> str:
+        """What the published runtime document was built without, in words; or empty.
+
+        A default, a schedule rule or a display's own playlist that names a
+        playlist which doesn't exist or has nothing to play is left out by
+        the compiler, and everything else is published
+        (`runtime_config.LeftOut`). It stands for as long as that is so: the
+        new window keeps it under its header, below a publication problem.
+        """
+        return runtime_config.left_out_notice(self._left_out_said)
+
+    def _note_left_out(self) -> None:
+        """Say what the newest compiled document leaves out, if that has changed.
+
+        On GTK, after a publication settles: the compile lane's, the health
+        lane's or a synchronous one. Said once, in the window's toast and the
+        activity log (`window_report`), and again only when the set of
+        references left out is a different one; never by every publication or
+        status poll that meets the same set. When nothing is left out any
+        more the notice goes, and the log says so.
+        """
+        with self._runtime_config_lock:
+            compiled = self._compiled_left_out
+        if compiled is None:
+            return
+        left_out = frozenset(compiled)
+        if left_out == self._left_out_said:
+            return
+        self._left_out_said = left_out
+        if left_out:
+            self.window_report(self.left_out_notice)
+        else:
+            self.activity_log.record(
+                "app", "Nothing is left out of playback any more: every saved playlist plays."
+            )
+        changed = getattr(self._window, "publication_changed", None)
+        if callable(changed):
+            changed()
 
     def _set_publication_problem(self, problem: str) -> None:
         if problem == self._publication_problem:
@@ -4900,11 +4916,9 @@ class Application(Adw.Application):
                 legacy_migration.unattended_transaction(timeout=0),
                 runtime_config.compiler_lock(timeout=0),
             ):
-                loaded = config.load_strict_document()
-                settings = loaded.settings
+                settings = config.load_strict()
                 snapshot = Session(settings)
                 snapshot.adopt_library(request.library, reconcile_workshop=False)
-                _told_the_default_rule(snapshot, loaded, self._session.left_out_default)
                 faults = snapshot.authoring_faults()
                 if faults:
                     return _RuntimeHealthResult(request)
@@ -4941,7 +4955,7 @@ class Application(Adw.Application):
                     # The markers are saved; the next valid publication carries them.
                     return _RuntimeHealthResult(request, saved=changed > 0)
                 try:
-                    document_changed = _runtime_installed(settings, snapshot)
+                    document_changed = self._installed_leaving_out(settings, snapshot)
                 except runtime_config.RuntimeConfigError as error:
                     # The markers are saved whatever the compiler makes of
                     # them: adopt them, and say why this publication stopped
@@ -5040,6 +5054,7 @@ class Application(Adw.Application):
         becomes the publication problem. A transaction that tried nothing
         (the gate was busy, the status was stale, the markers were there
         already) is neither a failure nor a success, and leaves both as they are.
+        What a document was built without is said once too (`_note_left_out`).
         """
         if result.error:
             self._say_health_failure_once(result.error)
@@ -5060,6 +5075,9 @@ class Application(Adw.Application):
             self._session.adopt_pairing_store(result.store)
             if result.changed and self._window is not None:
                 self._window.pairing_health_changed(self._session)
+        # What this lane's own compile left out, if it compiled: said only when
+        # it is not what was said last, so no poll repeats it.
+        self._note_left_out()
         publication = result.publication
         if publication is None:
             return
@@ -5965,8 +5983,8 @@ class Application(Adw.Application):
 
         An older profile's default, rule or display assignment may name the
         playlist by its name, which the compiler resolves (by id, then by
-        name); renaming it would leave that naming nothing and stop every
-        publication. So, in this one task:
+        name); renaming it would leave that naming nothing, and the compiler
+        would build without it (`runtime_config.LeftOut`). So, in this one task:
 
         1. Read every store first, writing nothing: the playlists file (with
            the new name checked as the rename would check it), the schedule
@@ -6639,8 +6657,8 @@ class Application(Adw.Application):
         On GTK, after every write queued before it has saved: a default
         playlist that has nothing to play by now (its last wallpaper removed
         meanwhile, say) is refused here (`runtime_config.settings_refusal`),
-        whichever page or window asked, so the runtime configuration can still
-        be built. A change to the library folders or Wallpaper Engine scanning
+        whichever page or window asked: it would be built as "All media", not
+        as what was chosen. A change to the library folders or Wallpaper Engine scanning
         is checked on the worker, before ``settings.toml`` is written, by a dry
         run of the real scan and compiler (`wall_in_one.dry_run.sources`). A
         refusal fails the whole batch, as a failed write does: every control

@@ -1228,8 +1228,10 @@ def require_playlist_deletable(
 
     Deleting the saved default playlist also clears ``active_playlist``. When
     that write can't happen, the deletion has already committed and the saved
-    default points at nothing, which stops runtime compilation. Callers check
-    this before deleting so the whole operation is refused instead.
+    default points at nothing: half a delete. Playback would go on (the
+    compiler builds such a default as "All media" and says so), but nobody
+    asked for that. Callers check this before deleting so the whole operation
+    is refused instead.
 
     Three cases are refused, each only when the saved default names this
     playlist, or can't be shown not to. The settings are read-only (they hold

@@ -237,6 +237,8 @@ class _ImageTemporary:
             file_io.respell_error(error, str(self.path.parent), str(self.logical_path.parent))
         why = file_io.public_text(str(error) or error.__class__.__name__)
         what = "the unpublished still"
+        if isinstance(error, file_io.UnconfirmedMoveError):
+            return f"{what} {error.said}"
         moved = error.preserved_path if isinstance(error, file_io.PathChangedError) else None
         if moved is not None:
             return f"{what} was moved to {moved}, but could not be verified there ({why})"
@@ -808,7 +810,7 @@ def write_sidecar(video: Path, still: Path) -> Path:
         source.close()
 
 
-_Retirement = Literal["retired", "changed", "unproven", "not-retired"]
+_Retirement = Literal["retired", "changed", "unproven", "not-retired", "moved"]
 
 
 def _retire_if_written(
@@ -830,6 +832,8 @@ def _retire_if_written(
     not ``written`` any more; "unproven", they could not be read back, so
     nothing is known either way (they may well still match); "not-retired",
     proven, but the move was refused (or undone). In all three it stays.
+    "moved": it is in the retained folder, but something about the move could
+    not be confirmed; the second value then says where it is and what.
     """
     try:
         current = pin.fingerprint
@@ -852,6 +856,14 @@ def _retire_if_written(
             pinned_source=pin,
             logical_parent=logical_parent,
         )
+    except file_io.UnconfirmedMoveError as error:
+        return "moved", error.said
+    except file_io.PathChangedError as error:
+        if error.preserved_path is not None:
+            return "moved", (
+                f"was moved to {error.preserved_path}, but could not be verified there"
+            )
+        return "not-retired", ""
     except OSError, ValueError:
         return "not-retired", ""
     return "retired", ""
@@ -883,6 +895,9 @@ def _left_unproven(
     active = sys.exception()
     reason = f"{active}; " if active is not None else ""
     named = path if shown is None else shown
+    if outcome == "moved":
+        # It left this name: where it is now, and what is not known, is ``why``.
+        return StillError(f"{reason}{what} at {named} {why}")
     try:
         path.lstat()
     except FileNotFoundError:

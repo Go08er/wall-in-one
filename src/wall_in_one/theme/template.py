@@ -668,6 +668,8 @@ def _settle_relocated_backup(
                 logical_path=temporary,
             )
         except file_io.PathChangedError as error:
+            if isinstance(error, file_io.UnconfirmedMoveError):
+                return f"; what was at {temporary} {error.said}"
             moved = _moved_to(error)
             if moved is not None:
                 return (
@@ -2471,6 +2473,8 @@ def _resolve_failed_exchange(
         except (OSError, ValueError) as error:
             # Its move into the retained namespace can land and then be neither
             # verified nor undone: then that is where it is, not at the swap.
+            if isinstance(error, file_io.UnconfirmedMoveError):
+                return (f"the candidate {error.said}", False)
             preserved = _moved_to(error) or transaction.swap
             return (f"the candidate remains preserved at {preserved}", False)
         _fsync_parent(path)

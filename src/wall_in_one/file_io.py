@@ -95,6 +95,28 @@ class PathChangedError(OSError):
         self.preserved_path = preserved_path
 
 
+class UnconfirmedMoveError(PathChangedError):
+    """An entry was moved to ``preserved_path``, and that could not be made durable.
+
+    The move happened, and the entry is there, intact, as far as this process
+    can see. A directory sync after it failed, so what a power cut would leave
+    is not known: the entry may then be at ``preserved_path``, back at its
+    old name, or at both. Nothing is undone and nothing is destroyed.
+
+    ``said`` is that as a clause for a caller's own sentence ("was moved to
+    ..., but that could not be confirmed durable (...): ..."); the message is
+    the same with the entry's old name in front.
+    """
+
+    def __init__(self, source: Path, destination: Path, cause: OSError) -> None:
+        self.said = (
+            f"was moved to {destination}, but that could not be confirmed durable "
+            f"({cause.strerror or cause}): after a power cut it may be there, back at its "
+            "old name, or both"
+        )
+        super().__init__(f"{source} {self.said}", preserved_path=destination)
+
+
 PathIdentity = tuple[int, int]
 # A persisted regular-file generation.  Device/inode alone are not a
 # generation identifier: after the last reference closes, a filesystem may
@@ -1683,6 +1705,7 @@ def _retain_exact_entry(
     retained_parent: Path | None = None,
     logical_parent: Path | None = None,
     logical_path: Path | None = None,
+    durable: bool = True,
 ) -> Path:
     """Move one exact inode into a shared inert-residue namespace.
 
@@ -1690,6 +1713,17 @@ def _retain_exact_entry(
     on inode identity.  One mode-0700 directory per filesystem parent avoids a
     claim directory for every cleanup while random child names prevent one
     retained generation from replacing another.
+
+    The move is made power-cut safe in the order `claim_for_deletion` uses,
+    through pinned directories: the retained folder's own name first (its
+    parent is synced before the move relies on it), then the move, then the
+    new link (the retained folder), and only then the withdrawal of the old
+    one (the source's folder). A failure before the move moves nothing. A
+    sync that fails after it raises `UnconfirmedMoveError`: the entry is at
+    the retained path it names, and nothing more is claimed.
+
+    ``durable=False`` leaves the barriers out. It is for a dead socket in the
+    runtime directory, which holds nothing and does not outlive the session.
     """
     access_parent = path.parent if retained_parent is None else retained_parent
     public_parent = access_parent if logical_parent is None else logical_parent
@@ -1699,7 +1733,27 @@ def _retain_exact_entry(
         access_directory.mkdir(mode=0o700)
     directory_pin = _pin_private_claim_directory(access_directory)
     public_source = path if logical_path is None else logical_path
+    source_parent_pin: PinnedPath | None = None
     try:
+        if durable:
+            # Pinned before the move, as the claim does: the folder synced
+            # afterwards is the one the entry was moved out of.
+            source_parent_pin = _pin_directory_for_durability(path.parent)
+            retained_parent_pin = _pin_directory_for_durability(access_parent)
+            try:
+                # Persist the retained folder's own name before the only link
+                # to the entry is inside it. Every time, as the claim does,
+                # not only when this call made the folder: an earlier call may
+                # have made it and failed here, and a released version made it
+                # without any sync.
+                _fsync_directory_capability(
+                    retained_parent_pin.descriptor,
+                    expected_identity=retained_parent_pin.identity,
+                    logical_path=public_parent,
+                )
+            finally:
+                with contextlib.suppress(OSError):
+                    retained_parent_pin.close()
         for _attempt in range(_RETAINED_ENTRY_ATTEMPTS):
             name = f"{RETAINED_ENTRY_PREFIX}{secrets.token_hex(16)}"
             destination = directory_pin.anchor / name
@@ -1728,8 +1782,29 @@ def _retain_exact_entry(
                         public_destination if error.preserved_path is not None else None
                     ),
                 ) from error
+            if source_parent_pin is not None:
+                try:
+                    # The new link first, then the withdrawal of the old one:
+                    # a power cut between the two leaves the entry at both
+                    # names at worst, never at neither.
+                    _fsync_directory_capability(
+                        directory_pin.descriptor,
+                        expected_identity=directory_pin.identity,
+                        logical_path=public_directory,
+                    )
+                    _fsync_directory_capability(
+                        source_parent_pin.descriptor,
+                        expected_identity=source_parent_pin.identity,
+                        logical_path=public_source.parent,
+                    )
+                except OSError as error:
+                    raise UnconfirmedMoveError(public_source, public_destination, error) from error
             return public_destination
     finally:
+        if source_parent_pin is not None:
+            # Closing a directory capability cannot undo the move or a sync.
+            with contextlib.suppress(OSError):
+                source_parent_pin.close()
         directory_pin.close()
     raise OSError("could not allocate an unused retained-entry name")
 

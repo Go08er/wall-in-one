@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from tests import sync_faults
 from wall_in_one import config, file_io, paths
 from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
@@ -1921,6 +1922,39 @@ def test_a_published_sidecar_rolled_back_unchanged_is_retired_intact(
     assert [entry.read_bytes() for entry in _retained(tmp_path)] == published
 
 
+def test_a_sidecar_retired_but_not_durably_is_said_where_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As above, and the retained folder's sync fails after the record was moved
+    into it (AC-3's class). The record is there, whole, and the error says where
+    and that it could not be confirmed durable: not nothing, as if it were done."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not decoded here")
+    chosen = tmp_path / "chosen.png"
+    chosen.write_bytes(b"png")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    real_sync = paths.fsync_directory
+    published: list[bytes] = []
+
+    def sync(directory: Path) -> None:
+        if not published and sidecar.exists():
+            published.append(sidecar.read_bytes())
+            raise OSError(errno.EIO, "injected directory sync failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(paths, "fsync_directory", sync)
+    sync_faults.fail_the_sync_after_a_retirement(monkeypatch)
+    with pytest.raises(stills.StillError) as raised:
+        stills.write_sidecar(video, chosen)
+
+    (kept,) = _retained(tmp_path)
+    assert kept.read_bytes() == published[0] and not sidecar.exists()
+    # Failed on 7bdc1a6: nothing was said about it: retired, with no sync behind it.
+    assert str(raised.value).endswith(
+        f"the pairing record at {sidecar} was moved to {kept}{sync_faults.UNCONFIRMED}"
+    ), str(raised.value)
+
+
 def test_a_sidecar_whose_retirement_could_not_be_verified_is_not_said_changed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2076,6 +2110,43 @@ def _rendered(_video: Path, temporary: Path, _seek: float, *, processes: object 
     del processes
     temporary.write_bytes(b"\x89PNG\r\n\x1a\nrendered")
     return ""
+
+
+def test_a_still_moved_back_and_retired_but_not_durably_is_said_where_it_is(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The rendered still is published, edited in place (so it no longer
+    verifies) and moved back to its temporary name; it is retired intact, edit and
+    all, and the retained folder's sync then fails (AC-3's class). The error and
+    the log say where it is and that this could not be confirmed durable."""
+    video = root / "clip.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"source")
+    target = stills.destination(video, root)
+    real_rename = file_io._rename_noreplace
+    steps: list[str] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        if not steps and destination.name == target.name:
+            steps.append("published")
+            with destination.open("ab") as handle:
+                handle.write(b" and edited")  # in place: it no longer verifies
+
+    monkeypatch.setattr(stills, "_run", _rendered)
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    sync_faults.fail_the_sync_after_a_retirement(monkeypatch)
+    with caplog.at_level(logging.WARNING), pytest.raises(stills.StillError) as raised:
+        stills.generate(video, root)
+
+    said = str(raised.value)
+    (kept,) = _retained(target.parent)
+    assert kept.read_bytes() == b"\x89PNG\r\n\x1a\nrendered and edited", "the edit survives"
+    assert not target.exists()
+    # Failed on 7bdc1a6: only logged, at INFO, as "retired intact to <path>".
+    told = f"the unpublished still was moved to {kept}{sync_faults.UNCONFIRMED}"
+    assert told in said and told in caplog.text, said
+    assert "/proc/" not in said, said
 
 
 @pytest.mark.parametrize("mode", [0o600, 0o000], ids=["0600", "0000"])

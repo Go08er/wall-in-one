@@ -962,6 +962,9 @@ class SocketServer:
                 expected_identity=identity,
                 expected_file_type=stat.S_IFSOCK,
                 externally_pinned=externally_pinned,
+                # A dead socket in the runtime directory: nothing in it to
+                # make durable, and it does not outlive the session anyway.
+                durable=False,
             )
         except FileNotFoundError:
             # Another actor may remove an already-dead path, but no unknown

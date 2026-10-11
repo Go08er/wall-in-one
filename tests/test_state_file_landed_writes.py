@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import sync_faults
 from tests.test_palettes import _document
 from tests.test_published_not_durable import _sync_fails_for
 from wall_in_one import file_io
@@ -359,6 +360,32 @@ def test_a_candidate_that_cannot_be_put_back_is_said_as_retired(
     assert said.endswith(RETIRED_INTACT.format(retired[0])), said
     assert raised.value.preserved_path == retired[0]
     assert wrote == []
+
+
+def test_a_candidate_retired_but_not_durably_is_said_where_it_is_and_not_as_retired(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As above, and the retained folder's sync fails after the candidate was moved
+    into it (AC-3's class). It is there, whole. It is not called "retired": the
+    error says where it is and that this could not be confirmed durable."""
+    target = folder / "state.json"
+
+    with (
+        put_back_refused(monkeypatch, target, lambda name: name.write_text("repair\n")) as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        sync_faults.fail_the_sync_after_a_retirement(monkeypatch)
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    (kept,) = _retired_entries(folder)
+    assert kept.read_text(encoding="utf-8") == CANDIDATE and not moved[0].exists()
+    # Failed on 7bdc1a6: "... was retired intact to <path>", with no sync behind it.
+    assert "retired intact" not in said, said
+    assert said.endswith(
+        f"; what was at {moved[0]} was moved to {kept}{sync_faults.UNCONFIRMED}"
+    ), said
+    assert raised.value.preserved_path == kept
 
 
 def test_a_candidate_the_cleanup_cannot_discard_is_said_where_it_is(

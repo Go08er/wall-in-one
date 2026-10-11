@@ -811,6 +811,7 @@ class _CandidateLeftBehind:
         changed: bool,
         retire_failed: OSError | None,
         still_ours: bool,
+        unconfirmed: str = "",
     ) -> str:
         """After the cleanup: ``retired`` to where, or moved to ``unverified`` and
         not verified there, or refused because it ``changed`` after its proof, or
@@ -826,6 +827,10 @@ class _CandidateLeftBehind:
                 f"candidate just before (it may have changed since), was retired intact "
                 f"to {retired}"
             )
+        if unverified is not None and unconfirmed:
+            # Moved intact; only the move's durability is unconfirmed
+            # (`file_io.UnconfirmedMoveError.said`).
+            return f"{self.reason}; what was at {temporary} {unconfirmed}"
         if unverified is not None:
             return (
                 f"{self.reason}; what was at {temporary} was moved to {unverified}, "
@@ -1369,6 +1374,7 @@ def write_atomic_bytes(
         still_ours = False
         retired: Path | None = None
         unverified: Path | None = None
+        unconfirmed = ""
         changed = False
         retire_failed: OSError | None = None
         if not relocated:
@@ -1421,6 +1427,8 @@ def write_atomic_bytes(
                 except file_io.PathChangedError as error:
                     if error.preserved_path is not None:
                         unverified = error.preserved_path
+                        if isinstance(error, file_io.UnconfirmedMoveError):
+                            unconfirmed = error.said
                     else:
                         # Refused, and not moved (or moved and put back, which
                         # moves its ctime): changed after its proof only if
@@ -1440,6 +1448,7 @@ def write_atomic_bytes(
                 temporary,
                 retired=retired,
                 unverified=unverified,
+                unconfirmed=unconfirmed,
                 changed=changed,
                 retire_failed=retire_failed,
                 still_ours=still_ours,

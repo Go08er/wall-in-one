@@ -8,6 +8,7 @@ import socket
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -1667,3 +1668,143 @@ def test_a_discard_that_leaves_its_claim_unreachable_does_not_answer_false(
     assert (folder / "entry").read_bytes() == b"transaction record" and not source.exists()
     assert raised.value.preserved_path == folder / "entry"
     assert f"whether it is still at {folder / 'entry'} could not be checked" in str(raised.value)
+
+
+# -- retiring an entry intact: durable at its new place before its old one (AC-3) ------
+
+
+def _record_moves_and_syncs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail: Callable[[file_io.PathIdentity, bool], bool] = lambda _identity, _moved: False,
+) -> list[tuple[str, file_io.PathIdentity | None]]:
+    """Every rename and directory sync `file_io` makes from here, in order.
+
+    ``fail(identity, moved)`` chooses a sync to fail with EIO; ``moved`` is
+    whether a rename has happened yet.
+    """
+    events: list[tuple[str, file_io.PathIdentity | None]] = []
+    real_rename = file_io._rename_noreplace
+    real_sync = file_io._fsync_directory_capability
+
+    def rename(current: Path, target: Path) -> None:
+        events.append(("rename", None))
+        real_rename(current, target)
+
+    def sync(
+        descriptor: int, *, expected_identity: file_io.PathIdentity, logical_path: Path
+    ) -> None:
+        if fail(expected_identity, ("rename", None) in events):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        events.append(("sync", expected_identity))
+        real_sync(descriptor, expected_identity=expected_identity, logical_path=logical_path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", sync)
+    return events
+
+
+def _retire(source: Path, *, retained_parent: Path | None = None) -> Path:
+    fingerprint = file_io.regular_file_fingerprint(source)
+    with file_io.pin_regular_path(
+        source, expected_identity=fingerprint[:2], expected_fingerprint=fingerprint
+    ) as pin:
+        return file_io._retain_exact_entry(
+            source,
+            expected_identity=fingerprint[:2],
+            expected_file_type=stat.S_IFREG,
+            expected_fingerprint=fingerprint,
+            pinned_source=pin,
+            retained_parent=retained_parent,
+        )
+
+
+@pytest.mark.parametrize("retained_folder", ["new", "existing", "elsewhere"])
+def test_retiring_an_entry_syncs_its_new_place_before_its_old_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retained_folder: str
+) -> None:
+    """A power cut can't be run, so the order is pinned: the retained folder's
+    own name (its parent; whether or not the folder is new, as the claim does),
+    then the move, then the new link (the retained folder), and only then the
+    withdrawal of the old one (the source's folder). "elsewhere": the retained
+    folder is not beside the source, so its parent and the source's folder are
+    different folders."""
+    folder = tmp_path / "library"
+    source = (
+        folder / "claim" / "record.json" if retained_folder == "elsewhere" else folder / "r.json"
+    )
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"a record a person added to")
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    if retained_folder == "existing":
+        retained.mkdir(mode=0o700)
+    events = _record_moves_and_syncs(monkeypatch)
+
+    destination = _retire(
+        source, retained_parent=folder if retained_folder == "elsewhere" else None
+    )
+
+    its_name = ("sync", file_io.path_identity(folder))
+    new_link = ("sync", file_io.path_identity(retained))
+    old_link = ("sync", file_io.path_identity(source.parent))
+    # Failed on 7bdc1a6: [("rename", None)], with no sync at all.
+    assert events == [its_name, ("rename", None), new_link, old_link]
+    assert destination.parent == retained and not source.exists()
+    assert destination.read_bytes() == b"a record a person added to"
+
+
+@pytest.mark.parametrize("failed_barrier", ["retained", "source"])
+def test_a_retirement_that_cannot_be_made_durable_says_where_the_entry_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_barrier: str
+) -> None:
+    """A sync fails after the move (a real EIO from fsync is not available, so it
+    is the one thing injected). The entry is not moved back and never destroyed:
+    the error names the retained path, says it could not be confirmed durable,
+    and the bytes are there, whole."""
+    folder = tmp_path / "library"
+    source = folder / "claim" / "record.json"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"a record a person added to")
+    retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
+    retained.mkdir(mode=0o700)
+    failing = file_io.path_identity(retained if failed_barrier == "retained" else source.parent)
+    events = _record_moves_and_syncs(
+        monkeypatch, fail=lambda identity, moved: moved and identity == failing
+    )
+
+    # Failed on 7bdc1a6: nothing raised, and "retired" was said with no sync behind it.
+    with pytest.raises(file_io.PathChangedError) as caught:
+        _retire(source, retained_parent=folder)
+
+    assert isinstance(caught.value, file_io.UnconfirmedMoveError)
+    kept = caught.value.preserved_path
+    assert kept is not None and kept.parent == retained
+    assert kept.read_bytes() == b"a record a person added to" and not source.exists()
+    assert str(caught.value) == (
+        f"{source} was moved to {kept}, but that could not be confirmed durable "
+        "(Input/output error): after a power cut it may be there, back at its old name, or both"
+    )
+    its_name = ("sync", file_io.path_identity(folder))
+    if failed_barrier == "retained":
+        assert events == [its_name, ("rename", None)], "the old link was not synced after it"
+    else:
+        assert events == [its_name, ("rename", None), ("sync", file_io.path_identity(retained))]
+
+
+def test_a_new_retained_folder_that_cannot_be_made_durable_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync of a retained folder's own name fails, before the move: the entry
+    stays at its name, untouched, and the failure is not the moved-but-unconfirmed one."""
+    folder = tmp_path / "library"
+    folder.mkdir()
+    source = folder / "record.json"
+    source.write_bytes(b"a record a person added to")
+    events = _record_moves_and_syncs(monkeypatch, fail=lambda _identity, moved: not moved)
+
+    with pytest.raises(OSError, match="Input/output error") as caught:
+        _retire(source)
+
+    assert not isinstance(caught.value, file_io.PathChangedError)
+    assert events == [] and source.read_bytes() == b"a record a person added to"
+    assert list((folder / file_io.RETAINED_ENTRY_DIRECTORY).iterdir()) == []

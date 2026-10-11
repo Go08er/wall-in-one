@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import sync_faults
 from wall_in_one import file_io, paths
 from wall_in_one.theme import template
 
@@ -3440,3 +3441,61 @@ def test_template_errors_never_carry_a_descriptor_spelling() -> None:
         os.close(descriptor)
 
     assert str(error) == f"cannot sync {file_io.DESCRIPTOR_STAND_IN}/x"
+
+
+# -- a retirement is durable where it went before it is called retired (AC-3's class) --
+
+
+@pytest.mark.parametrize("synced", [True, False])
+def test_a_moved_back_settings_copy_is_only_called_retired_once_that_is_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synced: bool
+) -> None:
+    """The backup copy of Noctalia's settings was public for a moment and moved
+    back to its temporary name; it is retired intact. That is said with the syncs
+    behind it: the retained folder's own name, the move, the new link, then the
+    old one. When the retained folder's sync fails, what is said is where the
+    copy is and that this could not be confirmed durable."""
+    folder = tmp_path / "noctalia"
+    folder.mkdir()
+    temporary = folder / ".settings.toml.bak.tmp"
+    document = b'[theme]\nmode = "dark"\n'
+    temporary.write_bytes(document)
+    identity = file_io.path_identity(temporary)
+    events: list[str] = []
+    real_rename = file_io._rename_noreplace
+    real_sync = file_io._fsync_directory_capability
+
+    def rename(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        events.append("move")
+
+    def sync(
+        descriptor: int, *, expected_identity: file_io.PathIdentity, logical_path: Path
+    ) -> None:
+        events.append(f"sync {logical_path.name}")
+        real_sync(descriptor, expected_identity=expected_identity, logical_path=logical_path)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", rename)
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", sync)
+    if not synced:
+        sync_faults.fail_the_sync_after_a_retirement(monkeypatch)
+    descriptor = os.open(temporary, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        said = template._settle_relocated_backup(temporary, descriptor, identity, document)
+    finally:
+        os.close(descriptor)
+
+    (kept,) = (folder / file_io.RETAINED_ENTRY_DIRECTORY).iterdir()
+    assert kept.read_bytes() == document and not temporary.exists()
+    if synced:
+        # Failed on 7bdc1a6: ["move"], with no sync at all.
+        assert events == [
+            "sync noctalia",
+            "move",
+            f"sync {file_io.RETAINED_ENTRY_DIRECTORY}",
+            "sync noctalia",
+        ]
+        assert said.endswith(f"was retired intact to {kept}"), said
+    else:
+        # Failed on 7bdc1a6: "... was retired intact to <path>".
+        assert said == f"; what was at {temporary} was moved to {kept}{sync_faults.UNCONFIRMED}"

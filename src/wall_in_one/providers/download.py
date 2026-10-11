@@ -1030,18 +1030,12 @@ def recover_abandoned(
                         path.name, claimed_info, prefixes
                     )
                     if not valid:
-                        try:
-                            restored = claim.restore()
-                        except OSError as error:
+                        back, where = _put_back(claim, path)
+                        if not back:
                             raise ProviderError(
                                 "local-io",
-                                f"could not restore an unverified recovery entry at {claim.path}",
-                            ) from error
-                        if not restored:
-                            raise ProviderError(
-                                "local-io",
-                                "provider recovery left an unverified entry preserved at "
-                                f"{claim.path}",
+                                "provider recovery could not put an unverified entry back; "
+                                + where,
                             )
                         continue
                     try:
@@ -1116,34 +1110,50 @@ def _names_missing_media(raw: bytes, location: ManagedLocation, logical_media: P
     )
 
 
-def _put_back_or_say_where(claim: file_io.ClaimedPath, path: Path) -> str:
-    """Put a claimed staging entry back at ``path``; say where it is, as far as is known.
+def _put_back(claim: file_io.ClaimedPath, path: Path) -> tuple[bool, str]:
+    """Put a claimed staging entry back at ``path``: whether it is back, and where it is.
 
-    A restore that failed says nothing about where the entry is, and one that
-    made the move but could not make it durable leaves it at ``path``. So the
-    claim is looked at (`ClaimedPath.presence`), and a look that fails is said
-    as that: the entry "may still be" there, never "remains" unseen.
+    True only when the restore finished. A restore that made the move but
+    could not make it durable raises with ``preserved_path``: the entry is
+    back at ``path``, and that it could not be confirmed is said. Any other
+    failure says nothing about where the entry is, so the claim is looked at
+    (`ClaimedPath.presence`), and a look that fails is said as that: the
+    entry "may still be" there, never "remains" unseen.
     """
     try:
         if claim.restore():
-            return f"entry remains at {path}"
+            return True, f"entry remains at {path}"
     except OSError as error:
         if isinstance(error, file_io.PathChangedError) and error.preserved_path is not None:
-            # The move was made; only its durability is in doubt.
-            return f"entry remains at {path}"
+            # The move was made, and one of two things about it is in doubt.
+            cause = error.__cause__
+            if isinstance(cause, file_io.PathChangedError):
+                return False, f"entry is back at {path}, but could not be verified there"
+            # Its durability: why is the sync's own failure, which the
+            # restore wraps in a sentence.
+            reason = cause if isinstance(cause, OSError) else error
+            why = file_io.public_text(str(reason.strerror or reason))
+            return False, (
+                f"entry is back at {path}, but that could not be confirmed durable ({why})"
+            )
         # Why is for the log; where the entry is now is looked at, not assumed.
         LOGGER.warning(
             "a claimed staging entry could not be put back: %s", file_io.public_text(str(error))
         )
     presence = claim.presence()
     if presence is True:
-        return f"entry remains at {claim.path}"
+        return False, f"entry remains at {claim.path}"
     if presence is False:
-        return f"entry is no longer at {claim.path}; it may be back at {path}"
-    return (
+        return False, f"entry is no longer at {claim.path}; it may be back at {path}"
+    return False, (
         f"entry may still be at {claim.path}; that could not be checked "
         f"({presence.strerror or presence})"
     )
+
+
+def _put_back_or_say_where(claim: file_io.ClaimedPath, path: Path) -> str:
+    """`_put_back`, for a step that has already failed: where the entry is now."""
+    return _put_back(claim, path)[1]
 
 
 def _retire_orphan_sidecar(
@@ -1199,7 +1209,15 @@ def _retire_orphan_sidecar(
                 expected_fingerprint=fingerprint,
                 pinned_source=pinned,
                 logical_parent=logical.parent,
+                logical_path=logical,
             )
+        except file_io.UnconfirmedMoveError as error:
+            # Moved, whole, and nothing about it changed: only its durability
+            # is unconfirmed. Said as that, and the sweep stops.
+            raise ProviderError(
+                "local-io",
+                f"provider recovery could not finish retiring an orphaned record: {error}",
+            ) from error
         except file_io.PathChangedError as error:
             if error.preserved_path is not None:
                 raise ProviderError(
@@ -1754,7 +1772,10 @@ def _settle_relocated(
                 expected_fingerprint=current,
                 pinned_source=pinned,
                 logical_parent=path.parent,
+                logical_path=Path(os.fspath(path)),
             )
+        except file_io.UnconfirmedMoveError as error:
+            return f"; what was at {path} {error.said}"
         except file_io.PathChangedError as error:
             if error.preserved_path is not None:
                 return (

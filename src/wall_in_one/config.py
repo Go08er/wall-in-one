@@ -139,10 +139,12 @@ def read_only_message(unknown_keys: Sequence[str]) -> str:
 
 
 class SettingsUnreadableError(ConfigError):
-    """A change was refused because settings.toml could not be read to check it.
+    """A change was refused because what is saved could not be read to check it.
 
-    Carries the stores' ``unreadable`` kind, and reads ``kind: message`` as
-    their errors do: nothing was changed, and what the file holds isn't known.
+    ``settings.toml``, or a store read with it for the same judgement
+    (`wall_in_one.session.Session.saved_view`). Carries the stores'
+    ``unreadable`` kind, and reads ``kind: message`` as their errors do:
+    nothing was changed, and what the file holds isn't known.
     """
 
     kind: Final = state_file.UNREADABLE
@@ -565,6 +567,24 @@ def load_strict_document(
     except OSError as error:
         raise ConfigError(f"cannot read {target}: {error}") from error
     return parse_strict_document(document, target)
+
+
+def load_saved(otherwise: Settings, path: Path | None = None) -> Settings:
+    """What ``settings.toml`` holds, read strictly; ``otherwise`` when there is no file.
+
+    For judging against what is saved now rather than what a window
+    remembers. With no file, nobody has saved anything, and the caller's own
+    settings stand. A file that can't be read, or doesn't parse, raises
+    `ConfigError`: what it holds is not known.
+    """
+    target = path if path is not None else paths.settings_path()
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        return otherwise
+    except OSError as error:
+        raise ConfigError(f"cannot read {target}: {error}") from error
+    return load_strict(target)
 
 
 def parse_strict_bytes(document: bytes, target: Path) -> Settings:

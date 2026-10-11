@@ -594,6 +594,29 @@ class Store:
         store._fault_kind = reading.fault_kind
         return store
 
+    def worker_copy(self, *, rebase: bool = False) -> Store:
+        """A detached copy; with ``rebase``, what the file holds, read on a worker.
+
+        As `playlists.Store.worker_copy`: a directly constructed Store may
+        seed an absent file, so its rules are kept until a file has existed;
+        an opened one treats absence as what is saved.
+        """
+        target = self._path if self._path is not None else state_path()
+        if rebase:
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                if self._loaded:
+                    return type(self).open(target)
+            except OSError:
+                return type(self).open(target)
+            else:
+                return type(self).open(target)
+        copied = type(self)(self._rules, target, _loaded=self._loaded)
+        copied._fault = self._fault
+        copied._fault_kind = self._fault_kind
+        return copied
+
     @property
     def rules(self) -> tuple[Rule, ...]:
         return tuple(self._rules)

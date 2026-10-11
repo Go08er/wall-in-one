@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from wall_in_one import config, file_io
 from wall_in_one.library import (
@@ -40,9 +40,6 @@ from wall_in_one.library.playlists import Playlist as NamedPlaylist
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
-
-if TYPE_CHECKING:
-    from wall_in_one.dry_run import Uses
 
 Scanner = Callable[[Sequence[Path] | None], Library]
 
@@ -307,10 +304,14 @@ class RemovalPlan:
     #: it to a deletion-capable generation proof with ``authority_for``;
     #: neither this path nor the old basename is authority on its own.
     adopted_capture: Path | None = None
-    #: The accepted library, what uses each playlist, and the session's
-    #: injected scanner (tests), for the dry run before anything is touched.
+    #: The accepted library and the session's injected scanner (tests), for
+    #: the dry run before anything is touched.
     library: Library = field(default_factory=lambda: Library(roots=(), items=()))
-    uses: Uses | None = None
+    #: Reads what is saved, on the worker (`Session.saved_view`). The dry run
+    #: takes the default and what uses each playlist from it: what
+    #: ``settings.toml``, the schedule and the displays' file say when it
+    #: runs, not what the session held when the plan was made.
+    saved: Callable[[], Session] | None = None
     scanner: Scanner | None = None
 
     def run(self) -> RemovalResult:
@@ -664,19 +665,29 @@ def _dry_run_removal(
     """
     from wall_in_one import dry_run, runtime_config  # dry_run builds Sessions
 
-    if plan.uses is None:  # pragma: no cover - prepare_removal_plan always sets it
-        raise ValueError("removal plan has no snapshot of what uses each playlist")
+    saved = plan.saved
+    if saved is None:  # pragma: no cover - prepare_removal_plan always sets it
+        raise ValueError("removal plan has no way to read what is saved")
     try:
+        # Judged on what is saved now, not on what the session held when the
+        # plan was made: the default from ``settings.toml`` as it reads here,
+        # the rules and assignments from their files. Another program may
+        # have put a playlist to use since.
+        view = saved()
+        try:
+            settings, uses, library = view.settings, dry_run.Uses.of(view), view.library
+        finally:
+            view.shutdown()
         verdict = dry_run.removal(
             plan.item,
-            settings=plan.settings,
-            library=plan.library,
+            settings=settings,
+            library=library,
             roots=plan.roots,
             adopted_authority=adopted_authority,
             favourite_store=favourite_store,
             pairing_store=pairing_store,
             playlist_store=playlist_store,
-            uses=plan.uses,
+            uses=uses,
             scanner=plan.scanner,
         )
     except Exception as error:
@@ -832,6 +843,10 @@ def _renderer_for(settings: config.Settings) -> renderer.Renderer:
     )
 
 
+#: `Session.authoring_faults` names of the stores a guard judges by (`Session.saved_view`).
+_JUDGED_STORES: Final = frozenset({"pairings", "playlists", "schedules", "display assignments"})
+
+
 class Session:
     """Library, play order, and the wallpaper currently applied."""
 
@@ -917,6 +932,13 @@ class Session:
         # Injected so a schedule can be tested at three in the morning in
         # December without waiting until then.
         self._now: Callable[[], datetime] = clock if clock is not None else datetime.now
+        #: For a view of what is saved (`saved_view`): whether its library is
+        #: the accepted one, which a scan from disk can still confirm
+        #: (`confirmed_on_disk`). False for every other Session.
+        self._confirmable = False
+        #: A guard let a change pass only because a playlist was already
+        #: broken, as this session's library has it (`note_already_broken`).
+        self._noted_already_broken = False
 
     # -- state -----------------------------------------------------------
 
@@ -1154,10 +1176,125 @@ class Session:
         """Durably authorize a local removal before media can be touched."""
         return self._removals.prepare(item, roots)
 
-    def prepare_removal_plan(self, item: MediaItem, *, trash: bool) -> RemovalPlan:
-        """Snapshot a detached removal without doing filesystem I/O on GTK."""
+    def saved_view(self) -> Callable[[], Session]:
+        """How a worker reads what is saved right now, for a guard to judge on.
+
+        Called on GTK, when a write reaches the head of the authoring lane. It
+        captures the accepted library and detached copies of the stores, and
+        returns a function for the worker to call just before it writes. That
+        function reads ``settings.toml`` and every store from disk and returns
+        a Session over them in which nothing is live: the default, the
+        playlists, the schedule rules and the display assignments as they are
+        saved at that moment, whoever saved them. A guard that asks "is this
+        playlist in use?" of that view judges what the compiler will build,
+        not what a window remembered from when it opened.
+
+        Its library is the accepted one while the saved folders and Wallpaper
+        Engine scanning are the ones this session holds, which is what that
+        library was scanned from. When another program saved others, the
+        accepted library says nothing about them, so the view's is scanned
+        from disk here instead (`scanned_from_disk`).
+
+        ``settings.toml`` or a store that can't be read raises
+        `config.ConfigError`: the question could not be answered, so the
+        caller refuses its write. A store that opens as empty because its
+        file is damaged, or was saved by a newer build, holds no rule and no
+        playlist, and "nothing uses it" from that would be a guess; this
+        process may have held the real ones since it started. With no file,
+        nothing was saved by anybody: no settings file leaves this session's
+        settings standing (`config.load_saved`), and no store file is an
+        empty store. The caller shuts the view down.
+        """
+        library = self._library
+        accepted = self._settings
+        scanner = self._scanner
+        pairing_store = self._pairings.worker_copy()
+        playlist_store = self._playlists.worker_copy()
+        favourite_store = self._favourites.worker_copy()
+        schedule_store = self._schedules.worker_copy()
+        display_store = self._displays.worker_copy()
+
+        def read() -> Session:
+            saved = config.load_saved(accepted)
+            view = Session(
+                saved,
+                scanner=scanner,
+                pairing_store=pairing_store.worker_copy(rebase=True),
+                playlist_store=playlist_store.worker_copy(rebase=True),
+                favourite_store=favourite_store.worker_copy(rebase=True),
+                schedule_store=schedule_store.worker_copy(rebase=True),
+                display_store=display_store.worker_copy(rebase=True),
+                removal_store=removals.Store(),
+                owns_playback=False,
+            )
+            # The stores a guard judges by. The favourites decide no playlist's
+            # use or playability, so a damaged star list refuses nothing here.
+            unread = [
+                (name, fault) for name, fault in view.authoring_faults() if name in _JUDGED_STORES
+            ]
+            if unread:
+                view.shutdown()
+                raise config.ConfigError("; ".join(f"{name}: {fault}" for name, fault in unread))
+            scanned_for_these = (saved.roots, saved.scan_workshop) == (
+                accepted.roots,
+                accepted.scan_workshop,
+            )
+            view._confirmable = scanned_for_these
+            view.adopt_library(
+                library if scanned_for_these else view.scanned_from_disk(),
+                reconcile_workshop=False,
+            )
+            return view
+
+        return read
+
+    def scanned_from_disk(self) -> Library:
+        """A scan, now, of this session's folders with its pairings; nothing is adopted."""
         from wall_in_one import dry_run  # it builds Sessions
 
+        return dry_run.on_disk(self._settings, self._pairings.records, self._scanner)
+
+    def note_already_broken(self) -> None:
+        """A guard let a change pass only because a playlist was already broken here.
+
+        `runtime_config.allowed_as_already_broken`. For a view of what is
+        saved, that is confirmed against a scan from disk before the write is
+        allowed (`confirmed_on_disk`). Any other Session has nothing to
+        confirm it with and keeps no note.
+        """
+        self._noted_already_broken = self._confirmable
+
+    @property
+    def noted_already_broken(self) -> bool:
+        return self._noted_already_broken
+
+    def confirmed_on_disk(self) -> Session | None:
+        """This view of what is saved, over a scan from disk; None if there is nothing to add.
+
+        For a view whose library is the accepted one (`saved_view`): the same
+        settings and stores, with the library as a scan finds it now. A file
+        another program added, which the accepted library has not scanned,
+        is in it. None for a view already scanned from disk, and for a
+        Session that is not such a view. The caller shuts it down.
+        """
+        if not self._confirmable:
+            return None
+        view = Session(
+            self._settings,
+            scanner=self._scanner,
+            pairing_store=self._pairings.worker_copy(),
+            playlist_store=self._playlists.worker_copy(),
+            favourite_store=self._favourites.worker_copy(),
+            schedule_store=self._schedules.worker_copy(),
+            display_store=self._displays.worker_copy(),
+            removal_store=removals.Store(),
+            owns_playback=False,
+        )
+        view.adopt_library(self.scanned_from_disk(), reconcile_workshop=False)
+        return view
+
+    def prepare_removal_plan(self, item: MediaItem, *, trash: bool) -> RemovalPlan:
+        """Snapshot a detached removal without doing filesystem I/O on GTK."""
         roots = tuple(self._library.roots)
         adopted_matches = tuple(
             capture for source, capture in self._library.adopted_stills if source == item.path
@@ -1174,7 +1311,7 @@ class Session:
             removal_store=self._removals.worker_copy(),
             adopted_capture=adopted_capture,
             library=self._library,
-            uses=dry_run.Uses.of(self),
+            saved=self.saved_view(),
             scanner=self._scanner,
         )
 

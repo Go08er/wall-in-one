@@ -873,7 +873,15 @@ class RealPlaylists:
             )
             kept = [entry for entry in current.entries if entry.id not in chosen]
             self._require_buildable(current, kept)
-            return lambda: (store.remove_entries(pid, chosen), removed)
+            # That was this page's early answer, in its own words. The one
+            # that counts is the application's, asked again on the worker of
+            # what is saved then (`runtime_config.checked_entries_removal`).
+            return runtime_config.checked_entries_removal(
+                pid,
+                chosen,
+                lambda: (store.remove_entries(pid, chosen), removed),
+                self._backend.session,
+            )
 
         def saved(
             result: tuple[playlists.Playlist, tuple[tuple[int, playlists.Entry], ...]],

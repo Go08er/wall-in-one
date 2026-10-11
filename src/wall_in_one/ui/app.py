@@ -3639,10 +3639,12 @@ class Application(Adw.Application):
                 raise ValueError(f"{still.name} was removed before the still choice could save")
         store = self._session.pairings
         roots = self._session.library.roots
+        # Asked on the worker, of what is saved then: a playlist another
+        # program put to use since this window opened is in use.
         unresolved = (
-            runtime_config.pairing_refusals_if_unresolved(current, self._session)
+            runtime_config.unresolved_on_what_is_saved(current, self._session)
             if still is None
-            else []
+            else None
         )
         # A chosen still taken from a library that isn't current, or none at
         # all, judged by one: refused while a playlist holds the wallpaper.
@@ -3656,10 +3658,11 @@ class Application(Adw.Application):
                 raise runtime_config.LibraryNotCurrentError(
                     f"{current.name}\u2019s still was not changed: {stale}"
                 )
-            if effective is None and unresolved:
+            broken = unresolved() if effective is None and unresolved is not None else []
+            if broken:
                 raise runtime_config.PlaybackGuardError(
                     f"{current.name}\u2019s still was not changed: it would have none, and "
-                    f"{runtime_config.listed(unresolved)}"
+                    f"{runtime_config.listed(broken)}"
                 )
             # Resolve the default before the durable mutation. A slow or
             # faulty source path can then fail cleanly without committing a
@@ -3681,7 +3684,8 @@ class Application(Adw.Application):
         current = self.current_item_for_authoring(item)
         store = self._session.pairings
         roots = self._session.library.roots
-        unresolved = runtime_config.pairing_refusals_if_unresolved(current, self._session)
+        # Asked on the worker, of what is saved then (see the still choice above).
+        unresolved = runtime_config.unresolved_on_what_is_saved(current, self._session)
         stale = self.pairing_currency_refusal(current)
 
         def work() -> _PairingResetMutationResult:
@@ -3690,10 +3694,11 @@ class Application(Adw.Application):
                 raise runtime_config.LibraryNotCurrentError(
                     f"{current.name} was not reset: {stale}"
                 )
-            if effective is None and unresolved:
+            broken = unresolved() if effective is None else []
+            if broken:
                 raise runtime_config.PlaybackGuardError(
                     f"{current.name} was not reset: it would have no still, and "
-                    f"{runtime_config.listed(unresolved)}"
+                    f"{runtime_config.listed(broken)}"
                 )
             changed = store.reset(current)
             return _PairingResetMutationResult(current, changed, effective)
@@ -5790,9 +5795,10 @@ class Application(Adw.Application):
 
         1. Read every store first, writing nothing: the playlists file (with
            the new name checked as the rename would check it), the schedule
-           and display stores, and settings when the default must change. One
-           that can't be read, is from a newer version, or would refuse the
-           name refuses the whole rename before anything is written.
+           and display stores, and the settings, always: whether the default
+           names the playlist is only known from the file. One that can't be
+           read, is from a newer version, or would refuse the name refuses
+           the whole rename before anything is written.
         2. Give each reference the playlist's id, one transaction per store:
            the default, every rule, every display assignment. The id names the
            same playlist before and after, so each is invisible on its own.
@@ -6484,27 +6490,33 @@ class Application(Adw.Application):
         if refusal:
             # Its kind keeps the reply a sentence (`control.server.failed`).
             raise runtime_config.PlaybackGuardError(refusal)
+        # The early answer, from what this process holds. The one that counts
+        # is asked on the worker, of the playlists as they are saved then.
+        default_refusal = (
+            runtime_config.default_refusal_on_what_is_saved(change_map, self._session)
+            if change_map.get("active_playlist")
+            else None
+        )
         sources = (
             self._sources_check()
             if any(key in {"roots", "scan_workshop"} for key, _gen, _value in changes)
             else None
         )
-        return lambda: self._persist_settings_batch(generation, changes, sources, roots_edits)
+        return lambda: self._persist_settings_batch(
+            generation, changes, sources, roots_edits, default_refusal
+        )
 
     def _sources_check(self) -> Callable[[config.Settings, config.Settings], None]:
         """A worker-side dry run of new library sources (`dry_run.sources`), refusing by raising.
 
-        Captured on GTK: the accepted library, copies of the stores, what
-        uses each playlist and the session's scanner; the worker reads the
-        durable stores and scans.
+        Captured on GTK: the session's scanner and how to read what is saved
+        (`Session.saved_view`). The worker takes the library, the stores and
+        what uses each playlist from that view, as their files read then, and
+        scans.
         """
         session = self._session
-        library = session.library
         scanner = session.scanner
-        uses = dry_run.Uses.of(session)
-        pairing_store = session.pairings.worker_copy()
-        playlist_store = session.playlists.worker_copy()
-        favourite_store = session.favourites.worker_copy()
+        saved = session.saved_view()
 
         def check(before: config.Settings, after: config.Settings) -> None:
             if before.roots != after.roots:
@@ -6518,16 +6530,20 @@ class Application(Adw.Application):
             else:
                 return
             try:
-                verdict = dry_run.sources(
-                    before,
-                    after,
-                    library=library,
-                    pairing_store=pairing_store.worker_copy(rebase=True),
-                    playlist_store=playlist_store.worker_copy(rebase=True),
-                    favourite_store=favourite_store.worker_copy(rebase=True),
-                    uses=uses,
-                    scanner=scanner,
-                )
+                view = saved()
+                try:
+                    verdict = dry_run.sources(
+                        before,
+                        after,
+                        library=view.library,
+                        pairing_store=view.pairings,
+                        playlist_store=view.playlists,
+                        favourite_store=view.favourites,
+                        uses=dry_run.Uses.of(view),
+                        scanner=scanner,
+                    )
+                finally:
+                    view.shutdown()
             except Exception as error:
                 raise dry_run.CheckFailed(
                     f"what {what} would leave could not be checked: {error}"
@@ -6545,11 +6561,16 @@ class Application(Adw.Application):
         changes: tuple[tuple[str, int, Any], ...],
         sources: Callable[[config.Settings, config.Settings], None] | None = None,
         roots_edits: tuple[config.RootsEdit, ...] = (),
+        default_refusal: Callable[[], str] | None = None,
     ) -> _SettingsResult:
         def persist() -> _SettingsResult:
             if not changes:  # pragma: no cover - guarded by the GTK scheduler
                 return _SettingsResult(generation, config.load_strict(), ())
             change_map = {key: value for key, _field_generation, value in changes}
+            if default_refusal is not None:
+                refused = default_refusal()
+                if refused:
+                    raise runtime_config.PlaybackGuardError(refused)
             wanted_default = change_map.get("active_playlist")
             if (
                 isinstance(wanted_default, str)
@@ -6821,6 +6842,9 @@ class Application(Adw.Application):
         if changes.get("active_playlist"):
             self.require_current_library()  # judged by the library, as in the window
         refusal = runtime_config.settings_refusal(changes, self._session)
+        if not refusal and changes.get("active_playlist"):
+            # And of the playlists as they are saved now, read here.
+            refusal = runtime_config.default_refusal_on_what_is_saved(changes, self._session)()
         if refusal:
             raise config.ConfigError(refusal)
         write: Callable[[], config.Settings] = lambda: config.update(changes)  # noqa: E731
@@ -7223,7 +7247,8 @@ class _Commands:
                             f"{item.name}\u2019s still was not changed: {stale}"
                         )
                     )
-                unresolved = runtime_config.pairing_refusals_if_unresolved(item, session)
+                # Of what is saved now, read here: this service is its own worker.
+                unresolved = runtime_config.unresolved_on_what_is_saved(item, session)()
                 if unresolved:
                     return server.failed(
                         runtime_config.PlaybackGuardError(
@@ -7321,7 +7346,7 @@ class _Commands:
                     return server.failed(
                         runtime_config.LibraryNotCurrentError(f"{item.name} was not reset: {stale}")
                     )
-                unresolved = runtime_config.pairing_refusals_if_unresolved(item, session)
+                unresolved = runtime_config.unresolved_on_what_is_saved(item, session)()
                 if unresolved:
                     return server.failed(
                         runtime_config.PlaybackGuardError(

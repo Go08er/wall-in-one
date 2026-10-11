@@ -66,8 +66,11 @@ class CheckFailed(ValueError):  # noqa: N818 - reads as the sentence it carries
 class Uses:
     """What uses playlists besides the settings: schedule rules and displays' own.
 
-    Taken from the live session on GTK, as values, so a dry run on the
-    worker counts the uses the change is made against.
+    Taken as values, so a dry run counts the uses the change is made against.
+    A dry run before a write takes them on its worker from
+    `Session.saved_view`: the rules and assignments as their files read at
+    that moment, whoever saved them, not the ones a window has held since it
+    opened.
     """
 
     rules: tuple[schedules.Rule, ...] = ()
@@ -175,9 +178,10 @@ def removal(
     judged = _judge(
         (settings, library, stores_before), (settings, after_library, stores_after), uses, gone
     )
-    if judged.refusals and scanner is None:
-        # Blame only what this removal breaks: against the library as it is on
-        # disk now, not as last accepted, in case something else went meanwhile.
+    if (judged.refusals or judged.excused) and scanner is None:
+        # Blame only what this removal breaks, and excuse only what was broken
+        # before it: against the library as it is on disk now, not as last
+        # accepted, in case something else went, or came, meanwhile.
         on_disk = _scan(settings, records, excluded=None)
         judged = _judge(
             (settings, on_disk, stores_before), (settings, after_library, stores_after), uses, gone
@@ -211,7 +215,11 @@ def sources(
         _scan(after, records, excluded=None) if scanner is None else scanner(after.roots)
     )
     judged = _judge((before, library, stores), (after, after_library, stores), uses, None)
-    if judged.refusals:
+    if judged.refusals or judged.excused:
+        # Blame only what this change breaks, and excuse only what was broken
+        # before it: both by the "before" folders as they are on disk now, not
+        # by the library last accepted, which may not have scanned them yet
+        # (another program added a folder, or a file, and a playlist of it).
         on_disk = (
             _scan(before, records, excluded=None) if scanner is None else scanner(before.roots)
         )
@@ -234,6 +242,10 @@ class _Judged:
     refusals: tuple[str, ...]
     compiled: str
     compile_error: str
+    #: Something is broken afterwards and was let pass as broken before
+    #: already (`runtime_config.allowed_as_already_broken`, or a document that
+    #: didn't build before either). That stands on the "before" library.
+    excused: bool = False
 
 
 def _verdict(library: Library, stores: _Stores, judged: _Judged) -> Verdict:
@@ -263,6 +275,19 @@ def _scan(
         workshop_roots=workshop.steam_roots() if include_workshop else (),
         excluded=excluded,
     )
+
+
+def on_disk(
+    settings: config.Settings,
+    records: Mapping[str, pairings.Pairing],
+    scanner: Scanner | None = None,
+) -> Library:
+    """A scan, now, of ``settings``' folders with the pairings ``records``: what is on disk.
+
+    An injected ``scanner`` (a test double handing over a ready library)
+    stands in for the real scan, as everywhere.
+    """
+    return _scan(settings, records, excluded=None) if scanner is None else scanner(settings.roots)
 
 
 def _session(settings: config.Settings, library: Library, stores: _Stores, uses: Uses) -> Session:
@@ -296,18 +321,20 @@ def _judge(
         known_before = runtime_config.library_index(before)
         known_after = runtime_config.library_index(after)
         found: list[str] = []
+        excused = False
         for playlist in after.playlists.all():
             previous = before.playlists.get(playlist.id)
             entries_before = previous.entries if previous is not None else ()
             can_before = runtime_config.playlist_playability(entries_before, before, known_before)
             can_after = runtime_config.playlist_playability(playlist.entries, after, known_after)
+            used = runtime_config.playlist_uses(playlist.id, settings_after, after)
             refusal = runtime_config.change_refusal(
-                f"\u201c{playlist.name}\u201d",
-                can_before,
-                can_after,
-                runtime_config.playlist_uses(playlist.id, settings_after, after),
+                f"\u201c{playlist.name}\u201d", can_before, can_after, used
             )
             if not refusal:
+                excused = excused or runtime_config.allowed_as_already_broken(
+                    can_before, can_after, bool(used)
+                )
                 continue
             compiled_before = {
                 entry.id
@@ -330,10 +357,10 @@ def _judge(
             try:
                 runtime_config.render(was[0], before)
             except runtime_config.RuntimeConfigError:
-                pass  # already unbuildable: not this change's doing
+                excused = True  # already unbuildable: not this change's doing
             else:
                 found.append(compile_error)
-        return _Judged(tuple(found), compiled, compile_error)
+        return _Judged(tuple(found), compiled, compile_error, excused)
     finally:
         before.shutdown()
         after.shutdown()

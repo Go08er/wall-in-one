@@ -190,7 +190,10 @@ service could not build its configuration around it): `playlist-remove`, a
 playlist that has nothing to play, `remove`, `select` of a video waiting for
 its still, and `still <video> default` or `reset-pairing` that would leave a
 video without one. The reply's kind is `nothing-to-play`, and nothing is
-written.
+written. The check is made against what is saved at that moment: the default
+in `settings.toml`, the schedule rules, the displays' playlists and the
+playlists themselves as their files read then, whoever saved them, not only
+what the app has held since it started.
 
 The same changes wait while the app knows its library isn't current: after a
 removal, until the scan after it has finished, and after the library folders or
@@ -200,12 +203,19 @@ and `select`, and `still` or `reset-pairing` for a wallpaper a playlist holds,
 are refused with kind `library-not-current`, and nothing is written. Try again
 once the scan has finished (refresh the library if it failed).
 
-Three refusals say the app couldn't check something, never that the thing is
+Four refusals say the app couldn't check something, never that the thing is
 gone, and nothing is written or deleted:
 
-- `playlist-remove` replies with kind `unreadable` while `settings.toml` can't
+- `playlist-delete` replies with kind `unreadable` while `settings.toml` can't
   be read or is malformed: the app can't tell whether that playlist is the
-  default. With no `settings.toml` at all, the playlist is removed as usual.
+  default. With no `settings.toml` at all, the playlist is deleted as usual.
+- The changes above that are checked against what is saved (`playlist-remove`,
+  `playlist-add`, `schedule-add`, `display-assign`, `still`, `reset-pairing`)
+  reply with kind `unreadable` while `settings.toml`, or the playlists,
+  schedule, display or pairing file, can't be read: a file that can't be read
+  is not taken as "nothing uses this playlist". `remove` says the same with
+  kind `local-io`. A file that isn't there at all is nothing saved, and the
+  change goes ahead.
 - `remove`, whether it deletes the wallpaper or moves it to the trash, replies
   with kind `local-io` when the wallpaper, or its folder, can't be looked at.
   Before 0.3.0 that answered `missing`, "is no longer there".

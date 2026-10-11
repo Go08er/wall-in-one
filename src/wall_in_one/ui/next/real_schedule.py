@@ -526,9 +526,17 @@ class RealScheduling:
         topics: tuple[str, ...],
         publish: Callable[[], None],
         settled: Settled | None,
-        recheck: Callable[[], str] | None = None,
+        recheck: Callable[[Session], str] | None = None,
     ) -> None:
-        """One store transaction on the authoring lane, settled exactly once."""
+        """One store transaction on the authoring lane, settled exactly once.
+
+        ``recheck`` says why the write may not be made as the session it is
+        given stands (a playlist that can't be put into use), or nothing. It
+        is asked at the head of the lane of what this window holds, and again
+        on the worker, just before the write, of what is saved then
+        (`runtime_config.judged_on_what_is_saved`): another program may have
+        emptied the playlist since this window opened.
+        """
         blocked = self.schedule_blocked()
         if blocked:
             self._refuse(settled, blocked, *topics)
@@ -539,12 +547,17 @@ class RealScheduling:
             # At the head of the lane: the playlist may have emptied since,
             # and whether it can be put into use is judged by the library,
             # never by one the app knows is stale.
-            if recheck is not None:
-                self._backend.require_current_library()
-            problem = recheck() if recheck is not None else ""
-            if problem:
-                raise ValueError(problem)
-            return work
+            if recheck is None:
+                return work
+            self._backend.require_current_library()
+            asked = recheck
+
+            def refuse(session: Session) -> None:
+                problem = asked(session)
+                if problem:
+                    raise ValueError(problem)
+
+            return runtime_config.judged_on_what_is_saved(refuse, work, self._session)
 
         def finish(_result: object) -> None:
             # Saved: settled first, so nothing below that can raise (they reach
@@ -627,7 +640,7 @@ class RealScheduling:
             topics=("schedule",),
             publish=self._backend.schedule_edited,
             settled=settled,
-            recheck=lambda: self.playlist_blocked(draft.playlist),
+            recheck=lambda session: runtime_config.use_refusal(draft.playlist, session),
         )
 
     def remove_rule(self, rule_id: str, settled: Settled | None = None) -> None:
@@ -653,7 +666,14 @@ class RealScheduling:
             topics=("schedule",),
             publish=self._backend.schedule_edited,
             settled=settled,
-            recheck=lambda: self.playlist_blocked(original.playlist),
+            # The rule as the session asked holds it: the copy is of that one.
+            recheck=lambda session: runtime_config.use_refusal(
+                next(
+                    (rule.playlist for rule in session.schedules.rules if rule.id == rule_id),
+                    original.playlist,
+                ),
+                session,
+            ),
         )
 
     def enable_rule(self, rule_id: str, enabled: bool, settled: Settled | None = None) -> None:
@@ -712,7 +732,7 @@ class RealScheduling:
             topics=("displays",),
             publish=self._backend.runtime_config_changed,
             settled=settled,
-            recheck=(lambda: self.playlist_blocked(pid)) if pid else None,
+            recheck=(lambda session: runtime_config.use_refusal(pid, session)) if pid else None,
         )
 
     def set_beats_global_rules(

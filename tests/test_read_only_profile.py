@@ -1370,15 +1370,6 @@ def test_a_template_install_the_state_folder_refuses_says_why(
     assert not life.probe.violations(), verdict(life.probe)
 
 
-SILENT_STILL: Final = (
-    "FINDING (lower severity: silence). A video with no still in a read-only library never "
-    "gets one, and nothing says so: not a toast, not the log. Where the library is writable "
-    "the same start writes Wall-in-One/Automatic Stills/video-<id>.png and its sidecar. "
-    "`StillMaker._run` (ui/stills.py:196) relies on `stills.ensure` swallowing its own "
-    "failures, so a folder that can't be written looks like a video ffmpeg can't read"
-)
-
-
 def _clip(folder: Path) -> Path:
     """A real one-second video, so a still can be captured from it."""
     ffmpeg = shutil.which("ffmpeg")
@@ -1427,10 +1418,17 @@ def test_a_writable_library_gets_the_videos_still_at_the_start(
     assert len(_made_stills(profile)) == 1, "the start made the video's still"
 
 
-@ro.pinned(SILENT_STILL)
 def test_a_still_a_read_only_library_cannot_take_is_said(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A video with no still, in a library that can't take one: none is made, and it is said.
+
+    Found here as silence: not a toast, not the log. `StillMaker._run` relied
+    on `stills.ensure` swallowing its own failures, so a folder that can't be
+    written looked like a video ffmpeg can't read. Now the folder's refusal
+    is its own kind of failure (`stills.StillFolderError`) and the maker says
+    it, once for the folder (`tests.test_ui_stills_read_only` has the rest).
+    """
     _clip(profile.library)
     before = ro.Snapshot.take(profile)
     said = _start_and_make_stills(profile, "library", monkeypatch)

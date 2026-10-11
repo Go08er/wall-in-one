@@ -86,8 +86,9 @@ def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
         *,
         processes: object | None = None,
         size: object | None = None,
+        refused: object | None = None,
     ) -> Path | None:
-        del processes, size
+        del processes, size, refused
         made.asked.append(target.path)
         return None
 
@@ -104,8 +105,9 @@ def maker(monkeypatch: pytest.MonkeyPatch) -> Recording:
         *,
         processes: object | None = None,
         size: object | None = None,
+        refused: object | None = None,
     ) -> Path | None:
-        del processes, size
+        del processes, size, refused
         made.asked.append(target.path)
         return root / f"{target.path.stem}.png" if made._succeeds else None
 
@@ -405,8 +407,9 @@ def test_shutdown_terminates_the_active_still_child_within_budget(
         *,
         processes: worker_processes.Cancellation | None = None,
         size: object | None = None,
+        refused: object | None = None,
     ) -> Path | None:
-        del size
+        del size, refused
         assert processes is not None
         try:
             processes.run(

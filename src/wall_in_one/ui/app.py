@@ -856,7 +856,10 @@ class Application(Adw.Application):
         #: `refresh_library(finished=...)` callbacks, told whether the next
         #: library install landed (True) or the refresh failed (False).
         self._library_refresh_waiters: list[Callable[[bool], None]] = []
-        self._stills = StillMaker(report=self.window_report)
+        self._stills = StillMaker(
+            report=self.window_report,
+            note=lambda message: self.activity_log.record("app", message),
+        )
 
     # -- lifecycle -------------------------------------------------------
 

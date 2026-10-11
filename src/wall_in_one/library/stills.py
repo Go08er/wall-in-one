@@ -37,7 +37,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
@@ -88,6 +88,63 @@ class StillError(Exception):
                 for argument in args
             )
         )
+
+
+class StillFolderError(StillError):
+    """A still could not be made because a folder it has to write in refused.
+
+    Told apart from a frame that could not be captured: nothing is wrong with
+    the wallpaper, and the same attempt works once ``folder`` takes writes.
+    ``folder`` is the one that refused (the library itself when the managed
+    folder could not be made in it; the video's own, for its pairing record)
+    and ``reason`` is the kernel's word for why ("Permission denied",
+    "Read-only file system").
+    """
+
+    def __init__(self, message: str, folder: Path, reason: str) -> None:
+        super().__init__(message)
+        self.folder = folder
+        self.reason = reason
+
+
+#: What a folder that takes no writes answers: a read-only one, or a read-only mount.
+_FOLDER_REFUSED: Final = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+
+
+def _refused(folder: Path, error: OSError, message: str) -> StillError:
+    """The `StillError` saying ``message`` for ``error``, met making something new in ``folder``.
+
+    A `StillFolderError` when the folder refused; any other failure there
+    (the folder went away, changed, filled up) stays a plain one.
+    """
+    if error.errno in _FOLDER_REFUSED:
+        return StillFolderError(message, folder, error.strerror or str(error))
+    return StillError(message)
+
+
+def _not_made(folder: Path, error: OSError) -> StillError:
+    """`_refused` for the managed folder ``folder``, which could not be made.
+
+    What refused is the folder it was to be made in: the parent of the one
+    `Path.mkdir` stopped at, which is ``folder`` or a missing ancestor of it.
+    """
+    stopped_at = Path(error.filename) if isinstance(error.filename, str | os.PathLike) else folder
+    return _refused(
+        stopped_at.parent, error, f"could not create {folder}: {error.strerror or error}"
+    )
+
+
+def _not_written(folder: Path, error: OSError, message: str) -> StillError:
+    """`_refused`, where more was tried in ``folder`` than making something new.
+
+    There the same answer also comes from one file in a folder that takes
+    writes (a pairing record that can't be read, a still that can't be
+    replaced), which is not the folder refusing: only a folder that takes
+    none is.
+    """
+    if os.access(folder, os.W_OK | os.X_OK):
+        return StillError(message)
+    return _refused(folder, error, message)
 
 
 def _say_also(active: BaseException | None, addition: str) -> bool:
@@ -1061,7 +1118,9 @@ def _write_sidecar_publication(
         if source is not None:
             # Said while the folder's descriptor is certainly still its own.
             file_io.respell_error(error, str(access_path.parent), str(path.parent))
-        raise StillError(f"could not write {path}: {error.strerror or error}") from error
+        raise _not_written(
+            path.parent, error, f"could not write {path}: {error.strerror or error}"
+        ) from error
     finally:
         try:
             if temporary_pin is not None:
@@ -1567,7 +1626,7 @@ def _generate_from_source(
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
-        raise StillError(f"could not create {target.parent}: {error.strerror or error}") from error
+        raise _not_made(target.parent, error) from error
     target_context = _pin_target_directory(root, target)
     target_access = target_context.child(target.name)
     try:
@@ -1625,8 +1684,10 @@ def _generate_from_source(
         except OSError as error:
             if existing is not None:
                 existing.close()
-            raise StillError(
-                f"could not create a temporary still in {target.parent}: {error}"
+            raise _refused(
+                target.parent,
+                error,
+                f"could not create a temporary still in {target.parent}: {error.strerror or error}",
             ) from error
         try:
             complaint = _run(
@@ -1688,7 +1749,9 @@ def _generate_from_source(
         except StillError:
             raise
         except OSError as error:
-            raise StillError(f"could not write {target}: {error.strerror or error}") from error
+            raise _not_written(
+                target.parent, error, f"could not write {target}: {error.strerror or error}"
+            ) from error
         finally:
             output.close()
             if existing is not None:
@@ -1822,7 +1885,7 @@ def _capture_scene_from_source(
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
-        raise StillError(f"could not create {target.parent}: {error.strerror or error}") from error
+        raise _not_made(target.parent, error) from error
     target_context = _pin_target_directory(root, target)
     target_access = target_context.child(target.name)
     try:
@@ -1836,8 +1899,10 @@ def _capture_scene_from_source(
         if existing is not None:
             existing.close()
         target_context.close()
-        raise StillError(
-            f"could not create a temporary still in {target.parent}: {error}"
+        raise _refused(
+            target.parent,
+            error,
+            f"could not create a temporary still in {target.parent}: {error.strerror or error}",
         ) from error
     try:
         engine_output = _engine_output_path(temporary, target_context)
@@ -1880,7 +1945,9 @@ def _capture_scene_from_source(
     except scenes.SceneError as error:
         raise StillError(str(error)) from error
     except OSError as error:
-        raise StillError(f"could not replace {target}: {error.strerror or error}") from error
+        raise _not_written(
+            target.parent, error, f"could not replace {target}: {error.strerror or error}"
+        ) from error
     finally:
         temporary.close()
         if existing is not None:
@@ -1894,6 +1961,7 @@ def ensure(
     *,
     processes: worker_processes.Cancellation | None = None,
     size: tuple[int, int] | None = None,
+    refused: Callable[[StillFolderError], None] | None = None,
 ) -> Path | None:
     """The still for ``item``, making one if it has none. ``None`` if it needs none.
 
@@ -1901,6 +1969,10 @@ def ensure(
     and can carry on without: a still that cannot be made is not a reason to
     refuse to play the wallpaper. For a scene this is the automatic pass;
     ``size`` is a display size the caller already measured.
+
+    ``refused`` hears the one failure that is not about the wallpaper: a
+    folder that would not be written in (`StillFolderError`). It is forgiven
+    like the rest; a caller that can tell a person gives this.
     """
     if not item.is_moving:
         return None
@@ -1911,6 +1983,10 @@ def ensure(
             )
         try:
             return capture_scene(item, root, processes=processes, size=size)
+        except StillFolderError as error:
+            if refused is not None:
+                refused(error)
+            return None
         except StillError:
             return None
     if item.paired_still is not None:
@@ -1920,5 +1996,9 @@ def ensure(
         return existing
     try:
         return generate(item.path, root, processes=processes)
+    except StillFolderError as error:
+        if refused is not None:
+            refused(error)
+        return None
     except StillError:
         return None

@@ -50,6 +50,15 @@ FailureCallback = Callable[[str], None]
 LOGGER = logging.getLogger(__name__)
 
 
+def _refusal(folder: Path, count: int, reason: str) -> str:
+    """What is said for ``count`` wallpapers whose still ``folder`` would not take."""
+    wallpapers = "1 wallpaper" if count == 1 else f"{count} wallpapers"
+    return (
+        f"No still could be made for {wallpapers}: {folder} cannot be written ({reason}). "
+        "Wall-in-One tries again the next time it starts"
+    )
+
+
 class StillMaker:
     """Fills in the missing stills for a library, off the main thread."""
 
@@ -58,10 +67,17 @@ class StillMaker:
         max_workers: int = MAX_WORKERS,
         *,
         report: FailureCallback | None = None,
+        note: FailureCallback | None = None,
     ) -> None:
+        """``report`` tells a person now (the window); ``note`` only keeps a record (the log)."""
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="still")
         self._closed = False
         self._report = report
+        self._note = note
+        # Folders already reported for refusing a still. One that is read-only
+        # refuses every still it is asked for, and a library holds hundreds:
+        # reported once while this maker lives, noted after that. Main thread only.
+        self._refused_reported: set[Path] = set()
         self._pending: set[Future[None]] = set()
         self._lock = Lock()
         self._processes = worker_processes.Cancellation()
@@ -169,6 +185,14 @@ class StillMaker:
 
     def _run(self, items: tuple[MediaItem, ...], root: Path, callback: Callback) -> None:
         made = 0
+        # The folders that would not be written in, with how many stills each
+        # refused and the first reason given (`stills.StillFolderError`).
+        refused: dict[Path, tuple[int, str]] = {}
+
+        def folder_refused(error: stills.StillFolderError) -> None:
+            count, reason = refused.get(error.folder, (0, error.reason))
+            refused[error.folder] = (count + 1, reason)
+
         # Asked once per batch, here on the worker: `niri msg` is a child
         # process, and neither the main thread nor every scene should wait on
         # one. With no display measured no scene still can be taken, and an
@@ -190,10 +214,26 @@ class StillMaker:
                 continue
             # `ensure` swallows its own failures: a still that cannot be made
             # is not a reason to stop making the others, and the video still
-            # plays either way.
-            if stills.ensure(item, root, processes=self._processes, size=display) is not None:
+            # plays either way. The one it hands over is a folder that would
+            # not be written in, which is nothing ffmpeg or the video did.
+            if (
+                stills.ensure(
+                    item, root, processes=self._processes, size=display, refused=folder_refused
+                )
+                is not None
+            ):
                 made += 1
-        if made == 0 or self._processes.cancelled():
+        if self._processes.cancelled():
+            return
+        if refused:
+            # Whether or not anything was made: a batch can do both. It asks
+            # for no rescan, and `_attempted` keeps these from being queued
+            # again, so a folder that refuses is asked once for each wallpaper.
+            # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
+            GLib.idle_add(  # type: ignore[call-arg]
+                self._say_refused, refused, priority=GLib.PRIORITY_DEFAULT
+            )
+        if made == 0:
             return
 
         def deliver() -> bool:
@@ -203,6 +243,20 @@ class StillMaker:
 
         # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
         GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
+
+    def _say_refused(self, refused: dict[Path, tuple[int, str]]) -> bool:
+        """Report each folder that refused, the first time; note it every time after."""
+        if self._closed:
+            return GLib.SOURCE_REMOVE
+        for folder, (count, reason) in refused.items():
+            say = self._note if folder in self._refused_reported else self._report
+            self._refused_reported.add(folder)
+            message = _refusal(folder, count, reason)
+            if say is not None:
+                say(message)
+            else:
+                LOGGER.warning("%s", message)
+        return GLib.SOURCE_REMOVE
 
     def regenerate_scene(self, item: MediaItem, root: Path, callback: Callback) -> None:
         """Force one managed scene still to be replaced, off the UI thread."""
